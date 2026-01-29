@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'corsheaders',
+    'widget_tweaks',
     'nucleo',
     'seguridad',
     'usuarios',
@@ -64,7 +65,7 @@ ROOT_URLCONF = 'ERP.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -145,3 +146,10 @@ REST_FRAMEWORK = {
 # CORS HEADERS
 # =========================
 CORS_ALLOW_ALL_ORIGINS = True
+
+# =========================
+# AUTH SETTINGS
+# =========================
+LOGIN_REDIRECT_URL = 'nucleo:dashboard'
+LOGOUT_REDIRECT_URL = 'login'
+

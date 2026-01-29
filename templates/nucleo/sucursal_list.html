@@ -1,0 +1,96 @@
+{% extends 'base_core.html' %}
+
+{% block title %}Sucursales - ERP Core{% endblock %}
+{% block header_title %}Sucursales{% endblock %}
+{% block header_subtitle %}Gestión de sucursales del sistema{% endblock %}
+
+{% block content %}
+<div class="mb-6 flex flex-col sm:flex-row justify-between items-center gap-4">
+    <div class="relative w-full sm:w-auto">
+        <input type="text" placeholder="Buscar sucursales..."
+            class="pl-10 pr-4 py-2 border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-sky-500 focus:border-sky-500 text-sm w-full sm:w-64 shadow-sm transition-all bg-white dark:bg-zinc-900 text-slate-900 dark:text-white placeholder-slate-400">
+        <i class="fas fa-search absolute left-3 top-2.5 text-slate-400"></i>
+    </div>
+    <a href="{% url 'nucleo:sucursal_create' %}"
+        class="w-full sm:w-auto inline-flex items-center justify-center px-4 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-sky-600 hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500 transition-colors">
+        <i class="fas fa-plus mr-2"></i> Nueva Sucursal
+    </a>
+</div>
+
+<div class="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 overflow-hidden">
+    <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-slate-200 dark:divide-slate-800">
+            <thead class="bg-slate-50 dark:bg-zinc-800/50">
+                <tr>
+                    <th scope="col"
+                        class="px-6 py-3 text-left text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Empresa
+                    </th>
+                    <th scope="col"
+                        class="px-6 py-3 text-left text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Código</th>
+                    <th scope="col"
+                        class="px-6 py-3 text-left text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Nombre</th>
+                    <th scope="col"
+                        class="px-6 py-3 text-left text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Estatus
+                    </th>
+                    <th scope="col" class="relative px-6 py-3"><span class="sr-only">Acciones</span></th>
+                </tr>
+            </thead>
+            <tbody class="bg-white dark:bg-zinc-900 divide-y divide-slate-200 dark:divide-slate-800">
+                {% for sucursal in sucursales %}
+                <tr class="hover:bg-slate-50 dark:hover:bg-zinc-800/50 transition-colors">
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="text-sm text-slate-900 dark:text-white font-medium">{{ sucursal.empresa.codigo }}</div>
+                        <div class="text-xs text-slate-500 dark:text-slate-400">{{ sucursal.empresa.razon_social|truncatechars:20 }}</div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <span
+                            class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700">
+                            {{ sucursal.codigo }}
+                        </span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="text-sm font-medium text-slate-900 dark:text-white">{{ sucursal.nombre }}</div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        {% if sucursal.estatus == 'activo' %}
+                        <span
+                            class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-300">
+                            <span class="w-2 h-2 mr-1.5 bg-emerald-400 rounded-full"></span> Activo
+                        </span>
+                        {% else %}
+                        <span
+                            class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300">
+                            {{ sucursal.estatus }}
+                        </span>
+                        {% endif %}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                        <div class="flex justify-end gap-2">
+                            <a href="{% url 'nucleo:sucursal_update' pk=sucursal.pk %}"
+                                class="text-sky-600 dark:text-sky-400 hover:text-sky-900 dark:hover:text-sky-300 p-2 hover:bg-sky-50 dark:hover:bg-sky-900/30 rounded-lg transition-colors"
+                                title="Editar">
+                                <i class="fas fa-edit"></i>
+                            </a>
+                            <a href="{% url 'nucleo:sucursal_delete' pk=sucursal.pk %}"
+                                class="text-red-600 dark:text-red-400 hover:text-red-900 dark:hover:text-red-300 p-2 hover:bg-red-50 dark:hover:bg-red-900/30 rounded-lg transition-colors"
+                                title="Eliminar">
+                                <i class="fas fa-trash"></i>
+                            </a>
+                        </div>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="5" class="px-6 py-10 text-center text-slate-500 dark:text-slate-400">
+                        <div class="flex flex-col items-center justify-center">
+                            <i class="fas fa-store text-4xl text-slate-300 dark:text-slate-600 mb-3"></i>
+                            <p>No hay sucursales registradas.</p>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

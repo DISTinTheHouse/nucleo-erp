@@ -1,0 +1,36 @@
+{% extends 'base_core.html' %}
+
+{% block title %}Eliminar Moneda - ERP Core{% endblock %}
+
+{% block content %}
+<div class="max-w-lg mx-auto mt-10">
+    <div class="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 overflow-hidden">
+        <div class="p-6">
+            <div class="flex items-center justify-center w-12 h-12 mx-auto bg-red-100 dark:bg-red-900/30 rounded-full mb-4">
+                <i class="fas fa-exclamation-triangle text-xl text-red-600 dark:text-red-400"></i>
+            </div>
+            
+            <h3 class="text-lg font-medium text-center text-slate-900 dark:text-white mb-2">
+                ¿Eliminar Moneda?
+            </h3>
+            
+            <p class="text-center text-slate-500 dark:text-slate-400 mb-6">
+                ¿Estás seguro que deseas eliminar la moneda <span class="font-semibold text-slate-900 dark:text-white">"{{ object }}"</span>?
+                Esta acción no se puede deshacer.
+            </p>
+
+            <form method="post" class="flex flex-col sm:flex-row gap-3 justify-center">
+                {% csrf_token %}
+                <a href="{% url 'nucleo:moneda_list' %}" 
+                   class="w-full sm:w-auto inline-flex justify-center items-center px-4 py-2 border border-slate-300 dark:border-slate-600 rounded-lg shadow-sm text-sm font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-500 transition-colors">
+                    Cancelar
+                </a>
+                <button type="submit" 
+                        class="w-full sm:w-auto inline-flex justify-center items-center px-4 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors">
+                    <i class="fas fa-trash-alt mr-2"></i> Confirmar Eliminación
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
