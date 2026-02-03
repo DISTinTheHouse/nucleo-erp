@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="es" data-bs-theme="auto">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}ERP Core{% endblock %}</title>
+
+    <!-- Tailwind CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+
+    <!-- Theme auto -->
+    <script>
+        (function () {
+            const root = document.documentElement;
+
+            function applySystemTheme() {
+                const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+                if (isDark) {
+                    root.classList.add('dark');
+                    root.setAttribute('data-bs-theme', 'dark');
+                } else {
+                    root.classList.remove('dark');
+                    root.setAttribute('data-bs-theme', 'light');
+                }
+            }
+
+            applySystemTheme();
+            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applySystemTheme);
+        })();
+    </script>
+
+    <!-- Fonts -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Poppins:wght@300;400;500;600;700&display=swap');
+
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+
+        h1,
+        h2,
+        h3,
+        .brand-font {
+            font-family: 'Poppins', sans-serif;
+        }
+
+        /* Custom Scrollbar */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+
+        /* Custom scrollbar for content if needed */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+
+        .dark ::-webkit-scrollbar-thumb {
+            background: #475569;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+    </style>
+
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    transitionProperty: {
+                        'width': 'width'
+                    },
+                    colors: {
+                        brand: {
+                            50: '#eff6ff',
+                            100: '#dbeafe',
+                            200: '#bfdbfe',
+                            300: '#93c5fd',
+                            400: '#60a5fa',
+                            500: '#3b82f6',
+                            600: '#2563eb',
+                            700: '#1d4ed8',
+                            800: '#1e40af',
+                            900: '#1e3a8a',
+                            950: '#172554',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+
+<body
+    class="bg-slate-50 dark:bg-black text-slate-900 dark:text-white h-screen overflow-hidden flex selection:bg-sky-500 selection:text-white">
+
+    <!-- Background Gradients -->
+    <div class="pointer-events-none fixed inset-0 z-0
+              bg-[radial-gradient(110%_70%_at_50%_-10%,rgba(56,189,248,0.28),rgba(255,255,255,0))]
+              dark:bg-[radial-gradient(120%_85%_at_50%_-20%,rgba(56,189,248,0.22),rgba(17,17,19,0))]">
+    </div>
+
+    <!-- SIDEBAR (Desktop) -->
+    <aside class="hidden md:flex flex-col h-full z-40 relative
+                w-20 hover:w-72 group/sidebar
+                bg-white/80 dark:bg-black/60 backdrop-blur-2xl
+                border-r border-slate-200 dark:border-white/5
+                transition-all duration-300 ease-in-out shadow-2xl">
+
+        <!-- Logo Section -->
+        <div
+            class="h-20 flex items-center px-6 shrink-0 overflow-hidden relative border-b border-slate-100 dark:border-slate-800/50">
+            <div class="flex items-center gap-4 min-w-max">
+                <a href="{% url 'nucleo:dashboard' %}" class="shrink-0 text-sky-600 dark:text-sky-400">
+                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="4.706" cy="16" r="4.706" class="fill-current opacity-80" />
+                        <circle cx="16.001" cy="4.706" r="4.706" class="fill-current opacity-80" />
+                        <circle cx="16.001" cy="27.294" r="4.706" class="fill-current opacity-80" />
+                        <circle cx="27.294" cy="16" r="4.706" class="fill-current opacity-80" />
+                    </svg>
+                </a>
+                <span
+                    class="brand-font font-bold text-xl tracking-tight opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-300 delay-100 whitespace-nowrap">
+                    ERP Core
+                </span>
+            </div>
+        </div>
+
+        <!-- Navigation Items -->
+        <nav class="flex-1 overflow-y-auto no-scrollbar py-6 px-3 space-y-1">
+
+            <!-- Dashboard -->
+            <a href="{% url 'nucleo:dashboard' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if request.resolver_match.url_name == 'dashboard' %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Dashboard</span>
+            </a>
+
+            <!-- Divider Label -->
+            <div class="px-3 py-2 mt-4 opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200">
+                <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Organización</span>
+            </div>
+
+            <!-- Empresas -->
+            <a href="{% url 'nucleo:empresa_list' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'empresa' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Empresas</span>
+            </a>
+
+            <!-- Sucursales -->
+            <a href="{% url 'nucleo:sucursal_list' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'sucursal' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Sucursales</span>
+            </a>
+
+            <!-- Departamentos -->
+            <a href="{% url 'nucleo:departamento_list' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'departamento' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Departamentos</span>
+            </a>
+
+            <!-- Divider Label -->
+            <div class="px-3 py-2 mt-4 opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200">
+                <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Seguridad</span>
+            </div>
+
+            <!-- Usuarios -->
+            <a href="{% url 'usuarios:usuario_list' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'usuario' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Usuarios</span>
+            </a>
+
+            <!-- Divider Label -->
+            <div class="px-3 py-2 mt-4 opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200">
+                <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Catálogos</span>
+            </div>
+
+            <!-- Monedas -->
+            <a href="{% url 'nucleo:moneda_list' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'moneda' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Monedas</span>
+            </a>
+
+        </nav>
+
+        <!-- Bottom Actions -->
+        <div class="p-4 border-t border-slate-200 dark:border-slate-800">
+            <a href="/admin/logout/" class="w-full mt-2 flex items-center justify-start gap-4 px-3 py-3 rounded-xl 
+                       text-red-500 hover:bg-red-50 dark:hover:bg-red-900/10 
+                       transition-colors group relative overflow-hidden">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Cerrar
+                    sesión</span>
+            </a>
+        </div>
+    </aside>
+
+    <!-- MOBILE HEADER (Visible only on mobile) -->
+    <header
+        class="md:hidden fixed top-0 left-0 w-full h-16 bg-white/80 dark:bg-zinc-900/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 flex items-center justify-between px-6 z-50">
+        <div class="flex items-center gap-3">
+            <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="4.706" cy="16" r="4.706" class="fill-sky-600 dark:fill-sky-400" />
+                <circle cx="16.001" cy="4.706" r="4.706" class="fill-sky-600 dark:fill-sky-400" />
+                <circle cx="16.001" cy="27.294" r="4.706" class="fill-sky-600 dark:fill-sky-400" />
+                <circle cx="27.294" cy="16" r="4.706" class="fill-sky-600 dark:fill-sky-400" />
+            </svg>
+            <span class="brand-font font-bold text-lg text-slate-900 dark:text-white">ERP</span>
+        </div>
+        <button id="mobileMenuBtn" class="p-2 text-slate-600 dark:text-slate-300">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16">
+                </path>
+            </svg>
+        </button>
+    </header>
+
+    <!-- MOBILE DRAWER -->
+    <div id="mobileDrawer"
+        class="fixed inset-0 z-[60] transform translate-x-full transition-transform duration-300 md:hidden">
+        <!-- Overlay -->
+        <div id="drawerOverlay"
+            class="absolute inset-0 bg-black/50 backdrop-blur-sm opacity-0 transition-opacity duration-300"></div>
+
+        <!-- Drawer Content -->
+        <div class="absolute right-0 top-0 h-full w-[80%] max-w-sm bg-white dark:bg-zinc-900 shadow-2xl flex flex-col">
+            <div class="h-16 flex items-center justify-between px-6 border-b border-slate-100 dark:border-slate-800">
+                <span class="brand-font font-bold text-lg">Menú</span>
+                <button id="closeDrawerBtn" class="p-2 text-slate-500 hover:text-slate-800 dark:hover:text-white">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12">
+                        </path>
+                    </svg>
+                </button>
+            </div>
+            <div class="flex-1 overflow-y-auto p-4 space-y-1">
+                <!-- Dashboard -->
+                <a href="{% url 'nucleo:dashboard' %}"
+                    class="flex items-center gap-4 px-4 py-3 rounded-xl bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300 transition-colors">
+                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z">
+                        </path>
+                    </svg>
+                    <span class="font-medium">Dashboard</span>
+                </a>
+
+                <div class="px-4 py-2 mt-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Organización</div>
+
+                <!-- Empresas -->
+                <a href="{% url 'nucleo:empresa_list' %}"
+                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
+                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4">
+                        </path>
+                    </svg>
+                    <span class="font-medium">Empresas</span>
+                </a>
+
+                <!-- Sucursales -->
+                <a href="{% url 'nucleo:sucursal_list' %}"
+                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
+                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z">
+                        </path>
+                    </svg>
+                    <span class="font-medium">Sucursales</span>
+                </a>
+
+                <!-- Departamentos -->
+                <a href="{% url 'nucleo:departamento_list' %}"
+                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
+                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z">
+                        </path>
+                    </svg>
+                    <span class="font-medium">Departamentos</span>
+                </a>
+
+                <div class="px-4 py-2 mt-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Seguridad</div>
+
+                <!-- Usuarios -->
+                <a href="{% url 'usuarios:usuario_list' %}"
+                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
+                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z">
+                        </path>
+                    </svg>
+                    <span class="font-medium">Usuarios</span>
+                </a>
+
+                <div class="px-4 py-2 mt-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Catálogos</div>
+
+                <!-- Monedas -->
+                <a href="{% url 'nucleo:moneda_list' %}"
+                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
+                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
+                        </path>
+                    </svg>
+                    <span class="font-medium">Monedas</span>
+                </a>
+
+            </div>
+            <div class="p-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-black/20">
+                <a href="/admin/logout/"
+                    class="block w-full text-center px-4 py-3 rounded-xl bg-black dark:bg-white text-white dark:text-black font-bold text-sm shadow-lg">Cerrar
+                    sesión</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- MAIN CONTENT -->
+    <div class="flex-1 flex flex-col relative overflow-hidden h-full">
+        <!-- Header -->
+        <header class="hidden md:flex h-20 items-center justify-between px-8 bg-transparent shrink-0 z-30">
+            <div class="flex items-center gap-4 text-slate-400">
+                <h2 class="text-2xl font-semibold text-slate-800 dark:text-white tracking-tight">{% block header_title%}Panel de Control{% endblock %}</h2>
+                <span class="text-sm font-medium">{% block header_subtitle %}{% endblock %}</span>
+            </div>
+            <div class="flex items-center gap-6">
+                <div class="flex flex-col items-end mr-2">
+                    <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ request.user.username }}</span>
+                    <span class="text-xs text-slate-500">{% if request.user.is_superuser %}Super Admin{% else %}Usuario{% endif %}</span>
+                </div>
+                <div
+                    class="h-10 w-10 rounded-full bg-gradient-to-br from-sky-500 to-sky-700 flex items-center justify-center text-white font-bold shadow-lg shadow-sky-500/20 ring-2 ring-white dark:ring-slate-800">
+                    {{ request.user.username|first|upper }}
+                </div>
+            </div>
+        </header>
+
+        <!-- Content Scrollable Area -->
+        <main class="flex-1 w-full overflow-y-auto px-6 pb-6 md:px-8 md:pb-8 pt-20 md:pt-0">
+            <div class="max-w-7xl mx-auto py-6 md:py-10">
+                {% if messages %}
+                <div class="mb-6 space-y-2 animate-fade-in-down">
+                    {% for message in messages %}
+                    <div
+                        class="p-4 rounded-lg border shadow-sm flex justify-between items-center transition-all duration-300 {% if message.tags == 'error' %}bg-red-50 text-red-700 border-red-200{% else %}bg-emerald-50 text-emerald-700 border-emerald-200{% endif %}">
+                        <div class="flex items-center">
+                            <div class="flex-shrink-0 mr-3">
+                                <i
+                                    class="fas {% if message.tags == 'error' %}fa-exclamation-circle{% else %}fa-check-circle{% endif %} text-lg"></i>
+                            </div>
+                            <span class="font-medium">{{ message }}</span>
+                        </div>
+                        <button onclick="this.parentElement.remove()"
+                            class="text-sm hover:opacity-75 transition-opacity p-1 rounded hover:bg-black/5">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
+                {% block content %}{% endblock %}
+            </div>
+        </main>
+    </div>
+
+    <!-- Mobile Drawer Logic -->
+    <script>
+        const mobileMenuBtn = document.getElementById('mobileMenuBtn');
+        const closeDrawerBtn = document.getElementById('closeDrawerBtn');
+        const mobileDrawer = document.getElementById('mobileDrawer');
+        const drawerOverlay = document.getElementById('drawerOverlay');
+
+        function openDrawer() {
+            mobileDrawer.classList.remove('translate-x-full');
+            setTimeout(() => {
+                drawerOverlay.classList.remove('opacity-0');
+            }, 10);
+        }
+
+        function closeDrawer() {
+            drawerOverlay.classList.add('opacity-0');
+            setTimeout(() => {
+                mobileDrawer.classList.add('translate-x-full');
+            }, 300);
+        }
+
+        mobileMenuBtn.addEventListener('click', openDrawer);
+        closeDrawerBtn.addEventListener('click', closeDrawer);
+        drawerOverlay.addEventListener('click', closeDrawer);
+    </script>
+
+</body>
+
+</html>
