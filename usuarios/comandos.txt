@@ -1,0 +1,2 @@
+*El sistema está configurado para bloquear el acceso tras 5 intentos fallidos consecutivos y el bloqueo dura 1 hora . Esto es para evitar ataques de fuerza bruta.
+- python manage.py axes_reset para eliminar todos los bloqueos activos.

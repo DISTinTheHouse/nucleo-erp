@@ -1,6 +1,7 @@
 from django import forms
 from django.utils.text import slugify
 from .models import Empresa, Sucursal, Departamento, Moneda, Impuesto, UnidadMedida
+from .utils import validate_rfc, check_sat_status_mock
 
 class TailwindModelForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
@@ -47,6 +48,24 @@ class EmpresaForm(TailwindModelForm):
             raise forms.ValidationError(f"El código '{slug}' ya está en uso por otra empresa.")
             
         return slug
+
+    def clean_rfc(self):
+        rfc = self.cleaned_data.get('rfc')
+        if rfc:
+            rfc = rfc.upper().strip()
+            
+            # 1. Validación Estructural y Checksum
+            es_valido, mensaje = validate_rfc(rfc)
+            if not es_valido:
+                raise forms.ValidationError(mensaje)
+            
+            # 2. Validación de Existencia (Simulación / API Placeholder)
+            # En un entorno real, esto conectaría a un servicio SAT
+            sat_status = check_sat_status_mock(rfc)
+            if not sat_status.get('exists'):
+                raise forms.ValidationError("El RFC tiene un formato válido pero NO se encuentra registrado en el SAT.")
+                
+        return rfc
 
 class SucursalForm(TailwindModelForm):
     class Meta:

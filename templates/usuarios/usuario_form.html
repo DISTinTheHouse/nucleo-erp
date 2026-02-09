@@ -1,204 +1,566 @@
 {% extends 'base_core.html' %}
 
 {% block title %}{% if object %}Editar{% else %}Nuevo{% endif %} Usuario - ERP Core{% endblock %}
+{% block header_title %}{% if object %}Editar{% else %}Nuevo{% endif %} Usuario{% endblock %}
+{% block header_subtitle %}Complete el formulario para {% if object %}actualizar{% else %}registrar{% endif %} un
+usuario{% endblock %}
 
 {% block content %}
 <div class="max-w-4xl mx-auto">
-    <div class="mb-8 flex items-center justify-between">
-        <div>
-            <h1 class="text-2xl font-bold text-slate-800 dark:text-white">{% if object %}Editar{% else %}Nuevo{% endif %} Usuario</h1>
-            <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Completa la información del usuario.</p>
-        </div>
-        <a href="{% url 'usuarios:usuario_list' %}"
-            class="inline-flex items-center px-4 py-2 border border-slate-300 dark:border-slate-600 rounded-lg shadow-sm text-sm font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-zinc-800 hover:bg-slate-50 dark:hover:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500 transition-colors">
-            <i class="fas fa-arrow-left mr-2"></i> Volver
-        </a>
-    </div>
-
     <div
-        class="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-slate-100 dark:border-slate-800 overflow-hidden">
-        <form method="post" class="p-6 md:p-8">
-            {% csrf_token %}
+        class="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 overflow-hidden">
+        <div
+            class="p-6 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center bg-slate-50/50 dark:bg-white/5">
+            <h3 class="text-lg font-medium text-slate-900 dark:text-white">Información del Usuario</h3>
+            <a href="{% url 'usuarios:usuario_list' %}"
+                class="text-sm text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 flex items-center transition-colors">
+                <i class="fas fa-arrow-left mr-2"></i> Volver
+            </a>
+        </div>
 
-            {% if form.non_field_errors %}
-            <div class="rounded-lg bg-red-50 dark:bg-red-900/20 p-4 mb-6 border border-red-200 dark:border-red-800">
-                <div class="flex">
-                    <div class="flex-shrink-0">
-                        <i class="fas fa-exclamation-circle text-red-400 dark:text-red-500"></i>
-                    </div>
-                    <div class="ml-3">
-                        <h3 class="text-sm font-medium text-red-800 dark:text-red-200">Errores de validación</h3>
-                        <div class="mt-2 text-sm text-red-700 dark:text-red-300">
-                            {{ form.non_field_errors }}
+        <div class="p-6 md:p-8">
+            <form method="post" class="space-y-6">
+                {% csrf_token %}
+
+                {% if form.non_field_errors %}
+                <div
+                    class="rounded-lg bg-red-50 dark:bg-red-900/20 p-4 border border-red-200 dark:border-red-800 animate-pulse">
+                    <div class="flex">
+                        <div class="flex-shrink-0">
+                            <i class="fas fa-exclamation-circle text-red-400 dark:text-red-500"></i>
+                        </div>
+                        <div class="ml-3">
+                            <h3 class="text-sm font-medium text-red-800 dark:text-red-200">Errores encontrados</h3>
+                            <div class="mt-2 text-sm text-red-700 dark:text-red-300">
+                                {{ form.non_field_errors }}
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
-            {% endif %}
-
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <!-- Username -->
-                <div>
-                    <label for="{{ form.username.id_for_label }}"
-                        class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Nombre de
-                        usuario</label>
-                    {{ form.username }}
-                    {% if form.username.errors %}
-                    <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                        <i class="fas fa-exclamation-circle mr-1"></i> {{ form.username.errors|striptags }}
-                    </p>
-                    {% endif %}
-                </div>
-
-                <!-- Email -->
-                <div>
-                    <label for="{{ form.email.id_for_label }}"
-                        class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Correo
-                        electrónico</label>
-                    {{ form.email }}
-                    {% if form.email.errors %}
-                    <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                        <i class="fas fa-exclamation-circle mr-1"></i> {{ form.email.errors|striptags }}
-                    </p>
-                    {% endif %}
-                </div>
-
-                <!-- First Name -->
-                <div>
-                    <label for="{{ form.first_name.id_for_label }}"
-                        class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Nombre(s)</label>
-                    {{ form.first_name }}
-                    {% if form.first_name.errors %}
-                    <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                        <i class="fas fa-exclamation-circle mr-1"></i> {{ form.first_name.errors|striptags }}
-                    </p>
-                    {% endif %}
-                </div>
-
-                <!-- Last Name -->
-                <div>
-                    <label for="{{ form.last_name.id_for_label }}"
-                        class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Apellidos</label>
-                    {{ form.last_name }}
-                    {% if form.last_name.errors %}
-                    <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                        <i class="fas fa-exclamation-circle mr-1"></i> {{ form.last_name.errors|striptags }}
-                    </p>
-                    {% endif %}
-                </div>
-
-                <!-- Empresa -->
-                <div>
-                    <label for="{{ form.empresa.id_for_label }}"
-                        class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Empresa</label>
-                    {{ form.empresa }}
-                    {% if form.empresa.errors %}
-                    <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                        <i class="fas fa-exclamation-circle mr-1"></i> {{ form.empresa.errors|striptags }}
-                    </p>
-                    {% endif %}
-                </div>
-
-                <!-- Sucursal Default -->
-                <div>
-                    <label for="{{ form.sucursal_default.id_for_label }}"
-                        class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Sucursal
-                        Predeterminada</label>
-                    {{ form.sucursal_default }}
-                    {% if form.sucursal_default.errors %}
-                    <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                        <i class="fas fa-exclamation-circle mr-1"></i> {{ form.sucursal_default.errors|striptags }}
-                    </p>
-                    {% endif %}
-                </div>
-
-                <!-- Password Fields (if present) -->
-                {% if form.password1 %}
-                <div>
-                    <label for="{{ form.password1.id_for_label }}"
-                        class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Contraseña</label>
-                    {{ form.password1 }}
-                    {% if form.password1.help_text %}
-                    <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400">{{ form.password1.help_text }}</p>
-                    {% endif %}
-                    {% if form.password1.errors %}
-                    <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                        <i class="fas fa-exclamation-circle mr-1"></i> {{ form.password1.errors|striptags }}
-                    </p>
-                    {% endif %}
-                </div>
                 {% endif %}
 
-                {% if form.password2 %}
-                <!-- Note: UserCreationForm uses password_2 usually? Or matches generic name? Django UserCreationForm uses 'password_2' -->
+                <!-- Credenciales -->
                 <div>
-                    <label for="{{ form.password2.id_for_label }}"
-                        class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Confirmar
-                        Contraseña</label>
-                    {{ form.password2 }}
-                    {% if form.password2.help_text %}
-                    <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400">{{ form.password2.help_text }}</p>
-                    {% endif %}
-                    {% if form.password2.errors %}
-                    <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                        <i class="fas fa-exclamation-circle mr-1"></i> {{ form.password2.errors|striptags }}
-                    </p>
-                    {% endif %}
-                </div>
-                {% endif %}
-
-                <!-- Checkboxes -->
-                <div class="col-span-2 space-y-4">
-                    {% if form.is_staff %}
-                    <div class="flex items-center">
-                        {{ form.is_staff }}
-                        <label for="{{ form.is_staff.id_for_label }}"
-                            class="ml-2 block text-sm text-slate-900 dark:text-slate-300">Es Staff
-                            (Acceso al admin)</label>
+                    <h4
+                        class="text-sm uppercase tracking-wide text-slate-500 font-semibold mb-4 border-b border-slate-100 dark:border-slate-700 pb-2">
+                        Credenciales</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <label for="{{ form.username.id_for_label }}"
+                                class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Nombre de
+                                Usuario</label>
+                            {{ form.username }}
+                            {% if form.username.errors %}
+                            <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                <i class="fas fa-exclamation-circle mr-1"></i> {{ form.username.errors|striptags }}
+                            </p>
+                            {% endif %}
+                            <p class="mt-1.5 text-xs text-slate-500">{{ form.username.help_text }}</p>
+                        </div>
                     </div>
-                    {% endif %}
 
-                    {% if form.is_superuser %}
-                    <div class="flex items-center">
-                        {{ form.is_superuser }}
-                        <label for="{{ form.is_superuser.id_for_label }}"
-                            class="ml-2 block text-sm text-slate-900 dark:text-slate-300">Es
-                            Superusuario</label>
-                    </div>
-                    {% endif %}
-
-                    {% if form.estatus %}
-                    <div class="flex items-center">
-                        <!-- Estatus is usually a select in UsuarioChangeForm, but if it was a checkbox... wait, model says estatus is CharField choices usually? No, AbstractUser uses is_active boolean. But Core uses estatus charfield? Let's check model. -->
-                        <!-- Usuario model in nucleo/models.py was not shown fully. -->
-                        <!-- Assuming estatus is select if shown. -->
+                    <!-- Campos de Password (Solo CreationForm) -->
+                    {% if not object %}
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
+                        {% if form.palabra_clave1 %}
+                        <div>
+                            <label
+                                class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Contraseña</label>
+                            {{ form.palabra_clave1 }}
+                            <!-- Django usa nombres raros a veces, verificar si es password, pass1, etc. UserCreationForm usa 'password_1' y 'password_2' pero se renderizan solos si usamos loop o acceso directo. UserCreationForm fields son 'username', 'password_1', 'password_2' virtualmente -->
+                            <!-- Mejor iterar campos ocultos o específicos si no los llamamos explicitamente -->
+                        </div>
+                        {% endif %}
                     </div>
                     {% endif %}
                 </div>
 
-                <!-- Fallback for Estatus if it's a select field -->
-                {% if form.estatus %}
-                <div>
-                    <label for="{{ form.estatus.id_for_label }}"
-                        class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Estatus</label>
-                    {{ form.estatus }}
+                <!-- Información Personal -->
+                <div class="mt-8">
+                    <h4
+                        class="text-sm uppercase tracking-wide text-slate-500 font-semibold mb-4 border-b border-slate-100 dark:border-slate-700 pb-2">
+                        Información Personal</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <label for="{{ form.first_name.id_for_label }}"
+                                class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Nombre(s)</label>
+                            {{ form.first_name }}
+                            {% if form.first_name.errors %}
+                            <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                <i class="fas fa-exclamation-circle mr-1"></i> {{ form.first_name.errors|striptags }}
+                            </p>
+                            {% endif %}
+                        </div>
+                        <div>
+                            <label for="{{ form.last_name.id_for_label }}"
+                                class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Apellidos</label>
+                            {{ form.last_name }}
+                            {% if form.last_name.errors %}
+                            <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                <i class="fas fa-exclamation-circle mr-1"></i> {{ form.last_name.errors|striptags }}
+                            </p>
+                            {% endif %}
+                        </div>
+                        <div>
+                            <label for="{{ form.email.id_for_label }}"
+                                class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Correo
+                                Electrónico</label>
+                            {{ form.email }}
+                            {% if form.email.errors %}
+                            <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                <i class="fas fa-exclamation-circle mr-1"></i> {{ form.email.errors|striptags }}
+                            </p>
+                            {% endif %}
+                        </div>
+                        <div>
+                            <label for="{{ form.telefono.id_for_label }}"
+                                class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Teléfono</label>
+                            {{ form.telefono }}
+                            {% if form.telefono.errors %}
+                            <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                <i class="fas fa-exclamation-circle mr-1"></i> {{ form.telefono.errors|striptags }}
+                            </p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Organización y Permisos -->
+                <div class="mt-8">
+                    <h4
+                        class="text-sm uppercase tracking-wide text-slate-500 font-semibold mb-4 border-b border-slate-100 dark:border-slate-700 pb-2">
+                        Organización y Roles</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <label for="{{ form.empresa.id_for_label }}"
+                                class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Empresa
+                                Asignada</label>
+                            {{ form.empresa }}
+                            {% if form.empresa.errors %}
+                            <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                <i class="fas fa-exclamation-circle mr-1"></i> {{ form.empresa.errors|striptags }}
+                            </p>
+                            {% endif %}
+                        </div>
+                        <div>
+                            <label for="{{ form.sucursal_default.id_for_label }}"
+                                class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Sucursal
+                                Predeterminada</label>
+                            {{ form.sucursal_default }}
+                            {% if form.sucursal_default.errors %}
+                            <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                <i class="fas fa-exclamation-circle mr-1"></i> {{ form.sucursal_default.errors|striptags }}
+                            </p>
+                            {% endif %}
+                        </div>
+
+                        <!-- Roles (Nuevo) -->
+                        <div class="col-span-1 md:col-span-2">
+                            <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                                Roles Globales <span class="text-slate-400 font-normal">(Definen accesos
+                                    automáticos)</span>
+                            </label>
+                            <div class="mt-2 bg-white dark:bg-zinc-800 border border-slate-300 dark:border-slate-600 rounded-lg p-4 max-h-48 overflow-y-auto"
+                                id="roles-container">
+                                {% if form.roles.field.queryset.exists or form.instance.empresa %}
+                                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                                    {% for checkbox in form.roles %}
+                                    <div
+                                        class="flex items-center p-2 rounded hover:bg-slate-50 dark:hover:bg-white/5 border border-transparent hover:border-slate-100 dark:hover:border-slate-700 transition-colors">
+                                        {{ checkbox.tag }}
+                                        <label for="{{ checkbox.id_for_label }}"
+                                            class="ml-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer select-none w-full">
+                                            {{ checkbox.choice_label }}
+                                        </label>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                {% else %}
+                                <p class="text-sm text-slate-500 italic text-center py-4">Seleccione una empresa para
+                                    ver los roles disponibles</p>
+                                {% endif %}
+                            </div>
+                            <p class="mt-1.5 text-xs text-slate-500">
+                                Al asignar un rol (ej. "Vendedor"), el usuario tendrá acceso automático a los
+                                departamentos correspondientes (ej. "Ventas") en todas sus sucursales permitidas.
+                            </p>
+                            {% if form.roles.errors %}
+                            <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                <i class="fas fa-exclamation-circle mr-1"></i> {{ form.roles.errors|striptags }}
+                            </p>
+                            {% endif %}
+                        </div>
+
+                        <div class="col-span-1 md:col-span-2">
+                            <label for="{{ form.sucursales.id_for_label }}"
+                                class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Sucursales
+                                Permitidas</label>
+                            <div class="mt-2 bg-white dark:bg-zinc-800 border border-slate-300 dark:border-slate-600 rounded-lg p-4 max-h-48 overflow-y-auto"
+                                id="sucursales-container">
+                                {% if form.sucursales.field.queryset.exists or form.instance.empresa %}
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                    {% for checkbox in form.sucursales %}
+                                    <div class="flex items-center">
+                                        {{ checkbox.tag }}
+                                        <label for="{{ checkbox.id_for_label }}"
+                                            class="ml-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+                                            {{ checkbox.choice_label }}
+                                        </label>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                {% else %}
+                                <p class="text-sm text-slate-500 italic text-center py-4">Seleccione una empresa para
+                                    ver las sucursales disponibles</p>
+                                {% endif %}
+                            </div>
+                            <p class="mt-1.5 text-xs text-slate-500">Seleccione las sucursales adicionales a las que el
+                                usuario tendrá acceso.</p>
+                            {% if form.sucursales.errors %}
+                            <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                <i class="fas fa-exclamation-circle mr-1"></i> {{ form.sucursales.errors|striptags }}
+                            </p>
+                            {% endif %}
+                        </div>
+
+                        <div class="col-span-1 md:col-span-2">
+                            <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Permisos
+                                Adicionales / Excepciones</label>
+                            <div class="mt-2 bg-white dark:bg-zinc-800 border border-slate-300 dark:border-slate-600 rounded-lg p-4 max-h-64 overflow-y-auto"
+                                id="departamentos-container">
+                                {% if form.departamentos.field.queryset.exists or form.instance.empresa %}
+                                <div class="space-y-4">
+                                    <!-- Esto se llenará dinámicamente vía JS -->
+                                    {% regroup form.departamentos.field.queryset by sucursal as sucursal_list %}
+                                    {% for sucursal in sucursal_list %}
+                                    <div>
+                                        <h5 class="text-xs uppercase tracking-wide text-slate-500 font-bold mb-2">{{
+                                            sucursal.grouper }}</h5>
+                                        <div
+                                            class="grid grid-cols-1 sm:grid-cols-2 gap-2 pl-2 border-l-2 border-slate-100 dark:border-slate-700">
+                                            {% for checkbox in form.departamentos %}
+                                            {% if checkbox.data.value in sucursal.list|yesno:"True,False" %}
+                                            <!-- Fallback only -->
+                                            {% endif %}
+                                            {% endfor %}
+                                            <!-- Simple flat list fallback -->
+                                            {% for checkbox in form.departamentos %}
+                                            <div class="flex items-center">
+                                                {{ checkbox.tag }}
+                                                <label for="{{ checkbox.id_for_label }}"
+                                                    class="ml-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+                                                    {{ checkbox.choice_label }}
+                                                </label>
+                                            </div>
+                                            {% endfor %}
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                {% else %}
+                                <p class="text-sm text-slate-500 italic text-center py-4">Seleccione una empresa para
+                                    ver los departamentos disponibles</p>
+                                {% endif %}
+                            </div>
+                            <p class="mt-1.5 text-xs text-slate-500">
+                                <strong>Nota:</strong> Los departamentos asociados a sus roles se activarán
+                                automáticamente. Use esta lista solo para dar accesos extra.
+                            </p>
+                            {% if form.departamentos.errors %}
+                            <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                <i class="fas fa-exclamation-circle mr-1"></i> {{ form.departamentos.errors|striptags }}
+                            </p>
+                            {% endif %}
+                        </div>
+
+                        <div
+                            class="col-span-1 md:col-span-2 bg-slate-50 dark:bg-white/5 p-4 rounded-lg border border-slate-100 dark:border-slate-700">
+                            <div class="flex items-start">
+                                <div class="flex items-center h-5">
+                                    {{ form.is_admin_empresa }}
+                                </div>
+                                <div class="ml-3 text-sm">
+                                    <label for="{{ form.is_admin_empresa.id_for_label }}"
+                                        class="font-medium text-slate-700 dark:text-slate-300">Administrador de
+                                        Empresa</label>
+                                    <p class="text-slate-500 dark:text-slate-400">Si se marca, el usuario tendrá control
+                                        total sobre la empresa asignada.</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label for="{{ form.estatus.id_for_label }}"
+                                class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Estatus</label>
+                            {{ form.estatus }}
+                            {% if form.estatus.errors %}
+                            <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                <i class="fas fa-exclamation-circle mr-1"></i> {{ form.estatus.errors|striptags }}
+                            </p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Renderizado de campos extra de Password si es creación (UserCreationForm) -->
+                {% if not object %}
+                <div class="mt-8">
+                    <h4
+                        class="text-sm uppercase tracking-wide text-slate-500 font-semibold mb-4 border-b border-slate-100 dark:border-slate-700 pb-2">
+                        Seguridad</h4>
+                    <div class="grid grid-cols-1 gap-6">
+                        {% for field in form %}
+                        {% if 'password' in field.name %}
+                        <div>
+                            <label for="{{ field.id_for_label }}"
+                                class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">{{
+                                field.label }}</label>
+                            {{ field }}
+                            {% if field.help_text %}
+                            <p class="mt-1 text-xs text-slate-500">{{ field.help_text|safe }}</p>
+                            {% endif %}
+                            {% if field.errors %}
+                            <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                <i class="fas fa-exclamation-circle mr-1"></i> {{ field.errors|striptags }}
+                            </p>
+                            {% endif %}
+                        </div>
+                        {% endif %}
+                        {% endfor %}
+                    </div>
                 </div>
                 {% endif %}
 
-            </div>
 
-            <div
-                class="mt-8 pt-6 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end space-x-3">
-                <a href="{% url 'usuarios:usuario_list' %}"
-                    class="inline-flex items-center px-4 py-2 border border-slate-300 dark:border-slate-600 rounded-lg shadow-sm text-sm font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-zinc-800 hover:bg-slate-50 dark:hover:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500 transition-colors">
-                    Cancelar
-                </a>
-                <button type="submit"
-                    class="inline-flex items-center px-4 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-sky-600 hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500 transition-colors">
-                    <i class="fas fa-save mr-2"></i> Guardar
-                </button>
-            </div>
-        </form>
+                <div class="mt-8 flex justify-end gap-3 pt-6 border-t border-slate-200 dark:border-slate-800">
+                    <a href="{% url 'usuarios:usuario_list' %}"
+                        class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 bg-white dark:bg-zinc-800 border border-slate-300 dark:border-slate-600 rounded-lg hover:bg-slate-50 dark:hover:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-brand-500 transition-colors">
+                        Cancelar
+                    </a>
+                    <button type="submit"
+                        class="inline-flex justify-center px-4 py-2 text-sm font-medium text-white bg-brand-600 border border-transparent rounded-lg shadow-sm hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-brand-500 transition-colors">
+                        <i class="fas fa-save mr-2"></i> {% if object %}Actualizar{% else %}Registrar{% endif %} Usuario
+                    </button>
+                </div>
+            </form>
+        </div>
     </div>
 </div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const empresaSelect = document.querySelector('#{{ form.empresa.id_for_label }}');
+        const sucursalSelect = document.querySelector('#{{ form.sucursal_default.id_for_label }}');
+        const sucursalesContainer = document.querySelector('#sucursales-container');
+        const departamentosContainer = document.querySelector('#departamentos-container');
+        const rolesContainer = document.querySelector('#roles-container');
+
+        // Guardar la opción seleccionada inicialmente (si estamos editando)
+        const selectedSucursal = sucursalSelect.value;
+        const selectedSucursalesPermitidas = Array.from(document.querySelectorAll('input[name="sucursales"]:checked')).map(cb => cb.value);
+        const selectedDepartamentos = Array.from(document.querySelectorAll('input[name="departamentos"]:checked')).map(cb => cb.value);
+        const selectedRoles = Array.from(document.querySelectorAll('input[name="roles"]:checked')).map(cb => cb.value);
+
+        function updateSucursales() {
+            const empresaId = empresaSelect.value;
+
+            // Limpiar opciones actuales
+            sucursalSelect.innerHTML = '<option value="">---------</option>';
+
+            // Mostrar estado de carga
+            const loaderHtml = '<div class="flex justify-center py-4"><i class="fas fa-circle-notch fa-spin text-brand-500"></i></div>';
+            sucursalesContainer.innerHTML = loaderHtml;
+            departamentosContainer.innerHTML = loaderHtml;
+            if (rolesContainer) rolesContainer.innerHTML = loaderHtml;
+
+            if (empresaId) {
+                // Hacer petición AJAX
+                fetch(`/ajax/sucursales/${empresaId}/`)
+                    .then(response => response.json())
+                    .then(data => {
+                        // Extraer datos (soporte para nueva estructura {sucursales, roles})
+                        const sucursalesList = data.sucursales || []; // Fallback por si la API no devuelve estructura nueva aun
+                        const rolesList = data.roles || [];
+
+                        // A. Render Roles
+                        if (rolesContainer) {
+                            rolesContainer.innerHTML = '';
+                            if (rolesList.length > 0) {
+                                const rolesGrid = document.createElement('div');
+                                rolesGrid.className = 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2';
+
+                                rolesList.forEach(rol => {
+                                    const div = document.createElement('div');
+                                    div.className = 'flex items-center p-2 rounded hover:bg-slate-50 dark:hover:bg-white/5 border border-transparent hover:border-slate-100 dark:hover:border-slate-700 transition-colors';
+
+                                    const input = document.createElement('input');
+                                    input.type = 'checkbox';
+                                    input.name = 'roles';
+                                    input.value = rol.id;
+                                    input.id = `id_roles_${rol.id}`;
+                                    input.className = 'h-4 w-4 text-brand-600 focus:ring-brand-500 border-gray-300 rounded cursor-pointer';
+
+                                    if (selectedRoles.includes(rol.id.toString())) {
+                                        input.checked = true;
+                                    }
+
+                                    const label = document.createElement('label');
+                                    label.htmlFor = `id_roles_${rol.id}`;
+                                    label.className = 'ml-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer select-none w-full';
+
+                                    let labelText = rol.nombre;
+                                    if (rol.clave_departamento) {
+                                        labelText += ` (${rol.clave_departamento})`;
+                                    }
+                                    label.textContent = labelText;
+
+                                    div.appendChild(input);
+                                    div.appendChild(label);
+                                    rolesGrid.appendChild(div);
+                                });
+                                rolesContainer.appendChild(rolesGrid);
+                            } else {
+                                rolesContainer.innerHTML = '<p class="text-sm text-slate-500 italic text-center py-4">No hay roles definidos en esta empresa</p>';
+                            }
+                        }
+
+                        // B. Actualizar Select de Sucursal Default
+                        sucursalesList.forEach(sucursal => {
+                            const option = document.createElement('option');
+                            option.value = sucursal.id_sucursal;
+                            option.textContent = `${sucursal.codigo} - ${sucursal.nombre}`;
+
+                            if (sucursal.id_sucursal == selectedSucursal) {
+                                option.selected = true;
+                            }
+                            sucursalSelect.appendChild(option);
+                        });
+
+                        // C. Actualizar Checkboxes de Sucursales Permitidas
+                        sucursalesContainer.innerHTML = '';
+                        departamentosContainer.innerHTML = '';
+
+                        const deptWrapper = document.createElement('div');
+                        deptWrapper.className = 'space-y-4';
+
+                        if (sucursalesList.length > 0) {
+                            // --- Sucursales Grid ---
+                            const grid = document.createElement('div');
+                            grid.className = 'grid grid-cols-1 sm:grid-cols-2 gap-2';
+
+                            sucursalesList.forEach(sucursal => {
+                                // 1. Checkbox Sucursal
+                                const div = document.createElement('div');
+                                div.className = 'flex items-center';
+
+                                const input = document.createElement('input');
+                                input.type = 'checkbox';
+                                input.name = 'sucursales';
+                                input.value = sucursal.id_sucursal;
+                                input.id = `id_sucursales_${sucursal.id_sucursal}`;
+                                input.className = 'h-4 w-4 text-brand-600 focus:ring-brand-500 border-gray-300 rounded cursor-pointer';
+
+                                if (selectedSucursalesPermitidas.includes(sucursal.id_sucursal.toString())) {
+                                    input.checked = true;
+                                }
+
+                                const label = document.createElement('label');
+                                label.htmlFor = `id_sucursales_${sucursal.id_sucursal}`;
+                                label.className = 'ml-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer select-none';
+                                label.textContent = `${sucursal.codigo} - ${sucursal.nombre}`;
+
+                                div.appendChild(input);
+                                div.appendChild(label);
+                                grid.appendChild(div);
+
+                                // 2. Departamentos Tree Group
+                                if (sucursal.departamentos && sucursal.departamentos.length > 0) {
+                                    const sucursalGroup = document.createElement('div');
+
+                                    const groupTitle = document.createElement('h5');
+                                    groupTitle.className = 'text-xs uppercase tracking-wide text-slate-500 font-bold mb-2';
+                                    groupTitle.textContent = `${sucursal.codigo} - ${sucursal.nombre}`;
+                                    sucursalGroup.appendChild(groupTitle);
+
+                                    const deptGrid = document.createElement('div');
+                                    deptGrid.className = 'grid grid-cols-1 sm:grid-cols-2 gap-2 pl-2 border-l-2 border-slate-100 dark:border-slate-700';
+
+                                    sucursal.departamentos.forEach(dept => {
+                                        const dDiv = document.createElement('div');
+                                        dDiv.className = 'flex items-center';
+
+                                        const dInput = document.createElement('input');
+                                        dInput.type = 'checkbox';
+                                        dInput.name = 'departamentos';
+                                        dInput.value = dept.id_departamento;
+                                        dInput.id = `id_departamentos_${dept.id_departamento}`;
+                                        dInput.className = 'h-4 w-4 text-brand-600 focus:ring-brand-500 border-gray-300 rounded cursor-pointer';
+
+                                        if (selectedDepartamentos.includes(dept.id_departamento.toString())) {
+                                            dInput.checked = true;
+                                        }
+
+                                        const dLabel = document.createElement('label');
+                                        dLabel.htmlFor = `id_departamentos_${dept.id_departamento}`;
+                                        dLabel.className = 'ml-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer select-none';
+                                        dLabel.textContent = dept.nombre;
+
+                                        dDiv.appendChild(dInput);
+                                        dDiv.appendChild(dLabel);
+                                        deptGrid.appendChild(dDiv);
+                                    });
+
+                                    sucursalGroup.appendChild(deptGrid);
+                                    deptWrapper.appendChild(sucursalGroup);
+                                }
+                            });
+                            sucursalesContainer.appendChild(grid);
+
+                            if (deptWrapper.hasChildNodes()) {
+                                departamentosContainer.appendChild(deptWrapper);
+                            } else {
+                                departamentosContainer.innerHTML = '<p class="text-sm text-slate-500 italic text-center py-4">No hay departamentos registrados en estas sucursales</p>';
+                            }
+
+                        } else {
+                            sucursalesContainer.innerHTML = '<p class="text-sm text-slate-500 italic text-center py-4">Esta empresa no tiene sucursales registradas</p>';
+                            departamentosContainer.innerHTML = '<p class="text-sm text-slate-500 italic text-center py-4">Sin sucursales no hay departamentos</p>';
+                        }
+
+                        // Si no hay sucursales, deshabilitar select
+                        if (sucursalesList.length === 0) {
+                            sucursalSelect.disabled = true;
+                        } else {
+                            sucursalSelect.disabled = false;
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error al cargar datos:', error);
+                        sucursalSelect.disabled = true;
+                        const errorHtml = '<p class="text-sm text-red-500 italic text-center py-4">Error al cargar datos</p>';
+                        sucursalesContainer.innerHTML = errorHtml;
+                        departamentosContainer.innerHTML = errorHtml;
+                        if (rolesContainer) rolesContainer.innerHTML = errorHtml;
+                    });
+            } else {
+                sucursalSelect.disabled = true;
+                const msgHtml = '<p class="text-sm text-slate-500 italic text-center py-4">Seleccione una empresa primero</p>';
+                sucursalesContainer.innerHTML = msgHtml;
+                departamentosContainer.innerHTML = msgHtml;
+                if (rolesContainer) rolesContainer.innerHTML = msgHtml;
+            }
+        }
+
+        if (empresaSelect) {
+            empresaSelect.addEventListener('change', updateSucursales);
+
+            // Si es un formulario nuevo (sin empresa seleccionada), deshabilitar
+            if (!empresaSelect.value) {
+                sucursalSelect.disabled = true;
+            }
+            // NOTA: Si ya hay valor (edición), NO llamamos updateSucursales() para no sobrescribir 
+            // la renderización inicial de Django que ya trae los datos correctos y estados de error.
+        }
+    });
+</script>
 {% endblock %}

@@ -202,6 +202,23 @@
 
             <!-- Divider Label -->
             <div class="px-3 py-2 mt-4 opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200">
+                <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Sistemas</span>
+            </div>
+
+            <!-- Logs -->
+            <a href="{% url 'auditoria:sistemas_dashboard' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'sistemas' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Logs</span>
+            </a>
+
+            <!-- Divider Label -->
+            <div class="px-3 py-2 mt-4 opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200">
                 <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Seguridad</span>
             </div>
 
@@ -215,6 +232,18 @@
                 </svg>
                 <span
                     class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Usuarios</span>
+            </a>
+
+            <!-- Roles -->
+            <a href="{% url 'seguridad:rol_list' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'rol' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Roles</span>
             </a>
 
             <!-- Divider Label -->
@@ -234,11 +263,92 @@
                     class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Monedas</span>
             </a>
 
+            <!-- Divider Label -->
+            <div class="px-3 py-2 mt-4 opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200">
+                <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">SAT (Fiscal)</span>
+            </div>
+
+            <!-- Régimen Fiscal -->
+            <a href="{% url 'nucleo:sat_regimen_list' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'sat_regimen' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Régimen
+                    Fiscal</span>
+            </a>
+
+            <!-- Uso CFDI -->
+            <a href="{% url 'nucleo:sat_usocfdi_list' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'sat_usocfdi' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Uso
+                    CFDI</span>
+            </a>
+
+            <!-- Otros Catálogos SAT -->
+            <a href="{% url 'nucleo:sat_metodopago_list' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'sat_metodopago' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Métodos
+                    Pago</span>
+            </a>
+
+            <!-- Formas Pago -->
+            <a href="{% url 'nucleo:sat_formapago_list' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'sat_formapago' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Formas
+                    Pago</span>
+            </a>
+
+            <!-- Prod/Serv -->
+            <a href="{% url 'nucleo:sat_prodserv_list' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'sat_prodserv' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Prod/Serv</span>
+            </a>
+
+            <!-- Unidades -->
+            <a href="{% url 'nucleo:sat_unidad_list' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'sat_unidad' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Unidades</span>
+            </a>
+
         </nav>
 
         <!-- Bottom Actions -->
         <div class="p-4 border-t border-slate-200 dark:border-slate-800">
-            <a href="/admin/logout/" class="w-full mt-2 flex items-center justify-start gap-4 px-3 py-3 rounded-xl 
+            <a href="#" onclick="event.preventDefault(); document.getElementById('logout-form').submit();" class="w-full mt-2 flex items-center justify-start gap-4 px-3 py-3 rounded-xl 
                        text-red-500 hover:bg-red-50 dark:hover:bg-red-900/10 
                        transition-colors group relative overflow-hidden">
                 <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -338,6 +448,19 @@
                     <span class="font-medium">Departamentos</span>
                 </a>
 
+                <div class="px-4 py-2 mt-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Sistemas</div>
+
+                <!-- Logs -->
+                <a href="{% url 'auditoria:sistemas_dashboard' %}"
+                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
+                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z">
+                        </path>
+                    </svg>
+                    <span class="font-medium">Logs</span>
+                </a>
+
                 <div class="px-4 py-2 mt-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Seguridad</div>
 
                 <!-- Usuarios -->
@@ -349,6 +472,17 @@
                         </path>
                     </svg>
                     <span class="font-medium">Usuarios</span>
+                </a>
+
+                <!-- Roles -->
+                <a href="{% url 'seguridad:rol_list' %}"
+                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
+                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z">
+                        </path>
+                    </svg>
+                    <span class="font-medium">Roles</span>
                 </a>
 
                 <div class="px-4 py-2 mt-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Catálogos</div>
@@ -366,7 +500,7 @@
 
             </div>
             <div class="p-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-black/20">
-                <a href="/admin/logout/"
+                <a href="#" onclick="event.preventDefault(); document.getElementById('logout-form').submit();"
                     class="block w-full text-center px-4 py-3 rounded-xl bg-black dark:bg-white text-white dark:text-black font-bold text-sm shadow-lg">Cerrar
                     sesión</a>
             </div>
@@ -378,7 +512,7 @@
         <!-- Header -->
         <header class="hidden md:flex h-20 items-center justify-between px-8 bg-transparent shrink-0 z-30">
             <div class="flex items-center gap-4 text-slate-400">
-                <h2 class="text-2xl font-semibold text-slate-800 dark:text-white tracking-tight">{% block header_title%}Panel de Control{% endblock %}</h2>
+                <h2 class="text-2xl font-semibold text-slate-800 dark:text-white tracking-tight">{% block header_title %}Panel de Control{% endblock %}</h2>
                 <span class="text-sm font-medium">{% block header_subtitle %}{% endblock %}</span>
             </div>
             <div class="flex items-center gap-6">
@@ -421,6 +555,11 @@
             </div>
         </main>
     </div>
+
+    <!-- Hidden Logout Form -->
+    <form id="logout-form" action="{% url 'logout' %}" method="post" style="display: none;">
+        {% csrf_token %}
+    </form>
 
     <!-- Mobile Drawer Logic -->
     <script>

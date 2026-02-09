@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="es" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Acceso Restringido</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+        .pattern-grid {
+            background-color: #f8fafc;
+            background-image: linear-gradient(#e2e8f0 1px, transparent 1px),
+                              linear-gradient(90deg, #e2e8f0 1px, transparent 1px);
+            background-size: 24px 24px;
+            background-position: center center;
+        }
+    </style>
+</head>
+<body class="h-full pattern-grid flex items-center justify-center p-4">
+    <!-- Main Card -->
+    <div class="max-w-md w-full bg-white rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.1)] overflow-hidden border border-slate-100 relative">
+        <!-- Top Accent Line -->
+        <div class="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-slate-700 via-slate-800 to-slate-900"></div>
+        
+        <div class="p-8 sm:p-10 text-center">
+            <!-- Icon Wrapper with subtle animation -->
+            <div class="group mx-auto w-20 h-20 bg-slate-50 rounded-2xl flex items-center justify-center mb-6 ring-1 ring-slate-100 shadow-sm transition-transform duration-500 hover:scale-105">
+                <svg class="w-10 h-10 text-slate-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                </svg>
+            </div>
+
+            <!-- Headlines -->
+            <h1 class="text-2xl font-bold text-slate-900 mb-3 tracking-tight">
+                Acceso Restringido
+            </h1>
+            <p class="text-slate-500 text-sm leading-relaxed mb-8 px-4">
+                Su perfil de usuario no cuenta con las credenciales ejecutivas para acceder a este módulo. Por seguridad, se requiere revalidar su sesión.
+            </p>
+
+            <!-- Action Section -->
+            <div class="space-y-6">
+                <form action="{% url 'logout' %}" method="post">
+                    {% csrf_token %}
+                    <button type="submit" class="group relative w-full flex justify-center py-3.5 px-4 border border-transparent text-sm font-semibold rounded-xl text-white bg-slate-900 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-900 transition-all duration-200 shadow-lg shadow-slate-900/20 active:scale-[0.98]">
+                        <span class="absolute left-0 inset-y-0 flex items-center pl-4">
+                            <svg class="h-5 w-5 text-slate-400 group-hover:text-slate-200 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                            </svg>
+                        </span>
+                        Cerrar Sesión Segura
+                    </button>
+                </form>
+                
+                <!-- Security Footer -->
+                <div class="border-t border-slate-50 pt-6">
+                    <div class="flex items-center justify-center gap-2 text-[10px] uppercase tracking-wider text-slate-400 font-medium">
+                        <div class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></div>
+                        Protocolo de Seguridad Activo
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

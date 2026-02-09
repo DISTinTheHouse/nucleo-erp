@@ -33,6 +33,14 @@ class Rol(models.Model):
     codigo = models.CharField(max_length=50)  # unique por empresa
     nombre = models.CharField(max_length=120)
     descripcion = models.TextField(blank=True, null=True)
+    
+    # Nuevo: Vinculación con códigos de departamentos (para permisos automáticos)
+    clave_departamento = models.CharField(
+        max_length=50, 
+        blank=True, 
+        null=True,
+        help_text="Código del departamento al que este rol da acceso automáticamente (ej. 'VENTAS')."
+    )
 
     is_system = models.BooleanField(default=False)
     estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)

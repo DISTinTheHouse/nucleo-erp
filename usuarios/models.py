@@ -2,110 +2,105 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 
 
-# class Usuario(AbstractUser):
-#     class Estatus(models.TextChoices):
-#         ACTIVO = "activo", "Activo"
-#         BLOQUEADO = "bloqueado", "Bloqueado"
+class Usuario(AbstractUser):
+    class Estatus(models.TextChoices):
+        ACTIVO = "activo", "Activo"
+        BLOQUEADO = "bloqueado", "Bloqueado"
 
-#     empresa = models.ForeignKey(
-#         "nucleo.Empresa",
-#         on_delete=models.PROTECT,
-#         related_name="usuarios",
-#         null=True,
-#         blank=True,
-#     )
+    empresa = models.ForeignKey(
+        "nucleo.Empresa",
+        on_delete=models.PROTECT,
+        related_name="usuarios",
+        null=True,
+        blank=True,
+    )
 
-#     sucursal_default = models.ForeignKey(
-#         "nucleo.Sucursal",
-#         on_delete=models.SET_NULL,
-#         related_name="usuarios_default",
-#         null=True,
-#         blank=True,
-#     )
+    # Empresas a las que el usuario tiene acceso (Multi-Tenant)
+    empresas = models.ManyToManyField(
+        "nucleo.Empresa",
+        related_name="usuarios_autorizados",
+        blank=True,
+        help_text="Empresas a las que el usuario tiene acceso."
+    )
 
-#     telefono = models.CharField(max_length=30, blank=True, null=True)
+    sucursal_default = models.ForeignKey(
+        "nucleo.Sucursal",
+        on_delete=models.SET_NULL,
+        related_name="usuarios_default",
+        null=True,
+        blank=True,
+    )
 
-#     is_admin_empresa = models.BooleanField(default=False)
-#     estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
+    # Para controlar a qué sucursales tiene acceso el usuario (Scope de Datos)
+    sucursales = models.ManyToManyField(
+        "nucleo.Sucursal",
+        related_name="usuarios_permitidos",
+        blank=True,
+        help_text="Sucursales a las que el usuario tiene acceso para operar."
+    )
 
-#     two_factor_enabled = models.BooleanField(default=False)
-#     avatar_url = models.URLField(blank=True, null=True)
-#     preferencias_json = models.JSONField(default=dict, blank=True)
+    # Para limitar la visualización por área funcional dentro de las sucursales
+    departamentos = models.ManyToManyField(
+        "nucleo.Departamento",
+        related_name="usuarios_permitidos",
+        blank=True,
+        help_text="Departamentos específicos a los que el usuario tiene acceso."
+    )
 
-#     created_at = models.DateTimeField(auto_now_add=True)
-#     updated_at = models.DateTimeField(auto_now=True)
+    telefono = models.CharField(max_length=30, blank=True, null=True)
 
-#     class Meta:
-#         db_table = "usuarios"
-#         verbose_name = "Usuario"
-#         verbose_name_plural = "Usuarios"
-#         indexes = [
-#             models.Index(fields=["empresa"]),
-#             models.Index(fields=["estatus"]),
-#         ]
-
-#     def __str__(self):
-#         return self.username
-    
-
-class Usuario(models.Model):
-    # claves primarias / foraneas
-    id_usuario = models.BigAutoField(primary_key=True)
-    id_empresa = models.BigIntegerField(db_index=True)
-    id_sucursal_default = models.BigIntegerField(null=True, blank=True)
-
-    # credenciales
-    username = models.CharField(max_length=50)
-    email = models.EmailField(max_length=255)
-    password_hash = models.CharField(max_length=255)
-
-    # informacion personal
-    nombre = models.CharField(max_length=100)
-    apellidos = models.CharField(max_length=150)
-    telefono = models.CharField(max_length=20, null=True, blank=True)
-
-    # Roles / estados
     is_admin_empresa = models.BooleanField(default=False)
+    estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
 
-    ESTATUS_CHOICES = {
-        (1, 'Activo'),
-        (2, 'Bloqueado'),
-        (3, 'Suspendido'),
-    }
-
-    estatus = models.PositiveSmallIntegerField(choices=ESTATUS_CHOICES, default=1)
-
-    # Auditoria
-    last_login_at = models.DateTimeField(null=True, blank=True)
-
-    # opcionales
     two_factor_enabled = models.BooleanField(default=False)
-    avatar_url = models.TextField(null=True, blank=True)
-    preferencias_json = models.JSONField(null=True, blank=True)
+    avatar_url = models.URLField(blank=True, null=True)
+    preferencias_json = models.JSONField(default=dict, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    # Meta
     class Meta:
-        db_table = 'usuarios'
-        verbose_name = 'Usuario'
-        verbose_name_plural = 'Usuarios'
-        constraints = [
-            models.UniqueConstraint(
-                fields=['id_empresa', 'username'],
-                name='uq_usuario_username_empresa'
-            ),
-            models.UniqueConstraint(
-                fields=['id_empresa', 'email'],
-                name='uq_usuario_email_empresa'
-            ),
-        ]
+        db_table = "usuarios"
+        verbose_name = "Usuario"
+        verbose_name_plural = "Usuarios"
         indexes = [
-            models.Index(fields=['id_empresa'], name='idx_usuario_empresa'),
-            models.Index(fields=['estatus'], name='idx_usuario_estatus'),
+            models.Index(fields=["empresa"]),
+            models.Index(fields=["estatus"]),
         ]
-    
-    def __str__(self):
-        return f'{self.username} ({self.email})'
 
+    def save(self, *args, **kwargs):
+        # Sincronizar is_active con estatus
+        if self.estatus == self.Estatus.BLOQUEADO:
+            self.is_active = False
+        elif self.estatus == self.Estatus.ACTIVO:
+            self.is_active = True
+        
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.username
+
+    def tiene_permiso(self, clave_permiso):
+        """
+        Verifica si el usuario tiene un permiso específico basado en sus roles asignados.
+        Retorna True si:
+        1. Es superusuario de Django (admin global).
+        2. Es admin de empresa (is_admin_empresa=True).
+        3. Tiene un rol activo asignado que contiene el permiso solicitado.
+        """
+        # 1. Superuser global siempre tiene acceso
+        if self.is_superuser:
+            return True
+
+        # 2. Admin de empresa tiene acceso total a su empresa (simplificación)
+        # Podrías refinar esto para que solo aplique a permisos de su propia empresa
+        if self.is_admin_empresa:
+            return True
+
+        # 3. Verificar roles asignados
+        # Buscamos en los roles asignados al usuario (UsuarioRol)
+        # Filtramos roles activos y verificamos si alguno tiene el permiso con la clave dada
+        return self.asignaciones_roles.filter(
+            rol__estatus="activo",
+            rol__permisos__clave=clave_permiso
+        ).exists()

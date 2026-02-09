@@ -210,4 +210,37 @@
         </div>
     </div>
 </div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const razonSocialInput = document.querySelector('[name="razon_social"]');
+        const nombreComercialInput = document.querySelector('[name="nombre_comercial"]');
+        const codigoInput = document.querySelector('[name="codigo"]');
+        
+        // Función simple para slugificar
+        function slugify(text) {
+            return text.toString().toLowerCase()
+                .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // Eliminar acentos
+                .replace(/\s+/g, '-')           // Reemplazar espacios con -
+                .replace(/[^\w\-]+/g, '')       // Eliminar caracteres no alfanuméricos
+                .replace(/\-\-+/g, '-')         // Reemplazar múltiples - con uno solo
+                .replace(/^-+/, '')             // Cortar - del inicio
+                .replace(/-+$/, '');            // Cortar - del final
+        }
+
+        // Solo auto-generar si estamos creando (o el campo código está vacío)
+        if (codigoInput && (!codigoInput.value || codigoInput.value.trim() === '')) {
+            function updateSlug() {
+                // Preferir nombre comercial, si no, usar razón social
+                const sourceText = nombreComercialInput.value || razonSocialInput.value;
+                if (sourceText) {
+                    codigoInput.value = slugify(sourceText);
+                }
+            }
+
+            if (razonSocialInput) razonSocialInput.addEventListener('input', updateSlug);
+            if (nombreComercialInput) nombreComercialInput.addEventListener('input', updateSlug);
+        }
+    });
+</script>
 {% endblock %}

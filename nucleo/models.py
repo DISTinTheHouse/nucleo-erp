@@ -203,7 +203,6 @@ class Departamento(models.Model):
         return f"{self.sucursal.nombre} - {self.nombre}"
 
 
-
 class SerieFolio(models.Model):
     class Estatus(models.TextChoices):
         ACTIVO = "activo", "Activo"
@@ -247,3 +246,142 @@ class SerieFolio(models.Model):
 
     def __str__(self):
         return f"{self.tipo_documento} {self.serie}"
+
+
+# =========================
+# CATÁLOGOS SAT (Globales)
+# =========================
+
+class SatUsoCfdi(models.Model):
+    id_sat_uso_cfdi = models.BigAutoField(primary_key=True)
+    codigo = models.CharField(max_length=10, unique=True)  # G01, G03
+    descripcion = models.CharField(max_length=255)
+    aplica_fisica = models.BooleanField(default=False)
+    aplica_moral = models.BooleanField(default=False)
+    estatus = models.CharField(max_length=20, default='activo')
+
+    class Meta:
+        db_table = "sat_uso_cfdi"
+        verbose_name = "SAT Uso CFDI"
+        verbose_name_plural = "SAT Usos CFDI"
+
+    def __str__(self):
+        return f"{self.codigo} - {self.descripcion}"
+
+
+class SatMetodoPago(models.Model):
+    id_sat_metodo_pago = models.BigAutoField(primary_key=True)
+    codigo = models.CharField(max_length=10, unique=True)
+    descripcion = models.CharField(max_length=255)
+    estatus = models.CharField(max_length=20, default='activo')
+
+    class Meta:
+        db_table = "sat_metodo_pago"
+        verbose_name = "SAT Método de Pago"
+        verbose_name_plural = "SAT Métodos de Pago"
+
+    def __str__(self):
+        return f"{self.codigo} - {self.descripcion}"
+
+
+class SatFormaPago(models.Model):
+    id_sat_forma_pago = models.BigAutoField(primary_key=True)
+    codigo = models.CharField(max_length=10, unique=True)
+    descripcion = models.CharField(max_length=255)
+    bancarizado = models.BooleanField(default=False)
+    estatus = models.CharField(max_length=20, default='activo')
+
+    class Meta:
+        db_table = "sat_forma_pago"
+        verbose_name = "SAT Forma de Pago"
+        verbose_name_plural = "SAT Formas de Pago"
+
+    def __str__(self):
+        return f"{self.codigo} - {self.descripcion}"
+
+
+class SatClaveProdServ(models.Model):
+    id_sat_prodserv = models.BigAutoField(primary_key=True)
+    codigo = models.CharField(max_length=20, unique=True)
+    descripcion = models.CharField(max_length=255)
+    estatus = models.CharField(max_length=20, default='activo')
+
+    class Meta:
+        db_table = "sat_clave_prodserv"
+        verbose_name = "SAT Clave Prod/Serv"
+        verbose_name_plural = "SAT Claves Prod/Serv"
+
+    def __str__(self):
+        return f"{self.codigo} - {self.descripcion}"
+
+
+class SatClaveUnidad(models.Model):
+    id_sat_unidad = models.BigAutoField(primary_key=True)
+    codigo = models.CharField(max_length=10, unique=True)
+    descripcion = models.CharField(max_length=255)
+    estatus = models.CharField(max_length=20, default='activo')
+
+    class Meta:
+        db_table = "sat_clave_unidad"
+        verbose_name = "SAT Clave Unidad"
+        verbose_name_plural = "SAT Claves Unidad"
+
+    def __str__(self):
+        return f"{self.codigo} - {self.descripcion}"
+
+
+class SatRegimenFiscal(models.Model):
+    id_sat_regimen_fiscal = models.BigAutoField(primary_key=True)
+    codigo = models.CharField(max_length=10, unique=True)  # 601, 626...
+    descripcion = models.CharField(max_length=255)
+    aplica_fisica = models.BooleanField(default=False)
+    aplica_moral = models.BooleanField(default=False)
+    estatus = models.CharField(max_length=20, default='activo')
+
+    class Meta:
+        db_table = "sat_regimen_fiscal"
+        verbose_name = "SAT Régimen Fiscal"
+        verbose_name_plural = "SAT Regímenes Fiscales"
+
+    def __str__(self):
+        return f"{self.codigo} - {self.descripcion}"
+
+
+# =========================
+# CONFIGURACIÓN FISCAL
+# =========================
+
+def get_upload_path_cer(instance, filename):
+    return f"sat/csd/{instance.empresa.codigo}/cer_{filename}"
+
+def get_upload_path_key(instance, filename):
+    return f"sat/csd/{instance.empresa.codigo}/key_{filename}"
+
+
+class EmpresaSatConfig(models.Model):
+    id_empresa_sat_config = models.BigAutoField(primary_key=True)
+    empresa = models.OneToOneField(Empresa, on_delete=models.CASCADE, related_name="sat_config")
+    regimen_fiscal = models.ForeignKey(SatRegimenFiscal, on_delete=models.PROTECT, related_name="empresas_config", blank=True, null=True)
+
+    # Archivos físicos
+    archivo_cer = models.FileField(upload_to=get_upload_path_cer, blank=True, null=True, help_text="Certificado (.cer)")
+    archivo_key = models.FileField(upload_to=get_upload_path_key, blank=True, null=True, help_text="Llave Privada (.key)")
+    
+    # Contenido en Base64/PEM para uso interno (se llena automático)
+    certificado_pem = models.TextField(blank=True, null=True)
+    llave_privada_pem = models.TextField(blank=True, null=True)
+    
+    password_llave = models.CharField(max_length=255, blank=True, null=True)
+    no_certificado = models.CharField(max_length=50, blank=True, null=True)
+    fecha_expiracion = models.DateTimeField(blank=True, null=True)
+    
+    validado = models.BooleanField(default=False)
+    mensaje_error = models.TextField(blank=True, null=True)
+
+    class Meta:
+        db_table = "empresa_sat_config"
+        verbose_name = "Configuración SAT Empresa"
+        verbose_name_plural = "Configuraciones SAT Empresa"
+
+    def __str__(self):
+        return f"Config SAT - {self.empresa.razon_social}"

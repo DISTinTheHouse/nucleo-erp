@@ -1,24 +1,46 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    EmpresaViewSet, CoreDashboardView,
+    EmpresaViewSet, SucursalViewSet, DepartamentoViewSet, MonedaViewSet,
+    CoreDashboardView, get_sucursales_por_empresa,
     EmpresaListView, EmpresaCreateView, EmpresaUpdateView, EmpresaDeleteView,
     SucursalListView, SucursalCreateView, SucursalUpdateView, SucursalDeleteView,
     DepartamentoListView, DepartamentoCreateView, DepartamentoUpdateView, DepartamentoDeleteView,
     MonedaListView, MonedaCreateView, MonedaUpdateView, MonedaDeleteView
+)
+from .views_sat import (
+    SatRegimenFiscalListView, SatUsoCfdiListView, SatMetodoPagoListView,
+    SatFormaPagoListView, SatClaveProdServListView, SatClaveUnidadListView
+)
+from .api_views import (
+    UserEmpresasAPIView, UserSucursalesAPIView, SatCatalogosAPIView, 
+    EmpresaSatConfigUpdateView, TenantRegistrationAPIView
 )
 
 app_name = 'nucleo'
 
 router = DefaultRouter()
 router.register(r'empresas', EmpresaViewSet)
+router.register(r'sucursales', SucursalViewSet)
+router.register(r'departamentos', DepartamentoViewSet)
+router.register(r'monedas', MonedaViewSet)
 
 urlpatterns = [
-    # API
+    # API (Router Default)
     path('api/v1/nucleo/', include(router.urls)),
+    
+    # API Custom (Next.js)
+    path('api/v1/nucleo/mis-empresas/', UserEmpresasAPIView.as_view(), name='api_mis_empresas'),
+    path('api/v1/nucleo/mis-sucursales/', UserSucursalesAPIView.as_view(), name='api_mis_sucursales'),
+    path('api/v1/nucleo/sat/catalogos/', SatCatalogosAPIView.as_view(), name='api_sat_catalogos'),
+    path('api/v1/nucleo/empresas/<int:empresa_id>/config-sat/', EmpresaSatConfigUpdateView.as_view(), name='api_empresa_sat_config'),
+    path('api/v1/onboarding/register/', TenantRegistrationAPIView.as_view(), name='api_tenant_register'),
 
     # WEB CORE - DASHBOARD
     path('core/dashboard/', CoreDashboardView.as_view(), name='dashboard'),
+    
+    # AJAX
+    path('ajax/sucursales/<int:empresa_id>/', get_sucursales_por_empresa, name='ajax_sucursales'),
 
     # WEB CORE - EMPRESAS
     path('core/empresas/', EmpresaListView.as_view(), name='empresa_list'),
@@ -43,4 +65,12 @@ urlpatterns = [
     path('core/monedas/nueva/', MonedaCreateView.as_view(), name='moneda_create'),
     path('core/monedas/<pk>/editar/', MonedaUpdateView.as_view(), name='moneda_update'),
     path('core/monedas/<pk>/eliminar/', MonedaDeleteView.as_view(), name='moneda_delete'),
+
+    # WEB CORE - CATALOGOS SAT
+    path('core/sat/regimenes/', SatRegimenFiscalListView.as_view(), name='sat_regimen_list'),
+    path('core/sat/usos-cfdi/', SatUsoCfdiListView.as_view(), name='sat_usocfdi_list'),
+    path('core/sat/metodos-pago/', SatMetodoPagoListView.as_view(), name='sat_metodopago_list'),
+    path('core/sat/formas-pago/', SatFormaPagoListView.as_view(), name='sat_formapago_list'),
+    path('core/sat/prod-serv/', SatClaveProdServListView.as_view(), name='sat_prodserv_list'),
+    path('core/sat/unidades/', SatClaveUnidadListView.as_view(), name='sat_unidad_list'),
 ]
