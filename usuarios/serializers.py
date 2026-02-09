@@ -15,8 +15,25 @@ class UsuarioSerializer(serializers.ModelSerializer):
         read_only_fields = ['date_joined', 'last_login', 'is_active']
         extra_kwargs = {
             'email': {'required': True},
-            'empresa': {'required': True}
+            'empresa': {'required': True},
+            'sucursal_default': {'required': True}
         }
+
+    def validate(self, data):
+        """
+        Validación cruzada de integridad.
+        """
+        empresa = data.get('empresa')
+        sucursal = data.get('sucursal_default')
+
+        # Si estamos creando (no hay instancia) o si se están actualizando ambos campos
+        if empresa and sucursal:
+            if sucursal.empresa != empresa:
+                raise serializers.ValidationError({
+                    "sucursal_default": "La sucursal seleccionada no pertenece a la empresa asignada."
+                })
+        
+        return data
 
     def create(self, validated_data):
         password = validated_data.pop('password', None)

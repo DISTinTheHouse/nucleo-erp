@@ -2,52 +2,9 @@
 
 ## 🌐 Configuración Base
 
-- **Base URL Desarrollo**: `http://localhost:8000` (o tu IP local `192.168.0.X:8000`)
-- **Autenticación**: Header `Authorization: Token <tu_token>`
+- **Base URL Desarrollo**: `http://localhost:8003` (o tu IP local `192.168.0.X:8003`)
+- **Autenticación**: Header `Authorization: Bearer <tu_token>` (Excepto Login)
 - **Content-Type**: `application/json` (excepto para subida de archivos)
-
----
-
-## 🚀 0. Onboarding (Registro de Nuevo Cliente)
-
-Endpoint público para registrar una nueva Empresa, su primera Sucursal y el Usuario Administrador inicial en un solo paso (Transacción Atómica).
-
-- **Endpoint**: `POST /api/v1/onboarding/register/`
-- **Permisos**: Público (`AllowAny`)
-- **Body**:
-  ```json
-  {
-    "empresa_razon_social": "Mi Nueva Empresa S.A.",
-    "empresa_codigo": "mi-empresa-sa",
-    "empresa_rfc": "XAXX010101000",
-    "empresa_email": "contacto@miempresa.com",
-
-    "sucursal_nombre": "Matriz Principal",
-    "sucursal_codigo": "SUC-001",
-
-    "usuario_username": "admin_miempresa",
-    "usuario_email": "admin@miempresa.com",
-    "usuario_password": "SecurePassword123!",
-    "usuario_first_name": "Juan",
-    "usuario_last_name": "Pérez"
-  }
-  ```
-- **Respuesta (201 Created)**:
-  ```json
-  {
-    "message": "Registro completado exitosamente",
-    "empresa": {
-      "id": 10,
-      "codigo": "mi-empresa-sa",
-      "razon_social": "Mi Nueva Empresa S.A."
-    },
-    "usuario": {
-      "id": 45,
-      "username": "admin_miempresa",
-      "email": "admin@miempresa.com"
-    }
-  }
-  ```
 
 ---
 
@@ -73,7 +30,8 @@ Obtén el token de sesión para el usuario.
     "email": "admin@empresa.com",
     "username": "admin",
     "nombre_completo": "Administrador Sistema",
-    "es_admin": true
+    "es_admin": true,
+    "is_superuser": true
   }
   ```
 
@@ -81,9 +39,9 @@ Obtén el token de sesión para el usuario.
 
 ## 🏢 2. Contexto de Usuario (Empresas y Sucursales)
 
-### Mis Empresas
+### Mis Empresas (Listado Simple)
 
-Lista las empresas a las que el usuario tiene acceso.
+Lista las empresas a las que el usuario tiene acceso explícito. Usar para el **Selector de Empresa**.
 
 - **Endpoint**: `GET /api/v1/nucleo/mis-empresas/`
 - **Respuesta**:
@@ -117,7 +75,43 @@ Lista las sucursales permitidas para el usuario dentro de una empresa específic
 
 ---
 
-## 📜 3. Catálogos del SAT (Facturación)
+## 🏭 3. Gestión de Empresas (CRUD Completo)
+
+Endpoint principal para administración de empresas.
+
+**Permisos**:
+
+- **Superusuario**: Acceso total (Crear, Leer Todas, Actualizar, Eliminar).
+- **Usuario Normal**: Solo lectura (Lista filtrada a sus empresas asignadas). No puede crear ni editar.
+
+- **Listar**: `GET /api/v1/nucleo/empresas/`
+- **Crear**: `POST /api/v1/nucleo/empresas/` (Solo Superusuario)
+- **Detalle**: `GET /api/v1/nucleo/empresas/{id}/`
+- **Actualizar**: `PUT/PATCH /api/v1/nucleo/empresas/{id}/` (Solo Superusuario)
+
+### Crear Empresa (Ejemplo - Solo Superusuario)
+
+Al crear una empresa, el superusuario se asigna automáticamente a ella.
+
+- **Endpoint**: `POST /api/v1/nucleo/empresas/`
+- **Body**:
+  ```json
+  {
+    "codigo": "EMP-NUEVA",
+    "nombre_fiscal": "Nueva Empresa S.A.",
+    "nombre_comercial": "Mi Nueva Empresa",
+    "rfc": "XAXX010101000",
+    "regimen_fiscal": "601",
+    "codigo_postal": "64000",
+    "pais": "MEX",
+    "moneda": "MXN"
+  }
+  ```
+- **Respuesta (201 Created)**: Objeto de la empresa creada.
+
+---
+
+## 📜 4. Catálogos del SAT (Facturación)
 
 Recupera todos los catálogos fiscales necesarios para llenar formularios de facturación o configuración de empresa.
 

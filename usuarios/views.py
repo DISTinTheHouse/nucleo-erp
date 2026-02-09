@@ -2,11 +2,23 @@ from django.shortcuts import render
 from django.urls import reverse_lazy
 from django.views.generic import ListView, CreateView, UpdateView, DeleteView
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
-from rest_framework import viewsets
+from rest_framework import viewsets, permissions
 from nucleo.mixins import AuditLogMixin
 from .models import Usuario
 from .forms import UsuarioCreationForm, UsuarioChangeForm
 from .serializers import UsuarioSerializer
+
+# Custom Permission
+class IsSuperUserOrReadOnly(permissions.BasePermission):
+    """
+    Permite acceso total a superusuarios.
+    Lectura permitida a usuarios autenticados (sujeta a filtros de queryset).
+    Escritura prohibida para no superusuarios.
+    """
+    def has_permission(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return request.user and request.user.is_authenticated
+        return request.user and request.user.is_superuser
 
 # API
 class UsuarioViewSet(viewsets.ModelViewSet):
@@ -15,6 +27,7 @@ class UsuarioViewSet(viewsets.ModelViewSet):
     """
     queryset = Usuario.objects.all()
     serializer_class = UsuarioSerializer
+    permission_classes = [IsSuperUserOrReadOnly]
 
     def get_queryset(self):
         user = self.request.user

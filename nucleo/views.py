@@ -10,20 +10,34 @@ from .models import (
     Empresa, Sucursal, Departamento, Moneda, Impuesto, UnidadMedida,
     SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, SatClaveProdServ, SatClaveUnidad
 )
+from usuarios.models import Usuario
 from .serializers import EmpresaSerializer, SucursalSerializer, DepartamentoSerializer, MonedaSerializer
 from .forms import EmpresaForm, SucursalForm, DepartamentoForm, MonedaForm, ImpuestoForm, UnidadMedidaForm
 from .mixins import AuditLogMixin
+from rest_framework import viewsets, permissions
 
-Usuario = get_user_model()
+# Custom Permission
+class IsSuperUserOrReadOnly(permissions.BasePermission):
+    """
+    Permite acceso total a superusuarios.
+    Lectura permitida a usuarios autenticados (sujeta a filtros de queryset).
+    Escritura prohibida para no superusuarios.
+    """
+    def has_permission(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return request.user and request.user.is_authenticated
+        return request.user and request.user.is_superuser
 
 # API
 class EmpresaViewSet(viewsets.ModelViewSet):
     """
     API endpoint para ver y editar empresas.
+    Permite crear empresas a usuarios autenticados y las vincula automáticamente.
     """
     queryset = Empresa.objects.all()
     serializer_class = EmpresaSerializer
     lookup_field = 'codigo'
+    permission_classes = [IsSuperUserOrReadOnly]
 
     def get_queryset(self):
         user = self.request.user
@@ -31,7 +45,6 @@ class EmpresaViewSet(viewsets.ModelViewSet):
             return self.queryset
         
         # Filtrar por empresas asignadas al usuario (M2M) o la empresa activa (FK)
-        # Importamos models aquí para evitar errores de referencia si no está importado
         from django.db import models
         queryset = self.queryset.filter(
             models.Q(pk=user.empresa_id) | 
@@ -44,10 +57,10 @@ class EmpresaViewSet(viewsets.ModelViewSet):
         empresa = serializer.save()
         user = self.request.user
         
-        # 1. Asignar la nueva empresa a la lista de empresas permitidas del usuario
+        # 1. Vincular al creador con la empresa (M2M)
         user.empresas.add(empresa)
         
-        # 2. Si el usuario no tiene empresa activa asignada, asignarle esta y hacerlo admin
+        # 2. Si no tiene empresa activa, asignarla como default y hacerlo admin
         if not user.empresa:
             user.empresa = empresa
             user.is_admin_empresa = True
@@ -60,6 +73,7 @@ class SucursalViewSet(viewsets.ModelViewSet):
     queryset = Sucursal.objects.all()
     serializer_class = SucursalSerializer
     lookup_field = 'codigo'
+    permission_classes = [IsSuperUserOrReadOnly]
 
     def get_queryset(self):
         user = self.request.user
@@ -76,6 +90,7 @@ class DepartamentoViewSet(viewsets.ModelViewSet):
     queryset = Departamento.objects.all()
     serializer_class = DepartamentoSerializer
     lookup_field = 'codigo'
+    permission_classes = [IsSuperUserOrReadOnly]
 
     def get_queryset(self):
         user = self.request.user
@@ -92,6 +107,7 @@ class MonedaViewSet(viewsets.ModelViewSet):
     queryset = Moneda.objects.all()
     serializer_class = MonedaSerializer
     lookup_field = 'codigo_iso'
+    permission_classes = [IsSuperUserOrReadOnly]
 
 def get_sucursales_por_empresa(request, empresa_id):
     """

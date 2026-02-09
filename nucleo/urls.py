@@ -14,7 +14,7 @@ from .views_sat import (
 )
 from .api_views import (
     UserEmpresasAPIView, UserSucursalesAPIView, SatCatalogosAPIView, 
-    EmpresaSatConfigUpdateView, TenantRegistrationAPIView
+    EmpresaSatConfigUpdateView
 )
 
 app_name = 'nucleo'
@@ -34,7 +34,6 @@ urlpatterns = [
     path('api/v1/nucleo/mis-sucursales/', UserSucursalesAPIView.as_view(), name='api_mis_sucursales'),
     path('api/v1/nucleo/sat/catalogos/', SatCatalogosAPIView.as_view(), name='api_sat_catalogos'),
     path('api/v1/nucleo/empresas/<int:empresa_id>/config-sat/', EmpresaSatConfigUpdateView.as_view(), name='api_empresa_sat_config'),
-    path('api/v1/onboarding/register/', TenantRegistrationAPIView.as_view(), name='api_tenant_register'),
 
     # WEB CORE - DASHBOARD
     path('core/dashboard/', CoreDashboardView.as_view(), name='dashboard'),

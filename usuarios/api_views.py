@@ -32,7 +32,8 @@ class LoginAPIView(APIView):
                 'email': user.email,
                 'username': user.username,
                 'nombre_completo': f"{user.first_name} {user.last_name}".strip(),
-                'es_admin': user.is_staff or user.is_superuser
+                'es_admin': user.is_staff or user.is_superuser,
+                'is_superuser': user.is_superuser
             })
         else:
             return Response({'error': 'Credenciales inválidas'}, status=status.HTTP_401_UNAUTHORIZED)

@@ -1,6 +1,6 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from django.shortcuts import get_object_or_404
 from django.db import models
@@ -8,33 +8,8 @@ from .models import Empresa, Sucursal, SatRegimenFiscal, SatUsoCfdi, SatMetodoPa
 from .serializers import (
     EmpresaSerializer, SucursalSerializer, SatRegimenFiscalSerializer, 
     SatUsoCfdiSerializer, SatMetodoPagoSerializer, SatFormaPagoSerializer,
-    EmpresaSatConfigSerializer, TenantRegistrationSerializer
+    EmpresaSatConfigSerializer
 )
-
-class TenantRegistrationAPIView(APIView):
-    """
-    Endpoint público para registrar un nuevo Tenant (Empresa + Sucursal + Usuario Admin).
-    """
-    permission_classes = [AllowAny]
-    
-    def post(self, request):
-        serializer = TenantRegistrationSerializer(data=request.data)
-        if serializer.is_valid():
-            result = serializer.save()
-            return Response({
-                'message': 'Registro completado exitosamente',
-                'empresa': {
-                    'id': result['empresa'].id_empresa,
-                    'codigo': result['empresa'].codigo,
-                    'razon_social': result['empresa'].razon_social
-                },
-                'usuario': {
-                    'id': result['usuario'].id,
-                    'username': result['usuario'].username,
-                    'email': result['usuario'].email
-                }
-            }, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class EmpresaSatConfigUpdateView(APIView):
     permission_classes = [IsAuthenticated]
