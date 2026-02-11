@@ -73,9 +73,61 @@ Lista las sucursales permitidas para el usuario dentro de una empresa específic
   ]
   ```
 
+### Sucursales (Gestión Completa)
+
+Permite ver detalles y editar sucursales.
+
+**Permisos**:
+
+- **Superusuario**: Acceso total.
+- **Admin Empresa**: Puede ver y editar (`PUT`/`PATCH`) las sucursales de su propia empresa.
+- **Usuario Normal**: Solo lectura (filtrado por permisos).
+
+- **Listar**: `GET /api/v1/nucleo/sucursales/`
+- **Detalle**: `GET /api/v1/nucleo/sucursales/{codigo}/`
+- **Editar**: `PATCH /api/v1/nucleo/sucursales/{codigo}/` (Requiere `is_admin_empresa=True`)
+
 ---
 
-## 🏭 3. Gestión de Empresas (CRUD Completo)
+## 👥 3. Gestión de Usuarios
+
+API completa para gestionar el personal de la empresa (cajeros, vendedores, gerentes).
+
+**Permisos**:
+
+- **Superusuario**: Acceso total.
+- **Admin Empresa**: Puede crear, editar y eliminar usuarios que pertenezcan a **su misma empresa**. No puede crear Superusuarios ni otros Admins de Empresa.
+
+### Endpoints
+
+- **Listar**: `GET /api/v1/usuarios/`
+- **Crear**: `POST /api/v1/usuarios/`
+- **Detalle**: `GET /api/v1/usuarios/{id}/`
+- **Editar**: `PATCH /api/v1/usuarios/{id}/`
+- **Eliminar**: `DELETE /api/v1/usuarios/{id}/`
+
+### Ejemplo: Crear Usuario (Cajero)
+
+El backend asigna automáticamente la empresa del administrador que crea el usuario.
+
+- **Endpoint**: `POST /api/v1/usuarios/`
+- **Body**:
+  ```json
+  {
+    "username": "cajero_sucursal1",
+    "email": "cajero@miempresa.com",
+    "password": "Password123!",
+    "first_name": "Juan",
+    "last_name": "Perez",
+    "sucursal_default": 5,
+    "sucursales": [5],
+    "estatus": "activo"
+  }
+  ```
+
+---
+
+## 🏭 4. Gestión de Empresas (CRUD Completo)
 
 Endpoint principal para administración de empresas.
 
@@ -130,7 +182,7 @@ Recupera todos los catálogos fiscales necesarios para llenar formularios de fac
 
 ---
 
-## ⚙️ 4. Configuración Fiscal (CSD)
+## ⚙️ 6. Configuración Fiscal (CSD)
 
 Sube y valida los archivos de Certificado de Sello Digital (CSD) para una empresa.
 
