@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 from decouple import config
 
@@ -218,7 +219,6 @@ if SECURE_SSL_REDIRECT:
 # =========================
 # LOGGING CONFIGURATION
 # =========================
-import os
 
 LOGS_DIR = BASE_DIR / 'logs'
 if not os.path.exists(LOGS_DIR):
