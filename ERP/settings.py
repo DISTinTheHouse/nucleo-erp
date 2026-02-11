@@ -220,83 +220,37 @@ if SECURE_SSL_REDIRECT:
 # LOGGING CONFIGURATION
 # =========================
 
-LOGS_DIR = BASE_DIR / 'logs'
-if not os.path.exists(LOGS_DIR):
-    os.makedirs(LOGS_DIR)
-
+# Logging Configuration
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
     'formatters': {
         'verbose': {
-            'format': '{asctime} [{levelname}] {name} {message}',
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
             'style': '{',
         },
         'simple': {
-            'format': '{asctime} {message}',
+            'format': '{levelname} {message}',
             'style': '{',
         },
-        'audit': {
-            'format': '{asctime} | {message}',
-            'style': '{',
-        }
     },
     'handlers': {
         'console': {
+            'level': 'DEBUG',
             'class': 'logging.StreamHandler',
             'formatter': 'simple',
-        },
-        'file_general': {
-            'level': 'INFO',
-            'class': 'logging.handlers.RotatingFileHandler',
-            'filename': LOGS_DIR / 'sistema.log',
-            'maxBytes': 1024 * 1024 * 5, # 5 MB
-            'backupCount': 5,
-            'formatter': 'verbose',
-            'encoding': 'utf-8',
-        },
-        'file_api': {
-            'level': 'INFO',
-            'class': 'logging.handlers.RotatingFileHandler',
-            'filename': LOGS_DIR / 'api.log',
-            'maxBytes': 1024 * 1024 * 5,
-            'backupCount': 5,
-            'formatter': 'verbose',
-            'encoding': 'utf-8',
-        },
-        'file_audit': {
-            'level': 'INFO',
-            'class': 'logging.handlers.RotatingFileHandler',
-            'filename': LOGS_DIR / 'auditoria.log',
-            'maxBytes': 1024 * 1024 * 10,
-            'backupCount': 10,
-            'formatter': 'audit',
-            'encoding': 'utf-8',
         },
     },
     'loggers': {
         'django': {
-            'handlers': ['console', 'file_general'],
+            'handlers': ['console'],
             'level': 'INFO',
             'propagate': True,
         },
-        'api_logger': {
-            'handlers': ['file_api'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'audit_logger': {
-            'handlers': ['file_audit'],
-            'level': 'INFO',
-            'propagate': False,
+        'nucleo': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+            'propagate': True,
         },
     },
 }
-
-if not DEBUG:
-    LOGGING["handlers"].pop("file_general", None)
-    LOGGING["handlers"].pop("file_api", None)
-    LOGGING["handlers"].pop("file_audit", None)
-    LOGGING["loggers"]["django"]["handlers"] = ["console"]
-    LOGGING["loggers"]["api_logger"]["handlers"] = ["console"]
-    LOGGING["loggers"]["audit_logger"]["handlers"] = ["console"]
