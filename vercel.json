@@ -1,15 +1,9 @@
 {
     "version": 2,
-    "builds": [
+    "rewrites": [
         {
-            "src": "ERP/wsgi.py",
-            "use": "@vercel/python"
-        }
-    ],
-    "routes": [
-        {
-            "src": "/(.*)",
-            "dest": "ERP/wsgi.py"
+            "source": "/(.*)",
+            "destination": "ERP/wsgi.py"
         }
     ]
 }
