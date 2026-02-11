@@ -1,7 +1,15 @@
 {
-  "buildCommand": "python manage.py collectstatic --noinput --clear",
-  "routes": [
-    { "handle": "filesystem" },
-    { "src": "/(.*)", "dest": "/api/index.py" }
-  ]
+    "version": 2,
+    "builds": [
+        {
+            "src": "ERP/wsgi.py",
+            "use": "@vercel/python"
+        }
+    ],
+    "routes": [
+        {
+            "src": "/(.*)",
+            "dest": "ERP/wsgi.py"
+        }
+    ]
 }
