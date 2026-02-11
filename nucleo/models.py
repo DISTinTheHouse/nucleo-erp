@@ -7,7 +7,12 @@ from django.utils import timezone
 # =========================
 
 class Moneda(models.Model):
-    codigo_iso = models.CharField(max_length=3, unique=True)  # MXN, USD
+    # Relación opcional con Empresa.
+    # Si es NULL, es una moneda GLOBAL (del sistema).
+    # Si tiene valor, es una moneda privada de esa empresa.
+    empresa = models.ForeignKey('Empresa', on_delete=models.CASCADE, null=True, blank=True, related_name='monedas_privadas')
+    
+    codigo_iso = models.CharField(max_length=3)  # Quitamos unique=True global
     nombre = models.CharField(max_length=60)
     simbolo = models.CharField(max_length=10, blank=True, null=True)
     decimales = models.PositiveSmallIntegerField(default=2)
@@ -21,6 +26,13 @@ class Moneda(models.Model):
         verbose_name = "Moneda"
         verbose_name_plural = "Monedas"
         ordering = ["codigo_iso"]
+        constraints = [
+            # Evitar duplicados dentro de la misma empresa
+            models.UniqueConstraint(fields=['empresa', 'codigo_iso'], name='unique_moneda_empresa'),
+            # Evitar duplicados en globales (empresa=null)
+            # Nota: En algunos DBs (Postgres), null!=null, por lo que esto requiere validación en serializer o índice parcial.
+            # Para simplificar y compatibilidad, lo manejaremos fuertemente en Serializer/Clean.
+        ]
 
     def __str__(self):
         return self.codigo_iso

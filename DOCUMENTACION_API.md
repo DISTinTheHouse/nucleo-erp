@@ -86,8 +86,8 @@ Endpoint principal para administración de empresas.
 
 - **Listar**: `GET /api/v1/nucleo/empresas/`
 - **Crear**: `POST /api/v1/nucleo/empresas/` (Solo Superusuario)
-- **Detalle**: `GET /api/v1/nucleo/empresas/{id}/`
-- **Actualizar**: `PUT/PATCH /api/v1/nucleo/empresas/{id}/` (Solo Superusuario)
+- **Detalle**: `GET /api/v1/nucleo/empresas/{id_o_codigo}/` (Acepta ID numérico o Código)
+- **Actualizar**: `PUT/PATCH /api/v1/nucleo/empresas/{id_o_codigo}/` (Solo Superusuario)
 
 ### Crear Empresa (Ejemplo - Solo Superusuario)
 

@@ -98,7 +98,45 @@ class SatFormaPagoSerializer(serializers.ModelSerializer):
 class MonedaSerializer(serializers.ModelSerializer):
     class Meta:
         model = Moneda
-        fields = '__all__'
+        fields = ['id', 'empresa', 'codigo_iso', 'nombre', 'simbolo', 'decimales', 'estatus']
+        read_only_fields = ['id', 'empresa'] # Empresa se asigna en el viewset
+
+    def validate(self, data):
+        request = self.context.get('request')
+        if not request or not request.user:
+            return data
+            
+        codigo_iso = data.get('codigo_iso')
+        if not codigo_iso:
+            return data # Dejar que la validación estándar de required lo maneje
+            
+        user = request.user
+        empresa = user.empresa if not user.is_superuser else None
+        
+        # Validar unicidad (Global o Local)
+        # 1. Si existe como global
+        if Moneda.objects.filter(codigo_iso=codigo_iso, empresa__isnull=True).exists():
+             # Si el usuario NO es superuser, no puede crear una que ya existe globalmente (se usa la global)
+             if not user.is_superuser:
+                 raise serializers.ValidationError(f"La moneda {codigo_iso} ya existe en el catálogo global.")
+             
+             # Si es superuser y está intentando crear otra global igual
+             if user.is_superuser and not data.get('empresa'):
+                 # Chequear si estamos actualizando la misma instancia
+                 if self.instance and self.instance.codigo_iso == codigo_iso:
+                     pass
+                 else:
+                     raise serializers.ValidationError(f"La moneda global {codigo_iso} ya existe.")
+
+        # 2. Si existe localmente para esta empresa
+        if empresa:
+             qs = Moneda.objects.filter(codigo_iso=codigo_iso, empresa=empresa)
+             if self.instance:
+                 qs = qs.exclude(pk=self.instance.pk)
+             if qs.exists():
+                 raise serializers.ValidationError(f"Ya tienes configurada la moneda {codigo_iso} en tu empresa.")
+                 
+        return data
 
 class SucursalSerializer(serializers.ModelSerializer):
     class Meta:

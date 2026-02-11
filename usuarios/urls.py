@@ -19,5 +19,5 @@ urlpatterns = [
     
     # API Endpoints
     path('api/v1/login/', LoginAPIView.as_view(), name='api_login'),
-    path('api/v1/usuarios/', include(router.urls)),
+    path('api/v1/', include(router.urls)),
 ]

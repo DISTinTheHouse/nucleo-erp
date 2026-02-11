@@ -1,4 +1,4 @@
-from django.shortcuts import render
+from django.shortcuts import render, get_object_or_404
 from django.urls import reverse_lazy
 from django.http import JsonResponse
 from django.views.generic import TemplateView, ListView, CreateView, UpdateView, DeleteView
@@ -34,7 +34,7 @@ class EmpresaViewSet(viewsets.ModelViewSet):
     API endpoint para ver y editar empresas.
     Permite crear empresas a usuarios autenticados y las vincula automáticamente.
     """
-    queryset = Empresa.objects.all()
+    queryset = Empresa.objects.all().order_by('-created_at')
     serializer_class = EmpresaSerializer
     lookup_field = 'codigo'
     permission_classes = [IsSuperUserOrReadOnly]
@@ -52,6 +52,29 @@ class EmpresaViewSet(viewsets.ModelViewSet):
         ).distinct()
         
         return queryset
+
+    def get_object(self):
+        """
+        Permite buscar por ID (pk) o por el campo lookup_field (código).
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        lookup_value = self.kwargs.get(lookup_url_kwarg)
+
+        # Si el valor es numérico, intentamos buscar por ID (pk)
+        if lookup_value and lookup_value.isdigit():
+             try:
+                 obj = queryset.get(pk=lookup_value)
+                 self.check_object_permissions(self.request, obj)
+                 return obj
+             except queryset.model.DoesNotExist:
+                 pass # Fallback a búsqueda por código (por si el código es numérico)
+        
+        # Búsqueda normal por el campo configurado (código)
+        filter_kwargs = {self.lookup_field: lookup_value}
+        obj = get_object_or_404(queryset, **filter_kwargs)
+        self.check_object_permissions(self.request, obj)
+        return obj
 
     def perform_create(self, serializer):
         empresa = serializer.save()
@@ -103,11 +126,58 @@ class DepartamentoViewSet(viewsets.ModelViewSet):
 class MonedaViewSet(viewsets.ModelViewSet):
     """
     API endpoint para ver y editar monedas.
+    Admite monedas Globales (System) y Privadas (Empresa).
     """
     queryset = Moneda.objects.all()
     serializer_class = MonedaSerializer
     lookup_field = 'codigo_iso'
-    permission_classes = [IsSuperUserOrReadOnly]
+    permission_classes = [permissions.IsAuthenticated] # Permitimos a usuarios autenticados, filtramos lógica dentro
+
+    def get_queryset(self):
+        user = self.request.user
+        # Superusuario ve todo
+        if user.is_superuser:
+            return self.queryset
+            
+        # Usuarios normales ven: Globales + Suyas
+        from django.db.models import Q
+        qs = self.queryset.filter(
+            Q(empresa__isnull=True) |  # Globales
+            Q(empresa=user.empresa)    # Propias
+        )
+        return qs
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.is_superuser:
+            # Superusuario crea globales por defecto (empresa=None)
+            serializer.save(empresa=None)
+        else:
+            # Validar que sea Admin de Empresa
+            if not getattr(user, 'is_admin_empresa', False):
+                raise permissions.exceptions.PermissionDenied("Solo los administradores de empresa pueden agregar monedas.")
+
+            # Admin de empresa crea privadas
+            if not user.empresa:
+                raise permissions.exceptions.PermissionDenied("Usuario sin empresa asignada.")
+            serializer.save(empresa=user.empresa)
+
+    def check_object_permissions(self, request, obj):
+        super().check_object_permissions(request, obj)
+        
+        # Si es solo lectura, permitir
+        if request.method in permissions.SAFE_METHODS:
+            return
+
+        # Bloquear edición/borrado de Globales para no-superusers
+        if obj.empresa is None:
+            if not request.user.is_superuser:
+                raise permissions.exceptions.PermissionDenied("No puedes editar monedas del catálogo global.")
+            return
+
+        # Bloquear edición/borrado de Privadas para no-admins
+        if not getattr(request.user, 'is_admin_empresa', False):
+             raise permissions.exceptions.PermissionDenied("Solo los administradores pueden gestionar monedas de la empresa.")
 
 def get_sucursales_por_empresa(request, empresa_id):
     """
@@ -155,6 +225,11 @@ class EmpresaListView(LoginRequiredMixin, SuperuserRequiredMixin, ListView):
     model = Empresa
     template_name = 'nucleo/empresa_list.html'
     context_object_name = 'empresas'
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        # Garantizar que se retornen todas las empresas para el superusuario
+        return Empresa.objects.all().order_by('-created_at')
 
 class EmpresaCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
     model = Empresa

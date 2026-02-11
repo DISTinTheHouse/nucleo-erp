@@ -63,6 +63,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'axes.middleware.AxesMiddleware',
     'nucleo.middleware.APILoggingMiddleware',
+    'nucleo.middleware.NoCacheMiddleware',
 ]
 
 ROOT_URLCONF = 'ERP.urls'

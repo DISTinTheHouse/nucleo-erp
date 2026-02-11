@@ -1,54 +1,52 @@
-# 🏗️ Arquitectura y Funcionamiento de la App
+# 🏗️ Arquitectura y Blindaje del Sistema
 
-Este documento explica cómo funciona la aplicación a nivel técnico y arquitectónico. El sistema es un **ERP Multi-tenant** construido con Django, diseñado para ser escalable y seguro.
+Este documento describe la arquitectura técnica y las medidas de seguridad ("Blindaje") implementadas para operar como un backend robusto basado puramente en APIs.
 
-## 1. Concepto Multi-tenant (Empresas)
-El núcleo del sistema es el modelo `Empresa`.
-- **Aislamiento Lógico**: Aunque todos los datos viven en la misma base de datos, cada registro importante (Sucursal, Usuario, Venta, etc.) tiene una llave foránea (`ForeignKey`) hacia `Empresa`.
-- **Seguridad**: Todas las consultas a la base de datos deben filtrar por la empresa del usuario activo para evitar fugas de información entre inquilinos.
+## 1. Stack Tecnológico
+- **Framework**: Django 6.0.2 (Python 3.12)
+- **API**: Django REST Framework (DRF) 3.15+
+- **Base de Datos**: PostgreSQL
+- **Seguridad**: `django-axes`, `cryptography`, `corsheaders`
 
-## 2. Sistema de Seguridad y Permisos
-El sistema utiliza un modelo de seguridad híbrido y robusto:
+## 2. Estrategia de Blindaje (Security Hardening)
 
-### A. Autenticación y Protección
-- **Token Auth**: API segura usando tokens estándar.
-- **Protección Fuerza Bruta**: Integración con `django-axes` para bloquear IPs tras 5 intentos fallidos de login (1 hora de bloqueo).
-- **Validación Estricta**: Validaciones regex y checksum para RFCs mexicanos.
+El sistema ha sido diseñado para "no confiar en el cliente" y validar todo en el servidor.
 
-### B. Autorización (Roles y Scopes)
-La autorización se decide en tres niveles:
-1.  **Nivel Empresa (Tenant)**: ¿El usuario pertenece a esta empresa?
-2.  **Nivel Sucursal (Scope)**: ¿El usuario tiene acceso a la sucursal donde intenta operar? (Campo `sucursales` M2M).
-3.  **Nivel Funcional (RBAC)**: ¿El usuario tiene el **Rol** necesario (ej. "Vendedor") y el **Permiso** específico (ej. `crear_pedido`)?
+### A. Aislamiento Multi-tenant (Nivel DB)
+Aunque es una base de datos compartida, el aislamiento lógico es absoluto:
+- **Middleware/ViewSets**: Sobrescribimos `get_queryset()` en todas las vistas.
+- **Lógica**: `queryset.filter(empresa=request.user.empresa)`
+- **Resultado**: Un usuario jamás puede leer ni escribir datos de otra empresa, incluso si manipula los IDs en la URL.
 
-## 3. Integración Fiscal (SAT México)
-La aplicación está diseñada para cumplir con la normativa mexicana.
-- **Catálogos SAT**: Base de datos poblada con catálogos oficiales (Uso CFDI, Régimen Fiscal, etc.).
-- **Manejo de CSD (Sellos Digitales)**:
-  - Almacenamiento seguro de archivos `.key` y `.cer` fuera del directorio público.
-  - **Validación Criptográfica**: Uso de librería `cryptography` (OpenSSL) para validar pares de llaves, contraseñas y vigencia al momento de la carga.
+### B. Validación de Datos (Nivel Serializer)
+No permitimos basura en la BD.
+- **RFCs**: Validación estricta de formato y checksum (algoritmo oficial SAT).
+- **Archivos CSD**: Al subir sellos digitales (`.cer`, `.key`), se validan criptográficamente en memoria antes de guardarse. Si la contraseña no abre la llave o el RFC no coincide, se rechaza.
 
-## 4. Sistema de Auditoría y Logging
-Implementamos una arquitectura de observabilidad en tres capas:
+### C. Protección de Red y Transporte
+- **CORS Estricto**: Solo se permiten peticiones desde el Frontend autorizado (configurado en `.env`).
+- **Allowed Hosts**: El servidor rechaza peticiones con Host headers desconocidos.
+- **Rate Limiting**: Protección contra ataques de fuerza bruta en el login (bloqueo temporal de IP).
 
-1.  **System Logs (`sistema.log`)**: Errores de bajo nivel y advertencias del framework.
-2.  **API Logs (`api.log`)**: Middleware (`APILoggingMiddleware`) que registra cada petición HTTP, payload (sanitizado), respuesta y tiempo de ejecución.
-3.  **Audit Logs (`auditoria.log` / DB)**: `AuditLogMixin` en modelos clave que registra *quién* modificó *qué* (creación, edición, eliminación) y el *diff* de los cambios.
+## 3. Flujo de Trabajo API-First
 
-## 5. Flujo de Datos (Frontend - Backend)
-Arquitectura orientada a servicios (API REST):
+El backend actúa como una "Caja Negra" segura para el Frontend (Next.js).
 
-1.  **Request**: Next.js envía petición con Token.
-2.  **Middleware**:
-    - `AxesMiddleware`: Verifica ataques.
-    - `APILoggingMiddleware`: Loguea la entrada.
-3.  **Vista/API**:
-    - `IsAuthenticated`: Verifica token.
-    - Serializers: Valida integridad de datos (ej. RFC).
-4.  **Response**: JSON estandarizado.
+1.  **Petición**: El frontend envía JSON + Token Bearer.
+2.  **Gatekeeper**: Django verifica Token, IP (bloqueos) y Origen (CORS).
+3.  **Contexto**: Se hidrata `request.user` y se determina su `empresa` activa.
+4.  **Procesamiento**:
+    - Se validan permisos (Role-Based Access Control).
+    - Se ejecutan reglas de negocio (ej. validación SAT).
+5.  **Respuesta**: JSON estructurado y códigos HTTP semánticos (200, 201, 400, 401, 403).
 
-## 6. Tecnologías Clave
-- **Backend**: Python 3.12 / Django 6.0
-- **Base de Datos**: PostgreSQL.
-- **Seguridad**: `django-axes`, `cryptography`.
-- **API**: Django REST Framework (DRF).
+## 4. Estructura de Endpoints
+
+- **`/api/v1/nucleo/`**: Gestión de estructura organizacional (Empresas, Sucursales).
+- **`/api/v1/auth/`**: Gestión de sesión.
+- **`/api/v1/sat/`**: Servicios fiscales y catálogos.
+
+## 5. Auditoría
+Cada escritura crítica genera un rastro:
+- **Logs de API**: Tiempos de respuesta, usuario y status code.
+- **Logs de Auditoría**: Cambios en modelos sensibles (quién cambió qué valor).

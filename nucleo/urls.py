@@ -26,7 +26,7 @@ router.register(r'departamentos', DepartamentoViewSet)
 router.register(r'monedas', MonedaViewSet)
 
 urlpatterns = [
-    # API (Router Default)
+    # API (Router Default)B
     path('api/v1/nucleo/', include(router.urls)),
     
     # API Custom (Next.js)

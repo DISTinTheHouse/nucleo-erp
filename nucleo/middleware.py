@@ -38,3 +38,22 @@ class APILoggingMiddleware:
             logger.error(log_message)
 
         return response
+
+class NoCacheMiddleware:
+    """
+    Middleware para deshabilitar el caché en todas las respuestas de la API.
+    Añade headers: Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+    """
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        
+        # Aplicar solo a rutas de API
+        if request.path.startswith('/api/'):
+            response['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+            response['Pragma'] = 'no-cache'
+            response['Expires'] = '0'
+            
+        return response

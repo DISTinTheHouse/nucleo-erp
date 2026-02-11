@@ -50,8 +50,8 @@ Relación 1:1 con `Empresa`.
 
 Gestión de identidades y sesiones.
 
-| Tabla | PK (ID) | Relaciones Clave | Descripción |
-|-------|---------|------------------|-------------|
+| Tabla | PK (ID) | Relaciones Clave | Descripción | 
+|-------|---------|------------------|-------------| 
 | **usuarios** | `id` | `empresa` (FK), `sucursal_default` (FK) | Usuario del sistema. Extiende `AbstractUser` de Django. |
 | **(M2M) usuarios_sucursales** | - | `usuario_id`, `sucursal_id` | Define el "Scope" geográfico/físico de acceso del usuario. |
 | **(M2M) usuarios_departamentos** | - | `usuario_id`, `departamento_id` | Limita la visualización de datos por área (ej. solo ver "Ventas"). |
@@ -83,8 +83,7 @@ Aunque gran parte se maneja en logs de archivo, existen estructuras para el segu
 ## 📐 Diagramas
 
 ### Jerarquía de Organización
-```mermaid
-graph TD
+```
     Empresa[Empresa (Tenant)] --> Sucursal[Sucursales]
     Sucursal --> Departamento[Departamentos]
     Empresa --> Rol[Roles]
@@ -93,8 +92,7 @@ graph TD
 ```
 
 ### Relación de Usuario y Accesos
-```mermaid
-graph LR
+```
     Usuario -->|Pertenece a| Empresa
     Usuario -->|Tiene acceso a| Sucursal(es)
     Usuario -->|Tiene Rol| Rol

@@ -12,6 +12,10 @@ class LoginAPIView(APIView):
         email = request.data.get('email')
         password = request.data.get('password')
 
+        # Limpieza básica
+        if email:
+            email = email.strip()
+
         print(f"DEBUG LOGIN: Email recibido: '{email}'")
         # print(f"DEBUG LOGIN: Password recibido: '{password}'") # No imprimir passwords reales en logs
 
@@ -33,7 +37,9 @@ class LoginAPIView(APIView):
                 'username': user.username,
                 'nombre_completo': f"{user.first_name} {user.last_name}".strip(),
                 'es_admin': user.is_staff or user.is_superuser,
-                'is_superuser': user.is_superuser
+                'is_superuser': user.is_superuser,
+                'is_admin_empresa': getattr(user, 'is_admin_empresa', False),
+                'empresa_id': user.empresa_id if user.empresa else None
             })
         else:
             return Response({'error': 'Credenciales inválidas'}, status=status.HTTP_401_UNAUTHORIZED)
