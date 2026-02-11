@@ -293,3 +293,10 @@ LOGGING = {
     },
 }
 
+if not DEBUG:
+    LOGGING["handlers"].pop("file_general", None)
+    LOGGING["handlers"].pop("file_api", None)
+    LOGGING["handlers"].pop("file_audit", None)
+    LOGGING["loggers"]["django"]["handlers"] = ["console"]
+    LOGGING["loggers"]["api_logger"]["handlers"] = ["console"]
+    LOGGING["loggers"]["audit_logger"]["handlers"] = ["console"]
