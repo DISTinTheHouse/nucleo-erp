@@ -96,7 +96,7 @@ class SucursalViewSet(viewsets.ModelViewSet):
     queryset = Sucursal.objects.all()
     serializer_class = SucursalSerializer
     lookup_field = 'codigo'
-    permission_classes = [IsSuperUserOrReadOnly]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
@@ -105,6 +105,32 @@ class SucursalViewSet(viewsets.ModelViewSet):
         if hasattr(user, 'empresa') and user.empresa:
             return self.queryset.filter(empresa=user.empresa)
         return self.queryset.none()
+
+    def check_object_permissions(self, request, obj):
+        super().check_object_permissions(request, obj)
+        
+        # 1. Superusuario: acceso total
+        if request.user.is_superuser:
+            return
+
+        # 2. Admin de Empresa: permitir edición de sus sucursales
+        if getattr(request.user, 'is_admin_empresa', False):
+            if obj.empresa != request.user.empresa:
+                raise permissions.exceptions.PermissionDenied("No puedes editar sucursales de otra empresa.")
+            return
+
+        # 3. Otros usuarios: solo lectura
+        if request.method not in permissions.SAFE_METHODS:
+            raise permissions.exceptions.PermissionDenied("No tienes permisos para editar sucursales.")
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        if not user.is_superuser:
+            # Asegurar que no cambien la empresa
+            if 'empresa' in serializer.validated_data and serializer.validated_data['empresa'] != user.empresa:
+                 raise permissions.exceptions.PermissionDenied("No puedes mover sucursales a otra empresa.")
+        
+        serializer.save()
 
 class DepartamentoViewSet(viewsets.ModelViewSet):
     """
