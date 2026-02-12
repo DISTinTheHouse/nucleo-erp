@@ -1,7 +1,7 @@
 services:
   - type: web
     name: nucleo-erp
-    env: python
+    runtime: python
     buildCommand: "bash build.sh"
     startCommand: "gunicorn ERP.wsgi:application"
     envVars:
