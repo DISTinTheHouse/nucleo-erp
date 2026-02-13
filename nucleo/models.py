@@ -125,7 +125,7 @@ class Empresa(models.Model):
         ]
 
     def __str__(self):
-        return self.codigo
+        return self.codigo or f"Empresa {self.pk}"
 
     def soft_delete(self):
         self.deleted_at = timezone.now()
