@@ -6,7 +6,7 @@ from django.shortcuts import get_object_or_404
 from django.db import models
 from .models import Empresa, Sucursal, SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, EmpresaSatConfig
 from .serializers import (
-    EmpresaSerializer, SucursalSerializer, SatRegimenFiscalSerializer, 
+    SatRegimenFiscalSerializer, 
     SatUsoCfdiSerializer, SatMetodoPagoSerializer, SatFormaPagoSerializer,
     EmpresaSatConfigSerializer
 )

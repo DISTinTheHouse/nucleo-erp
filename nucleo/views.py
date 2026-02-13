@@ -1,4 +1,4 @@
-from django.shortcuts import render, get_object_or_404
+from django.shortcuts import get_object_or_404
 from django.urls import reverse_lazy
 from django.http import JsonResponse
 from django.views.generic import TemplateView, ListView, CreateView, UpdateView, DeleteView
@@ -75,19 +75,6 @@ class EmpresaViewSet(viewsets.ModelViewSet):
         obj = get_object_or_404(queryset, **filter_kwargs)
         self.check_object_permissions(self.request, obj)
         return obj
-
-    def perform_create(self, serializer):
-        empresa = serializer.save()
-        user = self.request.user
-        
-        # 1. Vincular al creador con la empresa (M2M)
-        user.empresas.add(empresa)
-        
-        # 2. Si no tiene empresa activa, asignarla como default y hacerlo admin
-        if not user.empresa:
-            user.empresa = empresa
-            user.is_admin_empresa = True
-            user.save()
 
 class SucursalViewSet(viewsets.ModelViewSet):
     """
