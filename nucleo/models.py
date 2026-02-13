@@ -37,7 +37,6 @@ class Moneda(models.Model):
     def __str__(self):
         return self.codigo_iso
 
-
 class Impuesto(models.Model):
     class Tipo(models.TextChoices):
         TRASLADADO = "trasladado", "Trasladado"
@@ -61,7 +60,6 @@ class Impuesto(models.Model):
     def __str__(self):
         return f"{self.codigo}"
 
-
 class UnidadMedida(models.Model):
     clave = models.CharField(max_length=10, unique=True)  # PZA, MTR, KG
     nombre = models.CharField(max_length=100)
@@ -78,7 +76,6 @@ class UnidadMedida(models.Model):
 
     def __str__(self):
         return self.clave
-
 
 # =========================
 # 0) NÚCLEO / MULTI-TENANT
