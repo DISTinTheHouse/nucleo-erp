@@ -206,8 +206,6 @@ class Departamento(models.Model):
             # models.UniqueConstraint(fields=["sucursal", "nombre"], name="uq_departamento_sucursal_nombre"),
         ]
         indexes = [
-            models.Index(fields=["empresa"]),
-            models.Index(fields=["sucursal"]),
             models.Index(fields=["empresa", "estatus"]),
         ]
 

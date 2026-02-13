@@ -91,8 +91,8 @@ class UsuarioRol(models.Model):
             models.UniqueConstraint(fields=["usuario", "rol"], name="uq_usuario_rol"),
         ]
         indexes = [
-            models.Index(fields=["empresa"]),
-            models.Index(fields=["usuario"]),
+            # models.Index(fields=["empresa"]),
+            # models.Index(fields=["usuario"]),
         ]
 
 

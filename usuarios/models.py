@@ -64,7 +64,7 @@ class Usuario(AbstractUser):
         verbose_name = "Usuario"
         verbose_name_plural = "Usuarios"
         indexes = [
-            models.Index(fields=["empresa"]),
+            # models.Index(fields=["empresa"]),
             models.Index(fields=["estatus"]),
         ]
 
