@@ -6,13 +6,13 @@ Este repositorio contiene el **Núcleo (Core)** del sistema ERP. Es una aplicaci
 
 El sistema sigue una arquitectura **Headless / Desacoplada**:
 
-*   **🐍 Django (Backend/Core):**
+*   **Django (Backend/Core):**
     *   Actúa como la "Fuente de la Verdad" y el administrador central.
     *   Gestiona la lógica de negocio compleja, la seguridad, la base de datos y las validaciones fiscales (SAT).
     *   Provee el **Panel de Administración** para Superusuarios (Staff técnico).
     *   Expone una **API RESTful** segura para que los clientes se conecten.
 
-*   **⚛️ Next.js (Frontend/Cliente):**
+*   **Next.js (Frontend/Cliente):**
     *   Es la cara del usuario final (Clientes, Cajeros, Gerentes).
     *   Consume la API de Django para todas sus operaciones.
     *   Se enfoca en la experiencia de usuario (UX/UI) y la interactividad en tiempo real.
@@ -56,9 +56,11 @@ Hemos preparado documentación detallada para cada aspecto del sistema. ¿Qué n
     python manage.py runserver 0.0.0.0:8003
     ```
 
-## 🚀 Despliegue (Vercel)
+## 🚀 Despliegue (Render)
 
-El proyecto está configurado para desplegarse en **Vercel** usando Serverless Functions.
+El backend está desplegado en **Render** y accesible en la siguiente URL pública:
+
+*   Backend (Core): `https://nucleo-erp.onrender.com/`
 *   Base de datos: **Supabase** (PostgreSQL).
 *   Archivos estáticos: **Whitenoise**.
-*   Configuración: Ver `vercel.json`.
+*   Configuración de despliegue: ver `render.yaml` y `build.sh`.
