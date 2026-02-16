@@ -50,17 +50,31 @@ Hemos preparado documentación detallada para cada aspecto del sistema. ¿Qué n
     pip install -r requirements.txt
     ```
 3.  **Variables de Entorno**:
-    Crea un archivo `.env` basado en el ejemplo (ver `settings.py`).
+    Crea un archivo `.env` con las llaves que consume `settings.py`. Recomendadas:
+    - SECRET_KEY
+    - DEBUG
+    - POSTGRESQL_DB_HOST, POSTGRESQL_DB_USER, POSTGRESQL_DB_PASSWORD, POSTGRESQL_DB_NAME, POSTGRESQL_DB_PORT
+    - ALLOWED_HOSTS
+    - CORS_ALLOWED_ORIGINS, CORS_ALLOW_CREDENTIALS
+    - CSRF_TRUSTED_ORIGINS
 4.  **Ejecutar Servidor**:
     ```bash
     python manage.py runserver 0.0.0.0:8003
     ```
 
-## 🚀 Despliegue (Render)
+## 🚀 Despliegue (Vercel)
 
-El backend está desplegado en **Render** y accesible en la siguiente URL pública:
+El backend está desplegado en **Vercel** como Serverless Function usando `vercel.json` y `api/index.py`.
 
-*   Backend (Core): `https://nucleo-erp.onrender.com/`
-*   Base de datos: **Supabase** (PostgreSQL).
-*   Archivos estáticos: **Whitenoise**.
-*   Configuración de despliegue: ver `render.yaml` y `build.sh`.
+Guía rápida:
+- Configura variables en Vercel: SECRET_KEY, DEBUG=False, y credenciales de PostgreSQL (Supabase).
+- CI/CD: los workflows en `.github/workflows` ejecutan checks y despliegue automático a Vercel (Preview en PR, Production en main/master).
+- Endpoint de salud: `/healthz/`.
+
+Notas:
+- En entornos serverless los logs se escriben en `/tmp/logs` (no persistentes).
+- Para auditoría persistente y operación prolongada, Render queda como alternativa de contingencia.
+
+## 🧯 Contingencia (Render)
+- Configuración lista con `render.yaml` y `build.sh`.
+- Mismo código, mismas variables de entorno.

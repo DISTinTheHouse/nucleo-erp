@@ -11,6 +11,12 @@ from .serializers import (
     EmpresaSatConfigSerializer
 )
 
+class HealthzAPIView(APIView):
+    permission_classes = []
+
+    def get(self, request):
+        return Response({"ok": True}, status=200)
+
 class EmpresaSatConfigUpdateView(APIView):
     permission_classes = [IsAuthenticated]
     
