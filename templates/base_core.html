@@ -625,16 +625,14 @@
         <!-- Header -->
         <header class="hidden md:flex h-20 items-center justify-between px-8 bg-transparent shrink-0 z-30">
             <div class="flex items-center gap-4 text-slate-400">
-                <h2 class="text-2xl font-semibold text-slate-800 dark:text-white tracking-tight">{% block header_title
-                    %}Panel de Control{% endblock %}</h2>
+                <h2 class="text-2xl font-semibold text-slate-800 dark:text-white tracking-tight">{% block header_title %}Panel de Control{% endblock %}</h2>
                 <span class="text-sm font-medium">{% block header_subtitle %}{% endblock %}</span>
             </div>
             <div class="flex items-center gap-6">
                 <div class="flex flex-col items-end mr-2">
                     <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ request.user.username
                         }}</span>
-                    <span class="text-xs text-slate-500">{% if request.user.is_superuser %}Super Admin{% else
-                        %}Usuario{% endif %}</span>
+                    <span class="text-xs text-slate-500">{% if request.user.is_superuser %}Super Admin{% else %}Usuario{% endif %}</span>
                 </div>
                 <div
                     class="h-10 w-10 rounded-full bg-gradient-to-br from-sky-500 to-sky-700 flex items-center justify-center text-white font-bold shadow-lg shadow-sky-500/20 ring-2 ring-white dark:ring-slate-800">

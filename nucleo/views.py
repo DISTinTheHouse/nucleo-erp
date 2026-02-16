@@ -231,6 +231,13 @@ class CoreDashboardView(LoginRequiredMixin, SuperuserRequiredMixin, TemplateView
         context['total_empresas'] = Empresa.objects.count()
         context['total_sucursales'] = Sucursal.objects.count()
         context['total_usuarios'] = Usuario.objects.count()
+        try:
+            from inventarios.models import Almacen, Ubicacion
+            context['total_almacenes'] = Almacen.objects.count()
+            context['total_ubicaciones'] = Ubicacion.objects.count()
+        except Exception:
+            context['total_almacenes'] = 0
+            context['total_ubicaciones'] = 0
         return context
 
 # --- EMPRESA ---
