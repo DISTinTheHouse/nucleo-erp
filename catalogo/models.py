@@ -11,11 +11,36 @@ class TipoProducto(models.Model):
 
 class CategoriaProducto(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="categorias_producto")
+    nombre = models.CharField(max_length=100)
+    codigo = models.CharField(max_length=50)
+    descripcion = models.CharField(max_length=150)
+    activo = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "categorias_producto"
         verbose_name = "Categoria Producto"
         verbose_name_plural = "Categorias Producto"
+
+class Color(models.Model):
+    nombre = models.CharField(max_length=50)
+    codigo_hex = models.CharField(max_length=7)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "colores"
+        verbose_name = "Color"
+        verbose_name_plural = "Colores"
+
+class Talla(models.Model):
+    nombre = models.CharField(max_length=50)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "tallas"
+        verbose_name = "Talla"
+        verbose_name_plural = "Tallas"
 
 class Producto(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="productos")
@@ -24,10 +49,29 @@ class Producto(models.Model):
     impuesto = models.ForeignKey(Impuesto, on_delete=models.CASCADE, related_name="productos")
     sat_prodserv = models.ForeignKey(SatClaveProdServ, on_delete=models.CASCADE, related_name="productos")
     sat_unidad = models.ForeignKey(SatClaveUnidad, on_delete=models.CASCADE, related_name="productos")
+    nombre = models.CharField(max_length=100)
+    descripcion = models.CharField(max_length=150)
+    tipo = models.CharField(max_length=35)
+    activo = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "productos"
         verbose_name = "Producto"
         verbose_name_plural = "Productos"
 
+class ProductoVariante(models.Model):
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="variantes")
+    empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="variantes")
+    color = models.ForeignKey(Color, on_delete=models.CASCADE, related_name="variantes")
+    talla = models.ForeignKey(Talla, on_delete=models.CASCADE, related_name="variantes")
+    sku = models.CharField(max_length=50, unique=True)
+    precio_base = models.DecimalField(max_digits=10, decimal_places=2)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "variantes_producto"
+        verbose_name = "Variante Producto"
+        verbose_name_plural = "Variantes Producto"
 
