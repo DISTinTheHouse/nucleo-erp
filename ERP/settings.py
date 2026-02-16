@@ -93,8 +93,13 @@ WSGI_APPLICATION = 'ERP.wsgi.application'
 # =========================
 # LOGS DIRECTORY
 # =========================
-# Directorio base donde se guardan los archivos de logs que consulta Auditoría
-LOGS_DIR = BASE_DIR / 'logs'
+# Directorio base donde se guardan los archivos de logs que consulta Auditoría.
+# En plataformas serverless (ej. Vercel) el sistema de archivos es de solo lectura,
+# por lo que usamos /tmp como destino temporal.
+if os.environ.get('VERCEL'):
+    LOGS_DIR = Path('/tmp') / 'logs'
+else:
+    LOGS_DIR = BASE_DIR / 'logs'
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 
