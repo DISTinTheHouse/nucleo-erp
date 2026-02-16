@@ -27,7 +27,7 @@ SECRET_KEY = config('SECRET_KEY')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=False, cast=bool)
 
-ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='127.0.0.1').split(',') + ['.onrender.com']
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='127.0.0.1').split(',') + ['.onrender.com', '.vercel.app']
 
 
 # Application definition
@@ -187,10 +187,11 @@ CORS_ALLOW_CREDENTIALS = config('CORS_ALLOW_CREDENTIALS', default=True, cast=boo
 CORS_ALLOWED_ORIGINS = [o for o in config('CORS_ALLOWED_ORIGINS', default='http://localhost:3000,https://localhost:3000').split(',') if o]
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r'^https://.*\.onrender\.com$',
+    r'^https://.*\.vercel\.app$',
 ]
 CORS_URLS_REGEX = r'^/api/.*$'
 
-CSRF_TRUSTED_ORIGINS = [o for o in config('CSRF_TRUSTED_ORIGINS', default='https://*.onrender.com,https://localhost:3000,http://localhost:3000').split(',') if o]
+CSRF_TRUSTED_ORIGINS = [o for o in config('CSRF_TRUSTED_ORIGINS', default='https://*.onrender.com,https://*.vercel.app,https://localhost:3000,http://localhost:3000').split(',') if o]
 
 # =========================
 # AUTH SETTINGS
