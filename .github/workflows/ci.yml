@@ -1,0 +1,43 @@
+name: Backend CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  build-and-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Django system checks
+        env:
+          SECRET_KEY: django-insecure-dc!)r*3)r5od3r&cq2ct#toi6agpwg%8i7r13*zo3l$64k=*57
+          DEBUG: "False"
+          POSTGRESQL_DB_HOST: postgres
+          POSTGRESQL_DB_USER: postgres.ictbdlwwwhentsywyfch
+          POSTGRESQL_DB_PASSWORD: 4vmKE5mLHL6vj
+          POSTGRESQL_DB_NAME: aws-0-us-west-2.pooler.supabase.com
+          POSTGRESQL_DB_PORT: "6543"
+        run: |
+          python manage.py check
+
+      - name: Compile Python source
+        run: |
+          python -m compileall .
+

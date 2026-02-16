@@ -144,12 +144,28 @@
         contentDiv.innerHTML = '<div class="animate-pulse">Actualizando...</div>';
 
         fetch(`{% url 'auditoria:log_content' %}?type=${currentLogType}&lines=100`)
-            .then(response => response.json())
+            .then(response => {
+                const contentType = response.headers.get('content-type') || '';
+                if (!contentType.includes('application/json')) {
+                    return response.text().then(text => {
+                        const safeContent = text
+                            .replace(/&/g, "&amp;")
+                            .replace(/</g, "&lt;")
+                            .replace(/>/g, "&gt;")
+                            .replace(/"/g, "&quot;")
+                            .replace(/'/g, "&#039;");
+                        contentDiv.innerHTML = `<pre class="whitespace-pre-wrap text-red-400">Respuesta no JSON recibida:\\n${safeContent}</pre>`;
+                        contentDiv.scrollTop = contentDiv.scrollHeight;
+                        throw new Error("Respuesta no JSON");
+                    });
+                }
+                return response.json();
+            })
             .then(data => {
+                if (!data) return;
                 if (data.error) {
                     contentDiv.innerHTML = `<span class="text-red-500">Error: ${data.error}</span>`;
                 } else {
-                    // Escape HTML simple para seguridad básica en logs
                     const safeContent = data.content
                         .replace(/&/g, "&amp;")
                         .replace(/</g, "&lt;")
@@ -162,6 +178,9 @@
                 }
             })
             .catch(err => {
+                if (err && err.message === "Respuesta no JSON") {
+                    return;
+                }
                 contentDiv.innerHTML = `<span class="text-red-500">Error de conexión: ${err}</span>`;
             });
     }

@@ -90,6 +90,13 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'ERP.wsgi.application'
 
+# =========================
+# LOGS DIRECTORY
+# =========================
+# Directorio base donde se guardan los archivos de logs que consulta Auditoría
+LOGS_DIR = BASE_DIR / 'logs'
+os.makedirs(LOGS_DIR, exist_ok=True)
+
 
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
