@@ -45,6 +45,13 @@ El backend actúa como una "Caja Negra" segura para el Frontend (Next.js).
 - **`/api/v1/nucleo/`**: Gestión de estructura organizacional (Empresas, Sucursales).
 - **`/api/v1/auth/`**: Gestión de sesión.
 - **`/api/v1/sat/`**: Servicios fiscales y catálogos.
+- **`/api/v1/inventarios/`**: Almacenes y Ubicaciones (scoping por Empresa/Sucursales; CRUD para admin_empresa/superuser).
+
+## 6. Responsabilidades UI vs Backend
+
+- **Django (Core)**: Servicios y reglas de negocio; HTML solo para vistas internas de lectura (administración técnica).
+- **Next.js (Frontend)**: Toda la interacción de usuario final (CRUD de Inventarios, Usuarios, etc.) contra APIs DRF.
+- **Permisos y Alcance**: Aplicados en el backend; el frontend no puede elevar privilegios ni salir de su empresa/sucursales.
 
 ## 5. Auditoría
 Cada escritura crítica genera un rastro:

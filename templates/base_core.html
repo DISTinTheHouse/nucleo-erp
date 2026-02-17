@@ -263,34 +263,7 @@
                     class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Monedas</span>
             </a>
 
-            <!-- Divider Label -->
-            <div class="px-3 py-2 mt-4 opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200">
-                <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Inventarios</span>
-            </div>
-
-            <!-- Almacenes -->
-            <a href="{% url 'inventarios:almacen_list' %}"
-                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'almacen' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
-                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M3 7l9-4 9 4M4 10h16v8a2 2 0 01-2 2H6a2 2 0 01-2-2v-8z" />
-                </svg>
-                <span
-                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Almacenes</span>
-            </a>
-
-            <!-- Ubicaciones -->
-            <a href="{% url 'inventarios:ubicacion_list' %}"
-                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'ubicacion' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
-                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M12 11c1.657 0 3-1.343 3-3S13.657 5 12 5 9 6.343 9 8s1.343 3 3 3z" />
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M19.5 8c0 7.5-7.5 12-7.5 12S4.5 15.5 4.5 8a7.5 7.5 0 1115 0z" />
-                </svg>
-                <span
-                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Ubicaciones</span>
-            </a>
+            
 
             <!-- Divider Label -->
             <div class="px-3 py-2 mt-4 opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200">
@@ -527,28 +500,6 @@
                     <span class="font-medium">Monedas</span>
                 </a>
 
-                <div class="px-4 py-2 mt-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Inventarios</div>
-
-                <a href="{% url 'inventarios:almacen_list' %}"
-                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
-                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M3 7l9-4 9 4M4 10h16v8a2 2 0 01-2 2H6a2 2 0 01-2-2v-8z" />
-                    </svg>
-                    <span class="font-medium">Almacenes</span>
-                </a>
-
-                <a href="{% url 'inventarios:ubicacion_list' %}"
-                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
-                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M12 11c1.657 0 3-1.343 3-3S13.657 5 12 5 9 6.343 9 8s1.343 3 3 3z" />
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M19.5 8c0 7.5-7.5 12-7.5 12S4.5 15.5 4.5 8a7.5 7.5 0 1115 0z" />
-                    </svg>
-                    <span class="font-medium">Ubicaciones</span>
-                </a>
-
                 <div class="px-4 py-2 mt-2 text-xs font-bold text-slate-400 uppercase tracking-wider">SAT (Fiscal)</div>
 
                 <a href="{% url 'nucleo:sat_regimen_list' %}"
@@ -630,8 +581,7 @@
             </div>
             <div class="flex items-center gap-6">
                 <div class="flex flex-col items-end mr-2">
-                    <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ request.user.username
-                        }}</span>
+                    <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ request.user.username }}</span>
                     <span class="text-xs text-slate-500">{% if request.user.is_superuser %}Super Admin{% else %}Usuario{% endif %}</span>
                 </div>
                 <div

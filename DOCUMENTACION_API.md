@@ -182,6 +182,69 @@ Recupera todos los catálogos fiscales necesarios para llenar formularios de fac
 
 ---
 
+## 📦 5. Inventarios (Almacenes y Ubicaciones)
+
+Gestión de almacenes y ubicaciones para operaciones de inventario. La interacción de usuario se hace desde Next.js; el backend expone APIs con reglas de permisos y alcance.
+
+Permisos:
+- Lectura: cualquier usuario autenticado, datos filtrados por empresa y sucursales permitidas.
+- Crear/Editar: requiere is_admin_empresa=true o superusuario.
+- Eliminar: requiere is_admin_empresa=true o superusuario.
+
+Alcance y reglas:
+- Los listados se filtran por empresa activa y sucursales permitidas del usuario.
+- Almacén fuerza consistencia: empresa = sucursal.empresa.
+- Ubicación fuerza consistencia: empresa/sucursal se derivan del almacén.
+
+Almacenes
+- Listar: GET /api/v1/inventarios/almacenes/
+- Detalle: GET /api/v1/inventarios/almacenes/{id_almacen}/
+- Crear: POST /api/v1/inventarios/almacenes/
+- Editar: PATCH /api/v1/inventarios/almacenes/{id_almacen}/
+- Eliminar: DELETE /api/v1/inventarios/almacenes/{id_almacen}/
+
+Ejemplo crear almacén
+```
+POST /api/v1/inventarios/almacenes/
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "sucursal": 12,
+  "codigo": "ALM-01",
+  "nombre": "Almacén Central",
+  "estatus": "activo"
+}
+```
+
+Ubicaciones
+- Listar: GET /api/v1/inventarios/ubicaciones/
+- Detalle: GET /api/v1/inventarios/ubicaciones/{id_ubicacion}/
+- Crear: POST /api/v1/inventarios/ubicaciones/
+- Editar: PATCH /api/v1/inventarios/ubicaciones/{id_ubicacion}/
+- Eliminar: DELETE /api/v1/inventarios/ubicaciones/{id_ubicacion}/
+
+Ejemplo crear ubicación
+```
+POST /api/v1/inventarios/ubicaciones/
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "almacen": 34,
+  "codigo": "RACK-A1",
+  "nombre": "Rack A1",
+  "estatus": "activo"
+}
+```
+
+Notas de respuesta y errores
+- 200/201: operación exitosa.
+- 400: validación o alcance inválido (empresa/sucursal fuera de permiso).
+- 403: falta de privilegios para escribir/eliminar.
+
+---
+
 ## ⚙️ 6. Configuración Fiscal (CSD)
 
 Sube y valida los archivos de Certificado de Sello Digital (CSD) para una empresa.
