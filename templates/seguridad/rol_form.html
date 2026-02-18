@@ -60,8 +60,9 @@
 
                     <!-- Codigo -->
                     <div>
-                        <label for="{{ form.codigo.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Código (ID Interno)</label>
-                        {{ form.codigo }}
+                        <label for="codigo_display" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Código (ID Interno)</label>
+                        <input id="codigo_display" type="text" value="{{ form.codigo.value|default:'' }}" class="block w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-zinc-800 text-slate-700 dark:text-slate-200 shadow-sm focus:border-brand-500 focus:ring-brand-500 sm:text-sm transition-all py-2.5 cursor-not-allowed" placeholder="Se generará desde el Nombre" disabled>
+                        <input type="hidden" name="{{ form.codigo.html_name }}" id="{{ form.codigo.id_for_label }}" value="{{ form.codigo.value|default:'' }}">
                         {% if form.codigo.errors %}
                         <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
                             <i class="fas fa-exclamation-circle mr-1"></i> {{ form.codigo.errors|striptags }}
@@ -125,4 +126,57 @@
         </div>
     </div>
 </div>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const nombreInput = document.querySelector('[name="nombre"]');
+        const codigoHiddenInput = document.querySelector('input[type="hidden"][name="codigo"]');
+        const codigoDisplayInput = document.getElementById('codigo_display');
+
+        function slugify(text) {
+            return text.toString().toLowerCase()
+                .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                .replace(/\s+/g, '-')
+                .replace(/[^\w\-]+/g, '')
+                .replace(/\-\-+/g, '-')
+                .replace(/^-+/, '')
+                .replace(/-+$/, '');
+        }
+
+        if (codigoHiddenInput && codigoDisplayInput && (!codigoHiddenInput.value || codigoHiddenInput.value.trim() === '') && nombreInput) {
+            let nextIdPadded = null;
+            fetch("{% url 'seguridad:ajax_rol_next_id' %}")
+                .then(resp => resp.json())
+                .then(data => {
+                    nextIdPadded = data.next_id_padded || '0000';
+                    function updateSlug() {
+                        const sourceText = nombreInput.value;
+                        if (sourceText) {
+                            const base = slugify(sourceText);
+                            let prefix = base.slice(0, 10);
+                            prefix = prefix.replace(/-+$/, '');
+                            const preview = prefix ? `${prefix}-${nextIdPadded}` : '';
+                            codigoHiddenInput.value = preview;
+                            codigoDisplayInput.value = preview;
+                        } else {
+                            codigoHiddenInput.value = '';
+                            codigoDisplayInput.value = '';
+                        }
+                    }
+                    updateSlug();
+                    nombreInput.addEventListener('input', updateSlug);
+                })
+                .catch(() => {
+                    function updateFallback() {
+                        const base = slugify(nombreInput.value || '');
+                        let prefix = base.slice(0, 10).replace(/-+$/, '');
+                        const preview = prefix ? `${prefix}-####` : '';
+                        codigoHiddenInput.value = preview;
+                        codigoDisplayInput.value = preview;
+                    }
+                    updateFallback();
+                    nombreInput.addEventListener('input', updateFallback);
+                });
+        }
+    });
+</script>
 {% endblock %}

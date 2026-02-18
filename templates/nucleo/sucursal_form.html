@@ -15,8 +15,8 @@
             </a>
         </div>
 
-        <div class="p-6 md:p-8">
-            <form method="post" enctype="multipart/form-data" class="space-y-6">
+        <div class="p-0 md:p-0">
+            <form method="post" enctype="multipart/form-data" class="space-y-0">
                 {% csrf_token %}
 
                 {% if form.non_field_errors %}
@@ -35,29 +35,160 @@
                 </div>
                 {% endif %}
 
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {% for field in form %}
-                    <div class="{% if field.name == 'direccion' %}col-span-2{% endif %}">
-                        <label for="{{ field.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">{{ field.label }}</label>
-                        {% if field.field.widget.input_type == 'checkbox' %}
-                        <div class="flex items-center h-5">
-                            {{ field }}
-                            <span class="ml-2 text-sm text-slate-500 dark:text-slate-400 select-none cursor-pointer" onclick="document.getElementById('{{ field.id_for_label }}').click()">{{ field.help_text }}</span>
+                <div class="divide-y divide-slate-200 dark:divide-slate-800">
+                    <div class="p-6 md:p-8">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="brand-font text-sm font-semibold text-slate-700 dark:text-slate-200">Identidad</h3>
+                            <span class="text-xs text-slate-500 dark:text-slate-400">Empresa, código y nombre</span>
                         </div>
-                        {% else %}
-                        {{ field }}
-                        {% if field.help_text and field.field.widget.input_type != 'checkbox' %}
-                        <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400">{{ field.help_text }}</p>
-                        {% endif %}
-                        {% endif %}
-
-                        {% if field.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ field.errors|striptags }}
-                        </p>
-                        {% endif %}
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div class="md:col-span-2">
+                                <label for="{{ form.empresa.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Empresa</label>
+                                {{ form.empresa }}
+                                {% if form.empresa.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.empresa.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="codigo_display" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Código</label>
+                                <input id="codigo_display" type="text" value="{{ form.codigo.value|default:'' }}" class="block w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-zinc-800 text-slate-700 dark:text-slate-200 shadow-sm focus:border-brand-500 focus:ring-brand-500 sm:text-sm transition-all py-2.5 cursor-not-allowed" placeholder="Se generará desde el Nombre" disabled>
+                                <input type="hidden" name="{{ form.codigo.html_name }}" id="{{ form.codigo.id_for_label }}" value="{{ form.codigo.value|default:'' }}">
+                                {% if form.codigo.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.codigo.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                            <div class="md:col-span-3">
+                                <label for="{{ form.nombre.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Nombre</label>
+                                {{ form.nombre }}
+                                {% if form.nombre.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.nombre.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                        </div>
                     </div>
-                    {% endfor %}
+
+                    <div class="p-6 md:p-8">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="brand-font text-sm font-semibold text-slate-700 dark:text-slate-200">Contacto & Dirección</h3>
+                            <span class="text-xs text-slate-500 dark:text-slate-400">Datos para localizar la sucursal</span>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                                <label for "{{ form.telefono.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Teléfono</label>
+                                {{ form.telefono }}
+                                {% if form.telefono.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.telefono.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.email.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Email</label>
+                                {{ form.email }}
+                                {% if form.email.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.email.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.direccion_linea1.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Dirección línea 1</label>
+                                {{ form.direccion_linea1 }}
+                                {% if form.direccion_linea1.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.direccion_linea1.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.direccion_linea2.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Dirección línea 2</label>
+                                {{ form.direccion_linea2 }}
+                                {% if form.direccion_linea2.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.direccion_linea2.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.ciudad.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Ciudad</label>
+                                {{ form.ciudad }}
+                                {% if form.ciudad.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.ciudad.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.estado.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Estado</label>
+                                {{ form.estado }}
+                                {% if form.estado.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.estado.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.cp.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">C.P.</label>
+                                {{ form.cp }}
+                                {% if form.cp.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.cp.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.pais.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">País</label>
+                                {{ form.pais }}
+                                {% if form.pais.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.pais.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="p-6 md:p-8">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="brand-font text-sm font-semibold text-slate-700 dark:text-slate-200">Geolocalización & Estatus</h3>
+                            <span class="text-xs text-slate-500 dark:text-slate-400">Opcional</span>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+                            <div>
+                                <label for="{{ form.lat.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Latitud</label>
+                                {{ form.lat }}
+                                {% if form.lat.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.lat.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.lng.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Longitud</label>
+                                {{ form.lng }}
+                                {% if form.lng.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.lng.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.estatus.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Estatus</label>
+                                {{ form.estatus }}
+                                {% if form.estatus.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
+                                    <i class="fas fa-exclamation-circle mr-1"></i> {{ form.estatus.errors|striptags }}
+                                </p>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="pt-6 border-t border-slate-200 dark:border-slate-800 flex justify-end gap-3">
@@ -74,4 +205,59 @@
         </div>
     </div>
 </div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const nombreInput = document.querySelector('[name="nombre"]');
+        const codigoHiddenInput = document.querySelector('input[type="hidden"][name="codigo"]');
+        const codigoDisplayInput = document.getElementById('codigo_display');
+
+        function slugify(text) {
+            return text.toString().toLowerCase()
+                .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                .replace(/\s+/g, '-')
+                .replace(/[^\w\-]+/g, '')
+                .replace(/\-\-+/g, '-')
+                .replace(/^-+/, '')
+                .replace(/-+$/, '');
+        }
+
+        if (codigoHiddenInput && codigoDisplayInput && (!codigoHiddenInput.value || codigoHiddenInput.value.trim() === '') && nombreInput) {
+            let nextIdPadded = null;
+            fetch("{% url 'nucleo:ajax_sucursal_next_id' %}")
+                .then(resp => resp.json())
+                .then(data => {
+                    nextIdPadded = data.next_id_padded || '0000';
+                    function updateSlug() {
+                        const sourceText = nombreInput.value;
+                        if (sourceText) {
+                            const base = slugify(sourceText);
+                            let prefix = base.slice(0, 10);
+                            prefix = prefix.replace(/-+$/, '');
+                            const preview = prefix ? `${prefix}-${nextIdPadded}` : '';
+                            codigoHiddenInput.value = preview;
+                            codigoDisplayInput.value = preview;
+                        } else {
+                            codigoHiddenInput.value = '';
+                            codigoDisplayInput.value = '';
+                        }
+                    }
+                    updateSlug();
+                    nombreInput.addEventListener('input', updateSlug);
+                })
+                .catch(() => {
+                    function updateFallback() {
+                        const sourceText = nombreInput.value;
+                        const base = slugify(sourceText || '');
+                        let prefix = base.slice(0, 10).replace(/-+$/, '');
+                        const preview = prefix ? `${prefix}-####` : '';
+                        codigoHiddenInput.value = preview;
+                        codigoDisplayInput.value = preview;
+                    }
+                    updateFallback();
+                    nombreInput.addEventListener('input', updateFallback);
+                });
+        }
+    });
+</script>
 {% endblock %}

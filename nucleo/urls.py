@@ -6,7 +6,8 @@ from .views import (
     EmpresaListView, EmpresaCreateView, EmpresaUpdateView, EmpresaDeleteView,
     SucursalListView, SucursalCreateView, SucursalUpdateView, SucursalDeleteView,
     DepartamentoListView, DepartamentoCreateView, DepartamentoUpdateView, DepartamentoDeleteView,
-    MonedaListView, MonedaCreateView, MonedaUpdateView, MonedaDeleteView
+    MonedaListView, MonedaCreateView, MonedaUpdateView, MonedaDeleteView,
+    get_next_empresa_id, get_next_sucursal_id, get_next_departamento_id
 )
 from .views_sat import (
     SatRegimenFiscalListView, SatUsoCfdiListView, SatMetodoPagoListView,
@@ -16,6 +17,7 @@ from .api_views import (
     UserEmpresasAPIView, UserSucursalesAPIView, SatCatalogosAPIView, 
     EmpresaSatConfigUpdateView, HealthzAPIView
 )
+from .views import get_next_empresa_id
 
 app_name = 'nucleo'
 
@@ -40,7 +42,10 @@ urlpatterns = [
     path('core/dashboard/', CoreDashboardView.as_view(), name='dashboard'),
     
     # AJAX
+    path('ajax/sucursales/next-id/', get_next_sucursal_id, name='ajax_sucursal_next_id'),
     path('ajax/sucursales/<int:empresa_id>/', get_sucursales_por_empresa, name='ajax_sucursales'),
+    path('ajax/empresas/next-id/', get_next_empresa_id, name='ajax_empresa_next_id'),
+    path('ajax/departamentos/next-id/', get_next_departamento_id, name='ajax_departamento_next_id'),
 
     # WEB CORE - EMPRESAS
     path('core/empresas/', EmpresaListView.as_view(), name='empresa_list'),

@@ -138,6 +138,13 @@ class UsuarioListView(LoginRequiredMixin, SuperuserRequiredMixin, ListView):
     template_name = 'usuarios/usuario_list.html'
     context_object_name = 'usuarios'
 
+    def get_queryset(self):
+        return (
+            Usuario.objects.select_related("empresa")
+            .all()
+            .order_by("empresa__codigo", "username")
+        )
+
 class UsuarioCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
     model = Usuario
     form_class = UsuarioCreationForm

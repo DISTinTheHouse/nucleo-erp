@@ -2,8 +2,8 @@ from django.db import models
 
 
 class Permiso(models.Model):
-    # Catálogo global de permisos del PRODUCTO
-    clave = models.CharField(max_length=120, unique=True)  # ventas.pedidos.leer
+    # Catálogo global de permisos del PRODUCTO 
+    clave = models.CharField(max_length=120, unique=True)  # ventas.pedidos.leer(get)
     nombre = models.CharField(max_length=120)
     descripcion = models.TextField(blank=True, null=True)
     modulo = models.CharField(max_length=60, blank=True, null=True)  # ventas, compras, inventario, etc.

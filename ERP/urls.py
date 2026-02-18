@@ -7,7 +7,7 @@ urlpatterns = [
     path('', LoginView.as_view(template_name='registration/login.html', redirect_authenticated_user=True), name='login'),
     path('', include('nucleo.urls')),
     path('', include('usuarios.urls')),
-    path('', include('seguridad.urls')),
+    path('', include(('seguridad.urls', 'seguridad'), namespace='seguridad')),
     path('', include('inventarios.urls')),
     path('api/v1/inventarios/', include('inventarios.api.urls')),
     path('auditoria/', include('auditoria.urls')),

@@ -3,15 +3,37 @@ from django.utils.text import slugify
 from .models import Empresa, Sucursal, Departamento, Moneda, Impuesto, UnidadMedida
 from .utils import validate_rfc, check_sat_status_mock
 
+
+LANG_CHOICES = [
+    ("es-MX", "Español"),
+    ("en-US", "Inglés"),
+]
+
+TIMEZONE_CHOICES = [
+    ("America/Mexico_City", "America/Mexico_City"),
+    ("America/New_York", "America/New_York"),
+    ("Europe/Madrid", "Europe/Madrid"),
+    ("UTC", "UTC"),
+]
+
 class TailwindModelForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         for field_name, field in self.fields.items():
             if isinstance(field.widget, forms.CheckboxInput):
-                field.widget.attrs['class'] = 'h-4 w-4 text-brand-600 focus:ring-brand-500 border-gray-300 rounded cursor-pointer'
+                field.widget.attrs['class'] = (
+                    'h-4 w-4 text-brand-600 focus:ring-brand-500 border-slate-300 '
+                    'dark:border-slate-600 rounded cursor-pointer bg-white dark:bg-zinc-900'
+                )
             else:
                 existing_classes = field.widget.attrs.get('class', '')
-                new_classes = 'block w-full rounded-lg border-gray-300 shadow-sm focus:border-brand-500 focus:ring-brand-500 sm:text-sm transition-all py-2.5 hover:border-brand-400'
+                new_classes = (
+                    'block w-full rounded-lg border border-slate-300 dark:border-slate-700 '
+                    'bg-white dark:bg-zinc-900 text-slate-900 dark:text-slate-100 '
+                    'placeholder-slate-400 dark:placeholder-slate-500 '
+                    'shadow-sm focus:border-brand-500 focus:ring-brand-500 '
+                    'sm:text-sm transition-all py-2.5 hover:border-brand-400 dark:hover:border-brand-300'
+                )
                 field.widget.attrs['class'] = f"{existing_classes} {new_classes}".strip()
                 # Añadir placeholder automáticamente si no existe
                 if not field.widget.attrs.get('placeholder'):
@@ -23,6 +45,16 @@ class EmpresaForm(TailwindModelForm):
         label="Código (Slug)",
         help_text="Identificador único (se convertirá a minúsculas y guiones automáticamente)",
         max_length=32
+    )
+
+    idioma = forms.ChoiceField(
+        label="Idioma",
+        choices=LANG_CHOICES,
+    )
+
+    timezone = forms.ChoiceField(
+        label="Zona Horaria",
+        choices=TIMEZONE_CHOICES,
     )
 
     class Meta:

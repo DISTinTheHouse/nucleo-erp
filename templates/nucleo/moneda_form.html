@@ -6,7 +6,7 @@
 <div class="max-w-4xl mx-auto">
     <div class="mb-8 flex items-center justify-between">
         <div>
-            <h1 class="text-2xl font-bold text-slate-800 dark:text-white">{% if object %}Editar{% else %}Nueva{% endif %} Moneda</h1>
+            <h1 class="brand-font text-2xl font-bold text-slate-800 dark:text-white">{% if object %}Editar{% else %}Nueva{% endif %} Moneda</h1>
             <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Completa la información de la moneda.</p>
         </div>
         <a href="{% url 'nucleo:moneda_list' %}"
@@ -35,6 +35,10 @@
             </div>
             {% endif %}
 
+            <div class="mb-4">
+                <h3 class="brand-font text-sm text-slate-700 dark:text-slate-200 font-semibold mb-2">Identidad</h3>
+                <p class="text-xs text-slate-500 dark:text-slate-400">Código ISO, nombre, símbolo y formato.</p>
+            </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {% for field in form %}
                 <div class="{% if field.name == 'nombre' %}col-span-2{% endif %}">

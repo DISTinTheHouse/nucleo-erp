@@ -15,7 +15,7 @@
             </a>
         </div>
 
-        <div class="p-6 md:p-8">
+        <div class="p-0 md:p-0">
             <form method="post" enctype="multipart/form-data" class="space-y-6">
                 {% csrf_token %}
 
@@ -35,164 +35,136 @@
                 </div>
                 {% endif %}
 
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <!-- Codigo -->
-                    <div>
-                        <label for="{{ form.codigo.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Código (Slug)</label>
-                        {{ form.codigo }}
-                        {% if form.codigo.help_text %}
-                        <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400">{{ form.codigo.help_text }}</p>
-                        {% endif %}
-                        {% if form.codigo.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.codigo.errors|striptags }}
-                        </p>
-                        {% endif %}
+                <div class="divide-y divide-slate-200 dark:divide-slate-800">
+                    <div class="p-6 md:p-8">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="brand-font text-sm font-semibold text-slate-700 dark:text-slate-200">Identidad</h3>
+                            <span class="text-xs text-slate-500 dark:text-slate-400">Datos principales</span>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                                <label for="codigo_display" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Código (Slug)</label>
+                                <input id="codigo_display" type="text" value="{{ form.codigo.value|default:'' }}" class="block w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-zinc-800 text-slate-700 dark:text-slate-200 shadow-sm focus:border-brand-500 focus:ring-brand-500 sm:text-sm transition-all py-2.5 cursor-not-allowed" placeholder="Se generará a partir del Nombre Comercial" disabled>
+                                <input type="hidden" name="{{ form.codigo.html_name }}" id="{{ form.codigo.id_for_label }}" value="{{ form.codigo.value|default:'' }}">
+                                {% if form.codigo.help_text %}
+                                <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400">{{ form.codigo.help_text }}</p>
+                                {% endif %}
+                                {% if form.codigo.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.codigo.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.rfc.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">RFC</label>
+                                {{ form.rfc }}
+                                {% if form.rfc.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.rfc.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                            <div class="md:col-span-2">
+                                <label for="{{ form.nombre_comercial.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Nombre Comercial</label>
+                                {{ form.nombre_comercial }}
+                                {% if form.nombre_comercial.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.nombre_comercial.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                            <div class="md:col-span-2">
+                                <label for="{{ form.razon_social.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Razón Social</label>
+                                {{ form.razon_social }}
+                                {% if form.razon_social.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.razon_social.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                        </div>
                     </div>
 
-                    <!-- RFC -->
-                    <div>
-                        <label for="{{ form.rfc.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">RFC</label>
-                        {{ form.rfc }}
-                        {% if form.rfc.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.rfc.errors|striptags }}
-                        </p>
-                        {% endif %}
+                    <div class="p-6 md:p-8">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="brand-font text-sm font-semibold text-slate-700 dark:text-slate-200">Contacto & Sitio</h3>
+                            <span class="text-xs text-slate-500 dark:text-slate-400">Datos de contacto y branding</span>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                                <label for="{{ form.email_contacto.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Email Contacto</label>
+                                {{ form.email_contacto }}
+                                {% if form.email_contacto.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.email_contacto.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.telefono.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Teléfono</label>
+                                {{ form.telefono }}
+                                {% if form.telefono.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.telefono.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.sitio_web.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Sitio Web</label>
+                                {{ form.sitio_web }}
+                                {% if form.sitio_web.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.sitio_web.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.logo_url.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">URL del Logo</label>
+                                {{ form.logo_url }}
+                                {% if form.logo_url.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.logo_url.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                        </div>
                     </div>
 
-                    <!-- Razon Social -->
-                    <div class="col-span-2">
-                        <label for="{{ form.razon_social.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Razón Social</label>
-                        {{ form.razon_social }}
-                        {% if form.razon_social.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.razon_social.errors|striptags }}
-                        </p>
-                        {% endif %}
+                    <div class="p-6 md:p-8">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="brand-font text-sm font-semibold text-slate-700 dark:text-slate-200">Configuración</h3>
+                            <span class="text-xs text-slate-500 dark:text-slate-400">Preferencias del sistema</span>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+                            <div class="md:col-span-2">
+                                <label for="{{ form.moneda_base.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Moneda Base</label>
+                                {{ form.moneda_base }}
+                                {% if form.moneda_base.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.moneda_base.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.timezone.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Zona Horaria</label>
+                                {{ form.timezone }}
+                                {% if form.timezone.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.timezone.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.idioma.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Idioma</label>
+                                {{ form.idioma }}
+                                {% if form.idioma.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.idioma.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <label for="{{ form.estatus.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Estatus</label>
+                                {{ form.estatus }}
+                                {% if form.estatus.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.estatus.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                        </div>
                     </div>
 
-                    <!-- Nombre Comercial -->
-                    <div class="col-span-2">
-                        <label for="{{ form.nombre_comercial.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Nombre Comercial</label>
-                        {{ form.nombre_comercial }}
-                        {% if form.nombre_comercial.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.nombre_comercial.errors|striptags }}
-                        </p>
-                        {% endif %}
-                    </div>
-
-                    <!-- Email Contacto -->
-                    <div>
-                        <label for="{{ form.email_contacto.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Email Contacto</label>
-                        {{ form.email_contacto }}
-                        {% if form.email_contacto.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.email_contacto.errors|striptags }}
-                        </p>
-                        {% endif %}
-                    </div>
-
-                    <!-- Telefono -->
-                    <div>
-                        <label for="{{ form.telefono.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Teléfono</label>
-                        {{ form.telefono }}
-                        {% if form.telefono.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.telefono.errors|striptags }}
-                        </p>
-                        {% endif %}
-                    </div>
-
-                    <!-- Sitio Web -->
-                    <div>
-                        <label for="{{ form.sitio_web.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Sitio Web</label>
-                        {{ form.sitio_web }}
-                        {% if form.sitio_web.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.sitio_web.errors|striptags }}
-                        </p>
-                        {% endif %}
-                    </div>
-
-                    <!-- Moneda Base -->
-                    <div>
-                        <label for="{{ form.moneda_base.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Moneda Base</label>
-                        {{ form.moneda_base }}
-                        {% if form.moneda_base.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.moneda_base.errors|striptags }}
-                        </p>
-                        {% endif %}
-                    </div>
-
-                    <!-- Timezone -->
-                    <div>
-                        <label for="{{ form.timezone.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Zona Horaria</label>
-                        {{ form.timezone }}
-                        {% if form.timezone.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.timezone.errors|striptags }}
-                        </p>
-                        {% endif %}
-                    </div>
-
-                    <!-- Idioma -->
-                    <div>
-                        <label for="{{ form.idioma.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Idioma</label>
-                        {{ form.idioma }}
-                        {% if form.idioma.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.idioma.errors|striptags }}
-                        </p>
-                        {% endif %}
-                    </div>
-
-                    <!-- Estatus -->
-                    <div>
-                        <label for="{{ form.estatus.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Estatus</label>
-                        {{ form.estatus }}
-                        {% if form.estatus.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.estatus.errors|striptags }}
-                        </p>
-                        {% endif %}
-                    </div>
-
-                    <!-- Logo URL -->
-                    <div>
-                        <label for="{{ form.logo_url.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">URL del Logo</label>
-                        {{ form.logo_url }}
-                        {% if form.logo_url.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.logo_url.errors|striptags }}
-                        </p>
-                        {% endif %}
-                    </div>
-
-                    <!-- Config JSON -->
-                    <div class="col-span-2">
-                        <label for="{{ form.config_json.id_for_label }}"
-                            class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Configuración JSON</label>
-                        {{ form.config_json }}
-                        {% if form.config_json.errors %}
-                        <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center">
-                            <i class="fas fa-exclamation-circle mr-1"></i> {{ form.config_json.errors|striptags }}
-                        </p>
-                        {% endif %}
+                    <div class="p-6 md:p-8">
+                        <details class="group">
+                            <summary class="cursor-pointer select-none text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center justify-between">
+                                <span class="brand-font">Avanzado</span>
+                                <span class="text-xs text-slate-500 dark:text-slate-400">Configuración JSON</span>
+                            </summary>
+                            <div class="mt-4">
+                                <label for="{{ form.config_json.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Configuración JSON</label>
+                                {{ form.config_json }}
+                                {% if form.config_json.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.config_json.errors|striptags }}</p>
+                                {% endif %}
+                            </div>
+                        </details>
                     </div>
                 </div>
 
@@ -213,9 +185,9 @@
 
 <script>
     document.addEventListener('DOMContentLoaded', function() {
-        const razonSocialInput = document.querySelector('[name="razon_social"]');
         const nombreComercialInput = document.querySelector('[name="nombre_comercial"]');
-        const codigoInput = document.querySelector('[name="codigo"]');
+        const codigoHiddenInput = document.querySelector('input[type="hidden"][name="codigo"]');
+        const codigoDisplayInput = document.getElementById('codigo_display');
         
         // Función simple para slugificar
         function slugify(text) {
@@ -229,17 +201,43 @@
         }
 
         // Solo auto-generar si estamos creando (o el campo código está vacío)
-        if (codigoInput && (!codigoInput.value || codigoInput.value.trim() === '')) {
-            function updateSlug() {
-                // Preferir nombre comercial, si no, usar razón social
-                const sourceText = nombreComercialInput.value || razonSocialInput.value;
-                if (sourceText) {
-                    codigoInput.value = slugify(sourceText);
-                }
-            }
-
-            if (razonSocialInput) razonSocialInput.addEventListener('input', updateSlug);
-            if (nombreComercialInput) nombreComercialInput.addEventListener('input', updateSlug);
+        if (codigoHiddenInput && codigoDisplayInput && (!codigoHiddenInput.value || codigoHiddenInput.value.trim() === '') && nombreComercialInput) {
+            let nextIdPadded = null;
+            fetch("{% url 'nucleo:ajax_empresa_next_id' %}")
+                .then(resp => resp.json())
+                .then(data => {
+                    nextIdPadded = data.next_id_padded || '0000';
+                    function updateSlug() {
+                        const sourceText = nombreComercialInput.value;
+                        if (sourceText) {
+                            const base = slugify(sourceText);
+                            let prefix = base.slice(0, 10);
+                            prefix = prefix.replace(/-+$/, ''); // evitar terminar en guión
+                            const preview = prefix ? `${prefix}-${nextIdPadded}` : '';
+                            codigoHiddenInput.value = preview;
+                            codigoDisplayInput.value = preview;
+                        } else {
+                            codigoHiddenInput.value = '';
+                            codigoDisplayInput.value = '';
+                        }
+                    }
+                    // Render inicial y suscripción a cambios
+                    updateSlug();
+                    nombreComercialInput.addEventListener('input', updateSlug);
+                })
+                .catch(() => {
+                    // Fallback si falla la llamada: usar ####
+                    function updateFallback() {
+                        const sourceText = nombreComercialInput.value;
+                        const base = slugify(sourceText || '');
+                        let prefix = base.slice(0, 10).replace(/-+$/, '');
+                        const preview = prefix ? `${prefix}-####` : '';
+                        codigoHiddenInput.value = preview;
+                        codigoDisplayInput.value = preview;
+                    }
+                    updateFallback();
+                    nombreComercialInput.addEventListener('input', updateFallback);
+                });
         }
     });
 </script>

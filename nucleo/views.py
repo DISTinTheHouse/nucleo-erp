@@ -4,6 +4,7 @@ from django.http import JsonResponse
 from django.views.generic import TemplateView, ListView, CreateView, UpdateView, DeleteView
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from rest_framework import viewsets
+from django.db.models import Max
 
 from django.contrib.auth import get_user_model
 from .models import (
@@ -218,6 +219,20 @@ def get_sucursales_por_empresa(request, empresa_id):
         'roles': list(roles)
     }, safe=False)
 
+def get_next_empresa_id(request):
+    max_id = Empresa.objects.aggregate(m=Max('pk'))['m'] or 0
+    next_id = max_id + 1
+    return JsonResponse({'next_id': next_id, 'next_id_padded': f'{next_id:04d}'})
+
+def get_next_sucursal_id(request):
+    max_id = Sucursal.objects.aggregate(m=Max('pk'))['m'] or 0
+    next_id = max_id + 1
+    return JsonResponse({'next_id': next_id, 'next_id_padded': f'{next_id:04d}'})
+
+def get_next_departamento_id(request):
+    max_id = Departamento.objects.aggregate(m=Max('pk'))['m'] or 0
+    next_id = max_id + 1
+    return JsonResponse({'next_id': next_id, 'next_id_padded': f'{next_id:04d}'})
 # WEB CORE
 class SuperuserRequiredMixin(UserPassesTestMixin):
     def test_func(self):
@@ -256,6 +271,26 @@ class EmpresaCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixi
     form_class = EmpresaForm
     template_name = 'nucleo/empresa_form.html'
     success_url = reverse_lazy('nucleo:empresa_list')
+    
+    def form_valid(self, form):
+        from django.utils.text import slugify
+        # Guardar provisionalmente con prefix-0000 y luego actualizar a prefix-<id:04d>
+        self.object = form.save(commit=False)
+        base_text = form.cleaned_data.get('nombre_comercial') or form.cleaned_data.get('razon_social') or ''
+        base_slug = slugify(base_text)
+        prefix = base_slug[:10].strip('-')
+        if not prefix:
+            form.add_error('nombre_comercial', 'Proporciona un Nombre Comercial para generar el código.')
+            return self.form_invalid(form)
+        provisional = f"{prefix}-0000"
+        self.object.codigo = provisional
+        self.object.save()
+        final_codigo = f"{prefix}-{self.object.pk:04d}"
+        if self.object.codigo != final_codigo:
+            self.object.codigo = final_codigo
+            self.object.save(update_fields=["codigo"])
+        form.save_m2m()
+        return super().form_valid(form)
 
 class EmpresaUpdateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
     model = Empresa
@@ -274,11 +309,37 @@ class SucursalListView(LoginRequiredMixin, SuperuserRequiredMixin, ListView):
     template_name = 'nucleo/sucursal_list.html'
     context_object_name = 'sucursales'
 
+    def get_queryset(self):
+        return (
+            Sucursal.objects.select_related("empresa")
+            .all()
+            .order_by("empresa__codigo", "codigo")
+        )
+
 class SucursalCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
     model = Sucursal
     form_class = SucursalForm
     template_name = 'nucleo/sucursal_form.html'
     success_url = reverse_lazy('nucleo:sucursal_list')
+    
+    def form_valid(self, form):
+        from django.utils.text import slugify
+        self.object = form.save(commit=False)
+        base_text = form.cleaned_data.get('nombre') or ''
+        base_slug = slugify(base_text)
+        prefix = base_slug[:10].strip('-')
+        if not prefix:
+            form.add_error('nombre', 'Proporciona un Nombre para generar el código.')
+            return self.form_invalid(form)
+        provisional = f"{prefix}-0000"
+        self.object.codigo = provisional
+        self.object.save()
+        final_codigo = f"{prefix}-{self.object.pk:04d}"
+        if self.object.codigo != final_codigo:
+            self.object.codigo = final_codigo
+            self.object.save(update_fields=["codigo"])
+        form.save_m2m()
+        return super().form_valid(form)
 
 class SucursalUpdateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
     model = Sucursal
@@ -297,11 +358,37 @@ class DepartamentoListView(LoginRequiredMixin, SuperuserRequiredMixin, ListView)
     template_name = 'nucleo/departamento_list.html'
     context_object_name = 'departamentos'
 
+    def get_queryset(self):
+        return (
+            Departamento.objects.select_related("empresa", "sucursal")
+            .all()
+            .order_by("empresa__codigo", "sucursal__codigo", "codigo")
+        )
+
 class DepartamentoCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
     model = Departamento
     form_class = DepartamentoForm
     template_name = 'nucleo/departamento_form.html'
     success_url = reverse_lazy('nucleo:departamento_list')
+    
+    def form_valid(self, form):
+        from django.utils.text import slugify
+        self.object = form.save(commit=False)
+        base_text = form.cleaned_data.get('nombre') or ''
+        base_slug = slugify(base_text)
+        prefix = base_slug[:10].strip('-')
+        if not prefix:
+            form.add_error('nombre', 'Proporciona un Nombre para generar el código.')
+            return self.form_invalid(form)
+        provisional = f"{prefix}-0000"
+        self.object.codigo = provisional
+        self.object.save()
+        final_codigo = f"{prefix}-{self.object.pk:04d}"
+        if self.object.codigo != final_codigo:
+            self.object.codigo = final_codigo
+            self.object.save(update_fields=["codigo"])
+        form.save_m2m()
+        return super().form_valid(form)
 
 class DepartamentoUpdateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
     model = Departamento

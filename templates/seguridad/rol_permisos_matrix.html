@@ -1,0 +1,131 @@
+{% extends "base_core.html" %}
+
+{% block title %}Permisos por Rol{% endblock %}
+{% block header_title %}Permisos por Rol{% endblock %}
+{% block header_subtitle %}Configura qué puede hacer cada rol en tu empresa{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <form method="get" class="flex flex-wrap items-end gap-4 mb-4" id="filtros-matrix-form">
+        {% if empresas and empresas|length > 0 %}
+        <div>
+            <label class="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-1">Empresa</label>
+            <select name="empresa_id" id="empresa_id_select"
+                class="border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm bg-white dark:bg-zinc-900">
+                <option value="">Todas</option>
+                {% for e in empresas %}
+                <option value="{{ e.id }}" {% if empresa_seleccionada_id|stringformat:'s' == e.id|stringformat:'s' %}selected{% endif %}>
+                    {{ e.codigo }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        {% endif %}
+        <div>
+            <label class="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-1">Rol</label>
+            <select name="rol_id" id="rol_id_select"
+                class="border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm bg-white dark:bg-zinc-900">
+                {% for r in roles %}
+                <option value="{{ r.id }}" {% if rol_seleccionado and r.id == rol_seleccionado.id %}selected{% endif %}>
+                    {{ r.empresa.codigo }} - {{ r.nombre }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        <button type="submit" class="sr-only">Aplicar</button>
+    </form>
+
+    {% if not rol_seleccionado %}
+    <p class="text-sm text-slate-500">No hay roles activos configurados para esta empresa.</p>
+    {% else %}
+    <form method="post" class="space-y-4">
+        {% csrf_token %}
+        <input type="hidden" name="rol_id" value="{{ rol_seleccionado.id }}">
+        <div
+            class="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 overflow-hidden">
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-slate-200 dark:divide-slate-800">
+                    <thead class="bg-slate-50 dark:bg-white/5">
+                        <tr>
+                            <th scope="col"
+                                class="px-6 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                                Módulo</th>
+                            <th scope="col"
+                                class="px-6 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                                Clave</th>
+                            <th scope="col"
+                                class="px-6 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                                Nombre</th>
+                            <th scope="col"
+                                class="px-6 py-3 text-center text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                                Asignado</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white dark:bg-zinc-900 divide-y divide-slate-200 dark:divide-slate-800">
+                        {% for permiso in permisos %}
+                        <tr class="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
+                            <td class="px-6 py-4 whitespace-nowrap">{{ permiso.modulo|default:"-" }}</td>
+                            <td class="px-6 py-4 whitespace-nowrap font-mono text-xs">{{ permiso.clave }}</td>
+                            <td class="px-6 py-4">{{ permiso.nombre }}</td>
+                            <td class="px-6 py-4 text-center">
+                                <input class="accent-brand-500 w-3.5 h-3.5 rounded cursor-pointer" type="checkbox"
+                                    name="permiso_ids" value="{{ permiso.id }}" {% if permiso.id in permisos_asignados %}checked{% endif %}>
+                            </td>
+                        </tr>
+                        {% empty %}
+                        <tr>
+                            <td colspan="4" class="px-6 py-12 text-center text-slate-500 dark:text-slate-400">
+                                <div class="flex flex-col items-center justify-center">
+                                    <i class="fas fa-key text-4xl text-slate-300 dark:text-slate-600 mb-4"></i>
+                                    <p class="text-lg font-medium text-slate-900 dark:text-white">No hay permisos
+                                        definidos</p>
+                                    <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">Crea permisos en el admin
+                                        para comenzar.</p>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="flex justify-end">
+            <button type="submit"
+                class="inline-flex items-center rounded-xl border border-emerald-700 bg-emerald-900/40 px-4 py-2 text-sm font-medium text-emerald-200 hover:bg-emerald-800/60 transition">
+                Guardar permisos del rol
+            </button>
+        </div>
+    </form>
+    {% endif %}
+</div>
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const form = document.getElementById('filtros-matrix-form');
+        if (!form) return;
+        const empresaSelect = document.getElementById('empresa_id_select');
+        const rolSelect = document.getElementById('rol_id_select');
+
+        if (empresaSelect) {
+            empresaSelect.addEventListener('change', () => {
+                if (rolSelect) {
+                    rolSelect.value = '';
+                }
+                if (form.requestSubmit) {
+                    form.requestSubmit();
+                } else {
+                    form.submit();
+                }
+            });
+        }
+        if (rolSelect) {
+            rolSelect.addEventListener('change', () => {
+                if (form.requestSubmit) {
+                    form.requestSubmit();
+                } else {
+                    form.submit();
+                }
+            });
+        }
+    });
+</script>
+{% endblock %}

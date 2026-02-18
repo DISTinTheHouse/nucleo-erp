@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import RolListView, RolCreateView, RolUpdateView, RolDeleteView, RolViewSet
+from .views import RolListView, RolCreateView, RolUpdateView, RolDeleteView, RolViewSet, RolPermisosMatrixView, get_next_rol_id
 
 app_name = 'seguridad'
 
@@ -16,4 +16,6 @@ urlpatterns = [
     path('roles/crear/', RolCreateView.as_view(), name='rol_create'),
     path('roles/<int:pk>/editar/', RolUpdateView.as_view(), name='rol_update'),
     path('roles/<int:pk>/eliminar/', RolDeleteView.as_view(), name='rol_delete'),
+    path('roles/permisos/', RolPermisosMatrixView.as_view(), name='rol_permisos_matrix'),
+    path('ajax/roles/next-id/', get_next_rol_id, name='ajax_rol_next_id'),
 ]
