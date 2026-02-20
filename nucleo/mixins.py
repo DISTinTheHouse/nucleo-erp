@@ -16,22 +16,21 @@ class AuditLogMixin:
         return obj
 
     def form_valid(self, form):
-        # Determinamos si es creación o actualización
+        if not hasattr(form, 'instance'):
+            return super().form_valid(form)
+
         is_creation = not form.instance.pk
-        
-        # Si es actualización, calculamos cambios antes de guardar (ya tenemos _initial_state del get_object)
-        # Nota: form_valid guarda el objeto, así que comparamos form.cleaned_data con _initial_state
+
         changes = {}
         if not is_creation and hasattr(self, '_initial_state'):
             current_state = form.cleaned_data
             for field, value in current_state.items():
-                # Ignoramos campos M2M en esta comparación simple o manejamos tipos complejos
                 old_value = self._initial_state.get(field)
-                if old_value != value and old_value is not None: # Solo registramos si había un valor previo
+                if old_value != value and old_value is not None:
                     changes[field] = {'from': str(old_value), 'to': str(value)}
 
         response = super().form_valid(form)
-        
+
         action = 'CREATE' if is_creation else 'UPDATE'
         self.log_audit_action(form.instance, action, changes if action == 'UPDATE' else None)
         return response

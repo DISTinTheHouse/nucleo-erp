@@ -65,7 +65,7 @@ Configura quién puede hacer qué.
 Con la configuración lista, el usuario puede empezar a operar:
 
 1.  **Login**: El usuario ingresa sus credenciales.
-2.  **Dashboard**: Verá la información filtrada según sus permisos y sucursales asignadas.
+68→2.  **Dashboard**: Verá la información filtrada según sus permisos y sucursales asignadas. El frontend (Next.js) utiliza los permisos devueltos por el login para habilitar solo las acciones permitidas (lectura, edición y eliminación por módulo).
 3.  **Transacciones**: Al crear documentos (Ventas, Compras), el sistema tomará automáticamente la serie/folio de su sucursal activa.
 
 ---

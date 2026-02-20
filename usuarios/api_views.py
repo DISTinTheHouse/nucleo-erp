@@ -4,6 +4,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework.permissions import AllowAny
 from django.contrib.auth import authenticate
 from rest_framework import status
+from seguridad.models import UsuarioRol
 
 class LoginAPIView(APIView):
     permission_classes = [AllowAny]
@@ -28,8 +29,23 @@ class LoginAPIView(APIView):
         if user:
             if not user.is_active or getattr(user, 'estatus', '') == 'bloqueado':
                 return Response({'error': 'Su cuenta está bloqueada o inactiva. Contacte al administrador.'}, status=status.HTTP_403_FORBIDDEN)
-            
+
             token, created = Token.objects.get_or_create(user=user)
+
+            # Construir lista de permisos efectivos
+            is_superuser = user.is_superuser
+            is_admin_empresa = getattr(user, 'is_admin_empresa', False)
+
+            permisos = []
+            if is_superuser or is_admin_empresa:
+                permisos = []
+            else:
+                qs = UsuarioRol.objects.filter(
+                    usuario=user,
+                    rol__estatus="activo",
+                ).values_list("rol__permisos__clave", flat=True)
+                permisos = sorted(set(filter(None, qs)))
+
             return Response({
                 'token': token.key,
                 'user_id': user.pk,
@@ -37,9 +53,10 @@ class LoginAPIView(APIView):
                 'username': user.username,
                 'nombre_completo': f"{user.first_name} {user.last_name}".strip(),
                 'es_admin': user.is_staff or user.is_superuser,
-                'is_superuser': user.is_superuser,
-                'is_admin_empresa': getattr(user, 'is_admin_empresa', False),
-                'empresa_id': user.empresa_id if user.empresa else None
+                'is_superuser': is_superuser,
+                'is_admin_empresa': is_admin_empresa,
+                'empresa_id': user.empresa_id if user.empresa else None,
+                'permisos': permisos,
             })
         else:
             return Response({'error': 'Credenciales inválidas'}, status=status.HTTP_401_UNAUTHORIZED)

@@ -36,7 +36,7 @@ El backend actúa como una "Caja Negra" segura para el Frontend (Next.js).
 2.  **Gatekeeper**: Django verifica Token, IP (bloqueos) y Origen (CORS).
 3.  **Contexto**: Se hidrata `request.user` y se determina su `empresa` activa.
 4.  **Procesamiento**:
-    - Se validan permisos (Role-Based Access Control).
+    - Se validan permisos (Role-Based Access Control) usando roles y claves de permiso (`R-XXX`, `E-XXX`, `D-XXX`).
     - Se ejecutan reglas de negocio (ej. validación SAT).
 5.  **Respuesta**: JSON estructurado y códigos HTTP semánticos (200, 201, 400, 401, 403).
 

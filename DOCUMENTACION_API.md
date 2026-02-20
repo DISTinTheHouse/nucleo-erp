@@ -31,9 +31,20 @@ Obtén el token de sesión para el usuario.
     "username": "admin",
     "nombre_completo": "Administrador Sistema",
     "es_admin": true,
-    "is_superuser": true
+    "is_superuser": true,
+    "is_admin_empresa": true,
+    "empresa_id": 1,
+    "permisos": ["R-CONF", "E-CONF", "D-CONF", "R-USU", "..."]
   }
   ```
+
+- **Notas importantes para Frontend**:
+  - `permisos` es un arreglo de claves de permiso efectivas para el usuario.
+  - Las claves siguen el patrón `X-MODULO`, por ejemplo para el módulo Configuración:
+    - `R-CONF` → Lectura
+    - `E-CONF` → Edición
+    - `D-CONF` → Eliminación
+  - Para usuarios `is_superuser=true` o `is_admin_empresa=true`, el backend concede acceso amplio por rol; el frontend puede tratarlos como “tienen todo”, aunque la lista `permisos` pueda estar vacía.
 
 ---
 
