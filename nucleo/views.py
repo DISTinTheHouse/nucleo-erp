@@ -8,6 +8,7 @@ from rest_framework import viewsets
 from django.db.models import Max, Q
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.decorators import login_required
 from .models import (
     Empresa, Sucursal, Departamento, Moneda, Impuesto, UnidadMedida,
     SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, SatClaveProdServ, SatClaveUnidad
@@ -194,12 +195,21 @@ class MonedaViewSet(viewsets.ModelViewSet):
         if not getattr(request.user, 'is_admin_empresa', False):
              raise permissions.exceptions.PermissionDenied("Solo los administradores pueden gestionar monedas de la empresa.")
 
+@login_required
 def get_sucursales_por_empresa(request, empresa_id):
     """
     Retorna JSON con las sucursales activas de una empresa específica,
     incluyendo sus departamentos activos y roles disponibles.
     """
     # 1. Sucursales y Departamentos
+    # Seguridad adicional: verificar que el usuario tenga acceso a esta empresa
+    user = request.user
+    if not user.is_superuser:
+        # Si no es admin de empresa ni tiene acceso explícito, denegar
+        # (Lógica simplificada, idealmente checaríamos permisos detallados)
+        if hasattr(user, 'empresa') and user.empresa and user.empresa.pk != empresa_id:
+             return JsonResponse({'error': 'No autorizado'}, status=403)
+
     sucursales = Sucursal.objects.filter(empresa_id=empresa_id, estatus=Sucursal.Estatus.ACTIVO).order_by('codigo')
     data_sucursales = []
     for s in sucursales:
@@ -220,17 +230,26 @@ def get_sucursales_por_empresa(request, empresa_id):
         'roles': list(roles)
     }, safe=False)
 
+@login_required
 def get_next_empresa_id(request):
+    if not request.user.is_superuser:
+        return JsonResponse({'error': 'No autorizado'}, status=403)
     max_id = Empresa.objects.aggregate(m=Max('pk'))['m'] or 0
     next_id = max_id + 1
     return JsonResponse({'next_id': next_id, 'next_id_padded': f'{next_id:04d}'})
 
+@login_required
 def get_next_sucursal_id(request):
+    if not request.user.is_superuser:
+        return JsonResponse({'error': 'No autorizado'}, status=403)
     max_id = Sucursal.objects.aggregate(m=Max('pk'))['m'] or 0
     next_id = max_id + 1
     return JsonResponse({'next_id': next_id, 'next_id_padded': f'{next_id:04d}'})
 
+@login_required
 def get_next_departamento_id(request):
+    if not request.user.is_superuser:
+        return JsonResponse({'error': 'No autorizado'}, status=403)
     max_id = Departamento.objects.aggregate(m=Max('pk'))['m'] or 0
     next_id = max_id + 1
     return JsonResponse({'next_id': next_id, 'next_id_padded': f'{next_id:04d}'})

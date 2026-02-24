@@ -87,7 +87,12 @@ class RolUpdateView(AuditLogMixin, SuccessMessageMixin, LoginRequiredMixin, Supe
 from django.http import JsonResponse
 from django.db.models import Max
 
+from django.contrib.auth.decorators import login_required
+
+@login_required
 def get_next_rol_id(request):
+    if not request.user.is_superuser:
+        return JsonResponse({'error': 'No autorizado'}, status=403)
     max_id = Rol.objects.aggregate(m=Max('pk'))['m'] or 0
     next_id = max_id + 1
     return JsonResponse({'next_id': next_id, 'next_id_padded': f'{next_id:04d}'})
