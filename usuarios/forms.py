@@ -19,7 +19,7 @@ class TailwindFormMixin:
                     'bg-white dark:bg-zinc-900 text-slate-900 dark:text-slate-100 '
                     'placeholder-slate-400 dark:placeholder-slate-500 '
                     'shadow-sm focus:border-brand-500 focus:ring-brand-500 '
-                    'sm:text-sm transition-all py-2.5 hover:border-brand-400 dark:hover:border-brand-300'
+                    'sm:text-sm transition-all py-2.5 px-4 hover:border-brand-400 dark:hover:border-brand-300'
                 )
                 field.widget.attrs['class'] = f"{existing_classes} {new_classes}".strip()
                 # Añadir placeholder automáticamente si no existe
@@ -60,6 +60,13 @@ class UsuarioCreationForm(TailwindFormMixin, UserCreationForm):
         self.fields['departamentos'].widget = forms.CheckboxSelectMultiple()
         self.fields['departamentos'].queryset = self.fields['departamentos'].queryset.none()
         
+        # Placeholders personalizados
+        self.fields['username'].widget.attrs['placeholder'] = 'Ej. juan.perez'
+        self.fields['email'].widget.attrs['placeholder'] = 'juan.perez@empresa.com'
+        self.fields['first_name'].widget.attrs['placeholder'] = 'Ej. Juan'
+        self.fields['last_name'].widget.attrs['placeholder'] = 'Ej. Pérez'
+        self.fields['telefono'].widget.attrs['placeholder'] = 'Ej. 55 1234 5678'
+
         # Inicializar queryset de roles vacío
         from seguridad.models import Rol
         self.fields['roles'].queryset = Rol.objects.none()
@@ -150,6 +157,13 @@ class UsuarioChangeForm(TailwindFormMixin, UserChangeForm):
         self.fields['sucursales'].widget = forms.CheckboxSelectMultiple()
         self.fields['departamentos'].widget = forms.CheckboxSelectMultiple()
         
+        # Placeholders personalizados
+        self.fields['username'].widget.attrs['placeholder'] = 'Ej. juan.perez'
+        self.fields['email'].widget.attrs['placeholder'] = 'juan.perez@empresa.com'
+        self.fields['first_name'].widget.attrs['placeholder'] = 'Ej. Juan'
+        self.fields['last_name'].widget.attrs['placeholder'] = 'Ej. Pérez'
+        self.fields['telefono'].widget.attrs['placeholder'] = 'Ej. 55 1234 5678'
+
         # Inicializar queryset de roles vacío
         from seguridad.models import Rol
         self.fields['roles'].queryset = Rol.objects.none()

@@ -1,17 +1,18 @@
 {% extends 'base_core.html' %}
 
 {% block title %}Departamentos - ERP Core{% endblock %}
+{% block header_title %}Departamentos{% endblock %}
+{% block header_subtitle %}Gestión de departamentos por sucursal{% endblock %}
 
 {% block content %}
 <div class="mb-6 flex flex-col sm:flex-row justify-between items-center gap-4">
-    <div class="flex items-center gap-4 w-full sm:w-auto">
-        <h1 class="text-2xl font-bold text-slate-800 dark:text-white">Departamentos</h1>
-        <div class="relative w-full sm:w-auto">
-            <input type="text" placeholder="Buscar departamentos..."
-                class="pl-10 pr-4 py-2 border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-sky-500 focus:border-sky-500 text-sm w-full sm:w-64 shadow-sm transition-all bg-white dark:bg-zinc-900 text-slate-900 dark:text-white placeholder-slate-400">
-            <i class="fas fa-search absolute left-3 top-2.5 text-slate-400"></i>
-        </div>
-    </div>
+    <form method="get" class="relative w-full sm:w-auto">
+        <input type="text" name="q" value="{{ request.GET.q|default:'' }}" placeholder="Buscar departamentos..."
+            class="pl-10 pr-4 py-2 border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-sky-500 focus:border-sky-500 text-sm w-full sm:w-64 shadow-sm transition-all bg-white dark:bg-zinc-900 text-slate-900 dark:text-white placeholder-slate-400">
+        <button type="submit" class="absolute left-3 top-2.5 text-slate-400 bg-transparent border-0 p-0">
+            <i class="fas fa-search"></i>
+        </button>
+    </form>
     <a href="{% url 'nucleo:departamento_create' %}"
         class="w-full sm:w-auto inline-flex items-center justify-center px-4 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-sky-600 hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500 transition-colors">
         <i class="fas fa-plus mr-2"></i> Nuevo Departamento

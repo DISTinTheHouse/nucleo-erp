@@ -32,7 +32,7 @@ class TailwindModelForm(forms.ModelForm):
                     'bg-white dark:bg-zinc-900 text-slate-900 dark:text-slate-100 '
                     'placeholder-slate-400 dark:placeholder-slate-500 '
                     'shadow-sm focus:border-brand-500 focus:ring-brand-500 '
-                    'sm:text-sm transition-all py-2.5 hover:border-brand-400 dark:hover:border-brand-300'
+                    'sm:text-sm transition-all py-2.5 px-4 hover:border-brand-400 dark:hover:border-brand-300'
                 )
                 field.widget.attrs['class'] = f"{existing_classes} {new_classes}".strip()
                 # Añadir placeholder automáticamente si no existe
@@ -56,6 +56,17 @@ class EmpresaForm(TailwindModelForm):
         label="Zona Horaria",
         choices=TIMEZONE_CHOICES,
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['codigo'].widget.attrs['placeholder'] = 'Ej. mi-empresa (opcional, se autogenera)'
+        self.fields['razon_social'].widget.attrs['placeholder'] = 'Ej. Mi Empresa S.A. de C.V.'
+        self.fields['nombre_comercial'].widget.attrs['placeholder'] = 'Ej. Mi Empresa'
+        self.fields['rfc'].widget.attrs['placeholder'] = 'Ej. XAXX010101000'
+        self.fields['email_contacto'].widget.attrs['placeholder'] = 'contacto@empresa.com'
+        self.fields['telefono'].widget.attrs['placeholder'] = 'Ej. 55 1234 5678'
+        self.fields['sitio_web'].widget.attrs['placeholder'] = 'https://www.miempresa.com'
+        self.fields['logo_url'].widget.attrs['placeholder'] = 'https://ejemplo.com/logo.png'
 
     class Meta:
         model = Empresa
@@ -100,6 +111,17 @@ class EmpresaForm(TailwindModelForm):
         return rfc
 
 class SucursalForm(TailwindModelForm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['codigo'].widget.attrs['placeholder'] = 'Ej. SUC-MTY (opcional, se autogenera)'
+        self.fields['nombre'].widget.attrs['placeholder'] = 'Ej. Sucursal Monterrey Centro'
+        self.fields['direccion_linea1'].widget.attrs['placeholder'] = 'Calle Principal #123, Col. Centro'
+        self.fields['telefono'].widget.attrs['placeholder'] = 'Ej. 81 1234 5678'
+        self.fields['email'].widget.attrs['placeholder'] = 'sucursal@empresa.com'
+        self.fields['ciudad'].widget.attrs['placeholder'] = 'Ej. Monterrey'
+        self.fields['estado'].widget.attrs['placeholder'] = 'Ej. Nuevo León'
+        self.fields['cp'].widget.attrs['placeholder'] = 'Ej. 64000'
+
     class Meta:
         model = Sucursal
         fields = '__all__'

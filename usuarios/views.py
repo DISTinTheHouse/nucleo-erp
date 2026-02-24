@@ -2,6 +2,8 @@ from django.shortcuts import render
 from django.urls import reverse_lazy
 from django.views.generic import ListView, CreateView, UpdateView, DeleteView
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
+from django.contrib.messages.views import SuccessMessageMixin
+from django.db.models import Q
 from rest_framework import viewsets, permissions
 from rest_framework.exceptions import PermissionDenied
 from nucleo.mixins import AuditLogMixin
@@ -139,23 +141,35 @@ class UsuarioListView(LoginRequiredMixin, SuperuserRequiredMixin, ListView):
     context_object_name = 'usuarios'
 
     def get_queryset(self):
-        return (
+        qs = (
             Usuario.objects.select_related("empresa")
             .all()
             .order_by("empresa__codigo", "username")
         )
+        q = self.request.GET.get('q')
+        if q:
+            qs = qs.filter(
+                Q(username__icontains=q) | 
+                Q(first_name__icontains=q) | 
+                Q(last_name__icontains=q) | 
+                Q(email__icontains=q) |
+                Q(empresa__razon_social__icontains=q)
+            )
+        return qs
 
-class UsuarioCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
+class UsuarioCreateView(AuditLogMixin, SuccessMessageMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
     model = Usuario
     form_class = UsuarioCreationForm
     template_name = 'usuarios/usuario_form.html'
     success_url = reverse_lazy('usuarios:usuario_list')
+    success_message = "El usuario %(username)s fue creado correctamente."
 
-class UsuarioUpdateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
+class UsuarioUpdateView(AuditLogMixin, SuccessMessageMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
     model = Usuario
     form_class = UsuarioChangeForm
     template_name = 'usuarios/usuario_form.html'
     success_url = reverse_lazy('usuarios:usuario_list')
+    success_message = "El usuario %(username)s fue editado correctamente."
 
 class UsuarioDeleteView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, DeleteView):
     model = Usuario

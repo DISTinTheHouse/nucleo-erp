@@ -3,8 +3,9 @@ from django.urls import reverse_lazy
 from django.http import JsonResponse
 from django.views.generic import TemplateView, ListView, CreateView, UpdateView, DeleteView
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
+from django.contrib.messages.views import SuccessMessageMixin
 from rest_framework import viewsets
-from django.db.models import Max
+from django.db.models import Max, Q
 
 from django.contrib.auth import get_user_model
 from .models import (
@@ -264,13 +265,24 @@ class EmpresaListView(LoginRequiredMixin, SuperuserRequiredMixin, ListView):
 
     def get_queryset(self):
         # Garantizar que se retornen todas las empresas para el superusuario
-        return Empresa.objects.all().order_by('-created_at')
+        qs = Empresa.objects.all().order_by('-created_at')
+        
+        q = self.request.GET.get('q')
+        if q:
+            qs = qs.filter(
+                Q(razon_social__icontains=q) | 
+                Q(nombre_comercial__icontains=q) | 
+                Q(rfc__icontains=q) |
+                Q(codigo__icontains=q)
+            )
+        return qs
 
-class EmpresaCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
+class EmpresaCreateView(AuditLogMixin, SuccessMessageMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
     model = Empresa
     form_class = EmpresaForm
     template_name = 'nucleo/empresa_form.html'
     success_url = reverse_lazy('nucleo:empresa_list')
+    success_message = "La empresa %(razon_social)s fue creada correctamente."
     
     def form_valid(self, form):
         from django.utils.text import slugify
@@ -292,11 +304,12 @@ class EmpresaCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixi
         form.save_m2m()
         return super().form_valid(form)
 
-class EmpresaUpdateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
+class EmpresaUpdateView(AuditLogMixin, SuccessMessageMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
     model = Empresa
     form_class = EmpresaForm
     template_name = 'nucleo/empresa_form.html'
     success_url = reverse_lazy('nucleo:empresa_list')
+    success_message = "La empresa %(razon_social)s fue editada correctamente."
 
 class EmpresaDeleteView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, DeleteView):
     model = Empresa
@@ -310,17 +323,26 @@ class SucursalListView(LoginRequiredMixin, SuperuserRequiredMixin, ListView):
     context_object_name = 'sucursales'
 
     def get_queryset(self):
-        return (
+        qs = (
             Sucursal.objects.select_related("empresa")
             .all()
             .order_by("empresa__codigo", "codigo")
         )
+        q = self.request.GET.get('q')
+        if q:
+            qs = qs.filter(
+                Q(nombre__icontains=q) | 
+                Q(codigo__icontains=q) |
+                Q(empresa__razon_social__icontains=q)
+            )
+        return qs
 
-class SucursalCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
+class SucursalCreateView(AuditLogMixin, SuccessMessageMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
     model = Sucursal
     form_class = SucursalForm
     template_name = 'nucleo/sucursal_form.html'
     success_url = reverse_lazy('nucleo:sucursal_list')
+    success_message = "La sucursal %(nombre)s fue creada correctamente."
     
     def form_valid(self, form):
         from django.utils.text import slugify
@@ -341,11 +363,12 @@ class SucursalCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMix
         form.save_m2m()
         return super().form_valid(form)
 
-class SucursalUpdateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
+class SucursalUpdateView(AuditLogMixin, SuccessMessageMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
     model = Sucursal
     form_class = SucursalForm
     template_name = 'nucleo/sucursal_form.html'
     success_url = reverse_lazy('nucleo:sucursal_list')
+    success_message = "La sucursal %(nombre)s fue editada correctamente."
 
 class SucursalDeleteView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, DeleteView):
     model = Sucursal
@@ -359,17 +382,27 @@ class DepartamentoListView(LoginRequiredMixin, SuperuserRequiredMixin, ListView)
     context_object_name = 'departamentos'
 
     def get_queryset(self):
-        return (
+        qs = (
             Departamento.objects.select_related("empresa", "sucursal")
             .all()
             .order_by("empresa__codigo", "sucursal__codigo", "codigo")
         )
+        q = self.request.GET.get('q')
+        if q:
+            qs = qs.filter(
+                Q(nombre__icontains=q) | 
+                Q(codigo__icontains=q) |
+                Q(empresa__razon_social__icontains=q) |
+                Q(sucursal__nombre__icontains=q)
+            )
+        return qs
 
-class DepartamentoCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
+class DepartamentoCreateView(AuditLogMixin, SuccessMessageMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
     model = Departamento
     form_class = DepartamentoForm
     template_name = 'nucleo/departamento_form.html'
     success_url = reverse_lazy('nucleo:departamento_list')
+    success_message = "El departamento %(nombre)s fue creado correctamente."
     
     def form_valid(self, form):
         from django.utils.text import slugify
@@ -390,11 +423,12 @@ class DepartamentoCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequire
         form.save_m2m()
         return super().form_valid(form)
 
-class DepartamentoUpdateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
+class DepartamentoUpdateView(AuditLogMixin, SuccessMessageMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
     model = Departamento
     form_class = DepartamentoForm
     template_name = 'nucleo/departamento_form.html'
     success_url = reverse_lazy('nucleo:departamento_list')
+    success_message = "El departamento %(nombre)s fue editado correctamente."
 
 class DepartamentoDeleteView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, DeleteView):
     model = Departamento

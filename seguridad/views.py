@@ -1,6 +1,8 @@
 from django.urls import reverse_lazy
 from django.views.generic import ListView, CreateView, UpdateView, DeleteView, TemplateView
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
+from django.contrib.messages.views import SuccessMessageMixin
+from django.contrib import messages
 from rest_framework import viewsets, permissions
 from nucleo.mixins import AuditLogMixin
 from .models import Rol, Permiso
@@ -49,11 +51,12 @@ class RolListView(LoginRequiredMixin, SuperuserRequiredMixin, ListView):
     def get_queryset(self):
         return Rol.objects.all().select_related('empresa').order_by('empresa', 'nombre')
 
-class RolCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
+class RolCreateView(AuditLogMixin, SuccessMessageMixin, LoginRequiredMixin, SuperuserRequiredMixin, CreateView):
     model = Rol
     form_class = RolForm
     template_name = 'seguridad/rol_form.html'
     success_url = reverse_lazy('seguridad:rol_list')
+    success_message = "El rol %(nombre)s fue creado correctamente."
     
     def form_valid(self, form):
         from django.utils.text import slugify
@@ -74,11 +77,12 @@ class RolCreateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, C
         form.save_m2m()
         return super().form_valid(form)
 
-class RolUpdateView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
+class RolUpdateView(AuditLogMixin, SuccessMessageMixin, LoginRequiredMixin, SuperuserRequiredMixin, UpdateView):
     model = Rol
     form_class = RolForm
     template_name = 'seguridad/rol_form.html'
     success_url = reverse_lazy('seguridad:rol_list')
+    success_message = "El rol %(nombre)s fue editado correctamente."
 
 from django.http import JsonResponse
 from django.db.models import Max
@@ -160,4 +164,5 @@ class RolPermisosMatrixView(LoginRequiredMixin, SuperuserRequiredMixin, Template
         permisos_ids = request.POST.getlist("permiso_ids")
         permisos_qs = Permiso.objects.filter(id__in=permisos_ids)
         rol.permisos.set(permisos_qs)
+        messages.success(request, f"Permisos actualizados correctamente para el rol {rol.nombre}.")
         return self.get(request, *args, **kwargs)
