@@ -40,6 +40,10 @@ Obtén el token de sesión para el usuario.
 
 - **Notas importantes para Frontend**:
   - `permisos` es un arreglo de claves de permiso efectivas para el usuario.
+  - Incluye automáticamente:
+    1. Permisos asignados por Roles.
+    2. Overrides de tipo GRANT (UsuarioPermiso).
+    3. Excluye Overrides de tipo DENY.
   - Las claves siguen el patrón `X-MODULO`, por ejemplo para el módulo Configuración:
     - `R-CONF` → Lectura
     - `E-CONF` → Edición

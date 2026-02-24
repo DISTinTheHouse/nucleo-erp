@@ -82,25 +82,39 @@ class Usuario(AbstractUser):
 
     def tiene_permiso(self, clave_permiso):
         """
-        Verifica si el usuario tiene un permiso específico basado en sus roles asignados.
-        Retorna True si:
-        1. Es superusuario de Django (admin global).
-        2. Es admin de empresa (is_admin_empresa=True).
-        3. Tiene un rol activo asignado que contiene el permiso solicitado.
+        Verifica si el usuario tiene un permiso específico basado en sus roles asignados
+        Y sus overrides (UsuarioPermiso).
+        
+        Prioridad:
+        1. Superuser/Admin Empresa -> True
+        2. Override DENY -> False
+        3. Roles -> True
+        4. Override GRANT -> True
         """
         # 1. Superuser global siempre tiene acceso
         if self.is_superuser:
             return True
 
-        # 2. Admin de empresa tiene acceso total a su empresa (simplificación)
-        # Podrías refinar esto para que solo aplique a permisos de su propia empresa
+        # 2. Admin de empresa tiene acceso total a su empresa
         if self.is_admin_empresa:
             return True
 
-        # 3. Verificar roles asignados
-        # Buscamos en los roles asignados al usuario (UsuarioRol)
-        # Filtramos roles activos y verificamos si alguno tiene el permiso con la clave dada
-        return self.asignaciones_roles.filter(
+        # 3. Revisar Overrides (UsuarioPermiso)
+        # Consultamos si existe algún override para este permiso
+        qs_overrides = self.overrides_permisos.filter(permiso__clave=clave_permiso)
+        
+        # Si existe un DENY explícito, denegar acceso inmediatamente
+        if qs_overrides.filter(tipo="deny").exists():
+            return False
+
+        # 4. Verificar roles asignados
+        tiene_por_rol = self.asignaciones_roles.filter(
             rol__estatus="activo",
             rol__permisos__clave=clave_permiso
         ).exists()
+        
+        if tiene_por_rol:
+            return True
+            
+        # 5. Si no tiene por rol, verificar si tiene un GRANT explícito
+        return qs_overrides.filter(tipo="grant").exists()

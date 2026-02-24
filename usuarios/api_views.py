@@ -36,15 +36,33 @@ class LoginAPIView(APIView):
             is_superuser = user.is_superuser
             is_admin_empresa = getattr(user, 'is_admin_empresa', False)
 
-            permisos = []
+            permisos_finales = []
             if is_superuser or is_admin_empresa:
-                permisos = []
+                permisos_finales = []
             else:
-                qs = UsuarioRol.objects.filter(
+                # 1. Permisos por Roles
+                qs_roles = UsuarioRol.objects.filter(
                     usuario=user,
                     rol__estatus="activo",
                 ).values_list("rol__permisos__clave", flat=True)
-                permisos = sorted(set(filter(None, qs)))
+                permisos_roles = set(filter(None, qs_roles))
+
+                # 2. Permisos por Overrides
+                permisos_grant = set()
+                permisos_deny = set()
+                
+                # Optimizacion: select_related para evitar N+1 queries
+                overrides = user.overrides_permisos.select_related('permiso').all()
+                
+                for ov in overrides:
+                    if ov.tipo == 'grant':
+                        permisos_grant.add(ov.permiso.clave)
+                    elif ov.tipo == 'deny':
+                        permisos_deny.add(ov.permiso.clave)
+                
+                # 3. Calcular resultante: (Roles + Grant) - Deny
+                permisos_efectivos = (permisos_roles | permisos_grant) - permisos_deny
+                permisos_finales = sorted(list(permisos_efectivos))
 
             return Response({
                 'token': token.key,
@@ -56,7 +74,7 @@ class LoginAPIView(APIView):
                 'is_superuser': is_superuser,
                 'is_admin_empresa': is_admin_empresa,
                 'empresa_id': user.empresa_id if user.empresa else None,
-                'permisos': permisos,
+                'permisos': permisos_finales,
             })
         else:
             return Response({'error': 'Credenciales inválidas'}, status=status.HTTP_401_UNAUTHORIZED)

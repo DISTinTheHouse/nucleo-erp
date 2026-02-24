@@ -57,3 +57,14 @@ El backend actúa como una "Caja Negra" segura para el Frontend (Next.js).
 Cada escritura crítica genera un rastro:
 - **Logs de API**: Tiempos de respuesta, usuario y status code.
 - **Logs de Auditoría**: Cambios en modelos sensibles (quién cambió qué valor).
+
+## 7. Sistema de Permisos (RBAC + Overrides)
+
+El sistema implementa un control de acceso robusto y flexible:
+
+1.  **Roles (Base)**: Se asignan roles a los usuarios (ej. "Ventas", "Almacén") que agrupan permisos.
+2.  **Overrides (Excepciones)**: Se pueden otorgar o denegar permisos específicos a un usuario, sobrescribiendo sus roles.
+    - **GRANT**: Otorga un permiso extra (ej. Usuario de "Ventas" que necesita ver "Inventarios").
+    - **DENY**: Revoca un permiso crítico (ej. Usuario de "Admin" que no debe ver "Nómina").
+3.  **Resolución**: La API de Login calcula los permisos efectivos (`(Roles + Grant) - Deny`) y los entrega al frontend. El frontend no necesita conocer la lógica compleja, solo recibe la lista final de permisos.
+

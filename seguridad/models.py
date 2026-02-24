@@ -109,3 +109,64 @@ class RolPermiso(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["rol", "permiso"], name="uq_rol_permiso"),
         ]
+
+
+class UsuarioPermiso(models.Model):
+    """
+    Permite otorgar (GRANT) o denegar (DENY) permisos específicos a un usuario,
+    sobrescribiendo la configuración de sus roles.
+    """
+    TIPO_GRANT = "grant"
+    TIPO_DENY = "deny"
+    TIPO_CHOICES = [
+        (TIPO_GRANT, "Grant (Otorgar)"),
+        (TIPO_DENY, "Deny (Denegar)"),
+    ]
+
+    usuario = models.ForeignKey(
+        "usuarios.Usuario", 
+        on_delete=models.CASCADE, 
+        related_name="overrides_permisos"
+    )
+    permiso = models.ForeignKey(
+        Permiso, 
+        on_delete=models.CASCADE, 
+        related_name="overrides_usuarios"
+    )
+    
+    tipo = models.CharField(
+        max_length=10, 
+        choices=TIPO_CHOICES, 
+        default=TIPO_GRANT,
+        help_text="Grant: Otorga el permiso aunque no lo tenga por rol. Deny: Revoca el permiso aunque lo tenga por rol."
+    )
+    
+    # Contexto (opcional): Si se deja vacío, aplica globalmente (o a la empresa del usuario)
+    empresa = models.ForeignKey(
+        "nucleo.Empresa", 
+        on_delete=models.CASCADE, 
+        null=True, 
+        blank=True
+    )
+    sucursal = models.ForeignKey(
+        "nucleo.Sucursal", 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "usuarios_permisos"
+        verbose_name = "Usuario Permiso (Override)"
+        verbose_name_plural = "Usuarios Permisos (Overrides)"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["usuario", "permiso", "empresa", "sucursal"], 
+                name="uq_usuario_permiso_override"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.usuario.username} - {self.permiso.clave} ({self.tipo})"
