@@ -262,6 +262,12 @@ LOGGING = {
             'class': 'logging.StreamHandler',
             'formatter': 'simple',
         },
+        'api_file': {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'filename': LOGS_DIR / 'api.log',
+            'formatter': 'verbose',
+        },
     },
     'loggers': {
         'django': {
@@ -273,6 +279,11 @@ LOGGING = {
             'handlers': ['console'],
             'level': 'DEBUG',
             'propagate': True,
+        },
+        'api_logger': {
+            'handlers': ['api_file', 'console'],
+            'level': 'INFO',
+            'propagate': False,
         },
     },
 }
