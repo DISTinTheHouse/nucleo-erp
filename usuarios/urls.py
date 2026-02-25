@@ -15,6 +15,7 @@ urlpatterns = [
     path('core/usuarios/', UsuarioListView.as_view(), name='usuario_list'),
     path('core/usuarios/nuevo/', UsuarioCreateView.as_view(), name='usuario_create'),
     path('core/usuarios/<pk>/editar/', UsuarioUpdateView.as_view(), name='usuario_update'),
+    path('core/usuarios/<pk>/permisos/', UsuarioPermisosView.as_view(), name='usuario_permisos'),
     path('core/usuarios/<pk>/eliminar/', UsuarioDeleteView.as_view(), name='usuario_delete'),
     
     # API Endpoints
