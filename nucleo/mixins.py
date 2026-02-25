@@ -52,15 +52,50 @@ class AuditLogMixin:
         return state
 
     def log_audit_action(self, obj, action, changes=None):
-        user = self.request.user
-        model_name = obj._meta.verbose_name
-        object_str = str(obj)
+        from auditoria.models import AuditoriaEvento
         
-        extra_info = ""
+        user = self.request.user
+        if not user.is_authenticated:
+            return
+
+        # Intentar obtener la empresa del objeto o del usuario
+        empresa = getattr(obj, 'empresa', None)
+        # Si el objeto no tiene empresa (ej. Empresa misma), usar la del usuario si existe
+        if not empresa and hasattr(user, 'empresa_actual'):
+             empresa = user.empresa_actual
+             
+        # Si aun no hay empresa y el objeto ES una empresa, usarse a si misma (caso borde)
+        if not empresa and obj._meta.model_name == 'empresa':
+            empresa = obj
+
+        if not empresa:
+            # Si no hay contexto de empresa, no podemos guardar en AuditoriaEvento (requiere FK)
+            # Fallback a log normal o ignorar
+            logger.warning(f"No se pudo auditar {action} en {obj} - Falta Empresa")
+            return
+
+        ip = self.request.META.get('REMOTE_ADDR')
+        user_agent = self.request.META.get('HTTP_USER_AGENT', '')[:200] # Truncar si es necesario
+
+        antes = None
+        despues = None
+
         if changes:
-            # Formateamos los cambios para que sean legibles en una línea
-            change_list = [f"{k}: {v['from']} -> {v['to']}" for k, v in changes.items()]
-            extra_info = f" | Cambios: [{', '.join(change_list)}]"
-            
-        msg = f"Usuario: {user.email} | Accion: {action} | Modelo: {model_name} | Objeto: '{object_str}' (ID: {obj.pk}){extra_info}"
-        logger.info(msg)
+             antes = {k: v['from'] for k, v in changes.items()}
+             despues = {k: v['to'] for k, v in changes.items()}
+        
+        try:
+            AuditoriaEvento.objects.create(
+                empresa=empresa,
+                usuario=user,
+                modulo=obj._meta.app_label, # o verbose_name
+                accion=action,
+                tabla=obj._meta.db_table,
+                id_registro=str(obj.pk),
+                antes_json=antes,
+                despues_json=despues,
+                ip=ip,
+                user_agent=user_agent
+            )
+        except Exception as e:
+            logger.error(f"Error guardando auditoria DB: {e}")
