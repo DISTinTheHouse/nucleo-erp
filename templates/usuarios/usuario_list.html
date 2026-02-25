@@ -120,6 +120,11 @@
                             </td>
                             <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                                 <div class="flex justify-end space-x-2">
+                                    <a href="{% url 'usuarios:usuario_permisos' pk=usuario.pk %}"
+                                        class="text-indigo-600 dark:text-indigo-400 hover:text-indigo-900 dark:hover:text-indigo-300 p-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 rounded-lg transition-colors"
+                                        title="Permisos">
+                                        <i class="fas fa-shield-alt"></i>
+                                    </a>
                                     <a href="{% url 'usuarios:usuario_update' pk=usuario.pk %}"
                                         class="text-sky-600 dark:text-sky-400 hover:text-sky-900 dark:hover:text-sky-300 p-2 hover:bg-sky-50 dark:hover:bg-sky-900/20 rounded-lg transition-colors"
                                         title="Editar">
