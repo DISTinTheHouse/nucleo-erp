@@ -104,7 +104,46 @@ Permite ver detalles y editar sucursales.
 
 ---
 
-## 👥 3. Gestión de Usuarios
+## 🛡️ 4. Roles y Permisos
+
+### Gestión de Roles
+
+Permite a un Admin de Empresa o Superusuario gestionar los roles y sus permisos asociados.
+
+- **Base URL**: `/api/v1/seguridad/roles/`
+
+### Asignar Permisos a un Rol
+
+Endpoint específico para actualizar masivamente los permisos de un rol (Matrix de Permisos).
+
+- **Endpoint**: `GET /api/v1/seguridad/roles/{id}/permisos/`
+- **Descripción**: Obtiene la lista de IDs de permisos actualmente asignados al rol.
+- **Respuesta (200 OK)**:
+  ```json
+  {
+    "permisos": [1, 5, 8, 12]
+  }
+  ```
+
+- **Endpoint**: `PUT /api/v1/seguridad/roles/{id}/permisos/`
+- **Descripción**: Reemplaza completamente los permisos del rol con la nueva lista de IDs proporcionada.
+- **Body**:
+  ```json
+  {
+    "permisos": [1, 5, 8, 12, 15]
+  }
+  ```
+- **Respuesta (200 OK)**:
+  ```json
+  {
+    "status": "Permisos actualizados correctamente",
+    "permisos": [1, 5, 8, 12, 15]
+  }
+  ```
+
+---
+
+## 👥 5. Gestión de Usuarios
 
 API completa para gestionar el personal de la empresa (cajeros, vendedores, gerentes).
 
