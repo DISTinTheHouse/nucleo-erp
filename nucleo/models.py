@@ -229,7 +229,15 @@ class SerieFolio(models.Model):
 
     prefijo = models.CharField(max_length=20, blank=True, null=True)
     sufijo = models.CharField(max_length=20, blank=True, null=True)
-    relleno_ceros = models.PositiveSmallIntegerField(default=6)
+    
+    # Configuración de formato
+    relleno_ceros = models.PositiveSmallIntegerField(default=6, help_text="Ceros a la izquierda. 0 para desactivar.")
+    separador = models.CharField(max_length=5, default='-', blank=True, help_text="Caracter entre serie, folio y año")
+    
+    # Configuración de Año
+    incluir_anio = models.BooleanField(default=False, help_text="Incluir el año al final del folio (ej: -24)")
+    reiniciar_anual = models.BooleanField(default=False, help_text="Reiniciar el consecutivo al cambiar de año")
+    ultimo_anio = models.PositiveSmallIntegerField(blank=True, null=True, help_text="Último año registrado (2 dígitos)")
 
     estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
 
@@ -253,6 +261,58 @@ class SerieFolio(models.Model):
 
     def __str__(self):
         return f"{self.tipo_documento} {self.serie}"
+
+    def get_siguiente_folio(self):
+        """
+        Calcula el siguiente folio basado en la configuración.
+        No guarda el incremento, solo retorna la cadena formateada y el número.
+        """
+        import datetime
+        anio_actual = int(datetime.datetime.now().strftime('%y'))  # 24, 25, 26
+        
+        nuevo_consecutivo = self.folio_actual + 1
+
+        # Lógica de reinicio anual
+        if self.reiniciar_anual and self.ultimo_anio != anio_actual:
+            nuevo_consecutivo = 1
+        
+        # Formateo del número
+        if self.relleno_ceros > 0:
+            numero_str = str(nuevo_consecutivo).zfill(self.relleno_ceros)
+        else:
+            numero_str = str(nuevo_consecutivo)
+
+        # Construcción del folio completo
+        partes = []
+        if self.prefijo:
+            partes.append(self.prefijo)
+        
+        partes.append(self.serie)
+        partes.append(numero_str)
+        
+        if self.incluir_anio:
+            partes.append(str(anio_actual))
+
+        if self.sufijo:
+            partes.append(self.sufijo)
+
+        folio_formateado = self.separador.join(partes)
+        
+        # Corrección: si prefijo/sufijo no deben llevar separador, ajustar lógica.
+        # Por simplicidad actual: Serie-Folio-Año (P-1-26)
+        # Si se requiere P1-26, el separador debería ser vacio y manejar espacios en los campos.
+        
+        return folio_formateado, nuevo_consecutivo, anio_actual
+
+    def incrementar_folio(self):
+        """
+        Incrementa el folio y actualiza el último año.
+        """
+        _, nuevo_consecutivo, anio_actual = self.get_siguiente_folio()
+        self.folio_actual = nuevo_consecutivo
+        self.ultimo_anio = anio_actual
+        self.save()
+        return self.folio_actual
 
 
 # =========================

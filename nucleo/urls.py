@@ -1,7 +1,11 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from .api_views import (
+    EmpresaViewSet, SucursalViewSet, DepartamentoViewSet, MonedaViewSet, SerieFolioViewSet,
+    UserEmpresasAPIView, UserSucursalesAPIView, SatCatalogosAPIView, 
+    EmpresaSatConfigUpdateView, HealthzAPIView
+)
 from .views import (
-    EmpresaViewSet, SucursalViewSet, DepartamentoViewSet, MonedaViewSet,
     CoreDashboardView, get_sucursales_por_empresa,
     EmpresaListView, EmpresaCreateView, EmpresaUpdateView, EmpresaDeleteView,
     SucursalListView, SucursalCreateView, SucursalUpdateView, SucursalDeleteView,
@@ -13,11 +17,6 @@ from .views_sat import (
     SatRegimenFiscalListView, SatUsoCfdiListView, SatMetodoPagoListView,
     SatFormaPagoListView, SatClaveProdServListView, SatClaveUnidadListView
 )
-from .api_views import (
-    UserEmpresasAPIView, UserSucursalesAPIView, SatCatalogosAPIView, 
-    EmpresaSatConfigUpdateView, HealthzAPIView
-)
-from .views import get_next_empresa_id
 
 app_name = 'nucleo'
 
@@ -26,6 +25,7 @@ router.register(r'empresas', EmpresaViewSet)
 router.register(r'sucursales', SucursalViewSet)
 router.register(r'departamentos', DepartamentoViewSet)
 router.register(r'monedas', MonedaViewSet)
+router.register(r'series-folios', SerieFolioViewSet)
 
 urlpatterns = [
     # API (Router Default)B

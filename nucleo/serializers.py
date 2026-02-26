@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Empresa, Moneda, Sucursal, Departamento, SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, EmpresaSatConfig
+from .models import Empresa, Moneda, Sucursal, Departamento, SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, EmpresaSatConfig, SerieFolio
 from .utils import validate_csd, validate_rfc
 
 class EmpresaSatConfigSerializer(serializers.ModelSerializer):
@@ -172,4 +172,25 @@ class EmpresaSerializer(serializers.ModelSerializer):
         if not is_valid:
             raise serializers.ValidationError(error_msg)
         return value.upper()
+
+class SerieFolioSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SerieFolio
+        fields = '__all__'
+        read_only_fields = ['id_serie_folio', 'folio_actual', 'ultimo_anio', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        # Validar que la sucursal pertenezca a la empresa
+        empresa = attrs.get('empresa')
+        sucursal = attrs.get('sucursal')
+        
+        # Si es update, obtener valores de la instancia si no vienen en attrs
+        if self.instance:
+            empresa = empresa or self.instance.empresa
+            sucursal = sucursal or self.instance.sucursal
+
+        if empresa and sucursal and sucursal.empresa != empresa:
+             raise serializers.ValidationError({'sucursal': 'La sucursal no pertenece a la empresa seleccionada.'})
+        
+        return attrs
 

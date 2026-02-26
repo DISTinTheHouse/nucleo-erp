@@ -1,15 +1,142 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework import status
+from rest_framework import status, viewsets, permissions
 from django.shortcuts import get_object_or_404
 from django.db import models
-from .models import Empresa, Sucursal, SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, EmpresaSatConfig
+from .models import Empresa, Sucursal, Departamento, Moneda, SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, EmpresaSatConfig, SerieFolio
 from .serializers import (
     SatRegimenFiscalSerializer, 
     SatUsoCfdiSerializer, SatMetodoPagoSerializer, SatFormaPagoSerializer,
-    EmpresaSatConfigSerializer
+    EmpresaSatConfigSerializer,
+    EmpresaSerializer, SucursalSerializer, DepartamentoSerializer, MonedaSerializer, SerieFolioSerializer
 )
+from seguridad.views import IsSuperUserOrReadOnly
+
+# --- VIEWSETS (Movidios desde views.py para limpiar arquitectura) ---
+
+class EmpresaViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint para ver y editar empresas.
+    Permite crear empresas a usuarios autenticados y las vincula automáticamente.
+    """
+    queryset = Empresa.objects.all().order_by('-created_at')
+    serializer_class = EmpresaSerializer
+    lookup_field = 'codigo'
+    permission_classes = [IsSuperUserOrReadOnly]
+
+    def perform_create(self, serializer):
+        # Al crear una empresa, vincular al usuario creador
+        empresa = serializer.save()
+        user = self.request.user
+        
+        # Asignar usuario a la empresa y hacerlo admin
+        if not user.empresa:
+            user.empresa = empresa
+            user.is_admin_empresa = True
+            user.save()
+            
+        # Añadir a la lista de empresas permitidas (M2M)
+        user.empresas.add(empresa)
+
+class SucursalViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint para ver y editar sucursales.
+    """
+    queryset = Sucursal.objects.all()
+    serializer_class = SucursalSerializer
+    lookup_field = 'codigo'
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_superuser:
+            return self.queryset
+        if hasattr(user, 'empresa') and user.empresa:
+            # Filtrar por empresa del usuario
+            qs = self.queryset.filter(empresa=user.empresa)
+            # Y filtrar por sucursales asignadas al usuario (si no es admin empresa)
+            if not getattr(user, 'is_admin_empresa', False):
+                 qs = qs.filter(id_sucursal__in=user.sucursales.values_list('id_sucursal', flat=True))
+            return qs
+        return self.queryset.none()
+
+class DepartamentoViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint para ver y editar departamentos.
+    """
+    queryset = Departamento.objects.all()
+    serializer_class = DepartamentoSerializer
+    lookup_field = 'codigo'
+    permission_classes = [IsSuperUserOrReadOnly]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_superuser:
+            return self.queryset
+        if hasattr(user, 'empresa') and user.empresa:
+            return self.queryset.filter(empresa=user.empresa)
+        return self.queryset.none()
+
+class MonedaViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint para ver y editar monedas.
+    Admite monedas Globales (System) y Privadas (Empresa).
+    """
+    queryset = Moneda.objects.all()
+    serializer_class = MonedaSerializer
+    lookup_field = 'codigo_iso'
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        # 1. Monedas globales (empresa=None)
+        q_global = models.Q(empresa__isnull=True)
+        
+        # 2. Monedas de la empresa del usuario
+        if not user.is_superuser and user.empresa:
+            q_empresa = models.Q(empresa=user.empresa)
+            return self.queryset.filter(q_global | q_empresa)
+            
+        return self.queryset.filter(q_global)
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if not user.is_superuser:
+            # Forzar empresa del usuario si no es superuser
+            serializer.save(empresa=user.empresa)
+        else:
+            serializer.save()
+
+class SerieFolioViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint para gestionar Series y Folios de documentos.
+    Filtrado por empresa del usuario.
+    """
+    queryset = SerieFolio.objects.all()
+    serializer_class = SerieFolioSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_superuser:
+            return self.queryset
+        
+        if user.empresa:
+            # Solo mostrar series de la empresa del usuario
+            return self.queryset.filter(empresa=user.empresa)
+            
+        return self.queryset.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        # Asegurar que se crea para la empresa del usuario si no es superuser
+        if not user.is_superuser and user.empresa:
+             serializer.save(empresa=user.empresa)
+        else:
+             serializer.save()
+
+# --- API VIEWS CUSTOM ---
 
 class HealthzAPIView(APIView):
     permission_classes = []
