@@ -177,16 +177,30 @@ class SerieFolioSerializer(serializers.ModelSerializer):
     class Meta:
         model = SerieFolio
         fields = '__all__'
-        read_only_fields = ['id_serie_folio', 'folio_actual', 'ultimo_anio', 'created_at', 'updated_at']
+        read_only_fields = ['id_serie_folio', 'empresa', 'folio_actual', 'ultimo_anio', 'created_at', 'updated_at']
 
     def validate(self, attrs):
         # Validar que la sucursal pertenezca a la empresa
-        empresa = attrs.get('empresa')
+        # Nota: 'empresa' no viene en attrs porque es read_only, se obtiene del usuario en perform_create
+        # Pero para validación aquí, necesitamos saber la empresa del contexto o de la instancia.
+        
+        request = self.context.get('request')
+        user = request.user if request else None
+        
+        empresa = None
+        if self.instance:
+            empresa = self.instance.empresa
+        elif user and not user.is_superuser and user.empresa:
+            empresa = user.empresa
+            
+        # Si es superuser y no hay instancia, podría faltar empresa si no se pasa... 
+        # pero como es read_only, el superuser tampoco podría pasarla por el body directamente si usamos el mismo serializer.
+        # Asumimos flujo estándar de usuario normal por ahora.
+
         sucursal = attrs.get('sucursal')
         
         # Si es update, obtener valores de la instancia si no vienen en attrs
         if self.instance:
-            empresa = empresa or self.instance.empresa
             sucursal = sucursal or self.instance.sucursal
 
         if empresa and sucursal and sucursal.empresa != empresa:

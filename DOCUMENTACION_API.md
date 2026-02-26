@@ -104,6 +104,46 @@ Permite ver detalles y editar sucursales.
 
 ---
 
+## 🔢 3. Series y Folios
+
+Configuración de series y folios consecutivos para documentos (Facturas, Pedidos, etc.) por sucursal.
+
+### Listar Series
+Obtiene las series configuradas para la empresa del usuario.
+
+- **Endpoint**: `GET /api/v1/nucleo/series-folios/`
+- **Respuesta**:
+  ```json
+  [
+    {
+      "id_serie_folio": 1,
+      "sucursal": 5,
+      "tipo_documento": "FACTURA",
+      "serie": "F",
+      "folio_actual": 105,
+      "relleno_ceros": 6,
+      "separador": "-",
+      "incluir_anio": true
+    }
+  ]
+  ```
+
+### Crear Serie
+- **Endpoint**: `POST /api/v1/nucleo/series-folios/`
+- **Body**:
+  ```json
+  {
+    "sucursal": 5,
+    "tipo_documento": "FACTURA",
+    "serie": "F",
+    "relleno_ceros": 6,
+    "separador": "-",
+    "incluir_anio": true
+  }
+  ```
+
+---
+
 ## 🛡️ 4. Roles y Permisos
 
 ### Gestión de Roles
