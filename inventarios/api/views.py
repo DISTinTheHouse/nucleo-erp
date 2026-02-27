@@ -1,9 +1,8 @@
 from django.db import models
 from rest_framework import viewsets, permissions
 from rest_framework.exceptions import PermissionDenied
-from inventarios.models import Almacen, Ubicacion
-from .serializers import AlmacenSerializer, UbicacionSerializer
-
+from inventarios.models import Almacen, Ubicacion, Existencia, MovimientoInventario
+from .serializers import AlmacenSerializer, UbicacionSerializer, ExistenciaSerializer, MovimientoInventarioSerializer
 
 class IsAuthenticatedAndScoped(permissions.BasePermission):
     """
@@ -25,7 +24,6 @@ class IsAuthenticatedAndScoped(permissions.BasePermission):
             return True
         # Para write/delete, mismo criterio: admin_empresa o superuser
         return request.user.is_superuser or getattr(request.user, 'is_admin_empresa', False)
-
 
 class AlmacenViewSet(viewsets.ModelViewSet):
     queryset = Almacen.objects.all().select_related('empresa', 'sucursal')
@@ -60,7 +58,6 @@ class AlmacenViewSet(viewsets.ModelViewSet):
                 if user.empresa_id and instance.empresa_id != user.empresa_id and not user.empresas.filter(pk=instance.empresa_id).exists():
                     raise PermissionDenied("No tiene acceso a esta empresa")
 
-
 class UbicacionViewSet(viewsets.ModelViewSet):
     queryset = Ubicacion.objects.all().select_related('empresa', 'sucursal', 'almacen')
     serializer_class = UbicacionSerializer
@@ -91,3 +88,11 @@ class UbicacionViewSet(viewsets.ModelViewSet):
             if instance.empresa_id:
                 if user.empresa_id and instance.empresa_id != user.empresa_id and not user.empresas.filter(pk=instance.empresa_id).exists():
                     raise PermissionDenied("No tiene acceso a esta empresa")
+
+class ExistenciaViewSet(viewsets.ModelViewSet):
+    queryset = Existencia.objects.all()
+    serializer_class = ExistenciaSerializer
+
+class MovimientoInventarioViewSet(viewsets.ModelViewSet):
+    queryset = MovimientoInventario.objects.all()
+    serializer_class = MovimientoInventarioSerializer

@@ -1,7 +1,6 @@
 from rest_framework import serializers
-from inventarios.models import Almacen, Ubicacion
+from inventarios.models import Almacen, Ubicacion, Existencia, MovimientoInventario
 from nucleo.models import Sucursal
-
 
 class AlmacenSerializer(serializers.ModelSerializer):
     class Meta:
@@ -45,7 +44,6 @@ class AlmacenSerializer(serializers.ModelSerializer):
             validated_data['empresa'] = validated_data['sucursal'].empresa
         return super().update(instance, validated_data)
 
-
 class UbicacionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Ubicacion
@@ -87,3 +85,13 @@ class UbicacionSerializer(serializers.ModelSerializer):
             validated_data['empresa'] = validated_data['almacen'].empresa
             validated_data['sucursal'] = validated_data['almacen'].sucursal
         return super().update(instance, validated_data)
+
+class ExistenciaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Existencia
+        fields = '__all__'
+
+class MovimientoInventarioSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MovimientoInventario
+        fields = '__all__'

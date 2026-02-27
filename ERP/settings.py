@@ -50,6 +50,8 @@ INSTALLED_APPS = [
     'axes',
     'inventarios',
     'catalogo',
+    'terceros',
+    'ventas'
 ]
 
 AUTH_USER_MODEL = "usuarios.Usuario"
