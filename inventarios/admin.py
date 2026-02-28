@@ -1,6 +1,10 @@
 from django.contrib import admin
-from inventarios.models import Almacen, Ubicacion
+from inventarios.models import Almacen, Ubicacion, Lote, Serie, AjusteInventario, Existencia, MovimientoInventario
 
-# Register your models here.
 admin.site.register(Almacen)
 admin.site.register(Ubicacion)
+admin.site.register(Lote)
+admin.site.register(Serie)
+admin.site.register(AjusteInventario)
+admin.site.register(Existencia)
+admin.site.register(MovimientoInventario)

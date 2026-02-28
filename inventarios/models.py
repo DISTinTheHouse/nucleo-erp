@@ -1,6 +1,7 @@
 from django.db import models
 from nucleo.models import Empresa, Sucursal
-
+from catalogo.models import Producto
+from ventas.models import Pedido, Entrega, Devolucion
 
 class TipoAlmacen(models.TextChoices):
     MATERIA_PRIMA = "MP", "Materia Prima"
@@ -39,8 +40,7 @@ class Almacen(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.sucursal.nombre} - {self.nombre}"
-
+        return f"{self.nombre}"
 
 class TipoUbicacion(models.TextChoices):
     RECIBO = "RECIBO", "Recibo"
@@ -87,3 +87,60 @@ class Ubicacion(models.Model):
 
     def __str__(self):
         return f"{self.almacen.nombre} - {self.pasillo}-{self.rack}-{self.nivel}-{self.posicion}"
+
+class Lote(models.Model):
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="lotes", null=True, blank=True)
+
+    def __str__(self):
+        return str(self.id)
+
+class Serie(models.Model):
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="series", null=True, blank=True)
+
+    def __str__(self):
+        return str(self.id)
+
+class AjusteInventario(models.Model):
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="ajustes_inventario")
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="ajustes_inventario")
+    almacen = models.ForeignKey(Almacen, on_delete=models.PROTECT, related_name="ajustes_inventario")
+
+    class Meta:
+        db_table = "ajustes_inventario"
+        verbose_name = "Ajuste Inventario"
+        verbose_name_plural = "Ajustes Inventario"
+
+    def __str__(self):
+        return str(self.id)
+
+class Existencia(models.Model):
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name="existencia")
+    almacen = models.ForeignKey(Almacen, on_delete=models.PROTECT, related_name="existencia")
+    ubicacion = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="existencia")
+    lote = models.ForeignKey(Lote, on_delete=models.PROTECT, related_name="existencia")
+    serie = models.ForeignKey(Serie, on_delete=models.PROTECT, related_name="existencia")
+
+    class Meta:
+        db_table = "existencias"
+        verbose_name = "Existencia"
+        verbose_name_plural = "Existencia"
+
+    def __str__(self):
+        return f"{self.producto.nombre} - {self.almacen.nombre}"
+
+#TODO: ADD FIELDS: id_recepcion, id_transferencia, id_op
+class MovimientoInventario(models.Model):
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="movimientos_inventario")
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="movimientos_inventario")
+    pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="movimientos_inventario")
+    entrega = models.ForeignKey(Entrega, on_delete=models.CASCADE, related_name="movimientos_inventario", null=True)
+    devolucion = models.ForeignKey(Devolucion, on_delete=models.CASCADE, related_name="movimientos_inventario", null=True)
+    ajuste_inventario = models.ForeignKey(AjusteInventario, on_delete=models.CASCADE, related_name="movimientos_inventario")
+
+    class Meta:
+        db_table = "movimientos_inventario"
+        verbose_name = "Movimiento Inventario"
+        verbose_name_plural = "Movimientos Inventario"
+
+    def __str__(self):
+        return str(self.id) #change this

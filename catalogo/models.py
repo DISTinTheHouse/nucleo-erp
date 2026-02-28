@@ -22,6 +22,9 @@ class CategoriaProducto(models.Model):
         db_table = "categorias_producto"
         verbose_name = "Categoria Producto"
         verbose_name_plural = "Categorias Producto"
+    
+    def __str__(self):
+        return self.nombre
 
 class Color(models.Model):
     nombre = models.CharField(max_length=50)
@@ -32,6 +35,9 @@ class Color(models.Model):
         db_table = "colores"
         verbose_name = "Color"
         verbose_name_plural = "Colores"
+    
+    def __str__(self):
+        return self.nombre
 
 class Talla(models.Model):
     nombre = models.CharField(max_length=50)
@@ -41,6 +47,9 @@ class Talla(models.Model):
         db_table = "tallas"
         verbose_name = "Talla"
         verbose_name_plural = "Tallas"
+    
+    def __str__(self):
+        return self.nombre
 
 class Producto(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="productos")
@@ -60,6 +69,9 @@ class Producto(models.Model):
         db_table = "productos"
         verbose_name = "Producto"
         verbose_name_plural = "Productos"
+    
+    def __str__(self):
+        return self.nombre
 
 class ProductoVariante(models.Model):
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="variantes")
@@ -74,4 +86,7 @@ class ProductoVariante(models.Model):
         db_table = "variantes_producto"
         verbose_name = "Variante Producto"
         verbose_name_plural = "Variantes Producto"
+
+    def __str__(self):
+        return f"{self.producto.nombre} - {self.color.nombre} - {self.talla.nombre}"
 

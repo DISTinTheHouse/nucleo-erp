@@ -9,7 +9,7 @@ urlpatterns = [
     path('', include('usuarios.urls')),
     path('', include(('seguridad.urls', 'seguridad'), namespace='seguridad')),
     path('', include('inventarios.urls')),
-    path('catalogo/', include('catalogo.api.urls')),
+    path('api/v1/catalogo/', include('catalogo.api.urls')),
     path('api/v1/inventarios/', include('inventarios.api.urls')),
     path('auditoria/', include('auditoria.urls')),
     path('accounts/', include('django.contrib.auth.urls')),
