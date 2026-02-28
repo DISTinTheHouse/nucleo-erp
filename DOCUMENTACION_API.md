@@ -23,6 +23,7 @@ Obtén el token de sesión para el usuario.
   }
   ```
 - **Respuesta (200 OK)**:
+
   ```json
   {
     "token": "d834958c281321...",
@@ -109,6 +110,7 @@ Permite ver detalles y editar sucursales.
 Configuración de series y folios consecutivos para documentos (Facturas, Pedidos, etc.) por sucursal.
 
 ### Listar Series
+
 Obtiene las series configuradas para la empresa del usuario.
 
 - **Endpoint**: `GET /api/v1/nucleo/series-folios/`
@@ -129,6 +131,7 @@ Obtiene las series configuradas para la empresa del usuario.
   ```
 
 ### Crear Serie
+
 - **Endpoint**: `POST /api/v1/nucleo/series-folios/`
 - **Body**:
   ```json
@@ -159,6 +162,7 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
 - **Endpoint**: `GET /api/v1/seguridad/roles/{id}/permisos/`
 - **Descripción**: Obtiene la lista de IDs de permisos actualmente asignados al rol.
 - **Respuesta (200 OK)**:
+
   ```json
   {
     "permisos": [1, 5, 8, 12]
@@ -281,35 +285,72 @@ Recupera todos los catálogos fiscales necesarios para llenar formularios de fac
 Gestión de almacenes y ubicaciones para operaciones de inventario.
 
 **Permisos**:
+
 - **Lectura**: cualquier usuario autenticado, datos filtrados por empresa y sucursales permitidas.
 - **Crear/Editar**: requiere `is_admin_empresa=true` o superusuario.
 - **Eliminar**: requiere `is_admin_empresa=true` o superusuario.
 
 **Alcance y reglas**:
+
 - Los listados se filtran por empresa activa y sucursales permitidas del usuario.
 - **Almacén**: fuerza consistencia `empresa = sucursal.empresa`.
 - **Ubicación**: fuerza consistencia, empresa/sucursal se derivan del almacén.
 
 ### Almacenes
+
 - **Listar**: `GET /api/v1/inventarios/almacenes/`
+- **Respuesta**:
+  ```json
+  [
+    {
+      "id_almacen": 1,
+      "empresa": 1,
+      "sucursal": 5,
+      "codigo": "ALM-MTY-01",
+      "nombre": "Almacén Principal Monterrey",
+      "estatus": "ACTIVO",
+      "created_at": "2024-01-15T10:00:00Z",
+      "updated_at": "2024-01-15T10:00:00Z"
+    }
+  ]
+  ```
 - **Detalle**: `GET /api/v1/inventarios/almacenes/{id_almacen}/`
 - **Crear**: `POST /api/v1/inventarios/almacenes/`
 - **Editar**: `PATCH /api/v1/inventarios/almacenes/{id_almacen}/`
 - **Eliminar**: `DELETE /api/v1/inventarios/almacenes/{id_almacen}/`
 
 ### Ubicaciones
+
 - **Listar**: `GET /api/v1/inventarios/ubicaciones/`
+- **Respuesta**:
+  ```json
+  [
+    {
+      "id_ubicacion": 10,
+      "empresa": 1,
+      "sucursal": 5,
+      "almacen": 1,
+      "codigo": "P1-R3-N2",
+      "nombre": "Pasillo 1, Rack 3, Nivel 2",
+      "estatus": "ACTIVO",
+      "created_at": "2024-01-15T11:00:00Z",
+      "updated_at": "2024-01-15T11:00:00Z"
+    }
+  ]
+  ```
 - **Detalle**: `GET /api/v1/inventarios/ubicaciones/{id_ubicacion}/`
 - **Crear**: `POST /api/v1/inventarios/ubicaciones/`
 - **Editar**: `PATCH /api/v1/inventarios/ubicaciones/{id_ubicacion}/`
 - **Eliminar**: `DELETE /api/v1/inventarios/ubicaciones/{id_ubicacion}/`
 
 ### Existencias (Stock)
+
 - **Listar**: `GET /api/v1/inventarios/existencias/`
 - **Detalle**: `GET /api/v1/inventarios/existencias/{id}/`
 - **Crear/Editar**: `POST/PATCH` (Gestión manual de stock, uso restringido)
 
 ### Movimientos de Inventario
+
 - **Listar**: `GET /api/v1/inventarios/movimientos/`
 - **Crear**: `POST /api/v1/inventarios/movimientos/` (Registrar entrada/salida)
 
@@ -321,18 +362,67 @@ Gestión de productos, variantes, y catálogos auxiliares (Tallas, Colores, Cate
 
 **Base URL**: `/api/v1/catalogo/`
 
+### Productos
+
+Entidad principal que agrupa las variantes. Contiene la información general (nombre, descripción, categoría, impuestos).
+
+- **Listar**: `GET /api/v1/catalogo/producto/`
+- **Respuesta**:
+  ```json
+  [
+    {
+      "id": 1,
+      "empresa": 1,
+      "categoria_producto": 2,
+      "unidad_medida": 1,
+      "impuesto": 1,
+      "sat_prodserv": 5,
+      "sat_unidad": 3,
+      "nombre": "Camiseta Básica",
+      "descripcion": "Camiseta de algodón 100%",
+      "tipo": "Producto Terminado",
+      "activo": true,
+      "created_at": "2024-02-01T09:00:00Z",
+      "updated_at": "2024-02-01T09:00:00Z"
+    }
+  ]
+  ```
+- **Crear**: `POST /api/v1/catalogo/producto/`
+- **Editar**: `PATCH /api/v1/catalogo/producto/{id}/`
+- **Eliminar**: `DELETE /api/v1/catalogo/producto/{id}/`
+
+### Variantes de Producto
+
+Gestiona las combinaciones específicas (SKU, color, talla, precio).
+
+- **Listar**: `GET /api/v1/catalogo/producto-variante/`
+- **Respuesta**:
+  ```json
+  [
+    {
+      "id": 101,
+      "producto": 1,
+      "empresa": 1,
+      "color": 3,
+      "talla": 2,
+      "sku": "CAM-BAS-NEG-M",
+      "precio_base": "150.00",
+      "activo": true
+    }
+  ]
+  ```
+- **Crear**: `POST /api/v1/catalogo/producto-variante/`
+- **Editar**: `PATCH /api/v1/catalogo/producto-variante/{id}/`
+- **Eliminar**: `DELETE /api/v1/catalogo/producto-variante/{id}/`
+
 ### Catálogos Auxiliares
+
 Todos soportan CRUD estándar (`GET`, `POST`, `PATCH`, `DELETE`).
 
-- **Tipos de Producto**: `/api/v1/catalogo/tipos-producto/`
-- **Categorías**: `/api/v1/catalogo/categorias/`
-- **Colores**: `/api/v1/catalogo/colores/`
-- **Tallas**: `/api/v1/catalogo/tallas/`
-
-### Productos y Variantes
-- **Variantes**: `/api/v1/catalogo/producto-variante/`
-  - Gestiona las variantes específicas (SKU, código de barras, precio).
-- **Productos**: *(Pendiente de implementación completa)*
+- **Tipos de Producto**: `/api/v1/catalogo/tipo-producto/`
+- **Categorías**: `/api/v1/catalogo/categoria-producto/`
+- **Colores**: `/api/v1/catalogo/color/`
+- **Tallas**: `/api/v1/catalogo/talla/`
 
 ---
 

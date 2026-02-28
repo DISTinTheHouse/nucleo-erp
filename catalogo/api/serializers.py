@@ -21,7 +21,10 @@ class TallaSerializer(serializers.ModelSerializer):
         model = Talla
         exclude = ['activo']
 
-#TODO: Producto serializer
+class ProductoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Producto
+        fields = '__all__'
 
 class ProductoVarianteSerializer(serializers.ModelSerializer):
     class Meta:

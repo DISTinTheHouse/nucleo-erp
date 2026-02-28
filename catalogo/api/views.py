@@ -1,6 +1,6 @@
 from rest_framework import viewsets
-from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, ProductoVariante
-from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoVarianteSerializer
+from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
+from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoVarianteSerializer
 
 class TipoProductoViewSet(viewsets.ModelViewSet):
     queryset = TipoProducto.objects.all()
@@ -24,7 +24,11 @@ class TallaViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return Talla.objects.filter(activo=True)
     
-# TODO: Producto ViewSet
+class ProductoViewSet(viewsets.ModelViewSet):
+    serializer_class = ProductoSerializer
+
+    def get_queryset(self):
+        return Producto.objects.filter(activo=True)
     
 class ProductoVarianteViewSet(viewsets.ModelViewSet):
     serializer_class = ProductoVarianteSerializer
