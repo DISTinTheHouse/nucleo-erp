@@ -10,6 +10,7 @@
 - [x] (opcion de agregar tipos de documentos) -> Implementado con Series y Folios (API Restructurada)
 - [x] Refactorización de Arquitectura API: Separación de views/serializers en carpetas 'api' (nucleo, usuarios, seguridad)
 - [x] Configuración de Producción: Variables de entorno seguras, DEBUG=False, y prefijos API verificados.
+- [x] Documentación API actualizada con endpoints de Catalogo e Inventarios.
 
 **objetivo: _Para que el sistema arranque, autentique y sepa donde existe el stock_**
 

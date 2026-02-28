@@ -221,7 +221,7 @@ El backend asigna automáticamente la empresa del administrador que crea el usua
 
 ---
 
-## 🏭 4. Gestión de Empresas (CRUD Completo)
+## 🏭 6. Gestión de Empresas (CRUD Completo)
 
 Endpoint principal para administración de empresas.
 
@@ -257,7 +257,7 @@ Al crear una empresa, el superusuario se asigna automáticamente a ella.
 
 ---
 
-## 📜 4. Catálogos del SAT (Facturación)
+## 📜 7. Catálogos del SAT (Facturación)
 
 Recupera todos los catálogos fiscales necesarios para llenar formularios de facturación o configuración de empresa.
 
@@ -276,70 +276,67 @@ Recupera todos los catálogos fiscales necesarios para llenar formularios de fac
 
 ---
 
-## 📦 5. Inventarios (Almacenes y Ubicaciones)
+## 📦 8. Inventarios (Almacenes y Ubicaciones)
 
-Gestión de almacenes y ubicaciones para operaciones de inventario. La interacción de usuario se hace desde Next.js; el backend expone APIs con reglas de permisos y alcance.
+Gestión de almacenes y ubicaciones para operaciones de inventario.
 
-Permisos:
-- Lectura: cualquier usuario autenticado, datos filtrados por empresa y sucursales permitidas.
-- Crear/Editar: requiere is_admin_empresa=true o superusuario.
-- Eliminar: requiere is_admin_empresa=true o superusuario.
+**Permisos**:
+- **Lectura**: cualquier usuario autenticado, datos filtrados por empresa y sucursales permitidas.
+- **Crear/Editar**: requiere `is_admin_empresa=true` o superusuario.
+- **Eliminar**: requiere `is_admin_empresa=true` o superusuario.
 
-Alcance y reglas:
+**Alcance y reglas**:
 - Los listados se filtran por empresa activa y sucursales permitidas del usuario.
-- Almacén fuerza consistencia: empresa = sucursal.empresa.
-- Ubicación fuerza consistencia: empresa/sucursal se derivan del almacén.
+- **Almacén**: fuerza consistencia `empresa = sucursal.empresa`.
+- **Ubicación**: fuerza consistencia, empresa/sucursal se derivan del almacén.
 
-Almacenes
-- Listar: GET /api/v1/inventarios/almacenes/
-- Detalle: GET /api/v1/inventarios/almacenes/{id_almacen}/
-- Crear: POST /api/v1/inventarios/almacenes/
-- Editar: PATCH /api/v1/inventarios/almacenes/{id_almacen}/
-- Eliminar: DELETE /api/v1/inventarios/almacenes/{id_almacen}/
+### Almacenes
+- **Listar**: `GET /api/v1/inventarios/almacenes/`
+- **Detalle**: `GET /api/v1/inventarios/almacenes/{id_almacen}/`
+- **Crear**: `POST /api/v1/inventarios/almacenes/`
+- **Editar**: `PATCH /api/v1/inventarios/almacenes/{id_almacen}/`
+- **Eliminar**: `DELETE /api/v1/inventarios/almacenes/{id_almacen}/`
 
-Ejemplo crear almacén
-```
-POST /api/v1/inventarios/almacenes/
-Authorization: Bearer <token>
-Content-Type: application/json
+### Ubicaciones
+- **Listar**: `GET /api/v1/inventarios/ubicaciones/`
+- **Detalle**: `GET /api/v1/inventarios/ubicaciones/{id_ubicacion}/`
+- **Crear**: `POST /api/v1/inventarios/ubicaciones/`
+- **Editar**: `PATCH /api/v1/inventarios/ubicaciones/{id_ubicacion}/`
+- **Eliminar**: `DELETE /api/v1/inventarios/ubicaciones/{id_ubicacion}/`
 
-{
-  "sucursal": 12,
-  "codigo": "ALM-01",
-  "nombre": "Almacén Central",
-  "estatus": "activo"
-}
-```
+### Existencias (Stock)
+- **Listar**: `GET /api/v1/inventarios/existencias/`
+- **Detalle**: `GET /api/v1/inventarios/existencias/{id}/`
+- **Crear/Editar**: `POST/PATCH` (Gestión manual de stock, uso restringido)
 
-Ubicaciones
-- Listar: GET /api/v1/inventarios/ubicaciones/
-- Detalle: GET /api/v1/inventarios/ubicaciones/{id_ubicacion}/
-- Crear: POST /api/v1/inventarios/ubicaciones/
-- Editar: PATCH /api/v1/inventarios/ubicaciones/{id_ubicacion}/
-- Eliminar: DELETE /api/v1/inventarios/ubicaciones/{id_ubicacion}/
-
-Ejemplo crear ubicación
-```
-POST /api/v1/inventarios/ubicaciones/
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{
-  "almacen": 34,
-  "codigo": "RACK-A1",
-  "nombre": "Rack A1",
-  "estatus": "activo"
-}
-```
-
-Notas de respuesta y errores
-- 200/201: operación exitosa.
-- 400: validación o alcance inválido (empresa/sucursal fuera de permiso).
-- 403: falta de privilegios para escribir/eliminar.
+### Movimientos de Inventario
+- **Listar**: `GET /api/v1/inventarios/movimientos/`
+- **Crear**: `POST /api/v1/inventarios/movimientos/` (Registrar entrada/salida)
 
 ---
 
-## ⚙️ 6. Configuración Fiscal (CSD)
+## 🏷️ 9. Catálogo de Productos
+
+Gestión de productos, variantes, y catálogos auxiliares (Tallas, Colores, Categorías).
+
+**Base URL**: `/api/v1/catalogo/`
+
+### Catálogos Auxiliares
+Todos soportan CRUD estándar (`GET`, `POST`, `PATCH`, `DELETE`).
+
+- **Tipos de Producto**: `/api/v1/catalogo/tipos-producto/`
+- **Categorías**: `/api/v1/catalogo/categorias/`
+- **Colores**: `/api/v1/catalogo/colores/`
+- **Tallas**: `/api/v1/catalogo/tallas/`
+
+### Productos y Variantes
+- **Variantes**: `/api/v1/catalogo/producto-variante/`
+  - Gestiona las variantes específicas (SKU, código de barras, precio).
+- **Productos**: *(Pendiente de implementación completa)*
+
+---
+
+## ⚙️ 10. Configuración Fiscal (CSD)
 
 Sube y valida los archivos de Certificado de Sello Digital (CSD) para una empresa.
 
