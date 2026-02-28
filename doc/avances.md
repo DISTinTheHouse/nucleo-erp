@@ -9,6 +9,7 @@
 - [x] (opcion de agregar uso-cfdi-sat, metodo-pago-sat, regiment-fiscal-sat, clave-productos-sat, clase-unidad-metodo-srt, y forma-pago-sat)
 - [x] (opcion de agregar tipos de documentos) -> Implementado con Series y Folios (API Restructurada)
 - [x] Refactorización de Arquitectura API: Separación de views/serializers en carpetas 'api' (nucleo, usuarios, seguridad)
+- [x] Configuración de Producción: Variables de entorno seguras, DEBUG=False, y prefijos API verificados.
 
 **objetivo: _Para que el sistema arranque, autentique y sepa donde existe el stock_**
 
