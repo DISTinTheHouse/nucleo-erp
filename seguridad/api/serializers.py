@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Rol, Permiso, RolPermiso
+from ..models import Rol, Permiso, RolPermiso
 
 class PermisoSerializer(serializers.ModelSerializer):
     class Meta:

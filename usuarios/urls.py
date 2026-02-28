@@ -1,9 +1,9 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    UsuarioListView, UsuarioCreateView, UsuarioUpdateView, UsuarioDeleteView, UsuarioViewSet, UsuarioPermisosView
+    UsuarioListView, UsuarioCreateView, UsuarioUpdateView, UsuarioDeleteView, UsuarioPermisosView
 )
-from .api_views import LoginAPIView
+from .api.api_views import LoginAPIView, UsuarioViewSet
 
 app_name = 'usuarios'
 

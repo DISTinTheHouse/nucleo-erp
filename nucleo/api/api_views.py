@@ -4,14 +4,14 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework import status, viewsets, permissions
 from django.shortcuts import get_object_or_404
 from django.db import models
-from .models import Empresa, Sucursal, Departamento, Moneda, SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, EmpresaSatConfig, SerieFolio
+from ..models import Empresa, Sucursal, Departamento, Moneda, SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, EmpresaSatConfig, SerieFolio
 from .serializers import (
     SatRegimenFiscalSerializer, 
     SatUsoCfdiSerializer, SatMetodoPagoSerializer, SatFormaPagoSerializer,
     EmpresaSatConfigSerializer,
     EmpresaSerializer, SucursalSerializer, DepartamentoSerializer, MonedaSerializer, SerieFolioSerializer
 )
-from seguridad.views import IsSuperUserOrReadOnly
+from seguridad.api.api_views import IsSuperUserOrReadOnly
 
 # --- VIEWSETS (Movidios desde views.py para limpiar arquitectura) ---
 

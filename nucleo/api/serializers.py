@@ -1,6 +1,6 @@
 from rest_framework import serializers
-from .models import Empresa, Moneda, Sucursal, Departamento, SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, EmpresaSatConfig, SerieFolio
-from .utils import validate_csd, validate_rfc
+from ..models import Empresa, Moneda, Sucursal, Departamento, SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, EmpresaSatConfig, SerieFolio
+from ..utils import validate_csd, validate_rfc
 
 class EmpresaSatConfigSerializer(serializers.ModelSerializer):
     archivo_cer = serializers.FileField(write_only=True, required=False)

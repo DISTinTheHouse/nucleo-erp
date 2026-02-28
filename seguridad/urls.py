@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import RolListView, RolCreateView, RolUpdateView, RolDeleteView, RolViewSet, RolPermisosMatrixView, get_next_rol_id
+from .views import RolListView, RolCreateView, RolUpdateView, RolDeleteView, RolPermisosMatrixView, get_next_rol_id
+from .api.api_views import RolViewSet
 
 app_name = 'seguridad'
 

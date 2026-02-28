@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .api_views import (
+from .api.api_views import (
     EmpresaViewSet, SucursalViewSet, DepartamentoViewSet, MonedaViewSet, SerieFolioViewSet,
     UserEmpresasAPIView, UserSucursalesAPIView, SatCatalogosAPIView, 
     EmpresaSatConfigUpdateView, HealthzAPIView

@@ -3,69 +3,9 @@ from django.views.generic import ListView, CreateView, UpdateView, DeleteView, T
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.contrib.messages.views import SuccessMessageMixin
 from django.contrib import messages
-from rest_framework import viewsets, permissions, status
-from rest_framework.decorators import action
-from rest_framework.response import Response
 from nucleo.mixins import AuditLogMixin
 from .models import Rol, Permiso
 from .forms import RolForm
-from .serializers import RolSerializer, RolPermisosSerializer
-
-# Custom Permission
-class IsSuperUserOrReadOnly(permissions.BasePermission):
-    """
-    Permite acceso total a superusuarios.
-    Lectura permitida a usuarios autenticados (sujeta a filtros de queryset).
-    Escritura prohibida para no superusuarios.
-    """
-    def has_permission(self, request, view):
-        # Permitir métodos seguros a autenticados
-        if request.method in permissions.SAFE_METHODS:
-            return request.user and request.user.is_authenticated
-            
-        # Para acciones personalizadas de permisos (POST/PUT), permitir si es superusuario o admin de empresa
-        if view.action == 'permisos':
-            return request.user and request.user.is_authenticated and (request.user.is_superuser or getattr(request.user, 'is_admin_empresa', False))
-            
-        return request.user and request.user.is_superuser
-
-# API
-class RolViewSet(viewsets.ModelViewSet):
-    """
-    API endpoint para ver y editar roles.
-    """
-    queryset = Rol.objects.all()
-    serializer_class = RolSerializer
-    permission_classes = [IsSuperUserOrReadOnly]
-
-    def get_queryset(self):
-        user = self.request.user
-        if user.is_superuser:
-            return self.queryset
-        if hasattr(user, 'empresa') and user.empresa:
-            return self.queryset.filter(empresa=user.empresa)
-        return self.queryset.none()
-
-    @action(detail=True, methods=['get', 'put'], serializer_class=RolPermisosSerializer)
-    def permisos(self, request, pk=None):
-        """
-        Endpoint para gestionar los permisos de un rol específico.
-        GET: Retorna los IDs de permisos asignados.
-        PUT: Actualiza la lista de permisos asignados (recibe lista de IDs).
-        """
-        rol = self.get_object()
-        
-        if request.method == 'GET':
-            # Retornar lista de IDs de permisos asignados
-            permisos_ids = rol.permisos.values_list('id', flat=True)
-            return Response({'permisos': list(permisos_ids)})
-            
-        elif request.method == 'PUT':
-            serializer = self.get_serializer(rol, data=request.data)
-            if serializer.is_valid():
-                serializer.save()
-                return Response({'status': 'Permisos actualizados correctamente', 'permisos': request.data.get('permisos', [])})
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class SuperuserRequiredMixin(UserPassesTestMixin):
     def test_func(self):
