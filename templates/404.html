@@ -1,71 +1,142 @@
 <!DOCTYPE html>
 <html lang="es" class="h-full">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Página No Encontrada | 404</title>
+    <title>404 | Coordenadas No Encontradas</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet">
     <style>
-        body { font-family: 'Plus Jakarta Sans', sans-serif; }
-        .pattern-grid {
-            background-color: #f8fafc;
-            background-image: linear-gradient(#e2e8f0 1px, transparent 1px),
-                              linear-gradient(90deg, #e2e8f0 1px, transparent 1px);
-            background-size: 24px 24px;
-            background-position: center center;
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
         }
-        @keyframes float {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-10px); }
+
+        .bg-grid-pattern {
+            background-image: linear-gradient(to right, #f1f5f9 1px, transparent 1px),
+                linear-gradient(to bottom, #f1f5f9 1px, transparent 1px);
+            background-size: 40px 40px;
         }
-        .animate-float {
-            animation: float 3s ease-in-out infinite;
+
+        @keyframes scan {
+            0% {
+                transform: translateY(-100%);
+            }
+
+            100% {
+                transform: translateY(100%);
+            }
+        }
+
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.5);
         }
     </style>
 </head>
-<body class="h-full pattern-grid flex items-center justify-center p-4">
-    <!-- Main Card -->
-    <div class="max-w-md w-full bg-white rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.1)] overflow-hidden border border-slate-100 relative">
-        <!-- Top Accent Line (Blue/Indigo for 404) -->
-        <div class="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600"></div>
-        
-        <div class="p-8 sm:p-10 text-center">
-            <!-- Icon Wrapper with float animation -->
-            <div class="group mx-auto w-24 h-24 bg-blue-50 rounded-2xl flex items-center justify-center mb-6 ring-1 ring-blue-100 shadow-sm animate-float">
-                <svg class="w-12 h-12 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
+
+<body
+    class="h-full bg-slate-50 bg-grid-pattern flex items-center justify-center p-6 overflow-hidden relative selection:bg-blue-100 selection:text-blue-900">
+
+    <!-- Ambient Glows -->
+    <div class="absolute top-0 left-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl -translate-y-1/2 animate-pulse">
+    </div>
+    <div class="absolute bottom-0 right-1/4 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl translate-y-1/2 animate-pulse"
+        style="animation-delay: 1s;"></div>
+
+    <!-- Main Container -->
+    <div class="max-w-2xl w-full relative z-10 flex flex-col items-center text-center">
+
+        <!-- Animated 404 Graphic -->
+        <div class="relative w-48 h-48 mb-8 group">
+            <!-- Outer Orbit Rings -->
+            <div class="absolute inset-0 border border-slate-200 rounded-full animate-[spin_12s_linear_infinite]"></div>
+            <div
+                class="absolute inset-4 border border-slate-200/80 rounded-full border-t-blue-400 animate-[spin_8s_linear_infinite_reverse]">
+            </div>
+            <div
+                class="absolute inset-8 border border-slate-200/60 rounded-full border-b-indigo-400 animate-[spin_4s_linear_infinite]">
             </div>
 
-            <!-- Headlines -->
-            <h1 class="text-6xl font-bold text-slate-900 mb-2 tracking-tight">404</h1>
-            <h2 class="text-xl font-semibold text-slate-700 mb-3">Página No Encontrada</h2>
-            
-            <p class="text-slate-500 text-sm leading-relaxed mb-8 px-4">
-                Lo sentimos, no pudimos encontrar la ruta que buscas. Es posible que haya sido eliminada o la dirección sea incorrecta.
-            </p>
-
-            <!-- Action Section -->
-            <div class="space-y-6">
-                <a href="/" class="group relative w-full flex justify-center py-3.5 px-4 border border-transparent text-sm font-semibold rounded-xl text-white bg-slate-900 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-900 transition-all duration-200 shadow-lg shadow-slate-900/20 active:scale-[0.98]">
-                    <span class="absolute left-0 inset-y-0 flex items-center pl-4">
-                        <svg class="h-5 w-5 text-slate-400 group-hover:text-slate-200 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                        </svg>
-                    </span>
-                    Regresar al Inicio
-                </a>
-                
-                <!-- Footer -->
-                <div class="border-t border-slate-50 pt-6">
-                    <div class="flex items-center justify-center gap-2 text-[10px] uppercase tracking-wider text-slate-400 font-medium">
-                        <div class="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></div>
-                        Navegación Segura
-                    </div>
+            <!-- Center Element -->
+            <div class="absolute inset-0 flex items-center justify-center">
+                <div
+                    class="relative w-24 h-24 bg-gradient-to-tr from-blue-600 to-indigo-600 rounded-2xl rotate-45 flex items-center justify-center shadow-xl shadow-blue-500/30 transition-all duration-500 group-hover:rotate-90 group-hover:scale-110 group-hover:shadow-blue-500/50">
+                    <div class="absolute inset-0 bg-white/20 blur-lg rounded-2xl"></div>
+                    <!-- Abstract Icon (Search/Location) -->
+                    <svg class="w-10 h-10 text-white -rotate-45 transition-transform duration-500 group-hover:-rotate-90"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
                 </div>
+            </div>
+
+            <!-- Floating Particles -->
+            <div class="absolute top-0 right-10 w-2 h-2 bg-blue-400 rounded-full animate-ping"></div>
+            <div class="absolute bottom-10 left-4 w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce"></div>
+        </div>
+
+        <!-- Typography -->
+        <div class="relative mb-6">
+            <h1
+                class="text-9xl font-black text-transparent bg-clip-text bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 tracking-tighter">
+                404
+            </h1>
+            <div
+                class="absolute -top-4 -right-8 bg-white/80 backdrop-blur border border-slate-200 shadow-sm px-3 py-1 rounded-full -rotate-12 transform hover:rotate-0 transition-transform cursor-default">
+                <span class="text-xs font-bold text-blue-600 uppercase tracking-wide">Ruta Desconocida</span>
+            </div>
+        </div>
+
+        <h2 class="text-2xl sm:text-3xl font-bold text-slate-800 mb-4 tracking-tight">
+            Coordenadas fuera del sistema
+        </h2>
+
+        <p class="text-slate-500 text-lg leading-relaxed mb-10 max-w-lg mx-auto">
+            El módulo que buscas no está disponible en esta dirección. Nuestro sistema de navegación sugiere reorientar
+            la búsqueda.
+        </p>
+
+        <!-- Actions -->
+        <div class="flex flex-col sm:flex-row items-center justify-center gap-4 w-full sm:w-auto">
+            <a href="/"
+                class="group relative w-full sm:w-auto inline-flex items-center justify-center px-8 py-4 text-sm font-bold text-white transition-all duration-200 bg-slate-900 rounded-xl hover:bg-slate-800 hover:shadow-lg hover:shadow-slate-900/20 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-900 hover:-translate-y-1 overflow-hidden">
+                <div
+                    class="absolute inset-0 bg-gradient-to-r from-blue-600 to-indigo-600 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                </div>
+                <span class="relative flex items-center">
+                    <svg class="w-5 h-5 mr-2 -ml-1 text-slate-400 group-hover:text-white transition-colors" fill="none"
+                        stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+                    </svg>
+                    Volver al Dashboard
+                </span>
+            </a>
+
+            <button onclick="window.history.back()"
+                class="w-full sm:w-auto inline-flex items-center justify-center px-8 py-4 text-sm font-bold text-slate-700 transition-all duration-200 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 hover:text-slate-900 hover:border-slate-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-200 hover:shadow-md">
+                Regresar
+            </button>
+        </div>
+
+        <!-- Footer Tech Info -->
+        <div class="mt-16 border-t border-slate-200/60 pt-6 w-full max-w-sm mx-auto">
+            <div
+                class="flex items-center justify-center gap-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold">
+                <span class="flex h-2 w-2 relative">
+                    <span
+                        class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+                Nucleo ERP v2.0 &bull; Sistemas Activos
             </div>
         </div>
     </div>
+
 </body>
+
 </html>

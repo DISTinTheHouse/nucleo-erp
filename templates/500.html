@@ -3,71 +3,92 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Error del Servidor | 500</title>
+    <title>500 | Error del Sistema</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Plus Jakarta Sans', sans-serif; }
-        .pattern-grid {
-            background-color: #f8fafc;
-            background-image: linear-gradient(#e2e8f0 1px, transparent 1px),
-                              linear-gradient(90deg, #e2e8f0 1px, transparent 1px);
-            background-size: 24px 24px;
-            background-position: center center;
-        }
-        @keyframes pulse-ring {
-            0% { transform: scale(0.8); opacity: 0.5; }
-            100% { transform: scale(1.2); opacity: 0; }
-        }
-        .animate-ring {
-            animation: pulse-ring 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        .bg-grid-pattern {
+            background-image: linear-gradient(to right, #f1f5f9 1px, transparent 1px),
+                              linear-gradient(to bottom, #f1f5f9 1px, transparent 1px);
+            background-size: 40px 40px;
         }
     </style>
 </head>
-<body class="h-full pattern-grid flex items-center justify-center p-4">
-    <!-- Main Card -->
-    <div class="max-w-md w-full bg-white rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.1)] overflow-hidden border border-slate-100 relative">
-        <!-- Top Accent Line (Red/Orange for Error) -->
-        <div class="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-red-500 via-orange-500 to-amber-500"></div>
+<body class="h-full bg-slate-50 bg-grid-pattern flex items-center justify-center p-6 overflow-hidden relative selection:bg-red-100 selection:text-red-900">
+    
+    <!-- Ambient Glows -->
+    <div class="absolute top-0 right-1/4 w-96 h-96 bg-red-500/10 rounded-full blur-3xl -translate-y-1/2 animate-pulse"></div>
+    <div class="absolute bottom-0 left-1/4 w-96 h-96 bg-orange-500/10 rounded-full blur-3xl translate-y-1/2 animate-pulse" style="animation-delay: 1s;"></div>
+
+    <!-- Main Container -->
+    <div class="max-w-2xl w-full relative z-10 flex flex-col items-center text-center">
         
-        <div class="p-8 sm:p-10 text-center">
-            <!-- Icon Wrapper with pulse effect -->
-            <div class="relative group mx-auto w-24 h-24 flex items-center justify-center mb-6">
-                <div class="absolute inset-0 bg-red-100 rounded-2xl animate-ring"></div>
-                <div class="relative w-24 h-24 bg-red-50 rounded-2xl flex items-center justify-center ring-1 ring-red-100 shadow-sm z-10">
-                    <svg class="w-12 h-12 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+        <!-- Animated 500 Graphic -->
+        <div class="relative w-48 h-48 mb-8 group">
+            <!-- Outer Orbit Rings -->
+            <div class="absolute inset-0 border border-slate-200 rounded-full animate-[spin_12s_linear_infinite]"></div>
+            <div class="absolute inset-4 border border-slate-200/80 rounded-full border-t-red-400 animate-[spin_8s_linear_infinite_reverse]"></div>
+            <div class="absolute inset-8 border border-slate-200/60 rounded-full border-b-orange-400 animate-[spin_4s_linear_infinite]"></div>
+            
+            <!-- Center Element -->
+            <div class="absolute inset-0 flex items-center justify-center">
+                <div class="relative w-24 h-24 bg-gradient-to-tr from-red-600 to-orange-600 rounded-2xl rotate-45 flex items-center justify-center shadow-xl shadow-red-500/30 transition-all duration-500 group-hover:rotate-180 group-hover:scale-110 group-hover:shadow-red-500/50">
+                    <div class="absolute inset-0 bg-white/20 blur-lg rounded-2xl"></div>
+                    <!-- Abstract Icon (Alert/System) -->
+                    <svg class="w-10 h-10 text-white -rotate-45 transition-transform duration-500 group-hover:-rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                     </svg>
                 </div>
             </div>
+        </div>
 
-            <!-- Headlines -->
-            <h1 class="text-6xl font-bold text-slate-900 mb-2 tracking-tight">500</h1>
-            <h2 class="text-xl font-semibold text-slate-700 mb-3">Error Interno del Servidor</h2>
+        <!-- Typography -->
+        <div class="relative mb-6">
+            <h1 class="text-9xl font-black text-transparent bg-clip-text bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 tracking-tighter">
+                500
+            </h1>
+            <div class="absolute -top-4 -right-8 bg-white/80 backdrop-blur border border-slate-200 shadow-sm px-3 py-1 rounded-full -rotate-12 transform hover:rotate-0 transition-transform cursor-default">
+                <span class="text-xs font-bold text-red-600 uppercase tracking-wide">Fallo de Sistema</span>
+            </div>
+        </div>
+        
+        <h2 class="text-2xl sm:text-3xl font-bold text-slate-800 mb-4 tracking-tight">
+            Interrupción inesperada del servicio
+        </h2>
+        
+        <p class="text-slate-500 text-lg leading-relaxed mb-10 max-w-lg mx-auto">
+            Nuestros ingenieros han sido notificados automáticamente. El sistema se restablecerá en breve.
+        </p>
+
+        <!-- Actions -->
+        <div class="flex flex-col sm:flex-row items-center justify-center gap-4 w-full sm:w-auto">
+            <button onclick="window.location.reload()" class="group relative w-full sm:w-auto inline-flex items-center justify-center px-8 py-4 text-sm font-bold text-white transition-all duration-200 bg-slate-900 rounded-xl hover:bg-slate-800 hover:shadow-lg hover:shadow-slate-900/20 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-900 hover:-translate-y-1 overflow-hidden">
+                <div class="absolute inset-0 bg-gradient-to-r from-red-600 to-orange-600 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                <span class="relative flex items-center">
+                    <svg class="w-5 h-5 mr-2 -ml-1 text-slate-400 group-hover:text-white transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    Reintentar Conexión
+                </span>
+            </button>
             
-            <p class="text-slate-500 text-sm leading-relaxed mb-8 px-4">
-                Nuestros sistemas han detectado un problema inesperado. El equipo de ingeniería ha sido notificado automáticamente.
-            </p>
+            <a href="/" class="w-full sm:w-auto inline-flex items-center justify-center px-8 py-4 text-sm font-bold text-slate-700 transition-all duration-200 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 hover:text-slate-900 hover:border-slate-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-200 hover:shadow-md">
+                Ir al Inicio
+            </a>
+        </div>
 
-            <!-- Action Section -->
-            <div class="space-y-4">
-                <button onclick="window.location.reload()" class="w-full flex justify-center py-3.5 px-4 border border-slate-200 text-sm font-semibold rounded-xl text-slate-700 bg-white hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-200 transition-all duration-200">
-                    Intentar Recargar
-                </button>
-
-                <a href="/" class="group relative w-full flex justify-center py-3.5 px-4 border border-transparent text-sm font-semibold rounded-xl text-white bg-slate-900 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-900 transition-all duration-200 shadow-lg shadow-slate-900/20 active:scale-[0.98]">
-                    Volver al Inicio
-                </a>
-                
-                <!-- Footer -->
-                <div class="border-t border-slate-50 pt-6 mt-6">
-                    <div class="flex items-center justify-center gap-2 text-[10px] uppercase tracking-wider text-slate-400 font-medium">
-                        <div class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></div>
-                        Sistema de Monitoreo Activo
-                    </div>
-                </div>
+        <!-- Footer Tech Info -->
+        <div class="mt-16 border-t border-slate-200/60 pt-6 w-full max-w-sm mx-auto">
+            <div class="flex items-center justify-center gap-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold">
+                <span class="flex h-2 w-2 relative">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                </span>
+                Nucleo ERP v2.0 &bull; Monitoreo Activo
             </div>
         </div>
     </div>
+
 </body>
 </html>
