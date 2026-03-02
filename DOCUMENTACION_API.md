@@ -345,14 +345,62 @@ Gestión de almacenes y ubicaciones para operaciones de inventario.
 
 ### Existencias (Stock)
 
+Permite consultar el inventario actual.
+**Nota de Seguridad**: Los resultados se filtran automáticamente según las sucursales y empresas permitidas para el usuario.
+
 - **Listar**: `GET /api/v1/inventarios/existencias/`
-- **Detalle**: `GET /api/v1/inventarios/existencias/{id}/`
-- **Crear/Editar**: `POST/PATCH` (Gestión manual de stock, uso restringido)
+- **Respuesta**:
+  ```json
+  [
+    {
+      "id": 105,
+      "producto": {
+        "id": 1,
+        "nombre": "Camiseta Básica",
+        "sku": "CAM-BAS-NEG-M"
+      },
+      "almacen": {
+        "id": 1,
+        "nombre": "Almacén Principal Monterrey"
+      },
+      "ubicacion": {
+        "id": 10,
+        "nombre": "Pasillo 1, Rack 3, Nivel 2"
+      },
+      "lote": null,
+      "serie": null,
+      "cantidad": 50.00
+    }
+  ]
+  ```
+- **Crear/Editar**: `POST/PATCH` (Restringido a Admin Empresa/Superusuario. Valida que el almacén pertenezca al scope del usuario).
 
 ### Movimientos de Inventario
 
+Historial de entradas y salidas de mercancía.
+**Nota de Seguridad**: Filtrado por scope de usuario.
+
 - **Listar**: `GET /api/v1/inventarios/movimientos/`
-- **Crear**: `POST /api/v1/inventarios/movimientos/` (Registrar entrada/salida)
+- **Respuesta**:
+  ```json
+  [
+    {
+      "id": 204,
+      "empresa": 1,
+      "sucursal": 5,
+      "tipo_movimiento": "ENTRADA",
+      "fecha": "2024-02-01T14:30:00Z",
+      "pedido": 1005,
+      "entrega": null,
+      "devolucion": null,
+      "ajuste_inventario": null,
+      "detalles": [
+        { "producto": "Camiseta Básica", "cantidad": 10 }
+      ]
+    }
+  ]
+  ```
+- **Crear**: `POST /api/v1/inventarios/movimientos/` (Requiere permisos de escritura y valida scope de empresa/sucursal).
 
 ---
 
