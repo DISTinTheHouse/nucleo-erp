@@ -2,7 +2,7 @@ from django.db import models
 from nucleo.models import Empresa, UnidadMedida, Impuesto, SatClaveProdServ, SatClaveUnidad
 
 class TipoProducto(models.Model):
-    codigo = models.CharField(max_length=10)
+    codigo = models.CharField(max_length=50)
 
     class Meta:
         db_table = "tipo_producto"
