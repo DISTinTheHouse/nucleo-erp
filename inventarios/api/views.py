@@ -1,8 +1,8 @@
 from django.db import models
 from rest_framework import viewsets, permissions
 from rest_framework.exceptions import PermissionDenied
-from inventarios.models import Almacen, Ubicacion, Existencia, MovimientoInventario
-from .serializers import AlmacenSerializer, UbicacionSerializer, ExistenciaSerializer, MovimientoInventarioSerializer
+from inventarios.models import Almacen, Ubicacion, Existencia, MovimientoInventario, MovimientoInventarioDetalle, AjusteInventario
+from .serializers import AlmacenSerializer, UbicacionSerializer, ExistenciaSerializer, MovimientoInventarioSerializer, MovimientoInventarioDetalleSerializer, AjusteInventarioSerializer
 
 class IsAuthenticatedAndScoped(permissions.BasePermission):
     """
@@ -156,3 +156,13 @@ class MovimientoInventarioViewSet(viewsets.ModelViewSet):
             if instance.empresa_id:
                 if user.empresa_id and instance.empresa_id != user.empresa_id and not user.empresas.filter(pk=instance.empresa_id).exists():
                     raise PermissionDenied("No tiene acceso a esta empresa")
+
+class MovimientoInventarioDetalleViewSet(viewsets.ModelViewSet):
+    queryset = MovimientoInventarioDetalle.objects.all()
+    serializer_class = MovimientoInventarioDetalleSerializer
+    permission_classes = [IsAuthenticatedAndScoped]
+
+class AjusteInventarioViewSet(viewsets.ModelViewSet):
+    queryset = AjusteInventario.objects.all()
+    serializer_class = AjusteInventarioSerializer
+    permission_classes = [IsAuthenticatedAndScoped]

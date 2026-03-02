@@ -144,3 +144,19 @@ class MovimientoInventario(models.Model):
 
     def __str__(self):
         return str(self.id) #change this
+    
+class MovimientoInventarioDetalle(models.Model):
+    movimiento_inventario = models.ForeignKey(MovimientoInventario, on_delete=models.CASCADE, related_name="detalles")
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle")
+    ubicacion_origen = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle_origen")
+    ubicacion_destino = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle_destino")
+    lote = models.ForeignKey(Lote, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle")
+    serie = models.ForeignKey(Serie, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle")
+
+    class Meta:
+        db_table = "movimiento_inventario_detalle"
+        verbose_name = "Movimiento Inventario Detalle"
+        verbose_name_plural = "Movimientos Inventario Detalle"
+
+    def __str__(self):
+        return str(self.id)
