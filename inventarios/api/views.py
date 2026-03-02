@@ -90,9 +90,69 @@ class UbicacionViewSet(viewsets.ModelViewSet):
                     raise PermissionDenied("No tiene acceso a esta empresa")
 
 class ExistenciaViewSet(viewsets.ModelViewSet):
-    queryset = Existencia.objects.all()
+    queryset = Existencia.objects.all().select_related('producto', 'almacen', 'ubicacion', 'lote', 'serie')
     serializer_class = ExistenciaSerializer
+    permission_classes = [IsAuthenticatedAndScoped]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = self.queryset
+        if user.is_superuser:
+            return qs
+        
+        empresa_ids = []
+        if user.empresa_id:
+            empresa_ids.append(user.empresa_id)
+        empresa_ids += list(user.empresas.values_list('pk', flat=True))
+        sucursal_ids = list(user.sucursales.values_list('pk', flat=True))
+        
+        # Filtrar por almacenes permitidos (ya que Existencia depende de Almacen)
+        return qs.filter(
+            models.Q(almacen__empresa_id__in=empresa_ids) &
+            models.Q(almacen__sucursal_id__in=sucursal_ids)
+        ).distinct()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        instance = serializer.save()
+        if not user.is_superuser:
+            # Validar acceso al almacén asociado
+            almacen = instance.almacen
+            if almacen:
+                if almacen.sucursal_id and not user.sucursales.filter(pk=almacen.sucursal_id).exists():
+                    raise PermissionDenied("No tiene acceso a la sucursal de este almacén")
+                if almacen.empresa_id:
+                    if user.empresa_id and almacen.empresa_id != user.empresa_id and not user.empresas.filter(pk=almacen.empresa_id).exists():
+                        raise PermissionDenied("No tiene acceso a la empresa de este almacén")
 
 class MovimientoInventarioViewSet(viewsets.ModelViewSet):
-    queryset = MovimientoInventario.objects.all()
+    queryset = MovimientoInventario.objects.all().select_related('empresa', 'sucursal', 'pedido', 'entrega', 'devolucion', 'ajuste_inventario')
     serializer_class = MovimientoInventarioSerializer
+    permission_classes = [IsAuthenticatedAndScoped]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = self.queryset
+        if user.is_superuser:
+            return qs
+        
+        empresa_ids = []
+        if user.empresa_id:
+            empresa_ids.append(user.empresa_id)
+        empresa_ids += list(user.empresas.values_list('pk', flat=True))
+        sucursal_ids = list(user.sucursales.values_list('pk', flat=True))
+        
+        return qs.filter(
+            models.Q(empresa_id__in=empresa_ids) &
+            models.Q(sucursal_id__in=sucursal_ids)
+        ).distinct()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        instance = serializer.save()
+        if not user.is_superuser:
+            if instance.sucursal_id and not user.sucursales.filter(pk=instance.sucursal_id).exists():
+                raise PermissionDenied("No tiene acceso a esta sucursal")
+            if instance.empresa_id:
+                if user.empresa_id and instance.empresa_id != user.empresa_id and not user.empresas.filter(pk=instance.empresa_id).exists():
+                    raise PermissionDenied("No tiene acceso a esta empresa")
