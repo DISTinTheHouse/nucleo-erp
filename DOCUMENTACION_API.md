@@ -402,6 +402,48 @@ Historial de entradas y salidas de mercancía.
   ```
 - **Crear**: `POST /api/v1/inventarios/movimientos/` (Requiere permisos de escritura y valida scope de empresa/sucursal).
 
+### Detalles de Movimiento de Inventario
+
+Gestiona los productos individuales dentro de un movimiento de inventario.
+**Nota de Seguridad**: Valida estrictamente que la empresa y sucursal del movimiento coincidan con los permisos del usuario.
+
+- **Listar**: `GET /api/v1/inventarios/movimiento-detalle/`
+- **Crear**: `POST /api/v1/inventarios/movimiento-detalle/`
+  - **Body**:
+    ```json
+    {
+      "movimiento_inventario": 204,
+      "producto": 1,
+      "cantidad": 5,
+      "costo_unitario": "150.00",
+      "ubicacion_origen": 10,
+      "ubicacion_destino": 11
+    }
+    ```
+- **Editar**: `PATCH /api/v1/inventarios/movimiento-detalle/{id}/`
+- **Eliminar**: `DELETE /api/v1/inventarios/movimiento-detalle/{id}/`
+
+### Ajustes de Inventario
+
+Permite registrar ajustes manuales (positivos o negativos) al inventario por pérdidas, daños o conteos cíclicos.
+**Nota de Seguridad**: Requiere permisos de escritura y valida scope de empresa/sucursal.
+
+- **Listar**: `GET /api/v1/inventarios/ajustes/`
+- **Crear**: `POST /api/v1/inventarios/ajustes/`
+  - **Body**:
+    ```json
+    {
+      "empresa": 1,
+      "sucursal": 5,
+      "almacen": 1,
+      "fecha_ajuste": "2024-02-10",
+      "motivo": "Daño en almacén",
+      "observaciones": "Caja mojada durante limpieza"
+    }
+    ```
+- **Editar**: `PATCH /api/v1/inventarios/ajustes/{id}/`
+- **Eliminar**: `DELETE /api/v1/inventarios/ajustes/{id}/`
+
 ---
 
 ## 🏷️ 9. Catálogo de Productos
