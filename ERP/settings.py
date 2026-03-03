@@ -52,7 +52,8 @@ INSTALLED_APPS = [
     'inventarios',
     'catalogo',
     'terceros',
-    'ventas'
+    'ventas',
+    'drf_spectacular',
 ]
 
 AUTH_USER_MODEL = "usuarios.Usuario"
@@ -184,6 +185,16 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Núcleo ERP API',
+    'DESCRIPTION': 'Documentación interactiva de la API para el sistema ERP.',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    # Opcional: Para autenticación en Swagger UI
+    'COMPONENT_SPLIT_REQUEST': True
 }
 
 # =========================
