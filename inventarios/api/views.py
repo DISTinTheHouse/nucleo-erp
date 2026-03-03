@@ -59,7 +59,7 @@ class AlmacenViewSet(viewsets.ModelViewSet):
                     raise PermissionDenied("No tiene acceso a esta empresa")
 
 class UbicacionViewSet(viewsets.ModelViewSet):
-    queryset = Ubicacion.objects.all().select_related('empresa', 'sucursal', 'almacen')
+    queryset = Ubicacion.objects.all().select_related('almacen__empresa', 'almacen__sucursal')
     serializer_class = UbicacionSerializer
     permission_classes = [IsAuthenticatedAndScoped]
     lookup_field = 'id_ubicacion'
@@ -75,15 +75,18 @@ class UbicacionViewSet(viewsets.ModelViewSet):
         empresa_ids += list(user.empresas.values_list('pk', flat=True))
         sucursal_ids = list(user.sucursales.values_list('pk', flat=True))
         return qs.filter(
-            models.Q(empresa_id__in=empresa_ids) &
-            models.Q(sucursal_id__in=sucursal_ids)
+            models.Q(almacen__empresa_id__in=empresa_ids) &
+            models.Q(almacen__sucursal_id__in=sucursal_ids)
         ).distinct()
 
     def perform_create(self, serializer):
         user = self.request.user
-        if not user.is_superuser:
-            sucursal = serializer.validated_data.get('sucursal')
-            empresa = serializer.validated_data.get('empresa')
+        # Obtener el almacén del validated_data
+        almacen = serializer.validated_data.get('almacen')
+        
+        if not user.is_superuser and almacen:
+            sucursal = almacen.sucursal
+            empresa = almacen.empresa
             
             if sucursal and not user.sucursales.filter(pk=sucursal.pk).exists():
                 raise PermissionDenied("No tiene acceso a esta sucursal")

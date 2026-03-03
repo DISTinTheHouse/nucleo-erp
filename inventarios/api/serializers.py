@@ -46,18 +46,20 @@ class AlmacenSerializer(serializers.ModelSerializer):
 
 class UbicacionSerializer(serializers.ModelSerializer):
     nombre_completo = serializers.CharField(source='__str__', read_only=True)
+    empresa = serializers.IntegerField(source='almacen.empresa_id', read_only=True)
+    sucursal = serializers.IntegerField(source='almacen.sucursal_id', read_only=True)
     
     class Meta:
         model = Ubicacion
         fields = [
-            'id_ubicacion', 'almacen', 'tipo_ubicacion', 'estatus',
+            'id_ubicacion', 'empresa', 'sucursal', 'almacen', 'tipo_ubicacion', 'estatus',
             'pasillo', 'rack', 'nivel', 'posicion',
             'orden_recorrido', 'bloqueada_entrada', 'bloqueada_salida',
             'permite_mezcla_productos', 'permite_mezcla_lotes',
             'nombre_completo',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id_ubicacion', 'created_at', 'updated_at', 'nombre_completo']
+        read_only_fields = ['id_ubicacion', 'created_at', 'updated_at', 'nombre_completo', 'empresa', 'sucursal']
 
     def validate(self, attrs):
         request = self.context.get('request')
