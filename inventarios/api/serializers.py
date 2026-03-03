@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from inventarios.models import Almacen, Ubicacion, Existencia, MovimientoInventario
+from inventarios.models import Almacen, Ubicacion, Existencia, MovimientoInventario, MovimientoInventarioDetalle, AjusteInventario
 from nucleo.models import Sucursal
 
 class AlmacenSerializer(serializers.ModelSerializer):
@@ -94,4 +94,14 @@ class ExistenciaSerializer(serializers.ModelSerializer):
 class MovimientoInventarioSerializer(serializers.ModelSerializer):
     class Meta:
         model = MovimientoInventario
+        fields = '__all__'
+
+class MovimientoInventarioDetalleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MovimientoInventarioDetalle
+        fields = '__all__'
+
+class AjusteInventarioSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AjusteInventario
         fields = '__all__'
