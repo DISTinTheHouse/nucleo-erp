@@ -11,6 +11,20 @@ class TipoAlmacen(models.TextChoices):
     DEVOLUCION = "DEVOLUCION", "Devolucion"
     TRANSITO = "TRANSITO", "Transito"
 
+class TipoUbicacion(models.TextChoices):
+    RECIBO = "RECIBO", "Recibo"
+    PICKING = "PICKING", "Picking"
+    RESERVA = "RESERVA", "Reserva"
+    STAGING = "STAGING", "Staging"
+    EMBARQUE = "EMBARQUE", "Embarque"
+    CUARENTENA = "CUARENTENA", "Cuarentena"
+    DEVOLUCION = "DEVOLUCION", "Devolucion"
+
+class EstatusUbicacion(models.TextChoices):
+    ACTIVO = "ACTIVO", "Activo"
+    INACTIVO = "INACTIVO", "Inactivo"
+    BLOQUEADO = "BLOQUEADO", "Bloqueado"
+
 class Almacen(models.Model):
     id_almacen = models.BigAutoField(primary_key=True)
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="almacenes", null=True, blank=True)
@@ -41,20 +55,6 @@ class Almacen(models.Model):
 
     def __str__(self):
         return f"{self.nombre}"
-
-class TipoUbicacion(models.TextChoices):
-    RECIBO = "RECIBO", "Recibo"
-    PICKING = "PICKING", "Picking"
-    RESERVA = "RESERVA", "Reserva"
-    STAGING = "STAGING", "Staging"
-    EMBARQUE = "EMBARQUE", "Embarque"
-    CUARENTENA = "CUARENTENA", "Cuarentena"
-    DEVOLUCION = "DEVOLUCION", "Devolucion"
-
-class EstatusUbicacion(models.TextChoices):
-    ACTIVO = "ACTIVO", "Activo"
-    INACTIVO = "INACTIVO", "Inactivo"
-    BLOQUEADO = "BLOQUEADO", "Bloqueado"
 
 class Ubicacion(models.Model):
     id_ubicacion = models.BigAutoField(primary_key=True)

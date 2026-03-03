@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'catalogo',
     'terceros',
     'ventas',
+    'compras',
     'drf_spectacular',
 ]
 
