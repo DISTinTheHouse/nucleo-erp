@@ -45,13 +45,19 @@ class AlmacenSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 class UbicacionSerializer(serializers.ModelSerializer):
+    nombre_completo = serializers.CharField(source='__str__', read_only=True)
+    
     class Meta:
         model = Ubicacion
         fields = [
-            'id_ubicacion', 'empresa', 'sucursal', 'almacen', 'codigo', 'nombre', 'estatus',
+            'id_ubicacion', 'almacen', 'tipo_ubicacion', 'estatus',
+            'pasillo', 'rack', 'nivel', 'posicion',
+            'orden_recorrido', 'bloqueada_entrada', 'bloqueada_salida',
+            'permite_mezcla_productos', 'permite_mezcla_lotes',
+            'nombre_completo',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id_ubicacion', 'created_at', 'updated_at', 'empresa', 'sucursal']
+        read_only_fields = ['id_ubicacion', 'created_at', 'updated_at', 'nombre_completo']
 
     def validate(self, attrs):
         request = self.context.get('request')
@@ -60,10 +66,6 @@ class UbicacionSerializer(serializers.ModelSerializer):
 
         if not almacen:
             raise serializers.ValidationError({'almacen': 'Almacén es requerido'})
-
-        # Enforce empresa/sucursal derivados del almacén
-        attrs['empresa'] = almacen.empresa
-        attrs['sucursal'] = almacen.sucursal
 
         # Alcance del usuario si no es superuser
         if user and not user.is_superuser:
@@ -80,10 +82,6 @@ class UbicacionSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
-        # Recalcular empresa/sucursal si cambió el almacén
-        if 'almacen' in validated_data and validated_data['almacen']:
-            validated_data['empresa'] = validated_data['almacen'].empresa
-            validated_data['sucursal'] = validated_data['almacen'].sucursal
         return super().update(instance, validated_data)
 
 class ExistenciaSerializer(serializers.ModelSerializer):
