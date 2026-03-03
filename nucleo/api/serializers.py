@@ -1,5 +1,11 @@
 from rest_framework import serializers
-from ..models import Empresa, Moneda, Sucursal, Departamento, SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, EmpresaSatConfig, SerieFolio
+from ..models import (
+    Empresa, Moneda, Sucursal, Departamento, 
+    SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, 
+    SatClaveProdServ, SatClaveUnidad,
+    EmpresaSatConfig, SerieFolio,
+    Impuesto, UnidadMedida
+)
 from ..utils import validate_csd, validate_rfc
 
 class EmpresaSatConfigSerializer(serializers.ModelSerializer):
@@ -94,6 +100,26 @@ class SatFormaPagoSerializer(serializers.ModelSerializer):
     class Meta:
         model = SatFormaPago
         fields = ['id_sat_forma_pago', 'codigo', 'descripcion', 'bancarizado']
+
+class SatClaveProdServSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SatClaveProdServ
+        fields = ['id_sat_prodserv', 'codigo', 'descripcion', 'estatus']
+
+class SatClaveUnidadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SatClaveUnidad
+        fields = ['id_sat_unidad', 'codigo', 'descripcion', 'estatus']
+
+class UnidadMedidaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UnidadMedida
+        fields = ['id', 'clave', 'nombre', 'estatus']
+
+class ImpuestoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Impuesto
+        fields = ['id', 'codigo', 'nombre', 'tasa', 'tipo', 'estatus']
 
 class MonedaSerializer(serializers.ModelSerializer):
     class Meta:

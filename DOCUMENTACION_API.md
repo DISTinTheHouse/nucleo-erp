@@ -278,6 +278,81 @@ Recupera todos los catálogos fiscales necesarios para llenar formularios de fac
   }
   ```
 
+### Claves de Producto/Servicio SAT
+
+Catálogo extenso (50,000+ registros) para clasificar productos.
+**Nota**: Soporta búsqueda por código o descripción.
+
+- **Endpoint**: `GET /api/v1/nucleo/sat/prod-serv/?q={busqueda}`
+- **Ejemplo**: `/api/v1/nucleo/sat/prod-serv/?q=computadora`
+- **Respuesta**:
+  ```json
+  [
+    {
+      "id_sat_prodserv": 105,
+      "codigo": "43211507",
+      "descripcion": "Computadores de escritorio",
+      "estatus": "activo"
+    }
+  ]
+  ```
+
+### Claves de Unidad SAT
+
+Catálogo de unidades de medida (H87, KGM, etc.).
+**Nota**: Soporta búsqueda.
+
+- **Endpoint**: `GET /api/v1/nucleo/sat/unidades/?q={busqueda}`
+- **Ejemplo**: `/api/v1/nucleo/sat/unidades/?q=pieza`
+- **Respuesta**:
+  ```json
+  [
+    {
+      "id_sat_unidad": 5,
+      "codigo": "H87",
+      "descripcion": "Pieza",
+      "estatus": "activo"
+    }
+  ]
+  ```
+
+### Unidades de Medida (CORE)
+
+Unidades de medida internas del sistema (PZA, KG, MTR), utilizadas en los productos.
+Generalmente se mapean a una clave SAT, pero este catálogo es el que se usa en la definición del producto.
+
+- **Listar**: `GET /api/v1/nucleo/unidades-medida/`
+- **Respuesta**:
+  ```json
+  [
+    {
+      "id": 1,
+      "clave": "PZA",
+      "nombre": "Pieza",
+      "estatus": true
+    }
+  ]
+  ```
+
+### Impuestos
+
+Catálogo de impuestos configurados en el sistema (IVA 16%, ISR, etc.).
+
+- **Listar**: `GET /api/v1/nucleo/impuestos/`
+- **Respuesta**:
+  ```json
+  [
+    {
+      "id": 1,
+      "codigo": "IVA16",
+      "nombre": "IVA 16%",
+      "tasa": "0.160000",
+      "tipo": "trasladado",
+      "estatus": true
+    }
+  ]
+  ```
+
 ---
 
 ## 📦 8. Inventarios (Almacenes y Ubicaciones)

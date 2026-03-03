@@ -30,11 +30,11 @@
 ## Fase 2 - Inventario base (sin implementar todo el WMS todavía) |
 
 - _unicamente : **entradas, salidas, ajustes**. para responder preguntas reales: "¿Cúanta tela hay? ¿Dónde está? ¿Por qué en esa ubicación?"_
-- [ ] ¿TERMINADO?
-- [ ] existencias
-- [ ] movimientos_inventario
-- [ ] movimiento_inventario_detalle
-- [ ] ajustes_inventario
+- [x] ¿TERMINADO?
+- [x] existencias
+- [x] movimientos_inventario
+- [x] movimiento_inventario_detalle
+- [x] ajustes_inventario
 
 ## Fase 3 - Proveedores + compras básicas para alimentar MP |
 

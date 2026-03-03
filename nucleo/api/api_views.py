@@ -4,10 +4,18 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework import status, viewsets, permissions
 from django.shortcuts import get_object_or_404
 from django.db import models
-from ..models import Empresa, Sucursal, Departamento, Moneda, SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, EmpresaSatConfig, SerieFolio
+from ..models import (
+    Empresa, Sucursal, Departamento, Moneda, SerieFolio,
+    SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, 
+    SatClaveProdServ, SatClaveUnidad,
+    EmpresaSatConfig,
+    UnidadMedida, Impuesto
+)
 from .serializers import (
     SatRegimenFiscalSerializer, 
     SatUsoCfdiSerializer, SatMetodoPagoSerializer, SatFormaPagoSerializer,
+    SatClaveProdServSerializer, SatClaveUnidadSerializer,
+    UnidadMedidaSerializer, ImpuestoSerializer,
     EmpresaSatConfigSerializer,
     EmpresaSerializer, SucursalSerializer, DepartamentoSerializer, MonedaSerializer, SerieFolioSerializer
 )
@@ -135,6 +143,54 @@ class SerieFolioViewSet(viewsets.ModelViewSet):
              serializer.save(empresa=user.empresa)
         else:
              serializer.save()
+
+class SatClaveProdServViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint para buscar Claves de Producto/Servicio SAT.
+    Soporta búsqueda por 'q' (código o descripción).
+    """
+    queryset = SatClaveProdServ.objects.filter(estatus='activo')
+    serializer_class = SatClaveProdServSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        qs = super().get_queryset()
+        q = self.request.query_params.get('q', None)
+        if q:
+            qs = qs.filter(models.Q(codigo__icontains=q) | models.Q(descripcion__icontains=q))
+        return qs
+
+class SatClaveUnidadViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint para buscar Claves de Unidad SAT.
+    Soporta búsqueda por 'q' (código o descripción).
+    """
+    queryset = SatClaveUnidad.objects.filter(estatus='activo')
+    serializer_class = SatClaveUnidadSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        q = self.request.query_params.get('q', None)
+        if q:
+            qs = qs.filter(models.Q(codigo__icontains=q) | models.Q(descripcion__icontains=q))
+        return qs
+
+class UnidadMedidaViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint para Unidades de Medida (Sistema CORE).
+    """
+    queryset = UnidadMedida.objects.filter(estatus=True)
+    serializer_class = UnidadMedidaSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class ImpuestoViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint para Impuestos (Sistema CORE).
+    """
+    queryset = Impuesto.objects.filter(estatus=True)
+    serializer_class = ImpuestoSerializer
+    permission_classes = [permissions.IsAuthenticated]
 
 # --- API VIEWS CUSTOM ---
 
