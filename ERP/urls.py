@@ -20,6 +20,7 @@ urlpatterns = [
     path('api/v1/inventarios/', include('inventarios.api.urls')),
     path('api/v1/terceros/', include('terceros.api.urls')),
     path('api/v1/compras/', include('compras.api.urls')),
+    path('api/v1/produccion/', include('produccion.api.urls')),
     path('auditoria/', include('auditoria.urls')),
     path('accounts/', include('django.contrib.auth.urls')),
 ]
