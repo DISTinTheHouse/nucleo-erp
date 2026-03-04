@@ -26,11 +26,11 @@ class ConsumoProduccionViewSet(viewsets.ModelViewSet):
     serializer_class = ConsumoProduccionSerializer
     http_method_names = ['get', 'post']
 
-    @action(detail=True, methods=['POST'])
+    @action(detail=True, methods=['post'])
     def confirmar(self, request, pk=None):
         return Response({'msg': 'ConsumoProduccionViewSet.confirmar'}, status=status.HTTP_200_OK)
     
-    @action(detail=True, methods=['POST'])
+    @action(detail=True, methods=['post'])
     def anular(self, request, pk=None):
         return Response({'msg': 'ConsumoProduccionViewSet.anular'}, status=status.HTTP_200_OK)
 
@@ -39,10 +39,10 @@ class ProductoTerminadoEntradasViewSet(viewsets.ModelViewSet):
     serializer_class = ProductoTerminadoEntradasSerializer
     http_method_names = ['get', 'post']
 
-    @action(detail=True, methods=['POST'])
+    @action(detail=True, methods=['post'])
     def confirmar(self, request, pk=None):
         return Response({'msg': 'ProductoTerminadoEntradasViewSet.confirmar'}, status=status.HTTP_200_OK)
     
-    @action(detail=True, methods=['POST'])
+    @action(detail=True, methods=['post'])
     def anular(self, request, pk=None):
         return Response({'msg': 'ProductoTerminadoEntradasViewSet.anular'}, status=status.HTTP_200_OK)
