@@ -25,13 +25,11 @@ class TallaViewSet(viewsets.ModelViewSet):
         return Talla.objects.filter(activo=True)
     
 class ProductoViewSet(viewsets.ModelViewSet):
+    queryset = Producto.objects.all()
     serializer_class = ProductoSerializer
-
-    def get_queryset(self):
-        return Producto.objects.filter(activo=True)
     
 class ProductoVarianteViewSet(viewsets.ModelViewSet):
+    queryset = ProductoVariante.objects.all()
     serializer_class = ProductoVarianteSerializer
 
-    def get_queryset(self):
-        return ProductoVariante.objects.filter(activo=True)
+
