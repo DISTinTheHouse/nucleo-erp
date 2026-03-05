@@ -26,16 +26,28 @@ class oportunidad(models.Model):
         return str(self.id)
 
 class Cotizacion(models.Model):
-    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="cotizaciones")
-    sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="cotizaciones")
-    cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="cotizaciones")
-    oportunidad = models.ForeignKey(oportunidad, on_delete=models.CASCADE, related_name="cotizaciones", null=True)
-    moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="cotizaciones")
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="cotizacion")
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="cotizacion")
+    cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="cotizacion")
+    oportunidad = models.ForeignKey(oportunidad, on_delete=models.CASCADE, related_name="cotizacion", null=True)
+    moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="cotizacion")
 
     class Meta:
         db_table = "cotizaciones"
         verbose_name = "Cotización"
         verbose_name_plural = "Cotizaciones"
+    
+    def __str__(self):
+        return str(self.id)
+
+class CotizacionDetalle(models.Model):
+    cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="cotizaciondetalle")
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="cotizaciondetalle")
+
+    class Meta:
+        db_table = "cotizacion_detalle"
+        verbose_name = "Cotización Detalle"
+        verbose_name_plural = "Cotizaciones Detalle"
     
     def __str__(self):
         return str(self.id)
@@ -48,12 +60,19 @@ class Pedido(models.Model):
         (4, "En Proceso"),
         (5, "Cerrado"),
     )
+    CHOICES_TIPO_PEDIDO = (
+        (1, "Stock"),
+        (2, "Fabricacion"),
+        (3, "Muestra"),
+        (4, "Mixto"),
+    )
         
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="pedidos")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="pedidos")
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="pedidos")
     cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="pedidos", null=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="pedidos")
+    tipo_pedido = models.SmallIntegerField(default=1, choices=CHOICES_TIPO_PEDIDO)
     estatus = models.SmallIntegerField(default=1, choices=CHOICES_ESTATUS)
 
     class Meta:
