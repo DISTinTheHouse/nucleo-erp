@@ -46,6 +46,9 @@ class EmpresaViewSet(viewsets.ModelViewSet):
             
         # Añadir a la lista de empresas permitidas (M2M)
         user.empresas.add(empresa)
+    
+    def perform_destroy(self, instance):
+        instance.soft_delete() 
 
 class SucursalViewSet(viewsets.ModelViewSet):
     """
@@ -68,6 +71,9 @@ class SucursalViewSet(viewsets.ModelViewSet):
                  qs = qs.filter(id_sucursal__in=user.sucursales.values_list('id_sucursal', flat=True))
             return qs
         return self.queryset.none()
+    
+    def perform_destroy(self, instance):
+        instance.soft_delete()
 
 class DepartamentoViewSet(viewsets.ModelViewSet):
     """
@@ -85,6 +91,9 @@ class DepartamentoViewSet(viewsets.ModelViewSet):
         if hasattr(user, 'empresa') and user.empresa:
             return self.queryset.filter(empresa=user.empresa)
         return self.queryset.none()
+    
+    def perform_destroy(self, instance):
+        instance.soft_delete()
 
 class MonedaViewSet(viewsets.ModelViewSet):
     """
@@ -115,6 +124,10 @@ class MonedaViewSet(viewsets.ModelViewSet):
             serializer.save(empresa=user.empresa)
         else:
             serializer.save()
+    
+    def perform_destroy(self, instance):
+        instance.soft_delete()
+
 
 class SerieFolioViewSet(viewsets.ModelViewSet):
     """
@@ -143,6 +156,9 @@ class SerieFolioViewSet(viewsets.ModelViewSet):
              serializer.save(empresa=user.empresa)
         else:
              serializer.save()
+    
+    def perform_destroy(self, instance):
+        instance.soft_delete()
 
 class SatClaveProdServViewSet(viewsets.ReadOnlyModelViewSet):
     """

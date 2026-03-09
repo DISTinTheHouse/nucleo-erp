@@ -4,8 +4,13 @@ from .models import (
     Empresa, Sucursal, Departamento, SerieFolio,
     SatUsoCfdi, SatMetodoPago, SatFormaPago, SatRegimenFiscal,
     SatClaveProdServ, SatClaveUnidad,
-    EmpresaSatConfig
+    EmpresaSatConfig, Status
 )
+
+@admin.register(Status)
+class StatusAdmin(admin.ModelAdmin):
+    list_display = ('code', 'name')
+    search_fields = ('code', 'name')
 
 @admin.register(Moneda)
 class MonedaAdmin(admin.ModelAdmin):

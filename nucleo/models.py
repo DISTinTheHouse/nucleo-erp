@@ -1,12 +1,33 @@
 from django.db import models
 from django.utils import timezone
 
+class Status(models.Model):
+    code = models.CharField(max_length=20, unique=True)
+    name = models.CharField(max_length=100)
+
+    class Meta:
+        db_table = "status"
+        verbose_name = "Status"
+        verbose_name_plural = "Status"
+
+    def __str__(self):
+        return self.name
+
+class SoftDeleteModel(models.Model):
+    status = models.ForeignKey(Status, on_delete=models.PROTECT, default=1, related_name='soft_delete_models')
+
+    class Meta:
+        abstract = True
+
+    def soft_delete(self):
+        self.status = Status.objects.get(code='deleted')
+        self.save(update_fields=['status'])
 
 # =========================
 # CATÁLOGOS BASE (globales)
 # =========================
 
-class Moneda(models.Model):
+class Moneda(SoftDeleteModel):
     # Relación opcional con Empresa.
     # Si es NULL, es una moneda GLOBAL (del sistema).
     # Si tiene valor, es una moneda privada de esa empresa.
@@ -17,6 +38,7 @@ class Moneda(models.Model):
     simbolo = models.CharField(max_length=10, blank=True, null=True)
     decimales = models.PositiveSmallIntegerField(default=2)
     estatus = models.BooleanField(default=True)
+    status = models.ForeignKey(Status, on_delete=models.PROTECT, default=1, related_name='monedas')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -47,6 +69,7 @@ class Impuesto(models.Model):
     tasa = models.DecimalField(max_digits=8, decimal_places=6, default=0)  # 0.160000
     tipo = models.CharField(max_length=20, choices=Tipo.choices, default=Tipo.TRASLADADO)
     estatus = models.BooleanField(default=True)
+    status = models.ForeignKey(Status, on_delete=models.PROTECT, default=1, related_name='impuestos')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -64,6 +87,7 @@ class UnidadMedida(models.Model):
     clave = models.CharField(max_length=10, unique=True)  # PZA, MTR, KG
     nombre = models.CharField(max_length=100)
     estatus = models.BooleanField(default=True)
+    status = models.ForeignKey(Status, on_delete=models.CASCADE, default=1, related_name='unidades_medida')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -81,7 +105,7 @@ class UnidadMedida(models.Model):
 # 0) NÚCLEO / MULTI-TENANT
 # =========================
 
-class Empresa(models.Model):
+class Empresa(SoftDeleteModel):
     class Estatus(models.TextChoices):
         ACTIVO = "activo", "Activo"
         SUSPENDIDO = "suspendido", "Suspendido"
@@ -104,6 +128,7 @@ class Empresa(models.Model):
     idioma = models.CharField(max_length=16, default="es-MX")
 
     estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
+    status = models.ForeignKey(Status, on_delete=models.CASCADE, default=1, related_name='empresas')
 
     logo_url = models.URLField(blank=True, null=True)
     config_json = models.JSONField(default=dict, blank=True)
@@ -124,13 +149,7 @@ class Empresa(models.Model):
     def __str__(self):
         return self.codigo or f"Empresa {self.pk}"
 
-    def soft_delete(self):
-        self.deleted_at = timezone.now()
-        self.estatus = self.Estatus.SUSPENDIDO
-        self.save(update_fields=["deleted_at", "estatus", "updated_at"])
-
-
-class Sucursal(models.Model):
+class Sucursal(SoftDeleteModel):
     class Estatus(models.TextChoices):
         ACTIVO = "activo", "Activo"
         INACTIVO = "inactivo", "Inactivo"
@@ -155,6 +174,7 @@ class Sucursal(models.Model):
     lng = models.DecimalField(max_digits=10, decimal_places=7, blank=True, null=True)
 
     estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
+    status = models.ForeignKey(Status, on_delete=models.CASCADE, default=1, related_name='sucursales')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -175,8 +195,7 @@ class Sucursal(models.Model):
     def __str__(self):
         return f"{self.empresa.codigo} - {self.nombre}"
 
-
-class Departamento(models.Model):
+class Departamento(SoftDeleteModel):
     class Estatus(models.TextChoices):
         ACTIVO = "activo", "Activo"
         INACTIVO = "inactivo", "Inactivo"
@@ -189,6 +208,7 @@ class Departamento(models.Model):
     codigo = models.CharField(max_length=50)  # <- obligatorio
     nombre = models.CharField(max_length=255)
     estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
+    status = models.ForeignKey(Status, on_delete=models.CASCADE, default=1, related_name='departamentos')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -208,9 +228,11 @@ class Departamento(models.Model):
 
     def __str__(self):
         return f"{self.sucursal.nombre} - {self.nombre}"
+    
+    def perform_destroy(self, instance):
+        instance.soft_delete()
 
-
-class SerieFolio(models.Model):
+class SerieFolio(SoftDeleteModel):
     class Estatus(models.TextChoices):
         ACTIVO = "activo", "Activo"
         INACTIVO = "inactivo", "Inactivo"
@@ -240,6 +262,7 @@ class SerieFolio(models.Model):
     ultimo_anio = models.PositiveSmallIntegerField(blank=True, null=True, help_text="Último año registrado (2 dígitos)")
 
     estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
+    status = models.ForeignKey(Status, on_delete=models.CASCADE, default=1, related_name='series_folios')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -314,7 +337,6 @@ class SerieFolio(models.Model):
         self.save()
         return self.folio_actual
 
-
 # =========================
 # CATÁLOGOS SAT (Globales)
 # =========================
@@ -326,6 +348,7 @@ class SatUsoCfdi(models.Model):
     aplica_fisica = models.BooleanField(default=False)
     aplica_moral = models.BooleanField(default=False)
     estatus = models.CharField(max_length=20, default='activo')
+    status = models.ForeignKey(Status, on_delete=models.CASCADE, default=1, related_name='sat_uso_cfdi')
 
     class Meta:
         db_table = "sat_uso_cfdi"
@@ -335,12 +358,12 @@ class SatUsoCfdi(models.Model):
     def __str__(self):
         return f"{self.codigo} - {self.descripcion}"
 
-
 class SatMetodoPago(models.Model):
     id_sat_metodo_pago = models.BigAutoField(primary_key=True)
     codigo = models.CharField(max_length=10, unique=True)
     descripcion = models.CharField(max_length=255)
     estatus = models.CharField(max_length=20, default='activo')
+    status = models.ForeignKey(Status, on_delete=models.CASCADE, default=1, related_name='sat_metodo_pago')
 
     class Meta:
         db_table = "sat_metodo_pago"
@@ -350,13 +373,13 @@ class SatMetodoPago(models.Model):
     def __str__(self):
         return f"{self.codigo} - {self.descripcion}"
 
-
 class SatFormaPago(models.Model):
     id_sat_forma_pago = models.BigAutoField(primary_key=True)
     codigo = models.CharField(max_length=10, unique=True)
     descripcion = models.CharField(max_length=255)
     bancarizado = models.BooleanField(default=False)
     estatus = models.CharField(max_length=20, default='activo')
+    status = models.ForeignKey(Status, on_delete=models.CASCADE, default=1, related_name='sat_forma_pago')
 
     class Meta:
         db_table = "sat_forma_pago"
@@ -366,12 +389,12 @@ class SatFormaPago(models.Model):
     def __str__(self):
         return f"{self.codigo} - {self.descripcion}"
 
-
 class SatClaveProdServ(models.Model):
     id_sat_prodserv = models.BigAutoField(primary_key=True)
     codigo = models.CharField(max_length=20, unique=True)
     descripcion = models.CharField(max_length=255)
     estatus = models.CharField(max_length=20, default='activo')
+    status = models.ForeignKey(Status, on_delete=models.CASCADE, default=1, related_name='sat_clave_prodserv')
 
     class Meta:
         db_table = "sat_clave_prodserv"
@@ -381,12 +404,12 @@ class SatClaveProdServ(models.Model):
     def __str__(self):
         return f"{self.codigo} - {self.descripcion}"
 
-
 class SatClaveUnidad(models.Model):
     id_sat_unidad = models.BigAutoField(primary_key=True)
     codigo = models.CharField(max_length=10, unique=True)
     descripcion = models.CharField(max_length=255)
     estatus = models.CharField(max_length=20, default='activo')
+    status = models.ForeignKey(Status, on_delete=models.CASCADE, default=1, related_name='sat_clave_unidad')
 
     class Meta:
         db_table = "sat_clave_unidad"
@@ -396,7 +419,6 @@ class SatClaveUnidad(models.Model):
     def __str__(self):
         return f"{self.codigo} - {self.descripcion}"
 
-
 class SatRegimenFiscal(models.Model):
     id_sat_regimen_fiscal = models.BigAutoField(primary_key=True)
     codigo = models.CharField(max_length=10, unique=True)  # 601, 626...
@@ -404,6 +426,7 @@ class SatRegimenFiscal(models.Model):
     aplica_fisica = models.BooleanField(default=False)
     aplica_moral = models.BooleanField(default=False)
     estatus = models.CharField(max_length=20, default='activo')
+    status = models.ForeignKey(Status, on_delete=models.CASCADE, default=1, related_name='sat_regimen_fiscal')
 
     class Meta:
         db_table = "sat_regimen_fiscal"
@@ -412,7 +435,6 @@ class SatRegimenFiscal(models.Model):
 
     def __str__(self):
         return f"{self.codigo} - {self.descripcion}"
-
 
 # =========================
 # CONFIGURACIÓN FISCAL
@@ -423,7 +445,6 @@ def get_upload_path_cer(instance, filename):
 
 def get_upload_path_key(instance, filename):
     return f"sat/csd/{instance.empresa.codigo}/key_{filename}"
-
 
 class EmpresaSatConfig(models.Model):
     id_empresa_sat_config = models.BigAutoField(primary_key=True)
