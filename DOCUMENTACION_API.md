@@ -155,6 +155,30 @@ Permite a un Admin de Empresa o Superusuario gestionar los roles y sus permisos 
 
 - **Base URL**: `/api/v1/seguridad/roles/`
 
+### Catálogo de Permisos (para Matrix)
+
+Endpoint para listar el catálogo global de permisos. Este endpoint se usa para pintar la tabla/matriz de permisos en frontend.
+
+- **Endpoint**: `GET /api/v1/seguridad/permisos/`
+- **Permisos**: Usuario autenticado (cualquier rol).
+- **Query Params (opcionales)**:
+  - `q`: búsqueda por `clave`, `nombre` o `descripcion`
+  - `modulo`: filtra por módulo (ej. `ventas`, `clientes`)
+
+- **Ejemplo**: `GET /api/v1/seguridad/permisos/?modulo=clientes&q=read`
+- **Respuesta (200 OK)**:
+  ```json
+  [
+    {
+      "id": 10,
+      "clave": "R-CLIE",
+      "nombre": "read",
+      "descripcion": "Permite ver clientes",
+      "modulo": "clientes"
+    }
+  ]
+  ```
+
 ### Asignar Permisos a un Rol
 
 Endpoint específico para actualizar masivamente los permisos de un rol (Matrix de Permisos).
