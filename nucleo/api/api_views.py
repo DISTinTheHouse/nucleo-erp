@@ -72,7 +72,7 @@ class SucursalViewSet(viewsets.ModelViewSet):
             return qs
         return self.queryset.none()
     
-    def perform_destroy(self, instance):
+    def perform_destroy(self, instance): 
         instance.soft_delete()
 
 class DepartamentoViewSet(viewsets.ModelViewSet):
@@ -124,9 +124,6 @@ class MonedaViewSet(viewsets.ModelViewSet):
             serializer.save(empresa=user.empresa)
         else:
             serializer.save()
-    
-    def perform_destroy(self, instance):
-        instance.soft_delete()
 
 
 class SerieFolioViewSet(viewsets.ModelViewSet):

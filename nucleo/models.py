@@ -23,7 +23,7 @@ class StatusLifecycleModel(models.Model):
 # CATÁLOGOS BASE (globales)
 # =========================
 
-class Moneda(StatusLifecycleModel):
+class Moneda(models.Model):
     # Relación opcional con Empresa.
     # Si es NULL, es una moneda GLOBAL (del sistema).
     # Si tiene valor, es una moneda privada de esa empresa.
@@ -33,7 +33,7 @@ class Moneda(StatusLifecycleModel):
     nombre = models.CharField(max_length=60)
     simbolo = models.CharField(max_length=10, blank=True, null=True)
     decimales = models.PositiveSmallIntegerField(default=2)
-    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
+    estatus = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
