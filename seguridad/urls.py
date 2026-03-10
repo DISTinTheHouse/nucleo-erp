@@ -1,12 +1,13 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import RolListView, RolCreateView, RolUpdateView, RolDeleteView, RolPermisosMatrixView, get_next_rol_id
-from .api.api_views import RolViewSet
+from .api.api_views import RolViewSet, PermisoViewSet
 
 app_name = 'seguridad'
 
 router = DefaultRouter()
 router.register(r'roles', RolViewSet)
+router.register(r'permisos', PermisoViewSet, basename='permiso')
 
 urlpatterns = [
     # API

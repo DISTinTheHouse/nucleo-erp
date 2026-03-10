@@ -4,14 +4,33 @@ from ..models import Rol, Permiso, RolPermiso
 class PermisoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Permiso
-        fields = '__all__'
+        fields = [
+            'id',
+            'clave',
+            'nombre',
+            'descripcion',
+            'modulo',
+        ]
+        read_only_fields = ['id']
 
 class RolSerializer(serializers.ModelSerializer):
     permisos_count = serializers.IntegerField(source='permisos.count', read_only=True)
     
     class Meta:
         model = Rol
-        fields = '__all__'
+        fields = [
+            'id',
+            'empresa',
+            'codigo',
+            'nombre',
+            'descripcion',
+            'clave_departamento',
+            'is_system',
+            'estatus',
+            'permisos_count',
+            'created_at',
+            'updated_at',
+        ]
         read_only_fields = ['created_at', 'updated_at']
 
 class RolPermisosSerializer(serializers.Serializer):

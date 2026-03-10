@@ -1,8 +1,9 @@
+from django.db.models import Q
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from ..models import Rol, Permiso
-from .serializers import RolSerializer, RolPermisosSerializer
+from .serializers import RolSerializer, RolPermisosSerializer, PermisoSerializer
 
 # Custom Permission
 class IsSuperUserOrReadOnly(permissions.BasePermission):
@@ -59,3 +60,23 @@ class RolViewSet(viewsets.ModelViewSet):
                 serializer.save()
                 return Response({'status': 'Permisos actualizados correctamente', 'permisos': request.data.get('permisos', [])})
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PermisoViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Permiso.objects.all().order_by('modulo', 'clave')
+    serializer_class = PermisoSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        q = self.request.query_params.get('q')
+        modulo = self.request.query_params.get('modulo')
+        if modulo:
+            qs = qs.filter(modulo__iexact=modulo)
+        if q:
+            qs = qs.filter(
+                Q(clave__icontains=q) |
+                Q(nombre__icontains=q) |
+                Q(descripcion__icontains=q)
+            )
+        return qs
