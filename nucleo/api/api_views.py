@@ -48,7 +48,7 @@ class EmpresaViewSet(viewsets.ModelViewSet):
         user.empresas.add(empresa)
     
     def perform_destroy(self, instance):
-        instance.soft_delete() 
+        instance.soft_delete()
 
 class SucursalViewSet(viewsets.ModelViewSet):
     """
