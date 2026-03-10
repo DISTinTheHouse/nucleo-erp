@@ -87,9 +87,76 @@ class UbicacionSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 class ExistenciaSerializer(serializers.ModelSerializer):
+    producto_info = serializers.SerializerMethodField(read_only=True)
+    almacen_info = serializers.SerializerMethodField(read_only=True)
+    ubicacion_info = serializers.SerializerMethodField(read_only=True)
+    lote_info = serializers.SerializerMethodField(read_only=True)
+    serie_info = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = Existencia
         fields = '__all__'
+
+    def get_producto_info(self, obj):
+        producto = getattr(obj, 'producto', None)
+        if not producto:
+            return None
+        return {
+            'id': producto.pk,
+            'nombre': getattr(producto, 'nombre', None),
+            'descripcion': getattr(producto, 'descripcion', None),
+            'tipo': getattr(producto, 'tipo', None),
+            'categoria_producto': getattr(producto, 'categoria_producto_id', None),
+            'unidad_medida': getattr(producto, 'unidad_medida_id', None),
+        }
+
+    def get_almacen_info(self, obj):
+        almacen = getattr(obj, 'almacen', None)
+        if not almacen:
+            return None
+        return {
+            'id_almacen': getattr(almacen, 'id_almacen', None),
+            'codigo': getattr(almacen, 'codigo', None),
+            'nombre': getattr(almacen, 'nombre', None),
+            'empresa': getattr(almacen, 'empresa_id', None),
+            'sucursal': getattr(almacen, 'sucursal_id', None),
+            'estatus': getattr(almacen, 'estatus', None),
+            'tipo_almacen': getattr(almacen, 'tipo_almacen', None),
+        }
+
+    def get_ubicacion_info(self, obj):
+        ubicacion = getattr(obj, 'ubicacion', None)
+        if not ubicacion:
+            return None
+        return {
+            'id_ubicacion': getattr(ubicacion, 'id_ubicacion', None),
+            'almacen': getattr(ubicacion, 'almacen_id', None),
+            'tipo_ubicacion': getattr(ubicacion, 'tipo_ubicacion', None),
+            'estatus': getattr(ubicacion, 'estatus', None),
+            'pasillo': getattr(ubicacion, 'pasillo', None),
+            'rack': getattr(ubicacion, 'rack', None),
+            'nivel': getattr(ubicacion, 'nivel', None),
+            'posicion': getattr(ubicacion, 'posicion', None),
+            'nombre_completo': str(ubicacion),
+        }
+
+    def get_lote_info(self, obj):
+        lote = getattr(obj, 'lote', None)
+        if not lote:
+            return None
+        return {
+            'id': getattr(lote, 'id', None),
+            'producto': getattr(lote, 'producto_id', None),
+        }
+
+    def get_serie_info(self, obj):
+        serie = getattr(obj, 'serie', None)
+        if not serie:
+            return None
+        return {
+            'id': getattr(serie, 'id', None),
+            'producto': getattr(serie, 'producto_id', None),
+        }
 
 class MovimientoInventarioSerializer(serializers.ModelSerializer):
     class Meta:
