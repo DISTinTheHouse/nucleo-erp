@@ -243,9 +243,19 @@ El backend asigna automáticamente la empresa del administrador que crea el usua
     "last_name": "Perez",
     "sucursal_default": 5,
     "sucursales": [5],
+    "roles": [3],
     "estatus": "activo"
   }
   ```
+
+### Roles (asignación por API)
+
+- **Listar roles disponibles (para selector)**: `GET /api/v1/seguridad/roles/`
+  - Devuelve roles filtrados automáticamente por la empresa del usuario (si no es superusuario).
+- **Asignar roles al crear/editar usuario**:
+  - Enviar `roles` como lista de IDs (reemplaza la asignación actual).
+  - Ejemplo: `PATCH /api/v1/usuarios/{id}/` con body `{ "roles": [3, 5] }`
+  - La respuesta incluye `roles_ids` con los IDs asignados.
 
 ---
 
@@ -468,7 +478,7 @@ Permite consultar el inventario actual.
       },
       "lote": null,
       "serie": null,
-      "cantidad": 50.00
+      "cantidad": 50.0
     }
   ]
   ```
@@ -493,9 +503,7 @@ Historial de entradas y salidas de mercancía.
       "entrega": null,
       "devolucion": null,
       "ajuste_inventario": null,
-      "detalles": [
-        { "producto": "Camiseta Básica", "cantidad": 10 }
-      ]
+      "detalles": [{ "producto": "Camiseta Básica", "cantidad": 10 }]
     }
   ]
   ```
