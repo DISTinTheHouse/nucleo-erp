@@ -4,6 +4,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework import status, viewsets, permissions
 from django.shortcuts import get_object_or_404
 from django.db import models
+from ..choices import StatusChoices
 from ..models import (
     Empresa, Sucursal, Departamento, Moneda, SerieFolio,
     SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, 
@@ -313,13 +314,26 @@ class UserSucursalesAPIView(APIView):
         if not empresa_id:
             return Response({'error': 'Empresa ID es requerido'}, status=status.HTTP_400_BAD_REQUEST)
 
+        try:
+            empresa_id = int(empresa_id)
+        except (TypeError, ValueError):
+            return Response({'error': 'Empresa ID inválido'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not user.is_superuser:
+            empresa_ids = []
+            if user.empresa_id:
+                empresa_ids.append(user.empresa_id)
+            empresa_ids += list(user.empresas.values_list('pk', flat=True))
+            if empresa_id not in set(empresa_ids):
+                return Response({'error': 'No autorizado'}, status=status.HTTP_403_FORBIDDEN)
+
         # Filtrar sucursales
         # Si es superuser, todas las de la empresa.
         # Si es usuario normal, intersección de (Sucursales de la Empresa) y (Sucursales Asignadas).
         
-        qs = Sucursal.objects.filter(empresa_id=empresa_id, estatus=Sucursal.Estatus.ACTIVO)
+        qs = Sucursal.objects.filter(empresa_id=empresa_id, estatus=StatusChoices.ACTIVE)
         
-        if not user.is_superuser:
+        if not user.is_superuser and not getattr(user, 'is_admin_empresa', False):
             # Filtrar solo las que están en user.sucursales
             # Nota: user.sucursales es M2M.
             qs = qs.filter(id_sucursal__in=user.sucursales.values_list('id_sucursal', flat=True))
