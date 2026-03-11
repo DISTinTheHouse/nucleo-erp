@@ -1,6 +1,23 @@
 from django.db import models
-from django.utils import timezone
+from nucleo.choices import StatusChoices
 
+class StatusLifecycleModel(models.Model):
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
+
+    class Meta:
+        abstract = True
+
+    def restore(self):
+        self.estatus = StatusChoices.ACTIVE
+        self.save(update_fields=['estatus'])
+
+    def soft_delete(self):
+        self.estatus = StatusChoices.DELETED
+        self.save(update_fields=['estatus'])
+
+    def archive(self):
+        self.estatus = StatusChoices.ARCHIVED
+        self.save(update_fields=['estatus'])
 
 # =========================
 # CATÁLOGOS BASE (globales)
@@ -46,7 +63,7 @@ class Impuesto(models.Model):
     nombre = models.CharField(max_length=100)
     tasa = models.DecimalField(max_digits=8, decimal_places=6, default=0)  # 0.160000
     tipo = models.CharField(max_length=20, choices=Tipo.choices, default=Tipo.TRASLADADO)
-    estatus = models.BooleanField(default=True)
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -63,7 +80,7 @@ class Impuesto(models.Model):
 class UnidadMedida(models.Model):
     clave = models.CharField(max_length=10, unique=True)  # PZA, MTR, KG
     nombre = models.CharField(max_length=100)
-    estatus = models.BooleanField(default=True)
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -81,11 +98,7 @@ class UnidadMedida(models.Model):
 # 0) NÚCLEO / MULTI-TENANT
 # =========================
 
-class Empresa(models.Model):
-    class Estatus(models.TextChoices):
-        ACTIVO = "activo", "Activo"
-        SUSPENDIDO = "suspendido", "Suspendido"
-
+class Empresa(StatusLifecycleModel):
     id_empresa = models.BigAutoField(primary_key=True)
 
     codigo = models.SlugField(max_length=32, unique=True)  # tenant key para URLs/prefijos
@@ -103,7 +116,7 @@ class Empresa(models.Model):
     timezone = models.CharField(max_length=64, default="America/Mexico_City")
     idioma = models.CharField(max_length=16, default="es-MX")
 
-    estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     logo_url = models.URLField(blank=True, null=True)
     config_json = models.JSONField(default=dict, blank=True)
@@ -124,17 +137,7 @@ class Empresa(models.Model):
     def __str__(self):
         return self.codigo or f"Empresa {self.pk}"
 
-    def soft_delete(self):
-        self.deleted_at = timezone.now()
-        self.estatus = self.Estatus.SUSPENDIDO
-        self.save(update_fields=["deleted_at", "estatus", "updated_at"])
-
-
-class Sucursal(models.Model):
-    class Estatus(models.TextChoices):
-        ACTIVO = "activo", "Activo"
-        INACTIVO = "inactivo", "Inactivo"
-
+class Sucursal(StatusLifecycleModel):
     id_sucursal = models.BigAutoField(primary_key=True)
 
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="sucursales")
@@ -154,7 +157,7 @@ class Sucursal(models.Model):
     lat = models.DecimalField(max_digits=10, decimal_places=7, blank=True, null=True)
     lng = models.DecimalField(max_digits=10, decimal_places=7, blank=True, null=True)
 
-    estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -175,8 +178,7 @@ class Sucursal(models.Model):
     def __str__(self):
         return f"{self.empresa.codigo} - {self.nombre}"
 
-
-class Departamento(models.Model):
+class Departamento(StatusLifecycleModel):
     class Estatus(models.TextChoices):
         ACTIVO = "activo", "Activo"
         INACTIVO = "inactivo", "Inactivo"
@@ -188,7 +190,7 @@ class Departamento(models.Model):
 
     codigo = models.CharField(max_length=50)  # <- obligatorio
     nombre = models.CharField(max_length=255)
-    estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -208,13 +210,11 @@ class Departamento(models.Model):
 
     def __str__(self):
         return f"{self.sucursal.nombre} - {self.nombre}"
+    
+    def perform_destroy(self, instance):
+        instance.soft_delete()
 
-
-class SerieFolio(models.Model):
-    class Estatus(models.TextChoices):
-        ACTIVO = "activo", "Activo"
-        INACTIVO = "inactivo", "Inactivo"
-
+class SerieFolio(StatusLifecycleModel):
     id_serie_folio = models.BigAutoField(primary_key=True)
 
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="series_folios")
@@ -239,7 +239,7 @@ class SerieFolio(models.Model):
     reiniciar_anual = models.BooleanField(default=False, help_text="Reiniciar el consecutivo al cambiar de año")
     ultimo_anio = models.PositiveSmallIntegerField(blank=True, null=True, help_text="Último año registrado (2 dígitos)")
 
-    estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -314,7 +314,6 @@ class SerieFolio(models.Model):
         self.save()
         return self.folio_actual
 
-
 # =========================
 # CATÁLOGOS SAT (Globales)
 # =========================
@@ -325,7 +324,7 @@ class SatUsoCfdi(models.Model):
     descripcion = models.CharField(max_length=255)
     aplica_fisica = models.BooleanField(default=False)
     aplica_moral = models.BooleanField(default=False)
-    estatus = models.CharField(max_length=20, default='activo')
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     class Meta:
         db_table = "sat_uso_cfdi"
@@ -335,12 +334,11 @@ class SatUsoCfdi(models.Model):
     def __str__(self):
         return f"{self.codigo} - {self.descripcion}"
 
-
 class SatMetodoPago(models.Model):
     id_sat_metodo_pago = models.BigAutoField(primary_key=True)
     codigo = models.CharField(max_length=10, unique=True)
     descripcion = models.CharField(max_length=255)
-    estatus = models.CharField(max_length=20, default='activo')
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     class Meta:
         db_table = "sat_metodo_pago"
@@ -350,13 +348,12 @@ class SatMetodoPago(models.Model):
     def __str__(self):
         return f"{self.codigo} - {self.descripcion}"
 
-
 class SatFormaPago(models.Model):
     id_sat_forma_pago = models.BigAutoField(primary_key=True)
     codigo = models.CharField(max_length=10, unique=True)
     descripcion = models.CharField(max_length=255)
     bancarizado = models.BooleanField(default=False)
-    estatus = models.CharField(max_length=20, default='activo')
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     class Meta:
         db_table = "sat_forma_pago"
@@ -366,12 +363,11 @@ class SatFormaPago(models.Model):
     def __str__(self):
         return f"{self.codigo} - {self.descripcion}"
 
-
 class SatClaveProdServ(models.Model):
     id_sat_prodserv = models.BigAutoField(primary_key=True)
     codigo = models.CharField(max_length=20, unique=True)
     descripcion = models.CharField(max_length=255)
-    estatus = models.CharField(max_length=20, default='activo')
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     class Meta:
         db_table = "sat_clave_prodserv"
@@ -381,12 +377,11 @@ class SatClaveProdServ(models.Model):
     def __str__(self):
         return f"{self.codigo} - {self.descripcion}"
 
-
 class SatClaveUnidad(models.Model):
     id_sat_unidad = models.BigAutoField(primary_key=True)
     codigo = models.CharField(max_length=10, unique=True)
     descripcion = models.CharField(max_length=255)
-    estatus = models.CharField(max_length=20, default='activo')
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     class Meta:
         db_table = "sat_clave_unidad"
@@ -396,14 +391,13 @@ class SatClaveUnidad(models.Model):
     def __str__(self):
         return f"{self.codigo} - {self.descripcion}"
 
-
 class SatRegimenFiscal(models.Model):
     id_sat_regimen_fiscal = models.BigAutoField(primary_key=True)
     codigo = models.CharField(max_length=10, unique=True)  # 601, 626...
     descripcion = models.CharField(max_length=255)
     aplica_fisica = models.BooleanField(default=False)
     aplica_moral = models.BooleanField(default=False)
-    estatus = models.CharField(max_length=20, default='activo')
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     class Meta:
         db_table = "sat_regimen_fiscal"
@@ -412,7 +406,6 @@ class SatRegimenFiscal(models.Model):
 
     def __str__(self):
         return f"{self.codigo} - {self.descripcion}"
-
 
 # =========================
 # CONFIGURACIÓN FISCAL
@@ -423,7 +416,6 @@ def get_upload_path_cer(instance, filename):
 
 def get_upload_path_key(instance, filename):
     return f"sat/csd/{instance.empresa.codigo}/key_{filename}"
-
 
 class EmpresaSatConfig(models.Model):
     id_empresa_sat_config = models.BigAutoField(primary_key=True)
@@ -444,6 +436,8 @@ class EmpresaSatConfig(models.Model):
     
     validado = models.BooleanField(default=False)
     mensaje_error = models.TextField(blank=True, null=True)
+
+    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
 
     class Meta:
         db_table = "empresa_sat_config"

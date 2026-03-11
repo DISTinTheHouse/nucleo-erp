@@ -7,6 +7,7 @@ from .models import (
     EmpresaSatConfig
 )
 
+
 @admin.register(Moneda)
 class MonedaAdmin(admin.ModelAdmin):
     list_display = ('codigo_iso', 'nombre', 'estatus')
