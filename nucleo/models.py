@@ -137,7 +137,11 @@ class Empresa(StatusLifecycleModel):
     def __str__(self):
         return self.codigo or f"Empresa {self.pk}"
 
-class Sucursal(StatusLifecycleModel):
+class Sucursal(models.Model):
+    class Estatus(models.TextChoices):
+        ACTIVO = "activo", "Activo"
+        INACTIVO = "inactivo", "Inactivo"
+
     id_sucursal = models.BigAutoField(primary_key=True)
 
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="sucursales")
@@ -157,7 +161,7 @@ class Sucursal(StatusLifecycleModel):
     lat = models.DecimalField(max_digits=10, decimal_places=7, blank=True, null=True)
     lng = models.DecimalField(max_digits=10, decimal_places=7, blank=True, null=True)
 
-    estatus = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.ACTIVE)
+    estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
