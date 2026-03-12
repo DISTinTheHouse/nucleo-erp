@@ -6,7 +6,7 @@
 - **Autenticación**: Header `Authorization: Bearer <tu_token>` (Excepto Login)
 - **Content-Type**: `application/json` (excepto para subida de archivos)
 
----
+***
 
 ## 🔐 1. Autenticación y Sesión
 
@@ -23,7 +23,6 @@ Obtén el token de sesión para el usuario.
   }
   ```
 - **Respuesta (200 OK)**:
-
   ```json
   {
     "token": "d834958c281321...",
@@ -38,7 +37,6 @@ Obtén el token de sesión para el usuario.
     "permisos": ["R-CONF", "E-CONF", "D-CONF", "R-USU", "..."]
   }
   ```
-
 - **Notas importantes para Frontend**:
   - `permisos` es un arreglo de claves de permiso efectivas para el usuario.
   - Incluye automáticamente:
@@ -51,7 +49,7 @@ Obtén el token de sesión para el usuario.
     - `D-CONF` → Eliminación
   - Para usuarios `is_superuser=true` o `is_admin_empresa=true`, el backend concede acceso amplio por rol; el frontend puede tratarlos como “tienen todo”, aunque la lista `permisos` pueda estar vacía.
 
----
+***
 
 ## 🏢 2. Contexto de Usuario (Empresas y Sucursales)
 
@@ -98,12 +96,11 @@ Permite ver detalles y editar sucursales.
 - **Superusuario**: Acceso total.
 - **Admin Empresa**: Puede ver y editar (`PUT`/`PATCH`) las sucursales de su propia empresa.
 - **Usuario Normal**: Solo lectura (filtrado por permisos).
-
 - **Listar**: `GET /api/v1/nucleo/sucursales/`
 - **Detalle**: `GET /api/v1/nucleo/sucursales/{codigo}/`
 - **Editar**: `PATCH /api/v1/nucleo/sucursales/{codigo}/` (Requiere `is_admin_empresa=True`)
 
----
+***
 
 ## 🔢 3. Series y Folios
 
@@ -145,7 +142,7 @@ Obtiene las series configuradas para la empresa del usuario.
   }
   ```
 
----
+***
 
 ## 🛡️ 4. Roles y Permisos
 
@@ -164,7 +161,6 @@ Endpoint para listar el catálogo global de permisos. Este endpoint se usa para 
 - **Query Params (opcionales)**:
   - `q`: búsqueda por `clave`, `nombre` o `descripcion`
   - `modulo`: filtra por módulo (ej. `ventas`, `clientes`)
-
 - **Ejemplo**: `GET /api/v1/seguridad/permisos/?modulo=clientes&q=read`
 - **Respuesta (200 OK)**:
   ```json
@@ -186,13 +182,11 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
 - **Endpoint**: `GET /api/v1/seguridad/roles/{id}/permisos/`
 - **Descripción**: Obtiene la lista de IDs de permisos actualmente asignados al rol.
 - **Respuesta (200 OK)**:
-
   ```json
   {
     "permisos": [1, 5, 8, 12]
   }
   ```
-
 - **Endpoint**: `PUT /api/v1/seguridad/roles/{id}/permisos/`
 - **Descripción**: Reemplaza completamente los permisos del rol con la nueva lista de IDs proporcionada.
 - **Body**:
@@ -209,7 +203,7 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
   }
   ```
 
----
+***
 
 ## 👥 5. Gestión de Usuarios
 
@@ -257,7 +251,7 @@ El backend asigna automáticamente la empresa del administrador que crea el usua
   - Ejemplo: `PATCH /api/v1/usuarios/{id}/` con body `{ "roles": [3, 5] }`
   - La respuesta incluye `roles_ids` con los IDs asignados.
 
----
+***
 
 ## 🏭 6. Gestión de Empresas (CRUD Completo)
 
@@ -267,7 +261,6 @@ Endpoint principal para administración de empresas.
 
 - **Superusuario**: Acceso total (Crear, Leer Todas, Actualizar, Eliminar).
 - **Usuario Normal**: Solo lectura (Lista filtrada a sus empresas asignadas). No puede crear ni editar.
-
 - **Listar**: `GET /api/v1/nucleo/empresas/`
 - **Crear**: `POST /api/v1/nucleo/empresas/` (Solo Superusuario)
 - **Detalle**: `GET /api/v1/nucleo/empresas/{id_o_codigo}/` (Acepta ID numérico o Código)
@@ -293,7 +286,7 @@ Al crear una empresa, el superusuario se asigna automáticamente a ella.
   ```
 - **Respuesta (201 Created)**: Objeto de la empresa creada.
 
----
+***
 
 ## 📜 7. Catálogos del SAT (Facturación)
 
@@ -387,7 +380,7 @@ Catálogo de impuestos configurados en el sistema (IVA 16%, ISR, etc.).
   ]
   ```
 
----
+***
 
 ## 📦 8. Inventarios (Almacenes y Ubicaciones)
 
@@ -551,7 +544,7 @@ Permite registrar ajustes manuales (positivos o negativos) al inventario por pé
 - **Editar**: `PATCH /api/v1/inventarios/ajustes/{id}/`
 - **Eliminar**: `DELETE /api/v1/inventarios/ajustes/{id}/`
 
----
+***
 
 ## 🏷️ 9. Catálogo de Productos
 
@@ -621,7 +614,7 @@ Todos soportan CRUD estándar (`GET`, `POST`, `PATCH`, `DELETE`).
 - **Colores**: `/api/v1/catalogo/color/`
 - **Tallas**: `/api/v1/catalogo/talla/`
 
----
+***
 
 ## ⚙️ 10. Configuración Fiscal (CSD)
 
@@ -653,14 +646,69 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
   - `archivo_key`: (File) Archivo .key
   - `password_llave`: (Text) Contraseña de la llave privada
   - `regimen_fiscal`: (Int, Opcional) ID del régimen fiscal
-
 - **Respuestas**:
   - `200 OK`: Archivos validados y guardados. `validado: true`.
   - `400 Bad Request`: Error de validación (ej. "Contraseña incorrecta", "RFC no coincide"). El campo `mensaje_error` contendrá el detalle.
 
----
+***
 
-## ⚠️ Notas de Integración
+## 👤 Terceros
 
-1.  **Validación de RFC**: Al crear o editar una empresa, el campo `rfc` se valida automáticamente (formato y checksum). Si es inválido, recibirás un `400 Bad Request`.
-2.  **Seguridad**: Si se detectan múltiples intentos fallidos de login (5 intentos), la IP será bloqueada temporalmente por 1 hora (`django-axes`).
+### Direcciones Cliente
+
+Listado de direcciones registradas de los clientes, incluyendo información de ubicación y configuración.
+
+### Obtener Listado
+
+- **Endpoint**: `GET terceros/direcciones-clientes/`
+- **Respuesta**:
+  ```json
+  [
+    {
+        "id": 1,
+        "is_default": true,
+        "activo": true,
+        "cliente": 1,
+        "empresa": 73
+    }
+  ]
+  ```
+
+
+### Obtener registro individual por ID.
+
+- **Endpoint**: `GET terceros/direcciones-clientes/{id}/`
+- **Respuesta**:
+  ```json
+    {
+        "id": 1,
+        "is_default": true,
+        "activo": true,
+        "cliente": 1,
+        "empresa": 73
+    }
+  ```
+  
+
+### Guardar direccion cliente.
+- **Endpoint**: `POST terceros/direcciones-clientes/`
+- **Body**:
+  ```json
+    {
+      "cliente": 1,
+      "empresa": 62,
+      "is_default": true
+    }
+  ```
+
+
+### Actualizar registro.
+- **Endpoint**: `PATCH terceros/direcciones-clientes/{id}/`
+- **Body**:
+  ```json
+    {
+      "cliente": 1,
+      "empresa": 62,
+      "is_default": true
+    }
+  ```
