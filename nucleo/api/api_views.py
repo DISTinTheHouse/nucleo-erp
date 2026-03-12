@@ -331,12 +331,26 @@ class UserSucursalesAPIView(APIView):
         # Si es superuser, todas las de la empresa.
         # Si es usuario normal, intersección de (Sucursales de la Empresa) y (Sucursales Asignadas).
         
-        qs = Sucursal.objects.filter(empresa_id=empresa_id, estatus=StatusChoices.ACTIVE)
+        active_values = {StatusChoices.ACTIVE, "activo", "ACTIVO"}
+        try:
+            active_values.add(Sucursal.Estatus.ACTIVO)
+        except Exception:
+            pass
+
+        qs = Sucursal.objects.filter(empresa_id=empresa_id, estatus__in=list(active_values))
         
         if not user.is_superuser and not getattr(user, 'is_admin_empresa', False):
-            # Filtrar solo las que están en user.sucursales
-            # Nota: user.sucursales es M2M.
-            qs = qs.filter(id_sucursal__in=user.sucursales.values_list('id_sucursal', flat=True))
+            allowed_ids = list(user.sucursales.values_list('id_sucursal', flat=True))
+            if not allowed_ids and getattr(user, 'sucursal_default_id', None):
+                try:
+                    if user.sucursal_default and user.sucursal_default.empresa_id == empresa_id:
+                        allowed_ids = [user.sucursal_default_id]
+                except Exception:
+                    allowed_ids = allowed_ids
+            if allowed_ids:
+                qs = qs.filter(id_sucursal__in=allowed_ids)
+            else:
+                qs = qs.none()
 
         data = []
         for suc in qs:
