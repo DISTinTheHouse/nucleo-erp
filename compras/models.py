@@ -1,7 +1,10 @@
 from django.db import models
-from nucleo.models import Empresa, Sucursal, Departamento, Moneda
-from terceros.models import Proveedor
+from django.conf import settings
+from nucleo.models import Empresa, Sucursal, Departamento, Moneda, StatusLifecycleModel
+from terceros.models import Proveedor, Transportista
 from catalogo.models import Producto
+from ventas.models import Pedido
+
 from inventarios.models import Almacen, Ubicacion, Lote, Serie
 
 class Requisicion(models.Model):
@@ -82,12 +85,42 @@ class SolicitudCompraDetalle(models.Model):
     def __str__(self):
         return str(self.id)
 
-class OrdenCompra(models.Model):
+class OrdenCompra(StatusLifecycleModel):
+    class EstatusOrdenCompra(models.IntegerChoices):
+        BORRADOR = 1, 'Borrador'
+        POR_AUTORIZAR = 2, 'Por autorizar'
+        AUTORIZADA = 3, 'Autorizada'
+        PARCIALMENTE_RECIBIDA = 4, 'Parcialmente recibida'
+        RECIBIDA = 5, 'Recibida'
+        CANCELADA = 6, 'Cancelada'
+
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE) 
     proveedor = models.ForeignKey(Proveedor, on_delete=models.CASCADE)
     solicitud_compra = models.ForeignKey(SolicitudCompra, on_delete=models.CASCADE)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE)
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name='ordenes_compra', null=True)
+
+    folio = models.CharField(max_length=30, unique=True)
+    referencia = models.CharField(max_length=50, null=True)
+
+    fecha_oc = models.DateField()
+    fecha_entrega_estimada = models.DateField(null=True)
+    fecha_autorizacion = models.DateTimeField(null=True)
+    
+    estatus = models.IntegerField(choices=EstatusOrdenCompra.choices, default=EstatusOrdenCompra.BORRADOR)
+
+    subtotal = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    descuento = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    impuestos = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    total = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+
+    observaciones = models.TextField(blank=True, null=True)
+
+    activo = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'ordenes_compra'
@@ -112,8 +145,35 @@ class OrdenCompraDetalle(models.Model):
         return str(self.id)
 
 class Recepcion(models.Model):
+    class EstatusRecepcion(models.IntegerChoices):
+        BORRADOR = 1, 'Borrador'
+        RECIBIDA = 2, 'Recibida'
+        PARCIAL = 3, 'Parcial'
+        EN_CALIDAD = 4, 'En calidad'
+        CERRADA = 5, 'Cerrada'
+        CANCELADA = 6, 'Cancelada'
+    
     orden_compra = models.ForeignKey(OrdenCompra, on_delete=models.CASCADE)
+    empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name='recepciones')
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE, related_name='recepciones')
+    proveedor = models.ForeignKey(Proveedor, on_delete=models.CASCADE, related_name='recepciones')
     almacen = models.ForeignKey(Almacen, on_delete=models.CASCADE)
+    transportista = models.ForeignKey(Transportista, on_delete=models.CASCADE, related_name='recepciones', null=True)
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='recepciones')
+
+    folio = models.CharField(max_length=30, unique=True)
+    remision = models.CharField(max_length=50, null=True)
+    factura_referencia = models.CharField(max_length=50, null=True)
+
+    fecha_recepcion = models.DateTimeField()
+
+    estatus = models.IntegerField(choices=EstatusRecepcion.choices, default=EstatusRecepcion.BORRADOR)
+    activo = models.BooleanField(default=True)
+
+    observaciones = models.TextField(blank=True, null=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'recepciones'

@@ -1,5 +1,6 @@
 from django.db import models
-from nucleo.models import Empresa, SatRegimenFiscal, SatUsoCfdi
+from nucleo.models import StatusLifecycleModel
+from nucleo.models import Empresa, SatRegimenFiscal, SatUsoCfdi, SatFormaPago, SatMetodoPago, Moneda
 
 class Cliente(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="clientes", null=True, blank=True)
@@ -14,8 +15,28 @@ class Cliente(models.Model):
     def __str__(self):
         return str(self.id)
 
-class Proveedor(models.Model):
+class Proveedor(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="proveedores", null=True, blank=True)
+    codigo = models.CharField(max_length=30)
+    nombre = models.CharField(max_length=150)
+    razon_social = models.CharField(max_length=180)
+    rfc = models.CharField(max_length=20)
+    email = models.EmailField(max_length=120)
+    telefono = models.CharField(max_length=30)
+    contacto_principal = models.CharField(max_length=120)
+
+    sat_regimen_fiscal = models.ForeignKey(SatRegimenFiscal, on_delete=models.CASCADE, related_name="proveedores")
+    sat_forma_pago = models.ForeignKey(SatFormaPago, on_delete=models.CASCADE, related_name="proveedores")
+    sat_metodo_pago = models.ForeignKey(SatMetodoPago, on_delete=models.CASCADE, related_name="proveedores")
+    moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="proveedores")
+
+    dias_credito = models.IntegerField(default=0)
+    limite_credito = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+
+    activo = models.BooleanField(default=True)
+    fecha_alta = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True)
 
     class Meta:
         db_table = "proveedores"
@@ -35,3 +56,11 @@ class DireccionCliente(models.Model):
         db_table = "direcciones_cliente"
         verbose_name = "Direccion Cliente"
         verbose_name_plural = "Direcciones Clientes"
+
+class Transportista(models.Model):
+    empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="transportistas")
+
+    class Meta:
+        db_table = "transportistas"
+        verbose_name = "Transportista"
+        verbose_name_plural = "Transportistas"
