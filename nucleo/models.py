@@ -23,7 +23,7 @@ class StatusLifecycleModel(models.Model):
 # CATÁLOGOS BASE (globales)
 # =========================
 
-class Moneda(models.Model):
+class Moneda(StatusLifecycleModel):
     # Relación opcional con Empresa.
     # Si es NULL, es una moneda GLOBAL (del sistema).
     # Si tiene valor, es una moneda privada de esa empresa.
@@ -33,7 +33,6 @@ class Moneda(models.Model):
     nombre = models.CharField(max_length=60)
     simbolo = models.CharField(max_length=10, blank=True, null=True)
     decimales = models.PositiveSmallIntegerField(default=2)
-    estatus = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -137,11 +136,7 @@ class Empresa(StatusLifecycleModel):
     def __str__(self):
         return self.codigo or f"Empresa {self.pk}"
 
-class Sucursal(models.Model):
-    class Estatus(models.TextChoices):
-        ACTIVO = "activo", "Activo"
-        INACTIVO = "inactivo", "Inactivo"
-
+class Sucursal(StatusLifecycleModel):
     id_sucursal = models.BigAutoField(primary_key=True)
 
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="sucursales")
@@ -160,8 +155,6 @@ class Sucursal(models.Model):
 
     lat = models.DecimalField(max_digits=10, decimal_places=7, blank=True, null=True)
     lng = models.DecimalField(max_digits=10, decimal_places=7, blank=True, null=True)
-
-    estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
