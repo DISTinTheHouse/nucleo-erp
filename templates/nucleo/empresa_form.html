@@ -142,10 +142,12 @@
                                 {% endif %}
                             </div>
                             <div>
-                                <label for="{{ form.estatus.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Estatus</label>
-                                {{ form.estatus }}
-                                {% if form.estatus.errors %}
-                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.estatus.errors|striptags }}</p>
+                                <label for="{{ form.activo.id_for_label }}" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Activo</label>
+                                <div class="mt-2">
+                                    {{ form.activo }}
+                                </div>
+                                {% if form.activo.errors %}
+                                <p class="mt-1.5 text-xs text-red-600 dark:text-red-400 font-medium flex items-center"><i class="fas fa-exclamation-circle mr-1"></i> {{ form.activo.errors|striptags }}</p>
                                 {% endif %}
                             </div>
                         </div>

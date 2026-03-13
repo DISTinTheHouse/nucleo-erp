@@ -53,7 +53,7 @@
                         <div class="text-sm text-slate-500 dark:text-slate-400">{{ empresa.rfc|default:"-" }}</div>
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap">
-                        {% if empresa.estatus == 'activo' %}
+                        {% if empresa.activo %}
                         <span
                             class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-400">
                             <span class="w-2 h-2 mr-1.5 bg-emerald-400 rounded-full"></span> Activo
@@ -61,7 +61,7 @@
                         {% else %}
                         <span
                             class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-400">
-                            {{ empresa.estatus }}
+                            Inactivo
                         </span>
                         {% endif %}
                     </td>

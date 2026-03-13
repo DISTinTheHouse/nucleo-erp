@@ -127,7 +127,6 @@ class SucursalForm(TailwindModelForm):
         fields = '__all__'
         widgets = {
             'empresa': forms.Select(attrs={'class': 'form-select'}),
-            'estatus': forms.Select(attrs={'class': 'form-select'}),
         }
     
     def clean(self):
