@@ -127,7 +127,7 @@ DATABASES = {
         'PORT': POSTGRESQL_DB_PORT,
         'DISABLE_SERVER_SIDE_CURSORS': True,
         'OPTIONS': {
-            'sslmode': 'require',
+            'sslmode': 'disable',
         },
     }
 }

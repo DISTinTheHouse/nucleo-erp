@@ -104,27 +104,27 @@ class SatFormaPagoSerializer(serializers.ModelSerializer):
 class SatClaveProdServSerializer(serializers.ModelSerializer):
     class Meta:
         model = SatClaveProdServ
-        fields = ['id_sat_prodserv', 'codigo', 'descripcion', 'estatus']
+        fields = ['id_sat_prodserv', 'codigo', 'descripcion', 'activo']
 
 class SatClaveUnidadSerializer(serializers.ModelSerializer):
     class Meta:
         model = SatClaveUnidad
-        fields = ['id_sat_unidad', 'codigo', 'descripcion', 'estatus']
+        fields = ['id_sat_unidad', 'codigo', 'descripcion', 'activo']
 
 class UnidadMedidaSerializer(serializers.ModelSerializer):
     class Meta:
         model = UnidadMedida
-        fields = ['id', 'clave', 'nombre', 'estatus']
+        fields = ['id', 'clave', 'nombre', 'activo']
 
 class ImpuestoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Impuesto
-        fields = ['id', 'codigo', 'nombre', 'tasa', 'tipo', 'estatus']
+        fields = ['id', 'codigo', 'nombre', 'tasa', 'tipo', 'activo']
 
 class MonedaSerializer(serializers.ModelSerializer):
     class Meta:
         model = Moneda
-        fields = ['id', 'empresa', 'codigo_iso', 'nombre', 'simbolo', 'decimales', 'estatus']
+        fields = ['id', 'empresa', 'codigo_iso', 'nombre', 'simbolo', 'decimales', 'activo']
         read_only_fields = ['id', 'empresa'] # Empresa se asigna en el viewset
 
     def validate(self, data):
@@ -187,7 +187,7 @@ class EmpresaSerializer(serializers.ModelSerializer):
         fields = [
             'id_empresa', 'codigo', 'razon_social', 'nombre_comercial', 
             'rfc', 'email_contacto', 'telefono', 'sitio_web', 
-            'moneda_base', 'timezone', 'idioma', 'estatus', 'logo_url'
+            'moneda_base', 'timezone', 'idioma', 'activo', 'logo_url'
         ]
         read_only_fields = ['id_empresa', 'created_at', 'updated_at', 'deleted_at']
 

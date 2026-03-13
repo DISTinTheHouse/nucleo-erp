@@ -126,6 +126,9 @@ class MonedaViewSet(viewsets.ModelViewSet):
         else:
             serializer.save()
 
+    def perform_destroy(self, instance):
+        instance.soft_delete()
+
 
 class SerieFolioViewSet(viewsets.ModelViewSet):
     """
@@ -163,7 +166,7 @@ class SatClaveProdServViewSet(viewsets.ReadOnlyModelViewSet):
     API endpoint para buscar Claves de Producto/Servicio SAT.
     Soporta búsqueda por 'q' (código o descripción).
     """
-    queryset = SatClaveProdServ.objects.filter(estatus='activo')
+    queryset = SatClaveProdServ.objects.filter(activo=True)
     serializer_class = SatClaveProdServSerializer
     permission_classes = [permissions.IsAuthenticated]
     
@@ -179,7 +182,7 @@ class SatClaveUnidadViewSet(viewsets.ReadOnlyModelViewSet):
     API endpoint para buscar Claves de Unidad SAT.
     Soporta búsqueda por 'q' (código o descripción).
     """
-    queryset = SatClaveUnidad.objects.filter(estatus='activo')
+    queryset = SatClaveUnidad.objects.filter(activo=True)
     serializer_class = SatClaveUnidadSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -194,7 +197,7 @@ class UnidadMedidaViewSet(viewsets.ReadOnlyModelViewSet):
     """
     API endpoint para Unidades de Medida (Sistema CORE).
     """
-    queryset = UnidadMedida.objects.filter(estatus=True)
+    queryset = UnidadMedida.objects.filter(activo=True)
     serializer_class = UnidadMedidaSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -202,7 +205,7 @@ class ImpuestoViewSet(viewsets.ReadOnlyModelViewSet):
     """
     API endpoint para Impuestos (Sistema CORE).
     """
-    queryset = Impuesto.objects.filter(estatus=True)
+    queryset = Impuesto.objects.filter(activo=True)
     serializer_class = ImpuestoSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -247,10 +250,10 @@ class SatCatalogosAPIView(APIView):
         Retorna todos los catálogos del SAT para uso en frontend (cacheable).
         """
         # Regímenes Fiscales
-        regimenes = SatRegimenFiscal.objects.filter(estatus='activo')
-        usos = SatUsoCfdi.objects.filter(estatus='activo')
-        metodos = SatMetodoPago.objects.filter(estatus='activo')
-        formas = SatFormaPago.objects.filter(estatus='activo')
+        regimenes = SatRegimenFiscal.objects.filter(activo=True)
+        usos = SatUsoCfdi.objects.filter(activo=True)
+        metodos = SatMetodoPago.objects.filter(activo=True)
+        formas = SatFormaPago.objects.filter(activo=True)
 
         data = {
             'regimenes_fiscales': SatRegimenFiscalSerializer(regimenes, many=True).data,
@@ -330,14 +333,14 @@ class UserSucursalesAPIView(APIView):
         # Filtrar sucursales
         # Si es superuser, todas las de la empresa.
         # Si es usuario normal, intersección de (Sucursales de la Empresa) y (Sucursales Asignadas).
-        
+         
         active_values = {StatusChoices.ACTIVE, "activo", "ACTIVO"}
         try:
             active_values.add(Sucursal.Estatus.ACTIVO)
         except Exception:
             pass
 
-        qs = Sucursal.objects.filter(empresa_id=empresa_id, estatus__in=list(active_values))
+        qs = Sucursal.objects.filter(empresa_id=empresa_id, activo=True)
         
         if not user.is_superuser and not getattr(user, 'is_admin_empresa', False):
             allowed_ids = list(user.sucursales.values_list('id_sucursal', flat=True))
