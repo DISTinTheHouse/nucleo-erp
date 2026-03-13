@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 import os
 from pathlib import Path
 from decouple import config
+import dj_database_url
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -111,26 +112,46 @@ except OSError:
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
-POSTGRESQL_DB_HOST = config('POSTGRESQL_DB_HOST')
-POSTGRESQL_DB_USER = config('POSTGRESQL_DB_USER')
-POSTGRESQL_DB_PASSWORD = config('POSTGRESQL_DB_PASSWORD')
-POSTGRESQL_DB_NAME = config('POSTGRESQL_DB_NAME')
-POSTGRESQL_DB_PORT = config('POSTGRESQL_DB_PORT')
+DATABASE_URL = config('DATABASE_URL', default='')
+SUPABASE_DATABASE_URL = config('SUPABASE_DATABASE_URL', default='')
+REMOTE_DATABASE_URL = DATABASE_URL or SUPABASE_DATABASE_URL
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': POSTGRESQL_DB_NAME,
-        'USER': POSTGRESQL_DB_USER,
-        'PASSWORD': POSTGRESQL_DB_PASSWORD,
-        'HOST': POSTGRESQL_DB_HOST,
-        'PORT': POSTGRESQL_DB_PORT,
-        'DISABLE_SERVER_SIDE_CURSORS': True,
-        'OPTIONS': {
-            'sslmode': 'disable',
-        },
+ENVIRONMENT = config('ENVIRONMENT', default='development')
+IS_VERCEL = os.environ.get('VERCEL') == '1'
+USE_REMOTE_DB = config('USE_REMOTE_DB', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+
+LOCAL_POSTGRES_DB_HOST = config('LOCAL_POSTGRES_DB_HOST', default='127.0.0.1')
+LOCAL_POSTGRES_DB_USER = config('LOCAL_POSTGRES_DB_USER', default='postgres')
+LEGACY_POSTGRESQL_DB_PASSWORD = config('POSTGRESQL_DB_PASSWORD', default='')
+LOCAL_POSTGRES_DB_PASSWORD = config('LOCAL_POSTGRES_DB_PASSWORD', default=LEGACY_POSTGRESQL_DB_PASSWORD)
+LOCAL_POSTGRES_DB_NAME = config('LOCAL_POSTGRES_DB_NAME', default='erp')
+LOCAL_POSTGRES_DB_PORT = config('LOCAL_POSTGRES_DB_PORT', default='5432')
+LOCAL_POSTGRES_SSLMODE = config('LOCAL_POSTGRES_SSLMODE', default='disable')
+
+if USE_REMOTE_DB and REMOTE_DATABASE_URL:
+    DATABASES = {
+        'default': dj_database_url.parse(
+            REMOTE_DATABASE_URL,
+            conn_max_age=600,
+            ssl_require=True,
+        )
     }
-}
+    DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': LOCAL_POSTGRES_DB_NAME,
+            'USER': LOCAL_POSTGRES_DB_USER,
+            'PASSWORD': LOCAL_POSTGRES_DB_PASSWORD,
+            'HOST': LOCAL_POSTGRES_DB_HOST,
+            'PORT': LOCAL_POSTGRES_DB_PORT,
+            'DISABLE_SERVER_SIDE_CURSORS': True,
+            'OPTIONS': {
+                'sslmode': LOCAL_POSTGRES_SSLMODE,
+            },
+        }
+    }
 
 
 # Password validation
@@ -305,3 +326,6 @@ LOGGING = {
         },
     },
 }
+
+# ALL CONFIGURATIONS
+# =========================
