@@ -7,6 +7,20 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Tipo de mantenimiento (ej. fake_migration)"
+        required: true
+        default: "fake_migration"
+      app:
+        description: "Nombre del app Django (ej. terceros)"
+        required: true
+        default: "terceros"
+      migration:
+        description: "Nombre/numero de migración (ej. 0005)"
+        required: true
+        default: "0005"
 
 concurrency:
   group: production
@@ -74,3 +88,33 @@ jobs:
         run: |
           vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
           vercel deploy --prod --token="$VERCEL_TOKEN"
+
+  maintenance:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Mantenimiento de BD (Supabase)
+        env:
+          SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
+          DEBUG: "false"
+          ENVIRONMENT: "production"
+          USE_REMOTE_DB: "true"
+          SUPABASE_DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: |
+          if [ "${{ github.event.inputs.task }}" = "fake_migration" ]; then
+            echo "Aplicando --fake a ${{ github.event.inputs.app }} ${{ github.event.inputs.migration }}"
+            python manage.py migrate "${{ github.event.inputs.app }}" "${{ github.event.inputs.migration }}" --fake
+            python manage.py migrate --noinput
+          else
+            echo "Tarea de mantenimiento no soportada: ${{ github.event.inputs.task }}"
+            exit 1
+          fi
