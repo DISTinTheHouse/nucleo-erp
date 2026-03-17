@@ -61,6 +61,24 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Validate Supabase URL (pooler)
+        env:
+          SUPABASE_DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          from urllib.parse import urlparse
+          url = os.environ.get("SUPABASE_DATABASE_URL", "")
+          if not url:
+              raise SystemExit("SUPABASE_DATABASE_URL no está configurada")
+          p = urlparse(url)
+          host = p.hostname or ""
+          port = p.port or 5432
+          if host.endswith(".pooler.supabase.com") and port == 5432:
+              raise SystemExit("SUPABASE_DATABASE_URL está usando pooler Session (5432). Cambia a Transaction pooler (6543).")
+          print(f"DB host={host} port={port}")
+          PY
+
       - name: Apply migrations (Supabase)
         env:
           SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
@@ -101,6 +119,24 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Validate Supabase URL (pooler)
+        env:
+          SUPABASE_DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          from urllib.parse import urlparse
+          url = os.environ.get("SUPABASE_DATABASE_URL", "")
+          if not url:
+              raise SystemExit("SUPABASE_DATABASE_URL no está configurada")
+          p = urlparse(url)
+          host = p.hostname or ""
+          port = p.port or 5432
+          if host.endswith(".pooler.supabase.com") and port == 5432:
+              raise SystemExit("SUPABASE_DATABASE_URL está usando pooler Session (5432). Cambia a Transaction pooler (6543).")
+          print(f"DB host={host} port={port}")
+          PY
 
       - name: Mantenimiento de BD (Supabase)
         env:

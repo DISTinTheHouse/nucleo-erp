@@ -129,7 +129,7 @@ LOCAL_POSTGRES_DB_PORT = config('LOCAL_POSTGRES_DB_PORT', default='5432')
 LOCAL_POSTGRES_SSLMODE = config('LOCAL_POSTGRES_SSLMODE', default='disable')
 
 if USE_REMOTE_DB and REMOTE_DATABASE_URL:
-    REMOTE_CONN_MAX_AGE = 0 if IS_VERCEL else 600
+    REMOTE_CONN_MAX_AGE = 0 if (IS_VERCEL or ENVIRONMENT.lower() == 'production') else 600
     DATABASES = {
         'default': dj_database_url.parse(
             REMOTE_DATABASE_URL,
