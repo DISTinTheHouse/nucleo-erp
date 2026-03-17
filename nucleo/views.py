@@ -31,10 +31,10 @@ def get_sucursales_por_empresa(request, empresa_id):
         if hasattr(user, 'empresa') and user.empresa and user.empresa.pk != empresa_id:
              return JsonResponse({'error': 'No autorizado'}, status=403)
 
-    sucursales = Sucursal.objects.filter(empresa_id=empresa_id, estatus=Sucursal.Estatus.ACTIVO).order_by('codigo')
+    sucursales = Sucursal.objects.filter(empresa_id=empresa_id, activo=True).order_by('codigo')
     data_sucursales = []
     for s in sucursales:
-        depts = s.departamentos.filter(estatus=Departamento.Estatus.ACTIVO).values('id_departamento', 'nombre', 'codigo')
+        depts = s.departamentos.filter(activo=True).values('id_departamento', 'nombre', 'codigo')
         data_sucursales.append({
             'id_sucursal': s.id_sucursal,
             'nombre': s.nombre,
