@@ -13,6 +13,9 @@ class ProveedorViewSet(viewsets.ModelViewSet):
     queryset = Proveedor.objects.all()
     serializer_class = ProveedorSerializer
 
+    def perform_destroy(self, instance):
+        instance.soft_delete()
+
 class DireccionClienteViewSet(viewsets.ModelViewSet):
     queryset = DireccionCliente.objects.all()
     serializer_class = DireccionClienteSerializer
