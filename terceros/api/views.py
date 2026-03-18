@@ -1,32 +1,27 @@
-from rest_framework import viewsets, status
+from rest_framework import viewsets
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import ProveedorSerializer, ClienteSerializer, DireccionClienteSerializer
-from rest_framework.decorators import action
-from rest_framework.response import Response
 
 class ClienteViewSet(viewsets.ModelViewSet):
-    queryset = Cliente.objects.all()
+    queryset = Cliente.objects.filter(activo=True)
     serializer_class = ClienteSerializer
-    http_method_names = ["get", "post", "patch"]
+
+    def perform_destroy(self, instance):
+        instance.soft_delete()
 
 class ProveedorViewSet(viewsets.ModelViewSet):
-    queryset = Proveedor.objects.all()
+    queryset = Proveedor.objects.filter(activo=True)
     serializer_class = ProveedorSerializer
 
     def perform_destroy(self, instance):
         instance.soft_delete()
 
 class DireccionClienteViewSet(viewsets.ModelViewSet):
-    queryset = DireccionCliente.objects.all()
+    queryset = DireccionCliente.objects.filter(activo=True)
     serializer_class = DireccionClienteSerializer
-    http_method_names = ["get", "post", "patch"]
 
-    @action(detail=True, methods=['post'])
-    def confirmar(self, request, pk=None):
-        return Response({'msg': 'DireccionClienteViewSet.confirmar'}, status=status.HTTP_200_OK)
+    def perform_destroy(self, instance):
+        instance.soft_delete()
 
-    @action(detail=True, methods=['post']) 
-    def anular(self, request, pk=None):
-        return Response({'msg': 'DireccionClienteViewSet.anular'}, status=status.HTTP_200_OK)
 
 
