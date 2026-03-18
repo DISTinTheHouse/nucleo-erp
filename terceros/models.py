@@ -60,6 +60,16 @@ class Proveedor(StatusLifecycleModel):
         return str(self.id)
 
 class DireccionCliente(StatusLifecycleModel):
+    destinatario = models.CharField(max_length=150)
+    empresa_envio = models.CharField(max_length=150)
+    telefono_envio = models.CharField(max_length=20)
+    celular_envio = models.CharField(max_length=20)
+    direccion_envio = models.CharField(max_length=255)
+    colonia_envio = models.CharField(max_length=120)
+    codigo_postal = models.CharField(max_length=10)
+    ciudad_envio = models.CharField(max_length=120)
+    estado_envio = models.CharField(max_length=120)
+    referencias = models.TextField(blank=True, null=True)
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="direcciones")
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="direcciones_clientes")
     is_default = models.BooleanField(default=False)
