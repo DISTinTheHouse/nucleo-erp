@@ -2,9 +2,22 @@ from django.db import models
 from nucleo.models import StatusLifecycleModel
 from nucleo.models import Empresa, SatRegimenFiscal, SatUsoCfdi, SatFormaPago, SatMetodoPago, Moneda
 
-class Cliente(models.Model):
+class Cliente(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="clientes", null=True, blank=True)
-    sat_regimen_fiscal = models.ForeignKey(SatRegimenFiscal, on_delete=models.CASCADE, related_name="clientes", null=True, blank=True)
+    razon_social = models.CharField(max_length=255)
+    nombre = models.CharField(max_length=150)
+    telefono = models.CharField(max_length=20)
+    correo = models.EmailField(max_length=254)
+    rfc = models.CharField(max_length=13)
+    sat_regimen_fiscal = models.ForeignKey(SatRegimenFiscal, on_delete=models.CASCADE, related_name="clientes")
+    direccion_fiscal = models.CharField(max_length=255)
+    colonia = models.CharField(max_length=120)
+    codigo_postal = models.CharField(max_length=10)
+    ciudad = models.CharField(max_length=120)
+    estado = models.CharField(max_length=120)
+    giro_empresarial = models.CharField(max_length=150)
+    activo = models.BooleanField(default=True)
+
     sat_uso_cfdi = models.ForeignKey(SatUsoCfdi, on_delete=models.CASCADE, related_name="clientes", null=True, blank=True)
 
     class Meta:
@@ -46,7 +59,7 @@ class Proveedor(StatusLifecycleModel):
     def __str__(self):
         return str(self.id)
 
-class DireccionCliente(models.Model):
+class DireccionCliente(StatusLifecycleModel):
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="direcciones")
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="direcciones_clientes")
     is_default = models.BooleanField(default=False)
