@@ -15,6 +15,7 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
 class PedidoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Pedido
+        read_only_fields = ['empresa']
         fields = '__all__'
 
 class PedidoDetalleSerializer(serializers.ModelSerializer):
