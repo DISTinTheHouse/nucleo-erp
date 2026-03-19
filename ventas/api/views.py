@@ -19,17 +19,15 @@ class CotizacionDetalleViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch']
 
 class PedidoViewSet(viewsets.ModelViewSet):
-    queryset = Pedido.objects.all()
+    queryset = Pedido.objects.filter(activo=True)
     serializer_class = PedidoSerializer
-    http_method_names = ['get', 'post', 'patch']
 
-    @action(detail=True, methods=['post'])
-    def confirmar(self, request, pk=None):
-        return Response({"msg": "PedidoViewSet.confirmar"})
+    def perform_create(self, serializer):
+        empresa = self.request.user.empresa
+        serializer.save(empresa=empresa)
     
-    @action(detail=True, methods=['post'])
-    def anular(self, request, pk=None):
-        return Response({"msg": "PedidoViewSet.anular"})
+    def perform_destroy(self, instance):
+        instance.soft_delete()
     
 class PedidoDetalleViewSet(viewsets.ModelViewSet):
     queryset = PedidoDetalle.objects.all()
