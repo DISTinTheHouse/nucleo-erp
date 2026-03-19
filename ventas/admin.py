@@ -1,8 +1,8 @@
 from django.contrib import admin
-from ventas.models import Prospecto, oportunidad, Cotizacion, Pedido, PedidoDetalle, Entrega, EntregaDetalle, Devolucion, DevolucionDetalle
+from ventas.models import Prospecto, Oportunidad, Cotizacion, Pedido, PedidoDetalle, Entrega, EntregaDetalle, Devolucion, DevolucionDetalle
 
 admin.site.register(Prospecto)
-admin.site.register(oportunidad)
+admin.site.register(Oportunidad)
 admin.site.register(Cotizacion)
 admin.site.register(Pedido)
 admin.site.register(PedidoDetalle)
