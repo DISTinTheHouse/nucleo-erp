@@ -14,7 +14,7 @@ class Prospecto(models.Model):
     def __str__(self):
         return str(self.id)
 
-class oportunidad(models.Model):
+class Oportunidad(models.Model):
     prospecto = models.ForeignKey(Prospecto, on_delete=models.CASCADE, related_name="oportunidades")
 
     class Meta:
@@ -26,11 +26,74 @@ class oportunidad(models.Model):
         return str(self.id)
 
 class Cotizacion(models.Model):
+    class FormaPago(models.TextChoices):
+        EFECTIVO = '01', '01 - Efectivo'
+        TRANSFERENCIA = '03', '03 - Transferencia'
+        TARJETA = '04', '04 - Tarjeta'
+    
+    class MetodoPago(models.TextChoices):
+        PUE = 'PUE', 'PUE - Pago en una sola exhibición'
+        PPD = 'PPD', 'PPD - Pago en parcialidades'
+        NA = 'NA', 'N/A'
+    
+    class UsoCfdi(models.TextChoices):
+        GO3 = 'G03', 'G03 - Gastos en general'
+        GO1 = 'G01', 'G01 - Adquisición de mercancías'
+        IO1 = 'I01', 'I01 - Construcciones'
+
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="cotizacion")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="cotizacion")
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="cotizacion")
-    oportunidad = models.ForeignKey(oportunidad, on_delete=models.CASCADE, related_name="cotizacion", null=True)
+    oportunidad = models.ForeignKey(Oportunidad, on_delete=models.CASCADE, related_name="cotizacion", null=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="cotizacion")
+    # Origen
+    recompra = models.BooleanField(default=False)
+    chat_online = models.BooleanField(default=False)
+    pedido_online = models.BooleanField(default=False)
+    prospeccion = models.BooleanField(default=False)
+    recomendacion = models.BooleanField(default=False)
+    amazon = models.BooleanField(default=False)
+    google = models.BooleanField(default=False)
+    publicidad = models.BooleanField(default=False)
+    mercado_libre = models.BooleanField(default=False)
+    redes_sociales = models.BooleanField(default=False)
+    otro = models.BooleanField(default=False)
+    mailing = models.BooleanField(default=False)
+    # Forma de pago y contacto para envio de facturas
+    persona_pagos = models.CharField(max_length=100)
+    correo_facturas = models.EmailField(max_length=150)
+    telefono_pagos = models.CharField(max_length=20)
+    oc = models.CharField(max_length=100, null=True)
+    forma_pago = models.CharField(max_length=5, choices=FormaPago.choices)
+    metodo_pago = models.CharField(max_length=10, choices=MetodoPago.choices)
+    uso_cfdi = models.CharField(max_length=10, choices=UsoCfdi.choices)
+    # Condiciones de pago
+    anticipo_total = models.BooleanField(default=False)
+    anticipo_parcial = models.BooleanField(default=False)
+    vendedor_autoriza = models.BooleanField(default=False)
+    pago_antes_embarque = models.BooleanField(default=False)
+    por_confirmar = models.BooleanField(default=False)
+    otra_cantidad = models.BooleanField(default=False)
+    monto = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    # Envio
+    empaque_ecologico = models.BooleanField(default=False)
+    embarque_parcial = models.BooleanField(default=False)
+    comentarios_parcialidad = models.TextField(null=True, blank=True)
+    # Servicios extra
+    envio = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    programa_bordados = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    bordado_pantalones_extras = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    bordado_logotipo = models.BooleanField(default=False)
+    observaciones = models.TextField(null=True, blank=True)
+    # Cargos adicionales
+    flete = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    seguros = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    anticipo = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    descuento_global = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    ieps = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    iva = models.IntegerField(default=16)
+    gran_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
     class Meta:
         db_table = "cotizaciones"
