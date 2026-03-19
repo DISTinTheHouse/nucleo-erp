@@ -4,6 +4,7 @@ from ventas.models import Cotizacion, CotizacionDetalle, Pedido, PedidoDetalle
 class CotizacionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Cotizacion
+        read_only_fields = ['empresa']
         fields = '__all__'
 
 class CotizacionDetalleSerializer(serializers.ModelSerializer):

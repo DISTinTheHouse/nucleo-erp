@@ -9,6 +9,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
     serializer_class = CotizacionSerializer
     http_method_names = ['get', 'post', 'patch']
 
+    def perform_create(self, serializer):
+        empresa = self.request.user.empresa 
+        serializer.save(empresa=empresa)
+
 class CotizacionDetalleViewSet(viewsets.ModelViewSet):
     queryset = CotizacionDetalle.objects.all()
     serializer_class = CotizacionDetalleSerializer
