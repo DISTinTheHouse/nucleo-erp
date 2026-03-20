@@ -66,7 +66,7 @@ class Producto(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     # campos para costo
     # costo_base = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    # precio_base = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    precio_base = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 
     class Meta:
         db_table = "productos"
