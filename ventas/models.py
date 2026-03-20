@@ -149,7 +149,7 @@ class Pedido(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="pedidos")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="pedidos")
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="pedidos")
-    cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="pedidos", null=True)
+    cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="pedidos", null=True, blank=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="pedidos")
     tipo_pedido = models.SmallIntegerField(default=1, choices=CHOICES_TIPO_PEDIDO)
     estatus = models.SmallIntegerField(default=1, choices=CHOICES_ESTATUS)

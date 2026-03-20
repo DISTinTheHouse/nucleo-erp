@@ -17,6 +17,9 @@ class PedidoSerializer(serializers.ModelSerializer):
         model = Pedido
         read_only_fields = ['empresa']
         fields = '__all__'
+        extra_kwargs = {
+            'cotizacion': {'required': False, 'allow_null': True},
+        }
 
 class PedidoDetalleSerializer(serializers.ModelSerializer):
     class Meta:
