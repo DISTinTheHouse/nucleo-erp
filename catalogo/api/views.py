@@ -27,6 +27,14 @@ class TallaViewSet(viewsets.ModelViewSet):
 class ProductoViewSet(viewsets.ModelViewSet):
     queryset = Producto.objects.all()
     serializer_class = ProductoSerializer
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        empresa = getattr(user, "empresa", None)
+        if not getattr(user, "is_superuser", False) and empresa:
+            serializer.save(empresa=empresa)
+            return
+        serializer.save()
     
 class ProductoVarianteViewSet(viewsets.ModelViewSet):
     queryset = ProductoVariante.objects.all()

@@ -14,9 +14,12 @@ El sistema ha sido diseñado para "no confiar en el cliente" y validar todo en e
 
 ### A. Aislamiento Multi-tenant (Nivel DB)
 Aunque es una base de datos compartida, el aislamiento lógico es absoluto:
-- **Middleware/ViewSets**: Sobrescribimos `get_queryset()` en todas las vistas.
-- **Lógica**: `queryset.filter(empresa=request.user.empresa)`
-- **Resultado**: Un usuario jamás puede leer ni escribir datos de otra empresa, incluso si manipula los IDs en la URL.
+- **DRF ViewSets (APIs operativas)**: Sobrescribimos `get_queryset()` en vistas multi-empresa para filtrar por la empresa del usuario.
+- **Lógica**: `queryset.filter(empresa=request.user.empresa)` (o filtro equivalente cuando la empresa está en la relación, ej. `cotizacion__empresa`).
+- **Resultado**: Un usuario no puede leer datos de otra empresa aunque manipule IDs en la URL.
+- **Comportamiento esperado**:
+  - Listados: `200 OK` con `[]` si el usuario no tiene empresa o no hay registros de su empresa.
+  - Detalle: `404 Not Found` si el recurso existe pero pertenece a otra empresa.
 
 ### B. Validación de Datos (Nivel Serializer)
 No permitimos basura en la BD.
@@ -67,4 +70,3 @@ El sistema implementa un control de acceso robusto y flexible:
     - **GRANT**: Otorga un permiso extra (ej. Usuario de "Ventas" que necesita ver "Inventarios").
     - **DENY**: Revoca un permiso crítico (ej. Usuario de "Admin" que no debe ver "Nómina").
 3.  **Resolución**: La API de Login calcula los permisos efectivos (`(Roles + Grant) - Deny`) y los entrega al frontend. El frontend no necesita conocer la lógica compleja, solo recibe la lista final de permisos.
-

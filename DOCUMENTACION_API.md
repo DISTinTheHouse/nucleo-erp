@@ -6,6 +6,15 @@
 - **Autenticación**: Header `Authorization: Bearer <tu_token>` (Excepto Login)
 - **Content-Type**: `application/json` (excepto para subida de archivos)
 
+## 🏢 Aislamiento por Empresa (Multi-tenant) — Notas Importantes
+
+La mayoría de endpoints operativos están **acotados por la empresa del usuario** (backend aplica scoping por `empresa` en el servidor).
+
+- **Listados (GET collection)**: si el usuario no tiene `empresa_id` o no hay registros para su empresa, la respuesta esperada es `200 OK` con arreglo vacío `[]`.
+- **Detalle (GET /{id}/)**: si el registro no pertenece a la empresa del usuario, el endpoint normalmente responderá `404 Not Found` (no se expone existencia cross-empresa).
+- **Superusuario**: puede ver información global según el módulo (sin scoping).
+- **Creación/edición**: cuando un recurso requiere `empresa`, usar siempre el `empresa_id` recibido en Login (no inventarlo ni cambiarlo desde el cliente).
+
 ***
 
 ## 🔐 1. Autenticación y Sesión

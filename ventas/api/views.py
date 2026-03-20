@@ -9,6 +9,16 @@ class CotizacionViewSet(viewsets.ModelViewSet):
     serializer_class = CotizacionSerializer
     http_method_names = ['get', 'post', 'patch']
 
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if empresa:
+            return qs.filter(empresa=empresa)
+        return qs.none()
+
     def perform_create(self, serializer):
         empresa = self.request.user.empresa 
         serializer.save(empresa=empresa)
@@ -17,6 +27,16 @@ class CotizacionDetalleViewSet(viewsets.ModelViewSet):
     queryset = CotizacionDetalle.objects.all()
     serializer_class = CotizacionDetalleSerializer
     http_method_names = ['get', 'post', 'patch']
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if empresa:
+            return qs.filter(cotizacion__empresa=empresa)
+        return qs.none()
 
 class PedidoViewSet(viewsets.ModelViewSet):
     queryset = Pedido.objects.filter(activo=True)

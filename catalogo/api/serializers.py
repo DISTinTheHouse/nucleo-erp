@@ -25,6 +25,9 @@ class ProductoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Producto
         fields = '__all__'
+        extra_kwargs = {
+            'empresa': {'required': False},
+        }
 
 class ProductoVarianteSerializer(serializers.ModelSerializer):
     class Meta:

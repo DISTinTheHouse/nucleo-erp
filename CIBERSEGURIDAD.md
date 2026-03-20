@@ -57,6 +57,9 @@ Implementado:
 Implementado:
 - El backend filtra datos por **empresa** y, cuando aplica, por **sucursales permitidas**.  
   Esto previene que un usuario pueda leer/escribir datos de otra empresa aunque manipule IDs o URLs.
+- Comportamiento esperado en APIs operativas:
+  - **Listados**: `200 OK` con `[]` si el usuario no tiene empresa o no hay registros en su empresa.
+  - **Detalle**: `404 Not Found` si el registro pertenece a otra empresa.
 
 ## 6) Protección de red, navegador y transporte
 

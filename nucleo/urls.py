@@ -19,6 +19,7 @@ from .views_sat import (
     SatRegimenFiscalListView, SatUsoCfdiListView, SatMetodoPagoListView,
     SatFormaPagoListView, SatClaveProdServListView, SatClaveUnidadListView
 )
+from catalogo.views import importar_productos_excel
 
 app_name = 'nucleo'
 
@@ -46,6 +47,9 @@ urlpatterns = [
 
     # WEB CORE - DASHBOARD
     path('core/dashboard/', CoreDashboardView.as_view(), name='dashboard'),
+
+    # WEB CORE - CATALOGO
+    path('core/catalogo/productos/importar-excel/', importar_productos_excel, name='producto_importar_excel'),
     
     # AJAX
     path('ajax/sucursales/next-id/', get_next_sucursal_id, name='ajax_sucursal_next_id'),
