@@ -1,5 +1,5 @@
 from django.db import models
-from nucleo.models import Empresa, Sucursal, Moneda, StatusLifecycleModel
+from nucleo.models import Empresa, Sucursal, Moneda, SerieFolio, StatusLifecycleModel
 from terceros.models import Cliente
 from catalogo.models import Producto, Talla
 
@@ -30,12 +30,12 @@ class Cotizacion(models.Model):
         EFECTIVO = '01', '01 - Efectivo'
         TRANSFERENCIA = '03', '03 - Transferencia'
         TARJETA = '04', '04 - Tarjeta'
-    
+
     class MetodoPago(models.TextChoices):
         PUE = 'PUE', 'PUE - Pago en una sola exhibición'
         PPD = 'PPD', 'PPD - Pago en parcialidades'
         NA = 'NA', 'N/A'
-    
+
     class UsoCfdi(models.TextChoices):
         GO3 = 'G03', 'G03 - Gastos en general'
         GO1 = 'G01', 'G01 - Adquisición de mercancías'
@@ -148,6 +148,10 @@ class Pedido(StatusLifecycleModel):
         
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="pedidos")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="pedidos")
+    serie_folio = models.ForeignKey(SerieFolio, on_delete=models.PROTECT, related_name="pedidos", null=True, blank=True)
+    folio = models.CharField(max_length=50, null=True, blank=True)
+    folio_consecutivo = models.PositiveIntegerField(null=True, blank=True)
+    folio_anio = models.PositiveSmallIntegerField(null=True, blank=True)
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="pedidos")
     cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="pedidos", null=True, blank=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="pedidos")

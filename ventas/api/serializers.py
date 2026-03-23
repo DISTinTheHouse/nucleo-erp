@@ -15,7 +15,7 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
 class PedidoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Pedido
-        read_only_fields = ['empresa']
+        read_only_fields = ['empresa', 'folio', 'folio_consecutivo', 'folio_anio']
         fields = '__all__'
         extra_kwargs = {
             'cotizacion': {'required': False, 'allow_null': True},
