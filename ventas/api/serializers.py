@@ -13,20 +13,24 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 class PedidoSerializer(serializers.ModelSerializer):
+    folio = serializers.CharField(read_only=True)
+    folio_consecutivo = serializers.IntegerField(read_only=True)
     class Meta:
         model = Pedido
-        read_only_fields = ['empresa', 'folio', 'folio_consecutivo', 'folio_anio']
+        read_only_fields = ['empresa']
         fields = '__all__'
         extra_kwargs = {
             'cotizacion': {'required': False, 'allow_null': True},
         }
 
 class PedidoDetalleSerializer(serializers.ModelSerializer):
+    pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
     class Meta:
         model = PedidoDetalle
         fields = '__all__'
 
 class PedidoDetalleTallaSerializer(serializers.ModelSerializer):
+    pedido_folio = serializers.CharField(source='pedido_detalle.pedido.folio', read_only=True)
     class Meta:
         model = PedidoDetalleTalla
         fields = '__all__'

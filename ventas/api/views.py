@@ -44,13 +44,20 @@ class PedidoViewSet(viewsets.ModelViewSet):
     queryset = Pedido.objects.filter(activo=True)
     serializer_class = PedidoSerializer
 
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if not getattr(user, "is_superuser", False) and getattr(user, "empresa", None):
+            qs = qs.filter(empresa=user.empresa)
+        q = self.request.query_params.get("q") or self.request.query_params.get("folio")
+        if q:
+            qs = qs.filter(folio__icontains=q)
+        return qs
+
     def perform_create(self, serializer):
         empresa = self.request.user.empresa
         with transaction.atomic():
             pedido = serializer.save(empresa=empresa)
-
-            if pedido.folio:
-                return
 
             serie_folio = None
 
@@ -69,7 +76,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
             if not serie_folio:
                 return
 
-            folio_formateado, nuevo_consecutivo, anio_actual = serie_folio.get_siguiente_folio()
+            try:
+                folio_formateado, nuevo_consecutivo, anio_actual = serie_folio.get_siguiente_folio()
+            except Exception:
+                return
 
             serie_folio.folio_actual = nuevo_consecutivo
             serie_folio.ultimo_anio = anio_actual
@@ -78,8 +88,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             pedido.serie_folio = serie_folio
             pedido.folio = folio_formateado
             pedido.folio_consecutivo = nuevo_consecutivo
-            pedido.folio_anio = anio_actual
-            pedido.save(update_fields=["serie_folio", "folio", "folio_consecutivo", "folio_anio"])
+            pedido.save(update_fields=["serie_folio", "folio", "folio_consecutivo"])
     
     def perform_destroy(self, instance):
         instance.soft_delete()

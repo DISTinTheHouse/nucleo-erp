@@ -255,45 +255,31 @@ class SerieFolio(StatusLifecycleModel):
         return f"{self.tipo_documento} {self.serie}"
 
     def get_siguiente_folio(self):
-        """
-        Calcula el siguiente folio basado en la configuración.
-        No guarda el incremento, solo retorna la cadena formateada y el número.
-        """
         import datetime
         anio_actual = int(datetime.datetime.now().strftime('%y'))  # 24, 25, 26
-        
-        nuevo_consecutivo = self.folio_actual + 1
-
-        # Lógica de reinicio anual
         if self.reiniciar_anual and self.ultimo_anio != anio_actual:
-            nuevo_consecutivo = 1
-        
-        # Formateo del número
+            nuevo_consecutivo = self.folio_inicial or 1
+        else:
+            if self.folio_actual and self.folio_actual > 0:
+                nuevo_consecutivo = self.folio_actual + 1
+            else:
+                nuevo_consecutivo = self.folio_inicial or 1
+        if self.folio_final is not None and nuevo_consecutivo > self.folio_final:
+            raise ValueError("Rango de folios agotado")
         if self.relleno_ceros > 0:
             numero_str = str(nuevo_consecutivo).zfill(self.relleno_ceros)
         else:
             numero_str = str(nuevo_consecutivo)
-
-        # Construcción del folio completo
         partes = []
         if self.prefijo:
             partes.append(self.prefijo)
-        
         partes.append(self.serie)
         partes.append(numero_str)
-        
         if self.incluir_anio:
             partes.append(str(anio_actual))
-
         if self.sufijo:
             partes.append(self.sufijo)
-
         folio_formateado = self.separador.join(partes)
-        
-        # Corrección: si prefijo/sufijo no deben llevar separador, ajustar lógica.
-        # Por simplicidad actual: Serie-Folio-Año (P-1-26)
-        # Si se requiere P1-26, el separador debería ser vacio y manejar espacios en los campos.
-        
         return folio_formateado, nuevo_consecutivo, anio_actual
 
     def incrementar_folio(self):

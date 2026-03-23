@@ -721,3 +721,108 @@ Listado de direcciones registradas de los clientes, incluyendo información de u
       "is_default": true
     }
   ```
+
+***
+
+## 🧾 Ventas - Pedidos
+
+**Base URL**: `/api/v1/ventas/`
+
+Este módulo está diseñado para ser escalable y evitar “duplicar líneas” por talla.
+
+**Estructura de datos (lógica de “una sola línea”)**
+- `Pedido`: encabezado del pedido.
+- `PedidoDetalle`: 1 registro por **producto** dentro del pedido (no guarda talla/cantidad).
+- `PedidoDetalleTalla`: sub-líneas por **talla** (aquí vive `cantidad` y `lleva_bordado`).
+
+### 1) Pedidos
+
+- **Listar**: `GET /api/v1/ventas/pedidos/`
+- **Buscar por folio**: `GET /api/v1/ventas/pedidos/?q=P-000001` (o `?folio=P-000001`)
+- **Detalle**: `GET /api/v1/ventas/pedidos/{id}/`
+- **Crear**: `POST /api/v1/ventas/pedidos/`
+- **Editar**: `PATCH /api/v1/ventas/pedidos/{id}/`
+- **Eliminar (soft delete)**: `DELETE /api/v1/ventas/pedidos/{id}/`
+
+**Generación de folio**
+- Al crear un pedido, el backend busca una `SerieFolio` activa para la combinación:
+  - `empresa` (del usuario autenticado)
+  - `sucursal` (del pedido)
+  - `tipo_documento = "Pedido"` (case-insensitive)
+- Se genera y asigna automáticamente `folio` (ej: `P-000001`) y `folio_consecutivo`.
+- Opcionalmente, se puede enviar `serie_folio` en el body para forzar la serie específica.
+
+**Ejemplo de crear pedido**
+- **POST**: `/api/v1/ventas/pedidos/`
+- **Body (mínimo práctico)**:
+  ```json
+  {
+    "sucursal": 1,
+    "cliente": 1,
+    "moneda": 1,
+    "persona_pagos": "Juan Pérez",
+    "correo_facturas": "facturas@cliente.com",
+    "telefono_pagos": "8110000000",
+    "forma_pago": "01",
+    "metodo_pago": "PUE",
+    "uso_cfdi": "G03"
+  }
+  ```
+
+**Respuesta (campos clave)**
+  ```json
+  {
+    "id": 123,
+    "empresa": 1,
+    "sucursal": 1,
+    "serie_folio": 10,
+    "folio": "P-000001",
+    "folio_consecutivo": 1
+  }
+  ```
+
+### 2) Pedido Detalle (1 línea por producto)
+
+- **Listar**: `GET /api/v1/ventas/pedido-detalle/`
+- **Detalle**: `GET /api/v1/ventas/pedido-detalle/{id}/`
+- **Crear**: `POST /api/v1/ventas/pedido-detalle/`
+- **Editar**: `PATCH /api/v1/ventas/pedido-detalle/{id}/`
+- **Eliminar**: `DELETE /api/v1/ventas/pedido-detalle/{id}/`
+
+**Notas**
+- Esta tabla representa la “línea” del pedido por producto.
+- No maneja tallas/cantidades directamente.
+- Para facilitar frontend, el serializer incluye `pedido_folio` además del `pedido` (id).
+
+**Ejemplo crear detalle**
+  ```json
+  {
+    "pedido": 123,
+    "producto": 50,
+    "precio_unitario": "120.00",
+    "costo_unitario": "80.00",
+    "subtotal_linea": "0.00"
+  }
+  ```
+
+### 3) Pedido Detalle Talla (cantidades y bordado)
+
+- **Listar**: `GET /api/v1/ventas/pedido-detalle-talla/`
+- **Detalle**: `GET /api/v1/ventas/pedido-detalle-talla/{id}/`
+- **Crear**: `POST /api/v1/ventas/pedido-detalle-talla/`
+- **Editar**: `PATCH /api/v1/ventas/pedido-detalle-talla/{id}/`
+- **Eliminar**: `DELETE /api/v1/ventas/pedido-detalle-talla/{id}/`
+
+**Notas**
+- Aquí vive `cantidad` por talla y el indicador `lleva_bordado`.
+- Para facilitar frontend, el serializer incluye `pedido_folio` además de `pedido_detalle` (id).
+
+**Ejemplo crear talla**
+  ```json
+  {
+    "pedido_detalle": 555,
+    "talla": 3,
+    "cantidad": 12,
+    "lleva_bordado": true
+  }
+  ```

@@ -149,9 +149,8 @@ class Pedido(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="pedidos")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="pedidos")
     serie_folio = models.ForeignKey(SerieFolio, on_delete=models.PROTECT, related_name="pedidos", null=True, blank=True)
-    folio = models.CharField(max_length=50, null=True, blank=True)
+    folio = models.CharField(max_length=50, null=True, blank=True, db_index=True)
     folio_consecutivo = models.PositiveIntegerField(null=True, blank=True)
-    folio_anio = models.PositiveSmallIntegerField(null=True, blank=True)
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="pedidos")
     cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="pedidos", null=True, blank=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="pedidos")
@@ -215,6 +214,9 @@ class Pedido(StatusLifecycleModel):
         db_table = "pedidos"
         verbose_name = "Pedido"
         verbose_name_plural = "Pedidos"
+        constraints = [
+            models.UniqueConstraint(fields=["serie_folio", "folio"], name="uq_pedido_seriefolio_folio")
+        ]
     
     def __str__(self):
         return str(self.id)
