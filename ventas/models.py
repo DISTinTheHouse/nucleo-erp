@@ -226,7 +226,7 @@ class PedidoDetalle(models.Model):
         db_table = "pedido_detalle"
         verbose_name = "Pedido Detalle"
         verbose_name_plural = "Pedidos Detalle"
-    
+
     def __str__(self):
         return str(self.id)
 
@@ -236,6 +236,7 @@ class PedidoDetalleTalla(models.Model):
     cantidad = models.PositiveIntegerField(default=1)
     precio_unitario = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     subtotal_talla = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    lleva_bordado = models.BooleanField(default=False)
 
     class Meta:
         db_table = "pedido_detalle_talla"
