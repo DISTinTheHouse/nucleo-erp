@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from ventas.models import Cotizacion, CotizacionDetalle, Pedido, PedidoDetalle
+from ventas.models import Cotizacion, CotizacionDetalle, Pedido, PedidoDetalle, PedidoDetalleTalla
 
 class CotizacionSerializer(serializers.ModelSerializer):
     class Meta:
@@ -24,4 +24,9 @@ class PedidoSerializer(serializers.ModelSerializer):
 class PedidoDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = PedidoDetalle
+        fields = '__all__'
+
+class PedidoDetalleTallaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PedidoDetalleTalla
         fields = '__all__'

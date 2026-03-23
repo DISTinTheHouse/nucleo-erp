@@ -1,7 +1,7 @@
 from django.db import models
 from nucleo.models import Empresa, Sucursal, Moneda, StatusLifecycleModel
 from terceros.models import Cliente
-from catalogo.models import Producto
+from catalogo.models import Producto, Talla
 
 class Prospecto(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="prospectos")
@@ -217,12 +217,30 @@ class Pedido(StatusLifecycleModel):
     
 class PedidoDetalle(models.Model):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="detalles")
-    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="detalles")
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name="detalles")
+    precio_unitario = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    costo_unitario = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    subtotal_linea = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     class Meta:
         db_table = "pedido_detalle"
         verbose_name = "Pedido Detalle"
         verbose_name_plural = "Pedidos Detalle"
+    
+    def __str__(self):
+        return str(self.id)
+
+class PedidoDetalleTalla(models.Model):
+    pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE, related_name="tallas")
+    talla = models.ForeignKey(Talla, on_delete=models.PROTECT, related_name="pedido_detalles_talla")
+    cantidad = models.PositiveIntegerField(default=1)
+    precio_unitario = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    subtotal_talla = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    class Meta:
+        db_table = "pedido_detalle_talla"
+        verbose_name = "Pedido Detalle Talla"
+        verbose_name_plural = "Pedidos Detalle Tallas"
     
     def __str__(self):
         return str(self.id)

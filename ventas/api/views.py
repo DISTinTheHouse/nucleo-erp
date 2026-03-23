@@ -1,8 +1,8 @@
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from ventas.models import Cotizacion, CotizacionDetalle, Pedido, PedidoDetalle
-from ventas.api.serializers import CotizacionSerializer, CotizacionDetalleSerializer, PedidoSerializer, PedidoDetalleSerializer
+from ventas.models import Cotizacion, CotizacionDetalle, Pedido, PedidoDetalle, PedidoDetalleTalla
+from ventas.api.serializers import CotizacionSerializer, CotizacionDetalleSerializer, PedidoSerializer, PedidoDetalleSerializer, PedidoDetalleTallaSerializer
 
 class CotizacionViewSet(viewsets.ModelViewSet):
     queryset = Cotizacion.objects.all()
@@ -57,3 +57,8 @@ class PedidoDetalleViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def anular(self, request, pk=None):
         return Response({"msg": "PedidoDetalleViewSet.anular"})
+
+class PedidoDetalleTallaViewSet(viewsets.ModelViewSet):
+    queryset = PedidoDetalleTalla.objects.all()
+    serializer_class = PedidoDetalleTallaSerializer
+    http_method_names = ['get', 'post', 'patch']
