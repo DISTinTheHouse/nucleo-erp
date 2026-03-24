@@ -758,17 +758,27 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
       ],
       "usos_cfdi": [{ "value": "G03", "label": "G03 - Gastos en general" }],
       "tallas": [{ "id": 1, "nombre": "CH" }],
+      "tipos_pedido": [{ "value": 1, "label": "Stock" }, { "value": 2, "label": "Fabricacion" }],
       "regimenes_fiscales": [
         { "value": "601", "label": "601 - General de Ley Personas Morales" }
       ]
-    },
-    "busqueda": {
-      "clientes": [
-        {
-          "id": 10,
-          "razon_social": "Cliente SA",
-          "nombre": "Cliente",
-          "rfc": "XAXX010101000"
+      "clientes": [{
+        "id": 10,
+        "razon_social": "Cliente SA",
+        "nombre": "Cliente",
+        "rfc": "XAXX010101000",
+        "correo": "cliente@demo.com",
+        "telefono": "8110000000",
+        "direccion_fiscal": "Calle 1",
+        "colonia": "Centro",
+        "codigo_postal": "64000",
+        "ciudad": "Monterrey",
+        "estado": "NL",
+        "giro_empresarial": "Textil",
+        "sat_regimen_fiscal_id": 3,
+        "sat_regimen_fiscal__codigo": "601",
+        "sat_regimen_fiscal__descripcion": "General de Ley Personas Morales"
+      }],
         }
       ],
       "productos": [
@@ -778,8 +788,6 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
           "precio_base": "0.00"
         }
       ]
-    }
-  }
   ```
 
 ### 2) Crear cotización y generar pedido para mesa de control (con detalle)

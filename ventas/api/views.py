@@ -184,6 +184,26 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 {"value": r["codigo"], "label": f"{r['codigo']} - {r['descripcion']}"}
                 for r in regimenes_fiscales
             ]
+            tipos_pedido = [{"value": tp[0], "label": tp[1]} for tp in Pedido.CHOICES_TIPO_PEDIDO]
+            clientes = list(
+                clientes_qs.order_by("id").values(
+                    "id",
+                    "razon_social",
+                    "nombre",
+                    "rfc",
+                    "correo",
+                    "telefono",
+                    "direccion_fiscal",
+                    "colonia",
+                    "codigo_postal",
+                    "ciudad",
+                    "estado",
+                    "giro_empresarial",
+                    "sat_regimen_fiscal_id",
+                    "sat_regimen_fiscal__codigo",
+                    "sat_regimen_fiscal__descripcion",
+                )[:limit]
+            )
 
             data = {
                 "vendedor": {
@@ -197,6 +217,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     "metodos_pago": [{"value": k, "label": v} for k, v in Cotizacion.MetodoPago.choices],
                     "usos_cfdi": [{"value": k, "label": v} for k, v in Cotizacion.UsoCfdi.choices],
                     "tallas": tallas,
+                    "tipos_pedido": tipos_pedido,
                     "regimenes_fiscales": regimenes_fiscales,
                 },
                 "busqueda": {
