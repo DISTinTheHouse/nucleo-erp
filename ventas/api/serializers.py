@@ -57,3 +57,20 @@ class PedidoOnboardingDetalleInputSerializer(serializers.Serializer):
 class PedidoOnboardingCreateSerializer(serializers.Serializer):
     pedido = PedidoSerializer()
     detalle = PedidoOnboardingDetalleInputSerializer(many=True)
+
+class CotizacionOnboardingTallaInputSerializer(serializers.Serializer):
+    talla = serializers.IntegerField()
+    cantidad = serializers.IntegerField(min_value=1)
+    lleva_bordado = serializers.BooleanField(required=False, default=False)
+    bordado_config = serializers.JSONField(required=False, allow_null=True)
+
+class CotizacionOnboardingDetalleInputSerializer(serializers.Serializer):
+    producto = serializers.IntegerField()
+    precio_unitario = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+    costo_unitario = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+    tallas = CotizacionOnboardingTallaInputSerializer(many=True)
+
+class CotizacionOnboardingCreateSerializer(serializers.Serializer):
+    cotizacion_id = serializers.IntegerField(required=False)
+    cotizacion = CotizacionSerializer()
+    detalle = CotizacionOnboardingDetalleInputSerializer(many=True)

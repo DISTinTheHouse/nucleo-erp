@@ -723,24 +723,21 @@ Listado de direcciones registradas de los clientes, incluyendo información de u
 
 ---
 
-## 🧾 Ventas - Pedidos (Onboarding)
+## 🧾 Ventas - Cotizaciones (Onboarding)
 
 **Base URL**: `/api/v1/ventas/`
 
-Para que Next.js no tenga que orquestar múltiples endpoints, existe un flujo de onboarding en **un solo endpoint** que:
+El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotización:
 
-- entrega catálogos/búsquedas mínimas para la UI (vendedor, tallas, opciones de pago, búsqueda de clientes/productos)
-- crea el pedido completo (encabezado + productos + tallas + configuración de bordado si aplica)
-
-**Estructura de datos (lógica de “una sola línea”)**
-
-- `Pedido`: encabezado del pedido.
-- `PedidoDetalle`: 1 registro por **producto** dentro del pedido.
-- `PedidoDetalleTalla`: sub-líneas por **talla** (cantidad + `lleva_bordado` + `bordado_config`).
+- se crea/actualiza un registro en **Pedidos** ligado a la cotización (mesa de control) con `estatus=Por Autorizar`
+- se genera el folio de pedido (ej: `P-000001`)
+- el detalle (productos/tallas/bordado) se guarda en la estructura de pedido:
+  - `PedidoDetalle`: 1 registro por **producto**
+  - `PedidoDetalleTalla`: sub-líneas por **talla** (`cantidad` + `lleva_bordado` + `bordado_config`)
 
 ### 1) Obtener datos para el formulario (búsquedas y catálogos)
 
-- **Endpoint**: `GET /api/v1/ventas/pedidos/onboarding/`
+- **Endpoint**: `GET /api/v1/ventas/cotizaciones/onboarding/`
 - **Query Params (opcionales)**:
   - `cliente_q`: texto para buscar cliente (nombre / razón social / RFC)
   - `producto_q`: texto para buscar producto (nombre)
@@ -760,8 +757,10 @@ Para que Next.js no tenga que orquestar múltiples endpoints, existe un flujo de
         { "value": "PUE", "label": "PUE - Pago en una sola exhibición" }
       ],
       "usos_cfdi": [{ "value": "G03", "label": "G03 - Gastos en general" }],
-      "tipos_pedido": [{ "value": 1, "label": "Stock" }],
-      "tallas": [{ "id": 1, "nombre": "CH" }]
+      "tallas": [{ "id": 1, "nombre": "CH" }],
+      "regimenes_fiscales": [
+        { "value": "601", "label": "601 - General de Ley Personas Morales" }
+      ]
     },
     "busqueda": {
       "clientes": [
@@ -783,16 +782,16 @@ Para que Next.js no tenga que orquestar múltiples endpoints, existe un flujo de
   }
   ```
 
-### 2) Crear pedido completo (encabezado + productos + tallas + bordado)
+### 2) Crear cotización y generar pedido para mesa de control (con detalle)
 
-- **Endpoint**: `POST /api/v1/ventas/pedidos/onboarding/`
+- **Endpoint**: `POST /api/v1/ventas/cotizaciones/onboarding/`
 
 **Reglas del flujo**
 
 - El backend crea **1 `PedidoDetalle` por producto** (aunque se repita el producto en el payload).
 - Las tallas repetidas se consolidan sumando `cantidad`.
-- El encabezado de pedido incluye un **snapshot de datos de facturación** del cliente: si el payload no envía esos campos, el backend los copia automáticamente del registro de Cliente al momento de crear el pedido. Si los envías en el payload, se respetan para ese pedido.
-- Nota: `cliente_regimen_fiscal` es el **id** del catálogo `SatRegimenFiscal` (no el código SAT “601”).
+- Si una talla viene con `lleva_bordado=true`, entonces `bordado_config` es requerido y se guarda en `PedidoDetalleTalla.bordado_config`.
+- Se crea el `Pedido` ligado a la cotización con `estatus=Por Autorizar` para que mesa de control valide.
 
 **Generación de folio**
 
@@ -802,7 +801,7 @@ Para que Next.js no tenga que orquestar múltiples endpoints, existe un flujo de
 
 ```json
 {
-  "pedido": {
+  "cotizacion": {
     "sucursal": 1,
     "cliente": 10,
     "moneda": 1,
@@ -812,16 +811,6 @@ Para que Next.js no tenga que orquestar múltiples endpoints, existe un flujo de
     "forma_pago": "01",
     "metodo_pago": "PUE",
     "uso_cfdi": "G03",
-    "cliente_razon_social": "Cliente Demo SA de CV",
-    "cliente_nombre": "Cliente Demo",
-    "cliente_rfc": "XAXX010101000",
-    "cliente_regimen_fiscal": 3,
-    "cliente_direccion_fiscal": "Calle 1",
-    "cliente_colonia": "Centro",
-    "cliente_codigo_postal": "64000",
-    "cliente_ciudad": "Monterrey",
-    "cliente_estado": "NL",
-    "cliente_giro_empresarial": "Textil",
     "embarque_parcial": false,
     "envio": "0.00",
     "flete": "0.00",
@@ -854,7 +843,13 @@ Para que Next.js no tenga que orquestar múltiples endpoints, existe un flujo de
 
 ```json
 {
-  "pedido": { "id": 123, "folio": "P-000001", "folio_consecutivo": 1 },
+  "cotizacion": { "id": 10 },
+  "pedido": {
+    "id": 123,
+    "folio": "P-000001",
+    "folio_consecutivo": 1,
+    "estatus": 2
+  },
   "detalles": [
     {
       "id": 555,
@@ -874,3 +869,9 @@ Para que Next.js no tenga que orquestar múltiples endpoints, existe un flujo de
   ]
 }
 ```
+
+### 3) Edición con ventana de tiempo + notificación a mesa de control
+
+- **Endpoint**: `PATCH /api/v1/ventas/cotizaciones/{id}/`
+- Regla: la edición está permitida dentro del periodo configurado; al editar, el pedido ligado se marca nuevamente como `Por Autorizar` (`estatus=2`) para revisión.
+- Para editar también el detalle (productos/tallas/bordado) usando el mismo flujo, re-envía `POST /api/v1/ventas/cotizaciones/onboarding/` agregando `cotizacion_id` (y el detalle completo actualizado).
