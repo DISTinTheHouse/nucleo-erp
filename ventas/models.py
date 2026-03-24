@@ -1,5 +1,5 @@
 from django.db import models
-from nucleo.models import Empresa, Sucursal, Moneda, SerieFolio, StatusLifecycleModel
+from nucleo.models import Empresa, Sucursal, Moneda, SerieFolio, StatusLifecycleModel, SatRegimenFiscal
 from terceros.models import Cliente
 from catalogo.models import Producto, Talla
 
@@ -177,6 +177,16 @@ class Pedido(StatusLifecycleModel):
     forma_pago = models.CharField(max_length=5, choices=FormaPago.choices)
     metodo_pago = models.CharField(max_length=10, choices=MetodoPago.choices)
     uso_cfdi = models.CharField(max_length=10, choices=UsoCfdi.choices)
+    cliente_razon_social = models.CharField(max_length=255, null=True, blank=True)
+    cliente_nombre = models.CharField(max_length=150, null=True, blank=True)
+    cliente_rfc = models.CharField(max_length=13, null=True, blank=True)
+    cliente_regimen_fiscal = models.ForeignKey(SatRegimenFiscal, on_delete=models.PROTECT, related_name="pedidos", null=True, blank=True)
+    cliente_direccion_fiscal = models.CharField(max_length=255, null=True, blank=True)
+    cliente_colonia = models.CharField(max_length=120, null=True, blank=True)
+    cliente_codigo_postal = models.CharField(max_length=10, null=True, blank=True)
+    cliente_ciudad = models.CharField(max_length=120, null=True, blank=True)
+    cliente_estado = models.CharField(max_length=120, null=True, blank=True)
+    cliente_giro_empresarial = models.CharField(max_length=150, null=True, blank=True)
     # Condiciones de pago
     anticipo_total = models.BooleanField(default=False)
     anticipo_parcial = models.BooleanField(default=False)
@@ -243,6 +253,7 @@ class PedidoDetalleTalla(models.Model):
     precio_unitario = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     subtotal_talla = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     lleva_bordado = models.BooleanField(default=False)
+    bordado_config = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = "pedido_detalle_talla"

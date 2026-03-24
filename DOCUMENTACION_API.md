@@ -15,7 +15,7 @@ La mayoría de endpoints operativos están **acotados por la empresa del usuario
 - **Superusuario**: puede ver información global según el módulo (sin scoping).
 - **Creación/edición**: cuando un recurso requiere `empresa`, usar siempre el `empresa_id` recibido en Login (no inventarlo ni cambiarlo desde el cliente).
 
-***
+---
 
 ## 🔐 1. Autenticación y Sesión
 
@@ -58,7 +58,7 @@ Obtén el token de sesión para el usuario.
     - `D-CONF` → Eliminación
   - Para usuarios `is_superuser=true` o `is_admin_empresa=true`, el backend concede acceso amplio por rol; el frontend puede tratarlos como “tienen todo”, aunque la lista `permisos` pueda estar vacía.
 
-***
+---
 
 ## 🏢 2. Contexto de Usuario (Empresas y Sucursales)
 
@@ -109,7 +109,7 @@ Permite ver detalles y editar sucursales.
 - **Detalle**: `GET /api/v1/nucleo/sucursales/{codigo}/`
 - **Editar**: `PATCH /api/v1/nucleo/sucursales/{codigo}/` (Requiere `is_admin_empresa=True`)
 
-***
+---
 
 ## 🔢 3. Series y Folios
 
@@ -151,7 +151,7 @@ Obtiene las series configuradas para la empresa del usuario.
   }
   ```
 
-***
+---
 
 ## 🛡️ 4. Roles y Permisos
 
@@ -212,7 +212,7 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
   }
   ```
 
-***
+---
 
 ## 👥 5. Gestión de Usuarios
 
@@ -260,7 +260,7 @@ El backend asigna automáticamente la empresa del administrador que crea el usua
   - Ejemplo: `PATCH /api/v1/usuarios/{id}/` con body `{ "roles": [3, 5] }`
   - La respuesta incluye `roles_ids` con los IDs asignados.
 
-***
+---
 
 ## 🏭 6. Gestión de Empresas (CRUD Completo)
 
@@ -295,7 +295,7 @@ Al crear una empresa, el superusuario se asigna automáticamente a ella.
   ```
 - **Respuesta (201 Created)**: Objeto de la empresa creada.
 
-***
+---
 
 ## 📜 7. Catálogos del SAT (Facturación)
 
@@ -389,7 +389,7 @@ Catálogo de impuestos configurados en el sistema (IVA 16%, ISR, etc.).
   ]
   ```
 
-***
+---
 
 ## 📦 8. Inventarios (Almacenes y Ubicaciones)
 
@@ -553,7 +553,7 @@ Permite registrar ajustes manuales (positivos o negativos) al inventario por pé
 - **Editar**: `PATCH /api/v1/inventarios/ajustes/{id}/`
 - **Eliminar**: `DELETE /api/v1/inventarios/ajustes/{id}/`
 
-***
+---
 
 ## 🏷️ 9. Catálogo de Productos
 
@@ -623,7 +623,7 @@ Todos soportan CRUD estándar (`GET`, `POST`, `PATCH`, `DELETE`).
 - **Colores**: `/api/v1/catalogo/color/`
 - **Tallas**: `/api/v1/catalogo/talla/`
 
-***
+---
 
 ## ⚙️ 10. Configuración Fiscal (CSD)
 
@@ -659,7 +659,7 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
   - `200 OK`: Archivos validados y guardados. `validado: true`.
   - `400 Bad Request`: Error de validación (ej. "Contraseña incorrecta", "RFC no coincide"). El campo `mensaje_error` contendrá el detalle.
 
-***
+---
 
 ## 👤 Terceros
 
@@ -674,155 +674,203 @@ Listado de direcciones registradas de los clientes, incluyendo información de u
   ```json
   [
     {
-        "id": 1,
-        "is_default": true,
-        "activo": true,
-        "cliente": 1,
-        "empresa": 73
+      "id": 1,
+      "is_default": true,
+      "activo": true,
+      "cliente": 1,
+      "empresa": 73
     }
   ]
   ```
-
 
 ### Obtener registro individual por ID.
 
 - **Endpoint**: `GET terceros/direcciones-clientes/{id}/`
 - **Respuesta**:
   ```json
-    {
-        "id": 1,
-        "is_default": true,
-        "activo": true,
-        "cliente": 1,
-        "empresa": 73
-    }
+  {
+    "id": 1,
+    "is_default": true,
+    "activo": true,
+    "cliente": 1,
+    "empresa": 73
+  }
   ```
-  
 
 ### Guardar direccion cliente.
+
 - **Endpoint**: `POST terceros/direcciones-clientes/`
 - **Body**:
   ```json
-    {
-      "cliente": 1,
-      "empresa": 62,
-      "is_default": true
-    }
+  {
+    "cliente": 1,
+    "empresa": 62,
+    "is_default": true
+  }
   ```
 
-
 ### Actualizar registro.
+
 - **Endpoint**: `PATCH terceros/direcciones-clientes/{id}/`
 - **Body**:
   ```json
-    {
-      "cliente": 1,
-      "empresa": 62,
-      "is_default": true
-    }
+  {
+    "cliente": 1,
+    "empresa": 62,
+    "is_default": true
+  }
   ```
 
-***
+---
 
-## 🧾 Ventas - Pedidos
+## 🧾 Ventas - Pedidos (Onboarding)
 
 **Base URL**: `/api/v1/ventas/`
 
-Este módulo está diseñado para ser escalable y evitar “duplicar líneas” por talla.
+Para que Next.js no tenga que orquestar múltiples endpoints, existe un flujo de onboarding en **un solo endpoint** que:
+
+- entrega catálogos/búsquedas mínimas para la UI (vendedor, tallas, opciones de pago, búsqueda de clientes/productos)
+- crea el pedido completo (encabezado + productos + tallas + configuración de bordado si aplica)
 
 **Estructura de datos (lógica de “una sola línea”)**
+
 - `Pedido`: encabezado del pedido.
-- `PedidoDetalle`: 1 registro por **producto** dentro del pedido (no guarda talla/cantidad).
-- `PedidoDetalleTalla`: sub-líneas por **talla** (aquí vive `cantidad` y `lleva_bordado`).
+- `PedidoDetalle`: 1 registro por **producto** dentro del pedido.
+- `PedidoDetalleTalla`: sub-líneas por **talla** (cantidad + `lleva_bordado` + `bordado_config`).
 
-### 1) Pedidos
+### 1) Obtener datos para el formulario (búsquedas y catálogos)
 
-- **Listar**: `GET /api/v1/ventas/pedidos/`
-- **Buscar por folio**: `GET /api/v1/ventas/pedidos/?q=P-000001` (o `?folio=P-000001`)
-- **Detalle**: `GET /api/v1/ventas/pedidos/{id}/`
-- **Crear**: `POST /api/v1/ventas/pedidos/`
-- **Editar**: `PATCH /api/v1/ventas/pedidos/{id}/`
-- **Eliminar (soft delete)**: `DELETE /api/v1/ventas/pedidos/{id}/`
-
-**Generación de folio**
-- Al crear un pedido, el backend busca una `SerieFolio` activa para la combinación:
-  - `empresa` (del usuario autenticado)
-  - `sucursal` (del pedido)
-  - `tipo_documento = "Pedido"` (case-insensitive)
-- Se genera y asigna automáticamente `folio` (ej: `P-000001`) y `folio_consecutivo`.
-- Opcionalmente, se puede enviar `serie_folio` en el body para forzar la serie específica.
-
-**Ejemplo de crear pedido**
-- **POST**: `/api/v1/ventas/pedidos/`
-- **Body (mínimo práctico)**:
+- **Endpoint**: `GET /api/v1/ventas/pedidos/onboarding/`
+- **Query Params (opcionales)**:
+  - `cliente_q`: texto para buscar cliente (nombre / razón social / RFC)
+  - `producto_q`: texto para buscar producto (nombre)
+  - `limit`: máximo 1–50 (default 20)
+- **Respuesta (resumen)**:
   ```json
   {
+    "vendedor": {
+      "id": 1,
+      "username": "user",
+      "email": "user@mail.com",
+      "empresa_id": 1
+    },
+    "catalogos": {
+      "formas_pago": [{ "value": "01", "label": "01 - Efectivo" }],
+      "metodos_pago": [
+        { "value": "PUE", "label": "PUE - Pago en una sola exhibición" }
+      ],
+      "usos_cfdi": [{ "value": "G03", "label": "G03 - Gastos en general" }],
+      "tipos_pedido": [{ "value": 1, "label": "Stock" }],
+      "tallas": [{ "id": 1, "nombre": "CH" }]
+    },
+    "busqueda": {
+      "clientes": [
+        {
+          "id": 10,
+          "razon_social": "Cliente SA",
+          "nombre": "Cliente",
+          "rfc": "XAXX010101000"
+        }
+      ],
+      "productos": [
+        {
+          "id": 50,
+          "nombre": "BATA EJECUTIVA DAMA BLANCO",
+          "precio_base": "0.00"
+        }
+      ]
+    }
+  }
+  ```
+
+### 2) Crear pedido completo (encabezado + productos + tallas + bordado)
+
+- **Endpoint**: `POST /api/v1/ventas/pedidos/onboarding/`
+
+**Reglas del flujo**
+
+- El backend crea **1 `PedidoDetalle` por producto** (aunque se repita el producto en el payload).
+- Las tallas repetidas se consolidan sumando `cantidad`.
+- El encabezado de pedido incluye un **snapshot de datos de facturación** del cliente: si el payload no envía esos campos, el backend los copia automáticamente del registro de Cliente al momento de crear el pedido. Si los envías en el payload, se respetan para ese pedido.
+- Nota: `cliente_regimen_fiscal` es el **id** del catálogo `SatRegimenFiscal` (no el código SAT “601”).
+
+**Generación de folio**
+
+- El folio se asigna automáticamente al crear el pedido (ej: `P-000001`) usando `SerieFolio` por sucursal y `tipo_documento="Pedido"`.
+
+**Body (ejemplo)**
+
+```json
+{
+  "pedido": {
     "sucursal": 1,
-    "cliente": 1,
+    "cliente": 10,
     "moneda": 1,
     "persona_pagos": "Juan Pérez",
     "correo_facturas": "facturas@cliente.com",
     "telefono_pagos": "8110000000",
     "forma_pago": "01",
     "metodo_pago": "PUE",
-    "uso_cfdi": "G03"
-  }
-  ```
+    "uso_cfdi": "G03",
+    "cliente_razon_social": "Cliente Demo SA de CV",
+    "cliente_nombre": "Cliente Demo",
+    "cliente_rfc": "XAXX010101000",
+    "cliente_regimen_fiscal": 3,
+    "cliente_direccion_fiscal": "Calle 1",
+    "cliente_colonia": "Centro",
+    "cliente_codigo_postal": "64000",
+    "cliente_ciudad": "Monterrey",
+    "cliente_estado": "NL",
+    "cliente_giro_empresarial": "Textil",
+    "embarque_parcial": false,
+    "envio": "0.00",
+    "flete": "0.00",
+    "seguros": "0.00",
+    "observaciones": "Notas opcionales"
+  },
+  "detalle": [
+    {
+      "producto": 50,
+      "tallas": [
+        {
+          "talla": 1,
+          "cantidad": 6,
+          "lleva_bordado": true,
+          "bordado_config": {
+            "ubicaciones": [
+              { "codigo": "F", "ancho_cm": 0, "alto_cm": 0, "color_hilo": null }
+            ],
+            "notas": "Opcional"
+          }
+        },
+        { "talla": 2, "cantidad": 4, "lleva_bordado": false }
+      ]
+    }
+  ]
+}
+```
 
-**Respuesta (campos clave)**
-  ```json
-  {
-    "id": 123,
-    "empresa": 1,
-    "sucursal": 1,
-    "serie_folio": 10,
-    "folio": "P-000001",
-    "folio_consecutivo": 1
-  }
-  ```
+**Respuesta**
 
-### 2) Pedido Detalle (1 línea por producto)
-
-- **Listar**: `GET /api/v1/ventas/pedido-detalle/`
-- **Detalle**: `GET /api/v1/ventas/pedido-detalle/{id}/`
-- **Crear**: `POST /api/v1/ventas/pedido-detalle/`
-- **Editar**: `PATCH /api/v1/ventas/pedido-detalle/{id}/`
-- **Eliminar**: `DELETE /api/v1/ventas/pedido-detalle/{id}/`
-
-**Notas**
-- Esta tabla representa la “línea” del pedido por producto.
-- No maneja tallas/cantidades directamente.
-- Para facilitar frontend, el serializer incluye `pedido_folio` además del `pedido` (id).
-
-**Ejemplo crear detalle**
-  ```json
-  {
-    "pedido": 123,
-    "producto": 50,
-    "precio_unitario": "120.00",
-    "costo_unitario": "80.00",
-    "subtotal_linea": "0.00"
-  }
-  ```
-
-### 3) Pedido Detalle Talla (cantidades y bordado)
-
-- **Listar**: `GET /api/v1/ventas/pedido-detalle-talla/`
-- **Detalle**: `GET /api/v1/ventas/pedido-detalle-talla/{id}/`
-- **Crear**: `POST /api/v1/ventas/pedido-detalle-talla/`
-- **Editar**: `PATCH /api/v1/ventas/pedido-detalle-talla/{id}/`
-- **Eliminar**: `DELETE /api/v1/ventas/pedido-detalle-talla/{id}/`
-
-**Notas**
-- Aquí vive `cantidad` por talla y el indicador `lleva_bordado`.
-- Para facilitar frontend, el serializer incluye `pedido_folio` además de `pedido_detalle` (id).
-
-**Ejemplo crear talla**
-  ```json
-  {
-    "pedido_detalle": 555,
-    "talla": 3,
-    "cantidad": 12,
-    "lleva_bordado": true
-  }
-  ```
+```json
+{
+  "pedido": { "id": 123, "folio": "P-000001", "folio_consecutivo": 1 },
+  "detalles": [
+    {
+      "id": 555,
+      "pedido": 123,
+      "pedido_folio": "P-000001",
+      "producto": 50,
+      "tallas": [
+        {
+          "id": 901,
+          "talla": 1,
+          "cantidad": 6,
+          "lleva_bordado": true,
+          "bordado_config": { "ubicaciones": [] }
+        }
+      ]
+    }
+  ]
+}
+```
