@@ -1,9 +1,11 @@
 from django.db import models
+from django.conf import settings
 from nucleo.models import StatusLifecycleModel
 from nucleo.models import Empresa, SatRegimenFiscal, SatUsoCfdi, SatFormaPago, SatMetodoPago, Moneda
 
 class Cliente(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="clientes", null=True, blank=True)
+    vendedores = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name="clientes_asignados", blank=True)
     razon_social = models.CharField(max_length=255)
     nombre = models.CharField(max_length=150)
     telefono = models.CharField(max_length=20)

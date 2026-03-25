@@ -233,6 +233,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             if getattr(user, "is_superuser", False) and empresa:
                 clientes_qs = clientes_qs.filter(empresa=empresa)
                 productos_qs = productos_qs.filter(empresa=empresa)
+            if not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
+                clientes_qs = clientes_qs.filter(vendedores__id=getattr(user, "id", None))
 
             if cliente_q:
                 clientes_qs = clientes_qs.filter(

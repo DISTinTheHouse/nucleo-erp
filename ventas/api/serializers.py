@@ -6,6 +6,9 @@ class CotizacionSerializer(serializers.ModelSerializer):
         model = Cotizacion
         read_only_fields = ['empresa']
         fields = '__all__'
+        extra_kwargs = {
+            'oc': {'required': False, 'allow_null': True},
+        }
 
 class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
     estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)

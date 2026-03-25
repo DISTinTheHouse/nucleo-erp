@@ -79,7 +79,7 @@ class Cotizacion(models.Model):
     persona_pagos = models.CharField(max_length=100)
     correo_facturas = models.EmailField(max_length=150)
     telefono_pagos = models.CharField(max_length=20)
-    oc = models.CharField(max_length=100, null=True)
+    oc = models.CharField(max_length=100, null=True, blank=True)
     forma_pago = models.CharField(max_length=5, choices=FormaPago.choices)
     metodo_pago = models.CharField(max_length=10, choices=MetodoPago.choices)
     uso_cfdi = models.CharField(max_length=10, choices=UsoCfdi.choices)
