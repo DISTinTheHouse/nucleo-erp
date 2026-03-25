@@ -454,6 +454,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 {
                     "cotizacion": CotizacionSerializer(cotizacion).data,
                     "detalles": CotizacionDetalleWithTallasSerializer(detalles_qs, many=True).data,
+                    "pedido": None,
                 },
                 status=status.HTTP_201_CREATED,
             )
