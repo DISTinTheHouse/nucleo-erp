@@ -41,11 +41,25 @@ class Cotizacion(models.Model):
         GO1 = 'G01', 'G01 - Adquisición de mercancías'
         IO1 = 'I01', 'I01 - Construcciones'
 
+    CHOICES_ESTATUS = (
+        (1, "Borrador"),
+        (2, "Por Autorizar"),
+        (3, "Autorizada"),
+        (4, "Rechazada"),
+        (5, "Cambios Por Autorizar"),
+    )
+
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="cotizacion")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="cotizacion")
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="cotizacion")
     oportunidad = models.ForeignKey(Oportunidad, on_delete=models.CASCADE, related_name="cotizacion", null=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="cotizacion")
+    estatus = models.SmallIntegerField(default=2, choices=CHOICES_ESTATUS, db_index=True)
+    autorizada_at = models.DateTimeField(null=True, blank=True)
+    cambios_solicitados_at = models.DateTimeField(null=True, blank=True)
+    aprobado_snapshot = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
     # Origen
     recompra = models.BooleanField(default=False)
     chat_online = models.BooleanField(default=False)
@@ -106,11 +120,31 @@ class Cotizacion(models.Model):
 class CotizacionDetalle(models.Model):
     cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="cotizaciondetalle")
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="cotizaciondetalle")
+    precio_unitario = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    costo_unitario = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    subtotal_linea = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     class Meta:
         db_table = "cotizacion_detalle"
         verbose_name = "Cotización Detalle"
         verbose_name_plural = "Cotizaciones Detalle"
+    
+    def __str__(self):
+        return str(self.id)
+
+class CotizacionDetalleTalla(models.Model):
+    cotizacion_detalle = models.ForeignKey(CotizacionDetalle, on_delete=models.CASCADE, related_name="tallas")
+    talla = models.ForeignKey(Talla, on_delete=models.PROTECT, related_name="cotizacion_detalles_talla")
+    cantidad = models.PositiveIntegerField(default=1)
+    precio_unitario = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    subtotal_talla = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    lleva_bordado = models.BooleanField(default=False)
+    bordado_config = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        db_table = "cotizacion_detalle_talla"
+        verbose_name = "Cotización Detalle Talla"
+        verbose_name_plural = "Cotizaciones Detalle Tallas"
     
     def __str__(self):
         return str(self.id)

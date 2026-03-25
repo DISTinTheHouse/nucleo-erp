@@ -118,6 +118,11 @@ REMOTE_DATABASE_URL = DATABASE_URL or SUPABASE_DATABASE_URL
 
 ENVIRONMENT = config('ENVIRONMENT', default='development')
 IS_VERCEL = os.environ.get('VERCEL') == '1'
+
+# =========================
+# Ventanas y tolerancias
+# =========================
+COTIZACION_EDIT_WINDOW_MINUTES = int(os.getenv('COTIZACION_EDIT_WINDOW_MINUTES', '30'))
 USE_REMOTE_DB = config('USE_REMOTE_DB', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
 
 LOCAL_POSTGRES_DB_HOST = config('LOCAL_POSTGRES_DB_HOST', default='127.0.0.1')

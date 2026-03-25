@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from ventas.models import Cotizacion, CotizacionDetalle, Pedido, PedidoDetalle, PedidoDetalleTalla
+from ventas.models import Cotizacion, CotizacionDetalle, CotizacionDetalleTalla, Pedido, PedidoDetalle, PedidoDetalleTalla
 
 class CotizacionSerializer(serializers.ModelSerializer):
     class Meta:
@@ -11,6 +11,17 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = CotizacionDetalle
         fields = '__all__'
+
+class CotizacionDetalleTallaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CotizacionDetalleTalla
+        fields = "__all__"
+
+class CotizacionDetalleWithTallasSerializer(serializers.ModelSerializer):
+    tallas = CotizacionDetalleTallaSerializer(many=True, read_only=True)
+    class Meta:
+        model = CotizacionDetalle
+        fields = "__all__"
 
 class PedidoSerializer(serializers.ModelSerializer):
     folio = serializers.CharField(read_only=True)

@@ -5,10 +5,12 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
-from ventas.models import Cotizacion, CotizacionDetalle, Pedido, PedidoDetalle, PedidoDetalleTalla
+from django.conf import settings
+from ventas.models import Cotizacion, CotizacionDetalle, CotizacionDetalleTalla, Pedido, PedidoDetalle, PedidoDetalleTalla
 from ventas.api.serializers import (
     CotizacionSerializer,
     CotizacionDetalleSerializer,
+    CotizacionDetalleWithTallasSerializer,
     PedidoSerializer,
     PedidoDetalleSerializer,
     PedidoDetalleTallaSerializer,
@@ -42,18 +44,19 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         cotizacion = self.get_object()
         if not getattr(user, "is_superuser", False) and empresa and cotizacion.empresa_id != empresa.id:
             raise ValidationError({"cotizacion": "No tienes acceso a esta cotización."})
+        edit_minutes = int(getattr(settings, "COTIZACION_EDIT_WINDOW_MINUTES", 30))
+        edit_minutes = max(1, edit_minutes)
 
-        pedido = Pedido.objects.filter(cotizacion=cotizacion, activo=True).order_by("-id").first()
-        if pedido and getattr(pedido, "created_at", None):
-            limite = pedido.created_at + timedelta(minutes=30)
+        if cotizacion.estatus == 3 and cotizacion.autorizada_at:
+            limite = cotizacion.autorizada_at + timedelta(minutes=edit_minutes)
             if timezone.now() > limite and not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
                 raise ValidationError({"cotizacion": "La cotización ya no está dentro del periodo permitido para edición."})
+            cotizacion.estatus = 5
+            cotizacion.cambios_solicitados_at = timezone.now()
 
         serializer.save()
-        pedido = Pedido.objects.filter(cotizacion=cotizacion, activo=True).order_by("-id").first()
-        if pedido:
-            pedido.estatus = 2
-            pedido.save(update_fields=["estatus"])
+        if cotizacion.estatus == 5:
+            cotizacion.save(update_fields=["estatus", "cambios_solicitados_at"])
 
     def _asignar_folio_pedido(self, pedido, empresa):
         if pedido.folio:
@@ -112,6 +115,17 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             for k, v in updates.items():
                 setattr(pedido, k, v)
             pedido.save(update_fields=list(updates.keys()))
+
+    def _snapshot_cotizacion(self, cotizacion_obj):
+        detalles_qs = (
+            CotizacionDetalle.objects.filter(cotizacion=cotizacion_obj)
+            .prefetch_related("tallas")
+            .order_by("id")
+        )
+        return {
+            "cotizacion": CotizacionSerializer(cotizacion_obj).data,
+            "detalles": CotizacionDetalleWithTallasSerializer(detalles_qs, many=True).data,
+        }
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding")
     def onboarding(self, request):
@@ -269,162 +283,13 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
             return list(agrupado.values())
 
-        with transaction.atomic():
-            if cotizacion_id:
-                cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion_id).first()
-                if not cotizacion:
-                    raise ValidationError({"cotizacion_id": "Cotización no encontrada."})
-                if not getattr(user, "is_superuser", False) and empresa and cotizacion.empresa_id != empresa.id:
-                    raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
-
-                pedido = Pedido.objects.select_for_update().filter(cotizacion=cotizacion, activo=True).order_by("-id").first()
-                if pedido and getattr(pedido, "created_at", None):
-                    limite = pedido.created_at + timedelta(minutes=30)
-                    if timezone.now() > limite and not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
-                        raise ValidationError({"cotizacion_id": "La cotización ya no está dentro del periodo permitido para edición."})
-
-                for k, v in cotizacion_data.items():
-                    setattr(cotizacion, k, v)
-                cotizacion.save(update_fields=list(cotizacion_data.keys()))
-
-                if not pedido:
-                    pedido = Pedido.objects.create(
-                        empresa=cotizacion.empresa,
-                        sucursal=cotizacion.sucursal,
-                        cliente=cotizacion.cliente,
-                        cotizacion=cotizacion,
-                        moneda=cotizacion.moneda,
-                        tipo_pedido=1,
-                        estatus=2,
-                        persona_pagos=cotizacion.persona_pagos,
-                        correo_facturas=cotizacion.correo_facturas,
-                        telefono_pagos=cotizacion.telefono_pagos,
-                        forma_pago=cotizacion.forma_pago,
-                        metodo_pago=cotizacion.metodo_pago,
-                        uso_cfdi=cotizacion.uso_cfdi,
-                    )
-                else:
-                    pedido.empresa = cotizacion.empresa
-                    pedido.sucursal = cotizacion.sucursal
-                    pedido.cliente = cotizacion.cliente
-                    pedido.moneda = cotizacion.moneda
-                    pedido.estatus = 2
-                    pedido.recompra = cotizacion.recompra
-                    pedido.chat_online = cotizacion.chat_online
-                    pedido.pedido_online = cotizacion.pedido_online
-                    pedido.prospeccion = cotizacion.prospeccion
-                    pedido.recomendacion = cotizacion.recomendacion
-                    pedido.amazon = cotizacion.amazon
-                    pedido.google = cotizacion.google
-                    pedido.publicidad = cotizacion.publicidad
-                    pedido.mercado_libre = cotizacion.mercado_libre
-                    pedido.redes_sociales = cotizacion.redes_sociales
-                    pedido.otro = cotizacion.otro
-                    pedido.mailing = cotizacion.mailing
-                    pedido.persona_pagos = cotizacion.persona_pagos
-                    pedido.correo_facturas = cotizacion.correo_facturas
-                    pedido.telefono_pagos = cotizacion.telefono_pagos
-                    pedido.oc = cotizacion.oc
-                    pedido.forma_pago = cotizacion.forma_pago
-                    pedido.metodo_pago = cotizacion.metodo_pago
-                    pedido.uso_cfdi = cotizacion.uso_cfdi
-                    pedido.anticipo_total = cotizacion.anticipo_total
-                    pedido.anticipo_parcial = cotizacion.anticipo_parcial
-                    pedido.vendedor_autoriza = cotizacion.vendedor_autoriza
-                    pedido.pago_antes_embarque = cotizacion.pago_antes_embarque
-                    pedido.por_confirmar = cotizacion.por_confirmar
-                    pedido.otra_cantidad = cotizacion.otra_cantidad
-                    pedido.monto = cotizacion.monto
-                    pedido.empaque_ecologico = cotizacion.empaque_ecologico
-                    pedido.embarque_parcial = cotizacion.embarque_parcial
-                    pedido.comentarios_parcialidad = cotizacion.comentarios_parcialidad
-                    pedido.envio = cotizacion.envio
-                    pedido.programa_bordados = cotizacion.programa_bordados
-                    pedido.bordado_pantalones_extras = cotizacion.bordado_pantalones_extras
-                    pedido.bordado_logotipo = cotizacion.bordado_logotipo
-                    pedido.observaciones = cotizacion.observaciones
-                    pedido.flete = cotizacion.flete
-                    pedido.seguros = cotizacion.seguros
-                    pedido.anticipo = cotizacion.anticipo
-                    pedido.subtotal = cotizacion.subtotal
-                    pedido.descuento_global = cotizacion.descuento_global
-                    pedido.ieps = cotizacion.ieps
-                    pedido.iva = cotizacion.iva
-                    pedido.gran_total = cotizacion.gran_total
-                    pedido.save()
-
-                PedidoDetalle.objects.filter(pedido=pedido).delete()
-            else:
-                cotizacion = Cotizacion.objects.create(empresa=empresa, **cotizacion_data)
-
-                pedido = Pedido.objects.create(
-                    empresa=empresa,
-                    sucursal=cotizacion.sucursal,
-                    cliente=cotizacion.cliente,
-                    cotizacion=cotizacion,
-                    moneda=cotizacion.moneda,
-                    tipo_pedido=1,
-                    estatus=2,
-                    recompra=cotizacion.recompra,
-                    chat_online=cotizacion.chat_online,
-                    pedido_online=cotizacion.pedido_online,
-                    prospeccion=cotizacion.prospeccion,
-                    recomendacion=cotizacion.recomendacion,
-                    amazon=cotizacion.amazon,
-                    google=cotizacion.google,
-                    publicidad=cotizacion.publicidad,
-                    mercado_libre=cotizacion.mercado_libre,
-                    redes_sociales=cotizacion.redes_sociales,
-                    otro=cotizacion.otro,
-                    mailing=cotizacion.mailing,
-                    persona_pagos=cotizacion.persona_pagos,
-                    correo_facturas=cotizacion.correo_facturas,
-                    telefono_pagos=cotizacion.telefono_pagos,
-                    oc=cotizacion.oc,
-                    forma_pago=cotizacion.forma_pago,
-                    metodo_pago=cotizacion.metodo_pago,
-                    uso_cfdi=cotizacion.uso_cfdi,
-                    anticipo_total=cotizacion.anticipo_total,
-                    anticipo_parcial=cotizacion.anticipo_parcial,
-                    vendedor_autoriza=cotizacion.vendedor_autoriza,
-                    pago_antes_embarque=cotizacion.pago_antes_embarque,
-                    por_confirmar=cotizacion.por_confirmar,
-                    otra_cantidad=cotizacion.otra_cantidad,
-                    monto=cotizacion.monto,
-                    empaque_ecologico=cotizacion.empaque_ecologico,
-                    embarque_parcial=cotizacion.embarque_parcial,
-                    comentarios_parcialidad=cotizacion.comentarios_parcialidad,
-                    envio=cotizacion.envio,
-                    programa_bordados=cotizacion.programa_bordados,
-                    bordado_pantalones_extras=cotizacion.bordado_pantalones_extras,
-                    bordado_logotipo=cotizacion.bordado_logotipo,
-                    observaciones=cotizacion.observaciones,
-                    flete=cotizacion.flete,
-                    seguros=cotizacion.seguros,
-                    anticipo=cotizacion.anticipo,
-                    subtotal=cotizacion.subtotal,
-                    descuento_global=cotizacion.descuento_global,
-                    ieps=cotizacion.ieps,
-                    iva=cotizacion.iva,
-                    gran_total=cotizacion.gran_total,
-                )
-
-            self._asignar_folio_pedido(pedido, cotizacion.empresa)
-            self._snapshot_facturacion_pedido(pedido)
-
-            detalle_data = _merge_detalle(detalle_data)
-
-            for item in detalle_data:
-                producto = Producto.objects.filter(
-                    pk=item["producto"],
-                    activo=True,
-                ).first()
+        def _save_cotizacion_detalle(cotizacion_obj, rows):
+            CotizacionDetalle.objects.filter(cotizacion=cotizacion_obj).delete()
+            rows = _merge_detalle(rows)
+            for item in rows:
+                producto = Producto.objects.filter(pk=item["producto"], activo=True).first()
                 if not getattr(user, "is_superuser", False) and empresa:
-                    producto = Producto.objects.filter(
-                        pk=item["producto"],
-                        empresa=empresa,
-                        activo=True,
-                    ).first()
+                    producto = Producto.objects.filter(pk=item["producto"], empresa=empresa, activo=True).first()
                 if not producto:
                     raise ValidationError({"detalle": f"Producto inválido: {item['producto']}"})
 
@@ -432,24 +297,21 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 if precio_unitario is None:
                     precio_unitario = producto.precio_base or 0
 
-                pedido_detalle = PedidoDetalle.objects.create(
-                    pedido=pedido,
+                cot_det = CotizacionDetalle.objects.create(
+                    cotizacion=cotizacion_obj,
                     producto=producto,
                     precio_unitario=precio_unitario,
                     costo_unitario=item.get("costo_unitario"),
                     subtotal_linea=0,
                 )
-
                 for t in item.get("tallas") or []:
                     talla = Talla.objects.filter(pk=t["talla"], activo=True).first()
                     if not talla:
                         raise ValidationError({"detalle": f"Talla inválida: {t['talla']}"})
-
                     if t.get("lleva_bordado") and t.get("bordado_config") is None:
                         raise ValidationError({"detalle": "Falta bordado_config en una talla marcada con lleva_bordado=true."})
-
-                    PedidoDetalleTalla.objects.create(
-                        pedido_detalle=pedido_detalle,
+                    CotizacionDetalleTalla.objects.create(
+                        cotizacion_detalle=cot_det,
                         talla=talla,
                         cantidad=t["cantidad"],
                         precio_unitario=precio_unitario,
@@ -458,19 +320,308 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         bordado_config=t.get("bordado_config"),
                     )
 
-            pedido = (
-                Pedido.objects.filter(pk=pedido.pk)
-                .prefetch_related("detalles__tallas")
-                .first()
-            )
+        with transaction.atomic():
+            edit_minutes = int(getattr(settings, "COTIZACION_EDIT_WINDOW_MINUTES", 30))
+            edit_minutes = max(1, edit_minutes)
+            now = timezone.now()
+
+            if cotizacion_id:
+                cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion_id).first()
+                if not cotizacion:
+                    raise ValidationError({"cotizacion_id": "Cotización no encontrada."})
+                if not getattr(user, "is_superuser", False) and empresa and cotizacion.empresa_id != empresa.id:
+                    raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
+
+                if cotizacion.estatus == 3 and cotizacion.autorizada_at:
+                    limite = cotizacion.autorizada_at + timedelta(minutes=edit_minutes)
+                    if now > limite and not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
+                        raise ValidationError({"cotizacion_id": "La cotización ya no está dentro del periodo permitido para edición."})
+                    cotizacion.estatus = 5
+                    cotizacion.cambios_solicitados_at = now
+                elif cotizacion.estatus == 4:
+                    cotizacion.estatus = 2
+
+                for k, v in cotizacion_data.items():
+                    setattr(cotizacion, k, v)
+                update_fields = list(cotizacion_data.keys())
+                update_fields += ["estatus", "cambios_solicitados_at"]
+                cotizacion.save(update_fields=list(dict.fromkeys(update_fields)))
+            else:
+                cotizacion = Cotizacion.objects.create(empresa=empresa, estatus=2, **cotizacion_data)
+
+            _save_cotizacion_detalle(cotizacion, detalle_data)
+            cotizacion = Cotizacion.objects.filter(pk=cotizacion.pk).first()
+            detalles_qs = CotizacionDetalle.objects.filter(cotizacion=cotizacion).prefetch_related("tallas")
             return Response(
                 {
                     "cotizacion": CotizacionSerializer(cotizacion).data,
-                    "pedido": PedidoSerializer(pedido).data,
-                    "detalles": PedidoDetalleWithTallasSerializer(pedido.detalles.all(), many=True).data,
+                    "detalles": CotizacionDetalleWithTallasSerializer(detalles_qs, many=True).data,
                 },
                 status=status.HTTP_201_CREATED,
             )
+
+    def _require_mesa_control(self, user):
+        if getattr(user, "is_superuser", False):
+            return
+        if getattr(user, "is_admin_empresa", False):
+            return
+        raise ValidationError({"permiso": "Acción disponible solo para mesa de control."})
+
+    def _copiar_cotizacion_a_pedido(self, cotizacion, empresa):
+        pedido = Pedido.objects.create(
+            empresa=empresa,
+            sucursal=cotizacion.sucursal,
+            cliente=cotizacion.cliente,
+            cotizacion=cotizacion,
+            moneda=cotizacion.moneda,
+            tipo_pedido=1,
+            estatus=3,
+            recompra=cotizacion.recompra,
+            chat_online=cotizacion.chat_online,
+            pedido_online=cotizacion.pedido_online,
+            prospeccion=cotizacion.prospeccion,
+            recomendacion=cotizacion.recomendacion,
+            amazon=cotizacion.amazon,
+            google=cotizacion.google,
+            publicidad=cotizacion.publicidad,
+            mercado_libre=cotizacion.mercado_libre,
+            redes_sociales=cotizacion.redes_sociales,
+            otro=cotizacion.otro,
+            mailing=cotizacion.mailing,
+            persona_pagos=cotizacion.persona_pagos,
+            correo_facturas=cotizacion.correo_facturas,
+            telefono_pagos=cotizacion.telefono_pagos,
+            oc=cotizacion.oc,
+            forma_pago=cotizacion.forma_pago,
+            metodo_pago=cotizacion.metodo_pago,
+            uso_cfdi=cotizacion.uso_cfdi,
+            anticipo_total=cotizacion.anticipo_total,
+            anticipo_parcial=cotizacion.anticipo_parcial,
+            vendedor_autoriza=cotizacion.vendedor_autoriza,
+            pago_antes_embarque=cotizacion.pago_antes_embarque,
+            por_confirmar=cotizacion.por_confirmar,
+            otra_cantidad=cotizacion.otra_cantidad,
+            monto=cotizacion.monto,
+            empaque_ecologico=cotizacion.empaque_ecologico,
+            embarque_parcial=cotizacion.embarque_parcial,
+            comentarios_parcialidad=cotizacion.comentarios_parcialidad,
+            envio=cotizacion.envio,
+            programa_bordados=cotizacion.programa_bordados,
+            bordado_pantalones_extras=cotizacion.bordado_pantalones_extras,
+            bordado_logotipo=cotizacion.bordado_logotipo,
+            observaciones=cotizacion.observaciones,
+            flete=cotizacion.flete,
+            seguros=cotizacion.seguros,
+            anticipo=cotizacion.anticipo,
+            subtotal=cotizacion.subtotal,
+            descuento_global=cotizacion.descuento_global,
+            ieps=cotizacion.ieps,
+            iva=cotizacion.iva,
+            gran_total=cotizacion.gran_total,
+        )
+        self._asignar_folio_pedido(pedido, empresa)
+        self._snapshot_facturacion_pedido(pedido)
+
+        detalles = CotizacionDetalle.objects.filter(cotizacion=cotizacion).prefetch_related("tallas").order_by("id")
+        for det in detalles:
+            pedido_det = PedidoDetalle.objects.create(
+                pedido=pedido,
+                producto=det.producto,
+                precio_unitario=det.precio_unitario,
+                costo_unitario=det.costo_unitario,
+                subtotal_linea=det.subtotal_linea,
+            )
+            for t in det.tallas.all():
+                PedidoDetalleTalla.objects.create(
+                    pedido_detalle=pedido_det,
+                    talla=t.talla,
+                    cantidad=t.cantidad,
+                    precio_unitario=t.precio_unitario,
+                    subtotal_talla=t.subtotal_talla,
+                    lleva_bordado=t.lleva_bordado,
+                    bordado_config=t.bordado_config,
+                )
+        return pedido
+
+    def _aplicar_cotizacion_a_pedido(self, cotizacion, pedido):
+        pedido.empresa = cotizacion.empresa
+        pedido.sucursal = cotizacion.sucursal
+        pedido.cliente = cotizacion.cliente
+        pedido.moneda = cotizacion.moneda
+        pedido.recompra = cotizacion.recompra
+        pedido.chat_online = cotizacion.chat_online
+        pedido.pedido_online = cotizacion.pedido_online
+        pedido.prospeccion = cotizacion.prospeccion
+        pedido.recomendacion = cotizacion.recomendacion
+        pedido.amazon = cotizacion.amazon
+        pedido.google = cotizacion.google
+        pedido.publicidad = cotizacion.publicidad
+        pedido.mercado_libre = cotizacion.mercado_libre
+        pedido.redes_sociales = cotizacion.redes_sociales
+        pedido.otro = cotizacion.otro
+        pedido.mailing = cotizacion.mailing
+        pedido.persona_pagos = cotizacion.persona_pagos
+        pedido.correo_facturas = cotizacion.correo_facturas
+        pedido.telefono_pagos = cotizacion.telefono_pagos
+        pedido.oc = cotizacion.oc
+        pedido.forma_pago = cotizacion.forma_pago
+        pedido.metodo_pago = cotizacion.metodo_pago
+        pedido.uso_cfdi = cotizacion.uso_cfdi
+        pedido.anticipo_total = cotizacion.anticipo_total
+        pedido.anticipo_parcial = cotizacion.anticipo_parcial
+        pedido.vendedor_autoriza = cotizacion.vendedor_autoriza
+        pedido.pago_antes_embarque = cotizacion.pago_antes_embarque
+        pedido.por_confirmar = cotizacion.por_confirmar
+        pedido.otra_cantidad = cotizacion.otra_cantidad
+        pedido.monto = cotizacion.monto
+        pedido.empaque_ecologico = cotizacion.empaque_ecologico
+        pedido.embarque_parcial = cotizacion.embarque_parcial
+        pedido.comentarios_parcialidad = cotizacion.comentarios_parcialidad
+        pedido.envio = cotizacion.envio
+        pedido.programa_bordados = cotizacion.programa_bordados
+        pedido.bordado_pantalones_extras = cotizacion.bordado_pantalones_extras
+        pedido.bordado_logotipo = cotizacion.bordado_logotipo
+        pedido.observaciones = cotizacion.observaciones
+        pedido.flete = cotizacion.flete
+        pedido.seguros = cotizacion.seguros
+        pedido.anticipo = cotizacion.anticipo
+        pedido.subtotal = cotizacion.subtotal
+        pedido.descuento_global = cotizacion.descuento_global
+        pedido.ieps = cotizacion.ieps
+        pedido.iva = cotizacion.iva
+        pedido.gran_total = cotizacion.gran_total
+        pedido.save()
+
+        PedidoDetalle.objects.filter(pedido=pedido).delete()
+        detalles = CotizacionDetalle.objects.filter(cotizacion=cotizacion).prefetch_related("tallas").order_by("id")
+        for det in detalles:
+            pedido_det = PedidoDetalle.objects.create(
+                pedido=pedido,
+                producto=det.producto,
+                precio_unitario=det.precio_unitario,
+                costo_unitario=det.costo_unitario,
+                subtotal_linea=det.subtotal_linea,
+            )
+            for t in det.tallas.all():
+                PedidoDetalleTalla.objects.create(
+                    pedido_detalle=pedido_det,
+                    talla=t.talla,
+                    cantidad=t.cantidad,
+                    precio_unitario=t.precio_unitario,
+                    subtotal_talla=t.subtotal_talla,
+                    lleva_bordado=t.lleva_bordado,
+                    bordado_config=t.bordado_config,
+                )
+
+    @action(detail=True, methods=["post"], url_path="autorizar")
+    def autorizar(self, request, pk=None):
+        user = request.user
+        self._require_mesa_control(user)
+        cotizacion = self.get_object()
+        empresa = cotizacion.empresa
+
+        with transaction.atomic():
+            cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
+            if cotizacion.estatus == 4:
+                raise ValidationError({"cotizacion": "La cotización está rechazada."})
+            pedido_existente = Pedido.objects.select_for_update().filter(cotizacion=cotizacion, activo=True).order_by("-id").first()
+            if pedido_existente:
+                raise ValidationError({"cotizacion": "La cotización ya tiene un pedido generado."})
+
+            pedido = self._copiar_cotizacion_a_pedido(cotizacion, empresa)
+            cotizacion.estatus = 3
+            cotizacion.autorizada_at = timezone.now()
+            cotizacion.cambios_solicitados_at = None
+            cotizacion.aprobado_snapshot = self._snapshot_cotizacion(cotizacion)
+            cotizacion.save(update_fields=["estatus", "autorizada_at", "cambios_solicitados_at", "aprobado_snapshot", "updated_at"])
+
+        pedido = Pedido.objects.filter(pk=pedido.pk).prefetch_related("detalles__tallas").first()
+        return Response(
+            {"cotizacion": CotizacionSerializer(cotizacion).data, "pedido": PedidoSerializer(pedido).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["post"], url_path="rechazar")
+    def rechazar(self, request, pk=None):
+        user = request.user
+        self._require_mesa_control(user)
+        cotizacion = self.get_object()
+        with transaction.atomic():
+            cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
+            if cotizacion.estatus == 3:
+                raise ValidationError({"cotizacion": "La cotización ya está autorizada."})
+            cotizacion.estatus = 4
+            cotizacion.save(update_fields=["estatus", "updated_at"])
+        return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
+
+    @action(detail=True, methods=["post"], url_path="aceptar-cambios")
+    def aceptar_cambios(self, request, pk=None):
+        user = request.user
+        self._require_mesa_control(user)
+        cotizacion = self.get_object()
+        with transaction.atomic():
+            cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
+            if cotizacion.estatus != 5:
+                raise ValidationError({"cotizacion": "La cotización no tiene cambios pendientes."})
+            pedido = Pedido.objects.select_for_update().filter(cotizacion=cotizacion, activo=True).order_by("-id").first()
+            if not pedido:
+                raise ValidationError({"cotizacion": "No existe pedido para aplicar cambios."})
+            self._aplicar_cotizacion_a_pedido(cotizacion, pedido)
+            cotizacion.estatus = 3
+            cotizacion.cambios_solicitados_at = None
+            cotizacion.aprobado_snapshot = self._snapshot_cotizacion(cotizacion)
+            cotizacion.save(update_fields=["estatus", "cambios_solicitados_at", "aprobado_snapshot", "updated_at"])
+        return Response({"cotizacion": CotizacionSerializer(cotizacion).data, "pedido_id": pedido.id})
+
+    @action(detail=True, methods=["post"], url_path="rechazar-cambios")
+    def rechazar_cambios(self, request, pk=None):
+        user = request.user
+        self._require_mesa_control(user)
+        cotizacion = self.get_object()
+        with transaction.atomic():
+            cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
+            if cotizacion.estatus != 5:
+                raise ValidationError({"cotizacion": "La cotización no tiene cambios pendientes."})
+            snapshot = cotizacion.aprobado_snapshot or {}
+            snap_cot = snapshot.get("cotizacion") or {}
+            snap_det = snapshot.get("detalles") or []
+            if not snap_cot:
+                raise ValidationError({"cotizacion": "No hay snapshot aprobado para revertir."})
+
+            skip = {"id", "empresa", "empresa_id", "created_at", "updated_at", "aprobado_snapshot"}
+            model_fields = {f.name for f in Cotizacion._meta.fields}
+            for k, v in snap_cot.items():
+                if k in skip:
+                    continue
+                if k in model_fields:
+                    setattr(cotizacion, k, v)
+            cotizacion.estatus = 3
+            cotizacion.cambios_solicitados_at = None
+            cotizacion.save(update_fields=["estatus", "cambios_solicitados_at", "updated_at"] + [k for k in snap_cot.keys() if k in model_fields and k not in skip])
+
+            CotizacionDetalle.objects.filter(cotizacion=cotizacion).delete()
+            for det in snap_det:
+                prod_id = det.get("producto")
+                if isinstance(prod_id, dict):
+                    prod_id = prod_id.get("id")
+                cot_det = CotizacionDetalle.objects.create(
+                    cotizacion=cotizacion,
+                    producto_id=prod_id,
+                    precio_unitario=det.get("precio_unitario") or 0,
+                    costo_unitario=det.get("costo_unitario"),
+                    subtotal_linea=det.get("subtotal_linea") or 0,
+                )
+                for t in det.get("tallas") or []:
+                    CotizacionDetalleTalla.objects.create(
+                        cotizacion_detalle=cot_det,
+                        talla_id=t.get("talla"),
+                        cantidad=t.get("cantidad") or 1,
+                        precio_unitario=t.get("precio_unitario"),
+                        subtotal_talla=t.get("subtotal_talla") or 0,
+                        lleva_bordado=bool(t.get("lleva_bordado")),
+                        bordado_config=t.get("bordado_config"),
+                    )
+        return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
 
 class CotizacionDetalleViewSet(viewsets.ModelViewSet):
     queryset = CotizacionDetalle.objects.all()

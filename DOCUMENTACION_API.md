@@ -883,3 +883,50 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 - **Endpoint**: `PATCH /api/v1/ventas/cotizaciones/{id}/`
 - Regla: la edición está permitida dentro del periodo configurado; al editar, el pedido ligado se marca nuevamente como `Por Autorizar` (`estatus=2`) para revisión.
 - Para editar también el detalle (productos/tallas/bordado) usando el mismo flujo, re-envía `POST /api/v1/ventas/cotizaciones/onboarding/` agregando `cotizacion_id` (y el detalle completo actualizado).
+
+---
+
+## 🧮 Mesa de Control
+
+- Ver cotizaciones pendientes: filtra por `estatus=2 (Por Autorizar)` y `estatus=5 (Cambios Por Autorizar)`.
+- Autorizar cotización:
+  - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/autorizar/`
+  - Efecto: se **duplica** la cotización a `Pedido` con folio `P-xxxxxx`, se marca la cotización como `Autorizada (3)` y se guarda un `aprobado_snapshot` del estado aprobado.
+- Rechazar cotización:
+  - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar/`
+  - Efecto: la cotización pasa a `Rechazada (4)`. **No** se crea pedido ni se gasta folio.
+- Aceptar cambios:
+  - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/aceptar-cambios/`
+  - Efecto: se **aplican** los cambios de la cotización al `Pedido` ya existente y la cotización vuelve a `Autorizada (3)` con `aprobado_snapshot` actualizado.
+- Rechazar cambios:
+  - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar-cambios/`
+  - Efecto: se **revierte** la cotización al `aprobado_snapshot` y vuelve a `Autorizada (3)`; el `Pedido` no se modifica.
+
+---
+
+## 🔐 Seguridad y Reglas
+
+- Acciones de mesa de control (autorizar/rechazar/aceptar-cambios/rechazar-cambios) requieren usuario con `is_superuser` o `is_admin_empresa`.  
+- El vendedor puede crear y editar cotizaciones dentro de la ventana de tolerancia configurada; si excede, el backend rechaza la edición.
+
+---
+
+## ⚙️ Configuración de Tolerancia (ventana de edición)
+
+- Variable: `COTIZACION_EDIT_WINDOW_MINUTES`
+- Ubicación: [ERP/settings.py](file:///c:/Users/Jes%C3%BAs%20Ibarra/Desktop/django-backend-v2/ERP/settings.py)
+- Default: `30` minutos. Se puede sobreescribir por entorno:
+
+```bash
+COTIZACION_EDIT_WINDOW_MINUTES=45
+```
+
+---
+
+## ✅ Pruebas Internas (resumen)
+
+- Crear cotización vía onboarding: crea en `cotizaciones` + `cotizacion_detalle` + `cotizacion_detalle_talla`; **no** crea pedido.
+- Autorizar: crea `pedido` con folio y duplica el detalle, status `Autorizada (3)`.
+- Rechazar: no crea pedido y no gasta folio.
+- Solicitar cambios dentro de ventana: al re-enviar onboarding con `cotizacion_id`, cotización pasa a `Cambios Por Autorizar (5)`.
+- Aceptar cambios: sincroniza `pedido` con el nuevo detalle; Rechazar cambios: restaura la cotización al `aprobado_snapshot` y no toca `pedido`.
