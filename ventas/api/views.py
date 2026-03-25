@@ -359,6 +359,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 from ventas.models import Cotizacion as CotModel
                 allowed = {f.name for f in CotModel._meta.get_fields() if getattr(f, "concrete", False)}
                 cotizacion_payload = {k: v for k, v in cotizacion_payload.items() if k in allowed}
+                for k in ["empresa", "vendedor", "estatus", "created_at", "updated_at", "autorizada_at", "cambios_solicitados_at", "aprobado_snapshot"]:
+                    cotizacion_payload.pop(k, None)
             except Exception:
                 pass
             normalized = {
@@ -458,32 +460,37 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             edit_minutes = max(1, edit_minutes)
             now = timezone.now()
 
-            if cotizacion_id:
-                cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion_id).first()
-                if not cotizacion:
-                    raise ValidationError({"cotizacion_id": "Cotización no encontrada."})
-                if not getattr(user, "is_superuser", False) and empresa and cotizacion.empresa_id != empresa.id:
-                    raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
-                if not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
-                    if cotizacion.vendedor_id and cotizacion.vendedor_id != getattr(user, "id", None):
+            try:
+                if cotizacion_id:
+                    cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion_id).first()
+                    if not cotizacion:
+                        raise ValidationError({"cotizacion_id": "Cotización no encontrada."})
+                    if not getattr(user, "is_superuser", False) and empresa and cotizacion.empresa_id != empresa.id:
                         raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
+                    if not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
+                        if cotizacion.vendedor_id and cotizacion.vendedor_id != getattr(user, "id", None):
+                            raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
 
-                if cotizacion.estatus == 3 and cotizacion.autorizada_at:
-                    limite = cotizacion.autorizada_at + timedelta(minutes=edit_minutes)
-                    if now > limite and not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
-                        raise ValidationError({"cotizacion_id": "La cotización ya no está dentro del periodo permitido para edición."})
-                    cotizacion.estatus = 5
-                    cotizacion.cambios_solicitados_at = now
-                elif cotizacion.estatus == 4:
-                    cotizacion.estatus = 2
+                    if cotizacion.estatus == 3 and cotizacion.autorizada_at:
+                        limite = cotizacion.autorizada_at + timedelta(minutes=edit_minutes)
+                        if now > limite and not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
+                            raise ValidationError({"cotizacion_id": "La cotización ya no está dentro del periodo permitido para edición."})
+                        cotizacion.estatus = 5
+                        cotizacion.cambios_solicitados_at = now
+                    elif cotizacion.estatus == 4:
+                        cotizacion.estatus = 2
 
-                for k, v in cotizacion_data.items():
-                    setattr(cotizacion, k, v)
-                update_fields = list(cotizacion_data.keys())
-                update_fields += ["estatus", "cambios_solicitados_at"]
-                cotizacion.save(update_fields=list(dict.fromkeys(update_fields)))
-            else:
-                cotizacion = Cotizacion.objects.create(empresa=empresa, vendedor=user, estatus=2, **cotizacion_data)
+                    for k, v in cotizacion_data.items():
+                        setattr(cotizacion, k, v)
+                    update_fields = list(cotizacion_data.keys())
+                    update_fields += ["estatus", "cambios_solicitados_at"]
+                    cotizacion.save(update_fields=list(dict.fromkeys(update_fields)))
+                else:
+                    cotizacion = Cotizacion.objects.create(empresa=empresa, vendedor=user, estatus=2, **cotizacion_data)
+            except TypeError as e:
+                raise ValidationError({"cotizacion": f"Datos inválidos: {str(e)}"})
+            except ValueError as e:
+                raise ValidationError({"cotizacion": f"Datos inválidos: {str(e)}"})
 
             _save_cotizacion_detalle(cotizacion, detalle_data)
             cotizacion = Cotizacion.objects.filter(pk=cotizacion.pk).first()
