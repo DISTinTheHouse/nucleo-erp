@@ -354,6 +354,13 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     for k, v in raw_dict.items()
                     if k not in {"detalle", "detalles", "cotizacion_id"}
                 }
+            # filtrar solo campos válidos del modelo
+            try:
+                from ventas.models import Cotizacion as CotModel
+                allowed = {f.name for f in CotModel._meta.get_fields() if getattr(f, "concrete", False)}
+                cotizacion_payload = {k: v for k, v in cotizacion_payload.items() if k in allowed}
+            except Exception:
+                pass
             normalized = {
                 "cotizacion_id": raw_dict.get("cotizacion_id") or (cotizacion_payload.get("id") if isinstance(cotizacion_payload, dict) else None),
                 "cotizacion": cotizacion_payload,
