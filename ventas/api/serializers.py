@@ -7,6 +7,33 @@ class CotizacionSerializer(serializers.ModelSerializer):
         read_only_fields = ['empresa']
         fields = '__all__'
 
+class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
+    estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)
+    cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
+    cliente_razon_social = serializers.CharField(source="cliente.razon_social", read_only=True)
+    pedido_id = serializers.IntegerField(read_only=True)
+    pedido_folio = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = Cotizacion
+        fields = [
+            "id",
+            "estatus",
+            "estatus_label",
+            "cliente",
+            "cliente_nombre",
+            "cliente_razon_social",
+            "oc",
+            "uso_cfdi",
+            "gran_total",
+            "autorizada_at",
+            "cambios_solicitados_at",
+            "created_at",
+            "updated_at",
+            "pedido_id",
+            "pedido_folio",
+        ]
+
 class CotizacionDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = CotizacionDetalle
@@ -21,6 +48,16 @@ class CotizacionDetalleWithTallasSerializer(serializers.ModelSerializer):
     tallas = CotizacionDetalleTallaSerializer(many=True, read_only=True)
     class Meta:
         model = CotizacionDetalle
+        fields = "__all__"
+
+class CotizacionFullSerializer(serializers.ModelSerializer):
+    estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)
+    detalles = CotizacionDetalleWithTallasSerializer(source="cotizaciondetalle", many=True, read_only=True)
+    cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
+    cliente_razon_social = serializers.CharField(source="cliente.razon_social", read_only=True)
+
+    class Meta:
+        model = Cotizacion
         fields = "__all__"
 
 class PedidoSerializer(serializers.ModelSerializer):

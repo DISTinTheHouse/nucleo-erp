@@ -729,11 +729,27 @@ Listado de direcciones registradas de los clientes, incluyendo información de u
 
 El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotización:
 
-- se crea/actualiza un registro en **Pedidos** ligado a la cotización (mesa de control) con `estatus=Por Autorizar`
-- se genera el folio de pedido (ej: `P-000001`)
-- el detalle (productos/tallas/bordado) se guarda en la estructura de pedido:
-  - `PedidoDetalle`: 1 registro por **producto**
-  - `PedidoDetalleTalla`: sub-líneas por **talla** (`cantidad` + `lleva_bordado` + `bordado_config`)
+- se crea/actualiza un registro en **Cotizaciones** con `estatus=Por Autorizar (2)`
+- el detalle (productos/tallas/bordado) se guarda en:
+  - `CotizacionDetalle`: 1 registro por **producto**
+  - `CotizacionDetalleTalla`: sub-líneas por **talla** (`cantidad` + `lleva_bordado` + `bordado_config`)
+- **no** se crea `Pedido` ni se asigna folio `P-xxxxxx` hasta que **mesa de control autorice**
+
+### 0) Dashboard: listar y ver cotizaciones
+
+- **Listar (tabla)**: `GET /api/v1/ventas/cotizaciones/`
+- **Scope**:
+  - Vendedor (usuario normal): solo sus cotizaciones (`vendedor = request.user`)
+  - Mesa de control (`is_admin_empresa`) / `is_superuser`: todas las cotizaciones de la empresa
+- **Query Params (opcionales)**:
+  - `q`: busca por `oc`, `cliente.nombre`, `cliente.razon_social`, `cliente.rfc` o `id` (si es numérico)
+  - `estatus`: uno o varios separados por coma (ej: `2` o `2,5`)
+  - `ordering`: lista separada por coma. Permitidos: `id`, `created_at`, `updated_at`, `gran_total`, `estatus` (ej: `-created_at`)
+- **Campos útiles para tabla**:
+  - `estatus_label`, `cliente_nombre`, `cliente_razon_social`, `pedido_id`, `pedido_folio`
+
+- **Ver cotización completa (modal)**: `GET /api/v1/ventas/cotizaciones/{id}/`
+  - Incluye campo `detalles` (productos + tallas + bordado_config) y `estatus_label`.
 
 ### 1) Obtener datos para el formulario (búsquedas y catálogos)
 
@@ -790,20 +806,20 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
       ]
   ```
 
-### 2) Crear cotización y generar pedido para mesa de control (con detalle)
+### 2) Crear cotización (con detalle)
 
 - **Endpoint**: `POST /api/v1/ventas/cotizaciones/onboarding/`
 
 **Reglas del flujo**
 
-- El backend crea **1 `PedidoDetalle` por producto** (aunque se repita el producto en el payload).
+- El backend crea **1 `CotizacionDetalle` por producto** (aunque se repita el producto en el payload).
 - Las tallas repetidas se consolidan sumando `cantidad`.
-- Si una talla viene con `lleva_bordado=true`, entonces `bordado_config` es requerido y se guarda en `PedidoDetalleTalla.bordado_config`.
-- Se crea el `Pedido` ligado a la cotización con `estatus=Por Autorizar` para que mesa de control valide.
+- Si una talla viene con `lleva_bordado=true`, entonces `bordado_config` es requerido y se guarda en `CotizacionDetalleTalla.bordado_config`.
+- La cotización queda en `estatus=Por Autorizar (2)` para que mesa de control valide.
 
-**Generación de folio**
+**Folio de Pedido**
 
-- El folio se asigna automáticamente al crear el pedido (ej: `P-000001`) usando `SerieFolio` por sucursal y `tipo_documento="Pedido"`.
+- El folio `P-xxxxxx` se asigna **solo** cuando mesa de control autoriza (`POST /api/v1/ventas/cotizaciones/{id}/autorizar/`).
 
 **Body (ejemplo)**
 
@@ -852,18 +868,12 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 ```json
 {
   "cotizacion": { "id": 10 },
-  "pedido": {
-    "id": 123,
-    "folio": "P-000001",
-    "folio_consecutivo": 1,
-    "estatus": 2
-  },
   "detalles": [
     {
       "id": 555,
-      "pedido": 123,
-      "pedido_folio": "P-000001",
+      "cotizacion": 10,
       "producto": 50,
+      "precio_unitario": "100.00",
       "tallas": [
         {
           "id": 901,
@@ -881,8 +891,9 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 ### 3) Edición con ventana de tiempo + notificación a mesa de control
 
 - **Endpoint**: `PATCH /api/v1/ventas/cotizaciones/{id}/`
-- Regla: la edición está permitida dentro del periodo configurado; al editar, el pedido ligado se marca nuevamente como `Por Autorizar` (`estatus=2`) para revisión.
-- Para editar también el detalle (productos/tallas/bordado) usando el mismo flujo, re-envía `POST /api/v1/ventas/cotizaciones/onboarding/` agregando `cotizacion_id` (y el detalle completo actualizado).
+- Regla: la edición está permitida dentro del periodo configurado. Si la cotización ya estaba `Autorizada (3)`, al editar pasa a `Cambios Por Autorizar (5)` y mesa de control debe decidir.
+- La edición **no** modifica el `Pedido` automáticamente. El `Pedido` solo se actualiza si mesa de control ejecuta `aceptar-cambios`.
+- Para editar también el detalle (productos/tallas/bordado), re-envía `POST /api/v1/ventas/cotizaciones/onboarding/` agregando `cotizacion_id` (y el detalle completo actualizado).
 
 ---
 
@@ -906,7 +917,7 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 
 ## 🔐 Seguridad y Reglas
 
-- Acciones de mesa de control (autorizar/rechazar/aceptar-cambios/rechazar-cambios) requieren usuario con `is_superuser` o `is_admin_empresa`.  
+- Acciones de mesa de control (autorizar/rechazar/aceptar-cambios/rechazar-cambios) requieren usuario con `is_superuser` o `is_admin_empresa`.
 - El vendedor puede crear y editar cotizaciones dentro de la ventana de tolerancia configurada; si excede, el backend rechaza la edición.
 
 ---

@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.db.models import OuterRef, Q, Subquery
 from datetime import timedelta
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -9,8 +10,10 @@ from django.conf import settings
 from ventas.models import Cotizacion, CotizacionDetalle, CotizacionDetalleTalla, Pedido, PedidoDetalle, PedidoDetalleTalla
 from ventas.api.serializers import (
     CotizacionSerializer,
+    CotizacionDashboardItemSerializer,
     CotizacionDetalleSerializer,
     CotizacionDetalleWithTallasSerializer,
+    CotizacionFullSerializer,
     PedidoSerializer,
     PedidoDetalleSerializer,
     PedidoDetalleTallaSerializer,
@@ -24,19 +27,34 @@ class CotizacionViewSet(viewsets.ModelViewSet):
     serializer_class = CotizacionSerializer
     http_method_names = ['get', 'post', 'patch']
 
+    def get_serializer_class(self):
+        if getattr(self, "action", None) == "list":
+            return CotizacionDashboardItemSerializer
+        if getattr(self, "action", None) == "retrieve":
+            return CotizacionFullSerializer
+        return super().get_serializer_class()
+
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset()
+        qs = (
+            super()
+            .get_queryset()
+            .select_related("cliente", "sucursal", "moneda", "vendedor")
+        )
         if getattr(user, "is_superuser", False):
-            return qs
+            return self._apply_filters(qs)
         empresa = getattr(user, "empresa", None)
         if empresa:
-            return qs.filter(empresa=empresa)
+            qs = qs.filter(empresa=empresa)
+            if not getattr(user, "is_admin_empresa", False):
+                qs = qs.filter(vendedor=user)
+            return self._apply_filters(qs)
         return qs.none()
 
     def perform_create(self, serializer):
-        empresa = self.request.user.empresa 
-        serializer.save(empresa=empresa)
+        user = self.request.user
+        empresa = getattr(user, "empresa", None)
+        serializer.save(empresa=empresa, vendedor=user)
 
     def perform_update(self, serializer):
         user = self.request.user
@@ -44,6 +62,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         cotizacion = self.get_object()
         if not getattr(user, "is_superuser", False) and empresa and cotizacion.empresa_id != empresa.id:
             raise ValidationError({"cotizacion": "No tienes acceso a esta cotización."})
+        if not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
+            if cotizacion.vendedor_id and cotizacion.vendedor_id != getattr(user, "id", None):
+                raise ValidationError({"cotizacion": "No tienes acceso a esta cotización."})
         edit_minutes = int(getattr(settings, "COTIZACION_EDIT_WINDOW_MINUTES", 30))
         edit_minutes = max(1, edit_minutes)
 
@@ -57,6 +78,55 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         serializer.save()
         if cotizacion.estatus == 5:
             cotizacion.save(update_fields=["estatus", "cambios_solicitados_at"])
+
+    def _apply_filters(self, qs):
+        if getattr(self, "action", None) == "retrieve":
+            qs = qs.prefetch_related("cotizaciondetalle__tallas")
+
+        if getattr(self, "action", None) == "list":
+            pedido_qs = Pedido.objects.filter(cotizacion_id=OuterRef("pk")).order_by("-id")
+            qs = qs.annotate(
+                pedido_id=Subquery(pedido_qs.values("id")[:1]),
+                pedido_folio=Subquery(pedido_qs.values("folio")[:1]),
+            )
+
+        estatus = self.request.query_params.get("estatus")
+        if estatus:
+            try:
+                estatus_list = [int(x) for x in str(estatus).split(",") if str(x).strip()]
+                qs = qs.filter(estatus__in=estatus_list)
+            except Exception:
+                raise ValidationError({"estatus": "Filtro inválido. Usa números separados por coma."})
+
+        q = (self.request.query_params.get("q") or "").strip()
+        if q:
+            q_filter = (
+                Q(oc__icontains=q)
+                | Q(cliente__razon_social__icontains=q)
+                | Q(cliente__nombre__icontains=q)
+                | Q(cliente__rfc__icontains=q)
+            )
+            if q.isdigit():
+                q_filter = q_filter | Q(id=int(q))
+            qs = qs.filter(q_filter)
+
+        ordering = (self.request.query_params.get("ordering") or "-created_at").strip()
+        allowed = {"id", "created_at", "updated_at", "gran_total", "estatus"}
+        ordering_fields = []
+        for part in ordering.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            desc = part.startswith("-")
+            field = part[1:] if desc else part
+            if field in allowed:
+                ordering_fields.append(part)
+        if ordering_fields:
+            qs = qs.order_by(*ordering_fields)
+        else:
+            qs = qs.order_by("-created_at")
+
+        return qs
 
     def _asignar_folio_pedido(self, pedido, empresa):
         if pedido.folio:
@@ -331,6 +401,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     raise ValidationError({"cotizacion_id": "Cotización no encontrada."})
                 if not getattr(user, "is_superuser", False) and empresa and cotizacion.empresa_id != empresa.id:
                     raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
+                if not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
+                    if cotizacion.vendedor_id and cotizacion.vendedor_id != getattr(user, "id", None):
+                        raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
 
                 if cotizacion.estatus == 3 and cotizacion.autorizada_at:
                     limite = cotizacion.autorizada_at + timedelta(minutes=edit_minutes)
@@ -347,7 +420,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 update_fields += ["estatus", "cambios_solicitados_at"]
                 cotizacion.save(update_fields=list(dict.fromkeys(update_fields)))
             else:
-                cotizacion = Cotizacion.objects.create(empresa=empresa, estatus=2, **cotizacion_data)
+                cotizacion = Cotizacion.objects.create(empresa=empresa, vendedor=user, estatus=2, **cotizacion_data)
 
             _save_cotizacion_detalle(cotizacion, detalle_data)
             cotizacion = Cotizacion.objects.filter(pk=cotizacion.pk).first()

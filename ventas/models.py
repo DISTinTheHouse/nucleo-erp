@@ -1,4 +1,5 @@
 from django.db import models
+from django.conf import settings
 from nucleo.models import Empresa, Sucursal, Moneda, SerieFolio, StatusLifecycleModel, SatRegimenFiscal
 from terceros.models import Cliente
 from catalogo.models import Producto, Talla
@@ -50,6 +51,7 @@ class Cotizacion(models.Model):
     )
 
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="cotizacion")
+    vendedor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="cotizaciones", null=True, blank=True, db_index=True)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="cotizacion")
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="cotizacion")
     oportunidad = models.ForeignKey(Oportunidad, on_delete=models.CASCADE, related_name="cotizacion", null=True)
@@ -58,7 +60,7 @@ class Cotizacion(models.Model):
     autorizada_at = models.DateTimeField(null=True, blank=True)
     cambios_solicitados_at = models.DateTimeField(null=True, blank=True)
     aprobado_snapshot = models.JSONField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
     # Origen
     recompra = models.BooleanField(default=False)
