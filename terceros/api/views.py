@@ -13,8 +13,21 @@ class ClienteViewSet(viewsets.ModelViewSet):
             return qs
         empresa = getattr(user, "empresa", None)
         if empresa:
-            return qs.filter(empresa=empresa)
+            qs = qs.filter(empresa=empresa)
+            if getattr(user, "is_admin_empresa", False):
+                return qs
+            return qs.filter(vendedores__id=getattr(user, "id", None))
         return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        empresa = getattr(user, "empresa", None)
+        cliente = serializer.save(empresa=empresa)
+        try:
+            if getattr(user, "id", None):
+                cliente.vendedores.add(user)
+        except Exception:
+            pass
 
     def perform_destroy(self, instance):
         instance.soft_delete()

@@ -5,7 +5,7 @@ class ClienteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Cliente
         fields = "__all__"
-        read_only_fields = ["activo"]
+        read_only_fields = ["activo", "empresa", "vendedores"]
 
 class ProveedorSerializer(serializers.ModelSerializer):
     class Meta:
