@@ -336,7 +336,38 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             }
             return Response(data)
 
-        serializer = CotizacionOnboardingCreateSerializer(data=request.data)
+        raw = request.data
+        if isinstance(raw, dict):
+            raw_dict = raw
+        else:
+            try:
+                raw_dict = dict(raw)
+            except Exception:
+                raw_dict = {}
+
+        if "cotizacion" not in raw_dict:
+            if "pedido" in raw_dict:
+                cotizacion_payload = raw_dict.get("pedido") or {}
+            else:
+                cotizacion_payload = {
+                    k: v
+                    for k, v in raw_dict.items()
+                    if k not in {"detalle", "detalles", "cotizacion_id"}
+                }
+            normalized = {
+                "cotizacion_id": raw_dict.get("cotizacion_id") or (cotizacion_payload.get("id") if isinstance(cotizacion_payload, dict) else None),
+                "cotizacion": cotizacion_payload,
+                "detalle": raw_dict.get("detalle") or raw_dict.get("detalles") or [],
+            }
+            if normalized.get("cotizacion_id") in (None, ""):
+                normalized.pop("cotizacion_id", None)
+        else:
+            normalized = raw_dict
+            if isinstance(normalized, dict) and normalized.get("cotizacion_id") in (None, ""):
+                normalized = dict(normalized)
+                normalized.pop("cotizacion_id", None)
+
+        serializer = CotizacionOnboardingCreateSerializer(data=normalized)
         serializer.is_valid(raise_exception=True)
         cotizacion_id = serializer.validated_data.get("cotizacion_id") or (request.data.get("cotizacion") or {}).get("id")
         cotizacion_data = serializer.validated_data["cotizacion"]
