@@ -207,8 +207,14 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             from terceros.models import Cliente
             from nucleo.models import SatRegimenFiscal
 
-            limit = int(request.query_params.get("limit") or 20)
-            limit = max(1, min(limit, 50))
+            limit_raw = request.query_params.get("limit")
+            limit = None
+            if limit_raw not in (None, "", "all", "ALL", "0", "-1"):
+                try:
+                    limit = int(limit_raw)
+                except Exception:
+                    limit = 20
+                limit = max(1, min(limit, 1000))
 
             empresa_id = request.query_params.get("empresa_id")
             if getattr(user, "is_superuser", False) and not empresa and empresa_id:
@@ -238,28 +244,46 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 )
 
             if producto_q:
-                productos_qs = productos_qs.filter(nombre__icontains=producto_q)
+                from decimal import Decimal
+                qtxt = producto_q
+                cond = Q(nombre__icontains=qtxt) | Q(descripcion__icontains=qtxt)
+                if qtxt.isdigit():
+                    try:
+                        cond = cond | Q(pk=int(qtxt))
+                    except Exception:
+                        pass
+                    try:
+                        cond = cond | Q(precio_base=Decimal(qtxt))
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        cond = cond | Q(precio_base=Decimal(qtxt))
+                    except Exception:
+                        pass
+                productos_qs = productos_qs.filter(cond)
 
-            clientes = list(
-                clientes_qs.order_by("id").values(
-                    "id",
-                    "razon_social",
-                    "nombre",
-                    "rfc",
-                    "correo",
-                    "telefono",
-                    "sat_regimen_fiscal_id",
-                    "sat_uso_cfdi_id",
-                )[:limit]
+            clientes_qs = clientes_qs.order_by("id").values(
+                "id",
+                "razon_social",
+                "nombre",
+                "rfc",
+                "correo",
+                "telefono",
+                "sat_regimen_fiscal_id",
+                "sat_uso_cfdi_id",
             )
-            productos = list(
-                productos_qs.order_by("id").values(
-                    "id",
-                    "nombre",
-                    "descripcion",
-                    "precio_base",
-                )[:limit]
+            productos_qs = productos_qs.order_by("id").values(
+                "id",
+                "nombre",
+                "descripcion",
+                "precio_base",
             )
+            if limit is not None:
+                clientes_qs = clientes_qs[:limit]
+                productos_qs = productos_qs[:limit]
+            clientes = list(clientes_qs)
+            productos = list(productos_qs)
             tallas = list(Talla.objects.filter(activo=True).order_by("id").values("id", "nombre"))
             regimenes_fiscales = list(
                 SatRegimenFiscal.objects.filter(activo=True).order_by("codigo").values("codigo", "descripcion")
@@ -269,25 +293,26 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 for r in regimenes_fiscales
             ]
             tipos_pedido = [{"value": tp[0], "label": tp[1]} for tp in Pedido.CHOICES_TIPO_PEDIDO]
-            clientes = list(
-                clientes_qs.order_by("id").values(
-                    "id",
-                    "razon_social",
-                    "nombre",
-                    "rfc",
-                    "correo",
-                    "telefono",
-                    "direccion_fiscal",
-                    "colonia",
-                    "codigo_postal",
-                    "ciudad",
-                    "estado",
-                    "giro_empresarial",
-                    "sat_regimen_fiscal_id",
-                    "sat_regimen_fiscal__codigo",
-                    "sat_regimen_fiscal__descripcion",
-                )[:limit]
+            clientes_qs = clientes_qs.order_by("id").values(
+                "id",
+                "razon_social",
+                "nombre",
+                "rfc",
+                "correo",
+                "telefono",
+                "direccion_fiscal",
+                "colonia",
+                "codigo_postal",
+                "ciudad",
+                "estado",
+                "giro_empresarial",
+                "sat_regimen_fiscal_id",
+                "sat_regimen_fiscal__codigo",
+                "sat_regimen_fiscal__descripcion",
             )
+            if limit is not None:
+                clientes_qs = clientes_qs[:limit]
+            clientes = list(clientes_qs)
 
             data = {
                 "vendedor": {
