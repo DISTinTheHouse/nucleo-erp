@@ -1,6 +1,29 @@
 from rest_framework import serializers
 from ventas.models import Cotizacion, CotizacionDetalle, CotizacionDetalleTalla, Pedido, PedidoDetalle, PedidoDetalleTalla
 
+
+def _normalize_bordado_config(raw):
+    if raw is None:
+        return None
+
+    if isinstance(raw, str):
+        parts = [p.strip() for p in raw.replace(",", "\n").splitlines()]
+        urls = [p for p in parts if p]
+        return {"imagenes": urls}
+
+    if isinstance(raw, list):
+        urls = [str(p).strip() for p in raw if str(p).strip()]
+        return {"imagenes": urls}
+
+    if isinstance(raw, dict):
+        if "imagenes" in raw and isinstance(raw["imagenes"], str):
+            parts = [p.strip() for p in raw["imagenes"].replace(",", "\n").splitlines()]
+            raw = dict(raw)
+            raw["imagenes"] = [p for p in parts if p]
+        return raw
+
+    return {"imagenes": [str(raw).strip()]} if str(raw).strip() else {"imagenes": []}
+
 class CotizacionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Cotizacion
@@ -99,6 +122,16 @@ class PedidoOnboardingTallaInputSerializer(serializers.Serializer):
     lleva_bordado = serializers.BooleanField(required=False, default=False)
     bordado_config = serializers.JSONField(required=False, allow_null=True)
 
+    def validate(self, attrs):
+        lleva_bordado = bool(attrs.get("lleva_bordado"))
+        bordado_config = _normalize_bordado_config(attrs.get("bordado_config"))
+
+        if lleva_bordado and bordado_config is None:
+            raise serializers.ValidationError({"bordado_config": "Requerido cuando lleva_bordado=true."})
+
+        attrs["bordado_config"] = bordado_config
+        return attrs
+
 class PedidoOnboardingDetalleInputSerializer(serializers.Serializer):
     producto = serializers.IntegerField()
     precio_unitario = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
@@ -114,6 +147,16 @@ class CotizacionOnboardingTallaInputSerializer(serializers.Serializer):
     cantidad = serializers.IntegerField(min_value=1)
     lleva_bordado = serializers.BooleanField(required=False, default=False)
     bordado_config = serializers.JSONField(required=False, allow_null=True)
+
+    def validate(self, attrs):
+        lleva_bordado = bool(attrs.get("lleva_bordado"))
+        bordado_config = _normalize_bordado_config(attrs.get("bordado_config"))
+
+        if lleva_bordado and bordado_config is None:
+            raise serializers.ValidationError({"bordado_config": "Requerido cuando lleva_bordado=true."})
+
+        attrs["bordado_config"] = bordado_config
+        return attrs
 
 class CotizacionOnboardingDetalleInputSerializer(serializers.Serializer):
     producto = serializers.IntegerField()
