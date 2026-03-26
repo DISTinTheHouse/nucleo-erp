@@ -3,6 +3,23 @@
 ## Qué es
 Asistente conversacional integrado al ERP para consultas y acciones comunes. Vive en la UI como un widget flotante y usa un endpoint interno para ejecutar herramientas seguras (conteos, búsquedas y altas controladas).
 
+## Vista Creator (Landing → Chat)
+- Flujo sin recargas: se inicia en Landing con textarea y chips; al enviar cambia a Chat.
+- Archivo: [creator.html](file:///c:/Users/Jes%C3%BAs%20Ibarra/Desktop/django-backend-v2/templates/ia/creator.html)
+- Nueva consulta: limpia la conversación y regresa a Landing.
+- Salir: redirige a la ruta `nucleo:dashboard` (ver [nucleo/urls.py](file:///c:/Users/Jes%C3%BAs%20Ibarra/Desktop/django-backend-v2/nucleo/urls.py)).
+- Scroll controlado: la página no hace scroll global en Creator; solo el área de mensajes del chat usa scroll cuando es necesario.
+- Sanitización: las respuestas del asistente se muestran sin etiquetas HTML incrustadas para evitar ver “código” en pantalla.
+
+### Barra superior del chat
+- Título: “Asistente del ERP”.
+- Controles: “Nueva consulta” y “Salir” con iconos.
+- Estética: oscura y moderna, bordes finos, hover sutil.
+
+### Chips de atajo (Landing)
+- Enfocados al ERP: Crear cliente, Generar cotización, Registrar venta, Crear producto, Ver reportes, Analizar datos, Resumen de ventas de hoy, Top 5 productos vendidos, Ver productos con bajo stock, Preparar mensaje para cliente.
+- Al hacer clic, rellenan el prompt y disparan el envío según el contexto.
+
 ## Cómo abrirlo
 - En cualquier pantalla del ERP, haz clic en el botón flotante con el icono de chat en la esquina inferior derecha. 
 - Escribe tu consulta en español y presiona Enter o el botón de enviar.
@@ -108,4 +125,3 @@ curl -X POST https://tu-dominio/api/v1/ai/chat/ \
 
 ---
 Si necesitas que el asistente acepte más operaciones (por ejemplo, más filtros o actualizaciones), indícalo y se agregan nuevas herramientas. 
-*** End Patch***} >>

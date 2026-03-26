@@ -3,10 +3,10 @@
 {% block header_title %}Crear con IA{% endblock %}
 {% block header_subtitle %}Describe tu idea y deja que el asistente te proponga acciones{% endblock %}
 {% block content %}
-<div class="w-full min-h-[calc(100vh-5rem)] flex flex-col">
-    <div class="flex-1 flex flex-col items-center justify-center px-4 sm:px-8">
+<div class="w-full h-[calc(100vh-5rem)] flex flex-col overflow-hidden overscroll-none">
+    <div class="flex-1 flex flex-col items-center justify-center px-4 sm:px-8 overflow-hidden overscroll-none">
         <div id="ia-landing"
-            class="w-full flex flex-col items-center opacity-100 translate-y-6 transition-all duration-300">
+            class="w-full flex flex-col items-center opacity-100 transition-all duration-300 max-h-full overscroll-none">
             <div class="w-full max-w-3xl flex flex-col items-center text-center">
                 <h1 class="text-4xl md:text-[40px] text-slate-800 dark:text-white">¿Qué quieres crear?</h1>
                 <p class="text-base mt-4 text-slate-600 dark:text-slate-300">Crea algo increíble con un solo mensaje</p>
@@ -31,7 +31,7 @@
                         </button>
                         <button id="ia-landing-send"
                             class="flex items-center justify-center p-1.5 rounded size-8 bg-orange-500 hover:bg-orange-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                            aria-label="Enviar">
+                            aria-label="Enviar" disabled>
                             <svg width="11" height="12" viewBox="0 0 11 12" fill="none"
                                 xmlns="http://www.w3.org/2000/svg">
                                 <path d="M1 5.5 5.5 1 10 5.5m-4.5 5.143V1" stroke="#fff" stroke-linecap="round"
@@ -60,12 +60,12 @@
                     <button type="button" data-prompt="Analizar datos"
                         class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Analizar
                         datos</button>
-                    <button type="button" data-prompt="Automatizar tarea"
-                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Automatizar
-                        tarea</button>
-                    <button type="button" data-prompt="Generar idea de negocio"
-                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Generar
-                        idea de negocio</button>
+                    <button type="button" data-prompt="Resumen de ventas de hoy"
+                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Resumen
+                        de ventas de hoy</button>
+                    <button type="button" data-prompt="Top 5 productos vendidos"
+                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Top
+                        5 productos vendidos</button>
                     <button type="button" data-prompt="Ver productos con bajo stock"
                         class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Ver
                         productos con bajo stock</button>
@@ -78,196 +78,283 @@
 
         <div id="ia-chat" class="hidden w-full max-w-4xl opacity-0 translate-y-2 transition-all duration-300">
             <div
-                class="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden shadow-sm flex flex-col h-[72vh] sm:h-[75vh]">
+                class="w-full bg-slate-900/90 border border-slate-800/70 rounded-2xl overflow-hidden shadow-2xl shadow-slate-900/30 flex flex-col h-[72vh] sm:h-[75vh]">
+                <div
+                    class="flex items-center justify-between px-4 py-3 border-b border-slate-800/70 bg-gradient-to-b from-slate-900/90 to-slate-800/60">
+                    <div class="text-sm font-semibold text-slate-100">Asistente del ERP</div>
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <button id="ia-new" type="button"
+                            class="px-3 py-1.5 text-sm rounded-lg bg-transparent hover:bg-slate-800/70 text-slate-200 border border-slate-700/70 transition-colors inline-flex items-center gap-2">
+                            <i class="fas fa-rotate-right"></i>
+                            Nueva consulta
+                        </button>
+                        <a id="ia-exit" href="{% url 'nucleo:dashboard' %}"
+                            class="px-3 py-1.5 text-sm rounded-lg bg-transparent hover:bg-slate-800/70 text-slate-200 border border-slate-700/70 transition-colors inline-flex items-center gap-2">
+                            <i class="fas fa-right-from-bracket"></i>
+                            Salir
+                        </a>
+                    </div>
+                </div>
                 <div id="ia-messages"
-                    class="flex-1 min-h-0 overflow-y-auto p-6 bg-slate-50 dark:bg-slate-900/40 space-y-3"></div>
-                <div class="border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-3">
+                    class="flex-1 min-h-0 overflow-y-auto p-6 bg-gradient-to-b from-slate-900/70 to-slate-900/40 space-y-3">
+                </div>
+                <div class="border-t border-slate-800/70 bg-slate-900/80 p-3">
                     <div class="flex gap-2 items-end">
                         <textarea id="ia-chat-input" rows="1"
-                            class="flex-1 p-3 border border-slate-300 dark:border-slate-600 rounded-xl bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-orange-500 text-sm resize-none max-h-32 overflow-y-auto"
+                            class="flex-1 p-3 rounded-xl bg-slate-800/80 border border-slate-700/60 text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-orange-500/60 focus:border-orange-400/40 text-sm resize-none max-h-32 overflow-y-auto"
                             placeholder="Escribe tu mensaje..."></textarea>
                         <button id="ia-chat-send"
-                            class="bg-orange-500 hover:bg-orange-600 text-white p-2 rounded-xl shadow-md transition-colors flex items-center justify-center w-11 h-11 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                            class="bg-gradient-to-r from-orange-500 to-orange-400 hover:from-orange-500 hover:to-orange-500 text-white p-2 rounded-xl shadow-md shadow-orange-500/20 ring-1 ring-orange-400/30 transition-colors flex items-center justify-center w-11 h-11 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
                             aria-label="Enviar" disabled>
                             <i class="fas fa-paper-plane"></i>
                         </button>
                     </div>
+
+
                 </div>
-            </div>
-        </div>
 
-        <footer class="mt-auto py-6 text-center text-sm text-slate-500 dark:text-slate-400">
-            <a href="#" class="underline hover:text-slate-700 dark:hover:text-slate-200 transition-colors">Términos de
-                uso</a>
-            <span class="mx-2">|</span>
-            <a href="#" class="underline hover:text-slate-700 dark:hover:text-slate-200 transition-colors">Política de
-                privacidad</a>
-        </footer>
+                <script>
+                    const landing = document.getElementById('ia-landing');
+                    const landingInput = document.getElementById('ia-landing-input');
+                    const landingSend = document.getElementById('ia-landing-send');
+                    const chips = document.getElementById('ia-chips');
+                    const chat = document.getElementById('ia-chat');
+                    let messages = document.getElementById('ia-messages');
+                    const chatInput = document.getElementById('ia-chat-input');
+                    const chatSend = document.getElementById('ia-chat-send');
 
-        <script>
-            const landing = document.getElementById('ia-landing');
-            const landingInput = document.getElementById('ia-landing-input');
-            const landingSend = document.getElementById('ia-landing-send');
-            const chips = document.getElementById('ia-chips');
-            const chat = document.getElementById('ia-chat');
-            const messages = document.getElementById('ia-messages');
-            const chatInput = document.getElementById('ia-chat-input');
-            const chatSend = document.getElementById('ia-chat-send');
+                    let conversation = [];
+                    let mode = 'landing';
+                    const landingPlaceholder = landingInput ? landingInput.getAttribute('placeholder') : '';
 
-            let conversation = [];
-            let mode = 'landing';
-            const landingPlaceholder = landingInput ? landingInput.getAttribute('placeholder') : '';
-
-            function getCookie(name) {
-                const cookies = document.cookie ? document.cookie.split(';') : [];
-                for (let i = 0; i < cookies.length; i++) {
-                    const c = cookies[i].trim();
-                    if (c.startsWith(name + '=')) return decodeURIComponent(c.substring(name.length + 1));
-                }
-                return '';
-            }
-
-            function autoResize(el) {
-                const min = 48;
-                const max = 128;
-                el.style.height = 'auto';
-                const target = Math.max(min, Math.min(el.scrollHeight, max));
-                el.style.height = target + 'px';
-            }
-
-            function scrollToBottom() {
-                messages.scrollTop = messages.scrollHeight;
-            }
-
-            function bubble(role, text) {
-                const wrapper = document.createElement('div');
-                wrapper.className = role === 'user' ? 'text-right' : 'text-left';
-                const span = document.createElement('span');
-                if (role === 'user') {
-                    span.className = 'inline-block bg-orange-500 text-white p-3 rounded-2xl rounded-tr-sm shadow-sm text-sm whitespace-pre-wrap max-w-[85%]';
-                } else {
-                    span.className = 'inline-block bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm whitespace-pre-wrap max-w-[85%]';
-                }
-                span.textContent = text;
-                wrapper.appendChild(span);
-                return wrapper;
-            }
-
-            function switchToChat() {
-                if (mode === 'chat') return;
-                mode = 'chat';
-                chat.classList.remove('hidden');
-                requestAnimationFrame(() => {
-                    chat.classList.remove('opacity-0', 'translate-y-2');
-                    chat.classList.add('opacity-100', 'translate-y-0');
-                    chatInput && chatInput.focus();
-                });
-                landing.classList.add('opacity-0', '-translate-y-2');
-                setTimeout(() => { landing.classList.add('hidden'); }, 180);
-            }
-
-            async function sendToAI(text) {
-                const csrftoken = getCookie('csrftoken');
-                try {
-                    const response = await fetch('{% url "ai_chat" %}', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrftoken },
-                        body: JSON.stringify({ message: text, conversation: conversation })
-                    });
-                    const data = await response.json();
-                    if (response.ok && data.reply) return { ok: true, reply: data.reply };
-                    return { ok: false, reply: data.error || 'Error al procesar la respuesta' };
-                } catch (_) {
-                    return { ok: false, reply: 'Error de conexión con el servidor' };
-                }
-            }
-
-            function setSendButtonState() {
-                if (landingSend) landingSend.disabled = !(landingInput && landingInput.value.trim().length);
-                if (chatSend) chatSend.disabled = !(chatInput && chatInput.value.trim().length);
-            }
-
-            async function handleSend(source) {
-                const input = source === 'landing' ? landingInput : chatInput;
-                const text = (input.value || '').trim();
-                if (!text) return;
-
-                if (source === 'landing') switchToChat();
-
-                input.value = '';
-                autoResize(input);
-                setSendButtonState();
-
-                messages.appendChild(bubble('user', text));
-                scrollToBottom();
-
-                const pending = document.createElement('div');
-                pending.className = 'text-left';
-                pending.innerHTML = '<span class="inline-block bg-white dark:bg-slate-700 text-slate-500 dark:text-slate-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm"><i class="fas fa-circle-notch fa-spin mr-1"></i> Pensando...</span>';
-                messages.appendChild(pending);
-                scrollToBottom();
-
-                const result = await sendToAI(text);
-                pending.remove();
-
-                messages.appendChild(bubble('assistant', result.reply));
-                scrollToBottom();
-
-                conversation.push({ role: 'user', content: text });
-                conversation.push({ role: 'assistant', content: result.reply });
-            }
-
-            function bindEnterToSend(el, source) {
-                el.addEventListener('input', () => autoResize(el));
-                el.addEventListener('keydown', (e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        handleSend(source);
+                    function getCookie(name) {
+                        const cookies = document.cookie ? document.cookie.split(';') : [];
+                        for (let i = 0; i < cookies.length; i++) {
+                            const c = cookies[i].trim();
+                            if (c.startsWith(name + '=')) return decodeURIComponent(c.substring(name.length + 1));
+                        }
+                        return '';
                     }
-                });
-                autoResize(el);
-            }
 
-            if (landingSend) landingSend.addEventListener('click', (e) => { e.preventDefault(); handleSend('landing'); });
-            if (chatSend) chatSend.addEventListener('click', (e) => { e.preventDefault(); handleSend('chat'); });
-            if (landingInput) {
-                bindEnterToSend(landingInput, 'landing');
-                landingInput.addEventListener('input', setSendButtonState);
-            }
-            if (chatInput) {
-                bindEnterToSend(chatInput, 'chat');
-                chatInput.addEventListener('input', setSendButtonState);
-            }
-            setSendButtonState();
+                    function autoResize(el) {
+                        const min = 48;
+                        const max = 128;
+                        el.style.height = 'auto';
+                        const target = Math.max(min, Math.min(el.scrollHeight, max));
+                        el.style.height = target + 'px';
+                    }
 
-            if (chips) {
-                chips.addEventListener('click', (e) => {
-                    const btn = e.target.closest('button[data-prompt]');
-                    if (!btn) return;
-                    e.preventDefault();
-                    const prompt = btn.getAttribute('data-prompt') || '';
-                    if (mode === 'landing') {
-                        landingInput.value = prompt;
+                    function scrollToBottom() {
+                        if (!messages) return;
+                        messages.scrollTop = messages.scrollHeight;
+                    }
+
+                    function bubble(role, text) {
+                        const wrapper = document.createElement('div');
+                        wrapper.className = role === 'user' ? 'text-right' : 'text-left';
+                        const span = document.createElement('span');
+                        if (role === 'user') {
+                            span.className = 'inline-block bg-gradient-to-r from-orange-600 to-orange-500 text-white p-3 rounded-2xl rounded-tr-sm shadow-md shadow-orange-500/20 text-sm whitespace-pre-wrap max-w-[85%]';
+                        } else {
+                            span.className = 'inline-block bg-slate-800/85 text-slate-100 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-700/60 text-sm whitespace-pre-wrap max-w-[85%]';
+                        }
+                        span.textContent = text;
+                        wrapper.appendChild(span);
+                        return wrapper;
+                    }
+
+                    function sanitizeReply(t) {
+                        if (!t) return '';
+                        try {
+                            let s = t.replace(/<[^>]*>/g, '');
+                            s = s.replace(/\b\w+\s*=\s*"[^"]*"/g, '');
+                            s = s.replace(/\s{2,}/g, ' ').trim();
+                            return s;
+                        } catch (_) {
+                            return t;
+                        }
+                    }
+
+                    function ensureChatVisible() {
+                        if (chat.classList.contains('hidden')) {
+                            chat.classList.remove('hidden');
+                            requestAnimationFrame(() => {
+                                chat.classList.remove('opacity-0', 'translate-y-2');
+                                chat.classList.add('opacity-100', 'translate-y-0');
+                            });
+                        }
+                    }
+
+                    function ensureMessagesContainer() {
+                        messages = document.getElementById('ia-messages');
+                        if (!messages) {
+                            console.error('[IA Creator] Contenedor de mensajes no encontrado (#ia-messages)');
+                            ensureChatVisible();
+                            messages = document.getElementById('ia-messages');
+                        }
+                        return !!messages;
+                    }
+
+                    function switchToChat() {
+                        if (mode === 'chat') return;
+                        mode = 'chat';
+                        chat.classList.remove('hidden');
+                        requestAnimationFrame(() => {
+                            chat.classList.remove('opacity-0', 'translate-y-2');
+                            chat.classList.add('opacity-100', 'translate-y-0');
+                            chatInput && chatInput.focus();
+                        });
+                        landing.classList.add('opacity-0', '-translate-y-2');
+                        setTimeout(() => { landing.classList.add('hidden'); }, 180);
+                    }
+
+                    async function sendToAI(text) {
+                        const csrftoken = getCookie('csrftoken');
+                        try {
+                            console.log('[IA Creator] haciendo request');
+                            const response = await fetch('{% url "ai_chat" %}', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrftoken },
+                                body: JSON.stringify({ message: text, conversation: conversation })
+                            });
+                            const data = await response.json();
+                            console.log('[IA Creator] respuesta recibida', { ok: response.ok });
+                            if (response.ok && data.reply) return { ok: true, reply: data.reply };
+                            return { ok: false, reply: data.error || 'Error al procesar la respuesta' };
+                        } catch (err) {
+                            console.error('[IA Creator] error en request', err);
+                            return { ok: false, reply: 'Hubo un problema al procesar la solicitud' };
+                        }
+                    }
+
+                    function setSendButtonState() {
+                        if (landingSend) landingSend.disabled = !(landingInput && landingInput.value.trim().length);
+                        if (chatSend) chatSend.disabled = !(chatInput && chatInput.value.trim().length);
+                    }
+
+                    async function handleSend(source) {
+                        const input = source === 'landing' ? landingInput : chatInput;
+                        const text = (input.value || '').trim();
+                        if (!text) return;
+
+                        if (source === 'landing') switchToChat();
+                        ensureChatVisible();
+                        if (!ensureMessagesContainer()) {
+                            alert('No fue posible mostrar el chat. Recarga la página.');
+                            return;
+                        }
+
+                        input.value = '';
+                        autoResize(input);
+                        setSendButtonState();
+
+                        try {
+                            console.log('[IA Creator] render usuario');
+                            messages.appendChild(bubble('user', text));
+                        } catch (err) {
+                            console.error('[IA Creator] error al renderizar usuario', err);
+                        }
+                        scrollToBottom();
+
+                        const pending = document.createElement('div');
+                        pending.className = 'text-left';
+                        const spinner = document.createElement('span');
+                        spinner.className = 'inline-block bg-slate-100/90 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-200/70 dark:border-slate-700/60 text-sm';
+                        spinner.innerHTML = '<i class="fas fa-circle-notch fa-spin mr-1"></i> Pensando...';
+                        pending.appendChild(spinner);
+                        try {
+                            messages.appendChild(pending);
+                        } catch (err) {
+                            console.error('[IA Creator] error al agregar pending', err);
+                        }
+                        scrollToBottom();
+
+                        console.log('[IA Creator] enviando mensaje');
+                        let result;
+                        try {
+                            result = await sendToAI(text);
+                        } catch (err) {
+                            console.error('[IA Creator] fallo inesperado en sendToAI', err);
+                            result = { ok: false, reply: 'Hubo un problema al procesar la solicitud' };
+                        }
+                        try { pending.remove(); } catch (_) { }
+
+                        const replyText = (result && typeof result.reply === 'string') ? result.reply : 'Hubo un problema al procesar la solicitud';
+                        try {
+                            const clean = sanitizeReply(replyText);
+                            messages.appendChild(bubble('assistant', clean));
+                        } catch (err) {
+                            console.error('[IA Creator] error al renderizar respuesta', err);
+                        }
+                        scrollToBottom();
+
+                        conversation.push({ role: 'user', content: text });
+                        conversation.push({ role: 'assistant', content: sanitizeReply(replyText) });
+                    }
+
+                    if (landingSend) landingSend.addEventListener('click', (e) => { e.preventDefault(); handleSend('landing'); });
+                    if (chatSend) chatSend.addEventListener('click', (e) => { e.preventDefault(); handleSend('chat'); });
+                    if (landingInput) {
+                        landingInput.addEventListener('input', () => { autoResize(landingInput); setSendButtonState(); });
+                        landingInput.addEventListener('keydown', (e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend('landing'); }
+                        });
                         autoResize(landingInput);
                         setSendButtonState();
-                        handleSend('landing');
-                    } else {
-                        chatInput.value = prompt;
-                        autoResize(chatInput);
-                        setSendButtonState();
-                        handleSend('chat');
                     }
-                });
-                if (landingInput) {
-                    chips.addEventListener('mouseenter', (e) => {
-                        const btn = e.target.closest('button[data-prompt]');
-                        if (!btn) return;
-                        landingInput.setAttribute('placeholder', btn.getAttribute('data-prompt') || landingPlaceholder);
-                    }, true);
-                    chips.addEventListener('mouseleave', () => {
-                        landingInput.setAttribute('placeholder', landingPlaceholder);
-                    }, true);
-                }
-            }
-        </script>
-        {% endblock %}
+                    if (chatInput) {
+                        chatInput.addEventListener('input', () => { autoResize(chatInput); setSendButtonState(); });
+                        chatInput.addEventListener('keydown', (e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend('chat'); }
+                        });
+                    }
+
+                    if (chips) {
+                        chips.addEventListener('click', (e) => {
+                            const btn = e.target.closest('button[data-prompt]');
+                            if (!btn) return;
+                            e.preventDefault();
+                            const prompt = btn.getAttribute('data-prompt') || '';
+                            if (mode === 'landing') {
+                                landingInput.value = prompt;
+                                autoResize(landingInput);
+                                setSendButtonState();
+                                handleSend('landing');
+                            } else {
+                                chatInput.value = prompt;
+                                autoResize(chatInput);
+                                setSendButtonState();
+                                handleSend('chat');
+                            }
+                        });
+                        if (landingInput) {
+                            chips.addEventListener('mouseenter', (e) => {
+                                const btn = e.target.closest('button[data-prompt]');
+                                if (!btn) return;
+                                landingInput.setAttribute('placeholder', btn.getAttribute('data-prompt') || landingPlaceholder);
+                            }, true);
+                            chips.addEventListener('mouseleave', () => {
+                                landingInput.setAttribute('placeholder', landingPlaceholder);
+                            }, true);
+                        }
+                    }
+                    const newBtn = document.getElementById('ia-new');
+                    if (newBtn) {
+                        newBtn.addEventListener('click', (e) => {
+                            e.preventDefault();
+                            conversation = [];
+                            if (messages) messages.innerHTML = '';
+                            mode = 'landing';
+                            landing.classList.remove('hidden', 'opacity-0', '-translate-y-2');
+                            landing.classList.add('opacity-100', 'translate-y-6');
+                            chat.classList.add('hidden');
+                            if (landingInput) {
+                                landingInput.value = '';
+                                autoResize(landingInput);
+                                landingInput.focus();
+                            }
+                            setSendButtonState();
+                        });
+                    }
+                </script>
+                {% endblock %}
