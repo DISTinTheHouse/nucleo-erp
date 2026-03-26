@@ -16,6 +16,7 @@ urlpatterns = [
     path('', include('usuarios.urls')),
     path('', include(('seguridad.urls', 'seguridad'), namespace='seguridad')),
     path('', include('inventarios.urls')),
+    path('ia/', include('ia.urls')),
     path('api/v1/catalogo/', include('catalogo.api.urls')),
     path('api/v1/inventarios/', include('inventarios.api.urls')),
     path('api/v1/terceros/', include('terceros.api.urls')),
