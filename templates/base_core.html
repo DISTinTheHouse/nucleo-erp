@@ -604,7 +604,8 @@
         <!-- Header -->
         <header class="hidden md:flex h-20 items-center justify-between px-8 bg-transparent shrink-0 z-30">
             <div class="flex items-center gap-4 text-slate-400">
-                <h2 class="text-2xl font-semibold text-slate-800 dark:text-white tracking-tight">{% block header_title %}Panel de Control{% endblock %}</h2>
+                <h2 class="text-2xl font-semibold text-slate-800 dark:text-white tracking-tight">{% block header_title
+                    %}Panel de Control{% endblock %}</h2>
                 <span class="text-sm font-medium">{% block header_subtitle %}{% endblock %}</span>
             </div>
             <div class="flex items-center gap-6">
@@ -614,8 +615,10 @@
                     Ir al Frontend
                 </a>
                 <div class="flex flex-col items-end mr-2">
-                    <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ request.user.username }}</span>
-                    <span class="text-xs text-slate-500">{% if request.user.is_superuser %}Super Admin{% else %}Usuario{% endif %}</span>
+                    <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ request.user.username
+                        }}</span>
+                    <span class="text-xs text-slate-500">{% if request.user.is_superuser %}Super Admin{% else
+                        %}Usuario{% endif %}</span>
                 </div>
                 <div
                     class="h-10 w-10 rounded-full bg-gradient-to-br from-sky-500 to-sky-700 flex items-center justify-center text-white font-bold shadow-lg shadow-sky-500/20 ring-2 ring-white dark:ring-slate-800">
@@ -699,9 +702,14 @@
                 <i class="fas fa-robot"></i>
                 <span class="font-bold">Asistente IA</span>
             </div>
-            <button id="close-chat" class="text-white hover:text-sky-200 transition-colors">
-                <i class="fas fa-times"></i>
-            </button>
+            <div class="flex items-center gap-2">
+                <button id="clear-chat" class="text-white/90 hover:text-white transition-colors">
+                    <i class="fas fa-trash"></i>
+                </button>
+                <button id="close-chat" class="text-white hover:text-sky-200 transition-colors">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
         </div>
         <div id="chat-messages" class="flex-1 p-4 overflow-y-auto h-80 bg-slate-50 dark:bg-slate-900/50 space-y-3">
             <div class="text-left">
@@ -711,11 +719,26 @@
                 </span>
             </div>
         </div>
-        <div class="p-3 bg-white dark:bg-slate-800 border-t border-slate-100 dark:border-slate-700">
-            <div class="flex gap-2">
-                <input type="text" id="chat-input"
-                    class="flex-1 p-2 border border-slate-300 dark:border-slate-600 rounded-xl bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 text-sm"
-                    placeholder="Escribe tu consulta...">
+        <div class="px-3 pt-2 bg-white dark:bg-slate-800 border-t border-slate-100 dark:border-slate-700">
+            <div id="chat-suggestions" class="flex flex-wrap gap-2 pb-2">
+                <button data-suggest="¿Cuántas empresas tengo?"
+                    class="px-3 py-1.5 rounded-full text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-200">¿Cuántas
+                    empresas?</button>
+                <button data-suggest="¿Cuántos usuarios hay?"
+                    class="px-3 py-1.5 rounded-full text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-200">¿Usuarios?</button>
+                <button data-suggest="¿Cuántas cotizaciones existen?"
+                    class="px-3 py-1.5 rounded-full text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-200">¿Cotizaciones?</button>
+                <button data-suggest="Crea un cliente 'Comercial XYZ' con RFC XAXX010101000"
+                    class="px-3 py-1.5 rounded-full text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-200">Crear
+                    cliente</button>
+                <button data-suggest="Lista las 5 empresas"
+                    class="px-3 py-1.5 rounded-full text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-200">Top
+                    5 empresas</button>
+            </div>
+            <div class="flex gap-2 pb-3">
+                <textarea id="chat-input" rows="1"
+                    class="flex-1 p-2 border border-slate-300 dark:border-slate-600 rounded-xl bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 text-sm resize-none"
+                    placeholder="Escribe tu consulta..."></textarea>
                 <button id="send-chat"
                     class="bg-sky-600 hover:bg-sky-700 text-white p-2 rounded-xl shadow-md transition-colors flex items-center justify-center w-10 h-10 shrink-0">
                     <i class="fas fa-paper-plane"></i>
@@ -733,111 +756,82 @@
         const chatWidget = document.getElementById('chat-widget');
         const openChatBtn = document.getElementById('open-chat');
         const closeChatBtn = document.getElementById('close-chat');
+        const clearChatBtn = document.getElementById('clear-chat');
         const sendChatBtn = document.getElementById('send-chat');
         const chatInput = document.getElementById('chat-input');
         const chatMessages = document.getElementById('chat-messages');
+        const suggestions = document.getElementById('chat-suggestions');
 
         let conversationHistory = [];
+        const STORAGE_KEY = 'erp_ai_chat_history';
+        function saveHistory() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(conversationHistory.slice(-40))); } catch (_) { } }
+        function appendMessage(role, text) {
+            if (role === 'user') {
+                chatMessages.innerHTML += `<div class="text-right"><span class="inline-block bg-sky-600 text-white p-3 rounded-2xl rounded-tr-sm shadow-sm text-sm">${text}</span></div>`;
+            } else {
+                chatMessages.innerHTML += `<div class="text-left"><span class="inline-block bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm whitespace-pre-wrap">${text}</span></div>`;
+            }
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        function loadHistory() {
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                if (!raw) return;
+                const arr = JSON.parse(raw);
+                if (Array.isArray(arr)) {
+                    conversationHistory = arr;
+                    chatMessages.innerHTML = '';
+                    for (const m of arr) { if (m && m.role && m.content) { appendMessage(m.role, m.content); } }
+                }
+            } catch (_) { }
+        }
+        function autoResize(el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
+        chatInput.addEventListener('input', () => autoResize(chatInput));
 
-        openChatBtn.addEventListener('click', () => {
-            chatWidget.classList.remove('hidden');
-            chatWidget.classList.remove('scale-0', 'opacity-0');
-            chatWidget.classList.add('scale-100', 'opacity-100');
-            openChatBtn.classList.add('hidden');
-            chatInput.focus();
-        });
+        openChatBtn.addEventListener('click', () => { chatWidget.classList.remove('hidden'); chatWidget.classList.remove('scale-0', 'opacity-0'); chatWidget.classList.add('scale-100', 'opacity-100'); openChatBtn.classList.add('hidden'); chatInput.focus(); });
+        closeChatBtn.addEventListener('click', () => { chatWidget.classList.remove('scale-100', 'opacity-100'); chatWidget.classList.add('scale-0', 'opacity-0'); setTimeout(() => { chatWidget.classList.add('hidden'); openChatBtn.classList.remove('hidden'); }, 300); });
 
-        closeChatBtn.addEventListener('click', () => {
-            chatWidget.classList.remove('scale-100', 'opacity-100');
-            chatWidget.classList.add('scale-0', 'opacity-0');
-            setTimeout(() => {
-                chatWidget.classList.add('hidden');
-                openChatBtn.classList.remove('hidden');
-            }, 300);
-        });
+        if (clearChatBtn) { clearChatBtn.addEventListener('click', () => { conversationHistory = []; chatMessages.innerHTML = `<div class="text-left"><span class="inline-block bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm">¡Hola! Soy tu asistente. ¿En qué te puedo ayudar hoy?</span></div>`; try { localStorage.removeItem(STORAGE_KEY); } catch (_) { } }); }
+        if (suggestions) { suggestions.addEventListener('click', (e) => { const t = e.target.closest('button[data-suggest]'); if (!t) return; const prompt = t.getAttribute('data-suggest') || ''; chatInput.value = prompt; autoResize(chatInput); sendMessage(); }); }
 
         async function sendMessage() {
             const message = chatInput.value.trim();
             if (!message) return;
-            chatInput.value = '';
+            chatInput.value = ''; autoResize(chatInput);
 
-            // User message UI
-            chatMessages.innerHTML += `
-                <div class="text-right">
-                    <span class="inline-block bg-sky-600 text-white p-3 rounded-2xl rounded-tr-sm shadow-sm text-sm">
-                        ${message}
-                    </span>
-                </div>
-            `;
-            chatMessages.scrollTop = chatMessages.scrollHeight;
+            appendMessage('user', message);
 
-            // Loading indicator UI
             const loadingId = 'loading-' + Date.now();
-            chatMessages.innerHTML += `
-                <div class="text-left" id="${loadingId}">
-                    <span class="inline-block bg-white dark:bg-slate-700 text-slate-500 dark:text-slate-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm">
-                        <i class="fas fa-circle-notch fa-spin"></i> Pensando...
-                    </span>
-                </div>
-            `;
+            chatMessages.innerHTML += `<div class="text-left" id="${loadingId}"><span class="inline-block bg-white dark:bg-slate-700 text-slate-500 dark:text-slate-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm"><i class="fas fa-circle-notch fa-spin"></i> Pensando...</span></div>`;
             chatMessages.scrollTop = chatMessages.scrollHeight;
 
             const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value;
 
             try {
-                const response = await fetch('{% url "ai_chat" %}', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRFToken': csrftoken
-                    },
-                    body: JSON.stringify({
-                        message: message,
-                        conversation: conversationHistory
-                    })
-                });
-
+                const response = await fetch('{% url "ai_chat" %}', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrftoken }, body: JSON.stringify({ message: message, conversation: conversationHistory }) });
                 const data = await response.json();
                 document.getElementById(loadingId).remove();
 
                 if (response.ok && data.reply) {
-                    // Assistant message UI
-                    chatMessages.innerHTML += `
-                        <div class="text-left">
-                            <span class="inline-block bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm whitespace-pre-wrap">${data.reply}</span>
-                        </div>
-                    `;
-                    // Update conversation history
+                    appendMessage('assistant', data.reply);
                     conversationHistory.push({ role: 'user', content: message });
                     conversationHistory.push({ role: 'assistant', content: data.reply });
+                    saveHistory();
                 } else {
                     const errorMsg = data.error || 'Error al procesar la respuesta';
-                    chatMessages.innerHTML += `
-                        <div class="text-left">
-                            <span class="inline-block bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-red-200 dark:border-red-800/50 text-sm">
-                                <i class="fas fa-exclamation-triangle mr-1"></i> ${errorMsg}
-                            </span>
-                        </div>
-                    `;
+                    chatMessages.innerHTML += `<div class="text-left"><span class="inline-block bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-red-200 dark:border-red-800/50 text-sm"><i class="fas fa-exclamation-triangle mr-1"></i> ${errorMsg}</span></div>`;
                 }
             } catch (error) {
                 document.getElementById(loadingId).remove();
-                chatMessages.innerHTML += `
-                    <div class="text-left">
-                        <span class="inline-block bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-red-200 dark:border-red-800/50 text-sm">
-                            <i class="fas fa-wifi mr-1"></i> Error de conexión con el servidor
-                        </span>
-                    </div>
-                `;
+                chatMessages.innerHTML += `<div class="text-left"><span class="inline-block bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-red-200 dark:border-red-800/50 text-sm"><i class="fas fa-wifi mr-1"></i> Error de conexión con el servidor</span></div>`;
             }
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
 
         sendChatBtn.addEventListener('click', sendMessage);
 
-        chatInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') sendMessage();
-        });
+        chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
+        loadHistory();
     </script>
 
     {% with host=request.get_host %}
