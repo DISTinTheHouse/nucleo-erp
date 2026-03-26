@@ -941,3 +941,69 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 - Rechazar: no crea pedido y no gasta folio.
 - Solicitar cambios dentro de ventana: al re-enviar onboarding con `cotizacion_id`, cotización pasa a `Cambios Por Autorizar (5)`.
 - Aceptar cambios: sincroniza `pedido` con el nuevo detalle; Rechazar cambios: restaura la cotización al `aprobado_snapshot` y no toca `pedido`.
+
+---
+
+## 🤖 Asistente IA (Chat)
+
+Asistente conversacional para ejecutar consultas y acciones controladas desde el frontend (próxima integración en Next.js).
+
+- **Endpoint**: `POST /api/v1/ai/chat/`
+- **Autenticación**: sesión/Token del usuario (hereda permisos).
+- **Headers**: `Content-Type: application/json`
+
+### Request
+```json
+{
+  "message": "¿Cuántas empresas tengo?",
+  "conversation": [
+    {"role":"user","content":"Hola"},
+    {"role":"assistant","content":"¿En qué te ayudo?"}
+  ]
+}
+```
+
+Notas:
+- `message` es obligatorio.
+- `conversation` es opcional; enviar historial breve mejora el contexto (máx. ~20 turnos recientes).
+
+### Response
+```json
+{
+  "reply": "Tienes 1 empresa.",
+  "tool_results": [
+    {"name": "count_empresas", "args": {}, "result": {"ok": true, "count": 1}}
+  ]
+}
+```
+
+### Consultas soportadas
+- Conteos: “¿Cuántas empresas/usuarios/cotizaciones hay?”
+- Listados: “Lista las 5 empresas”, “Muéstrame 10 usuarios de mi empresa”
+- Búsquedas: “Busca clientes con RFC XAXX010101000”
+- Detalles: “Dame los datos de la empresa lazzar-mex-0001”
+- Permisos: “¿Qué permisos efectivos tengo?”
+
+### Acciones (crear)
+- Empresa (solo superuser): “Crea una empresa …”
+- Rol (solo superuser): “Crea un rol Ventas …”
+- Usuario (admin-empresa o superuser): “Crea un usuario maria.garcia con rol Ventas …”
+- Cliente (admin-empresa o superuser): “Crea un cliente ‘Comercial XYZ’ con RFC XAXX010101000”
+
+El asistente valida campos críticos (RFC, SAT) y solicitará datos faltantes.
+
+### Seguridad
+- Respeta permisos del usuario autenticado:
+  - Superuser: puede crear Empresas y Roles; también Usuarios y Clientes.
+  - Admin de empresa: puede crear Usuarios y Clientes en su empresa.
+  - Usuario normal: consultas; no crea.
+- Si faltan permisos o datos, el asistente lo indicará sin ejecutar acciones.
+
+### Notas de configuración
+- Variables de entorno:
+  - `OPENAI_API_KEY` (obligatoria)
+  - `OPENAI_MODEL` (opcional, por defecto `gpt-4o-mini`)
+  - `OPENAI_BASE_URL` (opcional)
+- Archivos relevantes:
+  - Endpoint DRF: `ia/api/urls.py`, `ia/api/views.py`
+  - Configuración: `ERP/settings.py`

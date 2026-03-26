@@ -41,7 +41,6 @@ class UsuarioCreationForm(TailwindFormMixin, UserCreationForm):
             'sucursales',
             'departamentos',
             'is_admin_empresa',
-            'estatus',
         )
     
     roles = forms.ModelMultipleChoiceField(
@@ -141,7 +140,6 @@ class UsuarioChangeForm(TailwindFormMixin, UserChangeForm):
             'sucursales',
             'departamentos',
             'is_admin_empresa',
-            'estatus',
         )
 
     roles = forms.ModelMultipleChoiceField(

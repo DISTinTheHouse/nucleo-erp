@@ -22,7 +22,7 @@ class UsuarioListView(LoginRequiredMixin, SuperuserRequiredMixin, ListView):
 
     def get_queryset(self):
         qs = (
-            Usuario.objects.select_related("empresa")
+            Usuario.objects.select_related("empresa").prefetch_related("asignaciones_roles__rol")
             .all()
             .order_by("empresa__codigo", "username")
         )

@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'nucleo',
     'seguridad',
     'usuarios',
+    'ia',
     'auditoria',
     'axes',
     'inventarios',
@@ -123,6 +124,14 @@ IS_VERCEL = os.environ.get('VERCEL') == '1'
 # Ventanas y tolerancias
 # =========================
 COTIZACION_EDIT_WINDOW_MINUTES = int(os.getenv('COTIZACION_EDIT_WINDOW_MINUTES', '30'))
+
+# =========================
+# Integración con IA (OpenAI)
+# =========================
+OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
+OPENAI_BASE_URL = config('OPENAI_BASE_URL', default='https://api.openai.com/v1')
+OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o-mini')
+
 USE_REMOTE_DB = config('USE_REMOTE_DB', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
 
 LOCAL_POSTGRES_DB_HOST = config('LOCAL_POSTGRES_DB_HOST', default='127.0.0.1')
@@ -239,6 +248,10 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 CORS_URLS_REGEX = r'^/api/.*$'
 
 CSRF_TRUSTED_ORIGINS = [o for o in config('CSRF_TRUSTED_ORIGINS', default='https://*.onrender.com,https://*.vercel.app,https://localhost:3000,http://localhost:3000').split(',') if o]
+
+OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
+OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o-mini')
+OPENAI_BASE_URL = config('OPENAI_BASE_URL', default='https://api.openai.com/v1')
 
 # =========================
 # AUTH SETTINGS

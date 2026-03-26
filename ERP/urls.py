@@ -22,6 +22,7 @@ urlpatterns = [
     path('api/v1/compras/', include('compras.api.urls')),
     path('api/v1/produccion/', include('produccion.api.urls')),
     path('api/v1/ventas/', include('ventas.api.urls')),
+    path('api/v1/ai/', include('ia.api.urls')),
     path('auditoria/', include('auditoria.urls')),
     path('accounts/', include('django.contrib.auth.urls')),
 ]
