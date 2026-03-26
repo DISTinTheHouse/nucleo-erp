@@ -615,7 +615,7 @@
                 </a>
                 <div class="flex flex-col items-end mr-2">
                     <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ request.user.username }}</span>
-                    <span class="text-xs text-slate-500">{% if request.user.is_superuser %}Super Admin{% else %}Usuario{% endif %}</span>
+                    <span class="text-xs text-slate-500">{% if request.user.is_superuser %}Super Admin{% else }Usuario{% endif %}</span>
                 </div>
                 <div
                     class="h-10 w-10 rounded-full bg-gradient-to-br from-sky-500 to-sky-700 flex items-center justify-center text-white font-bold shadow-lg shadow-sky-500/20 ring-2 ring-white dark:ring-slate-800">
@@ -692,7 +692,7 @@
 
     <!-- Collapsible Chat Widget -->
     <div id="chat-widget"
-        class="fixed bottom-20 right-4 w-80 bg-white dark:bg-slate-800 rounded-2xl shadow-2xl flex flex-col hidden z-50 border border-slate-200 dark:border-slate-700 overflow-hidden transition-all duration-300 transform origin-bottom-right">
+        class="fixed bottom-20 right-4 w-[calc(100vw-2rem)] sm:w-96 max-h-[75vh] bg-white dark:bg-slate-800 rounded-2xl shadow-2xl flex flex-col hidden z-50 border border-slate-200 dark:border-slate-700 overflow-hidden transition-all duration-300 transform origin-bottom-right">
         <div id="chat-header"
             class="bg-gradient-to-r from-sky-500 to-sky-600 text-white p-4 cursor-pointer flex justify-between items-center shadow-md">
             <div class="flex items-center gap-2">
@@ -708,7 +708,8 @@
                 </button>
             </div>
         </div>
-        <div id="chat-messages" class="flex-1 p-4 overflow-y-auto h-80 bg-slate-50 dark:bg-slate-900/50 space-y-3">
+        <div id="chat-messages"
+            class="flex-1 min-h-0 max-h-[55vh] p-4 overflow-y-auto bg-slate-50 dark:bg-slate-900/50 space-y-3">
             <div class="text-left">
                 <span
                     class="inline-block bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm">
@@ -734,7 +735,7 @@
             </div>
             <div class="flex gap-2 pb-3">
                 <textarea id="chat-input" rows="1"
-                    class="flex-1 p-2 border border-slate-300 dark:border-slate-600 rounded-xl bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 text-sm resize-none"
+                    class="flex-1 p-2 border border-slate-300 dark:border-slate-600 rounded-xl bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 text-sm resize-none max-h-32 overflow-y-auto"
                     placeholder="Escribe tu consulta..."></textarea>
                 <button id="send-chat"
                     class="bg-sky-600 hover:bg-sky-700 text-white p-2 rounded-xl shadow-md transition-colors flex items-center justify-center w-10 h-10 shrink-0">
@@ -782,7 +783,13 @@
                 }
             } catch (_) { }
         }
-        function autoResize(el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
+        function autoResize(el) {
+            const min = 40;
+            const max = 128;
+            el.style.height = 'auto';
+            const target = Math.max(min, Math.min(el.scrollHeight, max));
+            el.style.height = target + 'px';
+        }
         chatInput.addEventListener('input', () => autoResize(chatInput));
 
         openChatBtn.addEventListener('click', () => { chatWidget.classList.remove('hidden'); chatWidget.classList.remove('scale-0', 'opacity-0'); chatWidget.classList.add('scale-100', 'opacity-100'); openChatBtn.classList.add('hidden'); chatInput.focus(); });
