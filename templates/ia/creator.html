@@ -3,41 +3,271 @@
 {% block header_title %}Crear con IA{% endblock %}
 {% block header_subtitle %}Describe tu idea y deja que el asistente te proponga acciones{% endblock %}
 {% block content %}
-<div class="w-full h-full flex flex-col items-center justify-center py-8">
-    <div class="flex flex-col items-center justify-center w-full">
-        <h1 class="text-4xl md:text-[40px] text-slate-800 dark:text-white">What do you want to create?</h1>
-        <p class="text-base mt-6 text-slate-600 dark:text-slate-300">Create something amazing with one simple message.
-        </p>
-        <div
-            class="max-w-xl w-full bg-orange-50 dark:bg-orange-900/10 border border-slate-300 dark:border-slate-700 rounded-xl overflow-hidden mt-4">
-            <textarea
-                class="w-full p-3 pb-0 resize-none outline-none bg-transparent text-slate-800 dark:text-slate-100 placeholder-slate-400"
-                placeholder="Tell us about your idea" rows="3"></textarea>
-            <div class="flex items-center justify-between pb-3 px-3">
-                <button class="flex items-center justify-center bg-gray-500 p-1 rounded-full size-6" aria-label="Add">
-                    <svg width="11" height="11" viewBox="0 0 11 11" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M1 5.5h9M5.5 1v9" stroke="#CCD5E2" stroke-linecap="round" stroke-linejoin="round" />
-                    </svg>
-                </button>
-                <button class="flex items-center justify-center p-1 rounded size-6 bg-orange-500" aria-label="Send">
-                    <svg width="11" height="12" viewBox="0 0 11 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M1 5.5 5.5 1 10 5.5m-4.5 5.143V1" stroke="#fff" stroke-linecap="round"
-                            stroke-linejoin="round" />
-                    </svg>
-                </button>
+<div class="w-full min-h-[calc(100vh-5rem)] flex flex-col">
+    <div class="flex-1 flex flex-col items-center justify-center px-4 sm:px-8">
+        <div id="ia-landing"
+            class="w-full flex flex-col items-center opacity-100 translate-y-6 transition-all duration-300">
+            <div class="w-full max-w-3xl flex flex-col items-center text-center">
+                <h1 class="text-4xl md:text-[40px] text-slate-800 dark:text-white">¿Qué quieres crear?</h1>
+                <p class="text-base mt-4 text-slate-600 dark:text-slate-300">Crea algo increíble con un solo mensaje</p>
+            </div>
+
+            <div class="w-full max-w-3xl mt-6">
+                <div
+                    class="w-full bg-orange-50 dark:bg-orange-900/10 border border-slate-300 dark:border-slate-700 rounded-2xl overflow-hidden">
+                    <textarea id="ia-landing-input"
+                        class="w-full p-5 resize-none outline-none bg-transparent text-slate-800 dark:text-slate-100 placeholder-slate-400 min-h-[160px] max-h-60 overflow-y-auto text-base"
+                        placeholder="Describe lo que necesitas. Ejemplo: genera una cotización para el cliente X con 3 productos"
+                        rows="6"></textarea>
+                    <div class="flex items-center justify-between pb-4 px-4">
+                        <button id="ia-add"
+                            class="flex items-center justify-center bg-slate-500 p-1.5 rounded-full size-8"
+                            aria-label="Agregar">
+                            <svg width="11" height="11" viewBox="0 0 11 11" fill="none"
+                                xmlns="http://www.w3.org/2000/svg">
+                                <path d="M1 5.5h9M5.5 1v9" stroke="#CCD5E2" stroke-linecap="round"
+                                    stroke-linejoin="round" />
+                            </svg>
+                        </button>
+                        <button id="ia-landing-send"
+                            class="flex items-center justify-center p-1.5 rounded size-8 bg-orange-500 hover:bg-orange-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            aria-label="Enviar">
+                            <svg width="11" height="12" viewBox="0 0 11 12" fill="none"
+                                xmlns="http://www.w3.org/2000/svg">
+                                <path d="M1 5.5 5.5 1 10 5.5m-4.5 5.143V1" stroke="#fff" stroke-linecap="round"
+                                    stroke-linejoin="round" />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="ia-chips" class="flex flex-wrap gap-2 mt-5">
+                    <button type="button" data-prompt="Crear cliente"
+                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Crear
+                        cliente</button>
+                    <button type="button" data-prompt="Generar cotización"
+                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Generar
+                        cotización</button>
+                    <button type="button" data-prompt="Registrar venta"
+                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Registrar
+                        venta</button>
+                    <button type="button" data-prompt="Crear producto"
+                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Crear
+                        producto</button>
+                    <button type="button" data-prompt="Ver reportes"
+                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Ver
+                        reportes</button>
+                    <button type="button" data-prompt="Analizar datos"
+                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Analizar
+                        datos</button>
+                    <button type="button" data-prompt="Automatizar tarea"
+                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Automatizar
+                        tarea</button>
+                    <button type="button" data-prompt="Generar idea de negocio"
+                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Generar
+                        idea de negocio</button>
+                    <button type="button" data-prompt="Ver productos con bajo stock"
+                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Ver
+                        productos con bajo stock</button>
+                    <button type="button" data-prompt="Preparar mensaje para cliente"
+                        class="px-4 py-2 rounded-full text-sm sm:text-base bg-white/80 hover:bg-white border border-slate-200 text-slate-800 dark:bg-slate-800/70 dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 transition-colors shadow-sm">Preparar
+                        mensaje para cliente</button>
+                </div>
             </div>
         </div>
-        <div class="grid grid-cols-2 gap-4 mt-8 text-slate-500 dark:text-slate-400">
-            <p class="cursor-pointer">How do I write a resume or cover letter?</p>
-            <p class="cursor-pointer">How do I improve my writing skills?</p>
-            <div class="w-full h-px bg-gray-400/50 dark:bg-white/10"></div>
-            <div class="w-full h-px bg-gray-400/50 dark:bg-white/10"></div>
-            <p class="cursor-pointer">Can you translate something for me?</p>
-            <p class="cursor-pointer">How can I be more productive?</p>
+
+        <div id="ia-chat" class="hidden w-full max-w-4xl opacity-0 translate-y-2 transition-all duration-300">
+            <div
+                class="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden shadow-sm flex flex-col h-[72vh] sm:h-[75vh]">
+                <div id="ia-messages"
+                    class="flex-1 min-h-0 overflow-y-auto p-6 bg-slate-50 dark:bg-slate-900/40 space-y-3"></div>
+                <div class="border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-3">
+                    <div class="flex gap-2 items-end">
+                        <textarea id="ia-chat-input" rows="1"
+                            class="flex-1 p-3 border border-slate-300 dark:border-slate-600 rounded-xl bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-orange-500 text-sm resize-none max-h-32 overflow-y-auto"
+                            placeholder="Escribe tu mensaje..."></textarea>
+                        <button id="ia-chat-send"
+                            class="bg-orange-500 hover:bg-orange-600 text-white p-2 rounded-xl shadow-md transition-colors flex items-center justify-center w-11 h-11 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                            aria-label="Enviar" disabled>
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
         </div>
-    </div>
-    <p class="text-gray-500 dark:text-slate-400 pt-6">By messaging us, you agree to our <a href="#"
-            class="underline">Terms of Use</a> and confirm you've read our <a href="#" class="underline">Privacy
-            Policy</a>.</p>
-</div>
-{% endblock %}
+
+        <footer class="mt-auto py-6 text-center text-sm text-slate-500 dark:text-slate-400">
+            <a href="#" class="underline hover:text-slate-700 dark:hover:text-slate-200 transition-colors">Términos de
+                uso</a>
+            <span class="mx-2">|</span>
+            <a href="#" class="underline hover:text-slate-700 dark:hover:text-slate-200 transition-colors">Política de
+                privacidad</a>
+        </footer>
+
+        <script>
+            const landing = document.getElementById('ia-landing');
+            const landingInput = document.getElementById('ia-landing-input');
+            const landingSend = document.getElementById('ia-landing-send');
+            const chips = document.getElementById('ia-chips');
+            const chat = document.getElementById('ia-chat');
+            const messages = document.getElementById('ia-messages');
+            const chatInput = document.getElementById('ia-chat-input');
+            const chatSend = document.getElementById('ia-chat-send');
+
+            let conversation = [];
+            let mode = 'landing';
+            const landingPlaceholder = landingInput ? landingInput.getAttribute('placeholder') : '';
+
+            function getCookie(name) {
+                const cookies = document.cookie ? document.cookie.split(';') : [];
+                for (let i = 0; i < cookies.length; i++) {
+                    const c = cookies[i].trim();
+                    if (c.startsWith(name + '=')) return decodeURIComponent(c.substring(name.length + 1));
+                }
+                return '';
+            }
+
+            function autoResize(el) {
+                const min = 48;
+                const max = 128;
+                el.style.height = 'auto';
+                const target = Math.max(min, Math.min(el.scrollHeight, max));
+                el.style.height = target + 'px';
+            }
+
+            function scrollToBottom() {
+                messages.scrollTop = messages.scrollHeight;
+            }
+
+            function bubble(role, text) {
+                const wrapper = document.createElement('div');
+                wrapper.className = role === 'user' ? 'text-right' : 'text-left';
+                const span = document.createElement('span');
+                if (role === 'user') {
+                    span.className = 'inline-block bg-orange-500 text-white p-3 rounded-2xl rounded-tr-sm shadow-sm text-sm whitespace-pre-wrap max-w-[85%]';
+                } else {
+                    span.className = 'inline-block bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm whitespace-pre-wrap max-w-[85%]';
+                }
+                span.textContent = text;
+                wrapper.appendChild(span);
+                return wrapper;
+            }
+
+            function switchToChat() {
+                if (mode === 'chat') return;
+                mode = 'chat';
+                chat.classList.remove('hidden');
+                requestAnimationFrame(() => {
+                    chat.classList.remove('opacity-0', 'translate-y-2');
+                    chat.classList.add('opacity-100', 'translate-y-0');
+                    chatInput && chatInput.focus();
+                });
+                landing.classList.add('opacity-0', '-translate-y-2');
+                setTimeout(() => { landing.classList.add('hidden'); }, 180);
+            }
+
+            async function sendToAI(text) {
+                const csrftoken = getCookie('csrftoken');
+                try {
+                    const response = await fetch('{% url "ai_chat" %}', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrftoken },
+                        body: JSON.stringify({ message: text, conversation: conversation })
+                    });
+                    const data = await response.json();
+                    if (response.ok && data.reply) return { ok: true, reply: data.reply };
+                    return { ok: false, reply: data.error || 'Error al procesar la respuesta' };
+                } catch (_) {
+                    return { ok: false, reply: 'Error de conexión con el servidor' };
+                }
+            }
+
+            function setSendButtonState() {
+                if (landingSend) landingSend.disabled = !(landingInput && landingInput.value.trim().length);
+                if (chatSend) chatSend.disabled = !(chatInput && chatInput.value.trim().length);
+            }
+
+            async function handleSend(source) {
+                const input = source === 'landing' ? landingInput : chatInput;
+                const text = (input.value || '').trim();
+                if (!text) return;
+
+                if (source === 'landing') switchToChat();
+
+                input.value = '';
+                autoResize(input);
+                setSendButtonState();
+
+                messages.appendChild(bubble('user', text));
+                scrollToBottom();
+
+                const pending = document.createElement('div');
+                pending.className = 'text-left';
+                pending.innerHTML = '<span class="inline-block bg-white dark:bg-slate-700 text-slate-500 dark:text-slate-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm"><i class="fas fa-circle-notch fa-spin mr-1"></i> Pensando...</span>';
+                messages.appendChild(pending);
+                scrollToBottom();
+
+                const result = await sendToAI(text);
+                pending.remove();
+
+                messages.appendChild(bubble('assistant', result.reply));
+                scrollToBottom();
+
+                conversation.push({ role: 'user', content: text });
+                conversation.push({ role: 'assistant', content: result.reply });
+            }
+
+            function bindEnterToSend(el, source) {
+                el.addEventListener('input', () => autoResize(el));
+                el.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSend(source);
+                    }
+                });
+                autoResize(el);
+            }
+
+            if (landingSend) landingSend.addEventListener('click', (e) => { e.preventDefault(); handleSend('landing'); });
+            if (chatSend) chatSend.addEventListener('click', (e) => { e.preventDefault(); handleSend('chat'); });
+            if (landingInput) {
+                bindEnterToSend(landingInput, 'landing');
+                landingInput.addEventListener('input', setSendButtonState);
+            }
+            if (chatInput) {
+                bindEnterToSend(chatInput, 'chat');
+                chatInput.addEventListener('input', setSendButtonState);
+            }
+            setSendButtonState();
+
+            if (chips) {
+                chips.addEventListener('click', (e) => {
+                    const btn = e.target.closest('button[data-prompt]');
+                    if (!btn) return;
+                    e.preventDefault();
+                    const prompt = btn.getAttribute('data-prompt') || '';
+                    if (mode === 'landing') {
+                        landingInput.value = prompt;
+                        autoResize(landingInput);
+                        setSendButtonState();
+                        handleSend('landing');
+                    } else {
+                        chatInput.value = prompt;
+                        autoResize(chatInput);
+                        setSendButtonState();
+                        handleSend('chat');
+                    }
+                });
+                if (landingInput) {
+                    chips.addEventListener('mouseenter', (e) => {
+                        const btn = e.target.closest('button[data-prompt]');
+                        if (!btn) return;
+                        landingInput.setAttribute('placeholder', btn.getAttribute('data-prompt') || landingPlaceholder);
+                    }, true);
+                    chips.addEventListener('mouseleave', () => {
+                        landingInput.setAttribute('placeholder', landingPlaceholder);
+                    }, true);
+                }
+            }
+        </script>
+        {% endblock %}
