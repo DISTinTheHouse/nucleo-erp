@@ -216,6 +216,8 @@ Table cotizaciones {
   id_cliente int
   id_oportunidad int
   id_moneda int
+  serigrafia decimal(10,2)
+  reflejante decimal(10,2)
 }
 
 Table cotizacion_detalle {
@@ -238,6 +240,8 @@ Table pedidos {
   //
   id_tipo_pedido int // 1=Stock, 2=Fabricación, 3=Muestra, 4=Mixto
   estatus_pedido int // 1=Borrador, 2=Por Autorizar, 3=Autorizado, 4=En Proceso, 5=Cerrado
+  serigrafia decimal(10,2)
+  reflejante decimal(10,2)
 }
 
 Table pedido_detalle {
