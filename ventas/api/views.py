@@ -1,5 +1,6 @@
 from django.db import transaction
-from django.db.models import OuterRef, Q, Subquery
+from django.db.models import OuterRef, Q, Subquery, Sum
+from django.db.models.functions import Coalesce
 from datetime import timedelta
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -88,6 +89,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             qs = qs.annotate(
                 pedido_id=Subquery(pedido_qs.values("id")[:1]),
                 pedido_folio=Subquery(pedido_qs.values("folio")[:1]),
+                piezas=Coalesce(Sum("cotizaciondetalle__tallas__cantidad"), 0),
             )
 
         estatus = self.request.query_params.get("estatus")
