@@ -747,9 +747,11 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
   - `ordering`: lista separada por coma. Permitidos: `id`, `created_at`, `updated_at`, `gran_total`, `estatus` (ej: `-created_at`)
 - **Campos útiles para tabla**:
   - `estatus_label`, `cliente_nombre`, `cliente_razon_social`, `pedido_id`, `pedido_folio`
+  - `piezas`: sumatoria de `cantidad` en tallas (detalle de la cotización)
+  - `importe_sin_iva`: importe antes de IVA (calculado a partir de `gran_total` e `iva`)
 
 - **Ver cotización completa (modal)**: `GET /api/v1/ventas/cotizaciones/{id}/`
-  - Incluye campo `detalles` (productos + tallas + bordado_config) y `estatus_label`.
+  - Incluye campo `detalles` (productos + tallas + bordado_config), `estatus_label`, `piezas` e `importe_sin_iva`.
 
 ### 1) Obtener datos para el formulario (búsquedas y catálogos)
 
