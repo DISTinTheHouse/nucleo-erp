@@ -110,6 +110,8 @@ class Cotizacion(models.Model):
     programa_bordados = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     bordado_pantalones_extras = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     bordado_logotipo = models.BooleanField(default=False)
+    serigrafia = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    reflejante = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     observaciones = models.TextField(null=True, blank=True)
     # Cargos adicionales
     flete = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -260,6 +262,8 @@ class Pedido(StatusLifecycleModel):
     programa_bordados = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     bordado_pantalones_extras = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     bordado_logotipo = models.BooleanField(default=False)
+    serigrafia = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    reflejante = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     observaciones = models.TextField(null=True, blank=True)
     # Cargos adicionales
     flete = models.DecimalField(max_digits=10, decimal_places=2, default=0)
