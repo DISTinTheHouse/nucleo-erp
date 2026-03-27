@@ -28,26 +28,26 @@ class Oportunidad(models.Model):
 
 class Cotizacion(models.Model):
     class FormaPago(models.TextChoices):
-        EFECTIVO = '01', '01 - Efectivo'
-        TRANSFERENCIA = '03', '03 - Transferencia'
-        TARJETA = '04', '04 - Tarjeta'
+        EFECTIVO = '01', '01 - EFECTIVO'
+        TRANSFERENCIA = '03', '03 - TRANSFERENCIA'
+        TARJETA = '04', '04 - TARJETA'
 
     class MetodoPago(models.TextChoices):
-        PUE = 'PUE', 'PUE - Pago en una sola exhibición'
-        PPD = 'PPD', 'PPD - Pago en parcialidades'
+        PUE = 'PUE', 'PUE - PAGO EN UNA SOLA EXIBICIÓN'
+        PPD = 'PPD', 'PPD - PAGO EN PARCIALIDADES'
         NA = 'NA', 'N/A'
 
     class UsoCfdi(models.TextChoices):
-        GO3 = 'G03', 'G03 - Gastos en general'
-        GO1 = 'G01', 'G01 - Adquisición de mercancías'
-        IO1 = 'I01', 'I01 - Construcciones'
+        GO3 = 'G03', 'G03 - GASTOS EN GENERAL (OTROS) (OTROS)'
+        GO1 = 'G01', 'G01 - ADQUISICIÓN DE MERCANCIAS'
+        IO1 = 'I01', 'I01 - CONSTRUCCIONES'
 
     CHOICES_ESTATUS = (
-        (1, "Borrador"),
-        (2, "Por Autorizar"),
-        (3, "Autorizada"),
-        (4, "Rechazada"),
-        (5, "Cambios Por Autorizar"),
+        (1, "BORRADOR"),
+        (2, "POR AUTORIZAR"),
+        (3, "AUTORIZADA"),
+        (4, "RECHAZADA"),
+        (5, "CAMBIOS POR AUTORIZAR"),
     )
 
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="cotizacion")
@@ -163,33 +163,33 @@ class CotizacionDetalleTalla(models.Model):
 
 class Pedido(StatusLifecycleModel):
     class FormaPago(models.TextChoices):
-        EFECTIVO = '01', '01 - Efectivo'
-        TRANSFERENCIA = '03', '03 - Transferencia'
-        TARJETA = '04', '04 - Tarjeta'
+        EFECTIVO = '01', '01 - EFECTIVO'
+        TRANSFERENCIA = '03', '03 - TRANSFERENCIA'
+        TARJETA = '04', '04 - TARJETA'
     
     class MetodoPago(models.TextChoices):
-        PUE = 'PUE', 'PUE - Pago en una sola exhibición'
-        PPD = 'PPD', 'PPD - Pago en parcialidades'
+        PUE = 'PUE', 'PUE - PAGO EN UNA SOLA EXIBICIÓN'
+        PPD = 'PPD', 'PPD - PAGO EN PARCIALIDADES'
         NA = 'NA', 'N/A'
     
     class UsoCfdi(models.TextChoices):
-        GO3 = 'G03', 'G03 - Gastos en general'
-        GO1 = 'G01', 'G01 - Adquisición de mercancías'
-        IO1 = 'I01', 'I01 - Construcciones'
+        GO3 = 'G03', 'G03 - GASTOS EN GENERAL (OTROS) (OTROS)'
+        GO1 = 'G01', 'G01 - ADQUISICIÓN DE MERCANCIAS'
+        IO1 = 'I01', 'I01 - CONSTRUCCIONES'
 
     CHOICES_ESTATUS = (
-        (1, "Borrador"),
-        (2, "Por Autorizar"),
-        (3, "Autorizado"),
-        (4, "En Proceso"),
-        (5, "Cerrado"),
+        (1, "BORRADOR"),
+        (2, "POR AUTORIZAR"),
+        (3, "AUTORIZADA"),
+        (4, "EN PROCESO"),
+        (5, "CANCELADO"),
     )
 
     CHOICES_TIPO_PEDIDO = (
-        (1, "Stock"),
-        (2, "Fabricacion"),
-        (3, "Muestra"),
-        (4, "Mixto"),
+        (1, "STOCK"),
+        (2, "FABRICACION"),
+        (3, "MUESTRAS"),
+        (4, "MIXTOs"),
     )
         
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="pedidos")
