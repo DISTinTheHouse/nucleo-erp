@@ -1,3 +1,4 @@
+from decimal import Decimal, InvalidOperation
 from rest_framework import serializers
 from ventas.models import Cotizacion, CotizacionDetalle, CotizacionDetalleTalla, Pedido, PedidoDetalle, PedidoDetalleTalla
 
@@ -16,6 +17,53 @@ class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
     cliente_razon_social = serializers.CharField(source="cliente.razon_social", read_only=True)
     pedido_id = serializers.IntegerField(read_only=True)
     pedido_folio = serializers.CharField(read_only=True)
+    piezas = serializers.SerializerMethodField()
+    importe_sin_iva = serializers.SerializerMethodField()
+
+    def get_piezas(self, obj):
+        piezas = getattr(obj, "piezas", None)
+        if piezas is not None:
+            try:
+                return int(piezas)
+            except Exception:
+                return 0
+        total = 0
+        try:
+            detalles = obj.cotizaciondetalle.all()
+        except Exception:
+            detalles = []
+        for det in detalles:
+            try:
+                tallas = det.tallas.all()
+            except Exception:
+                tallas = []
+            for t in tallas:
+                total += int(getattr(t, "cantidad", 0) or 0)
+        return total
+
+    def get_importe_sin_iva(self, obj):
+        gran_total = getattr(obj, "gran_total", None)
+        iva = getattr(obj, "iva", None)
+        try:
+            iva_int = int(iva or 0)
+        except Exception:
+            iva_int = 0
+        if gran_total in (None, ""):
+            base = Decimal("0")
+        else:
+            try:
+                base = Decimal(str(gran_total))
+            except (InvalidOperation, TypeError, ValueError):
+                base = Decimal("0")
+        if iva_int <= 0:
+            return base
+        factor = Decimal("1") + (Decimal(iva_int) / Decimal("100"))
+        if factor == 0:
+            return base
+        try:
+            return (base / factor).quantize(Decimal("0.01"))
+        except Exception:
+            return base / factor
 
     class Meta:
         model = Cotizacion
@@ -29,6 +77,8 @@ class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
             "oc",
             "uso_cfdi",
             "gran_total",
+            "importe_sin_iva",
+            "piezas",
             "autorizada_at",
             "cambios_solicitados_at",
             "created_at",
@@ -58,6 +108,53 @@ class CotizacionFullSerializer(serializers.ModelSerializer):
     detalles = CotizacionDetalleWithTallasSerializer(source="cotizaciondetalle", many=True, read_only=True)
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     cliente_razon_social = serializers.CharField(source="cliente.razon_social", read_only=True)
+    piezas = serializers.SerializerMethodField()
+    importe_sin_iva = serializers.SerializerMethodField()
+
+    def get_piezas(self, obj):
+        piezas = getattr(obj, "piezas", None)
+        if piezas is not None:
+            try:
+                return int(piezas)
+            except Exception:
+                return 0
+        total = 0
+        try:
+            detalles = obj.cotizaciondetalle.all()
+        except Exception:
+            detalles = []
+        for det in detalles:
+            try:
+                tallas = det.tallas.all()
+            except Exception:
+                tallas = []
+            for t in tallas:
+                total += int(getattr(t, "cantidad", 0) or 0)
+        return total
+
+    def get_importe_sin_iva(self, obj):
+        gran_total = getattr(obj, "gran_total", None)
+        iva = getattr(obj, "iva", None)
+        try:
+            iva_int = int(iva or 0)
+        except Exception:
+            iva_int = 0
+        if gran_total in (None, ""):
+            base = Decimal("0")
+        else:
+            try:
+                base = Decimal(str(gran_total))
+            except (InvalidOperation, TypeError, ValueError):
+                base = Decimal("0")
+        if iva_int <= 0:
+            return base
+        factor = Decimal("1") + (Decimal(iva_int) / Decimal("100"))
+        if factor == 0:
+            return base
+        try:
+            return (base / factor).quantize(Decimal("0.01"))
+        except Exception:
+            return base / factor
 
     class Meta:
         model = Cotizacion
