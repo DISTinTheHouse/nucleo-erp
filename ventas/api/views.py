@@ -1,5 +1,5 @@
 from django.db import transaction
-from django.db.models import OuterRef, Q, Subquery, Sum
+from django.db.models import OuterRef, Prefetch, Q, Subquery, Sum
 from django.db.models.functions import Coalesce
 from datetime import timedelta
 from django.utils import timezone
@@ -82,7 +82,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
     def _apply_filters(self, qs):
         if getattr(self, "action", None) == "retrieve":
-            qs = qs.prefetch_related("cotizaciondetalle__tallas")
+            detalles_qs = CotizacionDetalle.objects.select_related("producto").prefetch_related(
+                Prefetch("tallas", queryset=CotizacionDetalleTalla.objects.select_related("talla"))
+            )
+            qs = qs.prefetch_related(Prefetch("cotizaciondetalle", queryset=detalles_qs))
 
         if getattr(self, "action", None) == "list":
             pedido_qs = Pedido.objects.filter(cotizacion_id=OuterRef("pk")).order_by("-id")
