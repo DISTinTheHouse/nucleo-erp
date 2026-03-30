@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.urls import path, include
-from django.contrib.auth.views import LoginView
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
+from usuarios.views import TwoFactorLoginView, TwoFactorVerifyView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -11,7 +11,8 @@ urlpatterns = [
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
     path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
     # ...
-    path('', LoginView.as_view(template_name='registration/login.html', redirect_authenticated_user=True), name='login'),
+    path('', TwoFactorLoginView.as_view(), name='login'),
+    path('two-factor/', TwoFactorVerifyView.as_view(), name='two_factor_verify'),
     path('', include('nucleo.urls')),
     path('', include('usuarios.urls')),
     path('', include(('seguridad.urls', 'seguridad'), namespace='seguridad')),

@@ -256,8 +256,32 @@ OPENAI_BASE_URL = config('OPENAI_BASE_URL', default='https://api.openai.com/v1')
 # =========================
 # AUTH SETTINGS
 # =========================
+LOGIN_URL = '/'
 LOGIN_REDIRECT_URL = 'nucleo:dashboard'
 LOGOUT_REDIRECT_URL = '/'
+
+TWO_FACTOR_OTP_LENGTH = config('TWO_FACTOR_OTP_LENGTH', default=6, cast=int)
+TWO_FACTOR_OTP_TTL_SECONDS = config('TWO_FACTOR_OTP_TTL_SECONDS', default=300, cast=int)
+TWO_FACTOR_MAX_ATTEMPTS = config('TWO_FACTOR_MAX_ATTEMPTS', default=5, cast=int)
+TWO_FACTOR_DEBUG_SHOW_CODE = config('TWO_FACTOR_DEBUG_SHOW_CODE', default=False, cast=bool)
+
+TWO_FACTOR_SMS_ENABLED = config('TWO_FACTOR_SMS_ENABLED', default=False, cast=bool)
+TWILIO_ACCOUNT_SID = config('TWILIO_ACCOUNT_SID', default='')
+TWILIO_AUTH_TOKEN = config('TWILIO_AUTH_TOKEN', default='')
+TWILIO_FROM_NUMBER = config('TWILIO_FROM_NUMBER', default='')
+
+# =========================
+# EMAIL (SMTP)
+# =========================
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = config('EMAIL_HOST', default='smtp.gmail.com')
+EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
+EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
+_raw_email_password = config('EMAIL_HOST_PASSWORD', default='')
+EMAIL_HOST_PASSWORD = (_raw_email_password or '').replace(' ', '').strip()
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER)
+EMAIL_TIMEOUT = config('EMAIL_TIMEOUT', default=10, cast=int)
 
 # =========================
 # AXES SETTINGS
@@ -274,25 +298,25 @@ AUTHENTICATION_BACKENDS = [
 AXES_FAILURE_LIMIT = 5  # Numero de intentos fallidos antes de bloquear
 AXES_COOLOFF_TIME = 1   # Tiempo de espera en horas
 AXES_LOCKOUT_TEMPLATE = '403.html' # Usar nuestro template 403 o uno especifico para lockout
-AXES_USERNAME_FORM_FIELD = 'email'  # Indicar a Axes que usamos 'email' como identificador
+AXES_USERNAME_FORM_FIELD = 'username'  # El campo del POST en nuestro login web se llama "username" (aunque sea correo)
 
 # =========================
 # SECURITY HARDENING (Production Recommendations)
 # =========================
-SECURE_BROWSER_XSS_FILTER = True
-SECURE_CONTENT_TYPE_NOSNIFF = True
-X_FRAME_OPTIONS = 'DENY'
+# SECURE_BROWSER_XSS_FILTER = True
+# SECURE_CONTENT_TYPE_NOSNIFF = True
+# X_FRAME_OPTIONS = 'DENY'
 
 # SSL and Cookies (Controlled by env vars)
-SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=False, cast=bool)
-SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=False, cast=bool)
-CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=False, cast=bool)
+# SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=False, cast=bool)
+# SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=False, cast=bool)
+# CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=False, cast=bool)
 
-# # HSTS Settings (Only enable if SSL is active and stable)
-if SECURE_SSL_REDIRECT:
-     SECURE_HSTS_SECONDS = 31536000
-     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-     SECURE_HSTS_PRELOAD = True
+# # # HSTS Settings (Only enable if SSL is active and stable)
+# if SECURE_SSL_REDIRECT:
+#      SECURE_HSTS_SECONDS = 31536000
+#      SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+#      SECURE_HSTS_PRELOAD = True
 
 # =========================
 # LOGGING CONFIGURATION

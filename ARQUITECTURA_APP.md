@@ -31,6 +31,16 @@ No permitimos basura en la BD.
 - **Allowed Hosts**: El servidor rechaza peticiones con Host headers desconocidos.
 - **Rate Limiting**: Protección contra ataques de fuerza bruta en el login (bloqueo temporal de IP).
 
+### D. Doble Autenticación (2FA) en Login Web (Core)
+- **Alcance**: Solo aplica a las vistas web del Core (login HTML), no a los endpoints API.
+- **Control por usuario**: `Usuario.two_factor_enabled`.
+- **Canales**:
+  - **Email (SMTP)** usando Django nativo (`EmailMultiAlternatives`) con HTML + texto plano.
+  - **SMS (Twilio, opcional)** vía llamada HTTP directa al API de Twilio.
+- **Notas de seguridad**:
+  - El código es temporal (TTL) y se valida contra hash en sesión.
+  - Integrado con protección anti-fuerza-bruta (`django-axes`). En este proyecto el campo del POST es `username` (aunque el valor sea correo).
+
 ## 3. Flujo de Trabajo API-First
 
 El backend actúa como una "Caja Negra" segura para el Frontend (Next.js).
