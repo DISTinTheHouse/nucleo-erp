@@ -263,7 +263,7 @@ LOGOUT_REDIRECT_URL = '/'
 TWO_FACTOR_OTP_LENGTH = config('TWO_FACTOR_OTP_LENGTH', default=6, cast=int)
 TWO_FACTOR_OTP_TTL_SECONDS = config('TWO_FACTOR_OTP_TTL_SECONDS', default=300, cast=int)
 TWO_FACTOR_MAX_ATTEMPTS = config('TWO_FACTOR_MAX_ATTEMPTS', default=5, cast=int)
-TWO_FACTOR_DEBUG_SHOW_CODE = config('TWO_FACTOR_DEBUG_SHOW_CODE', default=False, cast=bool)
+TWO_FACTOR_DEBUG_SHOW_CODE = config('TWO_FACTOR_DEBUG_SHOW_CODE', default=False, cast=bool) and DEBUG
 
 TWO_FACTOR_SMS_ENABLED = config('TWO_FACTOR_SMS_ENABLED', default=False, cast=bool)
 TWILIO_ACCOUNT_SID = config('TWILIO_ACCOUNT_SID', default='')
@@ -277,6 +277,9 @@ EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = config('EMAIL_HOST', default='smtp.gmail.com')
 EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
 EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
+EMAIL_USE_SSL = config('EMAIL_USE_SSL', default=False, cast=bool)
+if EMAIL_USE_SSL:
+    EMAIL_USE_TLS = False
 EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
 _raw_email_password = config('EMAIL_HOST_PASSWORD', default='')
 EMAIL_HOST_PASSWORD = (_raw_email_password or '').replace(' ', '').strip()
@@ -299,24 +302,29 @@ AXES_FAILURE_LIMIT = 5  # Numero de intentos fallidos antes de bloquear
 AXES_COOLOFF_TIME = 1   # Tiempo de espera en horas
 AXES_LOCKOUT_TEMPLATE = '403.html' # Usar nuestro template 403 o uno especifico para lockout
 AXES_USERNAME_FORM_FIELD = 'username'  # El campo del POST en nuestro login web se llama "username" (aunque sea correo)
+AXES_CLIENT_IP_CALLABLE = 'nucleo.middleware.get_client_ip'
+AXES_LOCKOUT_PARAMETERS = ['username', 'ip_address']
 
 # =========================
-# SECURITY HARDENING (Production Recommendations)
+# SECURITY HARDENING
 # =========================
-# SECURE_BROWSER_XSS_FILTER = True
-# SECURE_CONTENT_TYPE_NOSNIFF = True
-# X_FRAME_OPTIONS = 'DENY'
+SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = config('X_FRAME_OPTIONS', default='DENY')
 
-# SSL and Cookies (Controlled by env vars)
-# SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=False, cast=bool)
-# SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=False, cast=bool)
-# CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=False, cast=bool)
+USE_X_FORWARDED_HOST = config('USE_X_FORWARDED_HOST', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-# # # HSTS Settings (Only enable if SSL is active and stable)
-# if SECURE_SSL_REDIRECT:
-#      SECURE_HSTS_SECONDS = 31536000
-#      SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-#      SECURE_HSTS_PRELOAD = True
+SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default='Lax')
+CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default='Lax')
+
+if SECURE_SSL_REDIRECT:
+    SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=31536000, cast=int)
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = config('SECURE_HSTS_INCLUDE_SUBDOMAINS', default=True, cast=bool)
+    SECURE_HSTS_PRELOAD = config('SECURE_HSTS_PRELOAD', default=True, cast=bool)
 
 # =========================
 # LOGGING CONFIGURATION

@@ -10,9 +10,9 @@ from django.contrib import messages
 from django.db.models import Q
 from django.utils import timezone
 from django.conf import settings
-from django.core.mail import send_mail
 from django.core.mail import EmailMultiAlternatives
 from datetime import timedelta
+import logging
 import hashlib
 import hmac
 import secrets
@@ -24,6 +24,8 @@ from nucleo.mixins import AuditLogMixin
 from seguridad.models import Permiso, UsuarioPermiso
 from .models import Usuario
 from .forms import UsuarioCreationForm, UsuarioChangeForm
+
+logger = logging.getLogger(__name__)
 
 def _normalize_phone(raw):
     raw = str(raw or "").strip()
@@ -51,7 +53,7 @@ def _send_two_factor_code(user, code):
             with urlopen(req, timeout=10) as _:
                 return {"ok": True, "channel": "sms"}
         except (HTTPError, URLError, TimeoutError, ValueError):
-            pass
+            logger.exception("Error enviando 2FA por SMS (Twilio).")
 
     email = str(getattr(user, "email", "") or "").strip()
     if email:
@@ -174,7 +176,7 @@ def _send_two_factor_code(user, code):
             if sent_count:
                 return {"ok": True, "channel": "email"}
         except Exception:
-            pass
+            logger.exception("Error enviando 2FA por correo (SMTP).")
 
     return {"ok": False, "channel": None}
 
@@ -324,7 +326,7 @@ class TwoFactorLoginView(LoginView):
         self.request.session["two_factor_next"] = self.get_success_url()
 
         debug_show = bool(getattr(settings, "TWO_FACTOR_DEBUG_SHOW_CODE", False))
-        debug_active = bool(debug_show or getattr(settings, "DEBUG", False))
+        debug_active = bool(debug_show)
         if debug_active:
             self.request.session["two_factor_debug_code"] = otp_code
 
@@ -424,7 +426,7 @@ class TwoFactorVerifyView(View):
             request.session["two_factor_attempts"] = 0
 
             debug_show = bool(getattr(settings, "TWO_FACTOR_DEBUG_SHOW_CODE", False))
-            debug_active = bool(debug_show or getattr(settings, "DEBUG", False))
+            debug_active = bool(debug_show)
             if debug_active:
                 request.session["two_factor_debug_code"] = otp_code
 

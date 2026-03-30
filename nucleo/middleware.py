@@ -1,7 +1,15 @@
 import logging
 import time
+from django.conf import settings
 
 logger = logging.getLogger('api_logger')
+
+def get_client_ip(request):
+    if getattr(settings, "IS_VERCEL", False) or str(getattr(settings, "ENVIRONMENT", "") or "").lower() == "production":
+        forwarded_for = (request.META.get("HTTP_X_FORWARDED_FOR") or "").strip()
+        if forwarded_for:
+            return forwarded_for.split(",")[0].strip()
+    return (request.META.get("REMOTE_ADDR") or "").strip()
 
 class APILoggingMiddleware:
     """
