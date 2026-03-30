@@ -41,6 +41,7 @@ class UsuarioCreationForm(TailwindFormMixin, UserCreationForm):
             'sucursales',
             'departamentos',
             'is_admin_empresa',
+            'two_factor_enabled',
         )
     
     roles = forms.ModelMultipleChoiceField(
@@ -65,6 +66,9 @@ class UsuarioCreationForm(TailwindFormMixin, UserCreationForm):
         self.fields['first_name'].widget.attrs['placeholder'] = 'Ej. Juan'
         self.fields['last_name'].widget.attrs['placeholder'] = 'Ej. Pérez'
         self.fields['telefono'].widget.attrs['placeholder'] = 'Ej. 55 1234 5678'
+        if 'two_factor_enabled' in self.fields:
+            self.fields['two_factor_enabled'].label = 'Doble autenticación (2FA)'
+            self.fields['two_factor_enabled'].help_text = 'Al iniciar sesión, se pedirá un código enviado por SMS (o por correo si no hay SMS configurado).'
 
         # Inicializar queryset de roles vacío
         from seguridad.models import Rol
@@ -140,6 +144,7 @@ class UsuarioChangeForm(TailwindFormMixin, UserChangeForm):
             'sucursales',
             'departamentos',
             'is_admin_empresa',
+            'two_factor_enabled',
         )
 
     roles = forms.ModelMultipleChoiceField(
@@ -161,6 +166,9 @@ class UsuarioChangeForm(TailwindFormMixin, UserChangeForm):
         self.fields['first_name'].widget.attrs['placeholder'] = 'Ej. Juan'
         self.fields['last_name'].widget.attrs['placeholder'] = 'Ej. Pérez'
         self.fields['telefono'].widget.attrs['placeholder'] = 'Ej. 55 1234 5678'
+        if 'two_factor_enabled' in self.fields:
+            self.fields['two_factor_enabled'].label = 'Doble autenticación (2FA)'
+            self.fields['two_factor_enabled'].help_text = 'Al iniciar sesión, se pedirá un código enviado por SMS (o por correo si no hay SMS configurado).'
 
         # Inicializar queryset de roles vacío
         from seguridad.models import Rol

@@ -289,6 +289,23 @@ usuario{% endblock %}
                             </div>
                 </div>
 
+                        <div
+                            class="col-span-1 md:col-span-2 bg-slate-50 dark:bg-white/5 p-4 rounded-lg border border-slate-100 dark:border-slate-700">
+                            <div class="flex items-start">
+                                <div class="flex items-center h-5">
+                                    {{ form.two_factor_enabled }}
+                                </div>
+                                <div class="ml-3 text-sm">
+                                    <label for="{{ form.two_factor_enabled.id_for_label }}"
+                                        class="font-medium text-slate-700 dark:text-slate-300">Doble autenticación
+                                        (2FA)</label>
+                                    <p class="text-slate-500 dark:text-slate-400">
+                                        Al iniciar sesión se pedirá un código de verificación enviado por SMS (o por correo si no hay SMS configurado).
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
                 <!-- Renderizado de campos extra de Password si es creación (UserCreationForm) -->
                 {% if not object %}
                 <div class="mt-8">

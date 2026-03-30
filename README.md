@@ -57,10 +57,35 @@ Hemos preparado documentación detallada para cada aspecto del sistema. ¿Qué n
     - ALLOWED_HOSTS
     - CORS_ALLOWED_ORIGINS, CORS_ALLOW_CREDENTIALS
     - CSRF_TRUSTED_ORIGINS
+
+    Variables opcionales para **2FA (correo/SMS)**:
+    - TWO_FACTOR_OTP_LENGTH (default 6)
+    - TWO_FACTOR_OTP_TTL_SECONDS (default 300)
+    - TWO_FACTOR_MAX_ATTEMPTS (default 5)
+    - TWO_FACTOR_DEBUG_SHOW_CODE (default False)
+    - TWO_FACTOR_EMAIL_BRAND (ej. "ERP Core")
+    - TWO_FACTOR_EMAIL_SUBJECT (ej. "ERP Core - Código de verificación")
+    - TWO_FACTOR_SMS_ENABLED (default False)
+    - TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER (solo si usas SMS)
+    - EMAIL_HOST, EMAIL_PORT, EMAIL_USE_TLS, EMAIL_HOST_USER, EMAIL_HOST_PASSWORD, DEFAULT_FROM_EMAIL (para SMTP)
 4.  **Ejecutar Servidor**:
     ```bash
     python manage.py runserver 0.0.0.0:8003
     ```
+
+## 🔐 2FA (Correo/SMS) en Login Web (Core)
+
+- **Qué es**: Doble autenticación (2 pasos) para el login web del Core (no APIs).
+- **Flujo**:
+  - Login: `/` (usuario/contraseña)
+  - Verificación: `/two-factor/` (captura del código)
+- **Activación por usuario**: campo `two_factor_enabled` en el modelo `Usuario` (se puede alternar desde Core → Usuarios o desde Admin).
+- **Entrega del código**:
+  - **Email (SMTP)**: HTML + texto plano (recomendado para desarrollo y producción).
+  - **SMS (Twilio, opcional)**: vía llamada HTTP al API de Twilio.
+- **Paquetes / pip**:
+  - No se instaló ninguna librería nueva para 2FA.
+  - Se usa Django nativo (`EmailMultiAlternatives`) para el correo y `urllib` estándar para el SMS (Twilio).
 
 ## 🚀 Despliegue (Vercel)
 
