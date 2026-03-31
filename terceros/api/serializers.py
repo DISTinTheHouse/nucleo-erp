@@ -13,6 +13,17 @@ class ClienteSerializer(serializers.ModelSerializer):
         read_only_fields = ["activo", "empresa", "vendedores"]
 
     def validate(self, attrs):
+        rfc = (attrs.get("rfc") or "").strip().upper()
+        if rfc:
+            attrs["rfc"] = rfc
+        request = self.context.get("request")
+        empresa = getattr(getattr(request, "user", None), "empresa", None)
+        if empresa and rfc:
+            qs = Cliente.objects.filter(empresa=empresa, rfc__iexact=rfc, activo=True)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({"rfc": "Este cliente ya existe en tu empresa (RFC duplicado)."})
         codigo_regimen = attrs.pop("sat_regimen_fiscal_codigo", None)
         if codigo_regimen and not attrs.get("sat_regimen_fiscal"):
             try:
