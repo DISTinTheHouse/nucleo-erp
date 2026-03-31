@@ -359,6 +359,22 @@
                     class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Unidades</span>
             </a>
 
+            <!-- Divider Label -->
+            <div class="px-3 py-2 mt-4 opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200">
+                <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Integraciones SAT</span>
+            </div>
+
+            <!-- Validar RFC -->
+            <a href="{% url 'rfc_status' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if request.resolver_match.url_name == 'rfc_status' %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M15 12a3 3 0 11-6 0 3 3 0 016 0zM2 12a10 10 0 1020 0 10 10 0 00-20 0z" />
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Integraciones SAT</span>
+            </a>
+
         </nav>
 
         <!-- Bottom Actions -->
@@ -583,6 +599,18 @@
                         </path>
                     </svg>
                     <span class="font-medium">Unidades</span>
+                </a>
+
+                <div class="px-4 py-2 mt-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Integraciones SAT
+                </div>
+
+                <a href="{% url 'rfc_status' %}"
+                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
+                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M15 12a3 3 0 11-6 0 3 3 0 016 0zM2 12a10 10 0 1020 0 10 10 0 00-20 0z" />
+                    </svg>
+                    <span class="font-medium">Validar RFC</span>
                 </a>
                 <a href="https://lazzar-erp.vercel.app/" target="_blank" rel="noopener noreferrer"
                     class="flex items-center gap-4 px-4 py-3 rounded-xl bg-gradient-to-r from-sky-500 to-sky-600 text-white hover:from-sky-600 hover:to-sky-700 transition-colors shadow-lg shadow-sky-500/20">

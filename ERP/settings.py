@@ -134,6 +134,10 @@ OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o-mini')
 
 USE_REMOTE_DB = config('USE_REMOTE_DB', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
 
+FACTURAMA_BASE_URL = config('FACTURAMA_BASE_URL', default='https://apisandbox.facturama.mx')
+FACTURAMA_USERNAME = config('FACTURAMA_USERNAME', default=config('FACTURAMA_USER', default=''))
+FACTURAMA_PASSWORD = config('FACTURAMA_PASSWORD', default='')
+
 LOCAL_POSTGRES_DB_HOST = config('LOCAL_POSTGRES_DB_HOST', default='127.0.0.1')
 LOCAL_POSTGRES_DB_USER = config('LOCAL_POSTGRES_DB_USER', default='postgres')
 LEGACY_POSTGRESQL_DB_PASSWORD = config('POSTGRESQL_DB_PASSWORD', default='')
@@ -141,17 +145,38 @@ LOCAL_POSTGRES_DB_PASSWORD = config('LOCAL_POSTGRES_DB_PASSWORD', default=LEGACY
 LOCAL_POSTGRES_DB_NAME = config('LOCAL_POSTGRES_DB_NAME', default='erp')
 LOCAL_POSTGRES_DB_PORT = config('LOCAL_POSTGRES_DB_PORT', default='5432')
 LOCAL_POSTGRES_SSLMODE = config('LOCAL_POSTGRES_SSLMODE', default='disable')
+REMOTE_POSTGRES_DB_HOST = config('POSTGRESQL_DB_HOST', default='')
+REMOTE_POSTGRES_DB_USER = config('POSTGRESQL_DB_USER', default='')
+REMOTE_POSTGRES_DB_PASSWORD = config('POSTGRESQL_DB_PASSWORD', default='')
+REMOTE_POSTGRES_DB_NAME = config('POSTGRESQL_DB_NAME', default='')
+REMOTE_POSTGRES_DB_PORT = config('POSTGRESQL_DB_PORT', default='5432')
 
-if USE_REMOTE_DB and REMOTE_DATABASE_URL:
-    REMOTE_CONN_MAX_AGE = 0 if (IS_VERCEL or ENVIRONMENT.lower() == 'production') else 600
-    DATABASES = {
-        'default': dj_database_url.parse(
-            REMOTE_DATABASE_URL,
-            conn_max_age=REMOTE_CONN_MAX_AGE,
-            ssl_require=True,
-        )
-    }
-    DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
+if USE_REMOTE_DB:
+    if REMOTE_DATABASE_URL:
+        REMOTE_CONN_MAX_AGE = 0 if (IS_VERCEL or ENVIRONMENT.lower() == 'production') else 600
+        DATABASES = {
+            'default': dj_database_url.parse(
+                REMOTE_DATABASE_URL,
+                conn_max_age=REMOTE_CONN_MAX_AGE,
+                ssl_require=True,
+            )
+        }
+        DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
+    else:
+        DATABASES = {
+            'default': {
+                'ENGINE': 'django.db.backends.postgresql',
+                'NAME': REMOTE_POSTGRES_DB_NAME,
+                'USER': REMOTE_POSTGRES_DB_USER,
+                'PASSWORD': REMOTE_POSTGRES_DB_PASSWORD,
+                'HOST': REMOTE_POSTGRES_DB_HOST,
+                'PORT': REMOTE_POSTGRES_DB_PORT,
+                'DISABLE_SERVER_SIDE_CURSORS': True,
+                'OPTIONS': {
+                    'sslmode': 'require',
+                },
+            }
+        }
 else:
     DATABASES = {
         'default': {
@@ -308,23 +333,23 @@ AXES_LOCKOUT_PARAMETERS = ['username', 'ip_address']
 # =========================
 # SECURITY HARDENING
 # =========================
-SECURE_BROWSER_XSS_FILTER = True
-SECURE_CONTENT_TYPE_NOSNIFF = True
-X_FRAME_OPTIONS = config('X_FRAME_OPTIONS', default='DENY')
+# SECURE_BROWSER_XSS_FILTER = True
+# SECURE_CONTENT_TYPE_NOSNIFF = True
+# X_FRAME_OPTIONS = config('X_FRAME_OPTIONS', default='DENY')
 
-USE_X_FORWARDED_HOST = config('USE_X_FORWARDED_HOST', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+# USE_X_FORWARDED_HOST = config('USE_X_FORWARDED_HOST', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+# SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default='Lax')
-CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default='Lax')
+# SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+# SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+# CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+# SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default='Lax')
+# CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default='Lax')
 
-if SECURE_SSL_REDIRECT:
-    SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=31536000, cast=int)
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = config('SECURE_HSTS_INCLUDE_SUBDOMAINS', default=True, cast=bool)
-    SECURE_HSTS_PRELOAD = config('SECURE_HSTS_PRELOAD', default=True, cast=bool)
+# if SECURE_SSL_REDIRECT:
+#     SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=31536000, cast=int)
+#     SECURE_HSTS_INCLUDE_SUBDOMAINS = config('SECURE_HSTS_INCLUDE_SUBDOMAINS', default=True, cast=bool)
+#     SECURE_HSTS_PRELOAD = config('SECURE_HSTS_PRELOAD', default=True, cast=bool)
 
 # =========================
 # LOGGING CONFIGURATION

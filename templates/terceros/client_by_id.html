@@ -1,0 +1,160 @@
+{% extends 'base_core.html' %}
+
+{% block title %}Crear Cliente - SAT{% endblock %}
+{% block header_title %}SAT - Crear Cliente{% endblock %}
+{% block header_subtitle %}Crea un nuevo cliente en Facturama{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl">
+  <div class="mb-4">
+    <div class="inline-flex rounded-lg bg-slate-100 dark:bg-slate-800 p-1">
+      <a href="{% url 'rfc_status' %}" class="px-3 py-1.5 rounded-md text-sm font-medium {% if request.resolver_match.url_name == 'rfc_status' %}bg-white dark:bg-zinc-900 text-sky-700 dark:text-sky-300 shadow{% else %}text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300{% endif %}">Validar RFC</a>
+      <a href="{% url 'facturama_cliente_create' %}" class="ml-1 px-3 py-1.5 rounded-md text-sm font-medium {% if request.resolver_match.url_name == 'facturama_cliente_create' %}bg-white dark:bg-zinc-900 text-sky-700 dark:text-sky-300 shadow{% else %}text-slate-600 dark:text-slate-300 hover:text-sky-700 dark:hover:text-sky-300{% endif %}">Crear Cliente</a>
+    </div>
+  </div>
+  <div class="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 p-6">
+    <form method="post" class="space-y-4">
+      {% csrf_token %}
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label for="email" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Email</label>
+          <input id="email" name="email" value="{{ form.Email|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" placeholder="cliente@dominio.com" required />
+        </div>
+        <div>
+          <label for="rfc" class="block text-sm font-medium text-slate-700 dark:text-slate-300">RFC</label>
+          <input id="rfc" name="rfc" value="{{ form.Rfc|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" placeholder="XAXX010101000" required />
+        </div>
+        <div class="md:col-span-2">
+          <label for="name" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Nombre / Razón Social</label>
+          <input id="name" name="name" value="{{ form.Name|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" placeholder="Nombre del cliente" required />
+        </div>
+        <div>
+          <label for="cfdi_use" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Uso CFDI</label>
+          <input id="cfdi_use" name="cfdi_use" value="{{ form.CfdiUse|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" placeholder="P01" />
+        </div>
+        <div>
+          <label for="fiscal_regime" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Régimen Fiscal</label>
+          <input id="fiscal_regime" name="fiscal_regime" value="{{ form.FiscalRegime|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" placeholder="601" />
+        </div>
+        <div>
+          <label for="email_op1" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Email opcional 1</label>
+          <input id="email_op1" name="email_op1" value="{{ form.EmailOp1|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" placeholder="opcional@dominio.com" />
+        </div>
+        <div>
+          <label for="email_op2" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Email opcional 2</label>
+          <input id="email_op2" name="email_op2" value="{{ form.EmailOp2|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" placeholder="opcional2@dominio.com" />
+        </div>
+        <div>
+          <label for="tax_zip_code" class="block text-sm font-medium text-slate-700 dark:text-slate-300">CP Fiscal</label>
+          <input id="tax_zip_code" name="tax_zip_code" value="{{ form.TaxZipCode|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" placeholder="01000" />
+        </div>
+        <div>
+          <label for="tax_residence" class="block text-sm font-medium text-slate-700 dark:text-slate-300">País de Residencia (extranjeros)</label>
+          <input id="tax_residence" name="tax_residence" value="{{ form.TaxResidence|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" placeholder="MEX" />
+        </div>
+        <div class="md:col-span-2">
+          <label for="num_reg_id_trib" class="block text-sm font-medium text-slate-700 dark:text-slate-300">NumRegIdTrib (extranjeros)</label>
+          <input id="num_reg_id_trib" name="num_reg_id_trib" value="{{ form.NumRegIdTrib|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" />
+        </div>
+      </div>
+
+      <div class="pt-2 border-t border-slate-200 dark:border-slate-800">
+        <div class="text-sm font-semibold text-slate-700 dark:text-slate-200">Dirección (opcional)</div>
+        <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="md:col-span-2">
+            <label for="address_street" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Calle</label>
+            <input id="address_street" name="address_street" value="{{ form.Address.Street|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" />
+          </div>
+          <div>
+            <label for="address_exterior_number" class="block text-sm font-medium text-slate-700 dark:text-slate-300">No. Exterior</label>
+            <input id="address_exterior_number" name="address_exterior_number" value="{{ form.Address.ExteriorNumber|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" />
+          </div>
+          <div>
+            <label for="address_interior_number" class="block text-sm font-medium text-slate-700 dark:text-slate-300">No. Interior</label>
+            <input id="address_interior_number" name="address_interior_number" value="{{ form.Address.InteriorNumber|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" />
+          </div>
+          <div>
+            <label for="address_neighborhood" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Colonia</label>
+            <input id="address_neighborhood" name="address_neighborhood" value="{{ form.Address.Neighborhood|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" />
+          </div>
+          <div>
+            <label for="address_zip_code" class="block text-sm font-medium text-slate-700 dark:text-slate-300">CP</label>
+            <input id="address_zip_code" name="address_zip_code" value="{{ form.Address.ZipCode|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" />
+          </div>
+          <div>
+            <label for="address_locality" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Localidad</label>
+            <input id="address_locality" name="address_locality" value="{{ form.Address.Locality|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" />
+          </div>
+          <div>
+            <label for="address_municipality" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Municipio</label>
+            <input id="address_municipality" name="address_municipality" value="{{ form.Address.Municipality|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" />
+          </div>
+          <div>
+            <label for="address_state" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Estado</label>
+            <input id="address_state" name="address_state" value="{{ form.Address.State|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" placeholder="SAN LUIS POTOSI" />
+          </div>
+          <div>
+            <label for="address_country" class="block text-sm font-medium text-slate-700 dark:text-slate-300">País</label>
+            <input id="address_country" name="address_country" value="{{ form.Address.Country|default:'' }}" class="mt-1 w-full rounded-lg bg-white dark:bg-zinc-950 border border-slate-300 dark:border-slate-700 px-3 py-2 focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-slate-900 dark:text-white" placeholder="MEX" />
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3 pt-2">
+        <button type="submit" class="inline-flex items-center justify-center px-4 py-2 rounded-lg text-sm font-semibold text-white bg-sky-600 hover:bg-sky-700 transition-colors"><i class="fas fa-plus mr-2"></i> Crear</button>
+        <span class="text-xs text-slate-500">Ambiente actual: {% if is_sandbox %}Sandbox{% else %}Productivo{% endif %}</span>
+      </div>
+    </form>
+
+    {% if result %}
+    <div class="mt-6 grid grid-cols-2 gap-3 text-sm">
+      <div class="text-slate-500 dark:text-slate-400">Id</div>
+      <div class="font-mono break-all">{{ result.Id }}</div>
+      <div class="text-slate-500 dark:text-slate-400">Name</div>
+      <div>{{ result.Name }}</div>
+      <div class="text-slate-500 dark:text-slate-400">Rfc</div>
+      <div class="font-mono">{{ result.Rfc }}</div>
+      <div class="text-slate-500 dark:text-slate-400">FiscalRegime</div>
+      <div>{{ result.FiscalRegime }}</div>
+      <div class="text-slate-500 dark:text-slate-400">Email</div>
+      <div>{{ result.Email }}</div>
+      <div class="text-slate-500 dark:text-slate-400">EmailOp1</div>
+      <div>{{ result.EmailOp1 }}</div>
+      <div class="text-slate-500 dark:text-slate-400">EmailOp2</div>
+      <div>{{ result.EmailOp2 }}</div>
+      <div class="text-slate-500 dark:text-slate-400">CfdiUse</div>
+      <div>{{ result.CfdiUse }}</div>
+      <div class="text-slate-500 dark:text-slate-400">TaxResidence</div>
+      <div>{{ result.TaxResidence }}</div>
+      <div class="text-slate-500 dark:text-slate-400">NumRegIdTrib</div>
+      <div>{{ result.NumRegIdTrib }}</div>
+      <div class="text-slate-500 dark:text-slate-400">TaxZipCode</div>
+      <div>{{ result.TaxZipCode }}</div>
+    </div>
+    {% if result.Address %}
+    <div class="mt-6 border-t border-slate-200 dark:border-slate-800 pt-4">
+      <div class="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">Address</div>
+      <div class="grid grid-cols-2 gap-3 text-sm">
+        <div class="text-slate-500 dark:text-slate-400">Street</div>
+        <div>{{ result.Address.Street }}</div>
+        <div class="text-slate-500 dark:text-slate-400">ExteriorNumber</div>
+        <div>{{ result.Address.ExteriorNumber }}</div>
+        <div class="text-slate-500 dark:text-slate-400">InteriorNumber</div>
+        <div>{{ result.Address.InteriorNumber }}</div>
+        <div class="text-slate-500 dark:text-slate-400">Neighborhood</div>
+        <div>{{ result.Address.Neighborhood }}</div>
+        <div class="text-slate-500 dark:text-slate-400">ZipCode</div>
+        <div>{{ result.Address.ZipCode }}</div>
+        <div class="text-slate-500 dark:text-slate-400">Municipality</div>
+        <div>{{ result.Address.Municipality }}</div>
+        <div class="text-slate-500 dark:text-slate-400">State</div>
+        <div>{{ result.Address.State }}</div>
+        <div class="text-slate-500 dark:text-slate-400">Country</div>
+        <div>{{ result.Address.Country }}</div>
+      </div>
+    </div>
+    {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
