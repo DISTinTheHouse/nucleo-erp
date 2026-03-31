@@ -1,11 +1,33 @@
 from rest_framework import serializers
 from terceros.models import Proveedor, Cliente, DireccionCliente
+from nucleo.models import SatRegimenFiscal, SatUsoCfdi
 
 class ClienteSerializer(serializers.ModelSerializer):
+    correo = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
+    sat_regimen_fiscal_codigo = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    sat_uso_cfdi_codigo = serializers.CharField(write_only=True, required=False, allow_blank=True)
+
     class Meta:
         model = Cliente
         fields = "__all__"
         read_only_fields = ["activo", "empresa", "vendedores"]
+
+    def validate(self, attrs):
+        codigo_regimen = attrs.pop("sat_regimen_fiscal_codigo", None)
+        if codigo_regimen and not attrs.get("sat_regimen_fiscal"):
+            try:
+                attrs["sat_regimen_fiscal"] = SatRegimenFiscal.objects.get(codigo=str(codigo_regimen).strip())
+            except SatRegimenFiscal.DoesNotExist:
+                raise serializers.ValidationError({"sat_regimen_fiscal_codigo": "Régimen fiscal no encontrado"})
+        codigo_uso = attrs.pop("sat_uso_cfdi_codigo", None)
+        if codigo_uso and not attrs.get("sat_uso_cfdi"):
+            try:
+                attrs["sat_uso_cfdi"] = SatUsoCfdi.objects.get(codigo=str(codigo_uso).strip())
+            except SatUsoCfdi.DoesNotExist:
+                raise serializers.ValidationError({"sat_uso_cfdi_codigo": "Uso CFDI no encontrado"})
+        if not attrs.get("correo"):
+            attrs["correo"] = ""
+        return attrs
 
 class ProveedorSerializer(serializers.ModelSerializer):
     class Meta:
