@@ -13,7 +13,11 @@ from seguridad.models import Rol
 from terceros.api.serializers import ClienteSerializer
 from usuarios.api.serializers import UsuarioSerializer
 from usuarios.models import Usuario
-from ventas.models import Cotizacion
+from ventas.models import Cotizacion, Pedido
+from terceros.models import Cliente
+from django.db.models import Q
+from django.utils import timezone
+from datetime import date
 
 
 class AIAssistantAPIView(APIView):
@@ -47,7 +51,7 @@ class AIAssistantAPIView(APIView):
 
         system_prompt = (
             "Eres un asistente dentro de un ERP. Responde en español. "
-            "Si necesitas datos del sistema (empresas, usuarios, cotizaciones) usa herramientas. "
+            "Si necesitas datos del sistema (cotizaciones, clientes, pedidos, empresas, usuarios) usa herramientas. "
             "Nunca inventes números. "
             "Para crear recursos, pide los campos requeridos y valida permisos: "
             "solo superuser puede crear empresas/roles; admin de empresa puede crear usuarios; "
@@ -147,6 +151,56 @@ class AIAssistantAPIView(APIView):
                     "parameters": {
                         "type": "object",
                         "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_cotizaciones_summary",
+                    "description": "Obtiene conteos de cotizaciones totales y autorizadas (aprobadas) para el usuario/empresa. Permite filtrar por periodo.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "period": {
+                                "type": "string",
+                                "description": "Opcional. hoy | este_mes | this_month | all",
+                            },
+                            "date_from": {"type": "string", "description": "Opcional. Fecha ISO YYYY-MM-DD"},
+                            "date_to": {"type": "string", "description": "Opcional. Fecha ISO YYYY-MM-DD"},
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_clientes_count",
+                    "description": "Obtiene el conteo de clientes activos según permisos (empresa completa o solo los asignados al vendedor).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_last_cliente_compra",
+                    "description": "Obtiene el último cliente que compró (último pedido autorizado/en proceso) según permisos. Permite filtrar por periodo.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "period": {
+                                "type": "string",
+                                "description": "Opcional. hoy | este_mes | this_month | all",
+                            },
+                            "date_from": {"type": "string", "description": "Opcional. Fecha ISO YYYY-MM-DD"},
+                            "date_to": {"type": "string", "description": "Opcional. Fecha ISO YYYY-MM-DD"},
+                        },
                         "additionalProperties": False,
                     },
                 },
@@ -267,6 +321,12 @@ class AIAssistantAPIView(APIView):
     def _execute_tool(self, request, name, args):
         if name == "get_counts":
             return self._tool_get_counts(request)
+        if name == "get_cotizaciones_summary":
+            return self._tool_get_cotizaciones_summary(request, args)
+        if name == "get_clientes_count":
+            return self._tool_get_clientes_count(request)
+        if name == "get_last_cliente_compra":
+            return self._tool_get_last_cliente_compra(request, args)
         if name == "create_empresa":
             return self._tool_create_empresa(request, args)
         if name == "create_rol":
@@ -276,6 +336,35 @@ class AIAssistantAPIView(APIView):
         if name == "create_cliente":
             return self._tool_create_cliente(request, args)
         return {"ok": False, "error": f"Herramienta desconocida: {name}"}
+
+    def _parse_date_filters(self, args):
+        period = (args or {}).get("period")
+        date_from_raw = (args or {}).get("date_from")
+        date_to_raw = (args or {}).get("date_to")
+        if isinstance(date_from_raw, str) and date_from_raw.strip():
+            try:
+                d_from = date.fromisoformat(date_from_raw.strip())
+            except ValueError:
+                d_from = None
+        else:
+            d_from = None
+        if isinstance(date_to_raw, str) and date_to_raw.strip():
+            try:
+                d_to = date.fromisoformat(date_to_raw.strip())
+            except ValueError:
+                d_to = None
+        else:
+            d_to = None
+        if d_from or d_to:
+            return d_from, d_to
+        period = (period or "all").strip().lower()
+        today = timezone.localdate()
+        if period in ("hoy", "today"):
+            return today, today
+        if period in ("este_mes", "this_month", "mes_actual"):
+            first_day = today.replace(day=1)
+            return first_day, today
+        return None, None
 
     def _tool_get_counts(self, request):
         user = request.user
@@ -319,6 +408,93 @@ class AIAssistantAPIView(APIView):
                 "empresas": empresas_qs.count(),
                 "usuarios": usuarios_qs.count(),
                 "cotizaciones": cot_qs.count(),
+            },
+        }
+
+    def _tool_get_cotizaciones_summary(self, request, args):
+        user = request.user
+        cot_qs = Cotizacion.objects.all()
+        if not getattr(user, "is_superuser", False):
+            empresa = getattr(user, "empresa", None)
+            if empresa:
+                cot_qs = cot_qs.filter(empresa=empresa)
+                if not getattr(user, "is_admin_empresa", False):
+                    cot_qs = cot_qs.filter(vendedor=user)
+            else:
+                cot_qs = cot_qs.none()
+
+        d_from, d_to = self._parse_date_filters(args)
+        if d_from and d_to:
+            cot_qs = cot_qs.filter(created_at__date__gte=d_from, created_at__date__lte=d_to)
+        elif d_from:
+            cot_qs = cot_qs.filter(created_at__date__gte=d_from)
+        elif d_to:
+            cot_qs = cot_qs.filter(created_at__date__lte=d_to)
+
+        total = cot_qs.count()
+        aprobadas = cot_qs.filter(estatus=3).count()
+        return {
+            "ok": True,
+            "filters": {"date_from": d_from.isoformat() if d_from else None, "date_to": d_to.isoformat() if d_to else None},
+            "counts": {"cotizaciones": total, "cotizaciones_aprobadas": aprobadas},
+        }
+
+    def _tool_get_clientes_count(self, request):
+        user = request.user
+        qs = Cliente.objects.filter(activo=True)
+        if getattr(user, "is_superuser", False):
+            return {"ok": True, "counts": {"clientes": qs.count()}}
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return {"ok": True, "counts": {"clientes": 0}}
+        qs = qs.filter(empresa=empresa)
+        if getattr(user, "is_admin_empresa", False):
+            return {"ok": True, "counts": {"clientes": qs.count()}}
+        qs = qs.filter(vendedores__id=getattr(user, "id", None))
+        return {"ok": True, "counts": {"clientes": qs.count()}}
+
+    def _tool_get_last_cliente_compra(self, request, args):
+        user = request.user
+        pedidos_qs = Pedido.objects.filter(activo=True).exclude(estatus=5)
+        if not getattr(user, "is_superuser", False):
+            empresa = getattr(user, "empresa", None)
+            if empresa:
+                pedidos_qs = pedidos_qs.filter(empresa=empresa)
+                if not getattr(user, "is_admin_empresa", False):
+                    pedidos_qs = pedidos_qs.filter(Q(cliente__vendedores=user) | Q(cotizacion__vendedor=user))
+            else:
+                pedidos_qs = pedidos_qs.none()
+
+        d_from, d_to = self._parse_date_filters(args)
+        if d_from and d_to:
+            pedidos_qs = pedidos_qs.filter(created_at__date__gte=d_from, created_at__date__lte=d_to)
+        elif d_from:
+            pedidos_qs = pedidos_qs.filter(created_at__date__gte=d_from)
+        elif d_to:
+            pedidos_qs = pedidos_qs.filter(created_at__date__lte=d_to)
+
+        pedido = pedidos_qs.order_by("-created_at", "-id").select_related("cliente").first()
+        if not pedido:
+            return {
+                "ok": True,
+                "filters": {"date_from": d_from.isoformat() if d_from else None, "date_to": d_to.isoformat() if d_to else None},
+                "last_purchase": None,
+            }
+        cliente = getattr(pedido, "cliente", None)
+        return {
+            "ok": True,
+            "filters": {"date_from": d_from.isoformat() if d_from else None, "date_to": d_to.isoformat() if d_to else None},
+            "last_purchase": {
+                "pedido_id": pedido.pk,
+                "folio": getattr(pedido, "folio", None),
+                "fecha": pedido.created_at.isoformat() if getattr(pedido, "created_at", None) else None,
+                "gran_total": str(getattr(pedido, "gran_total", "")),
+                "cliente": {
+                    "id": getattr(cliente, "pk", None),
+                    "razon_social": getattr(cliente, "razon_social", None),
+                    "nombre": getattr(cliente, "nombre", None),
+                    "rfc": getattr(cliente, "rfc", None),
+                },
             },
         }
 
