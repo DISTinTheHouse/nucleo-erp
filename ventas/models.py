@@ -188,10 +188,9 @@ class Pedido(StatusLifecycleModel):
     )
 
     CHOICES_TIPO_PEDIDO = (
-        (1, "STOCK"),
-        (2, "FABRICACION"),
-        (3, "MUESTRAS"),
-        (4, "MIXTOs"),
+        (1, "PEDIDO DE VENTA"),
+        (2, "MUESTRA"),
+        (3, "PEDIDO DE ERROR"),
     )
         
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="pedidos")
