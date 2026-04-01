@@ -4,6 +4,8 @@ from nucleo.models import SatRegimenFiscal, SatUsoCfdi
 
 class ClienteSerializer(serializers.ModelSerializer):
     correo = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
+    telefono = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    giro_empresarial = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     sat_regimen_fiscal_codigo = serializers.CharField(write_only=True, required=False, allow_blank=True)
     sat_uso_cfdi_codigo = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
@@ -36,8 +38,12 @@ class ClienteSerializer(serializers.ModelSerializer):
                 attrs["sat_uso_cfdi"] = SatUsoCfdi.objects.get(codigo=str(codigo_uso).strip())
             except SatUsoCfdi.DoesNotExist:
                 raise serializers.ValidationError({"sat_uso_cfdi_codigo": "Uso CFDI no encontrado"})
+        if not attrs.get("telefono"):
+            attrs["telefono"] = ""
         if not attrs.get("correo"):
             attrs["correo"] = ""
+        if not attrs.get("giro_empresarial"):
+            attrs["giro_empresarial"] = ""
         return attrs
 
 class ProveedorSerializer(serializers.ModelSerializer):

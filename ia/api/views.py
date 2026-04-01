@@ -301,8 +301,6 @@ class AIAssistantAPIView(APIView):
                         "required": [
                             "razon_social",
                             "nombre",
-                            "telefono",
-                            "correo",
                             "rfc",
                             "sat_regimen_fiscal",
                             "direccion_fiscal",
@@ -310,7 +308,6 @@ class AIAssistantAPIView(APIView):
                             "codigo_postal",
                             "ciudad",
                             "estado",
-                            "giro_empresarial",
                         ],
                         "additionalProperties": False,
                     },
