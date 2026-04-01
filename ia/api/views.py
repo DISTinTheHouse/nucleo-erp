@@ -280,7 +280,7 @@ class AIAssistantAPIView(APIView):
                 "type": "function",
                 "function": {
                     "name": "create_cliente",
-                    "description": "Crea un cliente y lo asigna al vendedor actual. Requiere campos fiscales básicos.",
+                    "description": "Crea un cliente y lo asigna al vendedor actual. Campos opcionales para cotizaciones rápidas.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -299,15 +299,7 @@ class AIAssistantAPIView(APIView):
                             "sat_uso_cfdi": {"type": "integer"},
                         },
                         "required": [
-                            "razon_social",
                             "nombre",
-                            "rfc",
-                            "sat_regimen_fiscal",
-                            "direccion_fiscal",
-                            "colonia",
-                            "codigo_postal",
-                            "ciudad",
-                            "estado",
                         ],
                         "additionalProperties": False,
                     },

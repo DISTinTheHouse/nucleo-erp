@@ -3,6 +3,7 @@ from terceros.models import Proveedor, Cliente, DireccionCliente
 from nucleo.models import SatRegimenFiscal, SatUsoCfdi
 
 class ClienteSerializer(serializers.ModelSerializer):
+    razon_social = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     correo = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
     telefono = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     giro_empresarial = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -44,6 +45,8 @@ class ClienteSerializer(serializers.ModelSerializer):
             attrs["correo"] = ""
         if not attrs.get("giro_empresarial"):
             attrs["giro_empresarial"] = ""
+        if not attrs.get("razon_social"):
+            attrs["razon_social"] = ""
         return attrs
 
 class ProveedorSerializer(serializers.ModelSerializer):
