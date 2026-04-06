@@ -42,7 +42,6 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
-    'rest_framework.authtoken',
     'corsheaders',
     'widget_tweaks',
     'nucleo',
@@ -57,8 +56,16 @@ INSTALLED_APPS = [
     'ventas',
     'compras',
     'produccion',
+    'allauth',
+    'allauth.account',
+    'auth_kit',
+    'auth_kit.mfa',
     'drf_spectacular',
 ]
+
+AUTH_KIT = {
+    'USE_MFA': True,  # Enable MFA system
+}
 
 AUTH_USER_MODEL = "usuarios.Usuario"
 
@@ -76,6 +83,7 @@ MIDDLEWARE = [
     'axes.middleware.AxesMiddleware',
     'nucleo.middleware.APILoggingMiddleware',
     'nucleo.middleware.NoCacheMiddleware',
+    'allauth.account.middleware.AccountMiddleware',
 ]
 
 ROOT_URLCONF = 'ERP.urls'
@@ -242,8 +250,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # =========================
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'usuarios.backends.BearerTokenAuthentication',
-        'rest_framework.authentication.SessionAuthentication',
+        'auth_kit.authentication.JWTCookieAuthentication'
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
