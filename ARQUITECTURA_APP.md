@@ -31,6 +31,13 @@ No permitimos basura en la BD.
 - **Allowed Hosts**: El servidor rechaza peticiones con Host headers desconocidos.
 - **Rate Limiting**: Protección contra ataques de fuerza bruta en el login (bloqueo temporal de IP).
 
+### E. Integración con Google Drive (OAuth 2.0)
+- **Modelo de seguridad**: una sola app OAuth (Client ID/Secret) para el sistema; cada usuario enlaza su cuenta con consentimiento propio.
+- **Tokens por usuario**: se almacenan por usuario en `ia_cloud_integrations` (`access_token`, `refresh_token`, expiración y metadata).
+- **Scopes**: lectura de Drive + email (`drive.readonly` y `userinfo.email`).
+- **Regla de producto**: el Core aplica “una nube por usuario” (si el usuario ya conectó una, bloquea el onboarding de otras).
+- **Transporte**: en producción se fuerza HTTPS y se confía en `X-Forwarded-Proto` para URLs correctas en entornos con proxy (Vercel).
+
 ### D. Doble Autenticación (2FA) en Login Web (Core)
 - **Alcance**: Solo aplica a las vistas web del Core (login HTML), no a los endpoints API.
 - **Control por usuario**: `Usuario.two_factor_enabled`.

@@ -58,6 +58,19 @@ Hemos preparado documentación detallada para cada aspecto del sistema. ¿Qué n
     - CORS_ALLOWED_ORIGINS, CORS_ALLOW_CREDENTIALS
     - CSRF_TRUSTED_ORIGINS
 
+    Variables para **Google Drive (OAuth 2.0)**:
+    - GOOGLE_DRIVE_CLIENT_ID
+    - GOOGLE_DRIVE_CLIENT_SECRET
+    - GOOGLE_DRIVE_REDIRECT_URI (recomendado en producción; ejemplo `https://<tu-app>.vercel.app/ia/drive/google/callback/`)
+
+    Requisitos en Google Cloud Console:
+    - Habilitar **Google Drive API** en el proyecto.
+    - Configurar **OAuth consent screen** (si está en *Testing*, agregar usuarios en *Test users*).
+    - Crear credenciales **OAuth client ID** tipo **Web application** y registrar *Authorized redirect URIs*:
+      - Local: `http://127.0.0.1:8000/ia/drive/google/callback/`
+      - Producción: `https://<tu-app>.vercel.app/ia/drive/google/callback/`
+    - El flujo se inicia en `/ia/drive/google/connect/` y finaliza en `/ia/drive/google/callback/`.
+
     Variables opcionales para **2FA (correo/SMS)**:
     - TWO_FACTOR_OTP_LENGTH (default 6)
     - TWO_FACTOR_OTP_TTL_SECONDS (default 300)

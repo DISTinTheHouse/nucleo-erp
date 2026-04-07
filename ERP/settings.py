@@ -131,6 +131,9 @@ COTIZACION_EDIT_WINDOW_MINUTES = int(os.getenv('COTIZACION_EDIT_WINDOW_MINUTES',
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 OPENAI_BASE_URL = config('OPENAI_BASE_URL', default='https://api.openai.com/v1')
 OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o-mini')
+GOOGLE_DRIVE_CLIENT_ID = config('GOOGLE_DRIVE_CLIENT_ID', default='')
+GOOGLE_DRIVE_CLIENT_SECRET = config('GOOGLE_DRIVE_CLIENT_SECRET', default='')
+GOOGLE_DRIVE_REDIRECT_URI = config('GOOGLE_DRIVE_REDIRECT_URI', default='')
 
 USE_REMOTE_DB = config('USE_REMOTE_DB', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
 
@@ -340,9 +343,9 @@ X_FRAME_OPTIONS = config('X_FRAME_OPTIONS', default='DENY')
 USE_X_FORWARDED_HOST = config('USE_X_FORWARDED_HOST', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+SECURE_SSL_REDIRECT = True if (IS_VERCEL or ENVIRONMENT.lower() == 'production') else config('SECURE_SSL_REDIRECT', default=False, cast=bool)
+SESSION_COOKIE_SECURE = True if (IS_VERCEL or ENVIRONMENT.lower() == 'production') else config('SESSION_COOKIE_SECURE', default=False, cast=bool)
+CSRF_COOKIE_SECURE = True if (IS_VERCEL or ENVIRONMENT.lower() == 'production') else config('CSRF_COOKIE_SECURE', default=False, cast=bool)
 SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default='Lax')
 CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default='Lax')
 
