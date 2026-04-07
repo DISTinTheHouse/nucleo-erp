@@ -1,3 +1,4 @@
+import logging
 import json
 import secrets
 import urllib.error
@@ -17,6 +18,7 @@ from ia.models import CloudIntegration
 
 
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email"
+logger = logging.getLogger("nucleo")
 
 
 def _provider_cards():
@@ -71,8 +73,21 @@ def _http_json(url, *, method="GET", data=None, headers=None, timeout=20):
         payload = urllib.parse.urlencode(data).encode("utf-8")
         merged_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
     request = urllib.request.Request(url, data=payload, headers=merged_headers, method=method)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = ""
+        safe_url = (url or "").split("?", 1)[0]
+        logger.warning("Drive HTTPError %s %s status=%s body=%s", method, safe_url, getattr(e, "code", ""), body[:600])
+        raise
+    except urllib.error.URLError as e:
+        safe_url = (url or "").split("?", 1)[0]
+        logger.warning("Drive URLError %s %s detail=%s", method, safe_url, str(e))
+        raise
 
 
 def _google_drive_refresh_token(integration):
@@ -202,9 +217,19 @@ def drive_google_connect(request):
 
     state = secrets.token_urlsafe(24)
     request.session["google_drive_oauth_state"] = state
+    redirect_uri = _drive_redirect_uri(request)
+    raw_client_id = (getattr(settings, "GOOGLE_DRIVE_CLIENT_ID", "") or "").strip()
+    client_id_suffix = raw_client_id[-8:] if raw_client_id else ""
+    logger.info(
+        "Drive OAuth connect user_id=%s host=%s redirect_uri=%s client_id_suffix=%s",
+        getattr(request.user, "id", None),
+        request.get_host(),
+        redirect_uri,
+        client_id_suffix,
+    )
     params = {
-        "client_id": (getattr(settings, "GOOGLE_DRIVE_CLIENT_ID", "") or "").strip(),
-        "redirect_uri": _drive_redirect_uri(request),
+        "client_id": raw_client_id,
+        "redirect_uri": redirect_uri,
         "response_type": "code",
         "access_type": "offline",
         "prompt": "consent",
@@ -218,9 +243,16 @@ def drive_google_connect(request):
 
 @login_required
 def drive_google_callback(request):
+    logger.info(
+        "Drive OAuth callback user_id=%s has_error=%s has_code=%s",
+        getattr(request.user, "id", None),
+        bool((request.GET.get("error") or "").strip()),
+        bool((request.GET.get("code") or "").strip()),
+    )
     oauth_error = (request.GET.get("error") or "").strip()
     if oauth_error:
         error_description = (request.GET.get("error_description") or "").strip().lower()
+        logger.warning("Drive OAuth error user_id=%s error=%s desc=%s", getattr(request.user, "id", None), oauth_error, error_description[:300])
         if oauth_error == "access_denied":
             if "verification" in error_description or "not verified" in error_description or "developer verification" in error_description:
                 messages.error(
@@ -237,11 +269,13 @@ def drive_google_callback(request):
     state = (request.GET.get("state") or "").strip()
     expected_state = request.session.pop("google_drive_oauth_state", "")
     if not state or state != expected_state:
+        logger.warning("Drive OAuth state mismatch user_id=%s state_ok=%s", getattr(request.user, "id", None), False)
         messages.error(request, "La autenticación con Google no es válida o expiró.")
         return redirect("drive")
 
     code = (request.GET.get("code") or "").strip()
     if not code:
+        logger.warning("Drive OAuth missing code user_id=%s", getattr(request.user, "id", None))
         messages.error(request, "Google no devolvió un código de autorización.")
         return redirect("drive")
 
