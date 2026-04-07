@@ -220,8 +220,15 @@ def drive_google_connect(request):
 def drive_google_callback(request):
     oauth_error = (request.GET.get("error") or "").strip()
     if oauth_error:
+        error_description = (request.GET.get("error_description") or "").strip().lower()
         if oauth_error == "access_denied":
-            messages.error(request, "Cancelaste la conexión con Google Drive.")
+            if "verification" in error_description or "not verified" in error_description or "developer verification" in error_description:
+                messages.error(
+                    request,
+                    "Google bloqueó el acceso porque la app no está verificada. Agrega tu correo como Test user en el OAuth consent screen o publica la app.",
+                )
+            else:
+                messages.error(request, "Cancelaste la conexión con Google Drive.")
         else:
             messages.error(request, "No se pudo completar la autenticación con Google.")
         request.session.pop("google_drive_oauth_state", None)
