@@ -1,5 +1,5 @@
 asgiref==3.11.1
-cryptography==46.0.4
+cryptography==46.0.7
 Django==6.0.2
 django-axes==8.1.0
 django-cors-headers==4.9.0
