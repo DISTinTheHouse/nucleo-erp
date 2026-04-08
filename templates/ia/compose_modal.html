@@ -1,0 +1,104 @@
+<!-- Centered Compose Modal (Dialog) -->
+<div id="compose-modal" class="hidden fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6 transition-all duration-200">
+    <!-- Backdrop with Blur -->
+    <div class="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onclick="toggleCompose()"></div>
+    
+    <!-- Modal Panel -->
+    <div class="relative bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col overflow-hidden border border-slate-200 dark:border-slate-800 transform transition-all duration-200 scale-95 opacity-0" id="compose-modal-panel">
+        
+        <!-- Header -->
+        <div class="flex justify-between items-center px-6 py-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50">
+            <h3 class="font-semibold text-slate-800 dark:text-white flex items-center gap-2">
+                <svg class="w-5 h-5 text-sky-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+                Nuevo Mensaje
+            </h3>
+            <button type="button" onclick="toggleCompose()" class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 p-1.5 rounded-lg transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+        </div>
+        
+        <!-- Body -->
+        <form action="{% url 'correo_send' %}" method="post" enctype="multipart/form-data" class="flex flex-col flex-1">
+            {% csrf_token %}
+            
+            <!-- Destinatario -->
+            <div class="px-6 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center gap-4 transition-colors focus-within:bg-sky-50/30 dark:focus-within:bg-sky-900/10">
+                <label class="text-sm font-medium text-slate-500 w-12">Para:</label>
+                <input type="email" name="to" required placeholder="ejemplo@correo.com" class="flex-1 bg-transparent outline-none text-sm text-slate-800 dark:text-white placeholder-slate-300 dark:placeholder-slate-600">
+            </div>
+            
+            <!-- Asunto -->
+            <div class="px-6 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center gap-4 transition-colors focus-within:bg-sky-50/30 dark:focus-within:bg-sky-900/10">
+                <label class="text-sm font-medium text-slate-500 w-12">Asunto:</label>
+                <input type="text" name="subject" required placeholder="Escribe un asunto..." class="flex-1 bg-transparent outline-none text-sm font-semibold text-slate-800 dark:text-white placeholder-slate-300 dark:placeholder-slate-600">
+            </div>
+            
+            <!-- Mensaje -->
+            <div class="p-6 h-64 relative group focus-within:bg-sky-50/10 dark:focus-within:bg-sky-900/5 transition-colors">
+                <textarea name="body" required placeholder="Escribe tu mensaje aquí..." class="w-full h-full bg-transparent outline-none resize-none text-sm text-slate-800 dark:text-white placeholder-slate-300 dark:placeholder-slate-600"></textarea>
+            </div>
+            
+            <!-- File Preview Area -->
+            <div id="file-list" class="px-6 pb-4 flex flex-wrap gap-2 hidden text-xs">
+                <!-- Badges will be injected here via JS -->
+            </div>
+
+            <!-- Footer / Actions -->
+            <div class="px-6 py-4 bg-slate-50 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between rounded-b-2xl">
+                <div class="flex items-center gap-4">
+                    <button type="submit" class="bg-sky-600 hover:bg-sky-700 text-white px-6 py-2.5 rounded-xl font-medium text-sm transition-all shadow-sm hover:shadow-md shadow-sky-500/20 flex items-center gap-2 active:scale-95">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                        Enviar Correo
+                    </button>
+                    
+                    <label class="cursor-pointer text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 px-3 py-2 rounded-lg flex items-center gap-2 transition-colors" title="Adjuntar archivos">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+                        <span class="text-sm font-medium">Adjuntar</span>
+                        <input type="file" name="attachments" multiple class="hidden" id="file-input" onchange="updateFileList(this)">
+                    </label>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+    function toggleCompose() {
+        const modal = document.getElementById('compose-modal');
+        const panel = document.getElementById('compose-modal-panel');
+        
+        if (modal.classList.contains('hidden')) {
+            // Mostrar
+            modal.classList.remove('hidden');
+            // Pequeño timeout para que la transición CSS surta efecto
+            setTimeout(() => {
+                panel.classList.remove('scale-95', 'opacity-0');
+                panel.classList.add('scale-100', 'opacity-100');
+            }, 10);
+        } else {
+            // Ocultar
+            panel.classList.remove('scale-100', 'opacity-100');
+            panel.classList.add('scale-95', 'opacity-0');
+            setTimeout(() => {
+                modal.classList.add('hidden');
+            }, 200); // Mismo tiempo que la duración de la transición
+        }
+    }
+
+    function updateFileList(input) {
+        const fileList = document.getElementById('file-list');
+        fileList.innerHTML = '';
+        if (input.files.length > 0) {
+            fileList.classList.remove('hidden');
+            for(let i = 0; i < input.files.length; i++) {
+                const badge = document.createElement('span');
+                badge.className = "bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 px-3 py-1.5 rounded-lg flex items-center gap-2 shadow-sm truncate max-w-[200px] transition-all hover:border-sky-300 dark:hover:border-sky-700";
+                badge.innerHTML = `<svg class="w-4 h-4 text-sky-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg> 
+                                   <span class="truncate">${input.files[i].name}</span>`;
+                fileList.appendChild(badge);
+            }
+        } else {
+            fileList.classList.add('hidden');
+        }
+    }
+</script>
