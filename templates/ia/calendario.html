@@ -14,21 +14,20 @@
         display: none !important;
     }
 
-    /* Forzar expansión completa para evitar que se apile (Bug de Tailwind/FullCalendar) */
-    .fc {
+    /* Reset Tailwind overrides for FullCalendar tables */
+    .fc table {
+        border-collapse: separate !important;
         width: 100% !important;
-        height: 100% !important;
     }
 
-    .fc table {
-        width: 100% !important;
-        table-layout: fixed !important;
+    .fc th,
+    .fc td {
+        border-width: 1px !important;
     }
 
     /* Eliminar bordes externos del grid porque nuestro contenedor ya tiene */
     .fc-theme-standard .fc-scrollgrid {
         border: none !important;
-        width: 100% !important;
     }
 
     /* Suavizar bordes internos */
