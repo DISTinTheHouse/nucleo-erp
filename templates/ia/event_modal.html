@@ -1,0 +1,88 @@
+<!-- Centered Event Compose Modal (Dialog) -->
+<div id="event-modal" class="hidden fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6 transition-all duration-200">
+    <!-- Backdrop with Blur -->
+    <div class="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onclick="toggleEventModal()"></div>
+    
+    <!-- Modal Panel -->
+    <div class="relative bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-xl flex flex-col overflow-hidden border border-slate-200 dark:border-slate-800 transform transition-all duration-200 scale-95 opacity-0" id="event-modal-panel">
+        
+        <!-- Header -->
+        <div class="flex justify-between items-center px-6 py-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50">
+            <h3 class="font-semibold text-slate-800 dark:text-white flex items-center gap-2">
+                <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                Nuevo Evento
+            </h3>
+            <button type="button" onclick="toggleEventModal()" class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 p-1.5 rounded-lg transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+        </div>
+
+        <!-- Form -->
+        <form action="{% url 'calendario_create' %}" method="post" class="flex flex-col flex-1">
+            {% csrf_token %}
+            
+            <div class="px-6 py-4 border-b border-slate-100 dark:border-slate-800 transition-colors focus-within:bg-blue-50/30 dark:focus-within:bg-blue-900/10">
+                <input type="text" name="summary" required placeholder="Título del evento" class="w-full bg-transparent outline-none text-lg font-semibold text-slate-800 dark:text-white placeholder-slate-400 dark:placeholder-slate-500">
+            </div>
+            
+            <div class="px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex gap-4">
+                <div class="flex-1">
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Inicio</label>
+                    <div class="flex gap-2">
+                        <input type="date" name="start_date" required class="flex-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-800 dark:text-white outline-none focus:border-blue-500">
+                        <input type="time" name="start_time" class="w-24 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-2 text-sm text-slate-800 dark:text-white outline-none focus:border-blue-500">
+                    </div>
+                </div>
+                <div class="flex-1">
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Fin</label>
+                    <div class="flex gap-2">
+                        <input type="date" name="end_date" required class="flex-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-800 dark:text-white outline-none focus:border-blue-500">
+                        <input type="time" name="end_time" class="w-24 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-2 text-sm text-slate-800 dark:text-white outline-none focus:border-blue-500">
+                    </div>
+                </div>
+            </div>
+
+            <div class="p-6 h-32 relative group focus-within:bg-blue-50/10 dark:focus-within:bg-blue-900/5 transition-colors">
+                <textarea name="description" placeholder="Añade una descripción o detalles del evento..." class="w-full h-full bg-transparent outline-none resize-none text-sm text-slate-800 dark:text-white placeholder-slate-400 dark:placeholder-slate-500"></textarea>
+            </div>
+
+            <!-- Footer / Actions -->
+            <div class="px-6 py-4 bg-slate-50 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end rounded-b-2xl">
+                <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-xl font-medium text-sm transition-all shadow-sm hover:shadow-md shadow-blue-500/20 flex items-center gap-2 active:scale-95">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                    Guardar Evento
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+    function toggleEventModal() {
+        const modal = document.getElementById('event-modal');
+        const panel = document.getElementById('event-modal-panel');
+        
+        if (modal.classList.contains('hidden')) {
+            // Set default dates to today
+            const today = new Date().toISOString().split('T')[0];
+            const startDateInput = modal.querySelector('input[name="start_date"]');
+            const endDateInput = modal.querySelector('input[name="end_date"]');
+            if(startDateInput && !startDateInput.value) startDateInput.value = today;
+            if(endDateInput && !endDateInput.value) endDateInput.value = today;
+
+            // Show
+            modal.classList.remove('hidden');
+            setTimeout(() => {
+                panel.classList.remove('scale-95', 'opacity-0');
+                panel.classList.add('scale-100', 'opacity-100');
+            }, 10);
+        } else {
+            // Hide
+            panel.classList.remove('scale-100', 'opacity-100');
+            panel.classList.add('scale-95', 'opacity-0');
+            setTimeout(() => {
+                modal.classList.add('hidden');
+            }, 200);
+        }
+    }
+</script>

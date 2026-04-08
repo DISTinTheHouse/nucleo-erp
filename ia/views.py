@@ -20,7 +20,7 @@ from django.views.decorators.http import require_POST
 from ia.models import CloudIntegration
 
 
-GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.modify"
+GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/calendar"
 logger = logging.getLogger("nucleo")
 
 
@@ -471,6 +471,110 @@ def correo_detail(request, msg_id):
     except urllib.error.HTTPError as e:
         messages.error(request, "Ocurrió un error al cargar el correo.")
         return redirect("correo")
+
+@login_required
+def calendario(request):
+    integration = CloudIntegration.objects.filter(user=request.user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).first()
+    if not integration or not integration.access_token:
+        messages.warning(request, "Conecta tu cuenta de Google primero para usar Calendario.")
+        return redirect("drive")
+    
+    access_token = _google_drive_refresh_token(integration)
+    events = []
+    calendar_error = ""
+    
+    # Calculate timeMin for upcoming events
+    now = timezone.now().isoformat()
+    
+    try:
+        url = f"https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin={urllib.parse.quote(now)}&maxResults=50&singleEvents=true&orderBy=startTime"
+        response = _http_json(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            }
+        )
+        
+        for item in response.get("items") or []:
+            start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date")
+            end = item.get("end", {}).get("dateTime") or item.get("end", {}).get("date")
+            events.append({
+                "id": item.get("id"),
+                "summary": item.get("summary") or "Sin título",
+                "description": item.get("description") or "",
+                "htmlLink": item.get("htmlLink"),
+                "start": start,
+                "end": end,
+                "status": item.get("status"),
+                "creator": item.get("creator", {}).get("email"),
+            })
+    except urllib.error.HTTPError as e:
+        logger.error("Calendar HTTPError: %s", str(e))
+        calendar_error = "Error al consultar tu calendario. Intenta reconectar tu cuenta de Google."
+    except Exception as e:
+        logger.error("Calendar Exception: %s", str(e))
+        calendar_error = "Error inesperado al cargar eventos."
+
+    context = {
+        "events": events,
+        "calendar_error": calendar_error,
+        "integration": integration,
+    }
+    return render(request, "ia/calendario.html", context)
+
+@login_required
+@require_POST
+def calendario_create(request):
+    integration = CloudIntegration.objects.filter(user=request.user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).first()
+    if not integration or not integration.access_token:
+        messages.warning(request, "Conecta tu cuenta de Google primero.")
+        return redirect("drive")
+        
+    access_token = _google_drive_refresh_token(integration)
+    
+    summary = request.POST.get("summary")
+    description = request.POST.get("description", "")
+    start_date = request.POST.get("start_date")
+    start_time = request.POST.get("start_time")
+    end_date = request.POST.get("end_date")
+    end_time = request.POST.get("end_time")
+    
+    if not summary or not start_date or not end_date:
+        messages.error(request, "Faltan campos obligatorios para el evento.")
+        return redirect("calendario")
+        
+    try:
+        # Construct ISO 8601 strings
+        if start_time:
+            start_dt = f"{start_date}T{start_time}:00"
+            end_dt = f"{end_date}T{end_time}:00" if end_time else f"{end_date}T{start_time}:00"
+            start_data = {"dateTime": start_dt, "timeZone": getattr(settings, "TIME_ZONE", "UTC")}
+            end_data = {"dateTime": end_dt, "timeZone": getattr(settings, "TIME_ZONE", "UTC")}
+        else:
+            # All day event
+            start_data = {"date": start_date}
+            end_data = {"date": end_date}
+            
+        event_body = {
+            "summary": summary,
+            "description": description,
+            "start": start_data,
+            "end": end_data,
+        }
+        
+        _http_json(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            method="POST",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json_data=event_body
+        )
+        messages.success(request, "Evento creado correctamente.")
+    except Exception as e:
+        logger.error("Error creating event: %s", str(e))
+        messages.error(request, "Error al crear el evento en el calendario.")
+        
+    return redirect("calendario")
 
 
 @login_required

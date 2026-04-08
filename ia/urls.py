@@ -10,4 +10,6 @@ urlpatterns = [
     path('correo/', views.correo, name='correo'),
     path('correo/send/', views.correo_send, name='correo_send'),
     path('correo/<str:msg_id>/', views.correo_detail, name='correo_detail'),
+    path('calendario/', views.calendario, name='calendario'),
+    path('calendario/create/', views.calendario_create, name='calendario_create'),
 ]
