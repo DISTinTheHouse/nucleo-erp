@@ -479,6 +479,11 @@ def calendario(request):
         messages.warning(request, "Conecta tu cuenta de Google primero para usar Calendario.")
         return redirect("drive")
     
+    scopes = integration.metadata.get("scope", "") if integration.metadata else ""
+    if "calendar" not in scopes.lower():
+        messages.warning(request, "Se requieren nuevos permisos de Calendario. Por favor, ve a la pestaña Drive, desconecta tu cuenta de Google y vuelve a conectarla para autorizar el calendario.")
+        return redirect("drive")
+    
     access_token = _google_drive_refresh_token(integration)
     events = []
     calendar_error = ""
@@ -529,6 +534,11 @@ def calendario_create(request):
     integration = CloudIntegration.objects.filter(user=request.user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).first()
     if not integration or not integration.access_token:
         messages.warning(request, "Conecta tu cuenta de Google primero.")
+        return redirect("drive")
+        
+    scopes = integration.metadata.get("scope", "") if integration.metadata else ""
+    if "calendar" not in scopes.lower():
+        messages.warning(request, "Se requieren nuevos permisos de Calendario. Por favor, ve a la pestaña Drive, desconecta tu cuenta de Google y vuelve a conectarla.")
         return redirect("drive")
         
     access_token = _google_drive_refresh_token(integration)
