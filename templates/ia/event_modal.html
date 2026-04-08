@@ -81,17 +81,33 @@
 </div>
 
 <script>
-    function toggleEventModal() {
+    function toggleEventModal(startDateStr = null, endDateStr = null) {
         const modal = document.getElementById('event-modal');
         const panel = document.getElementById('event-modal-panel');
 
         if (modal.classList.contains('hidden')) {
-            // Set default dates to today
+            // Set default dates
             const today = new Date().toISOString().split('T')[0];
             const startDateInput = modal.querySelector('input[name="start_date"]');
             const endDateInput = modal.querySelector('input[name="end_date"]');
-            if (startDateInput && !startDateInput.value) startDateInput.value = today;
-            if (endDateInput && !endDateInput.value) endDateInput.value = today;
+
+            // Format dates properly if provided (handle full ISO strings from calendar)
+            if (startDateInput) {
+                if (startDateStr) {
+                    startDateInput.value = startDateStr.split('T')[0];
+                } else {
+                    startDateInput.value = today;
+                }
+            }
+            if (endDateInput) {
+                if (endDateStr) {
+                    // FullCalendar select returns end date as exclusive (next day) for all-day events.
+                    // We might need to adjust, but let's just prefill what we have.
+                    endDateInput.value = endDateStr.split('T')[0];
+                } else {
+                    endDateInput.value = today;
+                }
+            }
 
             // Show
             modal.classList.remove('hidden');

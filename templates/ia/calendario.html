@@ -4,6 +4,8 @@
 {% block title %}Calendario - Núcleo ERP{% endblock %}
 
 {% block extra_css %}
+<!-- FullCalendar CSS -->
+<link href="https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.css" rel="stylesheet" />
 <style>
     /* Scrollbar minimalista */
     .scrollbar-hide::-webkit-scrollbar {
@@ -15,27 +17,98 @@
         scrollbar-width: none;
     }
 
-    /* Hover effects for rows */
-    .event-row {
-        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-        border-left: 3px solid transparent;
+    /* FullCalendar Overrides for Tailwind / Modern Look */
+    .fc-theme-standard .fc-scrollgrid {
+        border-color: #e2e8f0;
     }
 
-    .event-row:hover {
-        background-color: #f8fafc;
-        /* slate-50 */
-        border-left-color: #f97316;
-        /* orange-500 */
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+    .dark .fc-theme-standard .fc-scrollgrid {
+        border-color: #1e293b;
+    }
+
+    .fc-theme-standard td,
+    .fc-theme-standard th {
+        border-color: #e2e8f0;
+    }
+
+    .dark .fc-theme-standard td,
+    .dark .fc-theme-standard th {
+        border-color: #1e293b;
+    }
+
+    .fc .fc-col-header-cell-cushion {
+        padding: 12px 8px;
+        font-weight: 600;
+        color: #475569;
+    }
+
+    .dark .fc .fc-col-header-cell-cushion {
+        color: #cbd5e1;
+    }
+
+    .fc-daygrid-day-number {
+        padding: 8px !important;
+        color: #334155;
+        font-weight: 500;
+    }
+
+    .dark .fc-daygrid-day-number {
+        color: #cbd5e1;
+    }
+
+    .fc .fc-daygrid-day.fc-day-today {
+        background-color: #fff7ed !important;
+    }
+
+    .dark .fc .fc-daygrid-day.fc-day-today {
+        background-color: rgba(249, 115, 22, 0.1) !important;
+    }
+
+    .fc-event {
+        border-radius: 6px;
+        border: none;
+        padding: 2px 4px;
+        font-size: 0.75rem;
+        cursor: pointer;
+        transition: transform 0.1s;
+    }
+
+    .fc-event:hover {
         transform: translateY(-1px);
-        z-index: 10;
-        position: relative;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
     }
 
-    .dark .event-row:hover {
-        background-color: #0f172a;
-        /* slate-900 darker */
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
+    .fc-h-event {
+        background-color: #f97316;
+        /* orange-500 */
+        color: white;
+    }
+
+    .fc .fc-toolbar-title {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: #1e293b;
+    }
+
+    .dark .fc .fc-toolbar-title {
+        color: #f8fafc;
+    }
+
+    .fc .fc-button-primary {
+        background-color: #f97316;
+        border-color: #f97316;
+        text-transform: capitalize;
+    }
+
+    .fc .fc-button-primary:not(:disabled):active,
+    .fc .fc-button-primary:not(:disabled).fc-button-active {
+        background-color: #ea580c;
+        border-color: #ea580c;
+    }
+
+    .fc .fc-button-primary:hover {
+        background-color: #ea580c;
+        border-color: #ea580c;
     }
 </style>
 {% endblock %}
@@ -106,9 +179,9 @@
         </div>
 
         <!-- Events List -->
-        <div class="flex-1 overflow-y-auto bg-white dark:bg-slate-900 scrollbar-hide">
+        <div class="flex-1 overflow-y-auto bg-white dark:bg-slate-900 scrollbar-hide flex flex-col">
             <div
-                class="flex items-center justify-between px-4 py-2 border-b border-slate-200 dark:border-slate-800 sticky top-0 bg-white/90 dark:bg-slate-900/90 backdrop-blur z-10">
+                class="flex items-center justify-between px-4 py-2 border-b border-slate-200 dark:border-slate-800 sticky top-0 bg-white/90 dark:bg-slate-900/90 backdrop-blur z-10 flex-shrink-0">
                 <div class="flex items-center gap-2">
                     <button class="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full text-slate-500"
                         onclick="window.location.reload()" title="Actualizar">
@@ -122,51 +195,89 @@
             </div>
 
             {% if calendar_error %}
-            <div class="p-4 m-4 bg-red-50 text-red-600 rounded-lg border border-red-200">
+            <div class="p-4 m-4 bg-red-50 text-red-600 rounded-lg border border-red-200 flex-shrink-0">
                 {{ calendar_error }}
             </div>
             {% endif %}
 
-            <div class="divide-y divide-slate-100 dark:divide-slate-800">
-                {% for event in events %}
-                <a href="{{ event.htmlLink }}" target="_blank"
-                    class="event-row flex items-center px-4 py-4 bg-white dark:bg-slate-900 cursor-pointer text-sm gap-4 group">
-                    <div class="w-40 flex-shrink-0 flex flex-col font-medium text-slate-800 dark:text-slate-200">
-                        <span class="group-hover:text-orange-600 dark:group-hover:text-orange-400 transition-colors">{{ event.start|slice:":10" }}</span>
-                        <span class="text-xs text-slate-500">{{ event.start|slice:"11:16"|default:"Todo el día" }}</span>
-                    </div>
-                    <div
-                        class="flex-1 flex flex-col truncate pl-2 border-l border-slate-200 dark:border-slate-700 group-hover:border-orange-200 dark:group-hover:border-orange-500/30 transition-colors">
-                        <span class="font-semibold text-slate-800 dark:text-slate-200 truncate">{{ event.summary }}</span>
-                        {% if event.description %}
-                        <span class="text-slate-500 dark:text-slate-400 truncate text-xs mt-0.5">{{ event.description }}</span>
-                        {% endif %}
-                    </div>
-                    <div class="w-32 flex-shrink-0 text-right text-xs font-medium">
-                        {% if event.status == 'confirmed' %}
-                        <span
-                            class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20">Confirmado</span>
-                        {% else %}
-                        <span
-                            class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-slate-100 text-slate-800 border border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700">{{ event.status|title }}</span>
-                        {% endif %}
-                    </div>
-                </a>
-                {% empty %}
-                <div class="p-10 text-center text-slate-500 flex flex-col items-center">
-                    <svg class="w-12 h-12 mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-                            d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z">
-                        </path>
-                    </svg>
-                    <p>No tienes próximos eventos en tu calendario.</p>
-                </div>
-                {% endfor %}
+            <div class="p-4 md:p-6 flex-1 relative min-h-[600px]">
+                <div id="calendar"
+                    class="absolute inset-4 md:inset-6 bg-white dark:bg-slate-900 rounded-xl overflow-hidden"></div>
             </div>
         </div>
     </div>
 </div>
 
+{{ events|json_script:"events-data" }}
+
 {% include "ia/event_modal.html" %}
+
+<!-- FullCalendar JS -->
+<script src="https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/locales/es.js"></script>
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const rawEvents = JSON.parse(document.getElementById('events-data').textContent);
+        const formattedEvents = rawEvents.map(e => {
+            let event = {
+                title: e.summary,
+                start: e.start,
+                end: e.end,
+                url: e.htmlLink || null,
+                extendedProps: {
+                    description: e.description,
+                    status: e.status,
+                    creator: e.creator
+                }
+            };
+            return event;
+        });
+
+        const calendarEl = document.getElementById('calendar');
+        const calendar = new FullCalendar.Calendar(calendarEl, {
+            locale: 'es',
+            initialView: 'dayGridMonth',
+            headerToolbar: {
+                left: 'prev,next today',
+                center: 'title',
+                right: 'dayGridMonth,timeGridWeek,timeGridDay'
+            },
+            events: formattedEvents,
+            eventClick: function (info) {
+                if (info.event.url) {
+                    info.jsEvent.preventDefault();
+                    window.open(info.event.url, "_blank");
+                }
+            },
+            selectable: true,
+            select: function (info) {
+                toggleEventModal(info.startStr, info.endStr);
+            },
+            height: '100%',
+            slotMinTime: '06:00:00',
+            slotMaxTime: '22:00:00',
+            allDayText: 'Todo el día',
+            buttonText: {
+                today: 'Hoy',
+                month: 'Mes',
+                week: 'Semana',
+                day: 'Día',
+                list: 'Agenda'
+            },
+            eventTimeFormat: {
+                hour: 'numeric',
+                minute: '2-digit',
+                meridiem: 'short'
+            }
+        });
+
+        calendar.render();
+
+        // Actualizar el botón superior de "Actualizar" para que recargue y vuelva al mismo mes si es posible
+        window.reloadCalendar = function () {
+            window.location.reload();
+        }
+    });
+</script>
 
 {% endblock %}
