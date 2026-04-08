@@ -1,0 +1,97 @@
+{% extends "base_core.html" %}
+{% load static %}
+
+{% block title %}{{ email.subject }} - Correo{% endblock %}
+
+{% block extra_css %}
+<style>
+    .scrollbar-hide::-webkit-scrollbar { display: none; }
+    .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+    
+    .email-body {
+        font-family: Arial, Helvetica, sans-serif;
+        color: #1f2937;
+        line-height: 1.5;
+    }
+    .dark .email-body {
+        color: #f3f4f6;
+    }
+    .email-body a { color: #2563eb; text-decoration: underline; }
+    .dark .email-body a { color: #60a5fa; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="h-[calc(100vh-5rem)] flex flex-col bg-white dark:bg-slate-900 rounded-2xl overflow-hidden shadow-sm border border-slate-200 dark:border-slate-800">
+    
+    <!-- Header -->
+    <div class="flex items-center justify-between px-6 py-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+        <div class="flex items-center gap-4">
+            <a href="{% url 'correo' %}" class="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full text-slate-500 transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+            </a>
+            <div>
+                <h1 class="text-xl font-bold text-slate-800 dark:text-white truncate max-w-2xl">{{ email.subject }}</h1>
+            </div>
+        </div>
+        <div>
+            <span class="px-3 py-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-full text-xs font-medium border border-slate-200 dark:border-slate-700">
+                Recibidos
+            </span>
+        </div>
+    </div>
+
+    <!-- Main Layout -->
+    <div class="flex flex-1 overflow-hidden">
+        
+        <!-- Sidebar (Opcional, igual que correo.html) -->
+        <div class="w-64 flex-shrink-0 border-r border-slate-200 dark:border-slate-800 p-4 hidden md:flex flex-col gap-4 bg-slate-50/50 dark:bg-slate-900/50">
+            <a href="{% url 'correo' %}" class="flex items-center gap-3 px-6 py-4 bg-sky-100 dark:bg-sky-500/20 text-sky-700 dark:text-sky-300 rounded-2xl font-medium hover:shadow-md transition-all">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+                Redactar
+            </a>
+            
+            <nav class="flex flex-col gap-1 mt-4">
+                <a href="{% url 'correo' %}" class="flex items-center justify-between px-4 py-2 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-full font-medium text-sm transition-colors">
+                    <div class="flex items-center gap-3">
+                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M2.003 5.884L10 9.882l7.997-3.998A2 2 0 0016 4H4a2 2 0 00-1.997 1.884z"></path><path d="M18 8.118l-8 4-8-4V14a2 2 0 002 2h12a2 2 0 002-2V8.118z"></path></svg>
+                        Bandeja de Entrada
+                    </div>
+                </a>
+            </nav>
+        </div>
+
+        <!-- Email Content -->
+        <div class="flex-1 overflow-y-auto bg-white dark:bg-slate-900 p-8 scrollbar-hide">
+            
+            <!-- Email Header Details -->
+            <div class="flex items-start justify-between mb-8">
+                <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 rounded-full bg-indigo-100 dark:bg-indigo-900 text-indigo-600 dark:text-indigo-300 flex items-center justify-center text-xl font-bold uppercase border border-indigo-200 dark:border-indigo-700">
+                        {{ email.from|slice:":1" }}
+                    </div>
+                    <div>
+                        <h2 class="text-base font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                            {{ email.from }}
+                            <span class="text-xs font-normal text-slate-500 dark:text-slate-400">&lt;{{ email.from_full }}&gt;</span>
+                        </h2>
+                        <p class="text-sm text-slate-500 dark:text-slate-400">para mí <span class="text-xs ml-2 text-slate-400">{{ email.date }}</span></p>
+                    </div>
+                </div>
+                
+                <div class="flex items-center gap-2">
+                    <button class="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full text-slate-500 transition-colors" title="Responder">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"></path></svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Email Body -->
+            <div class="email-body">
+                {{ email.body_html|safe }}
+            </div>
+
+        </div>
+    </div>
+</div>
+{% endblock %}

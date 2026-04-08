@@ -5,140 +5,188 @@
 
 {% block extra_css %}
 <style>
-    .mail-surface {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+    /* Scrollbar minimalista */
+    .scrollbar-hide::-webkit-scrollbar {
+        display: none;
     }
-    .dark .mail-surface {
-        border-color: rgba(255, 255, 255, 0.08);
-        background: rgba(15, 23, 42, 0.44);
-        box-shadow: 0 4px 6px -1px rgba(2, 6, 23, 0.75);
+    .scrollbar-hide {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
     }
-    .mail-input {
-        width: 100%;
-        border-radius: 0.5rem;
-        border: 1px solid #e2e8f0;
-        background: transparent;
-        padding: 0.375rem 0.75rem;
-        font-size: 0.75rem;
-        color: #0f172a;
-        transition: all 150ms ease;
+    
+    /* Hover effects for rows */
+    .mail-row:hover {
+        box-shadow: inset 1px 0 0 #dadce0, inset -1px 0 0 #dadce0, 0 1px 2px 0 rgba(60,64,67,.3), 0 1px 3px 1px rgba(60,64,67,.15);
+        z-index: 10;
+        position: relative;
     }
-    .dark .mail-input {
-        border-color: rgba(255,255,255,0.1);
-        color: #f8fafc;
+
+    /* Floating Compose Modal */
+    #compose-modal {
+        transition: transform 0.2s ease, opacity 0.2s ease;
     }
-    .mail-input:focus {
-        outline: none;
-        border-color: #0ea5e9;
-        box-shadow: 0 0 0 1px #0ea5e9;
-    }
-    .mail-btn {
-        background: #0ea5e9;
-        color: white;
-        font-weight: 600;
-        font-size: 0.75rem;
-        padding: 0.375rem 1rem;
-        border-radius: 0.5rem;
-        transition: background 150ms ease;
-    }
-    .mail-btn:hover {
-        background: #0284c7;
+    #compose-modal.hidden {
+        transform: translateY(100%);
+        opacity: 0;
+        pointer-events: none;
     }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="mx-auto max-w-7xl px-4 py-4 sm:px-6 lg:px-8">
+<div class="h-[calc(100vh-5rem)] flex flex-col bg-white dark:bg-slate-900 rounded-2xl overflow-hidden shadow-sm border border-slate-200 dark:border-slate-800">
     
-    <div class="mb-4 flex items-center justify-between">
-        <div>
-            <h1 class="text-xl font-bold tracking-tight text-slate-900 dark:text-white">Bandeja de Correo</h1>
-            <p class="text-xs text-slate-500 dark:text-slate-400">
-                Conectado como <span class="font-medium text-slate-700 dark:text-slate-300">{{ account_email }}</span>
-            </p>
-        </div>
-        <a href="{% url 'drive' %}" class="text-xs font-medium text-sky-600 hover:text-sky-700 dark:text-sky-400 dark:hover:text-sky-300">
-            <i class="fas fa-cog mr-1"></i>Ajustes de conexión
-        </a>
-    </div>
-
-    {% if messages %}
-    <div class="mb-4 space-y-2">
-        {% for message in messages %}
-        <div class="rounded-lg p-2.5 text-xs font-medium {% if message.tags == 'error' %}bg-red-50 text-red-600 border border-red-100 dark:bg-red-900/20 dark:text-red-400 dark:border-red-900/30{% elif message.tags == 'warning' %}bg-amber-50 text-amber-600 border border-amber-100 dark:bg-amber-900/20 dark:text-amber-400 dark:border-amber-900/30{% else %}bg-green-50 text-green-600 border border-green-100 dark:bg-green-900/20 dark:text-green-400 dark:border-green-900/30{% endif %}">
-            {{ message }}
-        </div>
-        {% endfor %}
-    </div>
-    {% endif %}
-
-    <div class="grid grid-cols-1 gap-4 lg:grid-cols-12">
-        <!-- Redactar Correo (Izquierda) -->
-        <div class="lg:col-span-4">
-            <div class="mail-surface rounded-xl p-4">
-                <h2 class="mb-3 text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-2">
-                    <i class="fas fa-pen-to-square text-sky-500"></i> Redactar
-                </h2>
-                <form action="{% url 'correo_send' %}" method="post" class="space-y-3">
-                    {% csrf_token %}
-                    <div>
-                        <label class="mb-1 block text-[10px] font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">Para</label>
-                        <input type="email" name="to" required class="mail-input" placeholder="ejemplo@correo.com">
-                    </div>
-                    <div>
-                        <label class="mb-1 block text-[10px] font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">Asunto</label>
-                        <input type="text" name="subject" class="mail-input" placeholder="Asunto del correo">
-                    </div>
-                    <div>
-                        <label class="mb-1 block text-[10px] font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">Mensaje</label>
-                        <textarea name="body" required rows="6" class="mail-input resize-none" placeholder="Escribe tu mensaje aquí..."></textarea>
-                    </div>
-                    <div class="pt-1">
-                        <button type="submit" class="mail-btn w-full flex items-center justify-center gap-2">
-                            <i class="fas fa-paper-plane"></i> Enviar Correo
-                        </button>
-                    </div>
-                </form>
+    <!-- Header: Search / Brand -->
+    <div class="flex items-center justify-between px-6 py-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-full bg-red-50 dark:bg-red-500/10 flex items-center justify-center text-red-500">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+                </svg>
+            </div>
+            <div>
+                <h1 class="text-xl font-bold text-slate-800 dark:text-white">Correo Electrónico</h1>
+                <p class="text-xs text-slate-500 dark:text-slate-400">{{ account_email }}</p>
             </div>
         </div>
+        <div>
+            <a href="{% url 'drive_disconnect' 'google_drive' %}" class="flex items-center gap-2 text-sm text-slate-500 hover:text-red-500 transition-colors">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                Desconectar
+            </a>
+        </div>
+    </div>
 
-        <!-- Bandeja de entrada (Derecha) -->
-        <div class="lg:col-span-8">
-            <div class="mail-surface rounded-xl p-0 overflow-hidden flex flex-col h-full">
-                <div class="flex items-center justify-between border-b border-slate-100 px-4 py-3 dark:border-slate-800">
-                    <h2 class="text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-2">
-                        <i class="fas fa-inbox text-sky-500"></i> Últimos Correos
-                    </h2>
-                    <a href="{% url 'correo' %}" class="text-[10px] uppercase font-bold tracking-wider text-sky-500 hover:text-sky-600 transition-colors">
-                        <i class="fas fa-sync-alt mr-1"></i>Actualizar
-                    </a>
+    <!-- Main Layout -->
+    <div class="flex flex-1 overflow-hidden">
+        
+        <!-- Sidebar -->
+        <div class="w-64 flex-shrink-0 border-r border-slate-200 dark:border-slate-800 p-4 hidden md:flex flex-col gap-4 bg-slate-50/50 dark:bg-slate-900/50">
+            <button onclick="toggleCompose()" class="flex items-center gap-3 px-6 py-4 bg-sky-100 dark:bg-sky-500/20 text-sky-700 dark:text-sky-300 rounded-2xl font-medium hover:shadow-md transition-all">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+                Redactar
+            </button>
+            
+            <nav class="flex flex-col gap-1 mt-4">
+                <a href="#" class="flex items-center justify-between px-4 py-2 bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-300 rounded-full font-medium text-sm">
+                    <div class="flex items-center gap-3">
+                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M2.003 5.884L10 9.882l7.997-3.998A2 2 0 0016 4H4a2 2 0 00-1.997 1.884z"></path><path d="M18 8.118l-8 4-8-4V14a2 2 0 002 2h12a2 2 0 002-2V8.118z"></path></svg>
+                        Bandeja de Entrada
+                    </div>
+                    <span class="text-xs font-bold">{{ emails|length }}</span>
+                </a>
+                <!-- Más opciones de carpeta podrían ir aquí en el futuro -->
+            </nav>
+        </div>
+
+        <!-- Email List -->
+        <div class="flex-1 overflow-y-auto bg-white dark:bg-slate-900 scrollbar-hide">
+            <div class="flex items-center justify-between px-4 py-2 border-b border-slate-200 dark:border-slate-800 sticky top-0 bg-white/90 dark:bg-slate-900/90 backdrop-blur z-10">
+                <div class="flex items-center gap-2">
+                    <button class="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full text-slate-500" onclick="window.location.reload()">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                    </button>
                 </div>
-                
-                <div class="divide-y divide-slate-100 dark:divide-slate-800/50 overflow-y-auto max-h-[500px]">
-                    {% if emails %}
-                        {% for email in emails %}
-                        <div class="group flex flex-col gap-1 p-3 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer">
-                            <div class="flex items-center justify-between">
-                                <span class="text-xs font-bold text-slate-900 dark:text-slate-200 truncate pr-2">{{ email.from }}</span>
-                                <span class="shrink-0 text-[10px] font-medium text-slate-400 dark:text-slate-500">{{ email.date|truncatechars:16 }}</span>
-                            </div>
-                            <h3 class="text-[11px] font-semibold text-slate-700 dark:text-slate-300 truncate">{{ email.subject }}</h3>
-                            <p class="text-[11px] leading-relaxed text-slate-500 dark:text-slate-400 line-clamp-2">{{ email.snippet|safe }}</p>
-                        </div>
-                        {% endfor %}
-                    {% else %}
-                        <div class="flex flex-col items-center justify-center p-8 text-center">
-                            <div class="mb-3 rounded-full bg-slate-50 p-3 dark:bg-slate-800">
-                                <i class="fas fa-envelope-open text-2xl text-slate-300 dark:text-slate-600"></i>
-                            </div>
-                            <p class="text-xs font-medium text-slate-500 dark:text-slate-400">No hay correos recientes o hubo un error al cargar.</p>
-                        </div>
-                    {% endif %}
+            </div>
+
+            <div class="divide-y divide-slate-100 dark:divide-slate-800">
+                {% for email in emails %}
+                <a href="{% url 'correo_detail' email.id %}" class="mail-row flex items-center px-4 py-3 bg-white dark:bg-slate-900 cursor-pointer text-sm gap-4 group">
+                    <div class="w-48 flex-shrink-0 font-medium text-slate-800 dark:text-slate-200 truncate">
+                        {{ email.from }}
+                    </div>
+                    <div class="flex-1 flex items-center gap-2 truncate">
+                        <span class="font-semibold text-slate-800 dark:text-slate-200">{{ email.subject }}</span>
+                        <span class="text-slate-500 dark:text-slate-400 truncate">- {{ email.snippet }}</span>
+                    </div>
+                    <div class="w-24 flex-shrink-0 text-right text-xs font-medium text-slate-500 group-hover:text-slate-800 dark:group-hover:text-slate-200">
+                        {{ email.date|slice:":11" }}
+                    </div>
+                </a>
+                {% empty %}
+                <div class="p-10 text-center text-slate-500 flex flex-col items-center">
+                    <svg class="w-12 h-12 mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+                    <p>No hay correos en la bandeja de entrada.</p>
                 </div>
+                {% endfor %}
             </div>
         </div>
     </div>
 </div>
+
+<!-- Floating Compose Modal -->
+<div id="compose-modal" class="hidden fixed bottom-0 right-[5%] w-[500px] h-[500px] bg-white dark:bg-slate-800 shadow-2xl rounded-t-xl flex flex-col border border-slate-200 dark:border-slate-700 z-50">
+    <!-- Modal Header -->
+    <div class="flex justify-between items-center px-4 py-3 bg-slate-800 text-white rounded-t-xl">
+        <h3 class="font-semibold text-sm">Mensaje Nuevo</h3>
+        <button type="button" onclick="toggleCompose()" class="hover:bg-slate-700 p-1 rounded transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+        </button>
+    </div>
+    
+    <!-- Modal Body -->
+    <form action="{% url 'correo_send' %}" method="post" enctype="multipart/form-data" class="flex flex-col flex-1">
+        {% csrf_token %}
+        
+        <div class="border-b border-slate-200 dark:border-slate-700 px-4 py-2">
+            <input type="email" name="to" required placeholder="Para" class="w-full bg-transparent outline-none text-sm text-slate-800 dark:text-white placeholder-slate-400">
+        </div>
+        
+        <div class="border-b border-slate-200 dark:border-slate-700 px-4 py-2">
+            <input type="text" name="subject" required placeholder="Asunto" class="w-full bg-transparent outline-none text-sm font-semibold text-slate-800 dark:text-white placeholder-slate-400">
+        </div>
+        
+        <div class="flex-1 p-4 relative group">
+            <textarea name="body" required placeholder="Escribe tu mensaje aquí..." class="w-full h-full bg-transparent outline-none resize-none text-sm text-slate-800 dark:text-white placeholder-slate-400"></textarea>
+        </div>
+        
+        <!-- Modal Footer (Actions) -->
+        <div class="px-4 py-3 flex items-center justify-between bg-slate-50 dark:bg-slate-900/50">
+            <div class="flex items-center gap-4">
+                <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-full font-medium text-sm transition-colors shadow-sm">
+                    Enviar
+                </button>
+                
+                <!-- Botón de Adjuntar Archivo -->
+                <label class="cursor-pointer text-slate-500 hover:text-slate-800 dark:hover:text-white transition-colors flex items-center gap-1" title="Adjuntar archivos">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+                    <input type="file" name="attachments" multiple class="hidden" id="file-input" onchange="updateFileList(this)">
+                </label>
+            </div>
+            <button type="button" onclick="toggleCompose()" class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+            </button>
+        </div>
+        
+        <!-- Vista previa de archivos -->
+        <div id="file-list" class="px-4 pb-2 bg-slate-50 dark:bg-slate-900/50 flex flex-wrap gap-2 hidden text-xs text-slate-600 dark:text-slate-400">
+        </div>
+    </form>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    function toggleCompose() {
+        const modal = document.getElementById('compose-modal');
+        modal.classList.toggle('hidden');
+    }
+
+    function updateFileList(input) {
+        const fileList = document.getElementById('file-list');
+        fileList.innerHTML = '';
+        if (input.files.length > 0) {
+            fileList.classList.remove('hidden');
+            for(let i = 0; i < input.files.length; i++) {
+                const badge = document.createElement('span');
+                badge.className = "bg-slate-200 dark:bg-slate-700 px-2 py-1 rounded-md flex items-center gap-1 truncate max-w-[150px]";
+                badge.innerHTML = `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg> ${input.files[i].name}`;
+                fileList.appendChild(badge);
+            }
+        } else {
+            fileList.classList.add('hidden');
+        }
+    }
+</script>
 {% endblock %}

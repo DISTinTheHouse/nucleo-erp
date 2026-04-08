@@ -9,4 +9,5 @@ urlpatterns = [
     path('drive/disconnect/<str:provider>/', views.drive_disconnect, name='drive_disconnect'),
     path('correo/', views.correo, name='correo'),
     path('correo/send/', views.correo_send, name='correo_send'),
+    path('correo/<str:msg_id>/', views.correo_detail, name='correo_detail'),
 ]

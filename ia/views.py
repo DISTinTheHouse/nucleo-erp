@@ -6,6 +6,7 @@ import urllib.parse
 import urllib.request
 import base64
 from email.message import EmailMessage
+import mimetypes
 from datetime import timedelta
 
 from django.conf import settings
@@ -362,7 +363,7 @@ def correo(request):
     emails = []
     try:
         response = _http_json(
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=in:inbox",
             headers={"Authorization": f"Bearer {access_token}"}
         )
         
@@ -400,6 +401,78 @@ def correo(request):
     })
 
 
+def get_email_body(payload):
+    body = ""
+    html_body = ""
+    if 'parts' in payload:
+        for part in payload['parts']:
+            if part['mimeType'] == 'text/plain' and 'data' in part['body']:
+                try:
+                    body += base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
+                except:
+                    pass
+            elif part['mimeType'] == 'text/html' and 'data' in part['body']:
+                try:
+                    html_body += base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
+                except:
+                    pass
+            elif 'parts' in part:
+                sub_body, sub_html = get_email_body(part)
+                body += sub_body
+                html_body += sub_html
+    elif 'body' in payload and 'data' in payload['body']:
+        try:
+            if payload['mimeType'] == 'text/html':
+                html_body = base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8')
+            else:
+                body = base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8')
+        except:
+            pass
+    return body, html_body
+
+@login_required
+def correo_detail(request, msg_id):
+    integration = CloudIntegration.objects.filter(user=request.user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).first()
+    if not integration or not integration.access_token:
+        messages.warning(request, "Conecta tu cuenta de Google para usar Gmail.")
+        return redirect("drive")
+
+    access_token = _google_drive_refresh_token(integration)
+    if not access_token:
+        messages.error(request, "Tu sesión de Google expiró. Vuelve a conectarte.")
+        return redirect("drive")
+
+    try:
+        msg_detail = _http_json(
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+        
+        headers = {h['name']: h['value'] for h in msg_detail.get('payload', {}).get('headers', [])}
+        from_header = headers.get('From', '')
+        from_name = from_header.split('<')[0].strip().strip('"\'') if '<' in from_header else from_header
+        
+        body, html_body = get_email_body(msg_detail.get('payload', {}))
+        
+        email_data = {
+            'id': msg_detail['id'],
+            'subject': headers.get('Subject', '(Sin asunto)'),
+            'from': from_name,
+            'from_full': from_header,
+            'to': headers.get('To', ''),
+            'date': headers.get('Date', ''),
+            'body_html': html_body if html_body else body.replace('\n', '<br>'),
+        }
+        
+        return render(request, "ia/correo_detail.html", {
+            "email": email_data,
+            "account_email": integration.account_email,
+        })
+    except urllib.error.HTTPError as e:
+        messages.error(request, "Ocurrió un error al cargar el correo.")
+        return redirect("correo")
+
+
 @login_required
 @require_POST
 def correo_send(request):
@@ -424,6 +497,15 @@ def correo_send(request):
         message['To'] = to_email
         message['From'] = integration.account_email
         message['Subject'] = subject
+        
+        for f in request.FILES.getlist('attachments'):
+            file_data = f.read()
+            mime_type = mimetypes.guess_type(f.name)[0]
+            if mime_type:
+                maintype, subtype = mime_type.split('/', 1)
+            else:
+                maintype, subtype = 'application', 'octet-stream'
+            message.add_attachment(file_data, maintype=maintype, subtype=subtype, filename=f.name)
 
         encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
 
