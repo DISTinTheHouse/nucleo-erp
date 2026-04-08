@@ -4,6 +4,8 @@ import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
+import base64
+from email.message import EmailMessage
 from datetime import timedelta
 
 from django.conf import settings
@@ -17,7 +19,7 @@ from django.views.decorators.http import require_POST
 from ia.models import CloudIntegration
 
 
-GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email"
+GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.modify"
 logger = logging.getLogger("nucleo")
 
 
@@ -66,10 +68,13 @@ def _google_drive_credentials_configured():
     return bool(client_id and client_secret)
 
 
-def _http_json(url, *, method="GET", data=None, headers=None, timeout=20):
+def _http_json(url, *, method="GET", data=None, json_data=None, headers=None, timeout=20):
     payload = None
     merged_headers = dict(headers or {})
-    if data is not None:
+    if json_data is not None:
+        payload = json.dumps(json_data).encode("utf-8")
+        merged_headers.setdefault("Content-Type", "application/json")
+    elif data is not None:
         payload = urllib.parse.urlencode(data).encode("utf-8")
         merged_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
     request = urllib.request.Request(url, data=payload, headers=merged_headers, method=method)
@@ -340,3 +345,97 @@ def drive_disconnect(request, provider):
     CloudIntegration.objects.filter(user=request.user, provider=provider).delete()
     messages.success(request, "La integración se desconectó correctamente.")
     return redirect(f"{reverse('drive')}?onboarding=1")
+
+
+@login_required
+def correo(request):
+    integration = CloudIntegration.objects.filter(user=request.user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).first()
+    if not integration or not integration.access_token:
+        messages.warning(request, "Conecta tu cuenta de Google para usar Gmail.")
+        return redirect("drive")
+
+    access_token = _google_drive_refresh_token(integration)
+    if not access_token:
+        messages.error(request, "Tu sesión de Google expiró. Vuelve a conectarte.")
+        return redirect("drive")
+
+    emails = []
+    try:
+        response = _http_json(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+        
+        messages_list = response.get("messages", [])
+        for msg in messages_list:
+            msg_detail = _http_json(
+                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date",
+                headers={"Authorization": f"Bearer {access_token}"}
+            )
+            headers = {h['name']: h['value'] for h in msg_detail.get('payload', {}).get('headers', [])}
+            
+            # Extract name and email from "From" header (e.g. "Name <email@domain.com>" -> "Name")
+            from_header = headers.get('From', '')
+            from_name = from_header.split('<')[0].strip().strip('"\'') if '<' in from_header else from_header
+            
+            emails.append({
+                'id': msg['id'],
+                'snippet': msg_detail.get('snippet', ''),
+                'subject': headers.get('Subject', '(Sin asunto)'),
+                'from': from_name,
+                'date': headers.get('Date', ''),
+            })
+    except urllib.error.HTTPError as e:
+        if getattr(e, "code", 0) in (401, 403):
+            messages.error(request, "Permisos de Gmail insuficientes. Por favor, vuelve a conectar Google y acepta todos los permisos (Drive y Gmail).")
+            integration.delete()
+            return redirect("drive")
+        else:
+            messages.error(request, "Ocurrió un error al obtener tus correos.")
+            logger.exception("Error al obtener correos")
+
+    return render(request, "ia/correo.html", {
+        "emails": emails,
+        "account_email": integration.account_email,
+    })
+
+
+@login_required
+@require_POST
+def correo_send(request):
+    integration = CloudIntegration.objects.filter(user=request.user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).first()
+    if not integration or not integration.access_token:
+        messages.warning(request, "Conecta tu cuenta de Google primero.")
+        return redirect("drive")
+
+    access_token = _google_drive_refresh_token(integration)
+    
+    to_email = request.POST.get("to")
+    subject = request.POST.get("subject", "(Sin asunto)")
+    body = request.POST.get("body", "")
+    
+    if not to_email or not body:
+        messages.error(request, "Faltan campos obligatorios para enviar el correo.")
+        return redirect("correo")
+        
+    try:
+        message = EmailMessage()
+        message.set_content(body)
+        message['To'] = to_email
+        message['From'] = integration.account_email
+        message['Subject'] = subject
+
+        encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+
+        _http_json(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+            method="POST",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json_data={"raw": encoded_message}
+        )
+        messages.success(request, "Correo enviado correctamente.")
+    except Exception as e:
+        logger.error("Error sending email: %s", str(e))
+        messages.error(request, "Error al enviar el correo.")
+
+    return redirect("correo")

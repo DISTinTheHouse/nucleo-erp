@@ -219,10 +219,21 @@
             <a href="{% url 'drive' %}"
                 class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'drive' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
                 <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 014-4 5 5 0 019.584-1.163A3.5 3.5 0 1118.5 17H7a4 4 0 01-4-4z"></path>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M3 15a4 4 0 014-4 5 5 0 019.584-1.163A3.5 3.5 0 1118.5 17H7a4 4 0 01-4-4z"></path>
                 </svg>
                 <span
                     class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Drive</span>
+            </a>
+            <a href="{% url 'correo' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'correo' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Correo</span>
             </a>
 
             <!-- Divider Label -->
@@ -380,7 +391,8 @@
                         d="M15 12a3 3 0 11-6 0 3 3 0 016 0zM2 12a10 10 0 1020 0 10 10 0 00-20 0z" />
                 </svg>
                 <span
-                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Integraciones SAT</span>
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Integraciones
+                    SAT</span>
             </a>
 
         </nav>
@@ -502,9 +514,19 @@
                 <a href="{% url 'drive' %}"
                     class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
                     <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 014-4 5 5 0 019.584-1.163A3.5 3.5 0 1118.5 17H7a4 4 0 01-4-4z"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M3 15a4 4 0 014-4 5 5 0 019.584-1.163A3.5 3.5 0 1118.5 17H7a4 4 0 01-4-4z"></path>
                     </svg>
                     <span class="font-medium">Drive</span>
+                </a>
+                <a href="{% url 'correo' %}"
+                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
+                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z">
+                        </path>
+                    </svg>
+                    <span class="font-medium">Correo</span>
                 </a>
 
                 <div class="px-4 py-2 mt-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Seguridad</div>
@@ -647,7 +669,8 @@
         <!-- Header -->
         <header class="hidden md:flex h-20 items-center justify-between px-8 bg-transparent shrink-0 z-30">
             <div class="flex items-center gap-4 text-slate-400">
-                <h2 class="text-2xl font-semibold text-slate-800 dark:text-white tracking-tight">{% block header_title %}Panel de Control{% endblock %}</h2>
+                <h2 class="text-2xl font-semibold text-slate-800 dark:text-white tracking-tight">{% block header_title
+                    %}Panel de Control{% endblock %}</h2>
                 <span class="text-sm font-medium">{% block header_subtitle %}{% endblock %}</span>
             </div>
             <div class="flex items-center gap-6">
@@ -662,8 +685,10 @@
                     Ir al Frontend
                 </a>
                 <div class="flex flex-col items-end mr-2">
-                    <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ request.user.username }}</span>
-                    <span class="text-xs text-slate-500">{% if request.user.is_superuser %}Super Admin{% else %}Usuario{% endif %}</span>
+                    <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ request.user.username
+                        }}</span>
+                    <span class="text-xs text-slate-500">{% if request.user.is_superuser %}Super Admin{% else
+                        %}Usuario{% endif %}</span>
                 </div>
                 <div
                     class="h-10 w-10 rounded-full bg-gradient-to-br from-sky-500 to-sky-700 flex items-center justify-center text-white font-bold shadow-lg shadow-sky-500/20 ring-2 ring-white dark:ring-slate-800">
