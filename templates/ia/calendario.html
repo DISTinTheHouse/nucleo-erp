@@ -16,23 +16,44 @@
     }
 
     /* Hover effects for rows */
+    .event-row {
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        border-left: 3px solid transparent;
+    }
+
     .event-row:hover {
-        box-shadow: inset 1px 0 0 #dadce0, inset -1px 0 0 #dadce0, 0 1px 2px 0 rgba(60, 64, 67, .3), 0 1px 3px 1px rgba(60, 64, 67, .15);
+        background-color: #f8fafc;
+        /* slate-50 */
+        border-left-color: #f97316;
+        /* orange-500 */
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+        transform: translateY(-1px);
         z-index: 10;
         position: relative;
+    }
+
+    .dark .event-row:hover {
+        background-color: #0f172a;
+        /* slate-900 darker */
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
     }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="h-[calc(100vh-5rem)] flex flex-col bg-white dark:bg-slate-900 rounded-2xl overflow-hidden shadow-sm border border-slate-200 dark:border-slate-800">
+<div
+    class="h-[calc(100vh-5rem)] flex flex-col bg-white dark:bg-slate-900 rounded-2xl overflow-hidden shadow-sm border border-slate-200 dark:border-slate-800">
 
     <!-- Header: Search / Brand -->
-    <div class="flex items-center justify-between px-6 py-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+    <div
+        class="flex items-center justify-between px-6 py-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
         <div class="flex items-center gap-3">
-            <div class="w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-500/10 flex items-center justify-center text-blue-500">
+            <div
+                class="w-10 h-10 rounded-full bg-orange-50 dark:bg-orange-500/10 flex items-center justify-center text-orange-500">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z">
+                    </path>
                 </svg>
             </div>
             <div>
@@ -41,9 +62,12 @@
             </div>
         </div>
         <div>
-            <a href="{% url 'drive_disconnect' 'google_drive' %}" class="flex items-center gap-2 text-sm text-slate-500 hover:text-red-500 transition-colors">
+            <a href="{% url 'drive_disconnect' 'google_drive' %}"
+                class="flex items-center gap-2 text-sm text-slate-500 hover:text-red-500 transition-colors">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1">
+                    </path>
                 </svg>
                 Desconectar
             </a>
@@ -54,8 +78,10 @@
     <div class="flex flex-1 overflow-hidden">
 
         <!-- Sidebar -->
-        <div class="w-64 flex-shrink-0 border-r border-slate-200 dark:border-slate-800 p-4 hidden md:flex flex-col gap-4 bg-slate-50/50 dark:bg-slate-900/50">
-            <button onclick="toggleEventModal()" class="flex items-center gap-3 px-6 py-4 bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 rounded-2xl font-medium hover:shadow-md transition-all">
+        <div
+            class="w-64 flex-shrink-0 border-r border-slate-200 dark:border-slate-800 p-4 hidden md:flex flex-col gap-4 bg-slate-50/50 dark:bg-slate-900/50">
+            <button onclick="toggleEventModal()"
+                class="flex items-center justify-center gap-2 px-6 py-3.5 bg-orange-500 hover:bg-orange-600 text-white rounded-xl font-semibold shadow-sm shadow-orange-500/20 hover:shadow-orange-500/40 hover:-translate-y-0.5 transition-all duration-200 active:scale-95">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
                 </svg>
@@ -63,25 +89,33 @@
             </button>
 
             <nav class="flex flex-col gap-1 mt-4">
-                <a href="#" class="flex items-center justify-between px-4 py-2 bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-300 rounded-full font-medium text-sm">
-                    <div class="flex items-center gap-3">
-                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                            <path fill-rule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clip-rule="evenodd"></path>
+                <a href="#"
+                    class="flex items-center justify-between px-4 py-2 bg-orange-50 dark:bg-orange-500/10 text-orange-700 dark:text-orange-400 rounded-lg font-medium text-sm border border-orange-100 dark:border-orange-500/20 transition-colors">
+                    <div class="flex items-center gap-2.5">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z">
+                            </path>
                         </svg>
                         Próximos Eventos
                     </div>
-                    <span class="text-xs font-bold">{{ events|length }}</span>
+                    <span class="text-xs font-bold bg-orange-100 dark:bg-orange-500/20 px-2 py-0.5 rounded-full">{{
+                        events|length }}</span>
                 </a>
             </nav>
         </div>
 
         <!-- Events List -->
         <div class="flex-1 overflow-y-auto bg-white dark:bg-slate-900 scrollbar-hide">
-            <div class="flex items-center justify-between px-4 py-2 border-b border-slate-200 dark:border-slate-800 sticky top-0 bg-white/90 dark:bg-slate-900/90 backdrop-blur z-10">
+            <div
+                class="flex items-center justify-between px-4 py-2 border-b border-slate-200 dark:border-slate-800 sticky top-0 bg-white/90 dark:bg-slate-900/90 backdrop-blur z-10">
                 <div class="flex items-center gap-2">
-                    <button class="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full text-slate-500" onclick="window.location.reload()" title="Actualizar">
+                    <button class="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full text-slate-500"
+                        onclick="window.location.reload()" title="Actualizar">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+                            </path>
                         </svg>
                     </button>
                 </div>
@@ -95,12 +129,14 @@
 
             <div class="divide-y divide-slate-100 dark:divide-slate-800">
                 {% for event in events %}
-                <a href="{{ event.htmlLink }}" target="_blank" class="event-row flex items-center px-4 py-4 bg-white dark:bg-slate-900 cursor-pointer text-sm gap-4 group">
+                <a href="{{ event.htmlLink }}" target="_blank"
+                    class="event-row flex items-center px-4 py-4 bg-white dark:bg-slate-900 cursor-pointer text-sm gap-4 group">
                     <div class="w-40 flex-shrink-0 flex flex-col font-medium text-slate-800 dark:text-slate-200">
-                        <span>{{ event.start|slice:":10" }}</span>
+                        <span class="group-hover:text-orange-600 dark:group-hover:text-orange-400 transition-colors">{{ event.start|slice:":10" }}</span>
                         <span class="text-xs text-slate-500">{{ event.start|slice:"11:16"|default:"Todo el día" }}</span>
                     </div>
-                    <div class="flex-1 flex flex-col truncate">
+                    <div
+                        class="flex-1 flex flex-col truncate pl-2 border-l border-slate-200 dark:border-slate-700 group-hover:border-orange-200 dark:group-hover:border-orange-500/30 transition-colors">
                         <span class="font-semibold text-slate-800 dark:text-slate-200 truncate">{{ event.summary }}</span>
                         {% if event.description %}
                         <span class="text-slate-500 dark:text-slate-400 truncate text-xs mt-0.5">{{ event.description }}</span>
@@ -108,16 +144,21 @@
                     </div>
                     <div class="w-32 flex-shrink-0 text-right text-xs font-medium">
                         {% if event.status == 'confirmed' %}
-                        <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">Confirmado</span>
+                        <span
+                            class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20">Confirmado</span>
                         {% else %}
-                        <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-400">{{ event.status|title }}</span>
+                        <span
+                            class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-slate-100 text-slate-800 border border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700">{{
+                            event.status|title }}</span>
                         {% endif %}
                     </div>
                 </a>
                 {% empty %}
                 <div class="p-10 text-center text-slate-500 flex flex-col items-center">
                     <svg class="w-12 h-12 mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                            d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z">
+                        </path>
                     </svg>
                     <p>No tienes próximos eventos en tu calendario.</p>
                 </div>

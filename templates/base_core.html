@@ -236,7 +236,7 @@
                     class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Correo</span>
             </a>
             <a href="{% url 'calendario' %}"
-                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'calendario' in request.resolver_match.url_name %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if 'calendario' in request.resolver_match.url_name %}bg-orange-50 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400{% else %}hover:bg-orange-50 dark:hover:bg-orange-500/10 text-slate-500 dark:text-white hover:text-orange-600 dark:hover:text-orange-400{% endif %} transition-colors group relative">
                 <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                         d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z">
@@ -539,7 +539,7 @@
                     <span class="font-medium">Correo</span>
                 </a>
                 <a href="{% url 'calendario' %}"
-                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
+                    class="flex items-center gap-4 px-4 py-3 rounded-xl {% if 'calendario' in request.resolver_match.url_name %}bg-orange-50 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400{% else %}hover:bg-orange-50 dark:hover:bg-orange-500/10 text-slate-600 dark:text-white hover:text-orange-600 dark:hover:text-orange-400{% endif %} transition-colors">
                     <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                             d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z">
