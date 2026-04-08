@@ -18,6 +18,11 @@ from terceros.models import Cliente
 from django.db.models import Q
 from django.utils import timezone
 from datetime import date
+from email.message import EmailMessage
+import base64
+import urllib.parse
+from ia.models import CloudIntegration
+from ia.views import _google_drive_refresh_token, _http_json
 
 
 class AIAssistantAPIView(APIView):
@@ -305,6 +310,55 @@ class AIAssistantAPIView(APIView):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_calendar_event",
+                    "description": "Crea un evento en el calendario del usuario. Solo si el usuario tiene Google Calendar conectado.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "summary": {"type": "string", "description": "Título del evento"},
+                            "description": {"type": "string", "description": "Descripción del evento (opcional)"},
+                            "start_date": {"type": "string", "description": "Fecha de inicio YYYY-MM-DD"},
+                            "start_time": {"type": "string", "description": "Hora de inicio HH:MM (opcional para eventos de todo el día)"},
+                            "end_date": {"type": "string", "description": "Fecha de fin YYYY-MM-DD"},
+                            "end_time": {"type": "string", "description": "Hora de fin HH:MM (opcional para eventos de todo el día)"},
+                        },
+                        "required": ["summary", "start_date", "end_date"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_email",
+                    "description": "Envía un correo electrónico desde la cuenta del usuario. Solo si el usuario tiene Gmail conectado.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "to": {"type": "string", "description": "Dirección de correo del destinatario"},
+                            "subject": {"type": "string", "description": "Asunto del correo"},
+                            "body": {"type": "string", "description": "Cuerpo del correo en texto plano"},
+                        },
+                        "required": ["to", "subject", "body"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_pending_summary",
+                    "description": "Obtiene un resumen de próximos eventos en el calendario y los correos recientes recibidos en la bandeja de entrada.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            },
         ]
 
     def _execute_tool(self, request, name, args):
@@ -324,6 +378,12 @@ class AIAssistantAPIView(APIView):
             return self._tool_create_usuario(request, args)
         if name == "create_cliente":
             return self._tool_create_cliente(request, args)
+        if name == "create_calendar_event":
+            return self._tool_create_calendar_event(request, args)
+        if name == "send_email":
+            return self._tool_send_email(request, args)
+        if name == "get_pending_summary":
+            return self._tool_get_pending_summary(request, args)
         return {"ok": False, "error": f"Herramienta desconocida: {name}"}
 
     def _parse_date_filters(self, args):
@@ -598,3 +658,152 @@ class AIAssistantAPIView(APIView):
             pass
 
         return {"ok": True, "cliente": {"id": cliente.pk, "razon_social": cliente.razon_social, "empresa_id": cliente.empresa_id}}
+
+    def _tool_create_calendar_event(self, request, args):
+        user = request.user
+        integration = CloudIntegration.objects.filter(user=user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).first()
+        if not integration or not integration.access_token:
+            return {"ok": False, "error": "No tienes conectada la cuenta de Google para acceder a Calendario."}
+            
+        scopes = integration.metadata.get("scope", "") if integration.metadata else ""
+        if "calendar" not in scopes.lower():
+            return {"ok": False, "error": "Se requieren permisos de Calendario en tu cuenta de Google. Vuelve a conectarla."}
+
+        try:
+            access_token = _google_drive_refresh_token(integration)
+        except Exception:
+            return {"ok": False, "error": "Tu sesión de Google expiró. Vuelve a conectarte."}
+
+        summary = args.get("summary")
+        description = args.get("description", "")
+        start_date = args.get("start_date")
+        start_time = args.get("start_time")
+        end_date = args.get("end_date")
+        end_time = args.get("end_time")
+
+        if not summary or not start_date or not end_date:
+            return {"ok": False, "error": "Faltan campos obligatorios para el evento."}
+
+        try:
+            # Construct ISO 8601 strings
+            if start_time:
+                start_dt = f"{start_date}T{start_time}:00"
+                end_dt = f"{end_date}T{end_time}:00" if end_time else f"{end_date}T{start_time}:00"
+                start_data = {"dateTime": start_dt, "timeZone": getattr(settings, "TIME_ZONE", "UTC")}
+                end_data = {"dateTime": end_dt, "timeZone": getattr(settings, "TIME_ZONE", "UTC")}
+            else:
+                # All day event
+                start_data = {"date": start_date}
+                end_data = {"date": end_date}
+
+            event_body = {
+                "summary": summary,
+                "description": description,
+                "start": start_data,
+                "end": end_data,
+            }
+
+            _http_json(
+                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                method="POST",
+                headers={"Authorization": f"Bearer {access_token}"},
+                json_data=event_body
+            )
+            return {"ok": True, "message": "Evento creado correctamente."}
+        except Exception as e:
+            return {"ok": False, "error": f"Error al crear el evento en el calendario: {str(e)}"}
+
+    def _tool_send_email(self, request, args):
+        user = request.user
+        integration = CloudIntegration.objects.filter(user=user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).first()
+        if not integration or not integration.access_token:
+            return {"ok": False, "error": "No tienes conectada la cuenta de Google para acceder a Gmail."}
+
+        try:
+            access_token = _google_drive_refresh_token(integration)
+        except Exception:
+            return {"ok": False, "error": "Tu sesión de Google expiró. Vuelve a conectarte."}
+
+        to_email = args.get("to")
+        subject = args.get("subject", "(Sin asunto)")
+        body = args.get("body", "")
+
+        if not to_email or not body:
+            return {"ok": False, "error": "Faltan campos obligatorios para enviar el correo (to, body)."}
+
+        try:
+            message = EmailMessage()
+            message.set_content(body)
+            message['To'] = to_email
+            message['From'] = integration.account_email
+            message['Subject'] = subject
+
+            encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+
+            _http_json(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                method="POST",
+                headers={"Authorization": f"Bearer {access_token}"},
+                json_data={"raw": encoded_message}
+            )
+            return {"ok": True, "message": "Correo enviado correctamente."}
+        except Exception as e:
+            return {"ok": False, "error": f"Error al enviar el correo: {str(e)}"}
+
+    def _tool_get_pending_summary(self, request, args):
+        user = request.user
+        integration = CloudIntegration.objects.filter(user=user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).first()
+        if not integration or not integration.access_token:
+            return {"ok": False, "error": "No tienes conectada la cuenta de Google. Conéctala para obtener resumen."}
+
+        try:
+            access_token = _google_drive_refresh_token(integration)
+        except Exception:
+            return {"ok": False, "error": "Tu sesión de Google expiró. Vuelve a conectarte."}
+
+        summary_data = {"events": [], "emails": []}
+
+        # Fetch upcoming events
+        try:
+            now = timezone.now().isoformat()
+            url = f"https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin={urllib.parse.quote(now)}&maxResults=5&singleEvents=true&orderBy=startTime"
+            response = _http_json(
+                url,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/json",
+                }
+            )
+            for item in response.get("items", []):
+                start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date")
+                end = item.get("end", {}).get("dateTime") or item.get("end", {}).get("date")
+                summary_data["events"].append({
+                    "summary": item.get("summary") or "Sin título",
+                    "start": start,
+                    "end": end,
+                })
+        except Exception:
+            pass
+
+        # Fetch recent unread emails
+        try:
+            response = _http_json(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5&q=in:inbox is:unread",
+                headers={"Authorization": f"Bearer {access_token}"}
+            )
+            for msg in response.get("messages", []):
+                msg_detail = _http_json(
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}?format=metadata&metadataHeaders=Subject&metadataHeaders=From",
+                    headers={"Authorization": f"Bearer {access_token}"}
+                )
+                headers = {h['name']: h['value'] for h in msg_detail.get('payload', {}).get('headers', [])}
+                from_header = headers.get('From', '')
+                from_name = from_header.split('<')[0].strip().strip('"\'') if '<' in from_header else from_header
+                summary_data["emails"].append({
+                    "subject": headers.get('Subject', '(Sin asunto)'),
+                    "from": from_name,
+                })
+        except Exception:
+            pass
+
+        return {"ok": True, "summary": summary_data}
