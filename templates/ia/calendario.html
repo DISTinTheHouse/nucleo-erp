@@ -7,108 +7,163 @@
 <!-- FullCalendar CSS -->
 <link href="https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.css" rel="stylesheet" />
 <style>
-    /* Scrollbar minimalista */
-    .scrollbar-hide::-webkit-scrollbar {
-        display: none;
+    /* FullCalendar Premium Tailwind Integration */
+
+    /* Ocultar toolbar por defecto para usar nuestra cabecera custom */
+    .fc-header-toolbar {
+        display: none !important;
     }
 
-    .scrollbar-hide {
-        -ms-overflow-style: none;
-        scrollbar-width: none;
-    }
-
-    /* FullCalendar Overrides for Tailwind / Modern Look */
+    /* Eliminar bordes externos del grid porque nuestro contenedor ya tiene */
     .fc-theme-standard .fc-scrollgrid {
-        border-color: #e2e8f0;
+        border: none !important;
     }
 
-    .dark .fc-theme-standard .fc-scrollgrid {
-        border-color: #1e293b;
-    }
-
+    /* Suavizar bordes internos */
     .fc-theme-standard td,
     .fc-theme-standard th {
-        border-color: #e2e8f0;
+        border-color: #f1f5f9 !important;
+        /* slate-100 */
     }
 
     .dark .fc-theme-standard td,
     .dark .fc-theme-standard th {
-        border-color: #1e293b;
+        border-color: #1e293b !important;
+        /* slate-800 */
+    }
+
+    /* Cabeceras de los días (Lun, Mar...) */
+    .fc .fc-col-header-cell {
+        background-color: #f8fafc;
+        /* slate-50 */
+        padding: 12px 0;
+        border-bottom-width: 1px;
+    }
+
+    .dark .fc .fc-col-header-cell {
+        background-color: #0f172a;
+        /* slate-900 */
     }
 
     .fc .fc-col-header-cell-cushion {
-        padding: 12px 8px;
+        font-size: 0.875rem;
+        /* text-sm */
         font-weight: 600;
-        color: #475569;
-    }
-
-    .dark .fc .fc-col-header-cell-cushion {
-        color: #cbd5e1;
-    }
-
-    .fc-daygrid-day-number {
-        padding: 8px !important;
-        color: #334155;
-        font-weight: 500;
-    }
-
-    .dark .fc-daygrid-day-number {
-        color: #cbd5e1;
-    }
-
-    .fc .fc-daygrid-day.fc-day-today {
-        background-color: #fff7ed !important;
-    }
-
-    .dark .fc .fc-daygrid-day.fc-day-today {
-        background-color: rgba(249, 115, 22, 0.1) !important;
-    }
-
-    .fc-event {
-        border-radius: 6px;
-        border: none;
-        padding: 2px 4px;
-        font-size: 0.75rem;
-        cursor: pointer;
-        transition: transform 0.1s;
-    }
-
-    .fc-event:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-    }
-
-    .fc-h-event {
-        background-color: #f97316;
-        /* orange-500 */
-        color: white;
-    }
-
-    .fc .fc-toolbar-title {
-        font-size: 1.25rem;
-        font-weight: 700;
-        color: #1e293b;
-    }
-
-    .dark .fc .fc-toolbar-title {
-        color: #f8fafc;
-    }
-
-    .fc .fc-button-primary {
-        background-color: #f97316;
-        border-color: #f97316;
+        color: #64748b;
+        /* slate-500 */
         text-transform: capitalize;
     }
 
-    .fc .fc-button-primary:not(:disabled):active,
-    .fc .fc-button-primary:not(:disabled).fc-button-active {
-        background-color: #ea580c;
-        border-color: #ea580c;
+    .dark .fc .fc-col-header-cell-cushion {
+        color: #94a3b8;
     }
 
-    .fc .fc-button-primary:hover {
-        background-color: #ea580c;
-        border-color: #ea580c;
+    /* Números de los días en la vista de mes */
+    .fc .fc-daygrid-day-top {
+        padding: 8px 8px 0 8px;
+        flex-direction: row;
+        /* Alinear a la izquierda para estilo Google Calendar */
+    }
+
+    .fc .fc-daygrid-day-number {
+        font-size: 0.875rem;
+        font-weight: 500;
+        color: #334155;
+        width: 28px;
+        height: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 9999px;
+        text-decoration: none !important;
+    }
+
+    .dark .fc .fc-daygrid-day-number {
+        color: #cbd5e1;
+    }
+
+    .fc .fc-daygrid-day-number:hover {
+        background-color: #f1f5f9;
+    }
+
+    .dark .fc .fc-daygrid-day-number:hover {
+        background-color: #334155;
+    }
+
+    /* Resaltar el día actual (Hoy) */
+    .fc .fc-day-today {
+        background-color: #fafafa !important;
+    }
+
+    .dark .fc .fc-day-today {
+        background-color: rgba(15, 23, 42, 0.4) !important;
+    }
+
+    .fc .fc-day-today .fc-daygrid-day-number {
+        background-color: #f97316 !important;
+        /* orange-500 */
+        color: white !important;
+    }
+
+    .fc .fc-day-today .fc-daygrid-day-number:hover {
+        background-color: #ea580c !important;
+        /* orange-600 */
+    }
+
+    /* Estilo de los Eventos (Pastillas) */
+    .fc-event {
+        border-radius: 4px !important;
+        border: none !important;
+        padding: 3px 6px !important;
+        font-size: 0.75rem !important;
+        font-weight: 600 !important;
+        margin: 2px 6px !important;
+        cursor: pointer !important;
+        background-color: #fff7ed !important;
+        /* orange-50 */
+        color: #ea580c !important;
+        /* orange-600 */
+        border-left: 3px solid #f97316 !important;
+        transition: all 0.2s ease;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+    }
+
+    .dark .fc-event {
+        background-color: rgba(249, 115, 22, 0.15) !important;
+        color: #fdba74 !important;
+        /* orange-300 */
+        border-left-color: #f97316 !important;
+    }
+
+    .fc-event:hover {
+        background-color: #ffedd5 !important;
+        transform: translateY(-1px);
+        box-shadow: 0 3px 6px rgba(0, 0, 0, 0.1);
+    }
+
+    .dark .fc-event:hover {
+        background-color: rgba(249, 115, 22, 0.25) !important;
+    }
+
+    /* Ocultar el punto de los eventos de tiempo en la vista mes, lo hacemos todo pastilla */
+    .fc-daygrid-event-dot {
+        display: none;
+    }
+
+    /* Etiquetas de tiempo en vista semana/día */
+    .fc .fc-timegrid-slot-label-cushion {
+        font-size: 0.75rem;
+        color: #94a3b8;
+        padding-right: 8px;
+    }
+
+    .dark .fc .fc-timegrid-slot-label-cushion {
+        color: #64748b;
+    }
+
+    /* Eventos en vista semana/día */
+    .fc-timegrid-event .fc-event-main {
+        padding: 2px 4px;
     }
 </style>
 {% endblock %}
@@ -117,94 +172,99 @@
 <div
     class="h-[calc(100vh-5rem)] flex flex-col bg-white dark:bg-slate-900 rounded-2xl overflow-hidden shadow-sm border border-slate-200 dark:border-slate-800">
 
-    <!-- Header: Search / Brand -->
+    <!-- Premium Custom Header -->
     <div
-        class="flex items-center justify-between px-6 py-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
-        <div class="flex items-center gap-3">
-            <div
-                class="w-10 h-10 rounded-full bg-orange-50 dark:bg-orange-500/10 flex items-center justify-center text-orange-500">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z">
-                    </path>
-                </svg>
+        class="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 z-10 flex-shrink-0">
+
+        <!-- Left Side: Brand & Nav Controls -->
+        <div class="flex items-center gap-6">
+            <div class="flex items-center gap-3">
+                <div
+                    class="w-10 h-10 rounded-xl bg-orange-50 dark:bg-orange-500/10 flex items-center justify-center text-orange-500 shadow-sm border border-orange-100 dark:border-orange-500/20">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z">
+                        </path>
+                    </svg>
+                </div>
+                <div class="hidden sm:block">
+                    <h1 class="text-xl font-bold text-slate-800 dark:text-white leading-tight">Calendario</h1>
+                    <p class="text-xs text-slate-500 dark:text-slate-400 font-medium">{{ integration.account_email }}
+                    </p>
+                </div>
             </div>
-            <div>
-                <h1 class="text-xl font-bold text-slate-800 dark:text-white">Google Calendar</h1>
-                <p class="text-xs text-slate-500 dark:text-slate-400">{{ integration.account_email }}</p>
+
+            <!-- Custom Calendar Nav -->
+            <div class="hidden md:flex items-center gap-3 border-l border-slate-200 dark:border-slate-700 pl-6">
+                <button id="btn-today"
+                    class="px-4 py-2 text-sm font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors shadow-sm">
+                    Hoy
+                </button>
+                <div
+                    class="flex items-center bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg overflow-hidden shadow-sm">
+                    <button id="btn-prev"
+                        class="p-2 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7">
+                            </path>
+                        </svg>
+                    </button>
+                    <div class="w-px h-5 bg-slate-300 dark:bg-slate-600"></div>
+                    <button id="btn-next"
+                        class="p-2 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7">
+                            </path>
+                        </svg>
+                    </button>
+                </div>
+                <h2 id="calendar-title"
+                    class="ml-2 text-xl font-bold text-slate-800 dark:text-white capitalize min-w-[160px]">Cargando...
+                </h2>
             </div>
         </div>
-        <div>
+
+        <!-- Right Side: View Switcher & Actions -->
+        <div class="flex items-center gap-4">
+            <!-- Disconnect Google -->
             <a href="{% url 'drive_disconnect' 'google_drive' %}"
-                class="flex items-center gap-2 text-sm text-slate-500 hover:text-red-500 transition-colors">
+                class="hidden lg:flex items-center gap-2 text-sm font-medium text-slate-400 hover:text-red-500 transition-colors mr-2">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                         d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1">
                     </path>
                 </svg>
-                Desconectar
             </a>
-        </div>
-    </div>
 
-    <!-- Main Layout -->
-    <div class="flex flex-1 overflow-hidden">
+            <!-- View Switcher -->
+            <select id="view-selector"
+                class="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 text-sm font-semibold rounded-lg focus:ring-orange-500 focus:border-orange-500 block px-3 py-2 shadow-sm outline-none cursor-pointer">
+                <option value="dayGridMonth">Mes</option>
+                <option value="timeGridWeek">Semana</option>
+                <option value="timeGridDay">Día</option>
+                <option value="listMonth">Agenda</option>
+            </select>
 
-        <!-- Sidebar -->
-        <div
-            class="w-64 flex-shrink-0 border-r border-slate-200 dark:border-slate-800 p-4 hidden md:flex flex-col gap-4 bg-slate-50/50 dark:bg-slate-900/50">
+            <!-- Create Event Button -->
             <button onclick="toggleEventModal()"
-                class="flex items-center justify-center gap-2 px-6 py-3.5 bg-orange-500 hover:bg-orange-600 text-white rounded-xl font-semibold shadow-sm shadow-orange-500/20 hover:shadow-orange-500/40 hover:-translate-y-0.5 transition-all duration-200 active:scale-95">
+                class="flex items-center justify-center gap-2 px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded-lg font-bold shadow-sm shadow-orange-500/20 hover:shadow-orange-500/40 hover:-translate-y-0.5 transition-all duration-200 active:scale-95">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
                 </svg>
-                Crear Evento
+                <span class="hidden sm:inline">Nuevo Evento</span>
             </button>
-
-            <nav class="flex flex-col gap-1 mt-4">
-                <a href="#"
-                    class="flex items-center justify-between px-4 py-2 bg-orange-50 dark:bg-orange-500/10 text-orange-700 dark:text-orange-400 rounded-lg font-medium text-sm border border-orange-100 dark:border-orange-500/20 transition-colors">
-                    <div class="flex items-center gap-2.5">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z">
-                            </path>
-                        </svg>
-                        Próximos Eventos
-                    </div>
-                    <span class="text-xs font-bold bg-orange-100 dark:bg-orange-500/20 px-2 py-0.5 rounded-full">{{
-                        events|length }}</span>
-                </a>
-            </nav>
         </div>
+    </div>
 
-        <!-- Events List -->
-        <div class="flex-1 overflow-y-auto bg-white dark:bg-slate-900 scrollbar-hide flex flex-col">
-            <div
-                class="flex items-center justify-between px-4 py-2 border-b border-slate-200 dark:border-slate-800 sticky top-0 bg-white/90 dark:bg-slate-900/90 backdrop-blur z-10 flex-shrink-0">
-                <div class="flex items-center gap-2">
-                    <button class="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full text-slate-500"
-                        onclick="window.location.reload()" title="Actualizar">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
-                            </path>
-                        </svg>
-                    </button>
-                </div>
-            </div>
+    {% if calendar_error %}
+    <div class="p-4 bg-red-50 text-red-600 border-b border-red-200 flex-shrink-0 text-sm font-medium">
+        {{ calendar_error }}
+    </div>
+    {% endif %}
 
-            {% if calendar_error %}
-            <div class="p-4 m-4 bg-red-50 text-red-600 rounded-lg border border-red-200 flex-shrink-0">
-                {{ calendar_error }}
-            </div>
-            {% endif %}
-
-            <div class="p-4 md:p-6 flex-1 relative min-h-[600px]">
-                <div id="calendar"
-                    class="absolute inset-4 md:inset-6 bg-white dark:bg-slate-900 rounded-xl overflow-hidden"></div>
-            </div>
-        </div>
+    <!-- Main Calendar Container -->
+    <div class="flex-1 relative bg-white dark:bg-slate-900 overflow-hidden p-4">
+        <div id="calendar" class="absolute inset-4"></div>
     </div>
 </div>
 
@@ -219,7 +279,7 @@
     document.addEventListener('DOMContentLoaded', function () {
         const rawEvents = JSON.parse(document.getElementById('events-data').textContent);
         const formattedEvents = rawEvents.map(e => {
-            let event = {
+            return {
                 title: e.summary,
                 start: e.start,
                 end: e.end,
@@ -230,18 +290,13 @@
                     creator: e.creator
                 }
             };
-            return event;
         });
 
         const calendarEl = document.getElementById('calendar');
         const calendar = new FullCalendar.Calendar(calendarEl, {
             locale: 'es',
             initialView: 'dayGridMonth',
-            headerToolbar: {
-                left: 'prev,next today',
-                center: 'title',
-                right: 'dayGridMonth,timeGridWeek,timeGridDay'
-            },
+            headerToolbar: false, // We use our custom Tailwind header
             events: formattedEvents,
             eventClick: function (info) {
                 if (info.event.url) {
@@ -257,27 +312,30 @@
             slotMinTime: '06:00:00',
             slotMaxTime: '22:00:00',
             allDayText: 'Todo el día',
-            buttonText: {
-                today: 'Hoy',
-                month: 'Mes',
-                week: 'Semana',
-                day: 'Día',
-                list: 'Agenda'
-            },
             eventTimeFormat: {
                 hour: 'numeric',
                 minute: '2-digit',
                 meridiem: 'short'
-            }
+            },
+            // Update custom title when view or date changes
+            datesSet: function (info) {
+                document.getElementById('calendar-title').textContent = info.view.title;
+            },
+            // Force rendering events as block even in month view to look like pills
+            eventDisplay: 'block'
         });
 
         calendar.render();
 
-        // Actualizar el botón superior de "Actualizar" para que recargue y vuelva al mismo mes si es posible
-        window.reloadCalendar = function () {
-            window.location.reload();
-        }
+        // Custom Navigation Bindings
+        document.getElementById('btn-prev').addEventListener('click', () => calendar.prev());
+        document.getElementById('btn-next').addEventListener('click', () => calendar.next());
+        document.getElementById('btn-today').addEventListener('click', () => calendar.today());
+
+        // Custom View Switcher Binding
+        document.getElementById('view-selector').addEventListener('change', (e) => {
+            calendar.changeView(e.target.value);
+        });
     });
 </script>
-
 {% endblock %}
