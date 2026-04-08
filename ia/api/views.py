@@ -54,13 +54,15 @@ class AIAssistantAPIView(APIView):
                 if role in ("user", "assistant") and isinstance(content, str) and content.strip():
                     conversation.append({"role": role, "content": content.strip()})
 
+        now_str = timezone.now().strftime("%Y-%m-%d %H:%M")
         system_prompt = (
-            "Eres un asistente dentro de un ERP. Responde en español. "
+            f"Eres un asistente dentro de un ERP. Responde en español. Fecha y hora actual: {now_str}. "
             "Si necesitas datos del sistema (cotizaciones, clientes, pedidos, empresas, usuarios) usa herramientas. "
             "Nunca inventes números. "
-            "Para crear recursos, pide los campos requeridos y valida permisos: "
+            "Para crear recursos del sistema ERP, pide los campos requeridos y valida permisos: "
             "solo superuser puede crear empresas/roles; admin de empresa puede crear usuarios; "
-            "usuarios normales no pueden crear."
+            "usuarios normales no pueden crear recursos en el ERP. "
+            "SIN EMBARGO, para el calendario y correos, TODOS los usuarios pueden crear eventos y enviar correos, asume que siempre tienen permiso."
         )
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -325,7 +327,7 @@ class AIAssistantAPIView(APIView):
                             "end_date": {"type": "string", "description": "Fecha de fin YYYY-MM-DD"},
                             "end_time": {"type": "string", "description": "Hora de fin HH:MM (opcional para eventos de todo el día)"},
                         },
-                        "required": ["summary", "start_date", "end_date"],
+                        "required": ["summary", "start_date"],
                         "additionalProperties": False,
                     },
                 },
@@ -678,23 +680,41 @@ class AIAssistantAPIView(APIView):
         description = args.get("description", "")
         start_date = args.get("start_date")
         start_time = args.get("start_time")
-        end_date = args.get("end_date")
+        end_date = args.get("end_date") or start_date
         end_time = args.get("end_time")
 
-        if not summary or not start_date or not end_date:
-            return {"ok": False, "error": "Faltan campos obligatorios para el evento."}
+        if not summary or not start_date:
+            return {"ok": False, "error": "Faltan campos obligatorios para el evento (summary, start_date)."}
 
         try:
+            import datetime
             # Construct ISO 8601 strings
             if start_time:
+                if len(start_time) == 4: start_time = f"0{start_time}"
                 start_dt = f"{start_date}T{start_time}:00"
-                end_dt = f"{end_date}T{end_time}:00" if end_time else f"{end_date}T{start_time}:00"
+                
+                if not end_time:
+                    try:
+                        h, m = map(int, start_time.split(':'))
+                        h = (h + 1) % 24
+                        end_time = f"{h:02d}:{m:02d}"
+                    except:
+                        end_time = start_time
+                elif len(end_time) == 4:
+                    end_time = f"0{end_time}"
+                    
+                end_dt = f"{end_date}T{end_time}:00"
                 start_data = {"dateTime": start_dt, "timeZone": getattr(settings, "TIME_ZONE", "UTC")}
                 end_data = {"dateTime": end_dt, "timeZone": getattr(settings, "TIME_ZONE", "UTC")}
             else:
                 # All day event
                 start_data = {"date": start_date}
-                end_data = {"date": end_date}
+                try:
+                    ed = datetime.datetime.strptime(end_date, "%Y-%m-%d").date() + datetime.timedelta(days=1)
+                    end_date_exclusive = ed.isoformat()
+                except Exception:
+                    end_date_exclusive = end_date
+                end_data = {"date": end_date_exclusive}
 
             event_body = {
                 "summary": summary,
