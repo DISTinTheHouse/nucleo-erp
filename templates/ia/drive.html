@@ -157,22 +157,19 @@
                             <div
                                 class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
                                 Proveedor activo</div>
-                            <div class="mt-2 text-[1.05rem] font-semibold text-slate-950 dark:text-white">{% if
-                                google_integration %}Google Drive{% else %}Sin conexión{% endif %}</div>
+                            <div class="mt-2 text-[1.05rem] font-semibold text-slate-950 dark:text-white">{% if google_integration %}Google Drive{% else %}Sin conexión{% endif %}</div>
                         </div>
                         <div class="drive-surface rounded-2xl px-4 py-4">
                             <div
                                 class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
                                 Integraciones</div>
-                            <div class="mt-2 text-[1.05rem] font-semibold text-slate-950 dark:text-white">{% if
-                                google_integration %}1 conectada{% else %}0 conectadas{% endif %}</div>
+                            <div class="mt-2 text-[1.05rem] font-semibold text-slate-950 dark:text-white">{% if google_integration %}1 conectada{% else %}0 conectadas{% endif %}</div>
                         </div>
                         <div class="drive-surface rounded-2xl px-4 py-4">
                             <div
                                 class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
                                 Archivos visibles</div>
-                            <div class="mt-2 text-[1.05rem] font-semibold text-slate-950 dark:text-white">{{
-                                files|length }}</div>
+                            <div class="mt-2 text-[1.05rem] font-semibold text-slate-950 dark:text-white">{{ files|length }}</div>
                         </div>
                     </div>
                 </div>
@@ -201,8 +198,7 @@
                             <div class="min-w-0">
                                 <div class="text-sm font-semibold text-slate-950 dark:text-white">Google Drive conectado
                                 </div>
-                                <div class="truncate text-sm text-slate-500 dark:text-slate-400">{{
-                                    google_integration.account_email|default:"Cuenta enlazada" }}</div>
+                                <div class="truncate text-sm text-slate-500 dark:text-slate-400">{{ google_integration.account_email|default:"Cuenta enlazada" }}</div>
                             </div>
                         </div>
                         <p class="mt-4 text-[13px] leading-6 text-slate-600 dark:text-slate-300">Tu equipo ya puede
@@ -246,16 +242,14 @@
                         <div
                             class="truncate text-[1.02rem] font-semibold tracking-tight text-slate-950 dark:text-white">
                             {{ provider.name }}</div>
-                        <div class="mt-1 line-clamp-1 text-[13px] text-slate-500 dark:text-slate-400">{{
-                            provider.subtitle }}</div>
+                        <div class="mt-1 line-clamp-1 text-[13px] text-slate-500 dark:text-slate-400">{{ provider.subtitle }}</div>
                     </div>
                 </div>
                 <span
                     class="inline-flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] {% if provider.connected %}bg-emerald-500/10 text-emerald-500{% elif provider.locked_by_existing %}bg-amber-500/10 text-amber-500{% elif provider.enabled %}bg-sky-500/10 text-sky-500{% else %}bg-slate-500/10 text-slate-500 dark:text-slate-400{% endif %}">
                     <span
                         class="h-1.5 w-1.5 rounded-full {% if provider.connected %}bg-emerald-500{% elif provider.locked_by_existing %}bg-amber-500{% elif provider.enabled %}bg-sky-500{% else %}bg-slate-400{% endif %}"></span>
-                    {% if provider.connected %}Conectado{% elif provider.locked_by_existing %}Bloqueado{% else %}{{
-                    provider.badge }}{% endif %}
+                    {% if provider.connected %}Conectado{% elif provider.locked_by_existing %}Bloqueado{% else %}{{ provider.badge }}{% endif %}
                 </span>
             </div>
             <div class="mt-5 flex flex-1 flex-col space-y-3">
@@ -359,20 +353,16 @@
                             {% endif %}
                         </div>
                         <div class="min-w-0">
-                            <div class="truncate text-[15px] font-semibold text-slate-950 dark:text-white">{{ file.name
-                                }}</div>
-                            <div class="mt-1 break-all text-xs font-medium text-slate-500 dark:text-slate-400">{{
-                                file.mime_type|default:"Desconocido" }}</div>
+                            <div class="truncate text-[15px] font-semibold text-slate-950 dark:text-white">{{ file.name }}</div>
+                            <div class="mt-1 break-all text-xs font-medium text-slate-500 dark:text-slate-400">{{ file.mime_type|default:"Desconocido" }}</div>
                         </div>
                     </div>
                     <div
                         class="flex flex-wrap items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
                         <span
-                            class="rounded-full border border-slate-200/80 bg-slate-50/80 px-2.5 py-1 dark:border-white/10 dark:bg-white/[0.04]">{%
-                            if file.is_folder %}Carpeta{% else %}Archivo{% endif %}</span>
+                            class="rounded-full border border-slate-200/80 bg-slate-50/80 px-2.5 py-1 dark:border-white/10 dark:bg-white/[0.04]">{% if file.is_folder %}Carpeta{% else %}Archivo{% endif %}</span>
                         <span
-                            class="rounded-full border border-slate-200/80 bg-slate-50/80 px-2.5 py-1 dark:border-white/10 dark:bg-white/[0.04]">{{
-                            file.modified_time|default:"Sin fecha" }}</span>
+                            class="rounded-full border border-slate-200/80 bg-slate-50/80 px-2.5 py-1 dark:border-white/10 dark:bg-white/[0.04]">{{ file.modified_time|default:"Sin fecha" }}</span>
                     </div>
                 </div>
                 <div class="relative z-10 flex flex-wrap items-center justify-between gap-3">
@@ -495,8 +485,7 @@
                             class="inline-flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] {% if provider.connected %}bg-emerald-500/10 text-emerald-500{% elif provider.locked_by_existing %}bg-amber-500/10 text-amber-500{% elif provider.enabled %}bg-sky-500/10 text-sky-500{% else %}bg-slate-500/10 text-slate-500 dark:text-slate-400{% endif %}">
                             <span
                                 class="h-1.5 w-1.5 rounded-full {% if provider.connected %}bg-emerald-500{% elif provider.locked_by_existing %}bg-amber-500{% elif provider.enabled %}bg-sky-500{% else %}bg-slate-400{% endif %}"></span>
-                            {% if provider.connected %}Conectado{% elif provider.locked_by_existing %}Bloqueado{% else
-                            %}{{ provider.badge }}{% endif %}
+                            {% if provider.connected %}Conectado{% elif provider.locked_by_existing %}Bloqueado{% else %}{{ provider.badge }}{% endif %}
                         </span>
                     </div>
                     <div
@@ -522,8 +511,7 @@
                         <a href="{% url 'drive_google_connect' %}"
                             class="drive-btn drive-btn-dark inline-flex items-center gap-2 px-5">
                             <i class="fab fa-google-drive"></i>
-                            {% if provider.connected %}Google Drive conectado{% else %}Continuar con Google Drive{%
-                            endif %}
+                            {% if provider.connected %}Google Drive conectado{% else %}Continuar con Google Drive{% endif %}
                         </a>
                         {% else %}
                         <button type="button" class="drive-btn drive-btn-disabled inline-flex items-center gap-2 px-5"
