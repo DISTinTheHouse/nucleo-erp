@@ -60,13 +60,13 @@
         font-size: 0.875rem;
         /* text-sm */
         font-weight: 600;
-        color: #64748b;
+        color: #64748b !important;
         /* slate-500 */
         text-transform: capitalize;
     }
 
     .dark .fc .fc-col-header-cell-cushion {
-        color: #94a3b8;
+        color: #94a3b8 !important;
     }
 
     /* Números de los días en la vista de mes */
@@ -79,7 +79,7 @@
     .fc .fc-daygrid-day-number {
         font-size: 0.875rem;
         font-weight: 500;
-        color: #334155;
+        color: #334155 !important;
         width: 28px;
         height: 28px;
         display: flex;
@@ -90,7 +90,16 @@
     }
 
     .dark .fc .fc-daygrid-day-number {
-        color: #cbd5e1;
+        color: #cbd5e1 !important;
+    }
+
+    .fc .fc-day-other .fc-daygrid-day-number {
+        color: #94a3b8 !important;
+        opacity: 0.6;
+    }
+
+    .dark .fc .fc-day-other .fc-daygrid-day-number {
+        color: #64748b !important;
     }
 
     .fc .fc-daygrid-day-number:hover {
@@ -132,18 +141,28 @@
         cursor: pointer !important;
         background-color: #fff7ed !important;
         /* orange-50 */
-        color: #ea580c !important;
-        /* orange-600 */
         border-left: 3px solid #f97316 !important;
         transition: all 0.2s ease;
         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
     }
 
+    .fc-event .fc-event-main,
+    .fc-event .fc-event-title-container,
+    .fc-event .fc-event-title {
+        color: #ea580c !important;
+        /* orange-600 */
+    }
+
     .dark .fc-event {
         background-color: rgba(249, 115, 22, 0.15) !important;
+        border-left-color: #f97316 !important;
+    }
+
+    .dark .fc-event .fc-event-main,
+    .dark .fc-event .fc-event-title-container,
+    .dark .fc-event .fc-event-title {
         color: #fdba74 !important;
         /* orange-300 */
-        border-left-color: #f97316 !important;
     }
 
     .fc-event:hover {
@@ -164,12 +183,12 @@
     /* Etiquetas de tiempo en vista semana/día */
     .fc .fc-timegrid-slot-label-cushion {
         font-size: 0.75rem;
-        color: #94a3b8;
+        color: #64748b !important;
         padding-right: 8px;
     }
 
     .dark .fc .fc-timegrid-slot-label-cushion {
-        color: #64748b;
+        color: #94a3b8 !important;
     }
 
     /* Eventos en vista semana/día */
