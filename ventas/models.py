@@ -134,6 +134,7 @@ class Cotizacion(models.Model):
 class CotizacionDetalle(models.Model):
     cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="cotizaciondetalle")
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="cotizaciondetalle")
+    precio_lista = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     precio_unitario = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     costo_unitario = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     subtotal_linea = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -154,12 +155,30 @@ class CotizacionDetalleTalla(models.Model):
     subtotal_talla = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     lleva_bordado = models.BooleanField(default=False)
     bordado_config = models.JSONField(null=True, blank=True)
+    lleva_serigrafia = models.BooleanField(default=False)
+    serigrafia_config = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = "cotizacion_detalle_talla"
         verbose_name = "Cotización Detalle Talla"
         verbose_name_plural = "Cotizaciones Detalle Tallas"
     
+    def __str__(self):
+        return str(self.id)
+
+class CotizacionServicioExtra(models.Model):
+    cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="servicios_extras")
+    nombre = models.CharField(max_length=150)
+    monto = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    visible_en_factura = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "cotizacion_servicios_extras"
+        verbose_name = "Cotización Servicio Extra"
+        verbose_name_plural = "Cotizaciones Servicios Extras"
+
     def __str__(self):
         return str(self.id)
 
@@ -289,10 +308,27 @@ class Pedido(StatusLifecycleModel):
     
     def __str__(self):
         return str(self.id)
+
+class PedidoServicioExtra(models.Model):
+    pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="servicios_extras")
+    nombre = models.CharField(max_length=150)
+    monto = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    visible_en_factura = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "pedido_servicios_extras"
+        verbose_name = "Pedido Servicio Extra"
+        verbose_name_plural = "Pedidos Servicios Extras"
+
+    def __str__(self):
+        return str(self.id)
     
 class PedidoDetalle(models.Model):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="detalles")
     producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name="detalles")
+    precio_lista = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     precio_unitario = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     costo_unitario = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     subtotal_linea = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -313,6 +349,8 @@ class PedidoDetalleTalla(models.Model):
     subtotal_talla = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     lleva_bordado = models.BooleanField(default=False)
     bordado_config = models.JSONField(null=True, blank=True)
+    lleva_serigrafia = models.BooleanField(default=False)
+    serigrafia_config = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = "pedido_detalle_talla"

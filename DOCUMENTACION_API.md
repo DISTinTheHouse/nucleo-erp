@@ -730,9 +730,16 @@ Listado de direcciones registradas de los clientes, incluyendo información de u
 El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotización:
 
 - se crea/actualiza un registro en **Cotizaciones** con `estatus=Por Autorizar (2)`
-- el detalle (productos/tallas/bordado) se guarda en:
+- el detalle (productos/tallas/servicios por talla) se guarda en:
   - `CotizacionDetalle`: 1 registro por **producto**
-  - `CotizacionDetalleTalla`: sub-líneas por **talla** (`cantidad` + `lleva_bordado` + `bordado_config`)
+    - `precio_lista`: snapshot del `Producto.precio_base` (referencia) al momento de cotizar
+    - `precio_unitario`: precio editable (el vendedor puede ajustarlo y mesa de control valida)
+  - `CotizacionDetalleTalla`: sub-líneas por **talla**:
+    - `cantidad`
+    - `lleva_bordado` + `bordado_config`
+    - `lleva_serigrafia` + `serigrafia_config`
+- los **servicios extras (ilimitados)** se guardan en:
+  - `CotizacionServicioExtra`: (`nombre`, `monto`, `visible_en_factura`)
 - **no** se crea `Pedido` ni se asigna folio `P-xxxxxx` hasta que **mesa de control autorice**
 
 ### 0) Dashboard: listar y ver cotizaciones
@@ -817,6 +824,9 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 - El backend crea **1 `CotizacionDetalle` por producto** (aunque se repita el producto en el payload).
 - Las tallas repetidas se consolidan sumando `cantidad`.
 - Si una talla viene con `lleva_bordado=true`, entonces `bordado_config` es requerido y se guarda en `CotizacionDetalleTalla.bordado_config`.
+- Si una talla viene con `lleva_serigrafia=true`, entonces `serigrafia_config` es requerido y se guarda en `CotizacionDetalleTalla.serigrafia_config`.
+- `precio_unitario` es editable por el vendedor; `precio_lista` queda como referencia del precio base al momento de cotizar.
+- `servicios_extras` es opcional y permite agregar cargos ilimitados con control de visibilidad en factura (`visible_en_factura`).
 - La cotización queda en `estatus=Por Autorizar (2)` para que mesa de control valide.
 
 **Folio de Pedido**
@@ -846,6 +856,7 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
   "detalle": [
     {
       "producto": 50,
+      "precio_unitario": "250.00",
       "tallas": [
         {
           "talla": 1,
@@ -858,9 +869,23 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
             "notas": "Opcional"
           }
         },
-        { "talla": 2, "cantidad": 4, "lleva_bordado": false }
+        {
+          "talla": 2,
+          "cantidad": 4,
+          "lleva_bordado": false,
+          "lleva_serigrafia": true,
+          "serigrafia_config": {
+            "ubicacion": "PECHO",
+            "tintas": 1,
+            "notas": "Serigrafía 1 tinta"
+          }
+        }
       ]
     }
+  ],
+  "servicios_extras": [
+    { "nombre": "Serigrafía (cargo global)", "monto": "1500.00", "visible_en_factura": false },
+    { "nombre": "Envío express", "monto": "250.00", "visible_en_factura": true }
   ]
 }
 ```
@@ -875,6 +900,7 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
       "id": 555,
       "cotizacion": 10,
       "producto": 50,
+      "precio_lista": "300.00",
       "precio_unitario": "100.00",
       "tallas": [
         {
@@ -886,6 +912,9 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
         }
       ]
     }
+  ],
+  "servicios_extras": [
+    { "id": 1, "nombre": "Serigrafía (cargo global)", "monto": "1500.00", "visible_en_factura": false }
   ]
 }
 ```
@@ -904,16 +933,20 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 - Ver cotizaciones pendientes: filtra por `estatus=2 (Por Autorizar)` y `estatus=5 (Cambios Por Autorizar)`.
 - Autorizar cotización:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/autorizar/`
-  - Efecto: se **duplica** la cotización a `Pedido` con folio `P-xxxxxx`, se marca la cotización como `Autorizada (3)` y se guarda un `aprobado_snapshot` del estado aprobado.
+  - Efecto: se **duplica** la cotización a `Pedido` con folio `P-xxxxxx`:
+    - detalle (productos/tallas) + precios snapshot (`precio_lista` / `precio_unitario`)
+    - servicios por talla (bordado/serigrafía + configs)
+    - servicios extras ilimitados (`servicios_extras`)
+    - se marca la cotización como `Autorizada (3)` y se guarda un `aprobado_snapshot` del estado aprobado.
 - Rechazar cotización:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar/`
   - Efecto: la cotización pasa a `Rechazada (4)`. **No** se crea pedido ni se gasta folio.
 - Aceptar cambios:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/aceptar-cambios/`
-  - Efecto: se **aplican** los cambios de la cotización al `Pedido` ya existente y la cotización vuelve a `Autorizada (3)` con `aprobado_snapshot` actualizado.
+  - Efecto: se **aplican** los cambios de la cotización al `Pedido` ya existente (detalle + `servicios_extras`) y la cotización vuelve a `Autorizada (3)` con `aprobado_snapshot` actualizado.
 - Rechazar cambios:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar-cambios/`
-  - Efecto: se **revierte** la cotización al `aprobado_snapshot` y vuelve a `Autorizada (3)`; el `Pedido` no se modifica.
+  - Efecto: se **revierte** la cotización al `aprobado_snapshot` (incluye detalle y `servicios_extras`) y vuelve a `Autorizada (3)`; el `Pedido` no se modifica.
 
 ---
 

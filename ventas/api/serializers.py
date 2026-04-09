@@ -1,6 +1,15 @@
 from decimal import Decimal, InvalidOperation
 from rest_framework import serializers
-from ventas.models import Cotizacion, CotizacionDetalle, CotizacionDetalleTalla, Pedido, PedidoDetalle, PedidoDetalleTalla
+from ventas.models import (
+    Cotizacion,
+    CotizacionDetalle,
+    CotizacionDetalleTalla,
+    CotizacionServicioExtra,
+    Pedido,
+    PedidoDetalle,
+    PedidoDetalleTalla,
+    PedidoServicioExtra,
+)
 
 class CotizacionSerializer(serializers.ModelSerializer):
     class Meta:
@@ -108,9 +117,15 @@ class CotizacionDetalleWithTallasSerializer(serializers.ModelSerializer):
         model = CotizacionDetalle
         fields = "__all__"
 
+class CotizacionServicioExtraSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CotizacionServicioExtra
+        fields = "__all__"
+
 class CotizacionFullSerializer(serializers.ModelSerializer):
     estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)
     detalles = CotizacionDetalleWithTallasSerializer(source="cotizaciondetalle", many=True, read_only=True)
+    servicios_extras = CotizacionServicioExtraSerializer(many=True, read_only=True)
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     cliente_razon_social = serializers.CharField(source="cliente.razon_social", read_only=True)
     piezas = serializers.SerializerMethodField()
@@ -168,6 +183,15 @@ class CotizacionFullSerializer(serializers.ModelSerializer):
 class PedidoSerializer(serializers.ModelSerializer):
     folio = serializers.CharField(read_only=True)
     folio_consecutivo = serializers.IntegerField(read_only=True)
+    servicios_extras = serializers.SerializerMethodField()
+
+    def get_servicios_extras(self, obj):
+        try:
+            qs = obj.servicios_extras.all().order_by("id")
+        except Exception:
+            return []
+        return PedidoServicioExtraSerializer(qs, many=True).data
+
     class Meta:
         model = Pedido
         read_only_fields = ['empresa']
@@ -175,6 +199,11 @@ class PedidoSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'cotizacion': {'required': False, 'allow_null': True},
         }
+
+class PedidoServicioExtraSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PedidoServicioExtra
+        fields = "__all__"
 
 class PedidoDetalleSerializer(serializers.ModelSerializer):
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
@@ -200,6 +229,8 @@ class PedidoOnboardingTallaInputSerializer(serializers.Serializer):
     cantidad = serializers.IntegerField(min_value=1)
     lleva_bordado = serializers.BooleanField(required=False, default=False)
     bordado_config = serializers.JSONField(required=False, allow_null=True)
+    lleva_serigrafia = serializers.BooleanField(required=False, default=False)
+    serigrafia_config = serializers.JSONField(required=False, allow_null=True)
 
 class PedidoOnboardingDetalleInputSerializer(serializers.Serializer):
     producto = serializers.IntegerField()
@@ -207,15 +238,23 @@ class PedidoOnboardingDetalleInputSerializer(serializers.Serializer):
     costo_unitario = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
     tallas = PedidoOnboardingTallaInputSerializer(many=True)
 
+class ServicioExtraInputSerializer(serializers.Serializer):
+    nombre = serializers.CharField(max_length=150)
+    monto = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, default=0)
+    visible_en_factura = serializers.BooleanField(required=False, default=True)
+
 class PedidoOnboardingCreateSerializer(serializers.Serializer):
     pedido = PedidoSerializer()
     detalle = PedidoOnboardingDetalleInputSerializer(many=True)
+    servicios_extras = ServicioExtraInputSerializer(many=True, required=False)
 
 class CotizacionOnboardingTallaInputSerializer(serializers.Serializer):
     talla = serializers.IntegerField()
     cantidad = serializers.IntegerField(min_value=1)
     lleva_bordado = serializers.BooleanField(required=False, default=False)
     bordado_config = serializers.JSONField(required=False, allow_null=True)
+    lleva_serigrafia = serializers.BooleanField(required=False, default=False)
+    serigrafia_config = serializers.JSONField(required=False, allow_null=True)
 
 class CotizacionOnboardingDetalleInputSerializer(serializers.Serializer):
     producto = serializers.IntegerField()
@@ -227,3 +266,4 @@ class CotizacionOnboardingCreateSerializer(serializers.Serializer):
     cotizacion_id = serializers.IntegerField(required=False)
     cotizacion = CotizacionSerializer()
     detalle = CotizacionOnboardingDetalleInputSerializer(many=True)
+    servicios_extras = ServicioExtraInputSerializer(many=True, required=False)

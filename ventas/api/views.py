@@ -8,7 +8,16 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from django.conf import settings
-from ventas.models import Cotizacion, CotizacionDetalle, CotizacionDetalleTalla, Pedido, PedidoDetalle, PedidoDetalleTalla
+from ventas.models import (
+    Cotizacion,
+    CotizacionDetalle,
+    CotizacionDetalleTalla,
+    CotizacionServicioExtra,
+    Pedido,
+    PedidoDetalle,
+    PedidoDetalleTalla,
+    PedidoServicioExtra,
+)
 from ventas.api.serializers import (
     CotizacionSerializer,
     CotizacionDashboardItemSerializer,
@@ -197,9 +206,11 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             .prefetch_related("tallas")
             .order_by("id")
         )
+        servicios_extras_qs = CotizacionServicioExtra.objects.filter(cotizacion=cotizacion_obj).order_by("id")
         return {
             "cotizacion": CotizacionSerializer(cotizacion_obj).data,
             "detalles": CotizacionDetalleWithTallasSerializer(detalles_qs, many=True).data,
+            "servicios_extras": list(servicios_extras_qs.values("nombre", "monto", "visible_en_factura")),
         }
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding")
@@ -359,7 +370,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 cotizacion_payload = {
                     k: v
                     for k, v in raw_dict.items()
-                    if k not in {"detalle", "detalles", "cotizacion_id"}
+                    if k not in {"detalle", "detalles", "cotizacion_id", "servicios_extras"}
                 }
             # filtrar solo campos válidos del modelo
             try:
@@ -374,6 +385,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 "cotizacion_id": raw_dict.get("cotizacion_id") or (cotizacion_payload.get("id") if isinstance(cotizacion_payload, dict) else None),
                 "cotizacion": cotizacion_payload,
                 "detalle": raw_dict.get("detalle") or raw_dict.get("detalles") or [],
+                "servicios_extras": raw_dict.get("servicios_extras") or [],
             }
             if normalized.get("cotizacion_id") in (None, ""):
                 normalized.pop("cotizacion_id", None)
@@ -388,6 +400,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         cotizacion_id = serializer.validated_data.get("cotizacion_id") or (request.data.get("cotizacion") or {}).get("id")
         cotizacion_data = serializer.validated_data["cotizacion"]
         detalle_data = serializer.validated_data["detalle"]
+        servicios_extras_data = serializer.validated_data.get("servicios_extras") or []
 
         from catalogo.models import Producto, Talla
 
@@ -421,6 +434,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     agg["lleva_bordado"] = bool(agg.get("lleva_bordado") or t.get("lleva_bordado"))
                     if agg.get("bordado_config") is None and t.get("bordado_config") is not None:
                         agg["bordado_config"] = t.get("bordado_config")
+                    agg["lleva_serigrafia"] = bool(agg.get("lleva_serigrafia") or t.get("lleva_serigrafia"))
+                    if agg.get("serigrafia_config") is None and t.get("serigrafia_config") is not None:
+                        agg["serigrafia_config"] = t.get("serigrafia_config")
                 entry["tallas"] = list(by_talla.values())
 
             return list(agrupado.values())
@@ -442,6 +458,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 cot_det = CotizacionDetalle.objects.create(
                     cotizacion=cotizacion_obj,
                     producto=producto,
+                    precio_lista=producto.precio_base or 0,
                     precio_unitario=precio_unitario,
                     costo_unitario=item.get("costo_unitario"),
                     subtotal_linea=0,
@@ -452,6 +469,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         raise ValidationError({"detalle": f"Talla inválida: {t['talla']}"})
                     if t.get("lleva_bordado") and t.get("bordado_config") is None:
                         raise ValidationError({"detalle": "Falta bordado_config en una talla marcada con lleva_bordado=true."})
+                    if t.get("lleva_serigrafia") and t.get("serigrafia_config") is None:
+                        raise ValidationError({"detalle": "Falta serigrafia_config en una talla marcada con lleva_serigrafia=true."})
                     CotizacionDetalleTalla.objects.create(
                         cotizacion_detalle=cot_det,
                         talla=talla,
@@ -460,7 +479,19 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         subtotal_talla=0,
                         lleva_bordado=bool(t.get("lleva_bordado")),
                         bordado_config=t.get("bordado_config"),
+                        lleva_serigrafia=bool(t.get("lleva_serigrafia")),
+                        serigrafia_config=t.get("serigrafia_config"),
                     )
+
+        def _save_servicios_extras(cotizacion_obj, rows):
+            CotizacionServicioExtra.objects.filter(cotizacion=cotizacion_obj).delete()
+            for row in rows or []:
+                CotizacionServicioExtra.objects.create(
+                    cotizacion=cotizacion_obj,
+                    nombre=row.get("nombre") or "",
+                    monto=row.get("monto") or 0,
+                    visible_en_factura=bool(row.get("visible_en_factura", True)),
+                )
 
         with transaction.atomic():
             edit_minutes = int(getattr(settings, "COTIZACION_EDIT_WINDOW_MINUTES", 30))
@@ -500,12 +531,17 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 raise ValidationError({"cotizacion": f"Datos inválidos: {str(e)}"})
 
             _save_cotizacion_detalle(cotizacion, detalle_data)
+            _save_servicios_extras(cotizacion, servicios_extras_data)
             cotizacion = Cotizacion.objects.filter(pk=cotizacion.pk).first()
             detalles_qs = CotizacionDetalle.objects.filter(cotizacion=cotizacion).prefetch_related("tallas")
+            servicios_extras_qs = CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id")
             return Response(
                 {
                     "cotizacion": CotizacionSerializer(cotizacion).data,
                     "detalles": CotizacionDetalleWithTallasSerializer(detalles_qs, many=True).data,
+                    "servicios_extras": list(
+                        servicios_extras_qs.values("id", "nombre", "monto", "visible_en_factura")
+                    ),
                     "pedido": None,
                 },
                 status=status.HTTP_201_CREATED,
@@ -570,6 +606,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             programa_bordados=cotizacion.programa_bordados,
             bordado_pantalones_extras=cotizacion.bordado_pantalones_extras,
             bordado_logotipo=cotizacion.bordado_logotipo,
+            serigrafia=cotizacion.serigrafia,
+            reflejante=cotizacion.reflejante,
             observaciones=cotizacion.observaciones,
             flete=cotizacion.flete,
             seguros=cotizacion.seguros,
@@ -588,6 +626,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             pedido_det = PedidoDetalle.objects.create(
                 pedido=pedido,
                 producto=det.producto,
+                precio_lista=det.precio_lista,
                 precio_unitario=det.precio_unitario,
                 costo_unitario=det.costo_unitario,
                 subtotal_linea=det.subtotal_linea,
@@ -601,7 +640,16 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     subtotal_talla=t.subtotal_talla,
                     lleva_bordado=t.lleva_bordado,
                     bordado_config=t.bordado_config,
+                    lleva_serigrafia=t.lleva_serigrafia,
+                    serigrafia_config=t.serigrafia_config,
                 )
+        for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id"):
+            PedidoServicioExtra.objects.create(
+                pedido=pedido,
+                nombre=s.nombre,
+                monto=s.monto,
+                visible_en_factura=s.visible_en_factura,
+            )
         return pedido
 
     def _aplicar_cotizacion_a_pedido(self, cotizacion, pedido):
@@ -652,6 +700,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         pedido.programa_bordados = cotizacion.programa_bordados
         pedido.bordado_pantalones_extras = cotizacion.bordado_pantalones_extras
         pedido.bordado_logotipo = cotizacion.bordado_logotipo
+        pedido.serigrafia = cotizacion.serigrafia
+        pedido.reflejante = cotizacion.reflejante
         pedido.observaciones = cotizacion.observaciones
         pedido.flete = cotizacion.flete
         pedido.seguros = cotizacion.seguros
@@ -664,11 +714,13 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         pedido.save()
 
         PedidoDetalle.objects.filter(pedido=pedido).delete()
+        PedidoServicioExtra.objects.filter(pedido=pedido).delete()
         detalles = CotizacionDetalle.objects.filter(cotizacion=cotizacion).prefetch_related("tallas").order_by("id")
         for det in detalles:
             pedido_det = PedidoDetalle.objects.create(
                 pedido=pedido,
                 producto=det.producto,
+                precio_lista=det.precio_lista,
                 precio_unitario=det.precio_unitario,
                 costo_unitario=det.costo_unitario,
                 subtotal_linea=det.subtotal_linea,
@@ -682,7 +734,16 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     subtotal_talla=t.subtotal_talla,
                     lleva_bordado=t.lleva_bordado,
                     bordado_config=t.bordado_config,
+                    lleva_serigrafia=t.lleva_serigrafia,
+                    serigrafia_config=t.serigrafia_config,
                 )
+        for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id"):
+            PedidoServicioExtra.objects.create(
+                pedido=pedido,
+                nombre=s.nombre,
+                monto=s.monto,
+                visible_en_factura=s.visible_en_factura,
+            )
 
     @action(detail=True, methods=["post"], url_path="autorizar")
     def autorizar(self, request, pk=None):
@@ -756,6 +817,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             snapshot = cotizacion.aprobado_snapshot or {}
             snap_cot = snapshot.get("cotizacion") or {}
             snap_det = snapshot.get("detalles") or []
+            snap_servicios = snapshot.get("servicios_extras") or []
             if not snap_cot:
                 raise ValidationError({"cotizacion": "No hay snapshot aprobado para revertir."})
 
@@ -771,6 +833,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             cotizacion.save(update_fields=["estatus", "cambios_solicitados_at", "updated_at"] + [k for k in snap_cot.keys() if k in model_fields and k not in skip])
 
             CotizacionDetalle.objects.filter(cotizacion=cotizacion).delete()
+            CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).delete()
             for det in snap_det:
                 prod_id = det.get("producto")
                 if isinstance(prod_id, dict):
@@ -778,6 +841,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 cot_det = CotizacionDetalle.objects.create(
                     cotizacion=cotizacion,
                     producto_id=prod_id,
+                    precio_lista=det.get("precio_lista"),
                     precio_unitario=det.get("precio_unitario") or 0,
                     costo_unitario=det.get("costo_unitario"),
                     subtotal_linea=det.get("subtotal_linea") or 0,
@@ -791,7 +855,16 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         subtotal_talla=t.get("subtotal_talla") or 0,
                         lleva_bordado=bool(t.get("lleva_bordado")),
                         bordado_config=t.get("bordado_config"),
+                        lleva_serigrafia=bool(t.get("lleva_serigrafia")),
+                        serigrafia_config=t.get("serigrafia_config"),
                     )
+            for s in snap_servicios:
+                CotizacionServicioExtra.objects.create(
+                    cotizacion=cotizacion,
+                    nombre=s.get("nombre") or "",
+                    monto=s.get("monto") or 0,
+                    visible_en_factura=bool(s.get("visible_en_factura", True)),
+                )
         return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
 
 class CotizacionDetalleViewSet(viewsets.ModelViewSet):
