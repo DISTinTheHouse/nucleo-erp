@@ -434,16 +434,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     agg["lleva_bordado"] = bool(agg.get("lleva_bordado") or t.get("lleva_bordado"))
                     if agg.get("bordado_config") is None and t.get("bordado_config") is not None:
                         agg["bordado_config"] = t.get("bordado_config")
-                    if bool(agg.get("lleva_bordado")) or bool(t.get("lleva_bordado")):
-                        agg["dtf"] = bool(agg.get("dtf") or t.get("dtf"))
-                        agg["sublimado"] = bool(agg.get("sublimado") or t.get("sublimado"))
-                        agg["lleva_serigrafia"] = bool(agg.get("lleva_serigrafia") or t.get("lleva_serigrafia"))
-                        agg["revelado"] = bool(agg.get("revelado") or t.get("revelado"))
-                    else:
-                        agg["dtf"] = False
-                        agg["sublimado"] = False
-                        agg["lleva_serigrafia"] = False
-                        agg["revelado"] = False
+                    agg["lleva_serigrafia"] = bool(agg.get("lleva_serigrafia") or t.get("lleva_serigrafia"))
+                    if agg.get("serigrafia_config") is None and t.get("serigrafia_config") is not None:
+                        agg["serigrafia_config"] = t.get("serigrafia_config")
                 entry["tallas"] = list(by_talla.values())
 
             return list(agrupado.values())
@@ -476,19 +469,18 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         raise ValidationError({"detalle": f"Talla inválida: {t['talla']}"})
                     if t.get("lleva_bordado") and t.get("bordado_config") is None:
                         raise ValidationError({"detalle": "Falta bordado_config en una talla marcada con lleva_bordado=true."})
-                    _lleva_bordado = bool(t.get("lleva_bordado"))
+                    if t.get("lleva_serigrafia") and t.get("serigrafia_config") is None:
+                        raise ValidationError({"detalle": "Falta serigrafia_config en una talla marcada con lleva_serigrafia=true."})
                     CotizacionDetalleTalla.objects.create(
                         cotizacion_detalle=cot_det,
                         talla=talla,
                         cantidad=t["cantidad"],
                         precio_unitario=precio_unitario,
                         subtotal_talla=0,
-                        lleva_bordado=_lleva_bordado,
+                        lleva_bordado=bool(t.get("lleva_bordado")),
                         bordado_config=t.get("bordado_config"),
-                        dtf=(bool(t.get("dtf")) if _lleva_bordado else False),
-                        sublimado=(bool(t.get("sublimado")) if _lleva_bordado else False),
-                        lleva_serigrafia=(bool(t.get("lleva_serigrafia")) if _lleva_bordado else False),
-                        revelado=(bool(t.get("revelado")) if _lleva_bordado else False),
+                        lleva_serigrafia=bool(t.get("lleva_serigrafia")),
+                        serigrafia_config=t.get("serigrafia_config"),
                     )
 
         def _save_servicios_extras(cotizacion_obj, rows):
@@ -648,10 +640,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     subtotal_talla=t.subtotal_talla,
                     lleva_bordado=t.lleva_bordado,
                     bordado_config=t.bordado_config,
-                    dtf=t.dtf,
-                    sublimado=t.sublimado,
                     lleva_serigrafia=t.lleva_serigrafia,
-                    revelado=t.revelado,
+                    serigrafia_config=t.serigrafia_config,
                 )
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id"):
             PedidoServicioExtra.objects.create(
@@ -744,10 +734,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     subtotal_talla=t.subtotal_talla,
                     lleva_bordado=t.lleva_bordado,
                     bordado_config=t.bordado_config,
-                    dtf=t.dtf,
-                    sublimado=t.sublimado,
                     lleva_serigrafia=t.lleva_serigrafia,
-                    revelado=t.revelado,
+                    serigrafia_config=t.serigrafia_config,
                 )
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id"):
             PedidoServicioExtra.objects.create(
@@ -867,10 +855,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         subtotal_talla=t.get("subtotal_talla") or 0,
                         lleva_bordado=bool(t.get("lleva_bordado")),
                         bordado_config=t.get("bordado_config"),
-                        dtf=bool(t.get("dtf")),
-                        sublimado=bool(t.get("sublimado")),
                         lleva_serigrafia=bool(t.get("lleva_serigrafia")),
-                        revelado=bool(t.get("revelado")),
+                        serigrafia_config=t.get("serigrafia_config"),
                     )
             for s in snap_servicios:
                 CotizacionServicioExtra.objects.create(

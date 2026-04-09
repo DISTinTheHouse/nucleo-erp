@@ -737,7 +737,7 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
   - `CotizacionDetalleTalla`: sub-líneas por **talla**:
     - `cantidad`
     - `lleva_bordado` + `bordado_config`
-    - `dtf`, `sublimado`, `lleva_serigrafia`, `revelado` (booleanos)
+    - `lleva_serigrafia` + `serigrafia_config`
 - los **servicios extras (ilimitados)** se guardan en:
   - `CotizacionServicioExtra`: (`nombre`, `monto`, `visible_en_factura`)
 - **no** se crea `Pedido` ni se asigna folio `P-xxxxxx` hasta que **mesa de control autorice**
@@ -824,7 +824,7 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 - El backend crea **1 `CotizacionDetalle` por producto** (aunque se repita el producto en el payload).
 - Las tallas repetidas se consolidan sumando `cantidad`.
 - Si una talla viene con `lleva_bordado=true`, entonces `bordado_config` es requerido y se guarda en `CotizacionDetalleTalla.bordado_config`.
-- Servicios por talla: `dtf`, `sublimado`, `lleva_serigrafia`, `revelado` (booleanos). El detalle fino (ubicación, imagen, medidas, etc.) viaja dentro de `bordado_config.ubicaciones`.
+- Si una talla viene con `lleva_serigrafia=true`, entonces `serigrafia_config` es requerido y se guarda en `CotizacionDetalleTalla.serigrafia_config`.
 - `precio_unitario` es editable por el vendedor; `precio_lista` queda como referencia del precio base al momento de cotizar.
 - `servicios_extras` es opcional y permite agregar cargos ilimitados con control de visibilidad en factura (`visible_en_factura`).
 - La cotización queda en `estatus=Por Autorizar (2)` para que mesa de control valide.
@@ -873,10 +873,12 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
           "talla": 2,
           "cantidad": 4,
           "lleva_bordado": false,
-          "dtf": true,
-          "sublimado": false,
-          "lleva_serigrafia": false,
-          "revelado": false
+          "lleva_serigrafia": true,
+          "serigrafia_config": {
+            "ubicacion": "PECHO",
+            "tintas": 1,
+            "notas": "Serigrafía 1 tinta"
+          }
         }
       ]
     }

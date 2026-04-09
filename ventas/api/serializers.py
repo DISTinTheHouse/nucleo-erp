@@ -229,10 +229,8 @@ class PedidoOnboardingTallaInputSerializer(serializers.Serializer):
     cantidad = serializers.IntegerField(min_value=1)
     lleva_bordado = serializers.BooleanField(required=False, default=False)
     bordado_config = serializers.JSONField(required=False, allow_null=True)
-    dtf = serializers.BooleanField(required=False, default=False)
-    sublimado = serializers.BooleanField(required=False, default=False)
     lleva_serigrafia = serializers.BooleanField(required=False, default=False)
-    revelado = serializers.BooleanField(required=False, default=False)
+    serigrafia_config = serializers.JSONField(required=False, allow_null=True)
 
 class PedidoOnboardingDetalleInputSerializer(serializers.Serializer):
     producto = serializers.IntegerField()
@@ -255,10 +253,8 @@ class CotizacionOnboardingTallaInputSerializer(serializers.Serializer):
     cantidad = serializers.IntegerField(min_value=1)
     lleva_bordado = serializers.BooleanField(required=False, default=False)
     bordado_config = serializers.JSONField(required=False, allow_null=True)
-    dtf = serializers.BooleanField(required=False, default=False)
-    sublimado = serializers.BooleanField(required=False, default=False)
     lleva_serigrafia = serializers.BooleanField(required=False, default=False)
-    revelado = serializers.BooleanField(required=False, default=False)
+    serigrafia_config = serializers.JSONField(required=False, allow_null=True)
 
 class CotizacionOnboardingDetalleInputSerializer(serializers.Serializer):
     producto = serializers.IntegerField()
