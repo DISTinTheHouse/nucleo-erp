@@ -37,6 +37,7 @@ class TallaAdmin(admin.ModelAdmin):
 @admin.register(Producto)
 class ProductoAdmin(admin.ModelAdmin):
     list_display = (
+        "sku",
         "nombre",
         "empresa",
         "categoria_producto",
@@ -56,6 +57,7 @@ class ProductoAdmin(admin.ModelAdmin):
         "created_at",
     )
     search_fields = (
+        "sku",
         "nombre",
         "descripcion",
         "tipo",

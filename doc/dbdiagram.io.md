@@ -167,6 +167,7 @@ Table tallas {
 Table productos {
   id_producto int [pk]
   id_empresa int
+  sku varchar
   id_categoria_producto int
   id_unidad_medida int
   id_impuesto int

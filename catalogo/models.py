@@ -58,6 +58,7 @@ class Producto(models.Model):
     impuesto = models.ForeignKey(Impuesto, on_delete=models.CASCADE, related_name="productos", null=True, blank=True)
     sat_prodserv = models.ForeignKey(SatClaveProdServ, on_delete=models.CASCADE, related_name="productos", null=True, blank=True)
     sat_unidad = models.ForeignKey(SatClaveUnidad, on_delete=models.CASCADE, related_name="productos", null=True, blank=True)
+    sku = models.CharField(max_length=50, blank=True, default="", help_text="Stock Keeping Unit (Código interno)")
     nombre = models.CharField(max_length=100)
     descripcion = models.CharField(max_length=150, blank=True, default="")
     tipo = models.CharField(max_length=35, blank=True, default="")
