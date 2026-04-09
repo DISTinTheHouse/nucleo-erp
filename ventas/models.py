@@ -155,8 +155,10 @@ class CotizacionDetalleTalla(models.Model):
     subtotal_talla = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     lleva_bordado = models.BooleanField(default=False)
     bordado_config = models.JSONField(null=True, blank=True)
+    dtf = models.BooleanField(default=False)
+    sublimado = models.BooleanField(default=False)
     lleva_serigrafia = models.BooleanField(default=False)
-    serigrafia_config = models.JSONField(null=True, blank=True)
+    revelado = models.BooleanField(default=False)
 
     class Meta:
         db_table = "cotizacion_detalle_talla"
@@ -349,8 +351,10 @@ class PedidoDetalleTalla(models.Model):
     subtotal_talla = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     lleva_bordado = models.BooleanField(default=False)
     bordado_config = models.JSONField(null=True, blank=True)
+    dtf = models.BooleanField(default=False)
+    sublimado = models.BooleanField(default=False)
     lleva_serigrafia = models.BooleanField(default=False)
-    serigrafia_config = models.JSONField(null=True, blank=True)
+    revelado = models.BooleanField(default=False)
 
     class Meta:
         db_table = "pedido_detalle_talla"

@@ -737,7 +737,7 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
   - `CotizacionDetalleTalla`: sub-líneas por **talla**:
     - `cantidad`
     - `lleva_bordado` + `bordado_config`
-    - `lleva_serigrafia` + `serigrafia_config`
+    - `dtf`, `sublimado`, `lleva_serigrafia`, `revelado` (booleanos)
 - los **servicios extras (ilimitados)** se guardan en:
   - `CotizacionServicioExtra`: (`nombre`, `monto`, `visible_en_factura`)
 - **no** se crea `Pedido` ni se asigna folio `P-xxxxxx` hasta que **mesa de control autorice**
@@ -824,7 +824,7 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 - El backend crea **1 `CotizacionDetalle` por producto** (aunque se repita el producto en el payload).
 - Las tallas repetidas se consolidan sumando `cantidad`.
 - Si una talla viene con `lleva_bordado=true`, entonces `bordado_config` es requerido y se guarda en `CotizacionDetalleTalla.bordado_config`.
-- Si una talla viene con `lleva_serigrafia=true`, entonces `serigrafia_config` es requerido y se guarda en `CotizacionDetalleTalla.serigrafia_config`.
+- Servicios por talla: `dtf`, `sublimado`, `lleva_serigrafia`, `revelado` (booleanos). El detalle fino (ubicación, imagen, medidas, etc.) viaja dentro de `bordado_config.ubicaciones`.
 - `precio_unitario` es editable por el vendedor; `precio_lista` queda como referencia del precio base al momento de cotizar.
 - `servicios_extras` es opcional y permite agregar cargos ilimitados con control de visibilidad en factura (`visible_en_factura`).
 - La cotización queda en `estatus=Por Autorizar (2)` para que mesa de control valide.
@@ -873,18 +873,20 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
           "talla": 2,
           "cantidad": 4,
           "lleva_bordado": false,
-          "lleva_serigrafia": true,
-          "serigrafia_config": {
-            "ubicacion": "PECHO",
-            "tintas": 1,
-            "notas": "Serigrafía 1 tinta"
-          }
+          "dtf": true,
+          "sublimado": false,
+          "lleva_serigrafia": false,
+          "revelado": false
         }
       ]
     }
   ],
   "servicios_extras": [
-    { "nombre": "Serigrafía (cargo global)", "monto": "1500.00", "visible_en_factura": false },
+    {
+      "nombre": "Serigrafía (cargo global)",
+      "monto": "1500.00",
+      "visible_en_factura": false
+    },
     { "nombre": "Envío express", "monto": "250.00", "visible_en_factura": true }
   ]
 }
@@ -914,7 +916,12 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
     }
   ],
   "servicios_extras": [
-    { "id": 1, "nombre": "Serigrafía (cargo global)", "monto": "1500.00", "visible_en_factura": false }
+    {
+      "id": 1,
+      "nombre": "Serigrafía (cargo global)",
+      "monto": "1500.00",
+      "visible_en_factura": false
+    }
   ]
 }
 ```
@@ -988,31 +995,39 @@ Asistente conversacional para ejecutar consultas y acciones controladas desde el
 - **Headers**: `Content-Type: application/json`
 
 ### Request
+
 ```json
 {
   "message": "¿Cuántas empresas tengo?",
   "conversation": [
-    {"role":"user","content":"Hola"},
-    {"role":"assistant","content":"¿En qué te ayudo?"}
+    { "role": "user", "content": "Hola" },
+    { "role": "assistant", "content": "¿En qué te ayudo?" }
   ]
 }
 ```
 
 Notas:
+
 - `message` es obligatorio.
 - `conversation` es opcional; enviar historial breve mejora el contexto (máx. ~20 turnos recientes).
 
 ### Response
+
 ```json
 {
   "reply": "Tienes 1 empresa.",
   "tool_results": [
-    {"name": "count_empresas", "args": {}, "result": {"ok": true, "count": 1}}
+    {
+      "name": "count_empresas",
+      "args": {},
+      "result": { "ok": true, "count": 1 }
+    }
   ]
 }
 ```
 
 ### Consultas soportadas
+
 - Conteos: “¿Cuántas empresas/usuarios/cotizaciones hay?”
 - Listados: “Lista las 5 empresas”, “Muéstrame 10 usuarios de mi empresa”
 - Búsquedas: “Busca clientes con RFC XAXX010101000”
@@ -1020,6 +1035,7 @@ Notas:
 - Permisos: “¿Qué permisos efectivos tengo?”
 
 ### Acciones (crear)
+
 - Empresa (solo superuser): “Crea una empresa …”
 - Rol (solo superuser): “Crea un rol Ventas …”
 - Usuario (admin-empresa o superuser): “Crea un usuario maria.garcia con rol Ventas …”
@@ -1028,6 +1044,7 @@ Notas:
 El asistente valida campos críticos (RFC, SAT) y solicitará datos faltantes.
 
 ### Seguridad
+
 - Respeta permisos del usuario autenticado:
   - Superuser: puede crear Empresas y Roles; también Usuarios y Clientes.
   - Admin de empresa: puede crear Usuarios y Clientes en su empresa.
@@ -1035,6 +1052,7 @@ El asistente valida campos críticos (RFC, SAT) y solicitará datos faltantes.
 - Si faltan permisos o datos, el asistente lo indicará sin ejecutar acciones.
 
 ### Notas de configuración
+
 - Variables de entorno:
   - `OPENAI_API_KEY` (obligatoria)
   - `OPENAI_MODEL` (opcional, por defecto `gpt-4o-mini`)
