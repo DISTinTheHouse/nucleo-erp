@@ -12,6 +12,7 @@ class TipoAlmacen(models.TextChoices):
     TRANSITO = "TRANSITO", "Transito"
 
 class TipoUbicacion(models.TextChoices):
+    INVENTARIO = "INVENTARIO", "Inventario"
     RECIBO = "RECIBO", "Recibo"
     PICKING = "PICKING", "Picking"
     RESERVA = "RESERVA", "Reserva"
