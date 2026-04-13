@@ -18,6 +18,7 @@ from terceros.models import Cliente
 from django.db.models import Q
 from django.utils import timezone
 from datetime import date
+from datetime import timedelta
 from email.message import EmailMessage
 import base64
 import urllib.parse
@@ -827,3 +828,193 @@ class AIAssistantAPIView(APIView):
             pass
 
         return {"ok": True, "summary": summary_data}
+
+
+class GoogleCalendarEventsAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _get_integration(self, user):
+        integration = CloudIntegration.objects.filter(
+            user=user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE
+        ).first()
+        if not integration or not integration.access_token:
+            return None, {
+                "ok": False,
+                "error": "Conecta tu cuenta de Google primero para usar Calendario.",
+                "reconnect_required": True,
+            }
+        scopes = integration.metadata.get("scope", "") if integration.metadata else ""
+        if "calendar" not in (scopes or "").lower():
+            return None, {
+                "ok": False,
+                "error": "Se requieren permisos de Calendario. Desconecta y vuelve a conectar tu cuenta de Google.",
+                "reconnect_required": True,
+            }
+        return integration, None
+
+    def get(self, request):
+        integration, error = self._get_integration(request.user)
+        if error:
+            return Response(error, status=status.HTTP_400_BAD_REQUEST)
+
+        access_token = _google_drive_refresh_token(integration)
+
+        time_min = (request.query_params.get("timeMin") or "").strip()
+        time_max = (request.query_params.get("timeMax") or "").strip()
+        max_results_raw = (request.query_params.get("maxResults") or "").strip()
+        page_token = (request.query_params.get("pageToken") or "").strip()
+
+        if not time_min:
+            time_min = timezone.now().isoformat()
+
+        max_results = 50
+        if max_results_raw:
+            try:
+                max_results = int(max_results_raw)
+            except Exception:
+                max_results = 50
+        max_results = max(1, min(max_results, 250))
+
+        qp = {
+            "timeMin": time_min,
+            "maxResults": str(max_results),
+            "singleEvents": "true",
+            "orderBy": "startTime",
+        }
+        if time_max:
+            qp["timeMax"] = time_max
+        if page_token:
+            qp["pageToken"] = page_token
+
+        url = "https://www.googleapis.com/calendar/v3/calendars/primary/events?" + urllib.parse.urlencode(
+            qp, quote_via=urllib.parse.quote
+        )
+
+        try:
+            response = _http_json(
+                url,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/json",
+                },
+            )
+        except urllib.error.HTTPError as e:
+            return Response(
+                {"ok": False, "error": "Error al consultar tu calendario. Intenta reconectar tu cuenta de Google."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except Exception:
+            return Response(
+                {"ok": False, "error": "Error inesperado al cargar eventos."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        events = []
+        for item in response.get("items") or []:
+            start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date")
+            end = item.get("end", {}).get("dateTime") or item.get("end", {}).get("date")
+            events.append(
+                {
+                    "id": item.get("id"),
+                    "summary": item.get("summary") or "Sin título",
+                    "description": item.get("description") or "",
+                    "htmlLink": item.get("htmlLink"),
+                    "start": start,
+                    "end": end,
+                    "status": item.get("status"),
+                    "creator": item.get("creator", {}).get("email"),
+                    "updated": item.get("updated"),
+                    "location": item.get("location") or "",
+                }
+            )
+
+        return Response(
+            {
+                "ok": True,
+                "events": events,
+                "nextPageToken": response.get("nextPageToken"),
+            }
+        )
+
+    def post(self, request):
+        integration, error = self._get_integration(request.user)
+        if error:
+            return Response(error, status=status.HTTP_400_BAD_REQUEST)
+
+        access_token = _google_drive_refresh_token(integration)
+
+        summary = (request.data.get("summary") or "").strip()
+        description = request.data.get("description") or ""
+        start_date = (request.data.get("start_date") or "").strip()
+        start_time = (request.data.get("start_time") or "").strip()
+        end_date = (request.data.get("end_date") or "").strip()
+        end_time = (request.data.get("end_time") or "").strip()
+
+        if not summary or not start_date:
+            return Response(
+                {"ok": False, "error": "summary y start_date son requeridos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not end_date:
+            end_date = start_date
+
+        try:
+            if start_time:
+                start_dt = f"{start_date}T{start_time}:00"
+                if end_time:
+                    end_dt = f"{end_date}T{end_time}:00"
+                else:
+                    try:
+                        hh, mm = [int(x) for x in start_time.split(":")]
+                        end_dt = f"{end_date}T{(hh + 1) % 24:02d}:{mm:02d}:00"
+                    except Exception:
+                        end_dt = f"{end_date}T{start_time}:00"
+                start_data = {"dateTime": start_dt, "timeZone": getattr(settings, "TIME_ZONE", "UTC")}
+                end_data = {"dateTime": end_dt, "timeZone": getattr(settings, "TIME_ZONE", "UTC")}
+            else:
+                end_exclusive = (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
+                start_data = {"date": start_date}
+                end_data = {"date": end_exclusive}
+        except Exception:
+            return Response(
+                {"ok": False, "error": "Fechas u horas inválidas."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        event_body = {
+            "summary": summary,
+            "description": description,
+            "start": start_data,
+            "end": end_data,
+        }
+
+        try:
+            created = _http_json(
+                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                method="POST",
+                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+                json_data=event_body,
+            )
+        except urllib.error.HTTPError:
+            return Response(
+                {"ok": False, "error": "Error al crear el evento en el calendario."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except Exception:
+            return Response(
+                {"ok": False, "error": "Error inesperado al crear el evento."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(
+            {
+                "ok": True,
+                "event": {
+                    "id": created.get("id"),
+                    "htmlLink": created.get("htmlLink"),
+                    "status": created.get("status"),
+                },
+            },
+            status=status.HTTP_201_CREATED,
+        )
