@@ -21,6 +21,13 @@
         filter: blur(10px);
     }
 
+    .dark .drive-shell::before {
+        background:
+            radial-gradient(circle at 10% 20%, rgba(249, 115, 22, 0.14), transparent 34%),
+            radial-gradient(circle at 85% 10%, rgba(244, 63, 94, 0.12), transparent 28%),
+            radial-gradient(circle at 50% 100%, rgba(161, 161, 170, 0.06), transparent 30%);
+    }
+
     .drive-surface {
         border: 1px solid rgba(148, 163, 184, 0.16);
         background: rgba(255, 255, 255, 0.76);
@@ -30,7 +37,7 @@
 
     .dark .drive-surface {
         border-color: rgba(255, 255, 255, 0.08);
-        background: rgba(15, 23, 42, 0.44);
+        background: rgba(24, 24, 27, 0.55);
         box-shadow: 0 18px 48px -28px rgba(2, 6, 23, 0.75);
     }
 
@@ -115,7 +122,7 @@
 <div class="drive-shell space-y-8">
     <section class="drive-surface relative overflow-hidden rounded-[2rem] ring-1 ring-slate-900/5 dark:ring-white/10">
         <div
-            class="absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.7),rgba(255,255,255,0.15))] dark:bg-[linear-gradient(135deg,rgba(15,23,42,0.08),rgba(15,23,42,0.02))]">
+            class="absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.7),rgba(255,255,255,0.15))] dark:bg-[linear-gradient(135deg,rgba(24,24,27,0.12),rgba(24,24,27,0.05))]">
         </div>
         <div class="absolute -top-24 right-0 h-64 w-64 rounded-full bg-sky-500/12 blur-3xl"></div>
         <div class="absolute -bottom-24 left-24 h-56 w-56 rounded-full bg-indigo-500/12 blur-3xl"></div>
@@ -123,7 +130,7 @@
             <div class="grid gap-6 xl:grid-cols-[minmax(0,1.65fr)_minmax(320px,0.92fr)] xl:items-start">
                 <div class="space-y-5">
                     <div
-                        class="inline-flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/80 px-3.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 shadow-sm dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-300">
+                        class="inline-flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/80 px-3.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 shadow-sm dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
                         <span class="h-1.5 w-1.5 rounded-full bg-sky-500"></span>
                         Cloud Workspace
                     </div>
@@ -131,7 +138,7 @@
                         <h3
                             class="text-[2.15rem] font-semibold tracking-tight text-slate-950 dark:text-white md:text-[2.95rem] md:leading-[1.02]">
                             Centraliza archivos y conecta tus nubes con una experiencia más limpia y moderna.</h3>
-                        <p class="mt-3 max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-300 md:text-[14.5px]">
+                        <p class="mt-3 max-w-2xl text-sm leading-6 text-slate-600 dark:text-zinc-300 md:text-[14.5px]">
                             Empieza con Google Drive, deja visibles otras integraciones para tu roadmap y ofrece un
                             onboarding más claro para enlazar cuentas sin fricción.</p>
                     </div>
@@ -155,21 +162,24 @@
                     <div class="grid gap-3 sm:grid-cols-3">
                         <div class="drive-surface rounded-2xl px-4 py-4">
                             <div
-                                class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+                                class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-zinc-500">
                                 Proveedor activo</div>
-                            <div class="mt-2 text-[1.05rem] font-semibold text-slate-950 dark:text-white">{% if google_integration %}Google Drive{% else %}Sin conexión{% endif %}</div>
+                            <div class="mt-2 text-[1.05rem] font-semibold text-slate-950 dark:text-white">{% if
+                                google_integration %}Google Drive{% else %}Sin conexión{% endif %}</div>
                         </div>
                         <div class="drive-surface rounded-2xl px-4 py-4">
                             <div
-                                class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+                                class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-zinc-500">
                                 Integraciones</div>
-                            <div class="mt-2 text-[1.05rem] font-semibold text-slate-950 dark:text-white">{% if google_integration %}1 conectada{% else %}0 conectadas{% endif %}</div>
+                            <div class="mt-2 text-[1.05rem] font-semibold text-slate-950 dark:text-white">{% if
+                                google_integration %}1 conectada{% else %}0 conectadas{% endif %}</div>
                         </div>
                         <div class="drive-surface rounded-2xl px-4 py-4">
                             <div
-                                class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+                                class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-zinc-500">
                                 Archivos visibles</div>
-                            <div class="mt-2 text-[1.05rem] font-semibold text-slate-950 dark:text-white">{{ files|length }}</div>
+                            <div class="mt-2 text-[1.05rem] font-semibold text-slate-950 dark:text-white">{{
+                                files|length }}</div>
                         </div>
                     </div>
                 </div>
@@ -177,7 +187,7 @@
                     <div class="flex items-center justify-between gap-3">
                         <div>
                             <div
-                                class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+                                class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-zinc-500">
                                 Estado actual</div>
                             <div
                                 class="mt-2 text-[1.35rem] font-semibold tracking-tight text-slate-950 dark:text-white">
@@ -198,26 +208,27 @@
                             <div class="min-w-0">
                                 <div class="text-sm font-semibold text-slate-950 dark:text-white">Google Drive conectado
                                 </div>
-                                <div class="truncate text-sm text-slate-500 dark:text-slate-400">{{ google_integration.account_email|default:"Cuenta enlazada" }}</div>
+                                <div class="truncate text-sm text-slate-500 dark:text-zinc-400">{{
+                                    google_integration.account_email|default:"Cuenta enlazada" }}</div>
                             </div>
                         </div>
-                        <p class="mt-4 text-[13px] leading-6 text-slate-600 dark:text-slate-300">Tu equipo ya puede
+                        <p class="mt-4 text-[13px] leading-6 text-slate-600 dark:text-zinc-300">Tu equipo ya puede
                             abrir archivos, navegar carpetas y usar este espacio como hub central.</p>
                     </div>
                     {% else %}
                     <div class="mt-6 rounded-2xl border border-amber-500/15 bg-amber-500/[0.05] p-4">
                         <div class="text-[13px] font-semibold text-slate-950 dark:text-white">Sin nube conectada</div>
-                        <p class="mt-2 text-[13px] leading-6 text-slate-600 dark:text-slate-300">Abre el onboarding y
+                        <p class="mt-2 text-[13px] leading-6 text-slate-600 dark:text-zinc-300">Abre el onboarding y
                             enlaza Google Drive para empezar a trabajar con archivos reales.</p>
                     </div>
                     {% endif %}
                     <div class="mt-5 grid gap-3">
                         <div class="drive-surface flex items-center justify-between rounded-2xl px-4 py-3 text-[13px]">
-                            <span class="text-slate-500 dark:text-slate-400">Disponibles hoy</span>
+                            <span class="text-slate-500 dark:text-zinc-400">Disponibles hoy</span>
                             <span class="font-semibold text-slate-950 dark:text-white">Google Drive</span>
                         </div>
                         <div class="drive-surface flex items-center justify-between rounded-2xl px-4 py-3 text-[13px]">
-                            <span class="text-slate-500 dark:text-slate-400">En roadmap</span>
+                            <span class="text-slate-500 dark:text-zinc-400">En roadmap</span>
                             <span class="font-semibold text-slate-950 dark:text-white">2 proveedores</span>
                         </div>
                     </div>
@@ -242,19 +253,21 @@
                         <div
                             class="truncate text-[1.02rem] font-semibold tracking-tight text-slate-950 dark:text-white">
                             {{ provider.name }}</div>
-                        <div class="mt-1 line-clamp-1 text-[13px] text-slate-500 dark:text-slate-400">{{ provider.subtitle }}</div>
+                        <div class="mt-1 line-clamp-1 text-[13px] text-slate-500 dark:text-zinc-400">{{
+                            provider.subtitle }}</div>
                     </div>
                 </div>
                 <span
-                    class="inline-flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] {% if provider.connected %}bg-emerald-500/10 text-emerald-500{% elif provider.locked_by_existing %}bg-amber-500/10 text-amber-500{% elif provider.enabled %}bg-sky-500/10 text-sky-500{% else %}bg-slate-500/10 text-slate-500 dark:text-slate-400{% endif %}">
+                    class="inline-flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] {% if provider.connected %}bg-emerald-500/10 text-emerald-500{% elif provider.locked_by_existing %}bg-amber-500/10 text-amber-500{% elif provider.enabled %}bg-sky-500/10 text-sky-500{% else %}bg-slate-500/10 text-slate-500 dark:text-zinc-400{% endif %}">
                     <span
                         class="h-1.5 w-1.5 rounded-full {% if provider.connected %}bg-emerald-500{% elif provider.locked_by_existing %}bg-amber-500{% elif provider.enabled %}bg-sky-500{% else %}bg-slate-400{% endif %}"></span>
-                    {% if provider.connected %}Conectado{% elif provider.locked_by_existing %}Bloqueado{% else %}{{ provider.badge }}{% endif %}
+                    {% if provider.connected %}Conectado{% elif provider.locked_by_existing %}Bloqueado{% else %}{{
+                    provider.badge }}{% endif %}
                 </span>
             </div>
             <div class="mt-5 flex flex-1 flex-col space-y-3">
                 <div
-                    class="min-h-[78px] rounded-2xl border border-slate-200/70 bg-slate-50/80 px-4 py-3 text-[13px] leading-6 text-slate-600 dark:border-white/10 dark:bg-slate-950/50 dark:text-slate-300">
+                    class="min-h-[78px] rounded-2xl border border-slate-200/70 bg-slate-50/80 px-4 py-3 text-[13px] leading-6 text-slate-600 dark:border-white/10 dark:bg-zinc-950/50 dark:text-zinc-300">
                     {% if provider.account_email %}
                     <span class="block truncate">{{ provider.account_email }}</span>
                     {% elif provider.locked_by_existing %}
@@ -297,24 +310,24 @@
             <div class="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
                 <div class="max-w-2xl">
                     <div
-                        class="inline-flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/80 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-400">
+                        class="inline-flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/80 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">
                         <span class="h-1.5 w-1.5 rounded-full bg-sky-500"></span>
                         File Browser
                     </div>
                     <h3 class="mt-4 text-[1.7rem] font-semibold tracking-tight text-slate-950 dark:text-white">Explora
                         archivos con una vista más ligera y enfocada.</h3>
-                    <p class="mt-2 text-[13px] leading-6 text-slate-500 dark:text-slate-400">Busca, abre y descarga
+                    <p class="mt-2 text-[13px] leading-6 text-slate-500 dark:text-zinc-400">Busca, abre y descarga
                         contenido de Google Drive sin romper el flujo del ERP.</p>
                 </div>
                 <form method="get" class="flex w-full max-w-xl flex-col gap-3 sm:flex-row">
                     <label class="relative flex-1">
                         <span
-                            class="pointer-events-none absolute inset-y-0 left-4 flex items-center text-slate-400 dark:text-slate-500">
+                            class="pointer-events-none absolute inset-y-0 left-4 flex items-center text-slate-400 dark:text-zinc-500">
                             <i class="fas fa-magnifying-glass text-sm"></i>
                         </span>
                         <input type="text" name="q" value="{{ search_query }}"
                             placeholder="Buscar archivos, carpetas o documentos"
-                            class="w-full rounded-2xl border border-slate-200/90 bg-white/90 py-3 pl-11 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 focus:border-sky-400 focus:ring-4 focus:ring-sky-500/10 dark:border-white/10 dark:bg-slate-950/55 dark:text-white dark:placeholder:text-slate-500 dark:focus:border-sky-500/60 dark:focus:ring-sky-500/10">
+                            class="w-full rounded-2xl border border-slate-200/90 bg-white/90 py-3 pl-11 pr-4 text-sm text-slate-900 shadow-sm outline-none transition-all duration-200 placeholder:text-slate-400 focus:border-sky-400 focus:ring-4 focus:ring-sky-500/10 dark:border-white/10 dark:bg-zinc-950/55 dark:text-white dark:placeholder:text-zinc-500 dark:focus:border-sky-500/60 dark:focus:ring-sky-500/10">
                     </label>
                     <div class="grid grid-cols-2 gap-3 sm:flex">
                         <button type="submit"
@@ -353,20 +366,24 @@
                             {% endif %}
                         </div>
                         <div class="min-w-0">
-                            <div class="truncate text-[15px] font-semibold text-slate-950 dark:text-white">{{ file.name }}</div>
-                            <div class="mt-1 break-all text-xs font-medium text-slate-500 dark:text-slate-400">{{ file.mime_type|default:"Desconocido" }}</div>
+                            <div class="truncate text-[15px] font-semibold text-slate-950 dark:text-white">{{ file.name
+                                }}</div>
+                            <div class="mt-1 break-all text-xs font-medium text-slate-500 dark:text-zinc-400">{{
+                                file.mime_type|default:"Desconocido" }}</div>
                         </div>
                     </div>
                     <div
-                        class="flex flex-wrap items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+                        class="flex flex-wrap items-center gap-2 text-xs font-medium text-slate-500 dark:text-zinc-400">
                         <span
-                            class="rounded-full border border-slate-200/80 bg-slate-50/80 px-2.5 py-1 dark:border-white/10 dark:bg-white/[0.04]">{% if file.is_folder %}Carpeta{% else %}Archivo{% endif %}</span>
+                            class="rounded-full border border-slate-200/80 bg-slate-50/80 px-2.5 py-1 dark:border-white/10 dark:bg-white/[0.04]">{%
+                            if file.is_folder %}Carpeta{% else %}Archivo{% endif %}</span>
                         <span
-                            class="rounded-full border border-slate-200/80 bg-slate-50/80 px-2.5 py-1 dark:border-white/10 dark:bg-white/[0.04]">{{ file.modified_time|default:"Sin fecha" }}</span>
+                            class="rounded-full border border-slate-200/80 bg-slate-50/80 px-2.5 py-1 dark:border-white/10 dark:bg-white/[0.04]">{{
+                            file.modified_time|default:"Sin fecha" }}</span>
                     </div>
                 </div>
                 <div class="relative z-10 flex flex-wrap items-center justify-between gap-3">
-                    <div class="text-xs text-slate-400 dark:text-slate-500">
+                    <div class="text-xs text-slate-400 dark:text-zinc-500">
                         {% if file.size %}Tamaño: {{ file.size }} bytes{% else %}Disponible para vista previa{% endif %}
                     </div>
                     <div class="flex flex-wrap gap-2">
@@ -400,7 +417,7 @@
                 </div>
                 <h4 class="mt-6 text-[1.7rem] font-semibold tracking-tight text-slate-950 dark:text-white">No encontré
                     archivos con ese filtro</h4>
-                <p class="mt-3 text-[13px] leading-6 text-slate-500 dark:text-slate-400">Prueba otra búsqueda o limpia
+                <p class="mt-3 text-[13px] leading-6 text-slate-500 dark:text-zinc-400">Prueba otra búsqueda o limpia
                     el término actual para recuperar la vista completa de tu contenido en Google Drive.</p>
                 <div class="mt-6 flex justify-center">
                     <a href="{% url 'drive' %}"
@@ -418,13 +435,13 @@
                 <div
                     class="mx-auto flex h-24 w-24 items-center justify-center rounded-[2rem] border border-white/10 bg-gradient-to-br from-sky-500/12 via-indigo-500/10 to-transparent shadow-[0_18px_40px_-24px_rgba(56,189,248,0.5)]">
                     <div
-                        class="flex h-16 w-16 items-center justify-center rounded-[1.4rem] bg-slate-950 text-white dark:bg-white dark:text-slate-950">
+                        class="flex h-16 w-16 items-center justify-center rounded-[1.4rem] bg-slate-950 text-white dark:bg-white dark:text-zinc-950">
                         <i class="fas fa-cloud-arrow-up text-xl"></i>
                     </div>
                 </div>
                 <h4 class="mt-6 text-[1.7rem] font-semibold tracking-tight text-slate-950 dark:text-white">Conecta una
                     nube y convierte este espacio en tu hub de archivos.</h4>
-                <p class="mt-3 text-[13px] leading-6 text-slate-500 dark:text-slate-400">Tu equipo podrá abrir
+                <p class="mt-3 text-[13px] leading-6 text-slate-500 dark:text-zinc-400">Tu equipo podrá abrir
                     documentos, navegar carpetas y mantener un flujo más ordenado desde el ERP. El onboarding ya está
                     listo para iniciar con Google Drive.</p>
                 <div class="mt-7 flex justify-center">
@@ -442,24 +459,24 @@
 
 <div id="driveOnboardingModal" data-show-onboarding="{% if show_onboarding %}1{% else %}0{% endif %}"
     class="fixed inset-0 z-[70] hidden">
-    <div class="absolute inset-0 bg-slate-950/70 backdrop-blur-sm"></div>
+    <div class="absolute inset-0 bg-zinc-950/70 backdrop-blur-sm"></div>
     <div class="relative min-h-screen flex items-center justify-center px-4 py-8">
         <div
-            class="drive-surface w-full max-w-5xl overflow-hidden rounded-[2rem] bg-white/90 shadow-[0_30px_80px_-32px_rgba(15,23,42,0.7)] dark:bg-slate-950/88">
+            class="drive-surface w-full max-w-5xl overflow-hidden rounded-[2rem] bg-white/90 shadow-[0_30px_80px_-32px_rgba(15,23,42,0.7)] dark:bg-zinc-950/88">
             <div class="border-b border-slate-200/80 px-6 py-6 dark:border-white/10 md:px-8">
                 <div class="flex items-start justify-between gap-4">
                     <div>
                         <div
-                            class="inline-flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/80 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-400">
+                            class="inline-flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/80 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">
                             Onboarding Drive</div>
                         <h3 class="mt-4 text-[1.7rem] font-semibold tracking-tight text-slate-950 dark:text-white">Elige
                             la nube que quieres conectar</h3>
-                        <p class="mt-2 text-[13px] leading-6 text-slate-500 dark:text-slate-400">Google Drive ya
+                        <p class="mt-2 text-[13px] leading-6 text-slate-500 dark:text-zinc-400">Google Drive ya
                             funciona. Dropbox, OneDrive y Box quedan visibles para el flujo comercial y futuras
                             integraciones.</p>
                     </div>
                     <button type="button" data-close-drive-onboarding
-                        class="flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-200/90 bg-white/80 text-slate-600 transition-all duration-200 hover:border-slate-300 hover:bg-white dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-300 dark:hover:border-white/20 dark:hover:bg-white/[0.06]">
+                        class="flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-200/90 bg-white/80 text-slate-600 transition-all duration-200 hover:border-slate-300 hover:bg-white dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300 dark:hover:border-white/20 dark:hover:bg-white/[0.06]">
                         <i class="fas fa-times"></i>
                     </button>
                 </div>
@@ -477,19 +494,20 @@
                                 <div
                                     class="truncate text-base font-semibold tracking-tight text-slate-950 dark:text-white">
                                     {{ provider.name }}</div>
-                                <div class="text-[13px] text-slate-500 dark:text-slate-400">{{ provider.subtitle }}
+                                <div class="text-[13px] text-slate-500 dark:text-zinc-400">{{ provider.subtitle }}
                                 </div>
                             </div>
                         </div>
                         <span
-                            class="inline-flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] {% if provider.connected %}bg-emerald-500/10 text-emerald-500{% elif provider.locked_by_existing %}bg-amber-500/10 text-amber-500{% elif provider.enabled %}bg-sky-500/10 text-sky-500{% else %}bg-slate-500/10 text-slate-500 dark:text-slate-400{% endif %}">
+                            class="inline-flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] {% if provider.connected %}bg-emerald-500/10 text-emerald-500{% elif provider.locked_by_existing %}bg-amber-500/10 text-amber-500{% elif provider.enabled %}bg-sky-500/10 text-sky-500{% else %}bg-slate-500/10 text-slate-500 dark:text-zinc-400{% endif %}">
                             <span
                                 class="h-1.5 w-1.5 rounded-full {% if provider.connected %}bg-emerald-500{% elif provider.locked_by_existing %}bg-amber-500{% elif provider.enabled %}bg-sky-500{% else %}bg-slate-400{% endif %}"></span>
-                            {% if provider.connected %}Conectado{% elif provider.locked_by_existing %}Bloqueado{% else %}{{ provider.badge }}{% endif %}
+                            {% if provider.connected %}Conectado{% elif provider.locked_by_existing %}Bloqueado{% else
+                            %}{{ provider.badge }}{% endif %}
                         </span>
                     </div>
                     <div
-                        class="mt-5 min-h-[76px] rounded-2xl border border-slate-200/80 bg-white/80 px-4 py-3 text-[13px] leading-6 text-slate-600 dark:border-white/10 dark:bg-slate-950/45 dark:text-slate-300">
+                        class="mt-5 min-h-[76px] rounded-2xl border border-slate-200/80 bg-white/80 px-4 py-3 text-[13px] leading-6 text-slate-600 dark:border-white/10 dark:bg-zinc-950/45 dark:text-zinc-300">
                         {% if provider.key == 'google_drive' %}
                         Vincula tu cuenta y empieza a navegar archivos y carpetas desde el ERP.
                         {% elif provider.locked_by_existing %}
@@ -511,7 +529,8 @@
                         <a href="{% url 'drive_google_connect' %}"
                             class="drive-btn drive-btn-dark inline-flex items-center gap-2 px-5">
                             <i class="fab fa-google-drive"></i>
-                            {% if provider.connected %}Google Drive conectado{% else %}Continuar con Google Drive{% endif %}
+                            {% if provider.connected %}Google Drive conectado{% else %}Continuar con Google Drive{%
+                            endif %}
                         </a>
                         {% else %}
                         <button type="button" class="drive-btn drive-btn-disabled inline-flex items-center gap-2 px-5"
