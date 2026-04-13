@@ -39,8 +39,7 @@
 
     .dark .fc-theme-standard td,
     .dark .fc-theme-standard th {
-        border-color: #1e293b !important;
-        /* slate-800 */
+        border-color: #27272a !important;
     }
 
     /* Cabeceras de los días (Lun, Mar...) */
@@ -52,8 +51,7 @@
     }
 
     .dark .fc .fc-col-header-cell {
-        background-color: #0f172a;
-        /* slate-900 */
+        background-color: #18181b;
     }
 
     .fc .fc-col-header-cell-cushion {
@@ -66,7 +64,7 @@
     }
 
     .dark .fc .fc-col-header-cell-cushion {
-        color: #94a3b8 !important;
+        color: #a1a1aa !important;
     }
 
     /* Números de los días en la vista de mes */
@@ -90,7 +88,7 @@
     }
 
     .dark .fc .fc-daygrid-day-number {
-        color: #cbd5e1 !important;
+        color: #e4e4e7 !important;
     }
 
     .fc .fc-day-other .fc-daygrid-day-number {
@@ -99,7 +97,7 @@
     }
 
     .dark .fc .fc-day-other .fc-daygrid-day-number {
-        color: #64748b !important;
+        color: #71717a !important;
     }
 
     .fc .fc-daygrid-day-number:hover {
@@ -107,7 +105,7 @@
     }
 
     .dark .fc .fc-daygrid-day-number:hover {
-        background-color: #334155;
+        background-color: #27272a;
     }
 
     /* Resaltar el día actual (Hoy) */
@@ -116,7 +114,7 @@
     }
 
     .dark .fc .fc-day-today {
-        background-color: rgba(15, 23, 42, 0.4) !important;
+        background-color: rgba(24, 24, 27, 0.6) !important;
     }
 
     .fc .fc-day-today .fc-daygrid-day-number {
@@ -188,7 +186,7 @@
     }
 
     .dark .fc .fc-timegrid-slot-label-cushion {
-        color: #94a3b8 !important;
+        color: #a1a1aa !important;
     }
 
     /* Eventos en vista semana/día */
@@ -200,11 +198,11 @@
 
 {% block content %}
 <div
-    class="h-[calc(100vh-5rem)] flex flex-col bg-white dark:bg-slate-900 rounded-2xl overflow-hidden shadow-sm border border-slate-200 dark:border-slate-800">
+    class="h-[calc(100vh-5rem)] flex flex-col bg-white dark:bg-zinc-900 rounded-2xl overflow-hidden shadow-sm border border-slate-200 dark:border-zinc-800">
 
     <!-- Premium Custom Header -->
     <div
-        class="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 z-10 flex-shrink-0">
+        class="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 z-10 flex-shrink-0">
 
         <!-- Left Side: Brand & Nav Controls -->
         <div class="flex items-center gap-6">
@@ -227,21 +225,21 @@
             <!-- Custom Calendar Nav -->
             <div class="hidden md:flex items-center gap-3 border-l border-slate-200 dark:border-slate-700 pl-6">
                 <button id="btn-today"
-                    class="px-4 py-2 text-sm font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors shadow-sm">
+                    class="px-4 py-2 text-sm font-semibold text-slate-700 dark:text-zinc-200 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded-lg hover:bg-slate-50 dark:hover:bg-zinc-800 transition-colors shadow-sm">
                     Hoy
                 </button>
                 <div
-                    class="flex items-center bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg overflow-hidden shadow-sm">
+                    class="flex items-center bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded-lg overflow-hidden shadow-sm">
                     <button id="btn-prev"
-                        class="p-2 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors">
+                        class="p-2 hover:bg-slate-50 dark:hover:bg-zinc-800 text-slate-600 dark:text-zinc-300 transition-colors">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7">
                             </path>
                         </svg>
                     </button>
-                    <div class="w-px h-5 bg-slate-300 dark:bg-slate-600"></div>
+                    <div class="w-px h-5 bg-slate-300 dark:bg-zinc-700"></div>
                     <button id="btn-next"
-                        class="p-2 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors">
+                        class="p-2 hover:bg-slate-50 dark:hover:bg-zinc-800 text-slate-600 dark:text-zinc-300 transition-colors">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7">
                             </path>
@@ -268,7 +266,7 @@
 
             <!-- View Switcher -->
             <select id="view-selector"
-                class="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 text-sm font-semibold rounded-lg focus:ring-orange-500 focus:border-orange-500 block px-3 py-2 shadow-sm outline-none cursor-pointer">
+                class="bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 text-slate-700 dark:text-zinc-200 text-sm font-semibold rounded-lg focus:ring-orange-500 focus:border-orange-500 block px-3 py-2 shadow-sm outline-none cursor-pointer">
                 <option value="dayGridMonth">Mes</option>
                 <option value="timeGridWeek">Semana</option>
                 <option value="timeGridDay">Día</option>
@@ -293,7 +291,7 @@
     {% endif %}
 
     <!-- Main Calendar Container -->
-    <div class="flex-1 w-full bg-white dark:bg-slate-900 overflow-hidden p-4 md:p-6 flex flex-col">
+    <div class="flex-1 w-full bg-white dark:bg-zinc-900 overflow-hidden p-4 md:p-6 flex flex-col">
         <div id="calendar" class="flex-1 w-full h-full min-h-0"></div>
     </div>
 </div>
