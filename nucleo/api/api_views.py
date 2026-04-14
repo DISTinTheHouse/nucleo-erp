@@ -110,12 +110,18 @@ class MonedaViewSet(viewsets.ModelViewSet):
         user = self.request.user
         # 1. Monedas globales (empresa=None)
         q_global = models.Q(empresa__isnull=True)
-        
+
+        if user.is_superuser:
+            empresa_id = self.request.query_params.get("empresa_id") or self.request.query_params.get("empresa")
+            if empresa_id:
+                return self.queryset.filter(q_global | models.Q(empresa_id=empresa_id))
+            return self.queryset
+
         # 2. Monedas de la empresa del usuario
-        if not user.is_superuser and user.empresa:
+        if user.empresa:
             q_empresa = models.Q(empresa=user.empresa)
             return self.queryset.filter(q_global | q_empresa)
-            
+
         return self.queryset.filter(q_global)
 
     def perform_create(self, serializer):
