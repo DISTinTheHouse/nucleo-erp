@@ -7,15 +7,21 @@
     <title>Iniciar Sesión - ERP Core</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    
     <!-- Fonts -->
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Poppins:wght@300;400;500;600;700&display=swap');
-        
-        body { font-family: 'Inter', sans-serif; }
-        h1, h2, h3, .brand-font { font-family: 'Poppins', sans-serif; }
-    </style>
 
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+
+        h1,
+        h2,
+        h3,
+        .brand-font {
+            font-family: 'Poppins', sans-serif;
+        }
+    </style>
     <!-- Theme Script -->
     <script>
         (function () {
@@ -32,7 +38,6 @@
             window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applySystemTheme);
         })();
     </script>
-
     <script>
         tailwind.config = {
             darkMode: 'class',
@@ -59,8 +64,9 @@
     </script>
 </head>
 
-<body class="h-full flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8 bg-slate-50 dark:bg-black text-slate-900 dark:text-white selection:bg-sky-500 selection:text-white relative overflow-hidden">
-    
+<body
+    class="h-full flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8 bg-slate-50 dark:bg-black text-slate-900 dark:text-white selection:bg-sky-500 selection:text-white relative overflow-hidden">
+
     <!-- Background Gradients -->
     <div class="pointer-events-none fixed inset-0 z-0
               bg-[radial-gradient(110%_70%_at_50%_-10%,rgba(56,189,248,0.28),rgba(255,255,255,0))]
@@ -77,15 +83,17 @@
                     <circle cx="27.294" cy="16" r="4.706" class="fill-current opacity-80" />
                 </svg>
             </div>
-            <h2 class="mt-6 text-center text-3xl font-extrabold text-slate-900 dark:text-white brand-font tracking-tight">
+            <h2
+                class="mt-6 text-center text-3xl font-extrabold text-slate-900 dark:text-white brand-font tracking-tight">
                 ERP Core
             </h2>
             <p class="mt-2 text-center text-sm text-slate-600 dark:text-slate-400">
                 Acceso Administrativo
             </p>
         </div>
-        
-        <div class="bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl py-8 px-4 shadow-2xl sm:rounded-2xl sm:px-10 border border-slate-200 dark:border-white/10">
+
+        <div
+            class="bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl py-8 px-4 shadow-2xl sm:rounded-2xl sm:px-10 border border-slate-200 dark:border-white/10">
             {% if form.errors %}
             <div class="rounded-xl bg-red-50 dark:bg-red-900/20 p-4 mb-6 border border-red-100 dark:border-red-900/30">
                 <div class="flex">
@@ -114,8 +122,7 @@
                         <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                             <i class="fas fa-user text-slate-400 dark:text-slate-500 sm:text-sm"></i>
                         </div>
-                        <input type="text" name="username" id="id_username" required autofocus
-                            class="block w-full pl-10 sm:text-sm rounded-xl py-3
+                        <input type="text" name="username" id="id_username" required autofocus class="block w-full pl-10 sm:text-sm rounded-xl py-3
                                    bg-white dark:bg-black/50 border-slate-300 dark:border-slate-700
                                    text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500
                                    focus:ring-2 focus:ring-sky-500 focus:border-sky-500 transition-all"
@@ -131,8 +138,7 @@
                         <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                             <i class="fas fa-lock text-slate-400 dark:text-slate-500 sm:text-sm"></i>
                         </div>
-                        <input type="password" name="password" id="id_password" required
-                            class="block w-full pl-10 sm:text-sm rounded-xl py-3
+                        <input type="password" name="password" id="id_password" required class="block w-full pl-10 sm:text-sm rounded-xl py-3
                                    bg-white dark:bg-black/50 border-slate-300 dark:border-slate-700
                                    text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500
                                    focus:ring-2 focus:ring-sky-500 focus:border-sky-500 transition-all"
@@ -150,7 +156,7 @@
                 </div>
             </form>
         </div>
-        
+
         <div class="text-center">
             <p class="text-xs text-slate-400 dark:text-slate-600">
                 &copy; 2026 ERP System. Todos los derechos reservados.

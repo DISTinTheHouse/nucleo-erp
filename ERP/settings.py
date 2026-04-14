@@ -58,14 +58,20 @@ INSTALLED_APPS = [
     'produccion',
     'allauth',
     'allauth.account',
-    'auth_kit',
+    'auth_kit', 
     'auth_kit.mfa',
     'drf_spectacular',
 ]
 
 AUTH_KIT = {
-    'USE_MFA': True,  # Enable MFA system
+    'USE_MFA': True,
+    'USER_SERIALIZER': 'usuarios.api.serializers.UsuarioSerializer',
 }
+
+# JWT_AUTH = {
+#     "JWT_AUTH_COOKIE_SECURE": True,     # HTTPS
+#     "JWT_AUTH_COOKIE_HTTPONLY": True,   # no accesible desde JS
+# }
 
 AUTH_USER_MODEL = "usuarios.Usuario"
 
@@ -272,7 +278,7 @@ SPECTACULAR_SETTINGS = {
 # =========================
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = config('CORS_ALLOW_CREDENTIALS', default=True, cast=bool)
-CORS_ALLOWED_ORIGINS = [o for o in config('CORS_ALLOWED_ORIGINS', default='http://localhost:3000,https://localhost:3000').split(',') if o]
+CORS_ALLOWED_ORIGINS = [o for o in config('CORS_ALLOWED_ORIGINS', default='http://localhost:3000,https://localhost:3000, http://localhost:5173').split(',') if o]
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r'^https://.*\.onrender\.com$',
     r'^https://.*\.vercel\.app$',
