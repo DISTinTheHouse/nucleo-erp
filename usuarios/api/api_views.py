@@ -8,6 +8,7 @@ from django.contrib.auth import authenticate
 from django.middleware.csrf import get_token
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import ensure_csrf_cookie
+from auth_kit.jwt_auth import unset_jwt_cookies
 from seguridad.models import UsuarioRol
 from ..models import Usuario
 from .serializers import UsuarioSerializer
@@ -31,6 +32,14 @@ class CSRFCookieView(APIView):
     @method_decorator(ensure_csrf_cookie)
     def get(self, request):
         return Response({"csrfToken": get_token(request)})
+
+class LogoutAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        response = Response({"detail": "ok"})
+        unset_jwt_cookies(response)
+        return response
 
 class LoginAPIView(APIView):
     permission_classes = [AllowAny]

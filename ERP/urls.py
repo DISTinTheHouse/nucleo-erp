@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.urls import path, include
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 from usuarios.views import TwoFactorLoginView, TwoFactorVerifyView
-from usuarios.api.api_views import CSRFCookieView
+from usuarios.api.api_views import CSRFCookieView, LogoutAPIView
 from terceros.views import RfcStatusView, ClientCreateView
 
 urlpatterns = [
@@ -14,6 +14,7 @@ urlpatterns = [
     path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
     # ...
     path('api/auth/csrf/', CSRFCookieView.as_view(), name='auth_csrf'),
+    path('api/auth/logout/', LogoutAPIView.as_view(), name='auth_logout'),
     path('api/auth/', include('auth_kit.urls')),
     path('', TwoFactorLoginView.as_view(), name='login'),
     path('two-factor/', TwoFactorVerifyView.as_view(), name='two_factor_verify'),

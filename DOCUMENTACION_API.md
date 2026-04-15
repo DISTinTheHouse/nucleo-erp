@@ -3,8 +3,16 @@
 ## 🌐 Configuración Base
 
 - **Base URL Desarrollo**: `http://localhost:8003` (o tu IP local `192.168.0.X:8003`)
-- **Autenticación**: Header `Authorization: Bearer <tu_token>` (Excepto Login)
+- **Autenticación (Nuevo)**: JWT en cookies HttpOnly (sin Bearer)
 - **Content-Type**: `application/json` (excepto para subida de archivos)
+- **Fetch (Next.js)**: usar `credentials: "include"` en todas las llamadas
+- **Cookies JWT**:
+  - `auth-jwt` (access)
+  - `auth-refresh-jwt` (refresh)
+- **Producción**: requiere HTTPS para que las cookies `Secure` viajen entre dominios (ej. Vercel → API)
+- **CSRF (obligatorio en POST/PATCH/PUT/DELETE)**:
+  - 1. `GET /api/auth/csrf/` → `{ csrfToken }` y setea cookie `csrftoken`
+  - 2. mandar header `X-CSRFToken: <csrfToken>` en requests con mutación
 
 ## 🏢 Aislamiento por Empresa (Multi-tenant) — Notas Importantes
 
@@ -19,23 +27,38 @@ La mayoría de endpoints operativos están **acotados por la empresa del usuario
 
 ## 🔐 1. Autenticación y Sesión
 
-### Login
+### Login (JWT Cookies + MFA)
 
-Obtén el token de sesión para el usuario.
+Autenticación para Next.js usando cookies (sin `Authorization: Bearer`).
 
-- **Endpoint**: `POST /api/v1/login/`
-- **Body**:
+**0) CSRF**
+
+- **Endpoint**: `GET /api/auth/csrf/`
+- **Respuesta (200 OK)**:
+  ```json
+  { "csrfToken": "..." }
+  ```
+
+**1) Login**
+
+- **Endpoint**: `POST /api/auth/login/`
+- **Body** (nota: en este backend el campo se llama `username` y se envía el correo):
   ```json
   {
-    "email": "admin@empresa.com",
+    "username": "admin@empresa.com",
     "password": "password123"
   }
   ```
-- **Respuesta (200 OK)**:
+- **Respuesta (200 OK) sin MFA**:
+
   ```json
   {
-    "token": "d834958c281321...",
-    "user_id": 1,
+    "access": "jwt",
+    "refresh": "",
+    "access_expiration": "date_time",
+    "refresh_expiration": "date_time",
+    "user": { 
+      "user_id": 1,
     "email": "admin@empresa.com",
     "username": "admin",
     "nombre_completo": "Administrador Sistema",
@@ -44,19 +67,115 @@ Obtén el token de sesión para el usuario.
     "is_admin_empresa": true,
     "empresa_id": 1,
     "permisos": ["R-CONF", "E-CONF", "D-CONF", "R-USU", "..."]
+     }
   }
   ```
-- **Notas importantes para Frontend**:
-  - `permisos` es un arreglo de claves de permiso efectivas para el usuario.
-  - Incluye automáticamente:
-    1. Permisos asignados por Roles.
-    2. Overrides de tipo GRANT (UsuarioPermiso).
-    3. Excluye Overrides de tipo DENY.
-  - Las claves siguen el patrón `X-MODULO`, por ejemplo para el módulo Configuración:
-    - `R-CONF` → Lectura
-    - `E-CONF` → Edición
-    - `D-CONF` → Eliminación
-  - Para usuarios `is_superuser=true` o `is_admin_empresa=true`, el backend concede acceso amplio por rol; el frontend puede tratarlos como “tienen todo”, aunque la lista `permisos` pueda estar vacía.
+
+  - Además del JSON, el backend setea cookies HttpOnly: `auth-jwt` y `auth-refresh-jwt`.
+  - No guardes el `access` en localStorage ni uses Bearer. Para consumir APIs autenticadas: `credentials: "include"`.
+
+- **Respuesta (200 OK) con MFA habilitado**:
+  ```json
+  {
+    "ephemeral_token": "string",
+    "method": "app",
+    "mfa_enabled": true
+  }
+  ```
+
+**2) Verificar MFA**
+
+- **Endpoint**: `POST /api/auth/login/verify/`
+- **Body**:
+  ```json
+  {
+    "ephemeral_token": "string",
+    "code": "123456"
+  }
+  ```
+- **Respuesta (200 OK)**: igual que login sin MFA y setea cookies `auth-jwt` + `auth-refresh-jwt`.
+
+**3) Logout**
+
+- **Endpoint**: `POST /api/auth/logout/`
+- **Respuesta (200 OK)**:
+  ```json
+  { "detail": "ok" }
+  ```
+- Limpia cookies `auth-jwt` y `auth-refresh-jwt` (logout real; JS no puede borrar HttpOnly).
+
+### Ejemplo mínimo (Next.js)
+
+```ts
+const API_URL = process.env.NEXT_PUBLIC_API_URL!;
+
+let csrfToken: string | null = null;
+async function ensureCsrf() {
+  if (csrfToken) return csrfToken;
+  const r = await fetch(`${API_URL}/api/auth/csrf/`, {
+    credentials: "include",
+  });
+  const j = await r.json();
+  csrfToken = j.csrfToken;
+  return csrfToken;
+}
+
+async function apiFetch(path: string, init: RequestInit = {}) {
+  const method = (init.method || "GET").toUpperCase();
+  const headers = new Headers(init.headers);
+  headers.set("Content-Type", "application/json");
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    headers.set("X-CSRFToken", await ensureCsrf());
+  }
+  const r = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers,
+    credentials: "include",
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok)
+    throw Object.assign(new Error("API_ERROR"), { status: r.status, data });
+  return data;
+}
+
+export async function login(username: string, password: string) {
+  const data = await apiFetch("/api/auth/login/", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+  if (data?.mfa_enabled)
+    return { mfaRequired: true, ephemeral_token: data.ephemeral_token };
+  return { mfaRequired: false, user: data.user };
+}
+
+export async function verifyMfa(ephemeral_token: string, code: string) {
+  const data = await apiFetch("/api/auth/login/verify/", {
+    method: "POST",
+    body: JSON.stringify({ ephemeral_token, code }),
+  });
+  return data.user;
+}
+
+export async function logout() {
+  await apiFetch("/api/auth/logout/", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+```
+
+### MFA (configuración desde app)
+
+Para que un usuario active MFA desde un “perfil/seguridad” en Next.js:
+
+- `POST /api/auth/mfa/` con `{ "method": "app" }` → regresa `setup_data.qr_link` + `backup_codes`.
+- `POST /api/auth/mfa/confirm/` con `{ "method": "app", "code": "123456" }` → confirma.
+
+---
+
+### Login (Legacy / Bearer) — Deprecado
+
+El endpoint `POST /api/v1/login/` (Token DRF) sigue existiendo para compatibilidad, pero el frontend nuevo debe usar `/api/auth/*`.
 
 ---
 
