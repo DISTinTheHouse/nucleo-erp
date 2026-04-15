@@ -41,8 +41,13 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.contrib.sites',
+    'allauth',
+    'allauth.account',
     'rest_framework',
     'rest_framework.authtoken',
+    'auth_kit',
+    'auth_kit.mfa',
     'corsheaders',
     'widget_tweaks',
     'nucleo',
@@ -61,6 +66,7 @@ INSTALLED_APPS = [
 ]
 
 AUTH_USER_MODEL = "usuarios.Usuario"
+SITE_ID = 1
 
 
 MIDDLEWARE = [
@@ -71,6 +77,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'allauth.account.middleware.AccountMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'axes.middleware.AxesMiddleware',
@@ -245,7 +252,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # =========================
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'usuarios.backends.BearerTokenAuthentication',
+        'usuarios.backends.JWTCookieAuthenticationWithCSRF',
         'rest_framework.authentication.SessionAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
@@ -288,6 +295,19 @@ LOGIN_URL = '/'
 LOGIN_REDIRECT_URL = 'nucleo:dashboard'
 LOGOUT_REDIRECT_URL = '/'
 
+_default_auth_cookie_secure = IS_VERCEL or ENVIRONMENT.lower() == 'production'
+_default_auth_cookie_samesite = 'None' if _default_auth_cookie_secure else 'Lax'
+AUTH_KIT = {
+    'USE_MFA': True,
+    'USER_SERIALIZER': 'usuarios.api.serializers.UsuarioSerializer',
+    'AUTH_COOKIE_SECURE': config('AUTH_COOKIE_SECURE', default=_default_auth_cookie_secure, cast=bool),
+    'AUTH_COOKIE_SAMESITE': config('AUTH_COOKIE_SAMESITE', default=_default_auth_cookie_samesite),
+}
+
+ACCOUNT_EMAIL_VERIFICATION = 'none'
+ACCOUNT_LOGIN_METHODS = {'email'}
+ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']
+
 TWO_FACTOR_OTP_LENGTH = config('TWO_FACTOR_OTP_LENGTH', default=6, cast=int)
 TWO_FACTOR_OTP_TTL_SECONDS = config('TWO_FACTOR_OTP_TTL_SECONDS', default=300, cast=int)
 TWO_FACTOR_MAX_ATTEMPTS = config('TWO_FACTOR_MAX_ATTEMPTS', default=5, cast=int)
@@ -322,6 +342,7 @@ AUTHENTICATION_BACKENDS = [
     'axes.backends.AxesBackend',
     # Custom Email Backend
     'usuarios.backends.EmailBackend',
+    'allauth.account.auth_backends.AuthenticationBackend',
     # Django ModelBackend is the default authentication backend.
     'django.contrib.auth.backends.ModelBackend',
 ]
@@ -346,8 +367,9 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
 SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
 CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default='Lax')
-CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default='Lax')
+_default_samesite = 'None' if (IS_VERCEL or ENVIRONMENT.lower() == 'production') else 'Lax'
+SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default=_default_samesite)
+CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default=_default_samesite)
 
 if SECURE_SSL_REDIRECT:
     SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=31536000, cast=int)

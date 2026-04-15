@@ -1,6 +1,9 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.backends import ModelBackend
+from rest_framework.authentication import SessionAuthentication
 from rest_framework.authentication import TokenAuthentication
+from auth_kit.app_settings import auth_kit_settings
+from auth_kit.authentication import JWTCookieAuthentication
 
 class BearerTokenAuthentication(TokenAuthentication):
     """
@@ -9,6 +12,16 @@ class BearerTokenAuthentication(TokenAuthentication):
     Esto mejora la compatibilidad con clientes estándar como Postman y Next.js.
     """
     keyword = 'Bearer'
+
+class JWTCookieAuthenticationWithCSRF(JWTCookieAuthentication):
+    def authenticate(self, request):
+        header = self.get_header(request)
+        result = self.authenticate_with_cookie(request, auth_kit_settings.AUTH_JWT_COOKIE_NAME)
+        if result is None:
+            return None
+        if header is None and request.method not in ("GET", "HEAD", "OPTIONS", "TRACE"):
+            SessionAuthentication().enforce_csrf(request)
+        return result
 
 class EmailBackend(ModelBackend):
     """

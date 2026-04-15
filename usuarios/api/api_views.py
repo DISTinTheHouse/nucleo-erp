@@ -5,6 +5,9 @@ from rest_framework import permissions, viewsets, status
 from rest_framework.permissions import AllowAny
 from rest_framework.exceptions import PermissionDenied
 from django.contrib.auth import authenticate
+from django.middleware.csrf import get_token
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import ensure_csrf_cookie
 from seguridad.models import UsuarioRol
 from ..models import Usuario
 from .serializers import UsuarioSerializer
@@ -20,6 +23,14 @@ class IsSuperUserOrReadOnly(permissions.BasePermission):
         if request.method in permissions.SAFE_METHODS:
             return request.user and request.user.is_authenticated
         return request.user and request.user.is_superuser
+
+class CSRFCookieView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    @method_decorator(ensure_csrf_cookie)
+    def get(self, request):
+        return Response({"csrfToken": get_token(request)})
 
 class LoginAPIView(APIView):
     permission_classes = [AllowAny]

@@ -11,6 +11,7 @@ from django.db.models import Q
 from django.utils import timezone
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
+from django.db import transaction
 from datetime import timedelta
 import logging
 import hashlib
@@ -24,6 +25,9 @@ from nucleo.mixins import AuditLogMixin
 from seguridad.models import Permiso, UsuarioPermiso
 from .models import Usuario
 from .forms import UsuarioCreationForm, UsuarioChangeForm
+from auth_kit.mfa.handlers.base import MFAHandlerRegistry
+from auth_kit.mfa.models import MFAMethod
+from pyotp import random_base32
 
 logger = logging.getLogger(__name__)
 
@@ -301,10 +305,51 @@ class TwoFactorLoginView(LoginView):
 
     def form_valid(self, form):
         user = form.get_user()
-        if not getattr(user, "two_factor_enabled", False):
-            return super().form_valid(form)
+        require_mfa = bool(getattr(settings, "AUTH_KIT", {}).get("USE_MFA"))
+        require_mfa = require_mfa and bool(getattr(user, "is_staff", False) or getattr(user, "is_superuser", False))
+        if not require_mfa:
+            if not getattr(user, "two_factor_enabled", False):
+                return super().form_valid(form)
 
         self.request.session.cycle_key()
+
+        if require_mfa:
+            mfa_method = MFAMethod.objects.filter(user=user, is_primary=True, is_active=True).first()
+            setup = False
+            qr_link = None
+            secret = None
+            backup_codes = None
+            if not mfa_method:
+                setup = True
+                with transaction.atomic():
+                    MFAMethod.objects.filter(user=user, name="app").delete()
+                    secret = random_base32()
+                    mfa_method, raw_codes = MFAMethod.objects.create_with_backup_codes(
+                        user=user,
+                        name="app",
+                        secret=secret,
+                        is_primary=True,
+                        is_active=False,
+                    )
+                    MFAMethod.objects.filter(user=user).exclude(pk=mfa_method.pk).update(is_primary=False)
+                    backup_codes = sorted(list(raw_codes))
+                handler = MFAHandlerRegistry.get_handler(mfa_method)
+                qr_link = (handler.initialize_method() or {}).get("qr_link")
+                if not qr_link:
+                    qr_link = handler.initialize_method().get("qr_link")
+
+            self.request.session["mfa_user_id"] = user.pk
+            self.request.session["mfa_backend"] = getattr(user, "backend", "") or ""
+            self.request.session["mfa_next"] = self.get_success_url()
+            self.request.session["mfa_method_id"] = mfa_method.pk if mfa_method else None
+            self.request.session["mfa_setup"] = bool(setup)
+            if qr_link:
+                self.request.session["mfa_qr_link"] = qr_link
+            if secret:
+                self.request.session["mfa_secret"] = secret
+            if backup_codes:
+                self.request.session["mfa_backup_codes"] = backup_codes
+            return redirect("two_factor_verify")
 
         otp_length = int(getattr(settings, "TWO_FACTOR_OTP_LENGTH", 6) or 6)
         otp_ttl_seconds = int(getattr(settings, "TWO_FACTOR_OTP_TTL_SECONDS", 300) or 300)
@@ -357,6 +402,22 @@ class TwoFactorLoginView(LoginView):
 class TwoFactorVerifyView(View):
     template_name = "registration/two_factor.html"
 
+    def _get_mfa_session_state(self, request):
+        user_id = request.session.get("mfa_user_id")
+        method_id = request.session.get("mfa_method_id")
+        if not user_id or not method_id:
+            return None
+        return {
+            "user_id": user_id,
+            "method_id": method_id,
+            "setup": bool(request.session.get("mfa_setup")),
+            "backend": request.session.get("mfa_backend") or None,
+            "next": request.session.get("mfa_next") or getattr(settings, "LOGIN_REDIRECT_URL", "/"),
+            "qr_link": request.session.get("mfa_qr_link"),
+            "secret": request.session.get("mfa_secret"),
+            "backup_codes": request.session.get("mfa_backup_codes") or None,
+        }
+
     def _get_session_state(self, request):
         user_id = request.session.get("two_factor_user_id")
         otp_hash = request.session.get("two_factor_hash")
@@ -379,6 +440,14 @@ class TwoFactorVerifyView(View):
 
     def _clear(self, request):
         for k in [
+            "mfa_user_id",
+            "mfa_backend",
+            "mfa_next",
+            "mfa_method_id",
+            "mfa_setup",
+            "mfa_qr_link",
+            "mfa_secret",
+            "mfa_backup_codes",
             "two_factor_user_id",
             "two_factor_backend",
             "two_factor_hash",
@@ -394,6 +463,27 @@ class TwoFactorVerifyView(View):
                 pass
 
     def get(self, request):
+        mfa_state = self._get_mfa_session_state(request)
+        if mfa_state:
+            mfa_method = MFAMethod.objects.filter(pk=mfa_state["method_id"], user_id=mfa_state["user_id"]).first()
+            if not mfa_method:
+                self._clear(request)
+                return redirect("login")
+            qr_link = mfa_state.get("qr_link")
+            if mfa_state.get("setup") and not qr_link:
+                handler = MFAHandlerRegistry.get_handler(mfa_method)
+                qr_link = (handler.initialize_method() or {}).get("qr_link")
+            secret = mfa_state.get("secret") or getattr(mfa_method, "secret", None)
+            return render(
+                request,
+                self.template_name,
+                {
+                    "mode": "setup" if mfa_state.get("setup") else "verify",
+                    "qr_link": qr_link,
+                    "secret": secret,
+                },
+            )
+
         state = self._get_session_state(request)
         if not state:
             return redirect("login")
@@ -402,9 +492,70 @@ class TwoFactorVerifyView(View):
             messages.error(request, "El código expiró. Inicia sesión nuevamente.")
             return redirect("login")
         debug_code = request.session.get("two_factor_debug_code") if (getattr(settings, "TWO_FACTOR_DEBUG_SHOW_CODE", False) or getattr(settings, "DEBUG", False)) else None
-        return render(request, self.template_name, {"debug_code": debug_code})
+        return render(request, self.template_name, {"mode": "legacy", "debug_code": debug_code})
 
     def post(self, request):
+        mfa_state = self._get_mfa_session_state(request)
+        if mfa_state:
+            mfa_method = MFAMethod.objects.filter(pk=mfa_state["method_id"], user_id=mfa_state["user_id"]).first()
+            if not mfa_method:
+                self._clear(request)
+                messages.error(request, "Usuario inválido. Inicia sesión nuevamente.")
+                return redirect("login")
+
+            if "regenerate" in request.POST and mfa_state.get("setup"):
+                with transaction.atomic():
+                    MFAMethod.objects.filter(user_id=mfa_method.user_id, name="app").delete()
+                    secret = random_base32()
+                    mfa_method, raw_codes = MFAMethod.objects.create_with_backup_codes(
+                        user_id=mfa_method.user_id,
+                        name="app",
+                        secret=secret,
+                        is_primary=True,
+                        is_active=False,
+                    )
+                    MFAMethod.objects.filter(user_id=mfa_method.user_id).exclude(pk=mfa_method.pk).update(is_primary=False)
+                handler = MFAHandlerRegistry.get_handler(mfa_method)
+                qr_link = (handler.initialize_method() or {}).get("qr_link")
+                request.session["mfa_method_id"] = mfa_method.pk
+                request.session["mfa_qr_link"] = qr_link
+                request.session["mfa_secret"] = mfa_method.secret
+                request.session["mfa_backup_codes"] = sorted(list(raw_codes))
+                return redirect("two_factor_verify")
+
+            code = (request.POST.get("code") or "").strip()
+            handler = MFAHandlerRegistry.get_handler(mfa_method)
+            if not handler.validate_code(code):
+                return render(
+                    request,
+                    self.template_name,
+                    {
+                        "mode": "setup" if mfa_state.get("setup") else "verify",
+                        "qr_link": mfa_state.get("qr_link"),
+                        "secret": mfa_state.get("secret") or getattr(mfa_method, "secret", None),
+                        "error": "Código inválido.",
+                    },
+                )
+
+            if mfa_state.get("setup"):
+                with transaction.atomic():
+                    MFAMethod.objects.filter(user_id=mfa_method.user_id).exclude(pk=mfa_method.pk).update(is_primary=False)
+                    MFAMethod.objects.filter(pk=mfa_method.pk).update(is_active=True, is_primary=True)
+                messages.success(request, "Autenticación configurada correctamente.")
+
+            backend = mfa_state.get("backend")
+            next_url = mfa_state.get("next")
+            self._clear(request)
+            user = Usuario.objects.filter(pk=mfa_state["user_id"], is_active=True).first()
+            if not user:
+                messages.error(request, "Usuario inválido. Inicia sesión nuevamente.")
+                return redirect("login")
+            if backend:
+                auth_login(request, user, backend=backend)
+            else:
+                auth_login(request, user)
+            return redirect(next_url)
+
         state = self._get_session_state(request)
         if not state:
             return redirect("login")
@@ -457,7 +608,7 @@ class TwoFactorVerifyView(View):
         if not hmac.compare_digest(candidate_hash, state["otp_hash"]):
             request.session["two_factor_attempts"] = attempts + 1
             debug_code = request.session.get("two_factor_debug_code") if (getattr(settings, "TWO_FACTOR_DEBUG_SHOW_CODE", False) or getattr(settings, "DEBUG", False)) else None
-            return render(request, self.template_name, {"error": "Código inválido.", "debug_code": debug_code})
+            return render(request, self.template_name, {"mode": "legacy", "error": "Código inválido.", "debug_code": debug_code})
 
         try:
             user = Usuario.objects.get(pk=state["user_id"], is_active=True)
