@@ -316,12 +316,12 @@ class TwoFactorLoginView(LoginView):
 
         if require_mfa:
             try:
-                mfa_method = MFAMethod.objects.filter(user=user, is_primary=True).order_by("-is_active", "-id").first()
-                setup = (not mfa_method) or (not bool(getattr(mfa_method, "is_active", False))) or (getattr(mfa_method, "name", None) != "app")
+                mfa_method = MFAMethod.objects.filter(user=user, name="app").order_by("-is_active", "-is_primary", "-id").first()
+                setup = (not mfa_method) or (not bool(getattr(mfa_method, "is_active", False)))
                 qr_link = None
                 secret = None
                 backup_codes = None
-                if setup and (not mfa_method or getattr(mfa_method, "name", None) != "app"):
+                if setup and not mfa_method:
                     with transaction.atomic():
                         MFAMethod.objects.filter(user=user, name="app").delete()
                         secret = random_base32()
@@ -329,7 +329,7 @@ class TwoFactorLoginView(LoginView):
                             user=user,
                             name="app",
                             secret=secret,
-                            is_primary=True,
+                            is_primary=False,
                             is_active=False,
                         )
                         MFAMethod.objects.filter(user=user).exclude(pk=mfa_method.pk).update(is_primary=False)
@@ -550,7 +550,7 @@ class TwoFactorVerifyView(View):
                         user_id=mfa_method.user_id,
                         name="app",
                         secret=secret,
-                        is_primary=True,
+                        is_primary=False,
                         is_active=False,
                     )
                     MFAMethod.objects.filter(user_id=mfa_method.user_id).exclude(pk=mfa_method.pk).update(is_primary=False)
