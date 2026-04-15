@@ -84,146 +84,125 @@
             </div>
             <h2
                 class="mt-6 text-center text-3xl font-extrabold text-slate-900 dark:text-white brand-font tracking-tight">
-                {% if mode == "setup" %}Configurar Autenticación{% elif mode == "legacy" %}Verificación{% else %}Verificación{% endif %}
+                {% if mode == "setup" %}Configurar Autenticación{% else %}Verificación{% endif %}
             </h2>
             <p class="mt-2 text-center text-sm text-slate-600 dark:text-slate-400">
                 {% if mode == "setup" %}
-                Escanea el QR con tu app de autenticación y confirma con el código
-                {% elif mode == "legacy" %}
                 Ingresa el código enviado para completar el acceso
                 {% else %}
                 Ingresa el código de tu app de autenticación para completar el acceso
                 {% endif %}
             </p>
-        </div>
 
-        <div
-            class="bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl py-8 px-4 shadow-2xl sm:rounded-2xl sm:px-10 border border-slate-200 dark:border-white/10">
-            {% if messages %}
-            <div class="space-y-3 mb-6">
-                {% for message in messages %}
-                <div class="rounded-xl p-4 border
+            <div
+                class="bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl py-8 px-4 shadow-2xl sm:rounded-2xl sm:px-10 border border-slate-200 dark:border-white/10">
+                {% if messages %}
+                <div class="space-y-3 mb-6">
+                    {% for message in messages %}
+                    <div class="rounded-xl p-4 border
                             {% if message.tags == 'success' %}bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-900/30 text-emerald-900 dark:text-emerald-200{% endif %}
                             {% if message.tags == 'error' %}bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-900/30 text-red-900 dark:text-red-200{% endif %}
                             {% if message.tags == 'info' %}bg-sky-50 dark:bg-sky-900/20 border-sky-200 dark:border-sky-900/30 text-sky-900 dark:text-sky-200{% endif %}
                             {% if message.tags == 'warning' %}bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-900/30 text-amber-900 dark:text-amber-200{% endif %}
                             ">
-                    <div class="text-sm font-medium">{{ message }}</div>
-                </div>
-                {% endfor %}
-            </div>
-            {% endif %}
-
-            {% if mode == "setup" and qr_link %}
-            <div class="rounded-2xl border border-slate-200 dark:border-white/10 bg-white/70 dark:bg-black/30 p-5 mb-6">
-                <div class="text-sm font-semibold text-slate-900 dark:text-white mb-3">QR de configuración</div>
-                <input type="hidden" id="qr_link_value" value="{{ qr_link|escape }}">
-                <div class="flex items-center justify-center">
-                    <canvas id="qrCanvas"
-                        class="rounded-xl border border-slate-200 dark:border-white/10 bg-white p-2"></canvas>
-                </div>
-                {% if secret %}
-                <div class="mt-4 text-xs text-slate-600 dark:text-slate-400">
-                    Si no puedes escanear el QR, agrega la clave manualmente:
-                </div>
-                <div
-                    class="mt-2 font-mono text-xs break-all rounded-xl bg-slate-50 dark:bg-black/40 border border-slate-200 dark:border-white/10 p-3 text-slate-800 dark:text-slate-200">
-                    {{ secret }}
+                        <div class="text-sm font-medium">{{ message }}</div>
+                    </div>
+                    {% endfor %}
                 </div>
                 {% endif %}
-            </div>
-            <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
-            <script>
-                    (function () {
-                        var el = document.getElementById('qr_link_value');
-                        var canvas = document.getElementById('qrCanvas');
-                        if (!el || !canvas || !window.QRCode) return;
-                        var value = el.value || '';
-                        if (!value) return;
-                        window.QRCode.toCanvas(canvas, value, { width: 220, margin: 1 }, function () { });
-                    })();
-            </script>
-            {% endif %}
 
-            {% if error %}
-            <div class="rounded-xl bg-red-50 dark:bg-red-900/20 p-4 mb-6 border border-red-100 dark:border-red-900/30">
-                <div class="flex">
-                    <div class="flex-shrink-0">
-                        <i class="fas fa-exclamation-circle text-red-400 dark:text-red-500"></i>
+                {% if mode == "setup" %}
+                <div
+                    class="rounded-2xl border border-slate-200 dark:border-white/10 bg-white/70 dark:bg-black/30 p-5 mb-6">
+                    <div class="text-sm font-semibold text-slate-900 dark:text-white mb-3">QR de configuración</div>
+                    <div class="flex items-center justify-center">
+                        {% if qr_img %}
+                        <img src="{{ qr_img }}" alt="QR MFA"
+                            class="rounded-xl border border-slate-200 dark:border-white/10 bg-white p-2 w-[220px] h-[220px]" />
+                        {% else %}
+                        <div class="text-xs text-slate-600 dark:text-slate-400">
+                            No se pudo generar el QR. Usa "Generar nuevo QR".
+                        </div>
+                        {% endif %}
                     </div>
-                    <div class="ml-3">
-                        <h3 class="text-sm font-medium text-red-800 dark:text-red-300">
-                            Error de verificación
-                        </h3>
-                        <div class="mt-2 text-sm text-red-700 dark:text-red-400">
-                            <p>{{ error }}</p>
+                </div>
+                {% endif %}
+
+                {% if error %}
+                <div
+                    class="rounded-xl bg-red-50 dark:bg-red-900/20 p-4 mb-6 border border-red-100 dark:border-red-900/30">
+                    <div class="flex">
+                        <div class="flex-shrink-0">
+                            <i class="fas fa-exclamation-circle text-red-400 dark:text-red-500"></i>
+                        </div>
+                        <div class="ml-3">
+                            <h3 class="text-sm font-medium text-red-800 dark:text-red-300">
+                                Error de verificación
+                            </h3>
+                            <div class="mt-2 text-sm text-red-700 dark:text-red-400">
+                                <p>{{ error }}</p>
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
-            {% endif %}
+                {% endif %}
 
-            <form class="space-y-6" method="post">
-                {% csrf_token %}
-                <div>
-                    <label for="id_code" class="block text-sm font-medium text-slate-700 dark:text-slate-300">
-                        Código
-                    </label>
-                    <div class="mt-1 relative rounded-md shadow-sm">
-                        <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fas fa-shield-halved text-slate-400 dark:text-slate-500 sm:text-sm"></i>
-                        </div>
-                        <input type="text" name="code" id="id_code" required autofocus inputmode="numeric"
-                            autocomplete="one-time-code" class="block w-full pl-10 sm:text-sm rounded-xl py-3
+                <form class="space-y-6" method="post">
+                    {% csrf_token %}
+                    <div>
+                        <label for="id_code" class="block text-sm font-medium text-slate-700 dark:text-slate-300">
+                            Código
+                        </label>
+                        <div class="mt-1 relative rounded-md shadow-sm">
+                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                <i class="fas fa-shield-halved text-slate-400 dark:text-slate-500 sm:text-sm"></i>
+                            </div>
+                            <input type="text" name="code" id="id_code" required autofocus inputmode="numeric"
+                                autocomplete="one-time-code" class="block w-full pl-10 sm:text-sm rounded-xl py-3
                                    bg-white dark:bg-black/50 border-slate-300 dark:border-slate-700
                                    text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500
                                    focus:ring-2 focus:ring-sky-500 focus:border-sky-500 transition-all"
-                            placeholder="******">
+                                placeholder="******">
+                        </div>
                     </div>
-                </div>
 
-                <div class="flex items-center justify-between gap-3">
-                    <button type="submit" name="verify" value="1"
-                        class="w-full flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-lg shadow-sky-500/20 text-sm font-bold text-white
+                    <div class="flex items-center justify-between gap-3">
+                        <button type="submit" name="verify" value="1"
+                            class="w-full flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-lg shadow-sky-500/20 text-sm font-bold text-white
                                bg-gradient-to-r from-sky-500 to-sky-600 hover:from-sky-600 hover:to-sky-700
                                focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500 transition-all transform hover:-translate-y-0.5">
-                        Verificar
-                    </button>
-                </div>
+                            Verificar
+                        </button>
+                    </div>
 
-                <div class="flex items-center justify-between">
-                    {% if mode == "setup" %}
-                    <button type="submit" name="regenerate" value="1"
-                        class="text-sm font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors">
-                        Generar nuevo QR
-                    </button>
-                    {% elif mode == "legacy" %}
-                    <button type="submit" name="resend" value="1"
-                        class="text-sm font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors">
-                        Reenviar código
-                    </button>
-                    {% elif mode == "verify" %}
-                    <button type="submit" name="regenerate" value="1"
-                        class="text-sm font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors">
-                        Reconfigurar (mostrar QR)
-                    </button>
-                    {% else %}
-                    <span class="text-sm font-medium text-slate-500 dark:text-slate-500"></span>
-                    {% endif %}
-                    <a href="{% url 'login' %}"
-                        class="text-sm font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors">
-                        Volver al login
-                    </a>
-                </div>
-            </form>
-        </div>
+                    <div class="flex items-center justify-between">
+                        {% if mode == "setup" %}
+                        <button type="submit" name="regenerate" value="1"
+                            class="text-sm font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors">
+                            Generar nuevo QR
+                        </button>
+                        {% elif mode == "verify" %}
+                        <button type="submit" name="regenerate" value="1"
+                            class="text-sm font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors">
+                            Reconfigurar (mostrar QR)
+                        </button>
+                        {% else %}
+                        <span class="text-sm font-medium text-slate-500 dark:text-slate-500"></span>
+                        {% endif %}
+                        <a href="{% url 'login' %}"
+                            class="text-sm font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors">
+                            Volver al login
+                        </a>
+                    </div>
+                </form>
+            </div>
 
-        <div class="text-center">
-            <p class="text-xs text-slate-400 dark:text-slate-600">
-                &copy; 2026 ERP System. Todos los derechos reservados.
-            </p>
+            <div class="text-center">
+                <p class="text-xs text-slate-400 dark:text-slate-600">
+                    &copy; 2026 ERP System. Todos los derechos reservados.
+                </p>
+            </div>
         </div>
-    </div>
 </body>
 
 </html>

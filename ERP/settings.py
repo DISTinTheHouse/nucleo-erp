@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 import os
+import sys
 from pathlib import Path
 from decouple import config
 import dj_database_url
@@ -27,6 +28,7 @@ SECRET_KEY = config('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=False, cast=bool)
+RUNNING_DEV_SERVER = 'runserver' in sys.argv
 
 # ALLOWED_HOSTS defined in environment
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='127.0.0.1').split(',')
@@ -299,7 +301,7 @@ LOGIN_URL = '/'
 LOGIN_REDIRECT_URL = 'nucleo:dashboard'
 LOGOUT_REDIRECT_URL = '/'
 
-_default_auth_cookie_secure = IS_VERCEL or ENVIRONMENT.lower() == 'production'
+_default_auth_cookie_secure = (IS_VERCEL or ENVIRONMENT.lower() == 'production') and (not DEBUG) and (not RUNNING_DEV_SERVER)
 _default_auth_cookie_samesite = 'None' if _default_auth_cookie_secure else 'Lax'
 AUTH_KIT = {
     'USE_MFA': True,
@@ -365,13 +367,15 @@ SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = config('X_FRAME_OPTIONS', default='DENY')
 
-USE_X_FORWARDED_HOST = config('USE_X_FORWARDED_HOST', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+_secure_env = IS_VERCEL or ENVIRONMENT.lower() == 'production'
+_secure_cookie_default = _secure_env and (not DEBUG) and (not RUNNING_DEV_SERVER)
+USE_X_FORWARDED_HOST = config('USE_X_FORWARDED_HOST', default=_secure_env, cast=bool)
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-_default_samesite = 'None' if (IS_VERCEL or ENVIRONMENT.lower() == 'production') else 'Lax'
+SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=_secure_cookie_default, cast=bool)
+SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=_secure_cookie_default, cast=bool)
+CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=_secure_cookie_default, cast=bool)
+_default_samesite = 'None' if _secure_cookie_default else 'Lax'
 SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default=_default_samesite)
 CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default=_default_samesite)
 
