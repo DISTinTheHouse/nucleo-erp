@@ -68,6 +68,10 @@ INSTALLED_APPS = [
 AUTH_USER_MODEL = "usuarios.Usuario"
 SITE_ID = 1
 
+MIGRATION_MODULES = {
+    "mfa": "ERP.mfa_migrations",
+}
+
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
