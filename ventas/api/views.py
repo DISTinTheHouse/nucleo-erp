@@ -407,6 +407,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         if not getattr(user, "is_superuser", False) and not empresa:
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
+        def _is_empty_json(value):
+            return value in (None, "", [], {})
+
         def _merge_detalle(rows):
             agrupado = {}
             for row in rows:
@@ -440,17 +443,17 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         or t.get("lleva_reflejante")
                         or t.get("lleva_serigrafia")
                     )
-                    if agg.get("reflejante_config") is None:
+                    if _is_empty_json(agg.get("reflejante_config")):
                         cfg = t.get("reflejante_config")
-                        if cfg is None:
+                        if _is_empty_json(cfg):
                             cfg = t.get("serigrafia_config")
-                        if cfg is not None:
+                        if not _is_empty_json(cfg):
                             agg["reflejante_config"] = cfg
                     agg["lleva_corte_manga"] = bool(agg.get("lleva_corte_manga") or t.get("lleva_corte_manga"))
-                    if agg.get("corte_manga_config") is None and t.get("corte_manga_config") is not None:
+                    if _is_empty_json(agg.get("corte_manga_config")) and not _is_empty_json(t.get("corte_manga_config")):
                         agg["corte_manga_config"] = t.get("corte_manga_config")
                     agg["lleva_cambio_talla"] = bool(agg.get("lleva_cambio_talla") or t.get("lleva_cambio_talla"))
-                    if agg.get("cambio_talla_config") is None and t.get("cambio_talla_config") is not None:
+                    if _is_empty_json(agg.get("cambio_talla_config")) and not _is_empty_json(t.get("cambio_talla_config")):
                         agg["cambio_talla_config"] = t.get("cambio_talla_config")
                 entry["tallas"] = list(by_talla.values())
 
@@ -486,13 +489,13 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         raise ValidationError({"detalle": "Falta bordado_config en una talla marcada con lleva_bordado=true."})
                     lleva_reflejante = bool(t.get("lleva_reflejante") or t.get("lleva_serigrafia"))
                     reflejante_config = t.get("reflejante_config")
-                    if reflejante_config is None:
+                    if _is_empty_json(reflejante_config):
                         reflejante_config = t.get("serigrafia_config")
-                    if lleva_reflejante and reflejante_config is None:
+                    if lleva_reflejante and _is_empty_json(reflejante_config):
                         raise ValidationError({"detalle": "Falta reflejante_config en una talla marcada con lleva_reflejante=true."})
-                    if t.get("lleva_corte_manga") and t.get("corte_manga_config") is None:
+                    if t.get("lleva_corte_manga") and _is_empty_json(t.get("corte_manga_config")):
                         raise ValidationError({"detalle": "Falta corte_manga_config en una talla marcada con lleva_corte_manga=true."})
-                    if t.get("lleva_cambio_talla") and t.get("cambio_talla_config") is None:
+                    if t.get("lleva_cambio_talla") and _is_empty_json(t.get("cambio_talla_config")):
                         raise ValidationError({"detalle": "Falta cambio_talla_config en una talla marcada con lleva_cambio_talla=true."})
                     CotizacionDetalleTalla.objects.create(
                         cotizacion_detalle=cot_det,
