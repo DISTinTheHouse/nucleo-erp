@@ -6,7 +6,7 @@ django-cors-headers==4.9.0
 django-filter==25.2
 django-widget-tweaks==1.5.1
 djangorestframework==3.16.1
-pillow==12.2.0
+pillow==12.1.1
 psycopg[binary]==3.2.13
 python-decouple==3.8
 sqlparse==0.5.5
@@ -18,7 +18,3 @@ drf-spectacular==0.28.0
 PyYAML==6.0.1
 uritemplate==4.1.1
 openpyxl==3.1.5
-django-allauth==65.15.1
-drf-auth-kit==1.1.4
-pyotp==2.9.0
-qrcode==8.2

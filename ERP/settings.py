@@ -11,7 +11,6 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 import os
-import sys
 from pathlib import Path
 from decouple import config
 import dj_database_url
@@ -28,7 +27,6 @@ SECRET_KEY = config('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=False, cast=bool)
-RUNNING_DEV_SERVER = 'runserver' in sys.argv
 
 # ALLOWED_HOSTS defined in environment
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='127.0.0.1').split(',')
@@ -43,13 +41,8 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'django.contrib.sites',
-    'allauth',
-    'allauth.account',
     'rest_framework',
     'rest_framework.authtoken',
-    'auth_kit',
-    'auth_kit.mfa',
     'corsheaders',
     'widget_tweaks',
     'nucleo',
@@ -68,11 +61,6 @@ INSTALLED_APPS = [
 ]
 
 AUTH_USER_MODEL = "usuarios.Usuario"
-SITE_ID = 1
-
-MIGRATION_MODULES = {
-    "mfa": "ERP.mfa_migrations",
-}
 
 
 MIDDLEWARE = [
@@ -83,7 +71,6 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'allauth.account.middleware.AccountMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'axes.middleware.AxesMiddleware',
@@ -258,7 +245,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # =========================
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'usuarios.backends.JWTCookieAuthenticationWithCSRF',
+        'usuarios.backends.BearerTokenAuthentication',
         'rest_framework.authentication.SessionAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
@@ -301,19 +288,6 @@ LOGIN_URL = '/'
 LOGIN_REDIRECT_URL = 'nucleo:dashboard'
 LOGOUT_REDIRECT_URL = '/'
 
-_default_auth_cookie_secure = (IS_VERCEL or ENVIRONMENT.lower() == 'production') and (not DEBUG) and (not RUNNING_DEV_SERVER)
-_default_auth_cookie_samesite = 'None' if _default_auth_cookie_secure else 'Lax'
-AUTH_KIT = {
-    'USE_MFA': True,
-    'USER_SERIALIZER': 'usuarios.api.serializers.UsuarioSerializer',
-    'AUTH_COOKIE_SECURE': config('AUTH_COOKIE_SECURE', default=_default_auth_cookie_secure, cast=bool),
-    'AUTH_COOKIE_SAMESITE': config('AUTH_COOKIE_SAMESITE', default=_default_auth_cookie_samesite),
-}
-
-ACCOUNT_EMAIL_VERIFICATION = 'none'
-ACCOUNT_LOGIN_METHODS = {'email'}
-ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']
-
 TWO_FACTOR_OTP_LENGTH = config('TWO_FACTOR_OTP_LENGTH', default=6, cast=int)
 TWO_FACTOR_OTP_TTL_SECONDS = config('TWO_FACTOR_OTP_TTL_SECONDS', default=300, cast=int)
 TWO_FACTOR_MAX_ATTEMPTS = config('TWO_FACTOR_MAX_ATTEMPTS', default=5, cast=int)
@@ -348,7 +322,6 @@ AUTHENTICATION_BACKENDS = [
     'axes.backends.AxesBackend',
     # Custom Email Backend
     'usuarios.backends.EmailBackend',
-    'allauth.account.auth_backends.AuthenticationBackend',
     # Django ModelBackend is the default authentication backend.
     'django.contrib.auth.backends.ModelBackend',
 ]
@@ -367,17 +340,14 @@ SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = config('X_FRAME_OPTIONS', default='DENY')
 
-_secure_env = IS_VERCEL or ENVIRONMENT.lower() == 'production'
-_secure_cookie_default = _secure_env and (not DEBUG) and (not RUNNING_DEV_SERVER)
-USE_X_FORWARDED_HOST = config('USE_X_FORWARDED_HOST', default=_secure_env, cast=bool)
+USE_X_FORWARDED_HOST = config('USE_X_FORWARDED_HOST', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=_secure_cookie_default, cast=bool)
-SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=_secure_cookie_default, cast=bool)
-CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=_secure_cookie_default, cast=bool)
-_default_samesite = 'None' if _secure_cookie_default else 'Lax'
-SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default=_default_samesite)
-CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default=_default_samesite)
+SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default='Lax')
+CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default='Lax')
 
 if SECURE_SSL_REDIRECT:
     SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=31536000, cast=int)
