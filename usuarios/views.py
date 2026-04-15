@@ -12,6 +12,7 @@ from django.utils import timezone
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.db import transaction
+from django.db.utils import OperationalError, ProgrammingError
 from datetime import timedelta
 import logging
 import hashlib
@@ -314,29 +315,39 @@ class TwoFactorLoginView(LoginView):
         self.request.session.cycle_key()
 
         if require_mfa:
-            mfa_method = MFAMethod.objects.filter(user=user, is_primary=True, is_active=True).first()
-            setup = False
-            qr_link = None
-            secret = None
-            backup_codes = None
-            if not mfa_method:
-                setup = True
-                with transaction.atomic():
-                    MFAMethod.objects.filter(user=user, name="app").delete()
-                    secret = random_base32()
-                    mfa_method, raw_codes = MFAMethod.objects.create_with_backup_codes(
-                        user=user,
-                        name="app",
-                        secret=secret,
-                        is_primary=True,
-                        is_active=False,
-                    )
-                    MFAMethod.objects.filter(user=user).exclude(pk=mfa_method.pk).update(is_primary=False)
-                    backup_codes = sorted(list(raw_codes))
-                handler = MFAHandlerRegistry.get_handler(mfa_method)
-                qr_link = (handler.initialize_method() or {}).get("qr_link")
-                if not qr_link:
-                    qr_link = handler.initialize_method().get("qr_link")
+            try:
+                mfa_method = MFAMethod.objects.filter(user=user, is_primary=True).order_by("-is_active", "-id").first()
+                setup = (not mfa_method) or (not bool(getattr(mfa_method, "is_active", False))) or (getattr(mfa_method, "name", None) != "app")
+                qr_link = None
+                secret = None
+                backup_codes = None
+                if setup and (not mfa_method or getattr(mfa_method, "name", None) != "app"):
+                    with transaction.atomic():
+                        MFAMethod.objects.filter(user=user, name="app").delete()
+                        secret = random_base32()
+                        mfa_method, raw_codes = MFAMethod.objects.create_with_backup_codes(
+                            user=user,
+                            name="app",
+                            secret=secret,
+                            is_primary=True,
+                            is_active=False,
+                        )
+                        MFAMethod.objects.filter(user=user).exclude(pk=mfa_method.pk).update(is_primary=False)
+                        backup_codes = sorted(list(raw_codes))
+                elif setup and mfa_method:
+                    secret = getattr(mfa_method, "secret", None)
+
+                if setup and mfa_method:
+                    handler = MFAHandlerRegistry.get_handler(mfa_method)
+                    qr_link = (handler.initialize_method() or {}).get("qr_link")
+            except (OperationalError, ProgrammingError):
+                logger.exception("MFA no disponible (error de base de datos).")
+                messages.error(self.request, "MFA no disponible. Contacta al administrador.")
+                return redirect("login")
+            except Exception:
+                logger.exception("Error inesperado en MFA durante login.")
+                messages.error(self.request, "No se pudo iniciar MFA. Intenta nuevamente.")
+                return redirect("login")
 
             self.request.session["mfa_user_id"] = user.pk
             self.request.session["mfa_backend"] = getattr(user, "backend", "") or ""
@@ -465,20 +476,36 @@ class TwoFactorVerifyView(View):
     def get(self, request):
         mfa_state = self._get_mfa_session_state(request)
         if mfa_state:
-            mfa_method = MFAMethod.objects.filter(pk=mfa_state["method_id"], user_id=mfa_state["user_id"]).first()
+            try:
+                mfa_method = MFAMethod.objects.filter(pk=mfa_state["method_id"], user_id=mfa_state["user_id"]).first()
+            except (OperationalError, ProgrammingError):
+                logger.exception("MFA no disponible (error de base de datos).")
+                self._clear(request)
+                messages.error(request, "MFA no disponible. Contacta al administrador.")
+                return redirect("login")
+            except Exception:
+                logger.exception("Error inesperado en MFA (GET /two-factor/).")
+                self._clear(request)
+                messages.error(request, "Ocurrió un error al cargar MFA. Intenta nuevamente.")
+                return redirect("login")
+
             if not mfa_method:
                 self._clear(request)
                 return redirect("login")
+
+            setup = bool(mfa_state.get("setup")) or (not bool(getattr(mfa_method, "is_active", False)))
             qr_link = mfa_state.get("qr_link")
-            if mfa_state.get("setup") and not qr_link:
+            if setup and not qr_link:
                 handler = MFAHandlerRegistry.get_handler(mfa_method)
                 qr_link = (handler.initialize_method() or {}).get("qr_link")
+                if qr_link:
+                    request.session["mfa_qr_link"] = qr_link
             secret = mfa_state.get("secret") or getattr(mfa_method, "secret", None)
             return render(
                 request,
                 self.template_name,
                 {
-                    "mode": "setup" if mfa_state.get("setup") else "verify",
+                    "mode": "setup" if setup else "verify",
                     "qr_link": qr_link,
                     "secret": secret,
                 },
@@ -497,13 +524,25 @@ class TwoFactorVerifyView(View):
     def post(self, request):
         mfa_state = self._get_mfa_session_state(request)
         if mfa_state:
-            mfa_method = MFAMethod.objects.filter(pk=mfa_state["method_id"], user_id=mfa_state["user_id"]).first()
+            try:
+                mfa_method = MFAMethod.objects.filter(pk=mfa_state["method_id"], user_id=mfa_state["user_id"]).first()
+            except (OperationalError, ProgrammingError):
+                logger.exception("MFA no disponible (error de base de datos).")
+                self._clear(request)
+                messages.error(request, "MFA no disponible. Contacta al administrador.")
+                return redirect("login")
+            except Exception:
+                logger.exception("Error inesperado en MFA (POST /two-factor/).")
+                self._clear(request)
+                messages.error(request, "Ocurrió un error al validar MFA. Intenta nuevamente.")
+                return redirect("login")
+
             if not mfa_method:
                 self._clear(request)
                 messages.error(request, "Usuario inválido. Inicia sesión nuevamente.")
                 return redirect("login")
 
-            if "regenerate" in request.POST and mfa_state.get("setup"):
+            if "regenerate" in request.POST:
                 with transaction.atomic():
                     MFAMethod.objects.filter(user_id=mfa_method.user_id, name="app").delete()
                     secret = random_base32()
@@ -518,6 +557,7 @@ class TwoFactorVerifyView(View):
                 handler = MFAHandlerRegistry.get_handler(mfa_method)
                 qr_link = (handler.initialize_method() or {}).get("qr_link")
                 request.session["mfa_method_id"] = mfa_method.pk
+                request.session["mfa_setup"] = True
                 request.session["mfa_qr_link"] = qr_link
                 request.session["mfa_secret"] = mfa_method.secret
                 request.session["mfa_backup_codes"] = sorted(list(raw_codes))
@@ -542,6 +582,10 @@ class TwoFactorVerifyView(View):
                     MFAMethod.objects.filter(user_id=mfa_method.user_id).exclude(pk=mfa_method.pk).update(is_primary=False)
                     MFAMethod.objects.filter(pk=mfa_method.pk).update(is_active=True, is_primary=True)
                 messages.success(request, "Autenticación configurada correctamente.")
+            elif not bool(getattr(mfa_method, "is_active", False)):
+                with transaction.atomic():
+                    MFAMethod.objects.filter(user_id=mfa_method.user_id).exclude(pk=mfa_method.pk).update(is_primary=False)
+                    MFAMethod.objects.filter(pk=mfa_method.pk).update(is_active=True, is_primary=True)
 
             backend = mfa_state.get("backend")
             next_url = mfa_state.get("next")
