@@ -434,9 +434,24 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     agg["lleva_bordado"] = bool(agg.get("lleva_bordado") or t.get("lleva_bordado"))
                     if agg.get("bordado_config") is None and t.get("bordado_config") is not None:
                         agg["bordado_config"] = t.get("bordado_config")
-                    agg["lleva_serigrafia"] = bool(agg.get("lleva_serigrafia") or t.get("lleva_serigrafia"))
-                    if agg.get("serigrafia_config") is None and t.get("serigrafia_config") is not None:
-                        agg["serigrafia_config"] = t.get("serigrafia_config")
+                    agg["lleva_reflejante"] = bool(
+                        agg.get("lleva_reflejante")
+                        or agg.get("lleva_serigrafia")
+                        or t.get("lleva_reflejante")
+                        or t.get("lleva_serigrafia")
+                    )
+                    if agg.get("reflejante_config") is None:
+                        cfg = t.get("reflejante_config")
+                        if cfg is None:
+                            cfg = t.get("serigrafia_config")
+                        if cfg is not None:
+                            agg["reflejante_config"] = cfg
+                    agg["lleva_corte_manga"] = bool(agg.get("lleva_corte_manga") or t.get("lleva_corte_manga"))
+                    if agg.get("corte_manga_config") is None and t.get("corte_manga_config") is not None:
+                        agg["corte_manga_config"] = t.get("corte_manga_config")
+                    agg["lleva_cambio_talla"] = bool(agg.get("lleva_cambio_talla") or t.get("lleva_cambio_talla"))
+                    if agg.get("cambio_talla_config") is None and t.get("cambio_talla_config") is not None:
+                        agg["cambio_talla_config"] = t.get("cambio_talla_config")
                 entry["tallas"] = list(by_talla.values())
 
             return list(agrupado.values())
@@ -469,8 +484,16 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         raise ValidationError({"detalle": f"Talla inválida: {t['talla']}"})
                     if t.get("lleva_bordado") and t.get("bordado_config") is None:
                         raise ValidationError({"detalle": "Falta bordado_config en una talla marcada con lleva_bordado=true."})
-                    if t.get("lleva_serigrafia") and t.get("serigrafia_config") is None:
-                        raise ValidationError({"detalle": "Falta serigrafia_config en una talla marcada con lleva_serigrafia=true."})
+                    lleva_reflejante = bool(t.get("lleva_reflejante") or t.get("lleva_serigrafia"))
+                    reflejante_config = t.get("reflejante_config")
+                    if reflejante_config is None:
+                        reflejante_config = t.get("serigrafia_config")
+                    if lleva_reflejante and reflejante_config is None:
+                        raise ValidationError({"detalle": "Falta reflejante_config en una talla marcada con lleva_reflejante=true."})
+                    if t.get("lleva_corte_manga") and t.get("corte_manga_config") is None:
+                        raise ValidationError({"detalle": "Falta corte_manga_config en una talla marcada con lleva_corte_manga=true."})
+                    if t.get("lleva_cambio_talla") and t.get("cambio_talla_config") is None:
+                        raise ValidationError({"detalle": "Falta cambio_talla_config en una talla marcada con lleva_cambio_talla=true."})
                     CotizacionDetalleTalla.objects.create(
                         cotizacion_detalle=cot_det,
                         talla=talla,
@@ -479,8 +502,12 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         subtotal_talla=0,
                         lleva_bordado=bool(t.get("lleva_bordado")),
                         bordado_config=t.get("bordado_config"),
-                        lleva_serigrafia=bool(t.get("lleva_serigrafia")),
-                        serigrafia_config=t.get("serigrafia_config"),
+                        lleva_reflejante=lleva_reflejante,
+                        reflejante_config=reflejante_config,
+                        lleva_corte_manga=bool(t.get("lleva_corte_manga")),
+                        corte_manga_config=t.get("corte_manga_config"),
+                        lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
+                        cambio_talla_config=t.get("cambio_talla_config"),
                     )
 
         def _save_servicios_extras(cotizacion_obj, rows):
@@ -640,8 +667,12 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     subtotal_talla=t.subtotal_talla,
                     lleva_bordado=t.lleva_bordado,
                     bordado_config=t.bordado_config,
-                    lleva_serigrafia=t.lleva_serigrafia,
-                    serigrafia_config=t.serigrafia_config,
+                    lleva_reflejante=t.lleva_reflejante,
+                    reflejante_config=t.reflejante_config,
+                    lleva_corte_manga=t.lleva_corte_manga,
+                    corte_manga_config=t.corte_manga_config,
+                    lleva_cambio_talla=t.lleva_cambio_talla,
+                    cambio_talla_config=t.cambio_talla_config,
                 )
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id"):
             PedidoServicioExtra.objects.create(
@@ -734,8 +765,12 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     subtotal_talla=t.subtotal_talla,
                     lleva_bordado=t.lleva_bordado,
                     bordado_config=t.bordado_config,
-                    lleva_serigrafia=t.lleva_serigrafia,
-                    serigrafia_config=t.serigrafia_config,
+                    lleva_reflejante=t.lleva_reflejante,
+                    reflejante_config=t.reflejante_config,
+                    lleva_corte_manga=t.lleva_corte_manga,
+                    corte_manga_config=t.corte_manga_config,
+                    lleva_cambio_talla=t.lleva_cambio_talla,
+                    cambio_talla_config=t.cambio_talla_config,
                 )
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id"):
             PedidoServicioExtra.objects.create(
@@ -847,6 +882,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     subtotal_linea=det.get("subtotal_linea") or 0,
                 )
                 for t in det.get("tallas") or []:
+                    lleva_reflejante = bool(t.get("lleva_reflejante") or t.get("lleva_serigrafia"))
+                    reflejante_config = t.get("reflejante_config")
+                    if reflejante_config is None:
+                        reflejante_config = t.get("serigrafia_config")
                     CotizacionDetalleTalla.objects.create(
                         cotizacion_detalle=cot_det,
                         talla_id=t.get("talla"),
@@ -855,8 +894,12 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         subtotal_talla=t.get("subtotal_talla") or 0,
                         lleva_bordado=bool(t.get("lleva_bordado")),
                         bordado_config=t.get("bordado_config"),
-                        lleva_serigrafia=bool(t.get("lleva_serigrafia")),
-                        serigrafia_config=t.get("serigrafia_config"),
+                        lleva_reflejante=lleva_reflejante,
+                        reflejante_config=reflejante_config,
+                        lleva_corte_manga=bool(t.get("lleva_corte_manga")),
+                        corte_manga_config=t.get("corte_manga_config"),
+                        lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
+                        cambio_talla_config=t.get("cambio_talla_config"),
                     )
             for s in snap_servicios:
                 CotizacionServicioExtra.objects.create(

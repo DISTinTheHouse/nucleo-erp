@@ -155,8 +155,12 @@ class CotizacionDetalleTalla(models.Model):
     subtotal_talla = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     lleva_bordado = models.BooleanField(default=False)
     bordado_config = models.JSONField(null=True, blank=True)
-    lleva_serigrafia = models.BooleanField(default=False)
-    serigrafia_config = models.JSONField(null=True, blank=True)
+    lleva_reflejante = models.BooleanField(default=False)
+    reflejante_config = models.JSONField(null=True, blank=True)
+    lleva_corte_manga = models.BooleanField(default=False)
+    corte_manga_config = models.JSONField(null=True, blank=True)
+    lleva_cambio_talla = models.BooleanField(default=False)
+    cambio_talla_config = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = "cotizacion_detalle_talla"
@@ -349,8 +353,12 @@ class PedidoDetalleTalla(models.Model):
     subtotal_talla = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     lleva_bordado = models.BooleanField(default=False)
     bordado_config = models.JSONField(null=True, blank=True)
-    lleva_serigrafia = models.BooleanField(default=False)
-    serigrafia_config = models.JSONField(null=True, blank=True)
+    lleva_reflejante = models.BooleanField(default=False)
+    reflejante_config = models.JSONField(null=True, blank=True)
+    lleva_corte_manga = models.BooleanField(default=False)
+    corte_manga_config = models.JSONField(null=True, blank=True)
+    lleva_cambio_talla = models.BooleanField(default=False)
+    cambio_talla_config = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = "pedido_detalle_talla"
