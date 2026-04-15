@@ -27,159 +27,6 @@ from .forms import UsuarioCreationForm, UsuarioChangeForm
 
 logger = logging.getLogger(__name__)
 
-def _normalize_phone(raw):
-    raw = str(raw or "").strip()
-    if not raw:
-        return ""
-    allowed = set("0123456789+")
-    cleaned = "".join(ch for ch in raw if ch in allowed)
-    if cleaned.startswith("00"):
-        cleaned = "+" + cleaned[2:]
-    return cleaned
-
-def _send_two_factor_code(user, code):
-    telefono = _normalize_phone(getattr(user, "telefono", ""))
-    sms_enabled = bool(getattr(settings, "TWO_FACTOR_SMS_ENABLED", False))
-    twilio_sid = str(getattr(settings, "TWILIO_ACCOUNT_SID", "") or "").strip()
-    twilio_token = str(getattr(settings, "TWILIO_AUTH_TOKEN", "") or "").strip()
-    twilio_from = _normalize_phone(getattr(settings, "TWILIO_FROM_NUMBER", ""))
-
-    if sms_enabled and telefono and twilio_sid and twilio_token and twilio_from:
-        url = f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Messages.json"
-        data = urlencode({"To": telefono, "From": twilio_from, "Body": f"Tu código de acceso es: {code}"}).encode("utf-8")
-        auth = base64.b64encode(f"{twilio_sid}:{twilio_token}".encode("utf-8")).decode("ascii")
-        req = Request(url, data=data, method="POST", headers={"Authorization": f"Basic {auth}"})
-        try:
-            with urlopen(req, timeout=10) as _:
-                return {"ok": True, "channel": "sms"}
-        except (HTTPError, URLError, TimeoutError, ValueError):
-            logger.exception("Error enviando 2FA por SMS (Twilio).")
-
-    email = str(getattr(user, "email", "") or "").strip()
-    if email:
-        brand = str(getattr(settings, "TWO_FACTOR_EMAIL_BRAND", "") or "").strip() or "ERP Core"
-        subject = str(getattr(settings, "TWO_FACTOR_EMAIL_SUBJECT", "") or "").strip() or f"{brand} - Código de verificación"
-        message = f"Tu código de acceso es: {code}"
-        from_email = (
-            (getattr(settings, "DEFAULT_FROM_EMAIL", "") or "").strip()
-            or (getattr(settings, "EMAIL_HOST_USER", "") or "").strip()
-            or None
-        )
-        try:
-            html = f"""\
-<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>{subject}</title>
-</head>
-<body style="margin:0;padding:0;background:#020617;font-family:Inter,Segoe UI,Roboto,Arial,sans-serif;color:#e2e8f0;">
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#020617;padding:28px 12px;">
-    <tr>
-      <td align="center">
-        <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width:600px;width:100%;">
-          <tr>
-            <td align="center" style="padding:10px 0 18px 0;">
-              <table role="presentation" cellspacing="0" cellpadding="0">
-                <tr>
-                  <td align="center" style="padding:0 0 10px 0;">
-                    <table role="presentation" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:8px 8px;">
-                      <tr>
-                        <td></td>
-                        <td align="center">
-                          <span style="display:inline-block;width:10px;height:10px;border-radius:999px;background:#38bdf8;opacity:0.8;"></span>
-                        </td>
-                        <td></td>
-                      </tr>
-                      <tr>
-                        <td align="center">
-                          <span style="display:inline-block;width:10px;height:10px;border-radius:999px;background:#38bdf8;opacity:0.8;"></span>
-                        </td>
-                        <td></td>
-                        <td align="center">
-                          <span style="display:inline-block;width:10px;height:10px;border-radius:999px;background:#38bdf8;opacity:0.8;"></span>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td></td>
-                        <td align="center">
-                          <span style="display:inline-block;width:10px;height:10px;border-radius:999px;background:#38bdf8;opacity:0.8;"></span>
-                        </td>
-                        <td></td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-                <tr>
-                  <td align="center" style="font-size:30px;line-height:36px;font-weight:800;color:#ffffff;padding:0 0 6px 0;">
-                    {brand}
-                  </td>
-                </tr>
-                <tr>
-                  <td align="center" style="font-size:13px;line-height:18px;color:#94a3b8;">
-                    Acceso Administrativo
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-          <tr>
-            <td align="center">
-              <table role="presentation" width="560" cellspacing="0" cellpadding="0" style="max-width:560px;width:100%;background:#0b1220;border:1px solid rgba(148,163,184,0.22);border-radius:18px;overflow:hidden;">
-                <tr>
-                  <td style="padding:22px 22px 6px 22px;">
-                    <div style="font-size:18px;line-height:26px;font-weight:800;color:#ffffff;margin:0 0 8px 0;">Verificación</div>
-                    <div style="font-size:13px;line-height:18px;color:#94a3b8;margin:0 0 14px 0;">Ingresa este código para completar el acceso</div>
-                    <div style="text-align:center;margin:18px 0 14px 0;">
-                      <div style="display:inline-block;padding:14px 18px;border-radius:14px;border:1px solid rgba(148,163,184,0.22);background:rgba(2,6,23,0.55);">
-                        <span style="font-size:30px;letter-spacing:6px;font-weight:900;color:#ffffff;">{code}</span>
-                      </div>
-                    </div>
-                    <div style="font-size:12px;line-height:18px;color:#94a3b8;margin:0 0 18px 0;">
-                      Si no solicitaste este código, ignora este correo.
-                    </div>
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:0 22px 22px 22px;">
-                    <div style="display:block;background:#0ea5e9;background-image:linear-gradient(90deg,#0ea5e9,#2563eb);border-radius:14px;text-align:center;">
-                      <span style="display:block;padding:12px 14px;color:#ffffff;font-weight:800;font-size:14px;letter-spacing:0.2px;">
-                        Código válido por pocos minutos
-                      </span>
-                    </div>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-          <tr>
-            <td align="center" style="padding:18px 0 0 0;">
-              <div style="font-size:12px;line-height:18px;color:#475569;">
-                &copy; 2026 ERP System. Todos los derechos reservados.
-              </div>
-              <div style="font-size:12px;line-height:18px;color:#475569;margin-top:6px;">
-                Este es un mensaje automático. No respondas a este correo.
-              </div>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-"""
-            email_msg = EmailMultiAlternatives(subject=subject, body=message, from_email=from_email, to=[email])
-            email_msg.attach_alternative(html, "text/html")
-            sent_count = email_msg.send(fail_silently=False)
-            if sent_count:
-                return {"ok": True, "channel": "email"}
-        except Exception:
-            logger.exception("Error enviando 2FA por correo (SMTP).")
-
-    return {"ok": False, "channel": None}
-
 class SuperuserRequiredMixin(UserPassesTestMixin):
     def test_func(self):
         return self.request.user.is_authenticated and self.request.user.is_superuser
@@ -354,123 +201,123 @@ class TwoFactorLoginView(LoginView):
 
         return redirect("two_factor_verify")
 
-class TwoFactorVerifyView(View):
-    template_name = "registration/two_factor.html"
+# class TwoFactorVerifyView(View):
+#     template_name = "registration/two_factor.html"
 
-    def _get_session_state(self, request):
-        user_id = request.session.get("two_factor_user_id")
-        otp_hash = request.session.get("two_factor_hash")
-        salt = request.session.get("two_factor_salt")
-        expires_at_raw = request.session.get("two_factor_expires_at")
-        if not user_id or not otp_hash or not salt or not expires_at_raw:
-            return None
-        try:
-            expires_at = timezone.datetime.fromisoformat(expires_at_raw)
-            if timezone.is_naive(expires_at):
-                expires_at = timezone.make_aware(expires_at, timezone.get_current_timezone())
-        except Exception:
-            return None
-        return {
-            "user_id": user_id,
-            "otp_hash": otp_hash,
-            "salt": salt,
-            "expires_at": expires_at,
-        }
+#     def _get_session_state(self, request):
+#         user_id = request.session.get("two_factor_user_id")
+#         otp_hash = request.session.get("two_factor_hash")
+#         salt = request.session.get("two_factor_salt")
+#         expires_at_raw = request.session.get("two_factor_expires_at")
+#         if not user_id or not otp_hash or not salt or not expires_at_raw:
+#             return None
+#         try:
+#             expires_at = timezone.datetime.fromisoformat(expires_at_raw)
+#             if timezone.is_naive(expires_at):
+#                 expires_at = timezone.make_aware(expires_at, timezone.get_current_timezone())
+#         except Exception:
+#             return None
+#         return {
+#             "user_id": user_id,
+#             "otp_hash": otp_hash,
+#             "salt": salt,
+#             "expires_at": expires_at,
+#         }
 
-    def _clear(self, request):
-        for k in [
-            "two_factor_user_id",
-            "two_factor_backend",
-            "two_factor_hash",
-            "two_factor_salt",
-            "two_factor_expires_at",
-            "two_factor_attempts",
-            "two_factor_next",
-            "two_factor_debug_code",
-        ]:
-            try:
-                del request.session[k]
-            except KeyError:
-                pass
+#     def _clear(self, request):
+#         for k in [
+#             "two_factor_user_id",
+#             "two_factor_backend",
+#             "two_factor_hash",
+#             "two_factor_salt",
+#             "two_factor_expires_at",
+#             "two_factor_attempts",
+#             "two_factor_next",
+#             "two_factor_debug_code",
+#         ]:
+#             try:
+#                 del request.session[k]
+#             except KeyError:
+#                 pass
 
-    def get(self, request):
-        state = self._get_session_state(request)
-        if not state:
-            return redirect("login")
-        if timezone.now() > state["expires_at"]:
-            self._clear(request)
-            messages.error(request, "El código expiró. Inicia sesión nuevamente.")
-            return redirect("login")
-        debug_code = request.session.get("two_factor_debug_code") if (getattr(settings, "TWO_FACTOR_DEBUG_SHOW_CODE", False) or getattr(settings, "DEBUG", False)) else None
-        return render(request, self.template_name, {"debug_code": debug_code})
+#     def get(self, request):
+#         state = self._get_session_state(request)
+#         if not state:
+#             return redirect("login")
+#         if timezone.now() > state["expires_at"]:
+#             self._clear(request)
+#             messages.error(request, "El código expiró. Inicia sesión nuevamente.")
+#             return redirect("login")
+#         debug_code = request.session.get("two_factor_debug_code") if (getattr(settings, "TWO_FACTOR_DEBUG_SHOW_CODE", False) or getattr(settings, "DEBUG", False)) else None
+#         return render(request, self.template_name, {"debug_code": debug_code})
 
-    def post(self, request):
-        state = self._get_session_state(request)
-        if not state:
-            return redirect("login")
+#     def post(self, request):
+#         state = self._get_session_state(request)
+#         if not state:
+#             return redirect("login")
 
-        if "resend" in request.POST:
-            otp_length = int(getattr(settings, "TWO_FACTOR_OTP_LENGTH", 6) or 6)
-            otp_ttl_seconds = int(getattr(settings, "TWO_FACTOR_OTP_TTL_SECONDS", 300) or 300)
-            otp_length = max(4, min(10, otp_length))
-            otp_ttl_seconds = max(60, min(3600, otp_ttl_seconds))
-            max_value = 10 ** otp_length
-            otp_code = str(secrets.randbelow(max_value)).zfill(otp_length)
-            salt = secrets.token_hex(16)
-            otp_hash = hashlib.sha256(f"{salt}{otp_code}".encode("utf-8")).hexdigest()
-            expires_at = timezone.now() + timedelta(seconds=otp_ttl_seconds)
+#         if "resend" in request.POST:
+#             otp_length = int(getattr(settings, "TWO_FACTOR_OTP_LENGTH", 6) or 6)
+#             otp_ttl_seconds = int(getattr(settings, "TWO_FACTOR_OTP_TTL_SECONDS", 300) or 300)
+#             otp_length = max(4, min(10, otp_length))
+#             otp_ttl_seconds = max(60, min(3600, otp_ttl_seconds))
+#             max_value = 10 ** otp_length
+#             otp_code = str(secrets.randbelow(max_value)).zfill(otp_length)
+#             salt = secrets.token_hex(16)
+#             otp_hash = hashlib.sha256(f"{salt}{otp_code}".encode("utf-8")).hexdigest()
+#             expires_at = timezone.now() + timedelta(seconds=otp_ttl_seconds)
 
-            request.session["two_factor_hash"] = otp_hash
-            request.session["two_factor_salt"] = salt
-            request.session["two_factor_expires_at"] = expires_at.isoformat()
-            request.session["two_factor_attempts"] = 0
+#             request.session["two_factor_hash"] = otp_hash
+#             request.session["two_factor_salt"] = salt
+#             request.session["two_factor_expires_at"] = expires_at.isoformat()
+#             request.session["two_factor_attempts"] = 0
 
-            debug_show = bool(getattr(settings, "TWO_FACTOR_DEBUG_SHOW_CODE", False))
-            debug_active = bool(debug_show)
-            if debug_active:
-                request.session["two_factor_debug_code"] = otp_code
+#             debug_show = bool(getattr(settings, "TWO_FACTOR_DEBUG_SHOW_CODE", False))
+#             debug_active = bool(debug_show)
+#             if debug_active:
+#                 request.session["two_factor_debug_code"] = otp_code
 
-            user = Usuario.objects.filter(pk=state["user_id"], is_active=True).first()
-            result = _send_two_factor_code(user, otp_code) if user else {"ok": False, "channel": None}
-            if result.get("ok"):
-                messages.success(request, "Código reenviado.")
-            elif debug_active:
-                messages.warning(request, "No se pudo reenviar el código automáticamente; usando modo debug.")
-            else:
-                messages.error(request, "No se pudo reenviar el código. Revisa la configuración de SMS/Email.")
-            return redirect("two_factor_verify")
+#             user = Usuario.objects.filter(pk=state["user_id"], is_active=True).first()
+#             result = _send_two_factor_code(user, otp_code) if user else {"ok": False, "channel": None}
+#             if result.get("ok"):
+#                 messages.success(request, "Código reenviado.")
+#             elif debug_active:
+#                 messages.warning(request, "No se pudo reenviar el código automáticamente; usando modo debug.")
+#             else:
+#                 messages.error(request, "No se pudo reenviar el código. Revisa la configuración de SMS/Email.")
+#             return redirect("two_factor_verify")
 
-        attempts = int(request.session.get("two_factor_attempts") or 0)
-        max_attempts = int(getattr(settings, "TWO_FACTOR_MAX_ATTEMPTS", 5) or 5)
-        if attempts >= max_attempts:
-            self._clear(request)
-            messages.error(request, "Se excedió el número de intentos. Inicia sesión nuevamente.")
-            return redirect("login")
+#         attempts = int(request.session.get("two_factor_attempts") or 0)
+#         max_attempts = int(getattr(settings, "TWO_FACTOR_MAX_ATTEMPTS", 5) or 5)
+#         if attempts >= max_attempts:
+#             self._clear(request)
+#             messages.error(request, "Se excedió el número de intentos. Inicia sesión nuevamente.")
+#             return redirect("login")
 
-        if timezone.now() > state["expires_at"]:
-            self._clear(request)
-            messages.error(request, "El código expiró. Inicia sesión nuevamente.")
-            return redirect("login")
+#         if timezone.now() > state["expires_at"]:
+#             self._clear(request)
+#             messages.error(request, "El código expiró. Inicia sesión nuevamente.")
+#             return redirect("login")
 
-        code = (request.POST.get("code") or "").strip()
-        candidate_hash = hashlib.sha256(f"{state['salt']}{code}".encode("utf-8")).hexdigest()
-        if not hmac.compare_digest(candidate_hash, state["otp_hash"]):
-            request.session["two_factor_attempts"] = attempts + 1
-            debug_code = request.session.get("two_factor_debug_code") if (getattr(settings, "TWO_FACTOR_DEBUG_SHOW_CODE", False) or getattr(settings, "DEBUG", False)) else None
-            return render(request, self.template_name, {"error": "Código inválido.", "debug_code": debug_code})
+#         code = (request.POST.get("code") or "").strip()
+#         candidate_hash = hashlib.sha256(f"{state['salt']}{code}".encode("utf-8")).hexdigest()
+#         if not hmac.compare_digest(candidate_hash, state["otp_hash"]):
+#             request.session["two_factor_attempts"] = attempts + 1
+#             debug_code = request.session.get("two_factor_debug_code") if (getattr(settings, "TWO_FACTOR_DEBUG_SHOW_CODE", False) or getattr(settings, "DEBUG", False)) else None
+#             return render(request, self.template_name, {"error": "Código inválido.", "debug_code": debug_code})
 
-        try:
-            user = Usuario.objects.get(pk=state["user_id"], is_active=True)
-        except Usuario.DoesNotExist:
-            self._clear(request)
-            messages.error(request, "Usuario inválido. Inicia sesión nuevamente.")
-            return redirect("login")
+#         try:
+#             user = Usuario.objects.get(pk=state["user_id"], is_active=True)
+#         except Usuario.DoesNotExist:
+#             self._clear(request)
+#             messages.error(request, "Usuario inválido. Inicia sesión nuevamente.")
+#             return redirect("login")
 
-        backend = request.session.get("two_factor_backend") or None
-        next_url = request.session.get("two_factor_next") or getattr(settings, "LOGIN_REDIRECT_URL", "/")
-        self._clear(request)
-        if backend:
-            auth_login(request, user, backend=backend)
-        else:
-            auth_login(request, user)
-        return redirect(next_url)
+#         backend = request.session.get("two_factor_backend") or None
+#         next_url = request.session.get("two_factor_next") or getattr(settings, "LOGIN_REDIRECT_URL", "/")
+#         self._clear(request)
+#         if backend:
+#             auth_login(request, user, backend=backend)
+#         else:
+#             auth_login(request, user)
+#         return redirect(next_url)

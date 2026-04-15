@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.urls import path, include
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
-from usuarios.views import TwoFactorLoginView, TwoFactorVerifyView
+from django.contrib.auth.views import LoginView
 from terceros.views import RfcStatusView, ClientCreateView
 
 urlpatterns = [
@@ -12,8 +12,7 @@ urlpatterns = [
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
     path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
     # ...
-    path('', TwoFactorLoginView.as_view(), name='login'),
-    path('two-factor/', TwoFactorVerifyView.as_view(), name='two_factor_verify'),
+    path('', LoginView.as_view(template_name='registration/login.html', redirect_authenticated_user=True), name='login'),
     path('core/terceros/validar-rfc/', RfcStatusView.as_view(), name='rfc_status'),
     path('core/terceros/crear-cliente/', ClientCreateView.as_view(), name='facturama_cliente_create'),
     path('', include('nucleo.urls')),
