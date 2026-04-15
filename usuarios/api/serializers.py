@@ -6,10 +6,6 @@ class UsuarioSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False)
     roles = serializers.ListField(child=serializers.IntegerField(), required=False, write_only=True)
     roles_ids = serializers.SerializerMethodField(read_only=True)
-    permisos = serializers.SerializerMethodField(read_only=True)
-    empresa_id = serializers.SerializerMethodField(read_only=True)
-    nombre_completo = serializers.SerializerMethodField(read_only=True)
-    es_admin = serializers.SerializerMethodField(read_only=True)
     
     class Meta:
         model = Usuario
@@ -17,9 +13,7 @@ class UsuarioSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'first_name', 'last_name', 
             'is_active', 'estatus', 'empresa', 'sucursal_default', 
             'sucursales', 'departamentos', 'telefono', 'avatar_url', 
-            'is_admin_empresa', 'is_superuser', 'is_staff',
-            'empresa_id', 'nombre_completo', 'es_admin', 'permisos',
-            'password', 'roles', 'roles_ids', 'date_joined', 'last_login'
+            'is_admin_empresa', 'password', 'roles', 'roles_ids', 'date_joined', 'last_login'
         ]
         read_only_fields = ['date_joined', 'last_login', 'is_active']
         extra_kwargs = {
@@ -32,40 +26,6 @@ class UsuarioSerializer(serializers.ModelSerializer):
         return list(
             UsuarioRol.objects.filter(usuario=obj).values_list('rol_id', flat=True)
         )
-
-    def get_empresa_id(self, obj):
-        return getattr(obj, "empresa_id", None)
-
-    def get_nombre_completo(self, obj):
-        return f"{getattr(obj, 'first_name', '')} {getattr(obj, 'last_name', '')}".strip()
-
-    def get_es_admin(self, obj):
-        return bool(getattr(obj, "is_staff", False) or getattr(obj, "is_superuser", False))
-
-    def get_permisos(self, obj):
-        if getattr(obj, "is_superuser", False) or getattr(obj, "is_admin_empresa", False):
-            return []
-
-        qs_roles = UsuarioRol.objects.filter(
-            usuario=obj,
-            rol__estatus="activo",
-        ).values_list("rol__permisos__clave", flat=True)
-        permisos_roles = set(filter(None, qs_roles))
-
-        permisos_grant = set()
-        permisos_deny = set()
-        overrides = obj.overrides_permisos.select_related("permiso").all()
-        for ov in overrides:
-            clave = getattr(getattr(ov, "permiso", None), "clave", None)
-            if not clave:
-                continue
-            if ov.tipo == "grant":
-                permisos_grant.add(clave)
-            elif ov.tipo == "deny":
-                permisos_deny.add(clave)
-
-        permisos_efectivos = (permisos_roles | permisos_grant) - permisos_deny
-        return sorted(list(permisos_efectivos))
 
     def validate(self, data):
         """

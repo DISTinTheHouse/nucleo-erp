@@ -3,10 +3,8 @@
 ## 🌐 Configuración Base
 
 - **Base URL Desarrollo**: `http://localhost:8003` (o tu IP local `192.168.0.X:8003`)
-- **Autenticación (Nuevo)**: JWT en cookies HttpOnly (sin `Authorization: Bearer`)
+- **Autenticación**: Header `Authorization: Bearer <tu_token>` (Excepto Login)
 - **Content-Type**: `application/json` (excepto para subida de archivos)
-- **Fetch (Next.js)**: siempre `credentials: "include"`
-- **CSRF**: para `POST/PATCH/PUT/DELETE` mandar `X-CSRFToken` (se obtiene con `GET /api/auth/csrf/`)
 
 ## 🏢 Aislamiento por Empresa (Multi-tenant) — Notas Importantes
 
@@ -21,69 +19,44 @@ La mayoría de endpoints operativos están **acotados por la empresa del usuario
 
 ## 🔐 1. Autenticación y Sesión
 
-### Login (JWT Cookies + MFA)
+### Login
 
-**0) CSRF**
+Obtén el token de sesión para el usuario.
 
-- **Endpoint**: `GET /api/auth/csrf/`
-- **Respuesta (200 OK)**:
-  ```json
-  { "csrfToken": "..." }
-  ```
-
-**1) Login**
-
-- **Endpoint**: `POST /api/auth/login/`
-- **Body** (nota: el campo es `username` y se envía el correo):
-  ```json
-  { "username": "admin@empresa.com", "password": "password123" }
-  ```
-- **Respuesta (200 OK) sin MFA**: setea cookies `auth-jwt` + `auth-refresh-jwt` y regresa:
-  ```json
-  {
-    "access": "jwt",
-    "refresh": "",
-    "access_expiration": "date_time",
-    "refresh_expiration": "date_time",
-    "user": {
-      "id": 1,
-      "email": "admin@empresa.com",
-      "username": "admin@empresa.com",
-      "nombre_completo": "Administrador Sistema",
-      "es_admin": true,
-      "is_superuser": true,
-      "is_admin_empresa": true,
-      "empresa_id": 1,
-      "permisos": ["R-CONF", "E-CONF", "D-CONF", "R-USU", "..."]
-    }
-  }
-  ```
-- **Respuesta (200 OK) con MFA habilitado**:
-  ```json
-  { "ephemeral_token": "string", "method": "app", "mfa_enabled": true }
-  ```
-
-**2) Verificar MFA**
-
-- **Endpoint**: `POST /api/auth/login/verify/`
+- **Endpoint**: `POST /api/v1/login/`
 - **Body**:
   ```json
-  { "ephemeral_token": "string", "code": "123456" }
+  {
+    "email": "admin@empresa.com",
+    "password": "password123"
+  }
   ```
-- **Respuesta (200 OK)**: igual que login sin MFA + setea cookies `auth-jwt`/`auth-refresh-jwt`.
-
-**3) Logout**
-
-- **Endpoint**: `POST /api/auth/logout/`
 - **Respuesta (200 OK)**:
   ```json
-  { "detail": "ok" }
+  {
+    "token": "d834958c281321...",
+    "user_id": 1,
+    "email": "admin@empresa.com",
+    "username": "admin",
+    "nombre_completo": "Administrador Sistema",
+    "es_admin": true,
+    "is_superuser": true,
+    "is_admin_empresa": true,
+    "empresa_id": 1,
+    "permisos": ["R-CONF", "E-CONF", "D-CONF", "R-USU", "..."]
+  }
   ```
-
-**Notas de permisos**
-
-- `permisos`: (Roles + GRANT) - DENY.
-- Si `is_superuser=true` o `is_admin_empresa=true` → `permisos` viene vacío `[]` (acceso amplio).
+- **Notas importantes para Frontend**:
+  - `permisos` es un arreglo de claves de permiso efectivas para el usuario.
+  - Incluye automáticamente:
+    1. Permisos asignados por Roles.
+    2. Overrides de tipo GRANT (UsuarioPermiso).
+    3. Excluye Overrides de tipo DENY.
+  - Las claves siguen el patrón `X-MODULO`, por ejemplo para el módulo Configuración:
+    - `R-CONF` → Lectura
+    - `E-CONF` → Edición
+    - `D-CONF` → Eliminación
+  - Para usuarios `is_superuser=true` o `is_admin_empresa=true`, el backend concede acceso amplio por rol; el frontend puede tratarlos como “tienen todo”, aunque la lista `permisos` pueda estar vacía.
 
 ---
 
