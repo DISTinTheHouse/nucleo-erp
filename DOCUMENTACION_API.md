@@ -59,14 +59,14 @@ Autenticación para Next.js usando cookies (sin `Authorization: Bearer`).
     "refresh_expiration": "date_time",
     "user": { 
       "user_id": 1,
-    "email": "admin@empresa.com",
-    "username": "admin",
-    "nombre_completo": "Administrador Sistema",
-    "es_admin": true,
-    "is_superuser": true,
-    "is_admin_empresa": true,
-    "empresa_id": 1,
-    "permisos": ["R-CONF", "E-CONF", "D-CONF", "R-USU", "..."]
+      "email": "admin@empresa.com",
+      "username": "admin",
+      "nombre_completo": "Administrador Sistema",
+      "es_admin": true,
+      "is_superuser": true,
+      "is_admin_empresa": true,
+      "empresa_id": 1,
+      "permisos": ["R-CONF", "E-CONF", "D-CONF", "R-USU", "..."]
      }
   }
   ```
