@@ -28,8 +28,16 @@ SECRET_KEY = config('SECRET_KEY')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=False, cast=bool)
 
+ENVIRONMENT = config('ENVIRONMENT', default='development')
+IS_VERCEL = os.environ.get('VERCEL') == '1'
+
 # ALLOWED_HOSTS defined in environment
-ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='127.0.0.1').split(',')
+ALLOWED_HOSTS = [h.strip() for h in config('ALLOWED_HOSTS', default='localhost,127.0.0.1').split(',') if h.strip()]
+if IS_VERCEL:
+    ALLOWED_HOSTS.append('.vercel.app')
+    vercel_url = os.environ.get('VERCEL_URL')
+    if vercel_url:
+        ALLOWED_HOSTS.append(vercel_url)
 
 
 # Application definition
@@ -70,6 +78,10 @@ AUTH_KIT = {
 }
 
 AUTH_USER_MODEL = "usuarios.Usuario"
+
+MIGRATION_MODULES = {
+    "mfa": "ERP.mfa_migrations",
+}
 
 
 MIDDLEWARE = [
@@ -128,9 +140,6 @@ except OSError:
 DATABASE_URL = config('DATABASE_URL', default='')
 SUPABASE_DATABASE_URL = config('SUPABASE_DATABASE_URL', default='')
 REMOTE_DATABASE_URL = DATABASE_URL or SUPABASE_DATABASE_URL
-
-ENVIRONMENT = config('ENVIRONMENT', default='development')
-IS_VERCEL = os.environ.get('VERCEL') == '1'
 
 # =========================
 # Ventanas y tolerancias
@@ -243,7 +252,7 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
@@ -279,15 +288,18 @@ SPECTACULAR_SETTINGS = {
 # =========================
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = config('CORS_ALLOW_CREDENTIALS', default=True, cast=bool)
-CORS_ALLOWED_ORIGINS = [o for o in config('CORS_ALLOWED_ORIGINS', default='http://localhost:3000,https://localhost:3000,https://localhost:5432').split(',') if o]
+CORS_ALLOWED_ORIGINS = [o.strip() for o in config('CORS_ALLOWED_ORIGINS', default='http://localhost:3000,https://localhost:3000').split(',') if o.strip()]
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r'^https://.*\.onrender\.com$',
     r'^https://.*\.vercel\.app$',
-    r'^https://localhost:5432$',
 ]
 CORS_URLS_REGEX = r'^/api/.*$'
 
-CSRF_TRUSTED_ORIGINS = [o for o in config('CSRF_TRUSTED_ORIGINS', default='https://*.onrender.com,https://*.vercel.app,https://localhost:3000,http://localhost:3000,https://localhost:5432').split(',') if o]
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in config('CSRF_TRUSTED_ORIGINS', default='https://*.onrender.com,https://*.vercel.app,https://localhost:3000,http://localhost:3000').split(',') if o.strip()]
+if IS_VERCEL:
+    vercel_url = os.environ.get('VERCEL_URL')
+    if vercel_url:
+        CSRF_TRUSTED_ORIGINS.append(f"https://{vercel_url}")
 
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o-mini')
