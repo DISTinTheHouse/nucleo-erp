@@ -7,6 +7,9 @@ class Usuario(AbstractUser):
         ACTIVO = "activo", "Activo"
         BLOQUEADO = "bloqueado", "Bloqueado"
 
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = ['username']
+
     empresa = models.ForeignKey(
         "nucleo.Empresa",
         on_delete=models.PROTECT,
@@ -51,6 +54,7 @@ class Usuario(AbstractUser):
 
     is_admin_empresa = models.BooleanField(default=False)
     estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ACTIVO)
+    email = models.EmailField(unique=True)
 
     two_factor_enabled = models.BooleanField(default=False)
     avatar_url = models.URLField(blank=True, null=True)

@@ -94,6 +94,7 @@ class LoginAPIView(APIView):
         else:
             return Response({'error': 'Credenciales inválidas'}, status=status.HTTP_401_UNAUTHORIZED)
 
+            
 class UsuarioViewSet(viewsets.ModelViewSet):
     """
     API endpoint para ver y editar usuarios.

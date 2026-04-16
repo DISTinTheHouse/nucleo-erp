@@ -11,8 +11,10 @@ urlpatterns = [
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
     path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
-    # ...
+    # login 
     path('', LoginView.as_view(template_name='registration/login.html', redirect_authenticated_user=True), name='login'),
+    path('api/auth/', include('auth_kit.urls')),
+    # ...
     path('core/terceros/validar-rfc/', RfcStatusView.as_view(), name='rfc_status'),
     path('core/terceros/crear-cliente/', ClientCreateView.as_view(), name='facturama_cliente_create'),
     path('', include('nucleo.urls')),

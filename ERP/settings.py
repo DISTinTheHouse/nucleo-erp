@@ -57,8 +57,17 @@ INSTALLED_APPS = [
     'ventas',
     'compras',
     'produccion',
+    'allauth',
+    'allauth.account',
+    'auth_kit',
+    'auth_kit.mfa',
     'drf_spectacular',
 ]
+
+AUTH_KIT = {
+    'USE_MFA': True,
+    'USER_SERIALIZER': 'usuarios.api.serializers.UsuarioSerializer',
+}
 
 AUTH_USER_MODEL = "usuarios.Usuario"
 
@@ -76,7 +85,10 @@ MIDDLEWARE = [
     'axes.middleware.AxesMiddleware',
     'nucleo.middleware.APILoggingMiddleware',
     'nucleo.middleware.NoCacheMiddleware',
+    'allauth.account.middleware.AccountMiddleware',
 ]
+
+
 
 ROOT_URLCONF = 'ERP.urls'
 
@@ -245,8 +257,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # =========================
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'usuarios.backends.BearerTokenAuthentication',
-        'rest_framework.authentication.SessionAuthentication',
+        'auth_kit.authentication.JWTCookieAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -336,23 +347,23 @@ AXES_LOCKOUT_PARAMETERS = ['username', 'ip_address']
 # =========================
 # SECURITY HARDENING
 # =========================
-SECURE_BROWSER_XSS_FILTER = True
-SECURE_CONTENT_TYPE_NOSNIFF = True
-X_FRAME_OPTIONS = config('X_FRAME_OPTIONS', default='DENY')
+# SECURE_BROWSER_XSS_FILTER = True
+# SECURE_CONTENT_TYPE_NOSNIFF = True
+# X_FRAME_OPTIONS = config('X_FRAME_OPTIONS', default='DENY')
 
-USE_X_FORWARDED_HOST = config('USE_X_FORWARDED_HOST', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+# USE_X_FORWARDED_HOST = config('USE_X_FORWARDED_HOST', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+# SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default='Lax')
-CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default='Lax')
+# SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+# SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+# CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
+# SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default='Lax')
+# CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default='Lax')
 
-if SECURE_SSL_REDIRECT:
-    SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=31536000, cast=int)
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = config('SECURE_HSTS_INCLUDE_SUBDOMAINS', default=True, cast=bool)
-    SECURE_HSTS_PRELOAD = config('SECURE_HSTS_PRELOAD', default=True, cast=bool)
+# if SECURE_SSL_REDIRECT:
+#     SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=31536000, cast=int)
+#     SECURE_HSTS_INCLUDE_SUBDOMAINS = config('SECURE_HSTS_INCLUDE_SUBDOMAINS', default=True, cast=bool)
+#     SECURE_HSTS_PRELOAD = config('SECURE_HSTS_PRELOAD', default=True, cast=bool)
 
 # =========================
 # LOGGING CONFIGURATION
