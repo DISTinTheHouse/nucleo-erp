@@ -119,6 +119,5 @@ class Usuario(AbstractUser):
         
         if tiene_por_rol:
             return True
-            
         # 5. Si no tiene por rol, verificar si tiene un GRANT explícito
         return qs_overrides.filter(tipo="grant").exists()
