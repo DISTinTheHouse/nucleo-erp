@@ -58,7 +58,6 @@ class Producto(models.Model):
     impuesto = models.ForeignKey(Impuesto, on_delete=models.CASCADE, related_name="productos", null=True, blank=True)
     sat_prodserv = models.ForeignKey(SatClaveProdServ, on_delete=models.CASCADE, related_name="productos", null=True, blank=True)
     sat_unidad = models.ForeignKey(SatClaveUnidad, on_delete=models.CASCADE, related_name="productos", null=True, blank=True)
-    sku = models.CharField(max_length=50, blank=True, default="", help_text="Stock Keeping Unit (Código interno)")
     nombre = models.CharField(max_length=100)
     descripcion = models.CharField(max_length=150, blank=True, default="")
     tipo = models.CharField(max_length=35, blank=True, default="")
@@ -93,4 +92,17 @@ class ProductoVariante(models.Model):
 
     def __str__(self):
         return f"{self.producto.nombre} - {self.color.nombre} - {self.talla.nombre}"
+
+class VarianteProductoProduccion(models.Model):
+    empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="variantes_produccion")
+    op = models.ForeignKey('produccion.OrdenProduccion', on_delete=models.CASCADE, related_name="variantes_produccion")
+    producto_base = models.ForeignKey(Producto, on_delete=models.CASCADE, null=True, blank=True, related_name="variantes_produccion")
+    color = models.ForeignKey(Color, on_delete=models.CASCADE, null=True, blank=True, related_name="variantes_produccion")
+    talla = models.ForeignKey(Talla, on_delete=models.CASCADE, null=True, blank=True, related_name="variantes_produccion")
+
+    class Meta:
+        db_table = "variantes_producto_produccion"
+        verbose_name = "Variante Producto Produccion"
+        verbose_name_plural = "Variantes Producto Produccion"
+    
 

@@ -37,7 +37,6 @@ class TallaAdmin(admin.ModelAdmin):
 @admin.register(Producto)
 class ProductoAdmin(admin.ModelAdmin):
     list_display = (
-        "sku",
         "nombre",
         "empresa",
         "categoria_producto",
