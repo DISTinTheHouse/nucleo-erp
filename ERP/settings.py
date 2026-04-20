@@ -370,8 +370,8 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
 SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
 CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool)
-SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default='Lax')
-CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default='Lax')
+SESSION_COOKIE_SAMESITE = config('SESSION_COOKIE_SAMESITE', default='None')
+CSRF_COOKIE_SAMESITE = config('CSRF_COOKIE_SAMESITE', default='None')
 
 if SECURE_SSL_REDIRECT:
     SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=31536000, cast=int)
