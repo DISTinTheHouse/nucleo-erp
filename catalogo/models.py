@@ -12,7 +12,7 @@ class TipoProducto(models.Model):
 class CategoriaProducto(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="categorias_producto")
     nombre = models.CharField(max_length=100)
-    codigo = models.CharField(max_length=50)
+    codigo = models.CharField(max_length=3)
     descripcion = models.CharField(max_length=150)
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -28,6 +28,7 @@ class CategoriaProducto(models.Model):
 
 class Color(models.Model):
     nombre = models.CharField(max_length=50)
+    codigo = models.CharField(max_length=3)
     codigo_hex = models.CharField(max_length=7)
     activo = models.BooleanField(default=True)
 
