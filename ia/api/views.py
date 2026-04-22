@@ -1035,6 +1035,7 @@ def _cookie_samesite() -> str:
 IA_GOOGLE_OAUTH_STATE_COOKIE = "ia_google_oauth_state"
 IA_GOOGLE_OAUTH_USER_COOKIE = "ia_google_oauth_user"
 IA_GOOGLE_OAUTH_NEXT_COOKIE = "ia_google_oauth_next"
+IA_GOOGLE_OAUTH_STATE_SALT = "ia-google-oauth-state"
 
 
 def _clean_next_url(value: str | None) -> str:
@@ -1070,11 +1071,16 @@ class GoogleOAuthConnectAPIView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        state = secrets.token_urlsafe(24)
+        next_url = _clean_next_url(request.data.get("next") or request.query_params.get("next"))
+        state_payload = {
+            "uid": getattr(request.user, "id", None),
+            "next": next_url,
+            "nonce": secrets.token_urlsafe(16),
+        }
+        state = signing.dumps(state_payload, salt=IA_GOOGLE_OAUTH_STATE_SALT, compress=True)
         redirect_uri = request.build_absolute_uri(reverse("ai_google_oauth_callback"))
         client_id = (getattr(settings, "GOOGLE_DRIVE_CLIENT_ID", "") or "").strip()
 
-        next_url = _clean_next_url(request.data.get("next") or request.query_params.get("next"))
         user_payload = {"uid": getattr(request.user, "id", None)}
         signed_user = signing.dumps(user_payload, salt="ia-google-oauth", compress=True)
 
@@ -1127,7 +1133,20 @@ class GoogleOAuthCallbackAPIView(APIView):
         cookies = getattr(request, "COOKIES", None) or getattr(getattr(request, "_request", None), "COOKIES", {})
         expected_state = (cookies.get(IA_GOOGLE_OAUTH_STATE_COOKIE) or "").strip()
         signed_user = (cookies.get(IA_GOOGLE_OAUTH_USER_COOKIE) or "").strip()
-        next_url = _clean_next_url(cookies.get(IA_GOOGLE_OAUTH_NEXT_COOKIE) or "")
+        cookie_next_url = _clean_next_url(cookies.get(IA_GOOGLE_OAUTH_NEXT_COOKIE) or "")
+
+        signed_state_user_id = None
+        signed_state_next_url = ""
+        if state:
+            try:
+                signed_state = signing.loads(state, salt=IA_GOOGLE_OAUTH_STATE_SALT, max_age=900)
+                signed_state_user_id = signed_state.get("uid")
+                signed_state_next_url = _clean_next_url(signed_state.get("next"))
+            except Exception:
+                signed_state_user_id = None
+                signed_state_next_url = ""
+
+        next_url = signed_state_next_url or cookie_next_url
 
         redirect_uri = request.build_absolute_uri(reverse("ai_google_oauth_callback"))
 
@@ -1150,17 +1169,28 @@ class GoogleOAuthCallbackAPIView(APIView):
         if not code:
             return _final_redirect(next_url, {"ok": "0", "error": "missing_code"})
 
-        if not state or not expected_state or state != expected_state:
-            return _final_redirect(next_url, {"ok": "0", "error": "invalid_state"})
+        if signed_state_user_id is None:
+            if not state or not expected_state or state != expected_state:
+                return _final_redirect(
+                    next_url,
+                    {
+                        "ok": "0",
+                        "error": "invalid_state",
+                        "detail": "Inicia el flujo con POST /api/v1/ai/google/oauth/connect/ y luego redirige a auth_url.",
+                    },
+                )
 
-        try:
-            payload = signing.loads(signed_user, salt="ia-google-oauth", max_age=900)
-        except Exception:
-            return _final_redirect(next_url, {"ok": "0", "error": "invalid_user"})
+        if signed_state_user_id is not None:
+            user_id = signed_state_user_id
+        else:
+            try:
+                payload = signing.loads(signed_user, salt="ia-google-oauth", max_age=900)
+            except Exception:
+                return _final_redirect(next_url, {"ok": "0", "error": "invalid_user"})
 
-        user_id = payload.get("uid")
-        if not user_id:
-            return _final_redirect(next_url, {"ok": "0", "error": "invalid_user"})
+            user_id = payload.get("uid")
+            if not user_id:
+                return _final_redirect(next_url, {"ok": "0", "error": "invalid_user"})
 
         existing = CloudIntegration.objects.filter(user_id=user_id).exclude(provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).first()
         if existing:

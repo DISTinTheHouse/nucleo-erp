@@ -79,7 +79,8 @@ El backend solicita scopes para Drive (lectura), UserInfo (email), Gmail y Calen
 
 ### Flujo (Next.js)
 
-1) **Iniciar conexión** (obtiene `auth_url`)
+1. **Iniciar conexión** (obtiene `auth_url`)
+
 - **Endpoint**: `POST /api/v1/ai/google/oauth/connect/`
 - **Body**:
   ```json
@@ -99,17 +100,24 @@ El backend solicita scopes para Drive (lectura), UserInfo (email), Gmail y Calen
   ```
 
 Notas:
+
 - En el request de `connect` usar `credentials: "include"` (cookies JWT).
 - Luego redirigir el navegador a `auth_url`.
 
-2) **Callback** (lo ejecuta Google)
+2. **Callback** (lo ejecuta Google)
+
 - **URL**: `GET /api/v1/ai/google/oauth/callback/`
 - Google redirige a esta URL con `code` y `state`.
 - El backend guarda tokens y finalmente redirige a `next` con query params:
   - `?ok=1&provider=google_drive` si todo salió bien
   - `?ok=0&error=...` si falló
 
-3) **Consultar estado**
+Importante:
+
+- Si el backend responde `invalid_state`, normalmente significa que el flujo **no se inició** con `POST /api/v1/ai/google/oauth/connect/` en el mismo navegador (o faltó `credentials: "include"` en el request).
+
+3. **Consultar estado**
+
 - **Endpoint**: `GET /api/v1/ai/google/oauth/status/`
 - Útil para saber si ya está conectado y qué scopes tiene.
 
