@@ -60,6 +60,77 @@ Obtén el token de sesión para el usuario.
 
 ---
 
+## 🔌 1.1 Integración Google (OAuth) — Gmail / Calendar (API)
+
+Esta integración se hace **desde el backend** (para no exponer tokens). El frontend (Next.js) solo inicia el flujo y consume endpoints ya autenticados.
+
+### Google Cloud Console (OAuth Client)
+
+Crear un OAuth Client tipo **Web application** y configurar:
+
+- **Orígenes autorizados de JavaScript**:
+  - `https://lazzar-erp.vercel.app` (tu frontend)
+  - `https://nucleo-erp.vercel.app` (tu backend)
+- **URLs de redireccionamiento autorizadas**:
+  - Producción: `https://nucleo-erp.vercel.app/api/v1/ai/google/oauth/callback/`
+  - Desarrollo: `http://localhost:8003/api/v1/ai/google/oauth/callback/`
+
+El backend solicita scopes para Drive (lectura), UserInfo (email), Gmail y Calendar.
+
+### Flujo (Next.js)
+
+1) **Iniciar conexión** (obtiene `auth_url`)
+- **Endpoint**: `POST /api/v1/ai/google/oauth/connect/`
+- **Body**:
+  ```json
+  {
+    "next": "https://lazzar-erp.vercel.app/integraciones/google"
+  }
+  ```
+- **Respuesta (200 OK)**:
+  ```json
+  {
+    "ok": true,
+    "provider": "google_drive",
+    "auth_url": "https://accounts.google.com/o/oauth2/v2/auth?...",
+    "redirect_uri": "https://nucleo-erp.vercel.app/api/v1/ai/google/oauth/callback/",
+    "scope": "..."
+  }
+  ```
+
+Notas:
+- En el request de `connect` usar `credentials: "include"` (cookies JWT).
+- Luego redirigir el navegador a `auth_url`.
+
+2) **Callback** (lo ejecuta Google)
+- **URL**: `GET /api/v1/ai/google/oauth/callback/`
+- Google redirige a esta URL con `code` y `state`.
+- El backend guarda tokens y finalmente redirige a `next` con query params:
+  - `?ok=1&provider=google_drive` si todo salió bien
+  - `?ok=0&error=...` si falló
+
+3) **Consultar estado**
+- **Endpoint**: `GET /api/v1/ai/google/oauth/status/`
+- Útil para saber si ya está conectado y qué scopes tiene.
+
+### Gmail (API)
+
+Estos endpoints requieren que el usuario ya haya conectado Google con el flujo anterior.
+
+- **Listar mensajes**: `GET /api/v1/ai/google/gmail/messages/?maxResults=20&q=in:inbox`
+- **Detalle**: `GET /api/v1/ai/google/gmail/messages/{id}/`
+- **Enviar**: `POST /api/v1/ai/google/gmail/send/`
+  ```json
+  { "to": "cliente@dominio.com", "subject": "Hola", "body": "Mensaje..." }
+  ```
+
+### Calendar (API)
+
+- **Listar eventos**: `GET /api/v1/ai/google/calendar/events/`
+- **Crear evento**: `POST /api/v1/ai/google/calendar/events/`
+
+---
+
 ## 🏢 2. Contexto de Usuario (Empresas y Sucursales)
 
 ### Mis Empresas (Listado Simple)

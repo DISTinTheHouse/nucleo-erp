@@ -1,9 +1,13 @@
 from django.conf import settings
+from django.core import signing
+from django.http import HttpResponseRedirect
+from django.urls import reverse
 from django.utils.text import slugify
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 import json
+import secrets
 import urllib.error
 import urllib.request
 
@@ -23,7 +27,7 @@ from email.message import EmailMessage
 import base64
 import urllib.parse
 from ia.models import CloudIntegration
-from ia.views import _google_drive_refresh_token, _http_json
+from ia.views import GOOGLE_DRIVE_SCOPE, _google_drive_credentials_configured, _google_drive_refresh_token, _http_json
 
 
 class AIAssistantAPIView(APIView):
@@ -1018,3 +1022,455 @@ class GoogleCalendarEventsAPIView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+def _is_production_like() -> bool:
+    return bool(getattr(settings, "IS_VERCEL", False) or (getattr(settings, "ENVIRONMENT", "") or "").lower() == "production")
+
+
+def _cookie_samesite() -> str:
+    return "None" if _is_production_like() else "Lax"
+
+
+IA_GOOGLE_OAUTH_STATE_COOKIE = "ia_google_oauth_state"
+IA_GOOGLE_OAUTH_USER_COOKIE = "ia_google_oauth_user"
+IA_GOOGLE_OAUTH_NEXT_COOKIE = "ia_google_oauth_next"
+
+
+def _clean_next_url(value: str | None) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+
+    parsed = urllib.parse.urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+
+    host = (parsed.hostname or "").lower()
+    if host in ("localhost", "127.0.0.1") or host.endswith(".vercel.app") or host.endswith(".onrender.com"):
+        return raw
+
+    return ""
+
+
+class GoogleOAuthConnectAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        if not _google_drive_credentials_configured():
+            return Response(
+                {"ok": False, "error": "Falta configurar GOOGLE_DRIVE_CLIENT_ID y GOOGLE_DRIVE_CLIENT_SECRET."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        existing = CloudIntegration.objects.filter(user=request.user).exclude(provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).first()
+        if existing:
+            return Response(
+                {"ok": False, "error": "Ya tienes una nube conectada. Desconéctala antes de elegir otra."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        state = secrets.token_urlsafe(24)
+        redirect_uri = request.build_absolute_uri(reverse("ai_google_oauth_callback"))
+        client_id = (getattr(settings, "GOOGLE_DRIVE_CLIENT_ID", "") or "").strip()
+
+        next_url = _clean_next_url(request.data.get("next") or request.query_params.get("next"))
+        user_payload = {"uid": getattr(request.user, "id", None)}
+        signed_user = signing.dumps(user_payload, salt="ia-google-oauth", compress=True)
+
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "access_type": "offline",
+            "prompt": "consent",
+            "include_granted_scopes": "true",
+            "scope": GOOGLE_DRIVE_SCOPE,
+            "state": state,
+        }
+        auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+
+        response = Response(
+            {
+                "ok": True,
+                "provider": CloudIntegration.PROVIDER_GOOGLE_DRIVE,
+                "auth_url": auth_url,
+                "redirect_uri": redirect_uri,
+                "scope": GOOGLE_DRIVE_SCOPE,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+        cookie_kwargs = {
+            "max_age": 600,
+            "secure": _is_production_like(),
+            "httponly": True,
+            "samesite": _cookie_samesite(),
+            "path": "/",
+        }
+        response.set_cookie(IA_GOOGLE_OAUTH_STATE_COOKIE, state, **cookie_kwargs)
+        response.set_cookie(IA_GOOGLE_OAUTH_USER_COOKIE, signed_user, **cookie_kwargs)
+        response.set_cookie(IA_GOOGLE_OAUTH_NEXT_COOKIE, next_url, **cookie_kwargs)
+        return response
+
+
+class GoogleOAuthCallbackAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        qs = request.query_params
+        oauth_error = (qs.get("error") or "").strip()
+        code = (qs.get("code") or "").strip()
+        state = (qs.get("state") or "").strip()
+
+        cookies = getattr(request, "COOKIES", None) or getattr(getattr(request, "_request", None), "COOKIES", {})
+        expected_state = (cookies.get(IA_GOOGLE_OAUTH_STATE_COOKIE) or "").strip()
+        signed_user = (cookies.get(IA_GOOGLE_OAUTH_USER_COOKIE) or "").strip()
+        next_url = _clean_next_url(cookies.get(IA_GOOGLE_OAUTH_NEXT_COOKIE) or "")
+
+        redirect_uri = request.build_absolute_uri(reverse("ai_google_oauth_callback"))
+
+        def _final_redirect(url: str, params: dict):
+            if not url:
+                return Response(params, status=status.HTTP_200_OK)
+            parsed = urllib.parse.urlparse(url)
+            existing_qs = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+            merged_qs = {**existing_qs, **params}
+            new_url = urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(merged_qs)))
+            resp = HttpResponseRedirect(new_url)
+            resp.delete_cookie(IA_GOOGLE_OAUTH_STATE_COOKIE, path="/")
+            resp.delete_cookie(IA_GOOGLE_OAUTH_USER_COOKIE, path="/")
+            resp.delete_cookie(IA_GOOGLE_OAUTH_NEXT_COOKIE, path="/")
+            return resp
+
+        if oauth_error:
+            return _final_redirect(next_url, {"ok": "0", "error": oauth_error})
+
+        if not code:
+            return _final_redirect(next_url, {"ok": "0", "error": "missing_code"})
+
+        if not state or not expected_state or state != expected_state:
+            return _final_redirect(next_url, {"ok": "0", "error": "invalid_state"})
+
+        try:
+            payload = signing.loads(signed_user, salt="ia-google-oauth", max_age=900)
+        except Exception:
+            return _final_redirect(next_url, {"ok": "0", "error": "invalid_user"})
+
+        user_id = payload.get("uid")
+        if not user_id:
+            return _final_redirect(next_url, {"ok": "0", "error": "invalid_user"})
+
+        existing = CloudIntegration.objects.filter(user_id=user_id).exclude(provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).first()
+        if existing:
+            return _final_redirect(next_url, {"ok": "0", "error": "provider_locked"})
+
+        try:
+            token_data = _http_json(
+                "https://oauth2.googleapis.com/token",
+                method="POST",
+                data={
+                    "client_id": (getattr(settings, "GOOGLE_DRIVE_CLIENT_ID", "") or "").strip(),
+                    "client_secret": (getattr(settings, "GOOGLE_DRIVE_CLIENT_SECRET", "") or "").strip(),
+                    "code": code,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": redirect_uri,
+                },
+            )
+            access_token = (token_data.get("access_token") or "").strip()
+            if not access_token:
+                return _final_redirect(next_url, {"ok": "0", "error": "missing_access_token"})
+
+            user_info = _http_json(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            )
+        except urllib.error.HTTPError:
+            return _final_redirect(next_url, {"ok": "0", "error": "oauth_exchange_failed"})
+        except Exception:
+            return _final_redirect(next_url, {"ok": "0", "error": "oauth_exchange_failed"})
+
+        integration, _ = CloudIntegration.objects.get_or_create(
+            user_id=user_id,
+            provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE,
+        )
+        integration.account_email = user_info.get("email", "") or integration.account_email
+        integration.access_token = access_token or integration.access_token
+        incoming_refresh_token = (token_data.get("refresh_token") or "").strip()
+        if incoming_refresh_token:
+            integration.refresh_token = incoming_refresh_token
+        expires_in = int(token_data.get("expires_in") or 3600)
+        integration.token_expires_at = timezone.now() + timedelta(seconds=expires_in)
+        integration.metadata = {
+            **(integration.metadata or {}),
+            "scope": token_data.get("scope", "") or integration.metadata.get("scope", ""),
+            "token_type": token_data.get("token_type", ""),
+        }
+        integration.save()
+
+        return _final_redirect(next_url, {"ok": "1", "provider": CloudIntegration.PROVIDER_GOOGLE_DRIVE})
+
+
+class GoogleOAuthStatusAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        integration = CloudIntegration.objects.filter(
+            user=request.user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE
+        ).first()
+        if not integration:
+            return Response({"ok": True, "connected": False, "provider": CloudIntegration.PROVIDER_GOOGLE_DRIVE})
+
+        scopes = integration.metadata.get("scope", "") if integration.metadata else ""
+        return Response(
+            {
+                "ok": True,
+                "connected": bool((integration.access_token or "").strip()),
+                "provider": integration.provider,
+                "account_email": integration.account_email,
+                "token_expires_at": integration.token_expires_at,
+                "has_refresh_token": bool((integration.refresh_token or "").strip()),
+                "scope": scopes,
+            }
+        )
+
+
+class GoogleOAuthDisconnectAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        CloudIntegration.objects.filter(user=request.user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE).delete()
+        return Response({"ok": True})
+
+
+def _gmail_integration_or_error(user):
+    integration = CloudIntegration.objects.filter(
+        user=user, provider=CloudIntegration.PROVIDER_GOOGLE_DRIVE
+    ).first()
+    if not integration or not integration.access_token:
+        return None, {
+            "ok": False,
+            "error": "Conecta tu cuenta de Google primero para usar Gmail.",
+            "reconnect_required": True,
+        }
+    scopes = integration.metadata.get("scope", "") if integration.metadata else ""
+    scopes_lower = (scopes or "").lower()
+    if "gmail" not in scopes_lower:
+        return None, {
+            "ok": False,
+            "error": "Se requieren permisos de Gmail. Desconecta y vuelve a conectar tu cuenta de Google.",
+            "reconnect_required": True,
+        }
+    return integration, None
+
+
+def _gmail_headers_dict(message_payload: dict) -> dict:
+    headers = {}
+    for h in (message_payload.get("headers") or []):
+        name = (h.get("name") or "").strip()
+        value = h.get("value")
+        if name:
+            headers[name] = value
+    return headers
+
+
+def _gmail_decode_body(payload: dict) -> tuple[str, str]:
+    def _decode_piece(data: str) -> str:
+        if not data:
+            return ""
+        pad = "=" * (-len(data) % 4)
+        try:
+            return base64.urlsafe_b64decode((data + pad).encode("utf-8")).decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    text_body = ""
+    html_body = ""
+
+    if "parts" in payload:
+        for part in payload.get("parts") or []:
+            mime = part.get("mimeType")
+            body = part.get("body") or {}
+            data = body.get("data")
+            if mime == "text/plain" and isinstance(data, str):
+                text_body += _decode_piece(data)
+            elif mime == "text/html" and isinstance(data, str):
+                html_body += _decode_piece(data)
+            elif "parts" in part:
+                sub_text, sub_html = _gmail_decode_body(part)
+                text_body += sub_text
+                html_body += sub_html
+    else:
+        body = payload.get("body") or {}
+        data = body.get("data")
+        mime = payload.get("mimeType")
+        if isinstance(data, str):
+            if mime == "text/html":
+                html_body = _decode_piece(data)
+            else:
+                text_body = _decode_piece(data)
+
+    return text_body, html_body
+
+
+class GoogleGmailMessagesAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        integration, error = _gmail_integration_or_error(request.user)
+        if error:
+            return Response(error, status=status.HTTP_400_BAD_REQUEST)
+
+        access_token = _google_drive_refresh_token(integration)
+        max_results_raw = (request.query_params.get("maxResults") or "").strip()
+        q = (request.query_params.get("q") or "").strip()
+        page_token = (request.query_params.get("pageToken") or "").strip()
+
+        max_results = 20
+        if max_results_raw:
+            try:
+                max_results = int(max_results_raw)
+            except Exception:
+                max_results = 20
+        max_results = max(1, min(max_results, 50))
+
+        qp = {"maxResults": str(max_results)}
+        if q:
+            qp["q"] = q
+        if page_token:
+            qp["pageToken"] = page_token
+
+        url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?" + urllib.parse.urlencode(qp, quote_via=urllib.parse.quote)
+        try:
+            response = _http_json(
+                url,
+                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            )
+        except urllib.error.HTTPError:
+            return Response({"ok": False, "error": "Error al consultar Gmail."}, status=status.HTTP_502_BAD_GATEWAY)
+        except Exception:
+            return Response({"ok": False, "error": "Error inesperado al consultar Gmail."}, status=status.HTTP_502_BAD_GATEWAY)
+
+        messages_list = response.get("messages") or []
+        items = []
+        for msg in messages_list:
+            msg_id = msg.get("id")
+            if not msg_id:
+                continue
+            try:
+                msg_detail = _http_json(
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date&metadataHeaders=To",
+                    headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+                )
+                headers = _gmail_headers_dict((msg_detail.get("payload") or {}))
+                from_header = headers.get("From") or ""
+                from_name = from_header.split("<")[0].strip().strip('"\'') if "<" in from_header else from_header
+                items.append(
+                    {
+                        "id": msg_detail.get("id") or msg_id,
+                        "threadId": msg_detail.get("threadId"),
+                        "snippet": msg_detail.get("snippet", ""),
+                        "subject": headers.get("Subject", "(Sin asunto)"),
+                        "from": from_name,
+                        "from_full": from_header,
+                        "to": headers.get("To", ""),
+                        "date": headers.get("Date", ""),
+                    }
+                )
+            except Exception:
+                items.append({"id": msg_id})
+
+        return Response(
+            {
+                "ok": True,
+                "messages": items,
+                "nextPageToken": response.get("nextPageToken"),
+                "resultSizeEstimate": response.get("resultSizeEstimate"),
+            }
+        )
+
+
+class GoogleGmailMessageDetailAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, msg_id: str):
+        integration, error = _gmail_integration_or_error(request.user)
+        if error:
+            return Response(error, status=status.HTTP_400_BAD_REQUEST)
+
+        access_token = _google_drive_refresh_token(integration)
+        try:
+            msg_detail = _http_json(
+                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
+                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            )
+        except urllib.error.HTTPError:
+            return Response({"ok": False, "error": "No pude cargar el correo."}, status=status.HTTP_502_BAD_GATEWAY)
+        except Exception:
+            return Response({"ok": False, "error": "Error inesperado al cargar el correo."}, status=status.HTTP_502_BAD_GATEWAY)
+
+        payload = msg_detail.get("payload") or {}
+        headers = _gmail_headers_dict(payload)
+        from_header = headers.get("From") or ""
+        from_name = from_header.split("<")[0].strip().strip('"\'') if "<" in from_header else from_header
+        text_body, html_body = _gmail_decode_body(payload)
+
+        return Response(
+            {
+                "ok": True,
+                "email": {
+                    "id": msg_detail.get("id") or msg_id,
+                    "threadId": msg_detail.get("threadId"),
+                    "labelIds": msg_detail.get("labelIds") or [],
+                    "snippet": msg_detail.get("snippet", ""),
+                    "subject": headers.get("Subject", "(Sin asunto)"),
+                    "from": from_name,
+                    "from_full": from_header,
+                    "to": headers.get("To", ""),
+                    "date": headers.get("Date", ""),
+                    "body_text": text_body,
+                    "body_html": html_body,
+                },
+            }
+        )
+
+
+class GoogleGmailSendAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        integration, error = _gmail_integration_or_error(request.user)
+        if error:
+            return Response(error, status=status.HTTP_400_BAD_REQUEST)
+
+        access_token = _google_drive_refresh_token(integration)
+
+        to_email = (request.data.get("to") or "").strip()
+        subject = (request.data.get("subject") or "(Sin asunto)").strip()
+        body = request.data.get("body") or ""
+
+        if not to_email or not str(body).strip():
+            return Response({"ok": False, "error": "to y body son requeridos."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            message = EmailMessage()
+            message.set_content(str(body))
+            message["To"] = to_email
+            message["From"] = integration.account_email or ""
+            message["Subject"] = subject
+
+            encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+
+            sent = _http_json(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                method="POST",
+                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+                json_data={"raw": encoded_message},
+            )
+        except urllib.error.HTTPError:
+            return Response({"ok": False, "error": "Error al enviar el correo."}, status=status.HTTP_502_BAD_GATEWAY)
+        except Exception:
+            return Response({"ok": False, "error": "Error inesperado al enviar el correo."}, status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response({"ok": True, "message": {"id": sent.get("id"), "threadId": sent.get("threadId")}}, status=status.HTTP_201_CREATED)
