@@ -1479,16 +1479,22 @@ class GoogleGmailSendAPIView(APIView):
         to_email = (request.data.get("to") or "").strip()
         subject = (request.data.get("subject") or "(Sin asunto)").strip()
         body = request.data.get("body") or ""
+        html_body = request.data.get("html") or ""
 
         if not to_email or not str(body).strip():
             return Response({"ok": False, "error": "to y body son requeridos."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             message = EmailMessage()
-            message.set_content(str(body))
             message["To"] = to_email
             message["From"] = integration.account_email or ""
             message["Subject"] = subject
+
+            if html_body:
+                message.set_content(str(body) or "Cotización adjunta.")
+                message.add_alternative(str(html_body), subtype='html')
+            else:
+                message.set_content(str(body))
 
             encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
 
