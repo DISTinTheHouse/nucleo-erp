@@ -69,6 +69,7 @@ class Producto(models.Model):
     # costo_base = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     precio_base = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     cod_proscai = models.CharField(max_length=50, blank=True, default="")
+    codigo = models.CharField(max_length=4, null=True, blank=True)
 
     class Meta:
         db_table = "productos"
