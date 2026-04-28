@@ -37,6 +37,16 @@ class CotizacionViewSet(viewsets.ModelViewSet):
     serializer_class = CotizacionSerializer
     http_method_names = ['get', 'post', 'patch']
 
+    def _is_mesa_control(self, user):
+        try:
+            return bool(
+                user.tiene_permiso("R-MESACONTROL")
+                or user.tiene_permiso("E-MESACONTROL")
+                or user.tiene_permiso("D-MESACONTROL")
+            )
+        except Exception:
+            return bool(getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False))
+
     def get_serializer_class(self):
         if getattr(self, "action", None) == "list":
             return CotizacionDashboardItemSerializer
@@ -56,7 +66,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         empresa = getattr(user, "empresa", None)
         if empresa:
             qs = qs.filter(empresa=empresa)
-            if not getattr(user, "is_admin_empresa", False):
+            if not getattr(user, "is_admin_empresa", False) and not self._is_mesa_control(user):
                 qs = qs.filter(vendedor=user)
             return self._apply_filters(qs)
         return qs.none()
@@ -582,6 +592,15 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             return
         if getattr(user, "is_admin_empresa", False):
             return
+        try:
+            if (
+                user.tiene_permiso("R-MESACONTROL")
+                or user.tiene_permiso("E-MESACONTROL")
+                or user.tiene_permiso("D-MESACONTROL")
+            ):
+                return
+        except Exception:
+            pass
         raise ValidationError({"permiso": "Acción disponible solo para mesa de control."})
 
     def _copiar_cotizacion_a_pedido(self, cotizacion, empresa):
@@ -792,6 +811,14 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
+            if not cotizacion.cliente_id:
+                raise ValidationError({"cliente": "Asigna un cliente antes de autorizar la cotización."})
+            if not (cotizacion.persona_pagos or "").strip():
+                raise ValidationError({"persona_pagos": "Este campo es requerido para autorizar."})
+            if not (cotizacion.correo_facturas or "").strip():
+                raise ValidationError({"correo_facturas": "Este campo es requerido para autorizar."})
+            if not (cotizacion.telefono_pagos or "").strip():
+                raise ValidationError({"telefono_pagos": "Este campo es requerido para autorizar."})
             if cotizacion.estatus == 4:
                 raise ValidationError({"cotizacion": "La cotización está rechazada."})
             pedido_existente = Pedido.objects.select_for_update().filter(cotizacion=cotizacion, activo=True).order_by("-id").first()
