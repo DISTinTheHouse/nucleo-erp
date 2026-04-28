@@ -49,6 +49,7 @@ class Cotizacion(models.Model):
         (4, "RECHAZADA"),
         (5, "CAMBIOS SOLICITADOS"),
         (6, "AUTORIZADA"),
+        (7, "PENDIENTE POR ENVIAR A MESA DE CONTROL"),
     )
 
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="cotizacion")

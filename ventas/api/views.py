@@ -37,6 +37,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
     serializer_class = CotizacionSerializer
     http_method_names = ['get', 'post', 'patch']
 
+    STATUS_ENVIADA_A_AUTORIZACION = 2
+    STATUS_PENDIENTE_ENVIAR_MESA_CONTROL = 7
+
     def _is_mesa_control(self, user):
         try:
             return bool(
@@ -556,7 +559,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         cotizacion.estatus = 5
                         cotizacion.cambios_solicitados_at = now
                     elif cotizacion.estatus == 4:
-                        cotizacion.estatus = 2
+                        cotizacion.estatus = self.STATUS_PENDIENTE_ENVIAR_MESA_CONTROL
 
                     for k, v in cotizacion_data.items():
                         setattr(cotizacion, k, v)
@@ -564,7 +567,12 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     update_fields += ["estatus", "cambios_solicitados_at"]
                     cotizacion.save(update_fields=list(dict.fromkeys(update_fields)))
                 else:
-                    cotizacion = Cotizacion.objects.create(empresa=empresa, vendedor=user, estatus=2, **cotizacion_data)
+                    cotizacion = Cotizacion.objects.create(
+                        empresa=empresa,
+                        vendedor=user,
+                        estatus=self.STATUS_PENDIENTE_ENVIAR_MESA_CONTROL,
+                        **cotizacion_data,
+                    )
             except TypeError as e:
                 raise ValidationError({"cotizacion": f"Datos inválidos: {str(e)}"})
             except ValueError as e:
@@ -811,6 +819,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
+            if cotizacion.estatus != self.STATUS_ENVIADA_A_AUTORIZACION:
+                raise ValidationError({"cotizacion": "La cotización no está enviada a autorización."})
             if not cotizacion.cliente_id:
                 raise ValidationError({"cliente": "Asigna un cliente antes de autorizar la cotización."})
             if not (cotizacion.persona_pagos or "").strip():
@@ -838,6 +848,37 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    @action(detail=True, methods=["post"], url_path="enviar-a-autorizacion")
+    def enviar_a_autorizacion(self, request, pk=None):
+        user = request.user
+        cotizacion = self.get_object()
+
+        if cotizacion.estatus == 3:
+            raise ValidationError({"cotizacion": "La cotización ya está autorizada."})
+        if cotizacion.estatus == self.STATUS_ENVIADA_A_AUTORIZACION:
+            return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
+
+        with transaction.atomic():
+            cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
+            if cotizacion.estatus == 3:
+                raise ValidationError({"cotizacion": "La cotización ya está autorizada."})
+            if cotizacion.estatus == self.STATUS_ENVIADA_A_AUTORIZACION:
+                return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
+
+            if not cotizacion.cliente_id:
+                raise ValidationError({"cliente": "Asigna un cliente antes de enviar a autorización."})
+            if not (cotizacion.persona_pagos or "").strip():
+                raise ValidationError({"persona_pagos": "Este campo es requerido para enviar a autorización."})
+            if not (cotizacion.correo_facturas or "").strip():
+                raise ValidationError({"correo_facturas": "Este campo es requerido para enviar a autorización."})
+            if not (cotizacion.telefono_pagos or "").strip():
+                raise ValidationError({"telefono_pagos": "Este campo es requerido para enviar a autorización."})
+
+            cotizacion.estatus = self.STATUS_ENVIADA_A_AUTORIZACION
+            cotizacion.save(update_fields=["estatus", "updated_at"])
+
+        return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
+
     @action(detail=True, methods=["post"], url_path="rechazar")
     def rechazar(self, request, pk=None):
         user = request.user
@@ -847,6 +888,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
             if cotizacion.estatus == 3:
                 raise ValidationError({"cotizacion": "La cotización ya está autorizada."})
+            if cotizacion.estatus != self.STATUS_ENVIADA_A_AUTORIZACION and cotizacion.estatus != 5:
+                raise ValidationError({"cotizacion": "La cotización no está enviada a autorización."})
             cotizacion.estatus = 4
             cotizacion.save(update_fields=["estatus", "updated_at"])
         return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
