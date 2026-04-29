@@ -44,18 +44,17 @@ class Cotizacion(models.Model):
 
     CHOICES_ESTATUS = (
         (1, "BORRADOR"),
-        (2, "ENVIADA A AUTORIZACION"),
+        (2, "ENVIAR A AUTORIZACION"),
         (3, "EN REVISION"),
         (4, "RECHAZADA"),
         (5, "CAMBIOS SOLICITADOS"),
         (6, "AUTORIZADA"),
-        (7, "PENDIENTE POR ENVIAR A MESA DE CONTROL"),
     )
 
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="cotizacion")
     vendedor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="cotizaciones", null=True, blank=True, db_index=True)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="cotizacion")
-    cliente = models.ForeignKey(Cliente, on_delete=models.SET_NULL, related_name="cotizacion", null=True, blank=True)
+    cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="cotizacion")
     oportunidad = models.ForeignKey(Oportunidad, on_delete=models.CASCADE, related_name="cotizacion", null=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="cotizacion")
     estatus = models.SmallIntegerField(default=2, choices=CHOICES_ESTATUS, db_index=True)
@@ -78,9 +77,9 @@ class Cotizacion(models.Model):
     otro = models.BooleanField(default=False)
     mailing = models.BooleanField(default=False)
     # Forma de pago y contacto para envio de facturas
-    persona_pagos = models.CharField(max_length=100, blank=True, default="")
-    correo_facturas = models.EmailField(max_length=150, blank=True, default="")
-    telefono_pagos = models.CharField(max_length=20, blank=True, default="")
+    persona_pagos = models.CharField(max_length=100)
+    correo_facturas = models.EmailField(max_length=150)
+    telefono_pagos = models.CharField(max_length=20)
     oc = models.CharField(max_length=100, null=True, blank=True)
     forma_pago = models.CharField(max_length=5, choices=FormaPago.choices)
     metodo_pago = models.CharField(max_length=10, choices=MetodoPago.choices)
