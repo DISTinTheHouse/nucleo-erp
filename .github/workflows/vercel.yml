@@ -88,6 +88,15 @@ jobs:
           SUPABASE_DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
         run: python manage.py migrate --noinput
 
+      - name: Reset Axes lockouts (Supabase)
+        env:
+          SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
+          DEBUG: "false"
+          ENVIRONMENT: "production"
+          USE_REMOTE_DB: "true"
+          SUPABASE_DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: python manage.py axes_reset
+
   deploy_production:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [migrate_production]
