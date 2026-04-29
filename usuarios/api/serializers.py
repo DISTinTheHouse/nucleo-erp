@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from seguridad.models import Rol, UsuarioRol
 from ..models import Usuario
+from auth_kit.serializers.login_factors import LoginRequestSerializer as _AuthKitDefaultLoginRequestSerializer
 
 class UsuarioSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False)
@@ -136,3 +137,27 @@ class UsuarioSerializer(serializers.ModelSerializer):
         if roles_ids is not None:
             self._set_roles(user, roles_ids)
         return user
+
+
+class AuthKitLoginRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField(write_only=True, required=False)
+    username = serializers.CharField(write_only=True, required=False)
+    password = serializers.CharField(style={"input_type": "password"}, write_only=True)
+
+    def validate(self, attrs):
+        email = (attrs.get("email") or "").strip()
+        if not email:
+            email = (attrs.get("username") or "").strip()
+        if not email:
+            raise serializers.ValidationError({"email": "Este campo es requerido."})
+
+        password = attrs.get("password")
+        base = _AuthKitDefaultLoginRequestSerializer(
+            context=self.context,
+            data={"email": email, "password": password},
+        )
+        base.is_valid(raise_exception=True)
+        user = base.context.get("user")
+        if user is not None:
+            self.context["user"] = user
+        return attrs
