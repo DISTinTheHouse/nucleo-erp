@@ -70,7 +70,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         user = self.request.user
         empresa = getattr(user, "empresa", None)
         cotizacion = self.get_object()
-        if not getattr(user, "is_superuser", False) and empresa and cotizacion.empresa_id != empresa.id:
+        if not getattr(user, "is_superuser", False) and empresa and cotizacion.empresa_id != empresa.pk:
             raise ValidationError({"cotizacion": "No tienes acceso a esta cotización."})
         if not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
             if cotizacion.vendedor_id and cotizacion.vendedor_id != getattr(user, "id", None):
@@ -533,7 +533,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion_id).first()
                     if not cotizacion:
                         raise ValidationError({"cotizacion_id": "Cotización no encontrada."})
-                    if not getattr(user, "is_superuser", False) and empresa and cotizacion.empresa_id != empresa.id:
+                    if not getattr(user, "is_superuser", False) and empresa and cotizacion.empresa_id != empresa.pk:
                         raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
                     if not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
                         if cotizacion.vendedor_id and cotizacion.vendedor_id != getattr(user, "id", None):
