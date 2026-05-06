@@ -1,6 +1,6 @@
 from django.db import models
 from nucleo.models import Empresa, Sucursal
-from catalogo.models import Producto
+from catalogo.models import Producto, ProductoVariante
 from ventas.models import Pedido, Entrega, Devolucion
 
 class TipoAlmacen(models.TextChoices):
@@ -115,11 +115,9 @@ class AjusteInventario(models.Model):
         return str(self.id)
 
 class Existencia(models.Model):
-    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name="existencia")
+    producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.PROTECT, related_name="existencia")
     almacen = models.ForeignKey(Almacen, on_delete=models.PROTECT, related_name="existencia")
-    ubicacion = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="existencia")
-    lote = models.ForeignKey(Lote, on_delete=models.PROTECT, related_name="existencia")
-    serie = models.ForeignKey(Serie, on_delete=models.PROTECT, related_name="existencia")
+    ubicacion = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="existencia", null=True, blank=True)
     stock = models.IntegerField(default=0)
 
     class Meta:
@@ -128,7 +126,7 @@ class Existencia(models.Model):
         verbose_name_plural = "Existencia"
 
     def __str__(self):
-        return f"{self.producto.nombre} - {self.almacen.nombre}"
+        return f"{self.producto_variante.producto.nombre} - {self.almacen.nombre}"
 
 #TODO: ADD FIELDS: id_recepcion, id_transferencia, id_op
 class MovimientoInventario(models.Model):
