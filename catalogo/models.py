@@ -94,6 +94,14 @@ class ProductoVariante(models.Model):
         verbose_name = "Variante Producto"
         verbose_name_plural = "Variantes Producto"
 
+    @property
+    def nombre_completo(self):
+        return f"{self.producto.nombre} - {self.color.nombre} - {self.talla.nombre}"
+
+    def save(self, *args, **kwargs):
+        self.nombre = f"{self.producto.nombre} - {self.color.nombre} - {self.talla.nombre}"
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.producto.nombre} - {self.color.nombre} - {self.talla.nombre}"
 
