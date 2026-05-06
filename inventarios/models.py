@@ -120,6 +120,7 @@ class Existencia(models.Model):
     ubicacion = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="existencia")
     lote = models.ForeignKey(Lote, on_delete=models.PROTECT, related_name="existencia")
     serie = models.ForeignKey(Serie, on_delete=models.PROTECT, related_name="existencia")
+    stock = models.IntegerField(default=0)
 
     class Meta:
         db_table = "existencias"
