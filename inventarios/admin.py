@@ -86,24 +86,22 @@ class AjusteInventarioAdmin(admin.ModelAdmin):
 
 @admin.register(Existencia)
 class ExistenciaAdmin(admin.ModelAdmin):
-    list_display = ("id", "producto", "almacen", "ubicacion", "lote", "serie")
-    list_filter = ("almacen__empresa", "almacen", "producto")
+    list_display = ("id", "producto_variante__producto", "almacen", "ubicacion", "stock")
+    list_filter = ("almacen__empresa", "almacen", "producto_variante__producto")
     search_fields = (
         "id",
-        "producto__nombre",
-        "producto__id",
+        "producto_variante__producto__nombre",
+        "producto_variante__producto__id",
         "almacen__codigo",
         "almacen__nombre",
         "ubicacion__pasillo",
         "ubicacion__rack",
         "ubicacion__nivel",
         "ubicacion__posicion",
-        "lote__id",
-        "serie__id",
     )
     ordering = ("-id",)
-    autocomplete_fields = ("producto", "almacen", "ubicacion", "lote", "serie")
-    list_select_related = ("producto", "almacen", "ubicacion", "lote", "serie")
+    autocomplete_fields = ("producto_variante", "almacen", "ubicacion")
+    list_select_related = ("producto_variante", "almacen", "ubicacion")
 
 
 class MovimientoInventarioDetalleInline(admin.TabularInline):
