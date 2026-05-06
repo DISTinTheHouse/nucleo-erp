@@ -219,7 +219,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         empresa = getattr(user, "empresa", None)
 
         if request.method.lower() == "get":
-            from catalogo.models import Producto, Talla
+            from catalogo.models import Producto, Color, Talla
             from terceros.models import Cliente
             from nucleo.models import SatRegimenFiscal
 
@@ -302,6 +302,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 productos_qs = productos_qs[:limit]
             clientes = list(clientes_qs)
             productos = list(productos_qs)
+            colores = list(Color.objects.filter(activo=True).order_by("id").values("id", "nombre", "codigo", "codigo_hex"))
             tallas = list(Talla.objects.filter(activo=True).order_by("id").values("id", "nombre"))
             regimenes_fiscales = list(
                 SatRegimenFiscal.objects.filter(activo=True).order_by("codigo").values("codigo", "descripcion")
@@ -344,6 +345,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     "metodos_pago": [{"value": k, "label": v} for k, v in Cotizacion.MetodoPago.choices],
                     "usos_cfdi": [{"value": k, "label": v} for k, v in Cotizacion.UsoCfdi.choices],
                     "tallas": tallas,
+                    "colores": colores,
                     "tipos_pedido": tipos_pedido,
                     "regimenes_fiscales": regimenes_fiscales,
                 },
