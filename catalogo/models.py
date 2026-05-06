@@ -81,6 +81,7 @@ class Producto(models.Model):
 
 class ProductoVariante(models.Model):
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="variantes")
+    nombre = models.CharField(max_length=150, blank=True, default="")
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="variantes")
     color = models.ForeignKey(Color, on_delete=models.CASCADE, related_name="variantes")
     talla = models.ForeignKey(Talla, on_delete=models.CASCADE, related_name="variantes")
