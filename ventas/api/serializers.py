@@ -270,6 +270,10 @@ class CotizacionOnboardingTallaInputSerializer(serializers.Serializer):
 
 class CotizacionOnboardingDetalleInputSerializer(serializers.Serializer):
     producto = serializers.IntegerField()
+    color = serializers.IntegerField(required=False, allow_null=True)
+    color_id = serializers.IntegerField(required=False, allow_null=True)
+    direccion_envio_cliente = serializers.IntegerField(required=False, allow_null=True)
+    direccion_envio = serializers.IntegerField(required=False, allow_null=True)
     precio_unitario = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
     costo_unitario = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
     tallas = CotizacionOnboardingTallaInputSerializer(many=True)

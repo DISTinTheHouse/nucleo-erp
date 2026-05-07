@@ -1,8 +1,8 @@
 from django.db import models
 from django.conf import settings
 from nucleo.models import Empresa, Sucursal, Moneda, SerieFolio, StatusLifecycleModel, SatRegimenFiscal
-from terceros.models import Cliente
-from catalogo.models import Producto, Talla
+from terceros.models import Cliente, DireccionCliente
+from catalogo.models import Producto, Talla, Color
 
 class Prospecto(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="prospectos")
@@ -136,6 +136,10 @@ class Cotizacion(models.Model):
 class CotizacionDetalle(models.Model):
     cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="cotizaciondetalle")
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="cotizaciondetalle")
+    color = models.ForeignKey(Color, on_delete=models.PROTECT, related_name="cotizacion_detalles", null=True, blank=True)
+    direccion_envio_cliente = models.ForeignKey(
+        DireccionCliente, on_delete=models.PROTECT, related_name="cotizacion_detalles", null=True, blank=True
+    )
     precio_lista = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     precio_unitario = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     costo_unitario = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
@@ -334,6 +338,10 @@ class PedidoServicioExtra(models.Model):
 class PedidoDetalle(models.Model):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="detalles")
     producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name="detalles")
+    color = models.ForeignKey(Color, on_delete=models.PROTECT, related_name="pedido_detalles", null=True, blank=True)
+    direccion_envio_cliente = models.ForeignKey(
+        DireccionCliente, on_delete=models.PROTECT, related_name="pedido_detalles", null=True, blank=True
+    )
     precio_lista = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     precio_unitario = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     costo_unitario = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)

@@ -220,7 +220,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
         if request.method.lower() == "get":
             from catalogo.models import Producto, Color, Talla
-            from terceros.models import Cliente
+            from terceros.models import Cliente, DireccionCliente
             from nucleo.models import SatRegimenFiscal
 
             limit_raw = request.query_params.get("limit")
@@ -239,6 +239,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 empresa = Empresa.objects.filter(pk=empresa_id).first()
 
             cliente_q = (request.query_params.get("cliente_q") or "").strip()
+            cliente_id_raw = (request.query_params.get("cliente_id") or request.query_params.get("cliente") or "").strip()
             producto_q = (request.query_params.get("producto_q") or "").strip()
 
             clientes_qs = Cliente.objects.filter(activo=True)
@@ -304,6 +305,34 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             productos = list(productos_qs)
             colores = list(Color.objects.filter(activo=True).order_by("id").values("id", "nombre", "codigo", "codigo_hex"))
             tallas = list(Talla.objects.filter(activo=True).order_by("id").values("id", "nombre"))
+            direcciones_envio = []
+            if cliente_id_raw:
+                try:
+                    cliente_id = int(cliente_id_raw)
+                except Exception:
+                    cliente_id = None
+                if cliente_id:
+                    direcciones_qs = DireccionCliente.objects.filter(activo=True, cliente_id=cliente_id)
+                    if not getattr(user, "is_superuser", False) and empresa:
+                        direcciones_qs = direcciones_qs.filter(empresa=empresa)
+                    elif getattr(user, "is_superuser", False) and empresa:
+                        direcciones_qs = direcciones_qs.filter(empresa=empresa)
+                    direcciones_envio = list(
+                        direcciones_qs.order_by("id").values(
+                            "id",
+                            "destinatario",
+                            "empresa_envio",
+                            "telefono_envio",
+                            "celular_envio",
+                            "direccion_envio",
+                            "colonia_envio",
+                            "codigo_postal",
+                            "ciudad_envio",
+                            "estado_envio",
+                            "referencias",
+                            "is_default",
+                        )
+                    )
             regimenes_fiscales = list(
                 SatRegimenFiscal.objects.filter(activo=True).order_by("codigo").values("codigo", "descripcion")
             )
@@ -352,6 +381,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 "busqueda": {
                     "clientes": clientes,
                     "productos": productos,
+                    "direcciones_envio": direcciones_envio,
                 },
             }
             return Response(data)
@@ -416,15 +446,29 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             agrupado = {}
             for row in rows:
                 producto_id = row["producto"]
-                entry = agrupado.get(producto_id)
+                color_id = row.get("color") if row.get("color") not in (None, "") else row.get("color_id")
+                if color_id in ("", 0):
+                    color_id = None
+                direccion_id = (
+                    row.get("direccion_envio_cliente")
+                    if row.get("direccion_envio_cliente") not in (None, "")
+                    else row.get("direccion_envio")
+                )
+                if direccion_id in ("", 0):
+                    direccion_id = None
+
+                key = (producto_id, color_id, direccion_id)
+                entry = agrupado.get(key)
                 if not entry:
                     entry = {
                         "producto": producto_id,
+                        "color": color_id,
+                        "direccion_envio_cliente": direccion_id,
                         "precio_unitario": row.get("precio_unitario"),
                         "costo_unitario": row.get("costo_unitario"),
                         "tallas": [],
                     }
-                    agrupado[producto_id] = entry
+                    agrupado[key] = entry
                 entry["tallas"] += row.get("tallas") or []
 
             for entry in agrupado.values():
@@ -471,6 +515,33 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 if not producto:
                     raise ValidationError({"detalle": f"Producto inválido: {item['producto']}"})
 
+                color_obj = None
+                color_id = item.get("color")
+                if color_id not in (None, "", 0):
+                    try:
+                        from catalogo.models import Color as ColorModel
+                        color_obj = ColorModel.objects.filter(pk=int(color_id), activo=True).first()
+                    except Exception:
+                        color_obj = None
+                    if not color_obj:
+                        raise ValidationError({"detalle": f"Color inválido: {color_id}"})
+
+                direccion_obj = None
+                direccion_id = item.get("direccion_envio_cliente")
+                if direccion_id not in (None, "", 0):
+                    try:
+                        from terceros.models import DireccionCliente as DirModel
+                        direccion_obj = DirModel.objects.filter(
+                            pk=int(direccion_id),
+                            activo=True,
+                            empresa=cotizacion_obj.empresa,
+                            cliente_id=getattr(cotizacion_obj, "cliente_id", None),
+                        ).first()
+                    except Exception:
+                        direccion_obj = None
+                    if not direccion_obj:
+                        raise ValidationError({"detalle": f"Dirección de envío inválida: {direccion_id}"})
+
                 precio_unitario = item.get("precio_unitario")
                 if precio_unitario is None:
                     precio_unitario = producto.precio_base or 0
@@ -478,6 +549,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 cot_det = CotizacionDetalle.objects.create(
                     cotizacion=cotizacion_obj,
                     producto=producto,
+                    color=color_obj,
+                    direccion_envio_cliente=direccion_obj,
                     precio_lista=producto.precio_base or 0,
                     precio_unitario=precio_unitario,
                     costo_unitario=item.get("costo_unitario"),
@@ -658,6 +731,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             pedido_det = PedidoDetalle.objects.create(
                 pedido=pedido,
                 producto=det.producto,
+                color_id=getattr(det, "color_id", None),
+                direccion_envio_cliente_id=getattr(det, "direccion_envio_cliente_id", None),
                 precio_lista=det.precio_lista,
                 precio_unitario=det.precio_unitario,
                 costo_unitario=det.costo_unitario,
@@ -756,6 +831,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             pedido_det = PedidoDetalle.objects.create(
                 pedido=pedido,
                 producto=det.producto,
+                color_id=getattr(det, "color_id", None),
+                direccion_envio_cliente_id=getattr(det, "direccion_envio_cliente_id", None),
                 precio_lista=det.precio_lista,
                 precio_unitario=det.precio_unitario,
                 costo_unitario=det.costo_unitario,
