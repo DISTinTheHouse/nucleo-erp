@@ -303,6 +303,30 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 productos_qs = productos_qs[:limit]
             clientes = list(clientes_qs)
             productos = list(productos_qs)
+
+            # Annotate each product with its available colors from variantes_producto
+            from catalogo.models import ProductoVariante
+            producto_ids = [p["id"] for p in productos]
+            variantes_qs = (
+                ProductoVariante.objects
+                .filter(producto_id__in=producto_ids, activo=True)
+                .values("producto_id", "color_id", "color__nombre", "color__codigo_hex")
+                .order_by("producto_id", "color_id")
+                .distinct()
+            )
+            colores_por_producto: dict = {}
+            for v in variantes_qs:
+                pid = v["producto_id"]
+                if pid not in colores_por_producto:
+                    colores_por_producto[pid] = []
+                colores_por_producto[pid].append({
+                    "id": v["color_id"],
+                    "nombre": v["color__nombre"],
+                    "codigo_hex": v["color__codigo_hex"],
+                })
+            for p in productos:
+                p["colores"] = colores_por_producto.get(p["id"], [])
+
             colores = list(Color.objects.filter(activo=True).order_by("id").values("id", "nombre", "codigo", "codigo_hex"))
             tallas = list(Talla.objects.filter(activo=True).order_by("id").values("id", "nombre"))
             direcciones_envio = []
