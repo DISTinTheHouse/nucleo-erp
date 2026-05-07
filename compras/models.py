@@ -95,7 +95,7 @@ class OrdenCompra(StatusLifecycleModel):
         CANCELADA = 6, 'Cancelada'
 
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
-    sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE) 
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
     proveedor = models.ForeignKey(Proveedor, on_delete=models.CASCADE)
     solicitud_compra = models.ForeignKey(SolicitudCompra, on_delete=models.CASCADE)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE)
@@ -108,6 +108,7 @@ class OrdenCompra(StatusLifecycleModel):
     fecha_oc = models.DateField()
     fecha_entrega_estimada = models.DateField(null=True)
     fecha_autorizacion = models.DateTimeField(null=True)
+    fecha_vencimiento = models.DateField(null=True)
     
     estatus = models.IntegerField(choices=EstatusOrdenCompra.choices, default=EstatusOrdenCompra.BORRADOR)
 
@@ -115,6 +116,18 @@ class OrdenCompra(StatusLifecycleModel):
     descuento = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
     impuestos = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
     total = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+
+    tipo = models.CharField(max_length=20, default='ODC')
+    #totales y financieros
+    total_piezas = models.IntegerField(default=0)
+    subtotal = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    descuento = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    flete = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    seguros = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    porcentaje_iva = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    total_iva = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    gran_total = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    a_cuenta = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
 
     observaciones = models.TextField(blank=True, null=True)
 
@@ -135,6 +148,13 @@ class OrdenCompraDetalle(models.Model):
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
     solicitud_compra_detalle = models.ForeignKey(SolicitudCompraDetalle, on_delete=models.CASCADE)
     requisicion_detalle = models.ForeignKey(RequisicionDetalle, on_delete=models.CASCADE)
+    descripcion = models.CharField(max_length=200, null=True)
+    cantidad = models.IntegerField(default=0)
+    precio = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    descuento = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    importe = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE, related_name='ordenes_compra_detalle')
+    piezas = models.IntegerField(default=0)
 
     class Meta:
         db_table = 'orden_compra_detalle'
