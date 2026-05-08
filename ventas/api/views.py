@@ -91,7 +91,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
     def _apply_filters(self, qs):
         if getattr(self, "action", None) == "retrieve":
-            detalles_qs = CotizacionDetalle.objects.select_related("producto").prefetch_related(
+            detalles_qs = CotizacionDetalle.objects.select_related("producto", "color").prefetch_related(
                 Prefetch("tallas", queryset=CotizacionDetalleTalla.objects.select_related("talla"))
             )
             qs = qs.prefetch_related(Prefetch("cotizaciondetalle", queryset=detalles_qs))
