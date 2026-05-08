@@ -91,7 +91,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
     def _apply_filters(self, qs):
         if getattr(self, "action", None) == "retrieve":
-            detalles_qs = CotizacionDetalle.objects.select_related("producto", "color").prefetch_related(
+            detalles_qs = CotizacionDetalle.objects.select_related("producto").prefetch_related(
                 Prefetch("tallas", queryset=CotizacionDetalleTalla.objects.select_related("talla"))
             )
             qs = qs.prefetch_related(Prefetch("cotizaciondetalle", queryset=detalles_qs))
@@ -219,7 +219,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         empresa = getattr(user, "empresa", None)
 
         if request.method.lower() == "get":
-            from catalogo.models import Producto, Color, ProductoVariante, Talla
+            from catalogo.models import Producto, Color, Talla
             from terceros.models import Cliente, DireccionCliente
             from nucleo.models import SatRegimenFiscal
 
@@ -303,56 +303,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 productos_qs = productos_qs[:limit]
             clientes = list(clientes_qs)
             productos = list(productos_qs)
-
-            # Annotate each product with its available colors from variantes_producto
-            from catalogo.models import ProductoVariante
-            producto_ids = [p["id"] for p in productos]
-            variantes_qs = (
-                ProductoVariante.objects
-                .filter(producto_id__in=producto_ids, activo=True)
-                .values("producto_id", "color_id", "color__nombre", "color__codigo_hex")
-                .order_by("producto_id", "color_id")
-                .distinct()
-            )
-            colores_por_producto: dict = {}
-            for v in variantes_qs:
-                pid = v["producto_id"]
-                if pid not in colores_por_producto:
-                    colores_por_producto[pid] = []
-                colores_por_producto[pid].append({
-                    "id": v["color_id"],
-                    "nombre": v["color__nombre"],
-                    "codigo_hex": v["color__codigo_hex"],
-                })
-            for p in productos:
-                p["colores"] = colores_por_producto.get(p["id"], [])
-
             colores = list(Color.objects.filter(activo=True).order_by("id").values("id", "nombre", "codigo", "codigo_hex"))
             tallas = list(Talla.objects.filter(activo=True).order_by("id").values("id", "nombre"))
-            tallas_por_producto = {}
-            tallas_por_producto_color = {}
-            if productos:
-                producto_ids = [p["id"] for p in productos if p.get("id")]
-                variantes_qs = ProductoVariante.objects.filter(activo=True, producto_id__in=producto_ids)
-                if not getattr(user, "is_superuser", False) and empresa:
-                    variantes_qs = variantes_qs.filter(empresa=empresa)
-                if getattr(user, "is_superuser", False) and empresa:
-                    variantes_qs = variantes_qs.filter(empresa=empresa)
-
-                variantes = list(variantes_qs.values("producto_id", "color_id", "talla_id").distinct())
-                for v in variantes:
-                    pid = v.get("producto_id")
-                    cid = v.get("color_id")
-                    tid = v.get("talla_id")
-                    if not pid or not tid:
-                        continue
-                    tallas_por_producto.setdefault(str(pid), set()).add(tid)
-                    if cid:
-                        k = f"{pid}:{cid}"
-                        tallas_por_producto_color.setdefault(k, set()).add(tid)
-
-                tallas_por_producto = {k: sorted(list(v)) for k, v in tallas_por_producto.items()}
-                tallas_por_producto_color = {k: sorted(list(v)) for k, v in tallas_por_producto_color.items()}
             direcciones_envio = []
             if cliente_id_raw:
                 try:
@@ -422,8 +374,6 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     "metodos_pago": [{"value": k, "label": v} for k, v in Cotizacion.MetodoPago.choices],
                     "usos_cfdi": [{"value": k, "label": v} for k, v in Cotizacion.UsoCfdi.choices],
                     "tallas": tallas,
-                    "tallas_por_producto": tallas_por_producto,
-                    "tallas_por_producto_color": tallas_por_producto_color,
                     "colores": colores,
                     "tipos_pedido": tipos_pedido,
                     "regimenes_fiscales": regimenes_fiscales,
@@ -610,20 +560,6 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     talla = Talla.objects.filter(pk=t["talla"], activo=True).first()
                     if not talla:
                         raise ValidationError({"detalle": f"Talla inválida: {t['talla']}"})
-                    from catalogo.models import ProductoVariante
-                    variantes_qs = ProductoVariante.objects.filter(activo=True, producto=producto, talla=talla)
-                    if not getattr(user, "is_superuser", False) and empresa:
-                        variantes_qs = variantes_qs.filter(empresa=empresa)
-                    if getattr(user, "is_superuser", False) and empresa:
-                        variantes_qs = variantes_qs.filter(empresa=empresa)
-                    if color_obj:
-                        variantes_qs = variantes_qs.filter(color=color_obj)
-                    if not variantes_qs.exists():
-                        if color_obj:
-                            raise ValidationError(
-                                {"detalle": f"La talla {talla.pk} no existe para el producto {producto.pk} con color {color_obj.pk}."}
-                            )
-                        raise ValidationError({"detalle": f"La talla {talla.pk} no existe para el producto {producto.pk}."})
                     if t.get("lleva_bordado") and t.get("bordado_config") is None:
                         raise ValidationError({"detalle": "Falta bordado_config en una talla marcada con lleva_bordado=true."})
                     lleva_reflejante = bool(t.get("lleva_reflejante") or t.get("lleva_serigrafia"))
