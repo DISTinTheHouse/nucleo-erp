@@ -955,9 +955,17 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 prod_id = det.get("producto")
                 if isinstance(prod_id, dict):
                     prod_id = prod_id.get("id")
+                color_id = det.get("color")
+                if isinstance(color_id, dict):
+                    color_id = color_id.get("id")
+                direccion_id = det.get("direccion_envio_cliente")
+                if isinstance(direccion_id, dict):
+                    direccion_id = direccion_id.get("id")
                 cot_det = CotizacionDetalle.objects.create(
                     cotizacion=cotizacion,
                     producto_id=prod_id,
+                    color_id=color_id or None,
+                    direccion_envio_cliente_id=direccion_id or None,
                     precio_lista=det.get("precio_lista"),
                     precio_unitario=det.get("precio_unitario") or 0,
                     costo_unitario=det.get("costo_unitario"),
