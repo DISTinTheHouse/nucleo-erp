@@ -98,6 +98,8 @@ class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
 
 class CotizacionDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    color_nombre = serializers.CharField(source="color.nombre", read_only=True, default=None)
+    color_codigo_hex = serializers.CharField(source="color.codigo_hex", read_only=True, default=None)
 
     class Meta:
         model = CotizacionDetalle
@@ -113,6 +115,9 @@ class CotizacionDetalleTallaSerializer(serializers.ModelSerializer):
 class CotizacionDetalleWithTallasSerializer(serializers.ModelSerializer):
     tallas = CotizacionDetalleTallaSerializer(many=True, read_only=True)
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    color_nombre = serializers.CharField(source="color.nombre", read_only=True, default=None)
+    color_codigo_hex = serializers.CharField(source="color.codigo_hex", read_only=True, default=None)
+
     class Meta:
         model = CotizacionDetalle
         fields = "__all__"
