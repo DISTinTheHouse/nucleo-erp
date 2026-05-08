@@ -219,7 +219,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         empresa = getattr(user, "empresa", None)
 
         if request.method.lower() == "get":
-            from catalogo.models import Producto, Color, Talla
+            from catalogo.models import Producto, Color
             from terceros.models import Cliente, DireccionCliente
             from nucleo.models import SatRegimenFiscal
 
@@ -303,8 +303,45 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 productos_qs = productos_qs[:limit]
             clientes = list(clientes_qs)
             productos = list(productos_qs)
+
+            # Annotate each product with its variants (sku + color + talla) from variantes_producto
+            from catalogo.models import ProductoVariante
+            producto_ids = [p["id"] for p in productos]
+            variantes_qs = (
+                ProductoVariante.objects
+                .filter(producto_id__in=producto_ids, activo=True)
+                .values(
+                    "producto_id",
+                    "sku",
+                    "color_id",
+                    "color__nombre",
+                    "color__codigo_hex",
+                    "talla_id",
+                    "talla__nombre",
+                )
+                .order_by("producto_id", "color_id", "talla_id")
+            )
+            variantes_por_producto: dict = {}
+            for v in variantes_qs:
+                pid = v["producto_id"]
+                if pid not in variantes_por_producto:
+                    variantes_por_producto[pid] = []
+                variantes_por_producto[pid].append({
+                    "sku": v["sku"],
+                    "color": {
+                        "id": v["color_id"],
+                        "nombre": v["color__nombre"],
+                        "codigo_hex": v["color__codigo_hex"],
+                    },
+                    "talla": {
+                        "id": v["talla_id"],
+                        "nombre": v["talla__nombre"],
+                    },
+                })
+            for p in productos:
+                p["variantes"] = variantes_por_producto.get(p["id"], [])
+
             colores = list(Color.objects.filter(activo=True).order_by("id").values("id", "nombre", "codigo", "codigo_hex"))
-            tallas = list(Talla.objects.filter(activo=True).order_by("id").values("id", "nombre"))
             direcciones_envio = []
             if cliente_id_raw:
                 try:
@@ -373,7 +410,6 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     "formas_pago": [{"value": k, "label": v} for k, v in Cotizacion.FormaPago.choices],
                     "metodos_pago": [{"value": k, "label": v} for k, v in Cotizacion.MetodoPago.choices],
                     "usos_cfdi": [{"value": k, "label": v} for k, v in Cotizacion.UsoCfdi.choices],
-                    "tallas": tallas,
                     "colores": colores,
                     "tipos_pedido": tipos_pedido,
                     "regimenes_fiscales": regimenes_fiscales,
