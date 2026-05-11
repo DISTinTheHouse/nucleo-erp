@@ -252,6 +252,7 @@ class PedidoOnboardingDetalleInputSerializer(serializers.Serializer):
 class ServicioExtraInputSerializer(serializers.Serializer):
     nombre = serializers.CharField(max_length=150)
     monto = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, default=0)
+    cantidad = serializers.IntegerField(min_value=1, required=False, default=1)
     visible_en_factura = serializers.BooleanField(required=False, default=True)
 
 class PedidoOnboardingCreateSerializer(serializers.Serializer):
