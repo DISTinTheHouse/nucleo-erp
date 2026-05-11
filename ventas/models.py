@@ -181,6 +181,7 @@ class CotizacionServicioExtra(models.Model):
     cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="servicios_extras")
     nombre = models.CharField(max_length=150)
     monto = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    cantidad = models.PositiveIntegerField(default=1, verbose_name="cantidad")
     visible_en_factura = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -210,7 +210,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         return {
             "cotizacion": CotizacionSerializer(cotizacion_obj).data,
             "detalles": CotizacionDetalleWithTallasSerializer(detalles_qs, many=True).data,
-            "servicios_extras": list(servicios_extras_qs.values("nombre", "monto", "visible_en_factura")),
+            "servicios_extras": list(servicios_extras_qs.values("nombre", "monto", "cantidad", "visible_en_factura")),
         }
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding")
@@ -639,6 +639,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     cotizacion=cotizacion_obj,
                     nombre=row.get("nombre") or "",
                     monto=row.get("monto") or 0,
+                    cantidad=row.get("cantidad") or 1,
                     visible_en_factura=bool(row.get("visible_en_factura", True)),
                 )
 
@@ -689,7 +690,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     "cotizacion": CotizacionSerializer(cotizacion).data,
                     "detalles": CotizacionDetalleWithTallasSerializer(detalles_qs, many=True).data,
                     "servicios_extras": list(
-                        servicios_extras_qs.values("id", "nombre", "monto", "visible_en_factura")
+                        servicios_extras_qs.values("id", "nombre", "monto", "cantidad", "visible_en_factura")
                     ),
                     "pedido": None,
                 },
@@ -1043,6 +1044,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     cotizacion=cotizacion,
                     nombre=s.get("nombre") or "",
                     monto=s.get("monto") or 0,
+                    cantidad=s.get("cantidad") or 1,
                     visible_en_factura=bool(s.get("visible_en_factura", True)),
                 )
         return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
