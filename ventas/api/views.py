@@ -608,6 +608,13 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         raise ValidationError({"detalle": "Falta corte_manga_config en una talla marcada con lleva_corte_manga=true."})
                     if t.get("lleva_cambio_talla") and _is_empty_json(t.get("cambio_talla_config")):
                         raise ValidationError({"detalle": "Falta cambio_talla_config en una talla marcada con lleva_cambio_talla=true."})
+                    
+                    # Calcular SKU snapshot
+                    codigo_producto = (getattr(producto, "codigo", None) or "").strip()
+                    codigo_color = (getattr(color_obj, "codigo", None) or "").strip()
+                    codigo_talla = (getattr(talla, "nombre", None) or "").strip()
+                    sku_snapshot = f"{codigo_producto}{codigo_color}{codigo_talla}".replace(" ", "").upper()
+
                     CotizacionDetalleTalla.objects.create(
                         cotizacion_detalle=cot_det,
                         talla=talla,
@@ -622,6 +629,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         corte_manga_config=t.get("corte_manga_config"),
                         lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
                         cambio_talla_config=t.get("cambio_talla_config"),
+                        sku=sku_snapshot or None,
                     )
 
         def _save_servicios_extras(cotizacion_obj, rows):
@@ -789,6 +797,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     corte_manga_config=t.corte_manga_config,
                     lleva_cambio_talla=t.lleva_cambio_talla,
                     cambio_talla_config=t.cambio_talla_config,
+                    sku=getattr(t, "sku", None),
                 )
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id"):
             PedidoServicioExtra.objects.create(
@@ -889,6 +898,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     corte_manga_config=t.corte_manga_config,
                     lleva_cambio_talla=t.lleva_cambio_talla,
                     cambio_talla_config=t.cambio_talla_config,
+                    sku=getattr(t, "sku", None),
                 )
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id"):
             PedidoServicioExtra.objects.create(
@@ -1026,6 +1036,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         corte_manga_config=t.get("corte_manga_config"),
                         lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
                         cambio_talla_config=t.get("cambio_talla_config"),
+                        sku=t.get("sku"),
                     )
             for s in snap_servicios:
                 CotizacionServicioExtra.objects.create(

@@ -167,6 +167,7 @@ class CotizacionDetalleTalla(models.Model):
     corte_manga_config = models.JSONField(null=True, blank=True)
     lleva_cambio_talla = models.BooleanField(default=False)
     cambio_talla_config = models.JSONField(null=True, blank=True)
+    sku = models.CharField(max_length=150, null=True, blank=True)
 
     class Meta:
         db_table = "cotizacion_detalle_talla"

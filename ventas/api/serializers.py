@@ -107,18 +107,6 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
 
 class CotizacionDetalleTallaSerializer(serializers.ModelSerializer):
     talla_nombre = serializers.CharField(source="talla.nombre", read_only=True)
-    sku = serializers.SerializerMethodField()
-
-    def get_sku(self, obj):
-        producto = getattr(getattr(obj, "cotizacion_detalle", None), "producto", None)
-        color = getattr(getattr(obj, "cotizacion_detalle", None), "color", None)
-        talla = getattr(obj, "talla", None)
-
-        codigo_producto = (getattr(producto, "codigo", None) or "").strip()
-        codigo_color = (getattr(color, "codigo", None) or "").strip()
-        codigo_talla = (getattr(talla, "nombre", None) or "").strip()
-
-        return f"{codigo_producto}{codigo_color}{codigo_talla}".replace(" ", "").upper()
 
     class Meta:
         model = CotizacionDetalleTalla
@@ -230,18 +218,6 @@ class PedidoDetalleSerializer(serializers.ModelSerializer):
 
 class PedidoDetalleTallaSerializer(serializers.ModelSerializer):
     pedido_folio = serializers.CharField(source='pedido_detalle.pedido.folio', read_only=True)
-    sku = serializers.SerializerMethodField()
-
-    def get_sku(self, obj):
-        producto = getattr(getattr(obj, "pedido_detalle", None), "producto", None)
-        color = getattr(getattr(obj, "pedido_detalle", None), "color", None)
-        talla = getattr(obj, "talla", None)
-
-        codigo_producto = (getattr(producto, "codigo", None) or "").strip()
-        codigo_color = (getattr(color, "codigo", None) or "").strip()
-        codigo_talla = (getattr(talla, "nombre", None) or "").strip()
-
-        return f"{codigo_producto}{codigo_color}{codigo_talla}".replace(" ", "").upper()
     class Meta:
         model = PedidoDetalleTalla
         fields = '__all__'
