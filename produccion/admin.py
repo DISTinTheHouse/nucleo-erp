@@ -1,6 +1,24 @@
 from django.contrib import admin
-from produccion.models import ListaMaterialBom, RutaProduccion, OrdenProduccion, ConsumoProduccion, ProductoTerminadoEntradas
+from produccion.models import (
+    ListaMaterialBom, 
+    RutaProduccion, 
+    OrdenProduccion, 
+    ConsumoProduccion, 
+    ProductoTerminadoEntradas, 
+    OrdenesBordado,
+    BordadoAvances,
+    BordadoIncidencias,
+    OrdenesReflejante,
+    ReflejanteAvances,
+    ReflejanteIncidencias,
+)
 
+admin.site.register(OrdenesBordado)
+admin.site.register(BordadoAvances)
+admin.site.register(BordadoIncidencias)
+admin.site.register(OrdenesReflejante)
+admin.site.register(ReflejanteAvances)
+admin.site.register(ReflejanteIncidencias)
 
 @admin.register(ListaMaterialBom)
 class ListaMaterialBomAdmin(admin.ModelAdmin):
@@ -10,7 +28,6 @@ class ListaMaterialBomAdmin(admin.ModelAdmin):
     ordering = ("-bom_id",)
     autocomplete_fields = ("empresa", "producto")
     list_select_related = ("empresa", "producto")
-
 
 @admin.register(RutaProduccion)
 class RutaProduccionAdmin(admin.ModelAdmin):
@@ -27,17 +44,14 @@ class RutaProduccionAdmin(admin.ModelAdmin):
     autocomplete_fields = ("empresa", "producto")
     list_select_related = ("empresa", "producto")
 
-
 class ProductoTerminadoEntradasInline(admin.TabularInline):
     model = ProductoTerminadoEntradas
     extra = 0
     autocomplete_fields = ("almacen", "ubicacion")
 
-
 class ConsumoProduccionInline(admin.TabularInline):
     model = ConsumoProduccion
     extra = 0
-
 
 @admin.register(OrdenProduccion)
 class OrdenProduccionAdmin(admin.ModelAdmin):
@@ -58,7 +72,6 @@ class OrdenProduccionAdmin(admin.ModelAdmin):
     list_select_related = ("empresa", "sucursal", "pedido", "ruta_produccion")
     inlines = (ConsumoProduccionInline, ProductoTerminadoEntradasInline)
 
-
 @admin.register(ConsumoProduccion)
 class ConsumoProduccionAdmin(admin.ModelAdmin):
     list_display = ("consumo_produccion_id", "op")
@@ -67,7 +80,6 @@ class ConsumoProduccionAdmin(admin.ModelAdmin):
     ordering = ("-consumo_produccion_id",)
     autocomplete_fields = ("op",)
     list_select_related = ("op",)
-
 
 @admin.register(ProductoTerminadoEntradas)
 class ProductoTerminadoEntradasAdmin(admin.ModelAdmin):
