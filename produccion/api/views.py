@@ -1,8 +1,30 @@
-from produccion.models import ListaMaterialBom, OrdenProduccion, ConsumoProduccion, ProductoTerminadoEntradas
-from produccion.api.serializers import ListaMaterialBomSerializer, OrdenProduccionSerializer, ConsumoProduccionSerializer, ProductoTerminadoEntradasSerializer
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+
+from produccion.models import (
+    ListaMaterialBom, 
+    OrdenProduccion, ConsumoProduccion, 
+    ProductoTerminadoEntradas, 
+    OrdenesBordado, 
+    BordadoAvances,
+    BordadoIncidencias,
+    OrdenesReflejante,
+    ReflejanteAvances,
+    ReflejanteIncidencias,
+)
+from produccion.api.serializers import (
+    ListaMaterialBomSerializer, 
+    OrdenProduccionSerializer, 
+    ConsumoProduccionSerializer, 
+    ProductoTerminadoEntradasSerializer,
+    OrdenBordadoSerializer,
+    BordadoAvancesSerializer,
+    BordadoIncidenciasSerializer,
+    OrdenReflejanteSerializer,
+    ReflejanteAvancesSerializer,
+    ReflejanteIncidenciasSerializer,
+)
 
 class ListaMaterialBomViewSet(viewsets.ModelViewSet):
     queryset = ListaMaterialBom.objects.all()
@@ -46,3 +68,45 @@ class ProductoTerminadoEntradasViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def anular(self, request, pk=None):
         return Response({'msg': 'ProductoTerminadoEntradasViewSet.anular'}, status=status.HTTP_200_OK)
+
+class OrdenBordadoViewSet(viewsets.ModelViewSet):
+    queryset = OrdenesBordado.objects.filter(activo=True)
+    serializer_class = OrdenBordadoSerializer
+
+    def perform_destroy(self, instance):
+        instance.soft_delete()
+
+class BordadoAvancesViewSet(viewsets.ModelViewSet):
+    queryset = BordadoAvances.objects.filter(activo=True)
+    serializer_class = BordadoAvancesSerializer
+
+    def perform_destroy(self, instance):
+        instance.soft_delete()
+
+class BordadoIncidenciasViewSet(viewsets.ModelViewSet):
+    queryset = BordadoIncidencias.objects.filter(activo=True)
+    serializer_class = BordadoIncidenciasSerializer
+
+    def perform_destroy(self, instance):
+        instance.soft_delete()
+
+class OrdenReflejanteViewSet(viewsets.ModelViewSet):
+    queryset = OrdenesReflejante.objects.filter(activo=True)
+    serializer_class = OrdenReflejanteSerializer
+
+    def perform_destroy(self, instance):
+        instance.soft_delete()
+
+class ReflejanteAvancesViewSet(viewsets.ModelViewSet):
+    queryset = ReflejanteAvances.objects.filter(activo=True)
+    serializer_class = ReflejanteAvancesSerializer
+
+    def perform_destroy(self, instance):
+        instance.soft_delete()
+
+class ReflejanteIncidenciasViewSet(viewsets.ModelViewSet):
+    queryset = ReflejanteIncidencias.objects.filter(activo=True)
+    serializer_class = ReflejanteIncidenciasSerializer
+
+    def perform_destroy(self, instance):
+        instance.soft_delete()
