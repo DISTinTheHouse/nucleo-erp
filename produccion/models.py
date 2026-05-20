@@ -1,6 +1,6 @@
 from django.db import models
 from nucleo.models import Empresa, Sucursal, StatusLifecycleModel
-from catalogo.models import Producto
+from catalogo.models import Producto, Talla, Color
 from ventas.models import Pedido, PedidoDetalle
 from inventarios.models import Almacen, Ubicacion
 
@@ -86,10 +86,10 @@ class OrdenesBordado(StatusLifecycleModel):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE)
     folio_bordado = models.CharField(max_length=50, unique=True)
     estatus_bordado = models.IntegerField(default=EstatusBordado.PENDIENTE.value, choices=EstatusBordado.choices)
-    prioridad = models.IntegerField()
+    prioridad = models.IntegerField(default=1)
     fecha_inicio = models.DateTimeField(auto_now_add=True)
     fecha_fin = models.DateTimeField(null=True, blank=True)
-    usuario_asignado = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE)
+    usuario_asignado = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE, null=True, blank=True)
     observaciones = models.TextField(blank=True, null=True)
     activo = models.BooleanField(default=True)
 
@@ -102,13 +102,15 @@ class OrdenesBordado(StatusLifecycleModel):
         return self.folio_bordado
 
 class OrdenBordadoDetalle(models.Model):
-    ob = models.ForeignKey(OrdenesBordado, on_delete=models.CASCADE)
+    ob = models.ForeignKey(OrdenesBordado, on_delete=models.CASCADE, related_name='detalles')
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
     cantidad = models.FloatField()
-    posicion_bordado = models.CharField(max_length=50)
+    posicion_bordado = models.CharField(max_length=50, null=True, blank=True)
     colores_hilo = models.IntegerField(default=0)
     puntadas = models.IntegerField(default=0)
+    talla = models.ForeignKey(Talla, on_delete=models.SET_NULL, null=True, blank=True)
+    color = models.ForeignKey(Color, on_delete=models.SET_NULL, null=True, blank=True)
 
     class Meta:
         db_table = 'orden_bordado_detalle'

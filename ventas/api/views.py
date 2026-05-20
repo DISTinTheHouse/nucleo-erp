@@ -31,6 +31,7 @@ from ventas.api.serializers import (
     CotizacionOnboardingCreateSerializer,
 )
 from nucleo.models import SerieFolio
+from produccion.models import OrdenesBordado, OrdenBordadoDetalle
 
 class CotizacionViewSet(viewsets.ModelViewSet):
     queryset = Cotizacion.objects.all()
@@ -796,7 +797,73 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 monto=s.monto,
                 visible_en_factura=s.visible_en_factura,
             )
+        
+        # Generar Órdenes de Bordado (OB) automáticamente
+        self._generar_ordenes_bordado(pedido, empresa)
+
         return pedido
+
+    def _generar_ordenes_bordado(self, pedido, empresa):
+        """
+        Genera órdenes de bordado para los productos del pedido que tengan 'lleva_bordado=True'.
+        """
+        # Obtener todas las tallas del pedido que requieren bordado
+        detalles_con_tallas_bordado = PedidoDetalleTalla.objects.filter(
+            pedido_detalle__pedido=pedido,
+            lleva_bordado=True,
+            cantidad__gt=0
+        ).select_related('pedido_detalle__producto', 'pedido_detalle__color', 'talla')
+
+        if not detalles_con_tallas_bordado.exists():
+            return
+
+        with transaction.atomic():
+            # Intentar obtener serie para ORDEN_BORDADO
+            serie_folio = SerieFolio.objects.select_for_update().filter(
+                empresa=empresa,
+                sucursal=pedido.sucursal,
+                tipo_documento__iexact="ORDEN_BORDADO",
+                activo=True,
+            ).order_by("id_serie_folio").first()
+
+            folio_ob = None
+            if serie_folio:
+                try:
+                    folio_ob, nuevo_consecutivo, anio_actual = serie_folio.get_siguiente_folio()
+                    serie_folio.folio_actual = nuevo_consecutivo
+                    serie_folio.ultimo_anio = anio_actual
+                    serie_folio.save(update_fields=["folio_actual", "ultimo_anio", "updated_at"])
+                except Exception:
+                    pass
+            
+            if not folio_ob:
+                # Fallback: Folio basado en el folio del pedido
+                folio_ob = f"OB-{pedido.folio or pedido.id}"
+
+            # Crear la Orden de Bordado maestra
+            ob = OrdenesBordado.objects.create(
+                empresa=empresa,
+                sucursal=pedido.sucursal,
+                pedido=pedido,
+                folio_bordado=folio_ob,
+                estatus_bordado=1, # PENDIENTE
+                prioridad=1,
+            )
+
+            # Crear el detalle de la Orden de Bordado
+            for dt in detalles_con_tallas_bordado:
+                OrdenBordadoDetalle.objects.create(
+                    ob=ob,
+                    pedido_detalle=dt.pedido_detalle,
+                    producto=dt.pedido_detalle.producto,
+                    cantidad=dt.cantidad,
+                    talla=dt.talla,
+                    color=dt.pedido_detalle.color,
+                    # Configuración inicial (se puede pulir después)
+                    posicion_bordado=dt.bordado_config.get('posicion') if dt.bordado_config else None,
+                    colores_hilo=0,
+                    puntadas=0
+                )
 
     def _aplicar_cotizacion_a_pedido(self, cotizacion, pedido):
         pedido.empresa = cotizacion.empresa
