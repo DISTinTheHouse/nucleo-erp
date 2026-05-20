@@ -493,7 +493,15 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 if direccion_id in ("", 0):
                     direccion_id = None
 
-                key = (producto_id, color_id, direccion_id)
+                # Clave única por producto + color + dirección + configuración de tallas
+                # Para que productos iguales con configuraciones distintas no se agrupen,
+                # incluimos un hash de la configuración de las tallas en la key de agrupación.
+                import json
+                tallas_raw = row.get("tallas") or []
+                # Normalizamos tallas para que el orden no afecte, pero la config sí
+                tallas_config_str = json.dumps(tallas_raw, sort_keys=True)
+                
+                key = (producto_id, color_id, direccion_id, tallas_config_str)
                 entry = agrupado.get(key)
                 if not entry:
                     entry = {
@@ -505,38 +513,19 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         "tallas": [],
                     }
                     agrupado[key] = entry
-                entry["tallas"] += row.get("tallas") or []
+                entry["tallas"] += tallas_raw
 
             for entry in agrupado.values():
                 by_talla = {}
                 for t in entry["tallas"]:
                     talla_id = t["talla"]
+                    # Ahora, dentro de un mismo grupo (misma config base), 
+                    # si hay varias entradas de la misma talla, las sumamos.
                     agg = by_talla.get(talla_id)
                     if not agg:
                         by_talla[talla_id] = dict(t)
                         continue
                     agg["cantidad"] = int(agg["cantidad"]) + int(t["cantidad"])
-                    agg["lleva_bordado"] = bool(agg.get("lleva_bordado") or t.get("lleva_bordado"))
-                    if agg.get("bordado_config") is None and t.get("bordado_config") is not None:
-                        agg["bordado_config"] = t.get("bordado_config")
-                    agg["lleva_reflejante"] = bool(
-                        agg.get("lleva_reflejante")
-                        or agg.get("lleva_serigrafia")
-                        or t.get("lleva_reflejante")
-                        or t.get("lleva_serigrafia")
-                    )
-                    if _is_empty_json(agg.get("reflejante_config")):
-                        cfg = t.get("reflejante_config")
-                        if _is_empty_json(cfg):
-                            cfg = t.get("serigrafia_config")
-                        if not _is_empty_json(cfg):
-                            agg["reflejante_config"] = cfg
-                    agg["lleva_corte_manga"] = bool(agg.get("lleva_corte_manga") or t.get("lleva_corte_manga"))
-                    if _is_empty_json(agg.get("corte_manga_config")) and not _is_empty_json(t.get("corte_manga_config")):
-                        agg["corte_manga_config"] = t.get("corte_manga_config")
-                    agg["lleva_cambio_talla"] = bool(agg.get("lleva_cambio_talla") or t.get("lleva_cambio_talla"))
-                    if _is_empty_json(agg.get("cambio_talla_config")) and not _is_empty_json(t.get("cambio_talla_config")):
-                        agg["cambio_talla_config"] = t.get("cambio_talla_config")
                 entry["tallas"] = list(by_talla.values())
 
             return list(agrupado.values())
@@ -1192,3 +1181,78 @@ class PedidoDetalleTallaViewSet(viewsets.ModelViewSet):
     queryset = PedidoDetalleTalla.objects.all()
     serializer_class = PedidoDetalleTallaSerializer
     http_method_names = ['get', 'post', 'patch']
+
+class MesaControlViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet exclusivo para Mesa de Control para gestionar cotizaciones en revisión,
+    ver stock y realizar acciones de autorización.
+    """
+    serializer_class = CotizacionFullSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        # Solo mesa de control o superusuarios
+        if not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
+            return Cotizacion.objects.none()
+        
+        empresa = getattr(user, "empresa", None)
+        qs = Cotizacion.objects.filter(estatus=2) # Solo EN REVISION
+        if empresa:
+            qs = qs.filter(empresa=empresa)
+        
+        return qs.select_related("cliente", "sucursal", "moneda", "vendedor").prefetch_related(
+            Prefetch("cotizaciondetalle", queryset=CotizacionDetalle.objects.select_related("producto").prefetch_related(
+                Prefetch("tallas", queryset=CotizacionDetalleTalla.objects.select_related("talla"))
+            ))
+        )
+
+    @action(detail=True, methods=["get"], url_path="stock-detalle")
+    def stock_detalle(self, request, pk=None):
+        """
+        Consulta el stock actual de cada producto/talla de la cotización.
+        """
+        cotizacion = self.get_object()
+        from inventarios.models import Existencia
+        from catalogo.models import ProductoVariante
+
+        resultados = []
+        detalles = CotizacionDetalle.objects.filter(cotizacion=cotizacion).select_related("producto", "color")
+        
+        for det in detalles:
+            item = {
+                "producto": det.producto.nombre,
+                "color": det.color.nombre if det.color else "N/A",
+                "tallas": []
+            }
+            for ct in det.tallas.all():
+                # Buscar variante para obtener stock
+                variante = ProductoVariante.objects.filter(
+                    producto=det.producto,
+                    color=det.color,
+                    talla=ct.talla
+                ).first()
+                
+                stock_total = 0
+                if variante:
+                    stock_total = Existencia.objects.filter(
+                        producto_variante=variante
+                    ).aggregate(total=Sum("stock"))["total"] or 0
+                
+                item["tallas"].append({
+                    "talla": ct.talla.nombre,
+                    "cantidad_pedida": ct.cantidad,
+                    "stock_actual": stock_total,
+                    "diferencia": stock_total - ct.cantidad
+                })
+            resultados.append(item)
+            
+        return Response(resultados)
+
+    @action(detail=True, methods=["post"], url_path="autorizar")
+    def autorizar(self, request, pk=None):
+        """
+        Acceso directo a la autorización desde el ViewSet de Mesa de Control.
+        """
+        # Evitar importación circular importando aquí
+        from ventas.api.views import CotizacionViewSet
+        return CotizacionViewSet.as_view({'post': 'autorizar'})(request, pk=pk)
