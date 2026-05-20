@@ -666,7 +666,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         cotizacion.estatus = 5
                         cotizacion.cambios_solicitados_at = now
                     elif cotizacion.estatus == 4:
-                        cotizacion.estatus = 2
+                        cotizacion.estatus = 1
 
                     for k, v in cotizacion_data.items():
                         setattr(cotizacion, k, v)
@@ -674,7 +674,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     update_fields += ["estatus", "cambios_solicitados_at"]
                     cotizacion.save(update_fields=list(dict.fromkeys(update_fields)))
                 else:
-                    cotizacion = Cotizacion.objects.create(empresa=empresa, vendedor=user, estatus=2, **cotizacion_data)
+                    cotizacion = Cotizacion.objects.create(empresa=empresa, vendedor=user, estatus=1, **cotizacion_data)
             except TypeError as e:
                 raise ValidationError({"cotizacion": f"Datos inválidos: {str(e)}"})
             except ValueError as e:
@@ -909,6 +909,28 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 visible_en_factura=s.visible_en_factura,
             )
 
+    @action(detail=True, methods=["post"], url_path="enviar-revision")
+    def enviar_revision(self, request, pk=None):
+        cotizacion = self.get_object()
+        user = request.user
+        
+        # Solo el vendedor o un admin pueden enviarla a revisión
+        if not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
+            if cotizacion.vendedor_id and cotizacion.vendedor_id != user.id:
+                raise ValidationError({"permiso": "No tienes permiso para enviar esta cotización a revisión."})
+
+        if cotizacion.estatus not in [1, 4, 5]: # Borrador, Rechazada o Cambios Solicitados
+            raise ValidationError({"estatus": "La cotización ya está en revisión o autorizada."})
+
+        cotizacion.estatus = 2
+        cotizacion.save(update_fields=["estatus", "updated_at"])
+        
+        return Response({
+            "ok": True,
+            "estatus": "EN REVISION",
+            "cotizacion": CotizacionSerializer(cotizacion).data
+        })
+
     @action(detail=True, methods=["post"], url_path="autorizar")
     def autorizar(self, request, pk=None):
         user = request.user
@@ -918,8 +940,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             cotizacion = Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
-            if cotizacion.estatus == 4:
-                raise ValidationError({"cotizacion": "La cotización está rechazada."})
+            if cotizacion.estatus != 2:
+                raise ValidationError({"cotizacion": "La cotización debe estar EN REVISION para ser autorizada."})
+            
             pedido_existente = Pedido.objects.select_for_update().filter(cotizacion=cotizacion, activo=True).order_by("-id").first()
             if pedido_existente:
                 raise ValidationError({"cotizacion": "La cotización ya tiene un pedido generado."})

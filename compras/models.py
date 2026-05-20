@@ -96,13 +96,13 @@ class OrdenCompra(StatusLifecycleModel):
 
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
-    proveedor = models.ForeignKey(Proveedor, on_delete=models.CASCADE)
-    solicitud_compra = models.ForeignKey(SolicitudCompra, on_delete=models.CASCADE)
+    proveedor = models.ForeignKey(Proveedor, on_delete=models.SET_NULL, null=True, blank=True)
+    solicitud_compra = models.ForeignKey(SolicitudCompra, on_delete=models.SET_NULL, null=True, blank=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE)
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name='ordenes_compra', null=True)
+    pedido = models.ForeignKey(Pedido, on_delete=models.SET_NULL, related_name='ordenes_compra', null=True, blank=True)
 
-    folio = models.CharField(max_length=30, unique=True)
+    folio = models.CharField(max_length=30, unique=True, null=True, blank=True)
     referencia = models.CharField(max_length=50, null=True)
 
     fecha_oc = models.DateField()

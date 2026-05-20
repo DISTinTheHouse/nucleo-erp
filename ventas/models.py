@@ -44,12 +44,10 @@ class Cotizacion(models.Model):
 
     CHOICES_ESTATUS = (
         (1, "BORRADOR"),
-        (2, "ENVIAR A AUTORIZACION"),
-        (3, "EN REVISION"),
+        (2, "EN REVISION"),
+        (3, "AUTORIZADA"),
         (4, "RECHAZADA"),
         (5, "CAMBIOS SOLICITADOS"),
-        (6, "AUTORIZADA"),
-        # cotizacion finalizada
     )
 
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="cotizacion")
@@ -58,7 +56,7 @@ class Cotizacion(models.Model):
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="cotizacion")
     oportunidad = models.ForeignKey(Oportunidad, on_delete=models.CASCADE, related_name="cotizacion", null=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="cotizacion")
-    estatus = models.SmallIntegerField(default=2, choices=CHOICES_ESTATUS, db_index=True)
+    estatus = models.SmallIntegerField(default=1, choices=CHOICES_ESTATUS, db_index=True)
     autorizada_at = models.DateTimeField(null=True, blank=True)
     cambios_solicitados_at = models.DateTimeField(null=True, blank=True)
     aprobado_snapshot = models.JSONField(null=True, blank=True)
