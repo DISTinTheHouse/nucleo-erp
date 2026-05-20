@@ -1256,3 +1256,11 @@ class MesaControlViewSet(viewsets.ReadOnlyModelViewSet):
         # Evitar importación circular importando aquí
         from ventas.api.views import CotizacionViewSet
         return CotizacionViewSet.as_view({'post': 'autorizar'})(request, pk=pk)
+
+    @action(detail=True, methods=["post"], url_path="rechazar")
+    def rechazar(self, request, pk=None):
+        """
+        Acceso directo al rechazo desde el ViewSet de Mesa de Control.
+        """
+        from ventas.api.views import CotizacionViewSet
+        return CotizacionViewSet.as_view({'post': 'rechazar'})(request, pk=pk)
