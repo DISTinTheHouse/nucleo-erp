@@ -31,7 +31,7 @@ from ventas.api.serializers import (
     CotizacionOnboardingCreateSerializer,
 )
 from nucleo.models import SerieFolio
-from produccion.models import OrdenesBordado, OrdenBordadoDetalle
+from produccion.models import OrdenesBordado, OrdenBordadoDetalle, OrdenesReflejante, OrdenReflejanteDetalle
 
 class CotizacionViewSet(viewsets.ModelViewSet):
     queryset = Cotizacion.objects.all()
@@ -801,6 +801,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         # Generar Órdenes de Bordado (OB) automáticamente
         self._generar_ordenes_bordado(pedido, empresa)
 
+        # Generar Órdenes de Reflejante (OR) automáticamente
+        self._generar_ordenes_reflejante(pedido, empresa)
+
         return pedido
 
     def _generar_ordenes_bordado(self, pedido, empresa):
@@ -863,6 +866,68 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     posicion_bordado=dt.bordado_config.get('posicion') if dt.bordado_config else None,
                     colores_hilo=0,
                     puntadas=0
+                )
+
+    def _generar_ordenes_reflejante(self, pedido, empresa):
+        """
+        Genera órdenes de reflejante para los productos del pedido que tengan 'lleva_reflejante=True'.
+        """
+        # Obtener todas las tallas del pedido que requieren reflejante
+        detalles_con_tallas_reflejante = PedidoDetalleTalla.objects.filter(
+            pedido_detalle__pedido=pedido,
+            lleva_reflejante=True,
+            cantidad__gt=0
+        ).select_related('pedido_detalle__producto', 'pedido_detalle__color', 'talla')
+
+        if not detalles_con_tallas_reflejante.exists():
+            return
+
+        with transaction.atomic():
+            # Intentar obtener serie para ORDEN_REFLEJANTE
+            serie_folio = SerieFolio.objects.select_for_update().filter(
+                empresa=empresa,
+                sucursal=pedido.sucursal,
+                tipo_documento__iexact="ORDEN_REFLEJANTE",
+                activo=True,
+            ).order_by("id_serie_folio").first()
+
+            folio_or = None
+            if serie_folio:
+                try:
+                    folio_or, nuevo_consecutivo, anio_actual = serie_folio.get_siguiente_folio()
+                    serie_folio.folio_actual = nuevo_consecutivo
+                    serie_folio.ultimo_anio = anio_actual
+                    serie_folio.save(update_fields=["folio_actual", "ultimo_anio", "updated_at"])
+                except Exception:
+                    pass
+            
+            if not folio_or:
+                # Fallback: Folio basado en el folio del pedido
+                folio_or = f"OR-{pedido.folio or pedido.id}"
+
+            # Crear la Orden de Reflejante maestra
+            orden_r = OrdenesReflejante.objects.create(
+                empresa=empresa,
+                sucursal=pedido.sucursal,
+                pedido=pedido,
+                folio_reflejante=folio_or,
+                estatus_reflejante=1, # PENDIENTE
+                prioridad=1,
+            )
+
+            # Crear el detalle de la Orden de Reflejante
+            for dt in detalles_con_tallas_reflejante:
+                OrdenReflejanteDetalle.objects.create(
+                    orden_r=orden_r,
+                    pedido_detalle=dt.pedido_detalle,
+                    producto=dt.pedido_detalle.producto,
+                    cantidad=dt.cantidad,
+                    talla=dt.talla,
+                    color=dt.pedido_detalle.color,
+                    # Configuración inicial
+                    tipo_reflejante=dt.reflejante_config.get('tipo') if dt.reflejante_config else None,
+                    posicion=dt.reflejante_config.get('posicion') if dt.reflejante_config else None,
+                    metros=0
                 )
 
     def _aplicar_cotizacion_a_pedido(self, cotizacion, pedido):

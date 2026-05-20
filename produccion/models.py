@@ -153,14 +153,24 @@ class BordadoIncidencias(StatusLifecycleModel):
         return str(self.id)
 
 class OrdenesReflejante(StatusLifecycleModel):
+    class EstatusReflejante(models.IntegerChoices):
+        PENDIENTE = 1, "Pendiente"
+        PREPARACION = 2, "Preparacion"
+        APLICANDO = 3, "Aplicando"
+        REVISION = 4, "Revision"
+        COMPLETADO = 5, "Completado"
+        DETENIDO = 6, "Detenido"
+        CANCELADO = 7, "Cancelado"
+
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE)
     folio_reflejante = models.CharField(max_length=50, unique=True)
-    estatus_reflejante = models.IntegerField()
-    prioridad = models.IntegerField()
+    estatus_reflejante = models.IntegerField(default=EstatusReflejante.PENDIENTE, choices=EstatusReflejante.choices)
+    prioridad = models.IntegerField(default=1)
     fecha_inicio = models.DateTimeField(auto_now_add=True)
     fecha_fin = models.DateTimeField(null=True, blank=True)
+    usuario_asignado = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE, null=True, blank=True)
     observaciones = models.TextField(blank=True, null=True)
     activo = models.BooleanField(default=True)
 
@@ -173,13 +183,15 @@ class OrdenesReflejante(StatusLifecycleModel):
         return self.folio_reflejante
 
 class OrdenReflejanteDetalle(models.Model):
-    orden_r = models.ForeignKey(OrdenesReflejante, on_delete=models.CASCADE)
+    orden_r = models.ForeignKey(OrdenesReflejante, on_delete=models.CASCADE, related_name='detalles')
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
     cantidad = models.FloatField()
-    tipo_reflejante = models.CharField(max_length=50)
-    posicion = models.CharField(max_length=50)
-    metros = models.FloatField()
+    tipo_reflejante = models.CharField(max_length=50, null=True, blank=True)
+    posicion = models.CharField(max_length=50, null=True, blank=True)
+    metros = models.FloatField(default=0)
+    talla = models.ForeignKey(Talla, on_delete=models.SET_NULL, null=True, blank=True)
+    color = models.ForeignKey(Color, on_delete=models.SET_NULL, null=True, blank=True)
 
     class Meta:
         db_table = 'orden_reflejante_detalle'
