@@ -1314,12 +1314,12 @@ class PedidoDetalleTallaViewSet(viewsets.ModelViewSet):
     serializer_class = PedidoDetalleTallaSerializer
     http_method_names = ['get', 'post', 'patch']
 
-class MesaControlViewSet(viewsets.ReadOnlyModelViewSet):
+class MesaControlViewSet(CotizacionViewSet):
     """
     ViewSet exclusivo para Mesa de Control para gestionar cotizaciones en revisión,
     ver stock y realizar acciones de autorización.
     """
-    serializer_class = CotizacionFullSerializer
+    http_method_names = ['get', 'post']
 
     def get_queryset(self):
         user = self.request.user
@@ -1379,20 +1379,3 @@ class MesaControlViewSet(viewsets.ReadOnlyModelViewSet):
             resultados.append(item)
             
         return Response(resultados)
-
-    @action(detail=True, methods=["post"], url_path="autorizar")
-    def autorizar(self, request, pk=None):
-        """
-        Acceso directo a la autorización desde el ViewSet de Mesa de Control.
-        """
-        # Evitar importación circular importando aquí
-        from ventas.api.views import CotizacionViewSet
-        return CotizacionViewSet.as_view({'post': 'autorizar'})(request, pk=pk)
-
-    @action(detail=True, methods=["post"], url_path="rechazar")
-    def rechazar(self, request, pk=None):
-        """
-        Acceso directo al rechazo desde el ViewSet de Mesa de Control.
-        """
-        from ventas.api.views import CotizacionViewSet
-        return CotizacionViewSet.as_view({'post': 'rechazar'})(request, pk=pk)
