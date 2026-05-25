@@ -44,7 +44,7 @@ class OrdenProduccion(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE)
-    ruta_produccion = models.ForeignKey(RutaProduccion, on_delete=models.CASCADE)
+    ruta_produccion = models.ForeignKey(RutaProduccion, on_delete=models.SET_NULL, null=True, blank=True)
 
     folio_op = models.CharField(max_length=50, unique=True)
     estatus_op = models.IntegerField(default=EstatusOrdenProduccion.PENDIENTE.value, choices=EstatusOrdenProduccion.choices)
