@@ -1014,7 +1014,29 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 - La edición **no** modifica el `Pedido` automáticamente. El `Pedido` solo se actualiza si mesa de control ejecuta `aceptar-cambios`.
 - Para editar también el detalle (productos/tallas/bordado), re-envía `POST /api/v1/ventas/cotizaciones/onboarding/` agregando `cotizacion_id` (y el detalle completo actualizado).
 
----
+--- 
+
+## 📦 11. Pedidos
+
+Gestión de pedidos generados a partir de cotizaciones autorizadas.
+
+#### Automatización de Órdenes de Trabajo (Producción)
+Al autorizar una cotización (`/autorizar/`), el backend genera automáticamente las siguientes órdenes de trabajo según la configuración de los productos:
+
+1.  **Orden de Producción (OP)**: Se genera siempre por cada pedido autorizado.
+    - Nomenclatura: `OP-P-XXXX`
+2.  **Orden de Bordado (OB)**: Se genera si algún producto tiene `lleva_bordado: true`.
+    - Nomenclatura: `OB-P-XXXX`
+3.  **Orden de Reflejante (OR)**: Se genera si algún producto tiene `lleva_reflejante: true`.
+    - Nomenclatura: `OR-P-XXXX`
+4.  **Orden de Corte de Manga (OCM)**: Se genera si algún producto tiene `lleva_corte_manga: true`.
+    - Nomenclatura: `OCM-P-XXXX`
+
+Estas órdenes nacen en estado **PENDIENTE** y quedan vinculadas al pedido original.
+
+- **Listar**: `GET /api/v1/ventas/pedidos/` 
+
+--- 
 
 ## 🧮 Mesa de Control
 

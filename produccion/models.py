@@ -249,3 +249,50 @@ class ReflejanteIncidencias(StatusLifecycleModel):
 
     def __str__(self):
         return str(self.id)
+
+class OrdenesCorteManga(StatusLifecycleModel):
+    class EstatusCorte(models.IntegerChoices):
+        PENDIENTE = 1, "Pendiente"
+        PREPARACION = 2, "Preparacion"
+        CORTANDO = 3, "Cortando"
+        REVISION = 4, "Revision"
+        COMPLETADO = 5, "Completado"
+        DETENIDO = 6, "Detenido"
+        CANCELADO = 7, "Cancelado"
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
+    pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE)
+    folio_ocm = models.CharField(max_length=50, unique=True)
+    estatus_corte = models.IntegerField(default=EstatusCorte.PENDIENTE, choices=EstatusCorte.choices)
+    prioridad = models.IntegerField(default=1)
+    fecha_inicio = models.DateTimeField(auto_now_add=True)
+    fecha_fin = models.DateTimeField(null=True, blank=True)
+    usuario_asignado = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE, null=True, blank=True)
+    observaciones = models.TextField(blank=True, null=True)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'orden_corte_manga'
+        verbose_name = 'Orden Corte Manga'
+        verbose_name_plural = 'Ordenes Corte Manga'
+
+    def __str__(self):
+        return self.folio_ocm
+
+class OrdenCorteMangaDetalle(models.Model):
+    ocm = models.ForeignKey(OrdenesCorteManga, on_delete=models.CASCADE, related_name='detalles')
+    pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE)
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
+    cantidad = models.FloatField()
+    talla = models.ForeignKey(Talla, on_delete=models.SET_NULL, null=True, blank=True)
+    color = models.ForeignKey(Color, on_delete=models.SET_NULL, null=True, blank=True)
+    configuracion = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'orden_corte_manga_detalle'
+        verbose_name = 'Orden Corte Manga Detalle'
+        verbose_name_plural = 'Ordenes Corte Manga Detalle'
+
+    def __str__(self):
+        return str(self.id)

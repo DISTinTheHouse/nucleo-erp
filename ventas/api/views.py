@@ -34,13 +34,14 @@ from ventas.api.serializers import (
 )
 
 from nucleo.models import SerieFolio, Empresa
-
 from produccion.models import (
     OrdenesBordado,
     OrdenBordadoDetalle,
     OrdenesReflejante,
     OrdenReflejanteDetalle,
     OrdenProduccion,
+    OrdenesCorteManga,
+    OrdenCorteMangaDetalle,
 )
 
 from ventas.utils.helpers import _save_cotizacion_detalle, _save_servicios_extras
@@ -813,8 +814,71 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         self._generar_ordenes_reflejante(pedido, empresa)
         # Generar Orden de Producción (OP) automáticamente
         self._generar_orden_produccion(pedido, empresa)
+        # Generar Órdenes de Corte de Manga (OCM) automáticamente
+        self._generar_ordenes_corte_manga(pedido, empresa)
 
         return pedido
+
+    def _generar_ordenes_corte_manga(self, pedido, empresa):
+        """
+        Genera órdenes de corte de manga para los productos del pedido que tengan 'lleva_corte_manga=True'.
+        """
+        detalles_con_tallas_corte = PedidoDetalleTalla.objects.filter(
+            pedido_detalle__pedido=pedido, lleva_corte_manga=True, cantidad__gt=0
+        ).select_related("pedido_detalle__producto", "pedido_detalle__color", "talla")
+
+        if not detalles_con_tallas_corte.exists():
+            return
+
+        with transaction.atomic():
+            serie_folio = (
+                SerieFolio.objects.select_for_update()
+                .filter(
+                    empresa=empresa,
+                    sucursal=pedido.sucursal,
+                    tipo_documento__iexact="ORDEN_CORTE_MANGA",
+                    activo=True,
+                )
+                .order_by("id_serie_folio")
+                .first()
+            )
+
+            folio_ocm = None
+            if serie_folio:
+                try:
+                    folio_ocm, nuevo_consecutivo, anio_actual = (
+                        serie_folio.get_siguiente_folio()
+                    )
+                    serie_folio.folio_actual = nuevo_consecutivo
+                    serie_folio.ultimo_anio = anio_actual
+                    serie_folio.save(
+                        update_fields=["folio_actual", "ultimo_anio", "updated_at"]
+                    )
+                except Exception:
+                    pass
+
+            if not folio_ocm:
+                folio_ocm = f"OCM-{pedido.folio or pedido.id}"
+
+            ocm = OrdenesCorteManga.objects.create(
+                empresa=empresa,
+                sucursal=pedido.sucursal,
+                pedido=pedido,
+                folio_ocm=folio_ocm,
+                estatus_corte=1,  # PENDIENTE
+                prioridad=1,
+            )
+
+            for dt in detalles_con_tallas_corte:
+                OrdenCorteMangaDetalle.objects.create(
+                    ocm=ocm,
+                    pedido_detalle=dt.pedido_detalle,
+                    producto=dt.pedido_detalle.producto,
+                    cantidad=dt.cantidad,
+                    talla=dt.talla,
+                    color=dt.pedido_detalle.color,
+                    configuracion=dt.corte_manga_config,
+                )
 
     def _generar_orden_produccion(self, pedido, empresa):
         """
