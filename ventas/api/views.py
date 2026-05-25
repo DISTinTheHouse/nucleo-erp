@@ -811,8 +811,56 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         self._generar_ordenes_bordado(pedido, empresa)
         # Generar Órdenes de Reflejante (OR) automáticamente
         self._generar_ordenes_reflejante(pedido, empresa)
+        # Generar Orden de Producción (OP) automáticamente
+        self._generar_orden_produccion(pedido, empresa)
 
         return pedido
+
+    def _generar_orden_produccion(self, pedido, empresa):
+        """
+        Genera una Orden de Producción (OP) para el pedido.
+        """
+        with transaction.atomic():
+            # Intentar obtener serie para ORDEN_PRODUCCION
+            serie_folio = (
+                SerieFolio.objects.select_for_update()
+                .filter(
+                    empresa=empresa,
+                    sucursal=pedido.sucursal,
+                    tipo_documento__iexact="ORDEN_PRODUCCION",
+                    activo=True,
+                )
+                .order_by("id_serie_folio")
+                .first()
+            )
+
+            folio_op = None
+            if serie_folio:
+                try:
+                    folio_op, nuevo_consecutivo, anio_actual = (
+                        serie_folio.get_siguiente_folio()
+                    )
+                    serie_folio.folio_actual = nuevo_consecutivo
+                    serie_folio.ultimo_anio = anio_actual
+                    serie_folio.save(
+                        update_fields=["folio_actual", "ultimo_anio", "updated_at"]
+                    )
+                except Exception:
+                    pass
+
+            if not folio_op:
+                # Fallback: Folio basado en el folio del pedido
+                folio_op = f"OP-{pedido.folio or pedido.id}"
+
+            # Crear la Orden de Producción
+            OrdenProduccion.objects.create(
+                empresa=empresa,
+                sucursal=pedido.sucursal,
+                pedido=pedido,
+                folio_op=folio_op,
+                estatus_op=1,  # PENDIENTE
+                prioridad=1,
+            )
 
     def _generar_ordenes_bordado(self, pedido, empresa):
         """
