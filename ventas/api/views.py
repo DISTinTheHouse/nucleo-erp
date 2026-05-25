@@ -796,6 +796,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     lleva_cambio_talla=t.lleva_cambio_talla,
                     cambio_talla_config=t.cambio_talla_config,
                     sku=getattr(t, "sku", None),
+                    variante=t.variante,
                 )
                 
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id"):
@@ -1058,6 +1059,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     lleva_cambio_talla=t.lleva_cambio_talla,
                     cambio_talla_config=t.cambio_talla_config,
                     sku=getattr(t, "sku", None),
+                    variante=t.variante,
                 )
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by(
             "id"
@@ -1486,7 +1488,7 @@ class MesaControlViewSet(CotizacionViewSet):
                 ).prefetch_related(
                     Prefetch(
                         "tallas",
-                        queryset=CotizacionDetalleTalla.objects.select_related("talla"),
+                        queryset=CotizacionDetalleTalla.objects.select_related("talla", "variante"),
                     )
                 ),
             )
@@ -1513,10 +1515,8 @@ class MesaControlViewSet(CotizacionViewSet):
                 "tallas": [],
             }
             for ct in det.tallas.all():
-                # Buscar variante para obtener stock
-                variante = ProductoVariante.objects.filter(
-                    producto=det.producto, color=det.color, talla=ct.talla
-                ).first()
+                # Usar el vínculo directo a la variante para obtener stock
+                variante = ct.variante
 
                 stock_total = 0
                 if variante:

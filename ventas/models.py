@@ -2,7 +2,7 @@ from django.db import models
 from django.conf import settings
 from nucleo.models import Empresa, Sucursal, Moneda, SerieFolio, StatusLifecycleModel, SatRegimenFiscal
 from terceros.models import Cliente, DireccionCliente
-from catalogo.models import Producto, Talla, Color
+from catalogo.models import Producto, Talla, Color, ProductoVariante
 
 class Prospecto(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="prospectos")
@@ -167,6 +167,7 @@ class CotizacionDetalleTalla(models.Model):
     cambio_talla_config = models.JSONField(null=True, blank=True)
     sku = models.CharField(max_length=150, null=True, blank=True)
     requiere_produccion = models.BooleanField(default=False)
+    variante = models.ForeignKey(ProductoVariante, on_delete=models.SET_NULL, null=True, blank=True, related_name="cotizacion_tallas")
 
     class Meta:
         db_table = "cotizacion_detalle_talla"
@@ -370,6 +371,7 @@ class PedidoDetalleTalla(models.Model):
     corte_manga_config = models.JSONField(null=True, blank=True)
     lleva_cambio_talla = models.BooleanField(default=False)
     cambio_talla_config = models.JSONField(null=True, blank=True)
+    variante = models.ForeignKey(ProductoVariante, on_delete=models.SET_NULL, null=True, blank=True, related_name="pedido_tallas")
 
     class Meta:
         db_table = "pedido_detalle_talla"

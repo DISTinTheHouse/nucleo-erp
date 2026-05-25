@@ -1,4 +1,4 @@
-from catalogo.models import Talla, Producto
+from catalogo.models import Talla, Producto, ProductoVariante
 from ventas.models import CotizacionServicioExtra, CotizacionDetalle, CotizacionDetalleTalla
 from rest_framework.exceptions import ValidationError
 
@@ -168,6 +168,14 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                 " ", ""
             ).upper()
 
+            # Buscar variante para vincular
+            variante_obj = ProductoVariante.objects.filter(
+                producto=producto,
+                color=color_obj,
+                talla=talla,
+                empresa=cotizacion_obj.empresa
+            ).first()
+
             CotizacionDetalleTalla.objects.create(
                 cotizacion_detalle=cot_det,
                 talla=talla,
@@ -183,6 +191,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                 lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
                 cambio_talla_config=t.get("cambio_talla_config"),
                 sku=sku_snapshot or None,
+                variante=variante_obj
             )
 
 def _save_servicios_extras(cotizacion_obj, rows):
