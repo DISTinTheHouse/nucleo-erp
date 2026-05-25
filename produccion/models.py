@@ -31,11 +31,29 @@ class RutaProduccion(models.Model):
         return str(self.ruta_produccion_id)
     
 class OrdenProduccion(models.Model):
+    class EstatusOrdenProduccion(models.IntegerChoices):
+        PENDIENTE = 1, "Pendiente"
+        PREPARACION = 2, "Preparacion"
+        BORDANDO = 3, "En produccion"
+        REVISION = 4, "Revision"
+        COMPLETADO = 5, "Completado"
+        DETENIDO = 6, "Detenido"
+        CANCELADO = 7, "Cancelado"
+
     op_id = models.AutoField(primary_key=True)
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE)
     ruta_produccion = models.ForeignKey(RutaProduccion, on_delete=models.CASCADE)
+
+    folio_op = models.CharField(max_length=50, unique=True)
+    estatus_op = models.IntegerField(default=EstatusOrdenProduccion.PENDIENTE.value, choices=EstatusOrdenProduccion.choices)
+    prioridad = models.IntegerField(default=1)
+    fecha_inicio = models.DateTimeField(auto_now_add=True)
+    fecha_fin = models.DateTimeField(null=True, blank=True)
+    usuario_asignado = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE, null=True, blank=True)
+    observaciones = models.TextField(blank=True, null=True)
+    activo = models.BooleanField(default=True)
 
     class Meta:
         db_table = 'ordenes_produccion'
