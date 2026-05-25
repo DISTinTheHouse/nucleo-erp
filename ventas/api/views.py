@@ -938,7 +938,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 prioridad=1,
             )
 
-            # Crear el detalle de la Orden de Reflejante
+            # Crear el detalle de la Orden de Reflejante 
             for dt in detalles_con_tallas_reflejante:
                 OrdenReflejanteDetalle.objects.create(
                     orden_r=orden_r,
