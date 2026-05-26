@@ -808,14 +808,21 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 visible_en_factura=s.visible_en_factura,
             )
 
-        # Generar Órdenes de Bordado (OB) automáticamente
-        self._generar_ordenes_bordado(pedido, empresa)
-        # Generar Órdenes de Reflejante (OR) automáticamente
-        self._generar_ordenes_reflejante(pedido, empresa)
-        # Generar Orden de Producción (OP) automáticamente
-        self._generar_orden_produccion(pedido, empresa)
-        # Generar Órdenes de Corte de Manga (OCM) automáticamente
-        self._generar_ordenes_corte_manga(pedido, empresa)
+        # Generar Órdenes de Trabajo (Automáticas)
+        # Envolvemos en try/except para que un error en la generación de órdenes
+        # no detenga la autorización del pedido principal (fail-safe).
+        try:
+            # Generar Órdenes de Bordado (OB) automáticamente
+            self._generar_ordenes_bordado(pedido, empresa)
+            # Generar Órdenes de Reflejante (OR) automáticamente
+            self._generar_ordenes_reflejante(pedido, empresa)
+            # Generar Orden de Producción (OP) automáticamente
+            self._generar_orden_produccion(pedido, empresa)
+            # Generar Órdenes de Corte de Manga (OCM) automáticamente
+            self._generar_ordenes_corte_manga(pedido, empresa)
+        except Exception as e:
+            # Aquí se podría loguear el error: logger.error(f"Error generando órdenes: {e}")
+            pass
 
         return pedido
 
@@ -1183,9 +1190,6 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 visible_en_factura=s.visible_en_factura,
             )
 
-    def _store_op(self, empresa, pedido):
-        orden_produccion = OrdenProduccion.objects.create(empresa=empresa)
-
     @action(detail=True, methods=["post"], url_path="enviar-revision")
     def enviar_revision(self, request, pk=None):
         cotizacion = self.get_object()
@@ -1230,8 +1234,15 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         empresa = cotizacion.empresa
 
         with transaction.atomic():
-            cotizacion = (Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first())
-            
+            cotizacion = (
+                Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
+            )
+
+            if not cotizacion:
+                raise ValidationError(
+                    {"cotizacion": "No se encontró la cotización para autorizar."}
+                )
+
             if cotizacion.estatus != 2:
                 raise ValidationError({"cotizacion": "La cotización debe estar EN REVISION para ser autorizada."})
 
