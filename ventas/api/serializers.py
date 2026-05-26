@@ -18,6 +18,14 @@ class CotizacionSerializer(serializers.ModelSerializer):
         fields = '__all__'
         extra_kwargs = {
             'oc': {'required': False, 'allow_null': True},
+            'persona_pagos': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'correo_facturas': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'telefono_pagos': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'cliente': {'required': False, 'allow_null': True},
+            'moneda': {'required': False, 'allow_null': True},
+            'forma_pago': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'metodo_pago': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'uso_cfdi': {'required': False, 'allow_null': True, 'allow_blank': True},
         }
 
 class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
