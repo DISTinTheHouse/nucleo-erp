@@ -110,20 +110,71 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = self.queryset
-        if user.is_superuser:
+
+        qp = self.request.query_params
+
+        def to_int(v):
+            if v in (None, ""):
+                return None
+            try:
+                return int(v)
+            except Exception:
+                return None
+
+        empresa_id = to_int(qp.get("empresa_id") or qp.get("empresa"))
+        sucursal_id = to_int(qp.get("sucursal_id") or qp.get("sucursal"))
+        almacen_id = to_int(qp.get("almacen_id") or qp.get("almacen"))
+        producto_variante_id = to_int(
+            qp.get("producto_variante_id") or qp.get("producto_variante")
+        )
+        producto_id = to_int(qp.get("producto_id") or qp.get("producto"))
+        color_id = to_int(qp.get("color_id") or qp.get("color"))
+        talla_id = to_int(qp.get("talla_id") or qp.get("talla"))
+        sku_q = (qp.get("sku") or qp.get("q") or "").strip()
+
+        if empresa_id:
+            qs = qs.filter(almacen__empresa_id=empresa_id)
+        if sucursal_id:
+            qs = qs.filter(almacen__sucursal_id=sucursal_id)
+        if almacen_id:
+            qs = qs.filter(almacen_id=almacen_id)
+        if producto_variante_id:
+            qs = qs.filter(producto_variante_id=producto_variante_id)
+        if producto_id:
+            qs = qs.filter(producto_variante__producto_id=producto_id)
+        if color_id:
+            qs = qs.filter(producto_variante__color_id=color_id)
+        if talla_id:
+            qs = qs.filter(producto_variante__talla_id=talla_id)
+        if sku_q:
+            qs = qs.filter(producto_variante__sku__icontains=sku_q)
+
+        if not user.is_superuser:
+            empresa_ids = []
+            if user.empresa_id:
+                empresa_ids.append(user.empresa_id)
+            empresa_ids += list(user.empresas.values_list("pk", flat=True))
+            sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+            qs = qs.filter(
+                almacen__empresa_id__in=empresa_ids, almacen__sucursal_id__in=sucursal_ids
+            )
+
+        limit_raw = (qp.get("limit") or "").strip()
+        limit = None
+        if limit_raw.lower() in {"all", "0", "-1"}:
+            if not (user.is_superuser or getattr(user, "is_admin_empresa", False)):
+                limit = 500
+        else:
+            try:
+                limit = int(limit_raw) if limit_raw else 200
+            except Exception:
+                limit = 200
+
+        qs = qs.order_by("-id")
+        if limit is None:
             return qs
-        
-        empresa_ids = []
-        if user.empresa_id:
-            empresa_ids.append(user.empresa_id)
-        empresa_ids += list(user.empresas.values_list('pk', flat=True))
-        sucursal_ids = list(user.sucursales.values_list('pk', flat=True))
-        
-        # Filtrar por almacenes permitidos (ya que Existencia depende de Almacen)
-        return qs.filter(
-            models.Q(almacen__empresa_id__in=empresa_ids) &
-            models.Q(almacen__sucursal_id__in=sucursal_ids)
-        ).distinct()
+        limit = max(1, min(limit, 2000))
+        return qs[:limit]
 
     def perform_create(self, serializer):
         user = self.request.user
