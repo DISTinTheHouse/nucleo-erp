@@ -98,7 +98,8 @@ class ExistenciaSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
     def get_producto_info(self, obj):
-        producto = getattr(obj, 'producto', None)
+        variante = getattr(obj, "producto_variante", None)
+        producto = getattr(variante, "producto", None) if variante else None
         if not producto:
             return None
         return {
@@ -108,6 +109,11 @@ class ExistenciaSerializer(serializers.ModelSerializer):
             'tipo': getattr(producto, 'tipo', None),
             'categoria_producto': getattr(producto, 'categoria_producto_id', None),
             'unidad_medida': getattr(producto, 'unidad_medida_id', None),
+            'sku': getattr(variante, 'sku', None) if variante else None,
+            'color_id': getattr(variante, 'color_id', None) if variante else None,
+            'color': getattr(getattr(variante, 'color', None), 'nombre', None) if variante else None,
+            'talla_id': getattr(variante, 'talla_id', None) if variante else None,
+            'talla': getattr(getattr(variante, 'talla', None), 'nombre', None) if variante else None,
         }
 
     def get_almacen_info(self, obj):

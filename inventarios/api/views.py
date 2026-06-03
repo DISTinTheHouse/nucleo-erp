@@ -97,7 +97,13 @@ class UbicacionViewSet(viewsets.ModelViewSet):
         serializer.save()
 
 class ExistenciaViewSet(viewsets.ModelViewSet):
-    queryset = Existencia.objects.all().select_related('producto', 'almacen', 'ubicacion', 'lote', 'serie')
+    queryset = Existencia.objects.all().select_related(
+        "producto_variante__producto",
+        "producto_variante__color",
+        "producto_variante__talla",
+        "almacen",
+        "ubicacion",
+    )
     serializer_class = ExistenciaSerializer
     permission_classes = [IsAuthenticatedAndScoped]
 
