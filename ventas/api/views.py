@@ -358,8 +358,18 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             "rfc",
             "correo",
             "telefono",
+            "direccion_fiscal",
+            "colonia",
+            "codigo_postal",
+            "ciudad",
+            "estado",
+            "giro_empresarial",
             "sat_regimen_fiscal_id",
+            "sat_regimen_fiscal__codigo",
+            "sat_regimen_fiscal__descripcion",
             "sat_uso_cfdi_id",
+            "sat_uso_cfdi__codigo",
+            "sat_uso_cfdi__descripcion",
         )
 
         productos_qs = productos_qs.order_by("id").values(
@@ -464,27 +474,6 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         tipos_pedido = [
             {"value": tp[0], "label": tp[1]} for tp in Pedido.CHOICES_TIPO_PEDIDO
         ]
-        clientes_qs = clientes_qs.order_by("id").values(
-            "id",
-            "razon_social",
-            "nombre",
-            "rfc",
-            "correo",
-            "telefono",
-            "direccion_fiscal",
-            "colonia",
-            "codigo_postal",
-            "ciudad",
-            "estado",
-            "giro_empresarial",
-            "sat_regimen_fiscal_id",
-            "sat_regimen_fiscal__codigo",
-            "sat_regimen_fiscal__descripcion",
-        )
-        if limit is not None:
-            clientes_qs = clientes_qs[:limit]
-            clientes = list(clientes_qs)
-
         return  {
                 "vendedor": {
                     "id": getattr(user, "pk", None),
