@@ -103,6 +103,7 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         "producto_variante__talla",
         "almacen",
         "ubicacion",
+        "ubicacion__almacen",
     )
     serializer_class = ExistenciaSerializer
     permission_classes = [IsAuthenticatedAndScoped]
