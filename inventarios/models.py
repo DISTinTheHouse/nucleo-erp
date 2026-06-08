@@ -161,7 +161,6 @@ class Existencia(models.Model):
     def __str__(self):
         return f"{self.producto_variante.producto.nombre} - {self.almacen.nombre}"
 
-#TODO: ADD FIELDS: id_recepcion, id_transferencia, id_op
 class MovimientoInventario(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="movimientos_inventario")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="movimientos_inventario")
@@ -175,13 +174,17 @@ class MovimientoInventario(StatusLifecycleModel):
     usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE)
     observaciones = models.TextField(max_length=150, null=True, blank=True)
 
+    recepcion = models.ForeignKey('compras.Recepcion', on_delete=models.CASCADE, null=True)
+    transferencia = models.ForeignKey('wms.Transferencia', on_delete=models.CASCADE, null=True)
+    op = models.ForeignKey('produccion.OrdenProduccion', on_delete=models.CASCADE, null=True)
+
     class Meta:
         db_table = "movimientos_inventario"
         verbose_name = "Movimiento Inventario"
         verbose_name_plural = "Movimientos Inventario"
 
     def __str__(self):
-        return str(self.id) #change this
+        return str(self.id)
     
 class MovimientoInventarioDetalle(models.Model):
     movimiento_inventario = models.ForeignKey(MovimientoInventario, on_delete=models.CASCADE, related_name="detalles")

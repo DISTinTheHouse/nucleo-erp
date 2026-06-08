@@ -65,6 +65,8 @@ INSTALLED_APPS = [
     'ventas',
     'compras',
     'produccion',
+    'wms',
+    'logistica',
     'allauth',
     'allauth.account',
     'auth_kit',
