@@ -179,7 +179,7 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                         raise PermissionDenied("No tiene acceso a la empresa de este almacén")
 
 class MovimientoInventarioViewSet(viewsets.ModelViewSet):
-    queryset = MovimientoInventario.objects.all().select_related('empresa', 'sucursal', 'pedido', 'entrega', 'devolucion', 'ajuste_inventario')
+    queryset = MovimientoInventario.objects.filter(activo=True).select_related('empresa', 'sucursal', 'pedido', 'entrega', 'devolucion', 'ajuste_inventario')
     serializer_class = MovimientoInventarioSerializer
     permission_classes = [IsAuthenticatedAndScoped]
 
@@ -213,6 +213,10 @@ class MovimientoInventarioViewSet(viewsets.ModelViewSet):
                 if user.empresa_id and empresa.pk != user.empresa_id and not user.empresas.filter(pk=empresa.pk).exists():
                     raise PermissionDenied("No tiene acceso a esta empresa")
         serializer.save()
+
+    def perform_destroy(self, instance):
+        instance.soft_delete()
+
 
 class MovimientoInventarioDetalleViewSet(viewsets.ModelViewSet):
     queryset = MovimientoInventarioDetalle.objects.all().select_related('movimiento_inventario', 'producto', 'ubicacion_origen', 'ubicacion_destino', 'lote', 'serie')
@@ -249,7 +253,7 @@ class MovimientoInventarioDetalleViewSet(viewsets.ModelViewSet):
         serializer.save()
 
 class AjusteInventarioViewSet(viewsets.ModelViewSet):
-    queryset = AjusteInventario.objects.all().select_related('empresa', 'sucursal', 'almacen')
+    queryset = AjusteInventario.objects.filter(activo=True).select_related('empresa', 'sucursal', 'almacen')
     serializer_class = AjusteInventarioSerializer
     permission_classes = [IsAuthenticatedAndScoped]
 
@@ -283,3 +287,6 @@ class AjusteInventarioViewSet(viewsets.ModelViewSet):
                 if user.empresa_id and empresa.pk != user.empresa_id and not user.empresas.filter(pk=empresa.pk).exists():
                     raise PermissionDenied("No tiene acceso a esta empresa")
         serializer.save()
+    
+    def perform_destroy(self, instance):
+        instance.soft_delete()
