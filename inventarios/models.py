@@ -2,6 +2,7 @@ from django.db import models
 from nucleo.models import Empresa, Sucursal
 from catalogo.models import Producto, ProductoVariante
 from ventas.models import Pedido, Entrega, Devolucion
+from nucleo.models import StatusLifecycleModel
 
 class TipoAlmacen(models.TextChoices):
     MATERIA_PRIMA = "MP", "Materia Prima"
@@ -25,6 +26,12 @@ class EstatusUbicacion(models.TextChoices):
     ACTIVO = "ACTIVO", "Activo"
     INACTIVO = "INACTIVO", "Inactivo"
     BLOQUEADO = "BLOQUEADO", "Bloqueado"
+
+class TipoMovimiento(models.TextChoices):
+    ENTRADA = "ENTRADA", "Entrada"
+    SALIDA = "SALIDA", "Salida"
+    AJUSTE = "AJUSTE", "Ajuste"
+    TRANSFERENCIA = "TRANSFERENCIA", "Transferencia"
 
 class Almacen(models.Model):
     id_almacen = models.BigAutoField(primary_key=True)
@@ -101,10 +108,15 @@ class Serie(models.Model):
     def __str__(self):
         return str(self.id)
 
-class AjusteInventario(models.Model):
+class AjusteInventario(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="ajustes_inventario")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="ajustes_inventario")
     almacen = models.ForeignKey(Almacen, on_delete=models.PROTECT, related_name="ajustes_inventario")
+
+    fecha_ajuste = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+    usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE)
+    motivo = models.CharField(max_length=100)
+    observaciones = models.TextField(max_length=150, null=True, blank=True)
 
     class Meta:
         db_table = "ajustes_inventario"
@@ -114,11 +126,32 @@ class AjusteInventario(models.Model):
     def __str__(self):
         return str(self.id)
 
+class AjusteDetalle(models.Model):
+    ajuste = models.ForeignKey(AjusteInventario, on_delete=models.CASCADE)
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
+    ubicacion = models.ForeignKey(Ubicacion, on_delete=models.CASCADE)
+    lote = models.ForeignKey(Lote, on_delete=models.CASCADE)
+    serie = models.ForeignKey(Serie, on_delete=models.CASCADE)
+
+    cantidad_sistema = models.DecimalField(max_digits=18, decimal_places=4)
+    cantidad_fisica = models.DecimalField(max_digits=18, decimal_places=4)
+    diferencia = models.DecimalField(max_digits=18, decimal_places=4)
+
+    class Meta:
+        db_table = "ajuste_detalle"
+        verbose_name = "Ajuste detalle"
+        verbose_name_plural = "Ajustes Detalle"
+    
+    def __str__(self):
+        return str(self.id)
+
 class Existencia(models.Model):
     producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.PROTECT, related_name="existencia")
     almacen = models.ForeignKey(Almacen, on_delete=models.PROTECT, related_name="existencia")
     ubicacion = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="existencia", null=True, blank=True)
     stock = models.IntegerField(default=0)
+    cantidad = models.DecimalField(max_digits=18, decimal_places=4)
+    fecha_actualizacion = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         db_table = "existencias"
@@ -129,13 +162,18 @@ class Existencia(models.Model):
         return f"{self.producto_variante.producto.nombre} - {self.almacen.nombre}"
 
 #TODO: ADD FIELDS: id_recepcion, id_transferencia, id_op
-class MovimientoInventario(models.Model):
+class MovimientoInventario(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="movimientos_inventario")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="movimientos_inventario")
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="movimientos_inventario")
     entrega = models.ForeignKey(Entrega, on_delete=models.CASCADE, related_name="movimientos_inventario", null=True)
     devolucion = models.ForeignKey(Devolucion, on_delete=models.CASCADE, related_name="movimientos_inventario", null=True)
     ajuste_inventario = models.ForeignKey(AjusteInventario, on_delete=models.CASCADE, related_name="movimientos_inventario")
+    
+    tipo_movimiento = models.CharField(max_length=50, choices=TipoMovimiento.choices, default=TipoMovimiento.ENTRADA)
+    fecha_movimiento = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+    usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE)
+    observaciones = models.TextField(max_length=150, null=True, blank=True)
 
     class Meta:
         db_table = "movimientos_inventario"
@@ -152,6 +190,9 @@ class MovimientoInventarioDetalle(models.Model):
     ubicacion_destino = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle_destino")
     lote = models.ForeignKey(Lote, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle")
     serie = models.ForeignKey(Serie, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle")
+    
+    cantidad = models.DecimalField(max_digits=18, decimal_places=8, default=0)
+    costo_unitario = models.DecimalField(max_digits=18, decimal_places=8, default=0)
 
     class Meta:
         db_table = "movimiento_inventario_detalle"
