@@ -109,7 +109,6 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticatedAndScoped]
 
     def get_queryset(self):
-        user = self.request.user
         qs = self.queryset
 
         qp = self.request.query_params
@@ -150,21 +149,10 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         if sku_q:
             qs = qs.filter(producto_variante__sku__icontains=sku_q)
 
-        if not user.is_superuser:
-            empresa_ids = []
-            if user.empresa_id:
-                empresa_ids.append(user.empresa_id)
-            empresa_ids += list(user.empresas.values_list("pk", flat=True))
-            sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
-            qs = qs.filter(
-                almacen__empresa_id__in=empresa_ids, almacen__sucursal_id__in=sucursal_ids
-            )
-
         limit_raw = (qp.get("limit") or "").strip()
         limit = None
         if limit_raw.lower() in {"all", "0", "-1"}:
-            if not (user.is_superuser or getattr(user, "is_admin_empresa", False)):
-                limit = 500
+            limit = None
         else:
             try:
                 limit = int(limit_raw) if limit_raw else 200
