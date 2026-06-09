@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import AlmacenViewSet, UbicacionViewSet, ExistenciaViewSet, OperacionInventarioViewSet, MovimientoInventarioViewSet
 
 router = DefaultRouter()
+router.trailing_slash = "/?"
 router.register(r'almacenes', AlmacenViewSet, basename='almacen')
 router.register(r'ubicaciones', UbicacionViewSet, basename='ubicacion')
 router.register(r'existencias', ExistenciaViewSet, basename='existencia')
