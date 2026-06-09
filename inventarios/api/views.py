@@ -430,7 +430,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         return self._apply(request, "AJUSTE")
 
 
-class MovimientoInventarioViewSet(viewsets.ReadOnlyModelViewSet):
+class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AuditoriaMovimientoSerializer
     permission_classes = [IsAuthenticatedAndScoped]
 
