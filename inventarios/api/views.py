@@ -14,6 +14,7 @@ from inventarios.models import (
     MovimientoInventarioDetalle,
     AjusteInventario,
 )
+from auditoria.models import AuditoriaEvento
 from nucleo.models import Empresa, Sucursal
 from .serializers import (
     AlmacenSerializer,
@@ -22,6 +23,7 @@ from .serializers import (
     MovimientoInventarioSerializer,
     MovimientoInventarioDetalleSerializer,
     AjusteInventarioSerializer,
+    AuditoriaMovimientoSerializer,
 )
 
 class IsAuthenticatedAndScoped(permissions.BasePermission):
@@ -297,7 +299,9 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 )
                 ajuste_id = ajuste.pk
 
+        user = request.user
         results = []
+        before_after = []
         with transaction.atomic():
             for it in items:
                 ubicacion = None
@@ -351,6 +355,15 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                     ex.stock = ex.stock or 0
                 ex.save(update_fields=["cantidad", "stock", "fecha_actualizacion"])
 
+                before_after.append(
+                    {
+                        "producto_variante_id": ex.producto_variante_id,
+                        "ubicacion_id": ex.ubicacion_id,
+                        "cantidad_before": str(current),
+                        "cantidad_after": str(new_qty),
+                        "delta": str(new_qty - current),
+                    }
+                )
                 results.append(
                     {
                         "id": ex.pk,
@@ -362,11 +375,43 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                     }
                 )
 
+            empresa_evt = (
+                getattr(almacen, "empresa", None)
+                or getattr(user, "empresa", None)
+                or Empresa.objects.filter(
+                    pk=self._to_int(request.data.get("empresa") or request.data.get("empresa_id"))
+                ).first()
+            )
+            if empresa_evt:
+                ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
+                ua = request.META.get("HTTP_USER_AGENT")
+                ev = AuditoriaEvento.objects.create(
+                    empresa=empresa_evt,
+                    usuario=user if getattr(user, "pk", None) else None,
+                    modulo="inventarios",
+                    accion=tipo,
+                    tabla="existencias",
+                    id_registro=str(almacen.pk),
+                    antes_json={"items": before_after, "ajuste_id": ajuste_id},
+                    despues_json={
+                        "almacen_id": almacen.pk,
+                        "sucursal_id": almacen.sucursal_id,
+                        "empresa_id": almacen.empresa_id,
+                        "items": before_after,
+                        "ajuste_id": ajuste_id,
+                    },
+                    ip=ip,
+                    user_agent=ua,
+                )
+            else:
+                ev = None
+
         return Response(
             {
                 "tipo": tipo,
                 "almacen_id": almacen.pk,
                 "ajuste_id": ajuste_id,
+                "movimiento_id": (getattr(ev, "id_evento", None) if ev else None),
                 "result": results,
             },
             status=status.HTTP_200_OK,
@@ -383,6 +428,36 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
     @action(detail=False, methods=["post"], url_path="ajuste")
     def ajuste(self, request):
         return self._apply(request, "AJUSTE")
+
+
+class MovimientoInventarioViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = AuditoriaMovimientoSerializer
+    permission_classes = [IsAuthenticatedAndScoped]
+
+    def get_queryset(self):
+        qs = (
+            AuditoriaEvento.objects.filter(modulo="inventarios", tabla="existencias")
+            .select_related("empresa", "usuario")
+            .order_by("-created_at", "-id_evento")
+        )
+        qp = self.request.query_params
+        try:
+            empresa_id = int(qp.get("empresa_id") or qp.get("empresa") or 0)
+        except Exception:
+            empresa_id = 0
+        if empresa_id:
+            qs = qs.filter(empresa_id=empresa_id)
+        accion = (qp.get("accion") or qp.get("tipo") or "").strip().upper()
+        if accion in {"ENTRADA", "SALIDA", "AJUSTE"}:
+            qs = qs.filter(accion=accion)
+
+        limit_raw = (qp.get("limit") or "").strip()
+        try:
+            limit = int(limit_raw) if limit_raw else 200
+        except Exception:
+            limit = 200
+        limit = max(1, min(limit, 2000))
+        return qs[:limit]
 
 class MovimientoInventarioViewSet(viewsets.ModelViewSet):
     queryset = MovimientoInventario.objects.filter(activo=True).select_related('empresa', 'sucursal', 'pedido', 'entrega', 'devolucion', 'ajuste_inventario')

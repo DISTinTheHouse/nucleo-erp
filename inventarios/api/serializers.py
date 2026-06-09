@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from inventarios.models import Almacen, Ubicacion, Existencia, MovimientoInventario, MovimientoInventarioDetalle, AjusteInventario
 from nucleo.models import Sucursal
+from auditoria.models import AuditoriaEvento
 
 class AlmacenSerializer(serializers.ModelSerializer):
     class Meta:
@@ -178,3 +179,22 @@ class AjusteInventarioSerializer(serializers.ModelSerializer):
     class Meta:
         model = AjusteInventario
         fields = '__all__'
+
+
+class AuditoriaMovimientoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AuditoriaEvento
+        fields = [
+            "id_evento",
+            "empresa",
+            "usuario",
+            "modulo",
+            "accion",
+            "tabla",
+            "id_registro",
+            "antes_json",
+            "despues_json",
+            "ip",
+            "user_agent",
+            "created_at",
+        ]
