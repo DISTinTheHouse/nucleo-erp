@@ -30,10 +30,9 @@ def validate_rfc(rfc):
     try:
         if not _validar_digito_verificador(rfc):
             return False, "El RFC tiene un formato válido pero el dígito verificador es incorrecto (posiblemente falso o mal escrito)."
-    except Exception as e:
-        # En caso de error en el algoritmo, fallamos seguro por si acaso, o permitimos con warning.
-        # Preferible fallar si estamos seguros.
-        return False, f"Error al validar dígito verificador: {str(e)}"
+    except Exception:
+        # No exponer detalles internos de excepciones al cliente.
+        return False, "No fue posible validar el dígito verificador del RFC."
 
     return True, "RFC Válido"
 
