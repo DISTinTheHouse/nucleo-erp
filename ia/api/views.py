@@ -150,8 +150,8 @@ class AIAssistantAPIView(APIView):
             except Exception:
                 body = ""
             return {"error": "OpenAI HTTPError", "status_code": e.code, "body": body}
-        except Exception as e:
-            return {"error": "OpenAI request failed", "detail": str(e)}
+        except Exception:
+            return {"error": "OpenAI request failed"}
 
     def _tools_schema(self):
         return [
