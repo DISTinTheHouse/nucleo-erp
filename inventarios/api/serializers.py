@@ -182,19 +182,28 @@ class AjusteInventarioSerializer(serializers.ModelSerializer):
 
 
 class AuditoriaMovimientoSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(source="id_evento", read_only=True)
+    tipo_movimiento = serializers.CharField(source="accion", read_only=True)
+    fecha = serializers.DateTimeField(source="created_at", read_only=True)
+    fecha_movimiento = serializers.DateTimeField(source="created_at", read_only=True)
+
     class Meta:
         model = AuditoriaEvento
         fields = [
+            "id",
             "id_evento",
             "empresa",
             "usuario",
             "modulo",
             "accion",
+            "tipo_movimiento",
             "tabla",
             "id_registro",
             "antes_json",
             "despues_json",
             "ip",
             "user_agent",
+            "fecha",
+            "fecha_movimiento",
             "created_at",
         ]
