@@ -3,6 +3,9 @@ from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.http import HttpResponse, Http404, JsonResponse
 from django.conf import settings
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SuperuserRequiredMixin(UserPassesTestMixin):
     def test_func(self):
@@ -50,8 +53,9 @@ class LogViewerAPI(LoginRequiredMixin, SuperuserRequiredMixin, TemplateView):
                 last_lines = lines[-num_lines:]
                 content = "".join(last_lines)
                 return JsonResponse({'content': content})
-        except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
+        except Exception:
+            logger.exception("Error al leer el archivo de log solicitado.")
+            return JsonResponse({'error': 'Error interno al leer el log.'}, status=500)
 
 class LogDownloadView(LoginRequiredMixin, SuperuserRequiredMixin, TemplateView):
     def get(self, request, *args, **kwargs):
