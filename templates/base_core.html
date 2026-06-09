@@ -854,11 +854,20 @@
         const STORAGE_KEY = 'erp_ai_chat_history';
         function saveHistory() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(conversationHistory.slice(-40))); } catch (_) { } }
         function appendMessage(role, text) {
+            const row = document.createElement('div');
+            const bubble = document.createElement('span');
+
             if (role === 'user') {
-                chatMessages.innerHTML += `<div class="text-right"><span class="inline-block bg-sky-600 text-white p-3 rounded-2xl rounded-tr-sm shadow-sm text-sm">${text}</span></div>`;
+                row.className = 'text-right';
+                bubble.className = 'inline-block bg-sky-600 text-white p-3 rounded-2xl rounded-tr-sm shadow-sm text-sm';
             } else {
-                chatMessages.innerHTML += `<div class="text-left"><span class="inline-block bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm whitespace-pre-wrap">${text}</span></div>`;
+                row.className = 'text-left';
+                bubble.className = 'inline-block bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm whitespace-pre-wrap';
             }
+
+            bubble.textContent = text;
+            row.appendChild(bubble);
+            chatMessages.appendChild(row);
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
         function loadHistory() {
