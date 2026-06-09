@@ -1,3 +1,4 @@
+import logging
 from django.db import transaction
 from django.db.models import OuterRef, Prefetch, Q, Subquery, Sum
 from django.db.models.functions import Coalesce
@@ -45,6 +46,8 @@ from produccion.models import (
 )
 
 from ventas.utils.helpers import _save_cotizacion_detalle, _save_servicios_extras
+
+logger = logging.getLogger(__name__)
 
 
 class CotizacionViewSet(viewsets.ModelViewSet):
@@ -646,10 +649,12 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     cotizacion = Cotizacion.objects.create(
                         empresa=empresa, vendedor=user, estatus=1, **cotizacion_data
                     )
-            except TypeError as e:
-                raise ValidationError({"cotizacion": f"Datos inválidos: {str(e)}"})
-            except ValueError as e:
-                raise ValidationError({"cotizacion": f"Datos inválidos: {str(e)}"})
+            except TypeError:
+                logger.exception("TypeError al crear/actualizar cotización.")
+                raise ValidationError({"cotizacion": "Datos inválidos."})
+            except ValueError:
+                logger.exception("ValueError al crear/actualizar cotización.")
+                raise ValidationError({"cotizacion": "Datos inválidos."})
 
             _save_cotizacion_detalle(cotizacion, detalle_data, empresa, user)
             _save_servicios_extras(cotizacion, servicios_extras_data)
