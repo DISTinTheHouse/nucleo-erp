@@ -1,8 +1,28 @@
-from django.db import models
-from rest_framework import viewsets, permissions
-from rest_framework.exceptions import PermissionDenied
-from inventarios.models import Almacen, Ubicacion, Existencia, MovimientoInventario, MovimientoInventarioDetalle, AjusteInventario
-from .serializers import AlmacenSerializer, UbicacionSerializer, ExistenciaSerializer, MovimientoInventarioSerializer, MovimientoInventarioDetalleSerializer, AjusteInventarioSerializer
+from decimal import Decimal
+
+from django.db import models, transaction
+from rest_framework import status, viewsets, permissions
+from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.response import Response
+
+from inventarios.models import (
+    Almacen,
+    Ubicacion,
+    Existencia,
+    MovimientoInventario,
+    MovimientoInventarioDetalle,
+    AjusteInventario,
+)
+from nucleo.models import Empresa, Sucursal
+from .serializers import (
+    AlmacenSerializer,
+    UbicacionSerializer,
+    ExistenciaSerializer,
+    MovimientoInventarioSerializer,
+    MovimientoInventarioDetalleSerializer,
+    AjusteInventarioSerializer,
+)
 
 class IsAuthenticatedAndScoped(permissions.BasePermission):
     """
@@ -177,6 +197,192 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 if almacen.empresa_id:
                     if user.empresa_id and almacen.empresa_id != user.empresa_id and not user.empresas.filter(pk=almacen.empresa_id).exists():
                         raise PermissionDenied("No tiene acceso a la empresa de este almacén")
+
+
+class OperacionInventarioViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticatedAndScoped]
+
+    def _to_int(self, v):
+        if v in (None, ""):
+            return None
+        try:
+            return int(v)
+        except Exception:
+            return None
+
+    def _to_decimal(self, v):
+        if v in (None, ""):
+            return None
+        try:
+            return Decimal(str(v))
+        except Exception:
+            return None
+
+    def _get_almacen(self, request):
+        almacen_id = self._to_int(request.data.get("almacen") or request.data.get("almacen_id"))
+        if not almacen_id:
+            raise ValidationError({"almacen": "Almacén es requerido."})
+        almacen = (
+            Almacen.objects.select_related("empresa", "sucursal")
+            .filter(pk=almacen_id)
+            .first()
+        )
+        if not almacen:
+            raise ValidationError({"almacen": "Almacén no encontrado."})
+        return almacen
+
+    def _get_items(self, request):
+        items = request.data.get("items") or request.data.get("detalle") or []
+        if not isinstance(items, list) or not items:
+            raise ValidationError({"items": "items debe ser una lista no vacía."})
+        normalized = []
+        for idx, it in enumerate(items):
+            if not isinstance(it, dict):
+                raise ValidationError({"items": f"Item #{idx+1} inválido."})
+            pv_id = self._to_int(it.get("producto_variante") or it.get("producto_variante_id"))
+            if not pv_id:
+                raise ValidationError({"items": f"Item #{idx+1}: producto_variante es requerido."})
+            qty = self._to_decimal(it.get("cantidad"))
+            if qty is None:
+                raise ValidationError({"items": f"Item #{idx+1}: cantidad inválida."})
+            ubicacion_id = self._to_int(it.get("ubicacion") or it.get("ubicacion_id"))
+            modo = (it.get("modo") or "").strip().upper() or None
+            normalized.append(
+                {
+                    "producto_variante_id": pv_id,
+                    "cantidad": qty,
+                    "ubicacion_id": ubicacion_id,
+                    "modo": modo,
+                }
+            )
+        return normalized
+
+    def _apply(self, request, tipo):
+        tipo = (tipo or "").strip().upper()
+        if tipo not in {"ENTRADA", "SALIDA", "AJUSTE"}:
+            raise ValidationError({"tipo": "Tipo inválido."})
+
+        almacen = self._get_almacen(request)
+        items = self._get_items(request)
+
+        if tipo in {"ENTRADA", "SALIDA"}:
+            for it in items:
+                if it["cantidad"] <= 0:
+                    raise ValidationError({"items": "cantidad debe ser > 0 para entradas/salidas."})
+
+        ajuste_id = None
+        if tipo == "AJUSTE":
+            empresa_obj = almacen.empresa
+            sucursal_obj = almacen.sucursal
+
+            if not empresa_obj:
+                empresa_id = self._to_int(request.data.get("empresa") or request.data.get("empresa_id"))
+                if empresa_id:
+                    empresa_obj = Empresa.objects.filter(pk=empresa_id).first()
+            if not sucursal_obj:
+                sucursal_id = self._to_int(request.data.get("sucursal") or request.data.get("sucursal_id"))
+                if sucursal_id:
+                    sucursal_obj = Sucursal.objects.filter(pk=sucursal_id).first()
+
+            if empresa_obj and sucursal_obj:
+                motivo = (request.data.get("motivo") or "Ajuste").strip()[:100]
+                observaciones = (request.data.get("observaciones") or "").strip()[:150] or None
+                ajuste = AjusteInventario.objects.create(
+                    empresa=empresa_obj,
+                    sucursal=sucursal_obj,
+                    almacen=almacen,
+                    usuario=request.user,
+                    motivo=motivo,
+                    observaciones=observaciones,
+                )
+                ajuste_id = ajuste.pk
+
+        results = []
+        with transaction.atomic():
+            for it in items:
+                ubicacion = None
+                if it["ubicacion_id"]:
+                    ubicacion = Ubicacion.objects.filter(
+                        pk=it["ubicacion_id"], almacen_id=almacen.pk
+                    ).first()
+                    if not ubicacion:
+                        raise ValidationError({"ubicacion": "Ubicación inválida para el almacén."})
+
+                ex = (
+                    Existencia.objects.select_for_update()
+                    .filter(
+                        producto_variante_id=it["producto_variante_id"],
+                        almacen_id=almacen.pk,
+                        ubicacion_id=(ubicacion.pk if ubicacion else None),
+                    )
+                    .order_by("id")
+                    .first()
+                )
+                if not ex:
+                    ex = Existencia.objects.create(
+                        producto_variante_id=it["producto_variante_id"],
+                        almacen=almacen,
+                        ubicacion=ubicacion,
+                        stock=0,
+                        cantidad=Decimal("0"),
+                    )
+
+                current = ex.cantidad or Decimal("0")
+                qty = it["cantidad"]
+
+                if tipo == "ENTRADA":
+                    new_qty = current + qty
+                elif tipo == "SALIDA":
+                    new_qty = current - qty
+                else:
+                    modo = (it.get("modo") or request.data.get("modo") or "SET").strip().upper()
+                    if modo == "DELTA":
+                        new_qty = current + qty
+                    else:
+                        new_qty = qty
+
+                if new_qty < 0:
+                    raise ValidationError({"cantidad": "La operación deja stock negativo."})
+
+                ex.cantidad = new_qty
+                try:
+                    ex.stock = int(new_qty)
+                except Exception:
+                    ex.stock = ex.stock or 0
+                ex.save(update_fields=["cantidad", "stock", "fecha_actualizacion"])
+
+                results.append(
+                    {
+                        "id": ex.pk,
+                        "producto_variante_id": ex.producto_variante_id,
+                        "almacen_id": ex.almacen_id,
+                        "ubicacion_id": ex.ubicacion_id,
+                        "cantidad": str(ex.cantidad),
+                        "stock": ex.stock,
+                    }
+                )
+
+        return Response(
+            {
+                "tipo": tipo,
+                "almacen_id": almacen.pk,
+                "ajuste_id": ajuste_id,
+                "result": results,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="entrada")
+    def entrada(self, request):
+        return self._apply(request, "ENTRADA")
+
+    @action(detail=False, methods=["post"], url_path="salida")
+    def salida(self, request):
+        return self._apply(request, "SALIDA")
+
+    @action(detail=False, methods=["post"], url_path="ajuste")
+    def ajuste(self, request):
+        return self._apply(request, "AJUSTE")
 
 class MovimientoInventarioViewSet(viewsets.ModelViewSet):
     queryset = MovimientoInventario.objects.filter(activo=True).select_related('empresa', 'sucursal', 'pedido', 'entrega', 'devolucion', 'ajuste_inventario')
