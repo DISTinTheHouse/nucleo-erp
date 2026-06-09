@@ -735,8 +735,8 @@ class AIAssistantAPIView(APIView):
                 json_data=event_body
             )
             return {"ok": True, "message": "Evento creado correctamente."}
-        except Exception as e:
-            return {"ok": False, "error": f"Error al crear el evento en el calendario: {str(e)}"}
+        except Exception:
+            return {"ok": False, "error": "Error al crear el evento en el calendario."}
 
     def _tool_send_email(self, request, args):
         user = request.user
@@ -772,8 +772,8 @@ class AIAssistantAPIView(APIView):
                 json_data={"raw": encoded_message}
             )
             return {"ok": True, "message": "Correo enviado correctamente."}
-        except Exception as e:
-            return {"ok": False, "error": f"Error al enviar el correo: {str(e)}"}
+        except Exception:
+            return {"ok": False, "error": "Error al enviar el correo."}
 
     def _tool_get_pending_summary(self, request, args):
         user = request.user
