@@ -248,13 +248,11 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             if qty is None:
                 raise ValidationError({"items": f"Item #{idx+1}: cantidad inválida."})
             ubicacion_id = self._to_int(it.get("ubicacion") or it.get("ubicacion_id"))
-            modo = (it.get("modo") or "").strip().upper() or None
             normalized.append(
                 {
                     "producto_variante_id": pv_id,
                     "cantidad": qty,
                     "ubicacion_id": ubicacion_id,
-                    "modo": modo,
                 }
             )
         return normalized
@@ -322,7 +320,23 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                     .order_by("id")
                     .first()
                 )
+                if not ex and tipo == "SALIDA":
+                    fallback = (
+                        Existencia.objects.select_for_update()
+                        .filter(
+                            producto_variante_id=it["producto_variante_id"],
+                            almacen_id=almacen.pk,
+                        )
+                        .order_by("-cantidad", "id")
+                        .first()
+                    )
+                    ex = fallback
+
                 if not ex:
+                    if tipo == "SALIDA":
+                        raise ValidationError(
+                            {"cantidad": "No hay existencia para realizar la salida."}
+                        )
                     ex = Existencia.objects.create(
                         producto_variante_id=it["producto_variante_id"],
                         almacen=almacen,
@@ -339,11 +353,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 elif tipo == "SALIDA":
                     new_qty = current - qty
                 else:
-                    modo = (it.get("modo") or request.data.get("modo") or "SET").strip().upper()
-                    if modo == "DELTA":
-                        new_qty = current + qty
-                    else:
-                        new_qty = qty
+                    new_qty = current + qty
 
                 if new_qty < 0:
                     raise ValidationError({"cantidad": "La operación deja stock negativo."})
