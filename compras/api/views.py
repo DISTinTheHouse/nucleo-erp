@@ -6,7 +6,7 @@ from compras.api.serializers import OrdenCompraSerializer, RecepcionSerializer
 from nucleo.models import SerieFolio
 
 class OrdenCompraViewSet(viewsets.ModelViewSet):
-    queryset = OrdenCompra.objects.all()
+    queryset = OrdenCompra.objects.filter(activo=True)
     serializer_class = OrdenCompraSerializer
 
     def get_queryset(self):
@@ -50,7 +50,7 @@ class OrdenCompraViewSet(viewsets.ModelViewSet):
         
         # Fallback si no hay SerieFolio configurada
         count = OrdenCompra.objects.filter(empresa=empresa).count()
-        instance.folio = f"OC-{empresa.id}-{instance.id or count+1}"
+        instance.folio = f"OC-{empresa.pk}-{instance.id or count+1}"
         instance.save(update_fields=["folio"])
 
     def perform_destroy(self, instance):
