@@ -107,7 +107,7 @@ class DireccionCliente(StatusLifecycleModel):
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="direcciones")
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="direcciones_clientes")
     is_default = models.BooleanField(default=False)
-    activo = models.BooleanField(default=True, blank=True)  
+    activo = models.BooleanField(default=True, blank=True)
 
     class Meta:
         db_table = "direcciones_cliente"

@@ -9,7 +9,7 @@ from inventarios.models import Almacen, Ubicacion, Lote, Serie
 
 class Requisicion(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
-    sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE) 
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
     departamento = models.ForeignKey(Departamento, on_delete=models.CASCADE)
 
     class Meta:
