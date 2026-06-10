@@ -269,6 +269,10 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             for it in items:
                 if it["cantidad"] <= 0:
                     raise ValidationError({"items": "cantidad debe ser > 0 para entradas/salidas."})
+        elif tipo == "AJUSTE":
+            for it in items:
+                if it["cantidad"] < 0:
+                    raise ValidationError({"items": "En ajuste, cantidad debe ser >= 0 (cantidad final)."})
 
         ajuste_id = None
         if tipo == "AJUSTE":
@@ -353,7 +357,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 elif tipo == "SALIDA":
                     new_qty = current - qty
                 else:
-                    new_qty = current + qty
+                    new_qty = qty
 
                 if new_qty < 0:
                     raise ValidationError({"cantidad": "La operación deja stock negativo."})
