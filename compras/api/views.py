@@ -2,7 +2,7 @@ from rest_framework import status, viewsets
 from rest_framework.response import Response
 from django.utils import timezone
 from compras.models import OrdenCompra, Recepcion
-from compras.api.serializers import OrdenCompraSerializer, RecepcionSerializer
+from compras.api.serializers import OrdenCompraSerializer, RecepcionSerializer, RecepcionDetalleSerializer
 from nucleo.models import SerieFolio
 
 class OrdenCompraViewSet(viewsets.ModelViewSet):
@@ -60,3 +60,5 @@ class RecepcionViewSet(viewsets.ModelViewSet):
     queryset = Recepcion.objects.all()
     serializer_class = RecepcionSerializer
     http_method_names = ['get', 'post', 'patch']
+
+        
