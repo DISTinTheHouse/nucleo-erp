@@ -208,8 +208,8 @@ class RecepcionDetalle(models.Model):
     orden_compra_detalle = models.ForeignKey(OrdenCompraDetalle, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
     ubicacion = models.ForeignKey(Ubicacion, on_delete=models.CASCADE)
-    lote = models.ForeignKey(Lote, on_delete=models.CASCADE)
-    serie = models.ForeignKey(Serie, on_delete=models.CASCADE)
+    lote = models.ForeignKey(Lote, on_delete=models.CASCADE, null=True, blank=True)
+    serie = models.ForeignKey(Serie, on_delete=models.CASCADE, null=True, blank=True)
 
     class Meta:
         db_table = 'recepcion_detalle'
