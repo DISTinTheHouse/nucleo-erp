@@ -258,7 +258,10 @@ def drive_google_callback(request):
     oauth_error = (request.GET.get("error") or "").strip()
     if oauth_error:
         error_description = (request.GET.get("error_description") or "").strip().lower()
-        logger.warning("Drive OAuth error user_id=%s error=%s desc=%s", getattr(request.user, "id", None), oauth_error, error_description[:300])
+        logger.warning(
+            "Drive OAuth error user_id=%s",
+            getattr(request.user, "id", None),
+        )
         if oauth_error == "access_denied":
             if "verification" in error_description or "not verified" in error_description or "developer verification" in error_description:
                 messages.error(
