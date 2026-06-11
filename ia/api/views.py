@@ -1083,6 +1083,7 @@ class GoogleOAuthConnectAPIView(APIView):
 
         user_payload = {"uid": getattr(request.user, "id", None)}
         signed_user = signing.dumps(user_payload, salt="ia-google-oauth", compress=True)
+        signed_next = signing.dumps({"next": next_url}, salt="ia-google-oauth-next", compress=True) if next_url else ""
 
         params = {
             "client_id": client_id,
@@ -1116,7 +1117,7 @@ class GoogleOAuthConnectAPIView(APIView):
         }
         response.set_cookie(IA_GOOGLE_OAUTH_STATE_COOKIE, state, **cookie_kwargs)
         response.set_cookie(IA_GOOGLE_OAUTH_USER_COOKIE, signed_user, **cookie_kwargs)
-        response.set_cookie(IA_GOOGLE_OAUTH_NEXT_COOKIE, next_url, **cookie_kwargs)
+        response.set_cookie(IA_GOOGLE_OAUTH_NEXT_COOKIE, signed_next, **cookie_kwargs)
         return response
 
 
