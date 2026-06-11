@@ -58,7 +58,7 @@ class RecepcionSerializer(serializers.ModelSerializer):
             folio_formateado, nuevo_consecutivo, anio_actual = serie_folio.get_siguiente_folio()
         except Exception as e:
             raise serializers.ValidationError(
-                {"folio": f"No se pudo generar el folio de la recepción: {str(e)}"}
+                {"folio": "No se pudo generar el folio de la recepción."}
             )
             
         serie_folio.folio_actual = nuevo_consecutivo
