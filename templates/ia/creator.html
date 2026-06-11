@@ -166,7 +166,7 @@
                     function sanitizeReply(t) {
                         if (!t) return '';
                         try {
-                            let s = t.replace(/<[^>]*>/g, '');
+                            let s = t.replace(/[<>]/g, '');
                             s = s.replace(/\b\w+\s*=\s*"[^"]*"/g, '');
                             s = s.replace(/\s{2,}/g, ' ').trim();
                             return s;
