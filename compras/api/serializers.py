@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from compras.models import OrdenCompra, Recepcion, RecepcionDetalle
+from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 from django.db import transaction
 from nucleo.models import SerieFolio
 
@@ -20,6 +20,34 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             if field in data and (data[field] == "0" or data[field] == 0):
                 data[field] = None
         return super().to_internal_value(data)
+
+
+class OrdenCompraDetalleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrdenCompraDetalle
+        fields = "__all__"
+
+
+class OrdenCompraOnboardingHeaderSerializer(serializers.Serializer):
+    sucursal = serializers.IntegerField(required=False, allow_null=True)
+    proveedor = serializers.IntegerField(required=False, allow_null=True)
+    moneda = serializers.IntegerField(required=False, allow_null=True)
+    fecha_oc = serializers.DateField(required=False, allow_null=True)
+    referencia = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    observaciones = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+
+
+class OrdenCompraOnboardingDetalleInputSerializer(serializers.Serializer):
+    producto = serializers.IntegerField()
+    cantidad = serializers.IntegerField(min_value=1)
+    precio = serializers.DecimalField(max_digits=14, decimal_places=2, required=False, allow_null=True)
+    descripcion = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+
+
+class OrdenCompraOnboardingSerializer(serializers.Serializer):
+    orden_compra_id = serializers.IntegerField(required=False)
+    orden_compra = OrdenCompraOnboardingHeaderSerializer(required=False)
+    detalle = OrdenCompraOnboardingDetalleInputSerializer(many=True, required=False)
 
 class RecepcionDetalleSerializer(serializers.ModelSerializer):
     class Meta:

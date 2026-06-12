@@ -146,9 +146,9 @@ class OrdenCompra(StatusLifecycleModel):
 class OrdenCompraDetalle(models.Model):
     orden_compra = models.ForeignKey(OrdenCompra, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
-    solicitud_compra_detalle = models.ForeignKey(SolicitudCompraDetalle, on_delete=models.CASCADE)
-    requisicion_detalle = models.ForeignKey(RequisicionDetalle, on_delete=models.CASCADE)
-    descripcion = models.CharField(max_length=200, null=True)
+    solicitud_compra_detalle = models.ForeignKey(SolicitudCompraDetalle, on_delete=models.CASCADE, null=True, blank=True)
+    requisicion_detalle = models.ForeignKey(RequisicionDetalle, on_delete=models.CASCADE, null=True, blank=True)
+    descripcion = models.CharField(max_length=200, null=True, blank=True)
     cantidad = models.IntegerField(default=0)
     precio = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
     descuento = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
