@@ -200,6 +200,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             else:
                 oc = OrdenCompra()
 
+            has_sucursal = "sucursal" in header
+            has_proveedor = "proveedor" in header
+            has_moneda = "moneda" in header
+            has_fecha_oc = "fecha_oc" in header
+
             sucursal_id = header.get("sucursal")
             proveedor_id = header.get("proveedor")
             moneda_id = header.get("moneda")
@@ -219,10 +224,14 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
             oc.empresa = empresa
             oc.usuario = user
-            oc.sucursal_id = sucursal_id
-            oc.proveedor_id = proveedor_id
-            oc.moneda_id = moneda_id
-            oc.fecha_oc = fecha_oc
+            if not oc.pk or has_sucursal:
+                oc.sucursal_id = sucursal_id
+            if not oc.pk or has_proveedor:
+                oc.proveedor_id = proveedor_id
+            if not oc.pk or has_moneda:
+                oc.moneda_id = moneda_id
+            if not oc.pk or has_fecha_oc:
+                oc.fecha_oc = fecha_oc
             if "referencia" in header:
                 oc.referencia = header.get("referencia") or None
             if "observaciones" in header:
@@ -280,18 +289,26 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
         }:
             raise ValidationError({"estatus": "La orden ya no puede aceptarse."})
-        if not oc.proveedor_id:
-            raise ValidationError({"proveedor": "Proveedor es requerido para aceptar."})
+        body_proveedor_id = request.data.get("proveedor") or request.data.get("proveedor_id")
+        try:
+            body_proveedor_id = int(body_proveedor_id) if body_proveedor_id not in (None, "") else None
+        except Exception:
+            body_proveedor_id = None
+
         if OrdenCompraDetalle.objects.filter(orden_compra=oc).count() <= 0:
             raise ValidationError({"detalle": "Agrega al menos un producto antes de aceptar."})
 
         with transaction.atomic():
             oc = OrdenCompra.objects.select_for_update().filter(pk=oc.pk).first()
+            if body_proveedor_id:
+                oc.proveedor_id = body_proveedor_id
+            if not oc.proveedor_id:
+                raise ValidationError({"proveedor": "Proveedor es requerido para aceptar."})
             if not oc.folio:
                 self._asignar_folio_oc(oc, oc.empresa)
             oc.estatus = OrdenCompra.EstatusOrdenCompra.AUTORIZADA
             oc.fecha_autorizacion = timezone.now()
-            oc.save(update_fields=["estatus", "fecha_autorizacion", "updated_at"])
+            oc.save(update_fields=["proveedor", "estatus", "fecha_autorizacion", "updated_at"])
 
         return Response({"orden_compra": OrdenCompraSerializer(oc).data}, status=status.HTTP_200_OK)
 
