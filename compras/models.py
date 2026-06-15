@@ -2,7 +2,7 @@ from django.db import models
 from django.conf import settings
 from nucleo.models import Empresa, Sucursal, Departamento, Moneda, StatusLifecycleModel
 from terceros.models import Proveedor, Transportista
-from catalogo.models import Producto
+from catalogo.models import Producto, ProductoVariante
 from ventas.models import Pedido
 
 from inventarios.models import Almacen, Ubicacion, Lote, Serie
@@ -207,9 +207,11 @@ class RecepcionDetalle(models.Model):
     recepcion = models.ForeignKey(Recepcion, on_delete=models.CASCADE)
     orden_compra_detalle = models.ForeignKey(OrdenCompraDetalle, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
+    producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.CASCADE, null=True, blank=True)
     ubicacion = models.ForeignKey(Ubicacion, on_delete=models.CASCADE)
     lote = models.ForeignKey(Lote, on_delete=models.CASCADE, null=True, blank=True)
     serie = models.ForeignKey(Serie, on_delete=models.CASCADE, null=True, blank=True)
+    cantidad_recibida = models.DecimalField(max_digits=18, decimal_places=4, default=0)
 
     class Meta:
         db_table = 'recepcion_detalle'
