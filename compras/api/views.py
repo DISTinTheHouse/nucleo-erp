@@ -394,40 +394,21 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return Decimal(str(total or 0))
 
-    def _resolver_producto_variante(self, producto_id, producto_variante_id, empresa):
-        if producto_variante_id:
-            pv = ProductoVariante.objects.filter(
-                pk=producto_variante_id,
-                producto_id=producto_id,
-                activo=True,
-            ).first()
-            if not pv:
-                raise ValidationError(
-                    {"producto_variante": "La variante no corresponde al producto."}
-                )
-            return pv
-
+    def _resolver_producto_variante(self, producto_id, empresa):
         variantes = ProductoVariante.objects.filter(producto_id=producto_id, activo=True)
         if empresa:
             variantes = variantes.filter(empresa=empresa)
         variantes = list(variantes.order_by("id"))
-        if len(variantes) == 1:
-            return variantes[0]
         if len(variantes) == 0:
             raise ValidationError(
                 {
-                    "producto_variante": (
+                    "producto": (
                         "El producto no tiene variante configurada para inventario."
                     )
                 }
             )
-        raise ValidationError(
-            {
-                "producto_variante": (
-                    "producto_variante es requerido cuando el producto tiene múltiples variantes."
-                )
-            }
-        )
+        # Para recepción simplificada, se toma la primera variante activa del producto.
+        return variantes[0]
 
     def _actualizar_existencias(self, recepcion, detalle_payload):
         movimientos = []
@@ -531,6 +512,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         oc_q = (request.query_params.get("q") or "").strip()
+        orden_compra_id = (
+            request.query_params.get("orden_compra_id")
+            or request.query_params.get("orden_compra")
+            or request.query_params.get("oc_id")
+            or request.query_params.get("id")
+        )
         almacen_id = request.query_params.get("almacen_id")
 
         ordenes_qs = (
@@ -555,6 +542,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         ordenes_limitadas = list(ordenes_qs[:50])
+        if not orden_compra_id and ordenes_limitadas:
+            orden_compra_id = ordenes_limitadas[0].pk
 
         # ── Prefetch all line-items for every returned OC ──────────────
         oc_ids = [oc.pk for oc in ordenes_limitadas]
@@ -604,24 +593,31 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
 
         # ── Build the ordenes_compra list with embedded detalle ────────
         ordenes = []
+        orden_compra_data = None
+        detalle_data = []
         for oc in ordenes_limitadas:
             detalle_list = []
             for detalle in detalles_by_oc.get(oc.pk, []):
                 recibido = recibido_map.get(detalle.pk, Decimal("0"))
                 ordered = Decimal(str(detalle.cantidad or 0))
                 pendiente = ordered - recibido
+                variantes = variantes_by_product.get(detalle.producto_id, [])
+                detalle_item = {
+                    "id": detalle.pk,
+                    "producto_id": detalle.producto_id,
+                    "producto_nombre": detalle.producto.nombre,
+                    "cantidad_ordenada": str(ordered),
+                    "cantidad_recibida": str(recibido),
+                    "cantidad_pendiente": str(max(pendiente, Decimal("0"))),
+                    "descripcion": detalle.descripcion,
+                    "variantes": variantes,
+                    "producto_variante_default_id": (variantes[0]["id"] if variantes else None),
+                }
                 detalle_list.append(
-                    {
-                        "id": detalle.pk,
-                        "producto_id": detalle.producto_id,
-                        "producto_nombre": detalle.producto.nombre,
-                        "cantidad_ordenada": str(ordered),
-                        "cantidad_recibida": str(recibido),
-                        "cantidad_pendiente": str(max(pendiente, Decimal("0"))),
-                        "descripcion": detalle.descripcion,
-                        "variantes": variantes_by_product.get(detalle.producto_id, []),
-                    }
+                    detalle_item
                 )
+                if str(oc.pk) == str(orden_compra_id):
+                    detalle_data.append(detalle_item)
             ordenes.append(
                 {
                     "id": oc.pk,
@@ -634,6 +630,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     "detalle": detalle_list,
                 }
             )
+            if str(oc.pk) == str(orden_compra_id):
+                orden_compra_data = OrdenCompraSerializer(oc).data
 
         almacenes_qs = Almacen.objects.filter(estatus="ACTIVO")
         if empresa:
@@ -685,6 +683,9 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 "series_recepcion": series,
             },
             "busqueda": {"ordenes_compra": ordenes},
+            "orden_compra_id": orden_compra_id,
+            "orden_compra": orden_compra_data,
+            "detalle": detalle_data,
         }
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding")
@@ -783,11 +784,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     }
                 )
 
-            producto_variante = self._resolver_producto_variante(
-                oc_detalle.producto_id,
-                item.get("producto_variante"),
-                oc.empresa,
-            )
+            producto_variante = self._resolver_producto_variante(oc_detalle.producto_id, oc.empresa)
             detalle_payload.append(
                 {
                     "oc_detalle": oc_detalle,

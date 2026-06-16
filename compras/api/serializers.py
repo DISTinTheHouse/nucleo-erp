@@ -76,7 +76,6 @@ class RecepcionOnboardingDetalleInputSerializer(serializers.Serializer):
     orden_compra_detalle = serializers.IntegerField()
     cantidad_recibida = serializers.DecimalField(max_digits=18, decimal_places=4)
     ubicacion = serializers.IntegerField(required=False, allow_null=True)
-    producto_variante = serializers.IntegerField(required=False, allow_null=True)
     lote = serializers.IntegerField(required=False, allow_null=True)
     serie = serializers.IntegerField(required=False, allow_null=True)
 
