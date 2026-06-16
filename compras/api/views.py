@@ -531,12 +531,6 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         oc_q = (request.query_params.get("q") or "").strip()
-        orden_compra_id = (
-            request.query_params.get("orden_compra_id")
-            or request.query_params.get("orden_compra")
-            or request.query_params.get("oc_id")
-            or request.query_params.get("id")
-        )
         almacen_id = request.query_params.get("almacen_id")
 
         ordenes_qs = (
@@ -561,11 +555,73 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         ordenes_limitadas = list(ordenes_qs[:50])
-        if not orden_compra_id and ordenes_limitadas:
-            orden_compra_id = ordenes_limitadas[0].pk
 
+        # ── Prefetch all line-items for every returned OC ──────────────
+        oc_ids = [oc.pk for oc in ordenes_limitadas]
+        detalles_qs = (
+            OrdenCompraDetalle.objects
+            .filter(orden_compra_id__in=oc_ids)
+            .select_related("producto")
+            .order_by("orden_compra_id", "id")
+        )
+        detalles_by_oc = {}          # oc_id → [detalle, …]
+        all_detalle_ids = []
+        all_product_ids = set()
+        for d in detalles_qs:
+            detalles_by_oc.setdefault(d.orden_compra_id, []).append(d)
+            all_detalle_ids.append(d.pk)
+            all_product_ids.add(d.producto_id)
+
+        # ── Bulk-fetch already-received quantities ─────────────────────
+        recibido_map = {}
+        if all_detalle_ids:
+            recibido_qs = (
+                RecepcionDetalle.objects
+                .filter(
+                    orden_compra_detalle_id__in=all_detalle_ids,
+                    recepcion__activo=True,
+                )
+                .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+                .values("orden_compra_detalle_id")
+                .annotate(total=Sum("cantidad_recibida"))
+            )
+            for row in recibido_qs:
+                recibido_map[row["orden_compra_detalle_id"]] = Decimal(str(row["total"] or 0))
+
+        # ── Bulk-fetch variants for all products ───────────────────────
+        variantes_by_product = {}
+        if all_product_ids:
+            variantes_qs = ProductoVariante.objects.filter(
+                producto_id__in=all_product_ids,
+                activo=True,
+            )
+            if empresa:
+                variantes_qs = variantes_qs.filter(empresa=empresa)
+            for v in variantes_qs.order_by("producto_id", "sku").values(
+                "id", "sku", "nombre", "color_id", "talla_id", "producto_id",
+            ):
+                variantes_by_product.setdefault(v["producto_id"], []).append(v)
+
+        # ── Build the ordenes_compra list with embedded detalle ────────
         ordenes = []
         for oc in ordenes_limitadas:
+            detalle_list = []
+            for detalle in detalles_by_oc.get(oc.pk, []):
+                recibido = recibido_map.get(detalle.pk, Decimal("0"))
+                ordered = Decimal(str(detalle.cantidad or 0))
+                pendiente = ordered - recibido
+                detalle_list.append(
+                    {
+                        "id": detalle.pk,
+                        "producto_id": detalle.producto_id,
+                        "producto_nombre": detalle.producto.nombre,
+                        "cantidad_ordenada": str(ordered),
+                        "cantidad_recibida": str(recibido),
+                        "cantidad_pendiente": str(max(pendiente, Decimal("0"))),
+                        "descripcion": detalle.descripcion,
+                        "variantes": variantes_by_product.get(detalle.producto_id, []),
+                    }
+                )
             ordenes.append(
                 {
                     "id": oc.pk,
@@ -575,6 +631,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     "proveedor_nombre": getattr(oc.proveedor, "nombre", None),
                     "sucursal_id": oc.sucursal_id,
                     "fecha_oc": oc.fecha_oc,
+                    "detalle": detalle_list,
                 }
             )
 
@@ -619,47 +676,6 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             .values("id_serie_folio", "tipo_documento", "serie", "sucursal_id")[:50]
         )
 
-        orden_compra_data = None
-        detalle_data = []
-        if orden_compra_id:
-            oc = (
-                OrdenCompra.objects.select_related("proveedor", "sucursal")
-                .filter(pk=orden_compra_id, activo=True)
-                .first()
-            )
-            if oc and (not empresa or oc.empresa_id == empresa.pk):
-                orden_compra_data = OrdenCompraSerializer(oc).data
-                detalles_qs = (
-                    OrdenCompraDetalle.objects.filter(orden_compra=oc)
-                    .select_related("producto")
-                    .order_by("id")
-                )
-                for detalle in detalles_qs:
-                    recibido = self._cantidad_recibida(detalle.pk)
-                    ordered = Decimal(str(detalle.cantidad or 0))
-                    pendiente = ordered - recibido
-                    variantes = list(
-                        ProductoVariante.objects.filter(
-                            producto_id=detalle.producto_id,
-                            activo=True,
-                            empresa=oc.empresa,
-                        )
-                        .order_by("sku")
-                        .values("id", "sku", "nombre", "color_id", "talla_id")
-                    )
-                    detalle_data.append(
-                        {
-                            "id": detalle.pk,
-                            "producto_id": detalle.producto_id,
-                            "producto_nombre": detalle.producto.nombre,
-                            "cantidad_ordenada": str(ordered),
-                            "cantidad_recibida": str(recibido),
-                            "cantidad_pendiente": str(max(pendiente, Decimal("0"))),
-                            "descripcion": detalle.descripcion,
-                            "variantes": variantes,
-                        }
-                    )
-
         return {
             "user": {"id": getattr(user, "pk", None), "email": getattr(user, "email", None)},
             "empresa_id": getattr(empresa, "pk", None),
@@ -669,9 +685,6 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 "series_recepcion": series,
             },
             "busqueda": {"ordenes_compra": ordenes},
-            "orden_compra_id": orden_compra_id,
-            "orden_compra": orden_compra_data,
-            "detalle": detalle_data,
         }
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding")
