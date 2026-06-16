@@ -531,7 +531,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         oc_q = (request.query_params.get("q") or "").strip()
-        orden_compra_id = request.query_params.get("orden_compra_id")
+        orden_compra_id = (
+            request.query_params.get("orden_compra_id")
+            or request.query_params.get("orden_compra")
+            or request.query_params.get("oc_id")
+            or request.query_params.get("id")
+        )
         almacen_id = request.query_params.get("almacen_id")
 
         ordenes_qs = (
@@ -555,8 +560,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 | Q(proveedor__razon_social__icontains=oc_q)
             )
 
+        ordenes_limitadas = list(ordenes_qs[:50])
+        if not orden_compra_id and ordenes_limitadas:
+            orden_compra_id = ordenes_limitadas[0].pk
+
         ordenes = []
-        for oc in ordenes_qs[:50]:
+        for oc in ordenes_limitadas:
             ordenes.append(
                 {
                     "id": oc.pk,
@@ -660,6 +669,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 "series_recepcion": series,
             },
             "busqueda": {"ordenes_compra": ordenes},
+            "orden_compra_id": orden_compra_id,
             "orden_compra": orden_compra_data,
             "detalle": detalle_data,
         }
