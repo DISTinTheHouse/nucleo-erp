@@ -51,7 +51,16 @@ class OrdenCompraOnboardingSerializer(serializers.Serializer):
 class RecepcionDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = RecepcionDetalle
-        fields = '__all__'
+        fields = (
+            "id",
+            "recepcion",
+            "orden_compra_detalle",
+            "producto",
+            "ubicacion",
+            "lote",
+            "serie",
+            "cantidad_recibida",
+        )
         read_only_fields = ('recepcion',)
 
 
