@@ -494,12 +494,6 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         oc_q = (request.query_params.get("q") or "").strip()
-        orden_compra_id = (
-            request.query_params.get("orden_compra_id")
-            or request.query_params.get("orden_compra")
-            or request.query_params.get("oc_id")
-            or request.query_params.get("id")
-        )
         almacen_id = request.query_params.get("almacen_id")
 
         ordenes_qs = (
@@ -524,8 +518,49 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         ordenes_limitadas = list(ordenes_qs[:50])
-        if not orden_compra_id and ordenes_limitadas:
-            orden_compra_id = ordenes_limitadas[0].pk
+        # ── Bulk-fetch detalle for all OCs (avoid N+1) ──
+        oc_ids = [oc.pk for oc in ordenes_limitadas]
+        oc_detalles_map = {}  # oc_id → [detalle_dict, …]
+        if oc_ids:
+            detalles_qs = (
+                OrdenCompraDetalle.objects
+                .filter(orden_compra_id__in=oc_ids)
+                .select_related("producto")
+                .order_by("orden_compra_id", "id")
+            )
+            detalles_list = list(detalles_qs)
+
+            detalle_ids = [d.pk for d in detalles_list]
+            recibido_map = {}
+            if detalle_ids:
+                recibido_qs = (
+                    RecepcionDetalle.objects.filter(
+                        orden_compra_detalle_id__in=detalle_ids,
+                        recepcion__activo=True,
+                    )
+                    .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+                    .values("orden_compra_detalle_id")
+                    .annotate(total=Sum("cantidad_recibida"))
+                )
+                for row in recibido_qs:
+                    recibido_map[row["orden_compra_detalle_id"]] = Decimal(str(row["total"] or 0))
+
+            for detalle in detalles_list:
+                recibido = recibido_map.get(detalle.pk, Decimal("0"))
+                ordered = Decimal(str(detalle.cantidad or 0))
+                pendiente = ordered - recibido
+                item = {
+                    "id": detalle.pk,
+                    "producto_id": detalle.producto_id,
+                    "producto_nombre": detalle.producto.nombre,
+                    "cantidad_ordenada": str(ordered),
+                    "cantidad_recibida": str(recibido),
+                    "cantidad_pendiente": str(max(pendiente, Decimal("0"))),
+                    "descripcion": detalle.descripcion,
+                }
+                oc_detalles_map.setdefault(detalle.orden_compra_id, []).append(item)
+
+        # ── Build ordenes with embedded detalle ──
         ordenes = []
         for oc in ordenes_limitadas:
             ordenes.append(
@@ -537,6 +572,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     "proveedor_nombre": getattr(oc.proveedor, "nombre", None),
                     "sucursal_id": oc.sucursal_id,
                     "fecha_oc": oc.fecha_oc,
+                    "detalle": oc_detalles_map.get(oc.pk, []),
                 }
             )
 
@@ -581,52 +617,6 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             .values("id_serie_folio", "tipo_documento", "serie", "sucursal_id")[:50]
         )
 
-        orden_compra_data = None
-        detalle_data = []
-        if orden_compra_id:
-            oc = (
-                OrdenCompra.objects.select_related("proveedor", "sucursal")
-                .filter(pk=orden_compra_id, activo=True)
-                .first()
-            )
-            if oc and (not empresa or oc.empresa_id == empresa.pk):
-                orden_compra_data = OrdenCompraSerializer(oc).data
-                detalles_qs = (
-                    OrdenCompraDetalle.objects.filter(orden_compra=oc)
-                    .select_related("producto")
-                    .order_by("id")
-                )
-                detalle_ids = [d.pk for d in detalles_qs]
-                recibido_map = {}
-                if detalle_ids:
-                    recibido_qs = (
-                        RecepcionDetalle.objects.filter(
-                            orden_compra_detalle_id__in=detalle_ids,
-                            recepcion__activo=True,
-                        )
-                        .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
-                        .values("orden_compra_detalle_id")
-                        .annotate(total=Sum("cantidad_recibida"))
-                    )
-                    for row in recibido_qs:
-                        recibido_map[row["orden_compra_detalle_id"]] = Decimal(str(row["total"] or 0))
-
-                for detalle in detalles_qs:
-                    recibido = recibido_map.get(detalle.pk, Decimal("0"))
-                    ordered = Decimal(str(detalle.cantidad or 0))
-                    pendiente = ordered - recibido
-                    detalle_data.append(
-                        {
-                            "id": detalle.pk,
-                            "producto_id": detalle.producto_id,
-                            "producto_nombre": detalle.producto.nombre,
-                            "cantidad_ordenada": str(ordered),
-                            "cantidad_recibida": str(recibido),
-                            "cantidad_pendiente": str(max(pendiente, Decimal("0"))),
-                            "descripcion": detalle.descripcion,
-                        }
-                    )
-
         return {
             "user": {"id": getattr(user, "pk", None), "email": getattr(user, "email", None)},
             "empresa_id": getattr(empresa, "pk", None),
@@ -636,9 +626,6 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 "series_recepcion": series,
             },
             "busqueda": {"ordenes_compra": ordenes},
-            "orden_compra_id": orden_compra_id,
-            "orden_compra": orden_compra_data,
-            "detalle": detalle_data,
         }
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding")
