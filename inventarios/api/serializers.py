@@ -103,11 +103,13 @@ class ExistenciaSerializer(serializers.ModelSerializer):
         producto = getattr(obj, "producto", None) or (getattr(variante, "producto", None) if variante else None)
         if not producto:
             return None
+        tipo_producto = getattr(producto, 'tipo', None)
         return {
             'id': producto.pk,
             'nombre': getattr(producto, 'nombre', None),
             'descripcion': getattr(producto, 'descripcion', None),
-            'tipo': getattr(producto, 'tipo', None),
+            'tipo': getattr(tipo_producto, 'codigo', None),
+            'tipo_id': getattr(producto, 'tipo_id', None),
             'categoria_producto': getattr(producto, 'categoria_producto_id', None),
             'unidad_medida': getattr(producto, 'unidad_medida_id', None),
             'sku': getattr(variante, 'sku', None) if variante else None,
