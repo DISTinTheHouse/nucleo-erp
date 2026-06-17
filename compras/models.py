@@ -208,7 +208,7 @@ class RecepcionDetalle(models.Model):
     orden_compra_detalle = models.ForeignKey(OrdenCompraDetalle, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
     producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.CASCADE, null=True, blank=True)
-    ubicacion = models.ForeignKey(Ubicacion, on_delete=models.CASCADE)
+    ubicacion = models.ForeignKey(Ubicacion, on_delete=models.CASCADE, null=True, blank=True)
     lote = models.ForeignKey(Lote, on_delete=models.CASCADE, null=True, blank=True)
     serie = models.ForeignKey(Serie, on_delete=models.CASCADE, null=True, blank=True)
     cantidad_recibida = models.DecimalField(max_digits=18, decimal_places=4, default=0)
