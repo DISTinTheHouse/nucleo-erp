@@ -1,3 +1,4 @@
+import logging
 from decimal import Decimal
 
 from django.db import transaction
@@ -22,6 +23,8 @@ from compras.api.serializers import (
 from inventarios.models import Almacen, Existencia, Ubicacion
 from nucleo.models import Moneda, SerieFolio, Sucursal
 from terceros.models import Proveedor, Transportista
+
+logger = logging.getLogger(__name__)
 
 class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = OrdenCompra.objects.filter(activo=True)
@@ -636,167 +639,178 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         if request.method.lower() == "get":
             return Response(self.handle_get_onboarding(request))
 
-        serializer = RecepcionOnboardingSerializer(data=request.data or {})
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        header = data["recepcion"]
-        detalle_raw = data["detalle"]
-        serie_codigo = (header.get("serie_codigo") or "RC").strip().upper()
+        try:
+            serializer = RecepcionOnboardingSerializer(data=request.data or {})
+            serializer.is_valid(raise_exception=True)
+            data = serializer.validated_data
+            header = data["recepcion"]
+            detalle_raw = data["detalle"]
+            serie_codigo = (header.get("serie_codigo") or "RC").strip().upper()
 
-        if not empresa and not getattr(user, "is_superuser", False):
-            raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
-        if serie_codigo not in {"RC", "RT", "RZ"}:
-            raise ValidationError({"serie_codigo": "serie_codigo debe ser RC, RT o RZ."})
+            if not empresa and not getattr(user, "is_superuser", False):
+                raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
+            if serie_codigo not in {"RC", "RT", "RZ"}:
+                raise ValidationError({"serie_codigo": "serie_codigo debe ser RC, RT o RZ."})
 
-        with transaction.atomic():
-            oc = (
-                OrdenCompra.objects.select_for_update(of=("self",))
-                .select_related("empresa", "sucursal", "proveedor")
-                .filter(pk=header["orden_compra"], activo=True)
-                .first()
-            )
-            if not oc:
-                raise ValidationError({"orden_compra": "Orden de compra no encontrada."})
-            if empresa and oc.empresa_id != empresa.pk:
-                raise ValidationError({"orden_compra": "No tienes acceso a esta orden de compra."})
-            if oc.estatus not in {
-                OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
-                OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
-            }:
-                raise ValidationError({"estatus": "La orden de compra no está disponible para recepción."})
-            if not oc.proveedor_id:
-                raise ValidationError({"proveedor": "La orden de compra no tiene proveedor asignado."})
+            with transaction.atomic():
+                oc = (
+                    OrdenCompra.objects.select_for_update(of=("self",))
+                    .select_related("empresa", "sucursal", "proveedor")
+                    .filter(pk=header["orden_compra"], activo=True)
+                    .first()
+                )
+                if not oc:
+                    raise ValidationError({"orden_compra": "Orden de compra no encontrada."})
+                if empresa and oc.empresa_id != empresa.pk:
+                    raise ValidationError({"orden_compra": "No tienes acceso a esta orden de compra."})
+                if oc.estatus not in {
+                    OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+                    OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+                }:
+                    raise ValidationError({"estatus": "La orden de compra no está disponible para recepción."})
+                if not oc.proveedor_id:
+                    raise ValidationError({"proveedor": "La orden de compra no tiene proveedor asignado."})
 
-            almacen = (
-                Almacen.objects.select_related("empresa", "sucursal")
-                .filter(pk=header["almacen"])
-                .first()
-            )
-            if not almacen:
-                raise ValidationError({"almacen": "Almacén no encontrado."})
-            if oc.empresa_id and almacen.empresa_id and oc.empresa_id != almacen.empresa_id:
-                raise ValidationError({"almacen": "El almacén no pertenece a la empresa de la orden."})
-            if oc.sucursal_id and almacen.sucursal_id and oc.sucursal_id != almacen.sucursal_id:
-                raise ValidationError({"almacen": "El almacén no pertenece a la sucursal de la orden."})
-            transportista_id = header.get("transportista")
-            if transportista_id and not Transportista.objects.filter(pk=transportista_id).exists():
-                raise ValidationError({"transportista": "Transportista no encontrado."})
+                almacen = (
+                    Almacen.objects.select_related("empresa", "sucursal")
+                    .filter(pk=header["almacen"])
+                    .first()
+                )
+                if not almacen:
+                    raise ValidationError({"almacen": "Almacén no encontrado."})
+                if oc.empresa_id and almacen.empresa_id and oc.empresa_id != almacen.empresa_id:
+                    raise ValidationError({"almacen": "El almacén no pertenece a la empresa de la orden."})
+                if oc.sucursal_id and almacen.sucursal_id and oc.sucursal_id != almacen.sucursal_id:
+                    raise ValidationError({"almacen": "El almacén no pertenece a la sucursal de la orden."})
+                transportista_id = header.get("transportista")
+                if transportista_id and not Transportista.objects.filter(pk=transportista_id).exists():
+                    raise ValidationError({"transportista": "Transportista no encontrado."})
 
-            detalles_oc = {
-                d.pk: d
-                for d in OrdenCompraDetalle.objects.select_related("producto")
-                .filter(orden_compra=oc)
-                .order_by("id")
-            }
-            if not detalles_oc:
-                raise ValidationError({"detalle": "La orden de compra no tiene productos para recibir."})
+                detalles_oc = {
+                    d.pk: d
+                    for d in OrdenCompraDetalle.objects.select_related("producto")
+                    .filter(orden_compra=oc)
+                    .order_by("id")
+                }
+                if not detalles_oc:
+                    raise ValidationError({"detalle": "La orden de compra no tiene productos para recibir."})
 
-            detalle_payload = []
-            for idx, item in enumerate(detalle_raw):
-                oc_detalle = detalles_oc.get(item["orden_compra_detalle"])
-                if not oc_detalle:
-                    raise ValidationError(
-                        {"detalle": f"El renglón #{idx + 1} no pertenece a la orden de compra."}
-                    )
+                detalle_payload = []
+                for idx, item in enumerate(detalle_raw):
+                    oc_detalle = detalles_oc.get(item["orden_compra_detalle"])
+                    if not oc_detalle:
+                        raise ValidationError(
+                            {"detalle": f"El renglón #{idx + 1} no pertenece a la orden de compra."}
+                        )
 
-                cantidad = Decimal(str(item["cantidad_recibida"]))
-                if cantidad <= 0:
-                    raise ValidationError(
-                        {"detalle": f"El renglón #{idx + 1} debe tener cantidad_recibida > 0."}
-                    )
+                    cantidad = Decimal(str(item["cantidad_recibida"]))
+                    if cantidad <= 0:
+                        raise ValidationError(
+                            {"detalle": f"El renglón #{idx + 1} debe tener cantidad_recibida > 0."}
+                        )
 
-                recibido = self._cantidad_recibida(oc_detalle.pk)
-                ordered = Decimal(str(oc_detalle.cantidad or 0))
-                pendiente = ordered - recibido
-                if pendiente <= 0:
-                    raise ValidationError(
+                    recibido = self._cantidad_recibida(oc_detalle.pk)
+                    ordered = Decimal(str(oc_detalle.cantidad or 0))
+                    pendiente = ordered - recibido
+                    if pendiente <= 0:
+                        raise ValidationError(
+                            {
+                                "detalle": (
+                                    f"El producto del renglón #{idx + 1} ya fue recibido completamente."
+                                )
+                            }
+                        )
+                    if cantidad > pendiente:
+                        raise ValidationError(
+                            {
+                                "detalle": (
+                                    f"El renglón #{idx + 1} excede la cantidad pendiente por recibir."
+                                )
+                            }
+                        )
+                    detalle_payload.append(
                         {
-                            "detalle": (
-                                f"El producto del renglón #{idx + 1} ya fue recibido completamente."
-                            )
+                            "oc_detalle": oc_detalle,
+                            "cantidad_recibida": cantidad,
+                            "ubicacion": item.get("ubicacion"),
+                            "lote": item.get("lote"),
+                            "serie": item.get("serie"),
                         }
                     )
-                if cantidad > pendiente:
-                    raise ValidationError(
-                        {
-                            "detalle": (
-                                f"El renglón #{idx + 1} excede la cantidad pendiente por recibir."
-                            )
-                        }
-                    )
-                detalle_payload.append(
-                    {
-                        "oc_detalle": oc_detalle,
-                        "cantidad_recibida": cantidad,
-                        "ubicacion": item.get("ubicacion"),
-                        "lote": item.get("lote"),
-                        "serie": item.get("serie"),
-                    }
+
+                recepcion = Recepcion(
+                    orden_compra=oc,
+                    empresa=oc.empresa,
+                    sucursal=oc.sucursal,
+                    proveedor=oc.proveedor,
+                    almacen=almacen,
+                    transportista_id=transportista_id,
+                    usuario=user,
+                    fecha_recepcion=header.get("fecha_recepcion") or timezone.now(),
+                    remision=(header.get("remision") or None),
+                    factura_referencia=(header.get("factura_referencia") or None),
+                    observaciones=(header.get("observaciones") or None),
+                    estatus=Recepcion.EstatusRecepcion.BORRADOR,
+                    activo=True,
+                )
+                self._asignar_folio_recepcion(recepcion, serie_codigo)
+                recepcion.save()
+
+                movimientos = self._actualizar_existencias(recepcion, detalle_payload)
+
+                orden_completa = True
+                for detalle in detalles_oc.values():
+                    ordered = Decimal(str(detalle.cantidad or 0))
+                    recibido = self._cantidad_recibida(detalle.pk)
+                    if recibido < ordered:
+                        orden_completa = False
+                        break
+
+                recepcion.estatus = (
+                    Recepcion.EstatusRecepcion.RECIBIDA
+                    if orden_completa
+                    else Recepcion.EstatusRecepcion.PARCIAL
+                )
+                recepcion.save(update_fields=["estatus", "updated_at"])
+                self._actualizar_estatus_oc(oc)
+
+                ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
+                ua = request.META.get("HTTP_USER_AGENT")
+                ev = AuditoriaEvento.objects.create(
+                    empresa=oc.empresa,
+                    usuario=user if getattr(user, "pk", None) else None,
+                    modulo="inventarios",
+                    accion="ENTRADA",
+                    tabla="existencias",
+                    id_registro=str(almacen.pk),
+                    antes_json={"items": movimientos, "recepcion_id": recepcion.pk},
+                    despues_json={
+                        "almacen_id": almacen.pk,
+                        "sucursal_id": almacen.sucursal_id,
+                        "empresa_id": almacen.empresa_id,
+                        "recepcion_id": recepcion.pk,
+                        "items": movimientos,
+                    },
+                    ip=ip,
+                    user_agent=ua,
                 )
 
-            recepcion = Recepcion(
-                orden_compra=oc,
-                empresa=oc.empresa,
-                sucursal=oc.sucursal,
-                proveedor=oc.proveedor,
-                almacen=almacen,
-                transportista_id=transportista_id,
-                usuario=user,
-                fecha_recepcion=header.get("fecha_recepcion") or timezone.now(),
-                remision=(header.get("remision") or None),
-                factura_referencia=(header.get("factura_referencia") or None),
-                observaciones=(header.get("observaciones") or None),
-                estatus=Recepcion.EstatusRecepcion.BORRADOR,
-                activo=True,
-            )
-            self._asignar_folio_recepcion(recepcion, serie_codigo)
-            recepcion.save()
-
-            movimientos = self._actualizar_existencias(recepcion, detalle_payload)
-
-            orden_completa = True
-            for detalle in detalles_oc.values():
-                ordered = Decimal(str(detalle.cantidad or 0))
-                recibido = self._cantidad_recibida(detalle.pk)
-                if recibido < ordered:
-                    orden_completa = False
-                    break
-
-            recepcion.estatus = (
-                Recepcion.EstatusRecepcion.RECIBIDA
-                if orden_completa
-                else Recepcion.EstatusRecepcion.PARCIAL
-            )
-            recepcion.save(update_fields=["estatus", "updated_at"])
-            self._actualizar_estatus_oc(oc)
-
-            ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
-            ua = request.META.get("HTTP_USER_AGENT")
-            ev = AuditoriaEvento.objects.create(
-                empresa=oc.empresa,
-                usuario=user if getattr(user, "pk", None) else None,
-                modulo="inventarios",
-                accion="ENTRADA",
-                tabla="existencias",
-                id_registro=str(almacen.pk),
-                antes_json={"items": movimientos, "recepcion_id": recepcion.pk},
-                despues_json={
-                    "almacen_id": almacen.pk,
-                    "sucursal_id": almacen.sucursal_id,
-                    "empresa_id": almacen.empresa_id,
-                    "recepcion_id": recepcion.pk,
-                    "items": movimientos,
+            detalles_recepcion = RecepcionDetalle.objects.filter(recepcion=recepcion).order_by("id")
+            return Response(
+                {
+                    "recepcion": RecepcionSerializer(recepcion).data,
+                    "detalle": RecepcionDetalleSerializer(detalles_recepcion, many=True).data,
+                    "movimiento_id": ev.id_evento,
                 },
-                ip=ip,
-                user_agent=ua,
+                status=status.HTTP_200_OK,
             )
-
-        detalles_recepcion = RecepcionDetalle.objects.filter(recepcion=recepcion).order_by("id")
-        return Response(
-            {
-                "recepcion": RecepcionSerializer(recepcion).data,
-                "detalle": RecepcionDetalleSerializer(detalles_recepcion, many=True).data,
-                "movimiento_id": ev.id_evento,
-            },
-            status=status.HTTP_200_OK,
-        )
+        except ValidationError as exc:
+            logger.warning(
+                "Recepcion onboarding validation error | user=%s | superuser=%s | empresa=%s | body=%s | detail=%s",
+                getattr(user, "username", None),
+                getattr(user, "is_superuser", False),
+                getattr(empresa, "pk", None),
+                request.data,
+                getattr(exc, "detail", exc),
+            )
+            raise
