@@ -348,16 +348,20 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             activo=True,
         )
         serie_codigo = (serie_codigo or "").strip().upper()
+        series_validas = ["RC", "RT", "RZ"]
         if serie_codigo:
-            qs = qs.filter(
+            serie_especifica = qs.filter(
                 Q(tipo_documento__iexact="RECEPCION", serie__iexact=serie_codigo)
                 | Q(tipo_documento__iexact=serie_codigo)
             )
-        else:
-            qs = qs.filter(
-                Q(tipo_documento__iexact="RECEPCION", serie__in=["RC", "RT", "RZ"])
-                | Q(tipo_documento__in=["RC", "RT", "RZ"])
-            )
+            serie_folio = serie_especifica.order_by("id_serie_folio").first()
+            if serie_folio:
+                return serie_folio
+
+        qs = qs.filter(
+            Q(tipo_documento__iexact="RECEPCION", serie__in=series_validas)
+            | Q(tipo_documento__in=series_validas)
+        )
         return qs.order_by("id_serie_folio").first()
 
     def _asignar_folio_recepcion(self, recepcion, serie_codigo):
@@ -370,7 +374,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 {
                     "serie_codigo": (
                         "No hay una Serie/Folio activa configurada para recepción "
-                        f"con serie {codigo}."
+                        f"con serie {codigo} ni una alternativa disponible entre RC, RT o RZ."
                     )
                 }
             )
