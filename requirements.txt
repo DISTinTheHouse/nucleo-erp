@@ -1,7 +1,7 @@
 asgiref==3.11.1
 attrs==25.4.0
 cffi==2.0.0
-cryptography==46.0.7
+cryptography>=48.0.1
 dj-database-url==2.1.0
 Django==6.0.5
 django-allauth==65.16.0
@@ -25,7 +25,7 @@ psycopg==3.2.13
 psycopg-binary==3.2.13
 psycopg2-binary==2.9.11
 pycparser==3.0
-PyJWT==2.12.1
+pyjwt>=2.13.0
 pyotp==2.9.0
 python-decouple==3.8
 PyYAML==6.0.1

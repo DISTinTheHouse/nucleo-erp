@@ -41,9 +41,9 @@
 _(sin materia prima no hay maquila)_
 
 - [ ] ¿TERMINADO?
-- [ ] proveedores
-- [ ] direcciones_proveedor
-- [ ] ordenes_compra
+- [x] proveedores
+- [x] direcciones_proveedor
+- [x] ordenes_compra
 - [ ] recepciones
 
 _// omitir por ahora calidad, facturas proveedor y pagos //_
