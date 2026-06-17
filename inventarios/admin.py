@@ -86,10 +86,12 @@ class AjusteInventarioAdmin(admin.ModelAdmin):
 
 @admin.register(Existencia)
 class ExistenciaAdmin(admin.ModelAdmin):
-    list_display = ("id", "producto_variante__producto", "almacen", "ubicacion", "stock")
-    list_filter = ("almacen__empresa", "almacen", "producto_variante__producto")
+    list_display = ("id", "display_producto", "display_producto_variante", "almacen", "ubicacion", "stock")
+    list_filter = ("almacen__empresa", "almacen", "producto", "producto_variante")
     search_fields = (
         "id",
+        "producto__nombre",
+        "producto__id",
         "producto_variante__producto__nombre",
         "producto_variante__producto__id",
         "almacen__codigo",
@@ -100,8 +102,17 @@ class ExistenciaAdmin(admin.ModelAdmin):
         "ubicacion__posicion",
     )
     ordering = ("-id",)
-    autocomplete_fields = ("producto_variante", "almacen", "ubicacion")
-    list_select_related = ("producto_variante", "almacen", "ubicacion")
+    autocomplete_fields = ("producto", "producto_variante", "almacen", "ubicacion")
+    list_select_related = ("producto", "producto_variante__producto", "almacen", "ubicacion")
+
+    @admin.display(description="Producto")
+    def display_producto(self, obj):
+        producto = obj.producto or getattr(obj.producto_variante, "producto", None)
+        return getattr(producto, "nombre", None)
+
+    @admin.display(description="Variante")
+    def display_producto_variante(self, obj):
+        return getattr(obj, "producto_variante_id", None)
 
 
 class MovimientoInventarioDetalleInline(admin.TabularInline):

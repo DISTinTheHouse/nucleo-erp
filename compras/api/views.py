@@ -9,7 +9,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import Producto, ProductoVariante
+from catalogo.models import Producto
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 from compras.api.serializers import (
     OrdenCompraOnboardingSerializer,
@@ -394,22 +394,6 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return Decimal(str(total or 0))
 
-    def _resolver_existencia_producto(self, producto_id, empresa):
-        variantes = ProductoVariante.objects.filter(producto_id=producto_id, activo=True)
-        if empresa:
-            variantes = variantes.filter(empresa=empresa)
-        variantes = list(variantes.order_by("id"))
-        if len(variantes) == 0:
-            raise ValidationError(
-                {
-                    "producto": (
-                        "El producto no tiene variante configurada para inventario."
-                    )
-                }
-            )
-        # La recepción se captura por producto; inventarios usa la primera variante activa.
-        return variantes[0]
-
     def _actualizar_existencias(self, recepcion, detalle_payload):
         movimientos = []
         for item in detalle_payload:
@@ -431,12 +415,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
 
             oc_detalle = item["oc_detalle"]
             cantidad = item["cantidad_recibida"]
-            variante_stock = item["variante_stock"]
+            producto_id = oc_detalle.producto_id
 
             existencia = (
                 Existencia.objects.select_for_update()
                 .filter(
-                    producto_variante_id=variante_stock.pk,
+                    producto_id=producto_id,
                     almacen_id=recepcion.almacen_id,
                     ubicacion_id=(ubicacion.pk if ubicacion else None),
                 )
@@ -445,7 +429,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             )
             if not existencia:
                 existencia = Existencia.objects.create(
-                    producto_variante=variante_stock,
+                    producto_id=producto_id,
                     almacen=recepcion.almacen,
                     ubicacion=ubicacion,
                     stock=0,
@@ -465,7 +449,6 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 recepcion=recepcion,
                 orden_compra_detalle=oc_detalle,
                 producto=oc_detalle.producto,
-                producto_variante=variante_stock,
                 ubicacion=ubicacion,
                 lote_id=item.get("lote"),
                 serie_id=item.get("serie"),
@@ -753,14 +736,11 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         )
                     }
                 )
-
-            variante_stock = self._resolver_existencia_producto(oc_detalle.producto_id, oc.empresa)
             detalle_payload.append(
                 {
                     "oc_detalle": oc_detalle,
                     "cantidad_recibida": cantidad,
                     "ubicacion": item.get("ubicacion"),
-                    "variante_stock": variante_stock,
                     "lote": item.get("lote"),
                     "serie": item.get("serie"),
                 }

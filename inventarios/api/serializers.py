@@ -100,7 +100,7 @@ class ExistenciaSerializer(serializers.ModelSerializer):
 
     def get_producto_info(self, obj):
         variante = getattr(obj, "producto_variante", None)
-        producto = getattr(variante, "producto", None) if variante else None
+        producto = getattr(obj, "producto", None) or (getattr(variante, "producto", None) if variante else None)
         if not producto:
             return None
         return {

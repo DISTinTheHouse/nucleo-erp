@@ -146,7 +146,8 @@ class AjusteDetalle(models.Model):
         return str(self.id)
 
 class Existencia(models.Model):
-    producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.PROTECT, related_name="existencia")
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, null=True, blank=True)
+    producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.PROTECT, related_name="existencia", null=True, blank=True)
     almacen = models.ForeignKey(Almacen, on_delete=models.PROTECT, related_name="existencia")
     ubicacion = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="existencia", null=True, blank=True)
     stock = models.IntegerField(default=0)
@@ -159,7 +160,9 @@ class Existencia(models.Model):
         verbose_name_plural = "Existencia"
 
     def __str__(self):
-        return f"{self.producto_variante.producto.nombre} - {self.almacen.nombre}"
+        producto = self.producto or getattr(self.producto_variante, "producto", None)
+        nombre = getattr(producto, "nombre", "Sin producto")
+        return f"{nombre} - {self.almacen.nombre}"
 
 class MovimientoInventario(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="movimientos_inventario")

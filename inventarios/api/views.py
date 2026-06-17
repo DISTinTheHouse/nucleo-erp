@@ -14,6 +14,7 @@ from inventarios.models import (
     MovimientoInventarioDetalle,
     AjusteInventario,
 )
+from catalogo.models import Producto, ProductoVariante
 from auditoria.models import AuditoriaEvento
 from nucleo.models import Empresa, Sucursal
 from .serializers import (
@@ -120,6 +121,7 @@ class UbicacionViewSet(viewsets.ModelViewSet):
 
 class ExistenciaViewSet(viewsets.ModelViewSet):
     queryset = Existencia.objects.all().select_related(
+        "producto",
         "producto_variante__producto",
         "producto_variante__color",
         "producto_variante__talla",
@@ -163,7 +165,10 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         if producto_variante_id:
             qs = qs.filter(producto_variante_id=producto_variante_id)
         if producto_id:
-            qs = qs.filter(producto_variante__producto_id=producto_id)
+            qs = qs.filter(
+                models.Q(producto_id=producto_id) |
+                models.Q(producto_variante__producto_id=producto_id)
+            )
         if color_id:
             qs = qs.filter(producto_variante__color_id=color_id)
         if talla_id:
@@ -238,23 +243,68 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         if not isinstance(items, list) or not items:
             raise ValidationError({"items": "items debe ser una lista no vacía."})
         normalized = []
+        producto_ids = set()
+        producto_variante_ids = set()
         for idx, it in enumerate(items):
             if not isinstance(it, dict):
                 raise ValidationError({"items": f"Item #{idx+1} inválido."})
+            producto_id = self._to_int(it.get("producto") or it.get("producto_id"))
             pv_id = self._to_int(it.get("producto_variante") or it.get("producto_variante_id"))
-            if not pv_id:
-                raise ValidationError({"items": f"Item #{idx+1}: producto_variante es requerido."})
+            if not producto_id and not pv_id:
+                raise ValidationError(
+                    {"items": f"Item #{idx+1}: producto o producto_variante es requerido."}
+                )
             qty = self._to_decimal(it.get("cantidad"))
             if qty is None:
                 raise ValidationError({"items": f"Item #{idx+1}: cantidad inválida."})
             ubicacion_id = self._to_int(it.get("ubicacion") or it.get("ubicacion_id"))
+            if producto_id:
+                producto_ids.add(producto_id)
+            if pv_id:
+                producto_variante_ids.add(pv_id)
             normalized.append(
                 {
+                    "producto_id": producto_id,
                     "producto_variante_id": pv_id,
                     "cantidad": qty,
                     "ubicacion_id": ubicacion_id,
                 }
             )
+
+        variantes = {
+            variante.pk: variante
+            for variante in ProductoVariante.objects.filter(pk__in=producto_variante_ids).only("id", "producto_id")
+        }
+        producto_ids.update(
+            variante.producto_id for variante in variantes.values() if getattr(variante, "producto_id", None)
+        )
+        productos = {
+            producto.pk: producto
+            for producto in Producto.objects.filter(pk__in=producto_ids).only("id")
+        }
+
+        for idx, item in enumerate(normalized):
+            variante_id = item["producto_variante_id"]
+            producto_id = item["producto_id"]
+
+            if variante_id:
+                variante = variantes.get(variante_id)
+                if not variante:
+                    raise ValidationError(
+                        {"items": f"Item #{idx+1}: producto_variante no encontrado."}
+                    )
+                if producto_id and variante.producto_id != producto_id:
+                    raise ValidationError(
+                        {
+                            "items": (
+                                f"Item #{idx+1}: producto y producto_variante no coinciden."
+                            )
+                        }
+                    )
+                item["producto_id"] = variante.producto_id
+
+            if not item["producto_id"] or item["producto_id"] not in productos:
+                raise ValidationError({"items": f"Item #{idx+1}: producto no encontrado."})
         return normalized
 
     def _apply(self, request, tipo):
@@ -316,24 +366,31 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
 
                 ex = (
                     Existencia.objects.select_for_update()
-                    .filter(
-                        producto_variante_id=it["producto_variante_id"],
-                        almacen_id=almacen.pk,
-                        ubicacion_id=(ubicacion.pk if ubicacion else None),
-                    )
+                    .filter(almacen_id=almacen.pk, ubicacion_id=(ubicacion.pk if ubicacion else None))
                     .order_by("id")
-                    .first()
                 )
+                if it["producto_variante_id"]:
+                    ex = ex.filter(producto_variante_id=it["producto_variante_id"])
+                else:
+                    ex = ex.filter(
+                        producto_id=it["producto_id"],
+                        producto_variante__isnull=True,
+                    )
+                ex = ex.first()
                 if not ex and tipo == "SALIDA":
                     fallback = (
                         Existencia.objects.select_for_update()
-                        .filter(
-                            producto_variante_id=it["producto_variante_id"],
-                            almacen_id=almacen.pk,
-                        )
+                        .filter(almacen_id=almacen.pk)
                         .order_by("-cantidad", "id")
-                        .first()
                     )
+                    if it["producto_variante_id"]:
+                        fallback = fallback.filter(producto_variante_id=it["producto_variante_id"])
+                    else:
+                        fallback = fallback.filter(
+                            producto_id=it["producto_id"],
+                            producto_variante__isnull=True,
+                        )
+                    fallback = fallback.first()
                     ex = fallback
 
                 if not ex:
@@ -342,6 +399,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                             {"cantidad": "No hay existencia para realizar la salida."}
                         )
                     ex = Existencia.objects.create(
+                        producto_id=it["producto_id"],
                         producto_variante_id=it["producto_variante_id"],
                         almacen=almacen,
                         ubicacion=ubicacion,
@@ -371,6 +429,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
 
                 before_after.append(
                     {
+                        "producto_id": ex.producto_id,
                         "producto_variante_id": ex.producto_variante_id,
                         "ubicacion_id": ex.ubicacion_id,
                         "cantidad_before": str(current),
@@ -381,6 +440,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 results.append(
                     {
                         "id": ex.pk,
+                        "producto_id": ex.producto_id,
                         "producto_variante_id": ex.producto_variante_id,
                         "almacen_id": ex.almacen_id,
                         "ubicacion_id": ex.ubicacion_id,
