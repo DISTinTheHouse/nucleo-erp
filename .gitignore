@@ -23,8 +23,7 @@ venv.bak/
 
 .vercel
 
-.vercel
-
-# Agents / Skills
+# AI / Skills
 .agents/
+.claude/
 skills-lock.json
