@@ -1,13 +1,18 @@
 from django.db import models
 from nucleo.models import Empresa, Sucursal, StatusLifecycleModel
-from catalogo.models import Producto, Talla, Color
+from catalogo.models import Producto, ProductoVariante, Talla, Color, UnidadMedida, VarianteProductoProduccion
 from ventas.models import Pedido, PedidoDetalle
 from inventarios.models import Almacen, Ubicacion
 
 class ListaMaterialBom(models.Model):
     bom_id = models.AutoField(primary_key=True)
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
-    producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
+    producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.CASCADE, null=True, blank=True)
+    variante_produccion = models.ForeignKey(VarianteProductoProduccion, on_delete=models.CASCADE, null=True, blank=True) # Variante de produccion especial
+
+    version = models.PositiveIntegerField(default=1)
+    activo = models.BooleanField(default=True)
+    observaciones = models.TextField(blank=True, null=True)
 
     class Meta:
         db_table = 'listas_materiales_bom'
@@ -16,6 +21,26 @@ class ListaMaterialBom(models.Model):
     
     def __str__(self):
         return str(self.bom_id)
+
+class BomDetalle(models.Model):
+    bom_detalle_id = models.AutoField(primary_key=True)
+    bom = models.ForeignKey(ListaMaterialBom, on_delete=models.CASCADE)
+    producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.PROTECT, null=True, blank=True)
+    variante_produccion = models.ForeignKey(VarianteProductoProduccion, null=True, blank=True, on_delete=models.PROTECT) # Variante de produccion especial
+
+    cantidad = models.DecimalField(max_digits=12, decimal_places=2)
+    unidad = models.ForeignKey(UnidadMedida, on_delete=models.PROTECT)
+    desperdicio = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    obligatorio = models.BooleanField(default=True)
+    observaciones = models.TextField(blank=True, null=True)
+    activo = models.BooleanField(default=True)
+    class Meta:
+        db_table = 'bom_detalles'
+        verbose_name = 'Bom Detalle'
+        verbose_name_plural = 'Bom Detalles'
+
+    def __str__(self):
+        return str(self.bom_detalle_id)
 
 class RutaProduccion(models.Model):
     ruta_produccion_id = models.AutoField(primary_key=True)

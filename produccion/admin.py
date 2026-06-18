@@ -22,12 +22,12 @@ admin.site.register(ReflejanteIncidencias)
 
 @admin.register(ListaMaterialBom)
 class ListaMaterialBomAdmin(admin.ModelAdmin):
-    list_display = ("bom_id", "empresa", "producto")
-    list_filter = ("empresa", "producto")
-    search_fields = ("bom_id", "producto__nombre", "producto__id", "empresa__codigo", "empresa__razon_social")
+    list_display = ("bom_id", "empresa", "producto_variante", "variante_produccion", "version", "activo")
+    list_filter = ("empresa", "activo")
+    search_fields = ("bom_id", "producto_variante__producto__nombre", "producto_variante__sku", "empresa__codigo", "empresa__razon_social")
     ordering = ("-bom_id",)
-    autocomplete_fields = ("empresa", "producto")
-    list_select_related = ("empresa", "producto")
+    autocomplete_fields = ("empresa", "producto_variante")
+    list_select_related = ("empresa", "producto_variante")
 
 @admin.register(RutaProduccion)
 class RutaProduccionAdmin(admin.ModelAdmin):
