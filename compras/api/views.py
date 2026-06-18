@@ -32,7 +32,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset()
+        qs = super().get_queryset().select_related('proveedor')
         empresa = getattr(user, "empresa", None)
         if empresa:
             return qs.filter(empresa=empresa)

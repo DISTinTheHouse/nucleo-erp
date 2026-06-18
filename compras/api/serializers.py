@@ -3,6 +3,7 @@ from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, Recepcion
 
 class OrdenCompraSerializer(serializers.ModelSerializer):
     estatus_label = serializers.SerializerMethodField()
+    proveedor_nombre = serializers.SerializerMethodField()
 
     class Meta:
         model = OrdenCompra
@@ -11,6 +12,7 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'empresa',
             'sucursal',
             'proveedor',
+            'proveedor_nombre',
             'solicitud_compra',
             'moneda',
             'usuario',
@@ -49,6 +51,9 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
 
     def get_estatus_label(self, obj):
         return obj.get_estatus_display()
+
+    def get_proveedor_nombre(self, obj):
+        return obj.proveedor.nombre if obj.proveedor_id else None
 
     def to_internal_value(self, data):
         # Convert "0" or 0 to None for FK fields if they are optional
