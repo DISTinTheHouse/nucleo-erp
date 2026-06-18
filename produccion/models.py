@@ -25,9 +25,8 @@ class ListaMaterialBom(models.Model):
 class BomDetalle(models.Model):
     bom_detalle_id = models.AutoField(primary_key=True)
     bom = models.ForeignKey(ListaMaterialBom, on_delete=models.CASCADE)
-    producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.PROTECT, null=True, blank=True)
     variante_produccion = models.ForeignKey(VarianteProductoProduccion, null=True, blank=True, on_delete=models.PROTECT) # Variante de produccion especial
-
+    componente = models.ForeignKey(Producto, on_delete=models.PROTECT, null=True, blank=True, related_name='bom_componentes')
     cantidad = models.DecimalField(max_digits=12, decimal_places=2)
     unidad = models.ForeignKey(UnidadMedida, on_delete=models.PROTECT)
     desperdicio = models.DecimalField(max_digits=5, decimal_places=2, default=0)
