@@ -14,6 +14,7 @@ from catalogo.models import Producto
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 from compras.api.serializers import (
     OrdenCompraOnboardingSerializer,
+    OrdenCompraRetrieveSerializer,
     OrdenCompraSerializer,
     OrdenCompraDetalleSerializer,
     RecepcionDetalleSerializer,
@@ -35,8 +36,17 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         qs = super().get_queryset().select_related('proveedor')
         empresa = getattr(user, "empresa", None)
         if empresa:
-            return qs.filter(empresa=empresa)
-        return qs.none()
+            qs = qs.filter(empresa=empresa)
+        else:
+            return qs.none()
+        if self.action == 'retrieve':
+            qs = qs.prefetch_related('ordencompradetalle_set')
+        return qs
+
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return OrdenCompraRetrieveSerializer
+        return OrdenCompraSerializer
 
     def _asignar_folio_oc(self, instance, empresa):
         serie_folio = SerieFolio.objects.filter(

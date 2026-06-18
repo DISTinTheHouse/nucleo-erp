@@ -1,6 +1,13 @@
 from rest_framework import serializers
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 
+
+class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrdenCompraDetalle
+        fields = ['descripcion', 'cantidad', 'descuento', 'importe', 'piezas', 'precio']
+
+
 class OrdenCompraSerializer(serializers.ModelSerializer):
     estatus_label = serializers.SerializerMethodField()
     proveedor_nombre = serializers.SerializerMethodField()
@@ -67,6 +74,13 @@ class OrdenCompraDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrdenCompraDetalle
         fields = "__all__"
+
+
+class OrdenCompraRetrieveSerializer(OrdenCompraSerializer):
+    detalles = OrdenCompraDetalleReadSerializer(many=True, read_only=True, source='ordencompradetalle_set')
+
+    class Meta(OrdenCompraSerializer.Meta):
+        fields = OrdenCompraSerializer.Meta.fields + ['detalles']
 
 
 class OrdenCompraOnboardingHeaderSerializer(serializers.Serializer):
