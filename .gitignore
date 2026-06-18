@@ -24,3 +24,7 @@ venv.bak/
 .vercel
 
 .vercel
+
+# Agents / Skills
+.agents/
+skills-lock.json
