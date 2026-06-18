@@ -2,15 +2,53 @@ from rest_framework import serializers
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 
 class OrdenCompraSerializer(serializers.ModelSerializer):
+    estatus_label = serializers.SerializerMethodField()
+
     class Meta:
         model = OrdenCompra
-        fields = '__all__'
+        fields = [
+            'id',
+            'empresa',
+            'sucursal',
+            'proveedor',
+            'solicitud_compra',
+            'moneda',
+            'usuario',
+            'pedido',
+            'folio',
+            'referencia',
+            'fecha_oc',
+            'fecha_entrega_estimada',
+            'fecha_autorizacion',
+            'fecha_vencimiento',
+            'estatus',
+            'estatus_label',
+            'subtotal',
+            'descuento',
+            'impuestos',
+            'total',
+            'tipo',
+            'total_piezas',
+            'flete',
+            'seguros',
+            'porcentaje_iva',
+            'total_iva',
+            'gran_total',
+            'a_cuenta',
+            'observaciones',
+            'activo',
+            'created_at',
+            'updated_at',
+        ]
         extra_kwargs = {
             'folio': {'required': False, 'allow_null': True},
             'solicitud_compra': {'required': False, 'allow_null': True},
             'pedido': {'required': False, 'allow_null': True},
             'proveedor': {'required': False, 'allow_null': True},
         }
+
+    def get_estatus_label(self, obj):
+        return obj.get_estatus_display()
 
     def to_internal_value(self, data):
         # Convert "0" or 0 to None for FK fields if they are optional
