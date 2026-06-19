@@ -15,6 +15,15 @@ from produccion.models import (
 from rest_framework import serializers
 
 class BomDetalleSerializer(serializers.ModelSerializer):
+    componente_nombre = serializers.SerializerMethodField()
+    unidad_clave = serializers.SerializerMethodField()
+
+    def get_componente_nombre(self, obj):
+        return obj.componente.nombre if obj.componente else None
+
+    def get_unidad_clave(self, obj):
+        return obj.unidad.clave if obj.unidad else None
+
     class Meta:
         model = BomDetalle
         fields = '__all__'
