@@ -2,7 +2,8 @@ from django.urls import path, include
 from rest_framework import routers
 from produccion.api.views import (
     OrdenBordadoViewSet,
-    ListaMaterialBomViewSet, 
+    ListaMaterialBomViewSet,
+    BomDetalleViewSet, 
     ConsumoProduccionViewSet, 
     OrdenProduccionViewSet, 
     ProductoTerminadoEntradasViewSet,
@@ -15,7 +16,8 @@ from produccion.api.views import (
 )
 
 router = routers.DefaultRouter()
-router.register(r'lista-material', ListaMaterialBomViewSet)
+router.register(r'lista-material', ListaMaterialBomViewSet, basename='lista-material-bom')
+router.register(r'bom-detalle', BomDetalleViewSet, basename='bom-detalle')
 router.register(r'orden', OrdenProduccionViewSet)
 router.register(r'consumo', ConsumoProduccionViewSet)
 router.register(r'producto-terminado-entradas', ProductoTerminadoEntradasViewSet)
