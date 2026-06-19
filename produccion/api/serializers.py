@@ -1,5 +1,6 @@
 from produccion.models import (
-    ListaMaterialBom, 
+    ListaMaterialBom,
+    BomDetalle,
     OrdenProduccion, 
     ConsumoProduccion, 
     ProductoTerminadoEntradas, 
@@ -13,10 +14,34 @@ from produccion.models import (
 
 from rest_framework import serializers
 
+class BomDetalleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BomDetalle
+        fields = '__all__'
+        read_only_fields = ['bom', 'activo']
+
 class ListaMaterialBomSerializer(serializers.ModelSerializer):
+    materia_prima_detalle = BomDetalleSerializer(many=True)
+
     class Meta:
         model = ListaMaterialBom
         fields = '__all__'
+        read_only_fields = ['activo', 'bom_id']
+    
+    def create(self, validated_data):
+        detallles_data = validated_data.pop('materia_prima_detalle')
+
+        try:
+            bom = ListaMaterialBom.objects.create(**validated_data)
+            detalles = [
+                BomDetalle(bom=bom, **detalle)
+                for detalle in detallles_data
+            ]
+            BomDetalle.objects.bulk_create(detalles)
+            
+            return bom
+        except Exception as e:
+            raise serializers.ValidationError("Error creating bom")
 
 class OrdenProduccionSerializer(serializers.ModelSerializer):
     class Meta:

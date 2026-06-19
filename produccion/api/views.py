@@ -1,10 +1,13 @@
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.exceptions import ValidationError
 
 from produccion.models import (
-    ListaMaterialBom, 
-    OrdenProduccion, ConsumoProduccion, 
+    ListaMaterialBom,
+    BomDetalle,
+    OrdenProduccion, 
+    ConsumoProduccion, 
     ProductoTerminadoEntradas, 
     OrdenesBordado, 
     BordadoAvances,
@@ -14,7 +17,8 @@ from produccion.models import (
     ReflejanteIncidencias,
 )
 from produccion.api.serializers import (
-    ListaMaterialBomSerializer, 
+    ListaMaterialBomSerializer,
+    BomDetalleSerializer,
     OrdenProduccionSerializer, 
     ConsumoProduccionSerializer, 
     ProductoTerminadoEntradasSerializer,
@@ -27,8 +31,45 @@ from produccion.api.serializers import (
 )
 
 class ListaMaterialBomViewSet(viewsets.ModelViewSet):
-    queryset = ListaMaterialBom.objects.all()
     serializer_class = ListaMaterialBomSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        empresa = getattr(user, 'empresa', None)
+
+        if empresa is None:
+            return ListaMaterialBom.objects.none()
+        
+        queryset = ListaMaterialBom.objects.filter(empresa=empresa)
+
+        producto_variante_id = self.request.query_params.get('producto_variante_id')
+        
+        if producto_variante_id is not None:
+            try:
+                producto_variante_id = int(producto_variante_id)
+            except ValueError:
+                raise ValidationError({"producto_variante_id": "Must be an integer."})
+        
+            if not ListaMaterialBom.objects.filter(producto_variante_id=producto_variante_id).exists():
+                raise ValidationError({"producto_variante_id": "There is no list of materials for the specified product variant."})
+
+            queryset = queryset.filter(producto_variante_id=producto_variante_id)
+            
+        return queryset
+
+class BomDetalleViewSet(viewsets.ModelViewSet):
+    serializer_class = BomDetalleSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        empresa = getattr(user, 'empresa', None)
+
+        if empresa is None:
+            return BomDetalle.objects.none()
+        
+        queryset = BomDetalle.objects.filter(bom__empresa=empresa)
+
+        return queryset
 
 class OrdenProduccionViewSet(viewsets.ModelViewSet):
     queryset = OrdenProduccion.objects.all()

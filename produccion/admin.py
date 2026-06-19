@@ -1,6 +1,7 @@
 from django.contrib import admin
 from produccion.models import (
-    ListaMaterialBom, 
+    ListaMaterialBom,
+    BomDetalle,
     RutaProduccion, 
     OrdenProduccion, 
     ConsumoProduccion, 
@@ -28,6 +29,15 @@ class ListaMaterialBomAdmin(admin.ModelAdmin):
     ordering = ("-bom_id",)
     autocomplete_fields = ("empresa", "producto_variante")
     list_select_related = ("empresa", "producto_variante")
+
+@admin.register(BomDetalle)
+class BomDetalleAdmin(admin.ModelAdmin):
+    list_display = ("bom_detalle_id", "bom", "componente", "cantidad")
+    list_filter = ("bom__empresa", "bom__producto_variante")
+    search_fields = ("bom_detalle_id", "bom__bom_id", "bom__producto_variante__sku", "componente__nombre")
+    ordering = ("-bom_detalle_id",)
+    autocomplete_fields = ("bom", "componente")
+    list_select_related = ("bom", "componente")
 
 @admin.register(RutaProduccion)
 class RutaProduccionAdmin(admin.ModelAdmin):
