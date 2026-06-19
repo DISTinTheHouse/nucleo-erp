@@ -40,7 +40,10 @@ class ListaMaterialBomViewSet(viewsets.ModelViewSet):
         if empresa is None:
             return ListaMaterialBom.objects.none()
         
-        queryset = ListaMaterialBom.objects.filter(empresa=empresa)
+        queryset = ListaMaterialBom.objects.filter(empresa=empresa).prefetch_related(
+            'materia_prima_detalle__componente',
+            'materia_prima_detalle__unidad',
+        )
 
         producto_variante_id = self.request.query_params.get('producto_variante_id')
         
