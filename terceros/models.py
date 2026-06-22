@@ -57,7 +57,7 @@ class Proveedor(StatusLifecycleModel):
     codigo_postal = models.CharField(max_length=10, blank=True, null=True)
     telefono = models.CharField(max_length=30)
     estado = models.CharField(max_length=120, blank=True, null=True)
-    fax = models.CharField(max_length=30)
+    fax = models.CharField(max_length=30) #opcional
     contacto_principal = models.CharField(max_length=120)
     observaciones = models.TextField(max_length=255, blank=True, null=True)
     curp = models.CharField(max_length=18, blank=True, null=True)

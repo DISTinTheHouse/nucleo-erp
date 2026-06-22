@@ -68,7 +68,7 @@ class OrdenProduccion(models.Model):
     op_id = models.AutoField(primary_key=True)
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
-    pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE)
+    pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, null=True, blank=True)
     ruta_produccion = models.ForeignKey(RutaProduccion, on_delete=models.SET_NULL, null=True, blank=True)
 
     folio_op = models.CharField(max_length=50, unique=True)
@@ -87,6 +87,26 @@ class OrdenProduccion(models.Model):
     
     def __str__(self):
         return str(self.op_id)
+
+class OrdenProduccionDetalle(models.Model):
+    op_detalle_id = models.AutoField(primary_key=True)
+    op = models.ForeignKey(OrdenProduccion, on_delete=models.CASCADE)
+    bom = models.ForeignKey(ListaMaterialBom, on_delete=models.CASCADE)
+    cantidad = models.DecimalField(max_digits=12, decimal_places=2)
+    unidad = models.ForeignKey(UnidadMedida, on_delete=models.PROTECT)
+    observaciones = models.TextField(blank=True, null=True)
+    pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE, null=True, blank=True)
+    producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.CASCADE, null=True, blank=True)
+
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'ordenes_produccion_detalles'
+        verbose_name = 'Orden Produccion Detalle'
+        verbose_name_plural = 'Ordenes Produccion Detalles'
+
+    def __str__(self):
+        return str(self.op_detalle_id)
 
 class ConsumoProduccion(models.Model):
     consumo_produccion_id = models.AutoField(primary_key=True)
