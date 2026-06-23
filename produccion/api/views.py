@@ -16,6 +16,7 @@ from produccion.models import (
     ReflejanteAvances,
     ReflejanteIncidencias,
 )
+
 from produccion.api.serializers import (
     ListaMaterialBomSerializer,
     BomDetalleSerializer,
@@ -29,6 +30,8 @@ from produccion.api.serializers import (
     ReflejanteAvancesSerializer,
     ReflejanteIncidenciasSerializer,
 )
+
+from produccion.services.orden_produccion_service import OrdenProduccionService
 
 class ListaMaterialBomViewSet(viewsets.ModelViewSet):
     serializer_class = ListaMaterialBomSerializer
@@ -77,15 +80,36 @@ class BomDetalleViewSet(viewsets.ModelViewSet):
 class OrdenProduccionViewSet(viewsets.ModelViewSet):
     queryset = OrdenProduccion.objects.all()
     serializer_class = OrdenProduccionSerializer
-    http_method_names = ['get', 'post', 'patch']
 
-    @action(detail=True, methods=['POST'])
-    def confirmar(self, request, pk=None):
-        return Response({'msg': 'OrdenProduccionViewSet.confirmar'}, status=status.HTTP_200_OK)
+    def get_queryset(self):
+        user = self.request.user
+        empresa = getattr(user, 'empresa', None)
+        if empresa is None: return OrdenProduccion.objects.none()
+        queryset = OrdenProduccion.objects.filter(empresa=empresa)
+        return queryset
     
-    @action(detail=True, methods=['POST'])
-    def anular(self, request, pk=None):
-        return Response({'msg': 'OrdenProduccionViewSet.anular'}, status=status.HTTP_200_OK)
+    def save_op(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        op = OrdenProduccionService.save_orden_produccion(serializer.validated_data, request.user)
+        return Response({'msg': 'Orden de producción creada exitosamente'}, status=status.HTTP_201_CREATED)
+    
+    def get_op_detalle(self, request):
+        op_id = request.query_params.get('op_id', None)
+        if op_id is None:
+            return Response({'msg': 'No se proporcionó orden de producción'}, status=status.HTTP_400_BAD_REQUEST)
+        res_data = OrdenProduccionService.get_formatted_op_detalle(op_id)
+        if res_data is None:
+            return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(res_data)
+    
+    @action(detail=False, methods=['get', 'post'], url_path='onboarding')
+    def onboarding(self, request):
+        if request.method == 'GET':
+            op_id = request.query_params.get('op_id', None)
+            return self.get_op_detalle(request)
+        elif request.method == 'POST':
+            return self.save_op(request)
 
 class ConsumoProduccionViewSet(viewsets.ModelViewSet):
     queryset = ConsumoProduccion.objects.all()

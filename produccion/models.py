@@ -90,7 +90,7 @@ class OrdenProduccion(models.Model):
 
 class OrdenProduccionDetalle(models.Model):
     op_detalle_id = models.AutoField(primary_key=True)
-    op = models.ForeignKey(OrdenProduccion, on_delete=models.CASCADE)
+    op = models.ForeignKey(OrdenProduccion, on_delete=models.CASCADE, related_name='orden_produccion_detalle')
     bom = models.ForeignKey(ListaMaterialBom, on_delete=models.CASCADE)
     cantidad = models.DecimalField(max_digits=12, decimal_places=2)
     unidad = models.ForeignKey(UnidadMedida, on_delete=models.PROTECT)
