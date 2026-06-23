@@ -3,7 +3,8 @@ from produccion.models import (
     ListaMaterialBom,
     BomDetalle,
     RutaProduccion, 
-    OrdenProduccion, 
+    OrdenProduccion,
+    OrdenProduccionDetalle,
     ConsumoProduccion, 
     ProductoTerminadoEntradas, 
     OrdenesBordado,
@@ -20,6 +21,7 @@ admin.site.register(BordadoIncidencias)
 admin.site.register(OrdenesReflejante)
 admin.site.register(ReflejanteAvances)
 admin.site.register(ReflejanteIncidencias)
+admin.site.register(OrdenProduccionDetalle)
 
 @admin.register(ListaMaterialBom)
 class ListaMaterialBomAdmin(admin.ModelAdmin):

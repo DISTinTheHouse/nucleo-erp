@@ -30,6 +30,10 @@ class ProductoSerializer(serializers.ModelSerializer):
         }
 
 class ProductoVarianteSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
+
     class Meta:
         model = ProductoVariante
         fields = '__all__'

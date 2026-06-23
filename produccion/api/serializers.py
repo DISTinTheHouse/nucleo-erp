@@ -1,7 +1,10 @@
+from rest_framework import serializers
+
 from produccion.models import (
     ListaMaterialBom,
     BomDetalle,
-    OrdenProduccion, 
+    OrdenProduccion,
+    OrdenProduccionDetalle,
     ConsumoProduccion, 
     ProductoTerminadoEntradas, 
     OrdenesBordado,
@@ -12,7 +15,9 @@ from produccion.models import (
     ReflejanteIncidencias
 )
 
-from rest_framework import serializers
+from catalogo.api.serializers import ProductoVarianteSerializer
+from catalogo.models import ProductoVariante
+
 
 class BomDetalleSerializer(serializers.ModelSerializer):
     componente_nombre = serializers.SerializerMethodField()
@@ -52,10 +57,31 @@ class ListaMaterialBomSerializer(serializers.ModelSerializer):
         except Exception as e:
             raise serializers.ValidationError("Error creating bom")
 
+class OrdenProduccionDetalleSerializer(serializers.ModelSerializer):
+    producto_variante = ProductoVarianteSerializer(read_only=True)
+    producto_variante_id = serializers.PrimaryKeyRelatedField(
+        queryset=ProductoVariante.objects.all(),
+        source='producto_variante',
+        write_only=True
+    )
+    bom_detalle = BomDetalleSerializer(
+        source='bom.materia_prima_detalle',
+        many=True,
+        read_only=True
+    )
+
+    class Meta:
+        model = OrdenProduccionDetalle
+        fields = '__all__'
+        read_only_fields = ['activo', 'op']
+
 class OrdenProduccionSerializer(serializers.ModelSerializer):
+    orden_produccion_detalle = OrdenProduccionDetalleSerializer(many=True)
+    
     class Meta:
         model = OrdenProduccion
         fields = '__all__'
+        read_only_fields = ['folio_op', 'activo', 'usuario_asignado']
 
 class ConsumoProduccionSerializer(serializers.ModelSerializer):
     class Meta:
