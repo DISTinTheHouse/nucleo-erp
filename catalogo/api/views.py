@@ -49,7 +49,13 @@ class ProductoViewSet(viewsets.ModelViewSet):
         serializer.save()
     
 class ProductoVarianteViewSet(viewsets.ModelViewSet):
-    queryset = ProductoVariante.objects.all()
+    # producto_nombre/color_nombre/talla_nombre (agregados en 0599352) recorren las FK
+    # producto, color y talla por su atributo .nombre. Con un queryset .all() sin
+    # select_related, DRF resuelve esas relaciones de forma perezosa fila por fila: el
+    # listado completo dispara 3 consultas por variante (N+1) y sobre la tabla real de
+    # variantes el endpoint tarda tanto que parece colgarse. select_related las trae en el
+    # mismo JOIN -> una sola consulta, sin alterar la forma de la respuesta.
+    queryset = ProductoVariante.objects.all().select_related("producto", "color", "talla")
     serializer_class = ProductoVarianteSerializer
 
 
