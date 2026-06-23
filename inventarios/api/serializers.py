@@ -188,6 +188,7 @@ class AuditoriaMovimientoSerializer(serializers.ModelSerializer):
     tipo_movimiento = serializers.CharField(source="accion", read_only=True)
     fecha = serializers.DateTimeField(source="created_at", read_only=True)
     fecha_movimiento = serializers.DateTimeField(source="created_at", read_only=True)
+    usuario_nombre = serializers.SerializerMethodField()
 
     class Meta:
         model = AuditoriaEvento
@@ -196,6 +197,7 @@ class AuditoriaMovimientoSerializer(serializers.ModelSerializer):
             "id_evento",
             "empresa",
             "usuario",
+            "usuario_nombre",
             "modulo",
             "accion",
             "tipo_movimiento",
@@ -209,3 +211,10 @@ class AuditoriaMovimientoSerializer(serializers.ModelSerializer):
             "fecha_movimiento",
             "created_at",
         ]
+
+    def get_usuario_nombre(self, obj):
+        usuario = obj.usuario
+        if not usuario:
+            return None
+        nombre = usuario.get_full_name().strip()
+        return nombre or usuario.email

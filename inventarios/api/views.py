@@ -122,7 +122,9 @@ class UbicacionViewSet(viewsets.ModelViewSet):
 class ExistenciaViewSet(viewsets.ModelViewSet):
     queryset = Existencia.objects.all().select_related(
         "producto",
+        "producto__tipo",
         "producto_variante__producto",
+        "producto_variante__producto__tipo",
         "producto_variante__color",
         "producto_variante__talla",
         "almacen",
