@@ -56,9 +56,6 @@ class ListaMaterialBomViewSet(viewsets.ModelViewSet):
             except ValueError:
                 raise ValidationError({"producto_variante_id": "Must be an integer."})
         
-            if not ListaMaterialBom.objects.filter(producto_variante_id=producto_variante_id).exists():
-                raise ValidationError({"producto_variante_id": "There is no list of materials for the specified product variant."})
-
             queryset = queryset.filter(producto_variante_id=producto_variante_id)
             
         return queryset
