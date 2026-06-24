@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Producción Interna</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: "Geist", sans-serif; background: #f7f7f8; }
+        .card { background: white; border: 1px solid #e5e7eb; border-radius: 28px; }
+        input, select { width: 100%; padding: .9rem; border: 1px solid #d4d4d8; border-radius: 14px; outline: none; }
+        input:focus, select:focus { border-color: black; }
+        .product { transition: .2s; }
+        .product:hover { background: #fafafa; }
+    </style>
+</head>
+<body>
+
+<div class="max-w-7xl mx-auto p-10">
+    <div class="mb-12">
+        <span class="text-xs border rounded-full px-3 py-1 bg-white shadow-sm">ERP · Producción</span>
+        <h1 class="text-5xl font-semibold mt-6 tracking-tight">Nueva Producción Interna</h1>
+        <p class="text-gray-500 mt-4 max-w-3xl text-lg">
+            Selecciona las variantes a producir. El sistema calculará automáticamente la explosión de materiales requerida.
+        </p>
+    </div>
+
+    {% if messages %}
+    <div class="mb-8 space-y-3">
+        {% for message in messages %}
+        <div class="p-4 rounded-2xl border text-sm flex items-center shadow-sm {% if message.tags == 'error' %} bg-red-50 text-red-700 border-red-200 {% else %} bg-green-50 text-green-700 border-green-200 {% endif %}">
+            <span class="font-medium mr-2">{% if message.tags == 'error' %}Error:{% else %}Éxito:{% endif %}</span> {{ message }}
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <form method="POST" action="{% url 'generar_orden_produccion' %}">
+        {% csrf_token %}
+        <div class="grid lg:grid-cols-3 gap-8">
+            
+            <div class="lg:col-span-2 space-y-8">
+                
+                <div class="card p-8 shadow-sm">
+                    <h2 class="text-xl font-semibold">Información General</h2>
+                    <div class="grid md:grid-cols-2 gap-6 mt-8">
+                        <div>
+                            <label class="text-sm font-medium text-gray-700 block mb-2">Sucursal</label>
+                            <select name="sucursal_id" required>
+                                <option value="">Selecciona una sucursal...</option>
+                                {% for sucursal in sucursales %}
+                                    <option value="{{ sucursal.id }}">{{ sucursal.nombre }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-sm font-medium text-gray-700 block mb-2">Prioridad</label>
+                            <select name="prioridad">
+                                <option value="1">Normal</option>
+                                <option value="2">Alta</option>
+                                <option value="3">Urgente</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mt-6">
+                        <label class="text-sm font-medium text-gray-700 block mb-2">Observaciones</label>
+                        <input type="text" name="observaciones" placeholder="Comentarios y detalles adicionales...">
+                    </div>
+                </div>
+
+                <div class="card p-8 shadow-sm">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-xl font-semibold">Variantes a Producir</h2>
+                    </div>
+
+                    <div class="flex items-end gap-4 mb-6 bg-gray-50 p-4 rounded-2xl border border-gray-100">
+                        <div class="flex-1">
+                            <label class="text-xs font-medium text-gray-500 block mb-2">Buscar variante en catálogo</label>
+                            <select id="selector-variante" class="w-full bg-white border border-gray-300">
+                                <option value="" disabled selected>Selecciona una variante...</option>
+                                {% for variante in variantes %}
+                                    <option value="{{ variante.id }}" 
+                                            data-nombre="{{ variante.nombre }}" 
+                                            data-sku="{{ variante.sku|default:'N/A' }}">
+                                        {{ variante.nombre }} - SKU: {{ variante.sku|default:'N/A' }}
+                                    </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <button type="button" id="btn-agregar-variante" class="bg-black text-white px-6 py-[0.95rem] rounded-xl font-medium hover:bg-gray-800 transition whitespace-nowrap">
+                            + Agregar
+                        </button>
+                    </div>
+                    
+                    <div id="contenedor-variantes" class="space-y-4 max-h-[400px] overflow-y-auto pr-2">
+                        <div id="empty-variantes" class="text-center py-10 border-2 border-dashed border-gray-200 rounded-2xl bg-gray-50">
+                            <p class="text-gray-500 text-sm">Selecciona una variante arriba y haz clic en "Agregar".</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card p-8 shadow-sm">
+                    <h2 class="text-xl font-semibold mb-6">Explosión de Materiales Requeridos</h2>
+                    <div class="border border-gray-200 rounded-2xl overflow-hidden">
+                        <table class="w-full text-left text-sm">
+                            <thead class="bg-gray-50 border-b border-gray-200">
+                                <tr>
+                                    <th class="p-4 font-semibold text-gray-700">Insumo / Materia Prima</th>
+                                    <th class="p-4 font-semibold text-gray-700 text-right">Cantidad Total</th>
+                                    <th class="p-4 font-semibold text-gray-700 text-left">Unidad</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tabla-materiales" class="divide-y divide-gray-100">
+                                <tr>
+                                    <td colspan="3" class="p-8 text-center text-gray-400">
+                                        Ingresa la cantidad a producir en los productos de arriba para calcular los materiales automáticamente.
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div>
+                <div class="card p-8 sticky top-10 shadow-sm">
+                    <h2 class="text-xl font-semibold mb-8">Resumen de Orden</h2>
+                    
+                    <div class="space-y-5 border-b border-gray-100 pb-6">
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-500">Variantes seleccionadas</span>
+                            <strong id="resumen-productos" class="text-xl">0</strong>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-500">Total a producir</span>
+                            <strong id="resumen-piezas" class="text-xl">0</strong>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-500">Folio asignado</span>
+                            <strong class="text-gray-400 font-normal italic text-sm border bg-gray-50 px-2 py-1 rounded">Automático</strong>
+                        </div>
+                    </div>
+                    
+                    <div class="mt-8">
+                        <button type="submit" class="w-full bg-black text-white py-4 rounded-2xl text-lg font-medium hover:bg-gray-800 transition shadow-md active:scale-[0.98]">
+                            Generar Orden
+                        </button>
+                        <a href="{% url 'produccion_workspace' %}" class="block text-center w-full mt-4 border border-gray-200 py-4 rounded-2xl text-gray-600 font-medium hover:bg-gray-50 transition">
+                            Cancelar
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </form>
+</div>
+
+{{ recetas_json|json_script:"recetas-data" }}
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Datos de Django
+        const recetasDataScript = document.getElementById('recetas-data');
+        const recetasData = recetasDataScript ? JSON.parse(recetasDataScript.textContent) : {};
+        
+        // Nodos Principales
+        const tablaMateriales = document.getElementById('tabla-materiales');
+        const resumenProductos = document.getElementById('resumen-productos');
+        const resumenPiezas = document.getElementById('resumen-piezas');
+        const btnAgregar = document.getElementById('btn-agregar-variante');
+        const selectorVariante = document.getElementById('selector-variante');
+        const contenedorVariantes = document.getElementById('contenedor-variantes');
+
+        // Función principal de cálculo
+        function calcularTodo() {
+            let totalesInsumos = {};
+            let totalProductos = 0;
+            let totalPiezas = 0;
+
+            // Buscamos dinámicamente los inputs que existan en ese momento
+            const inputsActivos = document.querySelectorAll('.js-cantidad');
+
+            inputsActivos.forEach(input => {
+                const cantidadProduccion = parseFloat(input.value);
+                const varianteId = input.getAttribute('data-variante-id');
+
+                if (!isNaN(cantidadProduccion) && cantidadProduccion > 0) {
+                    totalProductos++;
+                    totalPiezas += cantidadProduccion;
+                    const receta = recetasData[varianteId];
+                    
+                    if (receta) {
+                        receta.forEach(item => {
+                            const clave = item.insumo + '_' + item.unidad;
+                            const totalRequerido = cantidadProduccion * item.cantidad_unitaria;
+
+                            if (totalesInsumos[clave]) {
+                                totalesInsumos[clave].total += totalRequerido;
+                            } else {
+                                totalesInsumos[clave] = { nombre: item.insumo, total: totalRequerido, unidad: item.unidad };
+                            }
+                        });
+                    }
+                }
+            });
+
+            // Actualizar Resumen (Derecha)
+            resumenProductos.textContent = totalProductos;
+            resumenPiezas.textContent = totalPiezas % 1 === 0 ? totalPiezas : totalPiezas.toFixed(2);
+
+            // Actualizar Tabla Materiales (Izquierda Abajo)
+            renderizarTabla(totalesInsumos);
+        }
+
+        // Renderiza la tabla de explosión de materiales
+        function renderizarTabla(insumosAgrupados) {
+            tablaMateriales.innerHTML = '';
+            const keys = Object.keys(insumosAgrupados);
+
+            if (keys.length === 0) {
+                tablaMateriales.innerHTML = `<tr><td colspan="3" class="p-8 text-center text-gray-400">Ingresa la cantidad a producir en los productos de arriba para calcular los materiales automáticamente.</td></tr>`;
+                return;
+            }
+
+            keys.forEach(key => {
+                const insumo = insumosAgrupados[key];
+                const tr = document.createElement('tr');
+                tr.className = 'hover:bg-gray-50 transition-colors';
+                tr.innerHTML = `
+                    <td class="p-4 font-medium text-gray-800">${insumo.nombre}</td>
+                    <td class="p-4 text-right font-semibold text-black">${insumo.total % 1 === 0 ? insumo.total : insumo.total.toFixed(2)}</td>
+                    <td class="p-4 text-gray-500">${insumo.unidad}</td>
+                `;
+                tablaMateriales.appendChild(tr);
+            });
+        }
+
+        // AGREGAR VARIANTE DINÁMICAMENTE
+        btnAgregar.addEventListener('click', function() {
+            const selectedOption = selectorVariante.options[selectorVariante.selectedIndex];
+            
+            if (!selectedOption.value) return; // Si no ha seleccionado nada, salir.
+
+            const varianteId = selectedOption.value;
+            const nombre = selectedOption.getAttribute('data-nombre');
+            const sku = selectedOption.getAttribute('data-sku');
+
+            // Validar si ya se agregó a la lista
+            if (document.querySelector(`input[name="variante_ids"][value="${varianteId}"]`)) {
+                alert("Esta variante ya fue agregada a la lista de producción.");
+                return;
+            }
+
+            // Quitar el mensaje de "Vacío"
+            const emptyState = document.getElementById('empty-variantes');
+            if (emptyState) emptyState.remove();
+
+            // Crear el elemento HTML
+            const productDiv = document.createElement('div');
+            productDiv.className = 'product border border-gray-200 rounded-2xl p-4 flex justify-between items-center bg-white shadow-sm';
+            productDiv.innerHTML = `
+                <div>
+                    <h3 class="font-semibold text-gray-800">${nombre}</h3>
+                    <p class="text-sm text-gray-500 mt-1">SKU: ${sku}</p>
+                    <input type="hidden" name="variante_ids" value="${varianteId}">
+                </div>
+                <div class="flex items-center gap-4">
+                    <input type="number" 
+                           name="cantidades" 
+                           placeholder="Cant." 
+                           min="0" step="1" 
+                           class="w-24 text-right js-cantidad bg-white border border-gray-300 rounded-lg p-2 outline-none focus:border-black transition"
+                           data-variante-id="${varianteId}" required>
+                    <button type="button" class="text-red-400 hover:text-red-600 p-2 js-eliminar transition" title="Eliminar">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 256 256"><path d="M216,48H176V40a24,24,0,0,0-24-24H104A24,24,0,0,0,80,40v8H40a8,8,0,0,0,0,16h8V208a16,16,0,0,0,16,16H192a16,16,0,0,0,16-16V64h8a8,8,0,0,0,0-16ZM96,40a8,8,0,0,1,8-8h48a8,8,0,0,1,8,8v8H96Zm96,168H64V64H192ZM112,104v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Zm48,0v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Z"></path></svg>
+                    </button>
+                </div>
+            `;
+            
+            contenedorVariantes.prepend(productDiv); // Insertar arriba
+
+            // Añadir evento al nuevo input para que calcule al escribir
+            const newInput = productDiv.querySelector('.js-cantidad');
+            newInput.addEventListener('input', calcularTodo);
+            
+            // Añadir evento al botón de eliminar
+            const btnEliminar = productDiv.querySelector('.js-eliminar');
+            btnEliminar.addEventListener('click', function() {
+                productDiv.remove();
+                calcularTodo(); // Recalcular al borrar
+                
+                // Si la lista queda vacía, restaurar el mensaje original
+                if (contenedorVariantes.children.length === 0) {
+                    contenedorVariantes.innerHTML = `<div id="empty-variantes" class="text-center py-10 border-2 border-dashed border-gray-200 rounded-2xl bg-gray-50"><p class="text-gray-500 text-sm">Selecciona una variante arriba y haz clic en "Agregar".</p></div>`;
+                }
+            });
+
+            // Resetear el selector para la siguiente búsqueda
+            selectorVariante.selectedIndex = 0;
+            newInput.focus(); // Enfocar automáticamente el input de cantidad
+        });
+    });
+</script>
+
+</body>
+</html>

@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Producción Workspace</title>
+
+<script src="https://cdn.tailwindcss.com"></script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700;800&display=swap">
+
+<style>
+
+html{
+    scroll-behavior:smooth;
+}
+
+body{
+
+    font-family:"Geist",sans-serif;
+
+    background:
+        linear-gradient(
+            180deg,
+            #ffffff 0%,
+            #fbfbfb 45%,
+            #f6f6f7 100%
+        );
+
+    color:#111827;
+
+}
+
+body::before{
+
+    content:"";
+
+    position:fixed;
+    inset:0;
+
+    background-image:
+        linear-gradient(rgba(0,0,0,.025) 1px,transparent 1px),
+        linear-gradient(90deg,rgba(0,0,0,.025) 1px,transparent 1px);
+
+    background-size:42px 42px;
+
+    mask-image:radial-gradient(circle,#000 18%,transparent 90%);
+
+    pointer-events:none;
+
+}
+
+.card{
+
+    transition:.35s cubic-bezier(.2,.8,.2,1);
+
+    backdrop-filter:blur(16px);
+
+}
+
+.card:hover{
+
+    transform:translateY(-8px);
+
+    box-shadow:
+        0 28px 55px rgba(15,23,42,.08),
+        0 10px 22px rgba(15,23,42,.05);
+
+}
+
+.action:hover .arrow{
+
+    transform:translateX(6px);
+
+}
+
+.arrow{
+
+    transition:.25s;
+
+}
+
+.badge{
+
+    border:1px solid rgb(229 229 229);
+
+    border-radius:999px;
+
+    padding:.30rem .70rem;
+
+    font-size:.75rem;
+
+    background:white;
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="max-w-7xl mx-auto px-8 lg:px-20 py-24">
+
+    <!-- HERO -->
+
+    <div class="max-w-3xl">
+
+        <span class="badge">
+
+            ERP · QA · Producción
+
+        </span>
+
+        <h1 class="mt-8 text-5xl font-semibold tracking-tight">
+
+            Workspace de Producción
+
+        </h1>
+
+        <p class="mt-6 text-lg text-neutral-500 leading-8">
+
+            Administra las órdenes de producción, consulta el estado de fabricación
+            y accede rápidamente a las herramientas del módulo.
+
+        </p>
+
+    </div>
+
+
+    <!-- KPIs -->
+
+    <div class="grid gap-5 mt-14 md:grid-cols-4">
+
+        <div class="card rounded-3xl border border-neutral-200 bg-white/80 p-6">
+
+            <div class="text-sm text-neutral-500">
+
+                Órdenes Pendientes
+
+            </div>
+
+            <div class="mt-3 text-4xl font-semibold">
+
+                18
+
+            </div>
+
+        </div>
+
+        <div class="card rounded-3xl border border-neutral-200 bg-white/80 p-6">
+
+            <div class="text-sm text-neutral-500">
+
+                En Producción
+
+            </div>
+
+            <div class="mt-3 text-4xl font-semibold">
+
+                9
+
+            </div>
+
+        </div>
+
+        <div class="card rounded-3xl border border-neutral-200 bg-white/80 p-6">
+
+            <div class="text-sm text-neutral-500">
+
+                Completadas Hoy
+
+            </div>
+
+            <div class="mt-3 text-4xl font-semibold">
+
+                4
+
+            </div>
+
+        </div>
+
+        <div class="card rounded-3xl border border-neutral-200 bg-white/80 p-6">
+
+            <div class="text-sm text-neutral-500">
+
+                Incidencias
+
+            </div>
+
+            <div class="mt-3 text-4xl font-semibold">
+
+                2
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- Acciones -->
+
+    <h2 class="mt-20 mb-6 text-xl font-semibold">
+
+        Acciones rápidas
+
+    </h2>
+
+    <div class="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
+
+        <a href="{% url 'generar_orden_produccion' %}" class="action card rounded-[30px] border border-neutral-200 bg-white/80 p-8">
+
+            <div class="flex justify-between">
+
+                <div>
+
+                    <div class="text-4xl">
+
+                        ➕
+
+                    </div>
+
+                    <h3 class="mt-8 text-xl font-semibold">
+
+                        Generar Orden
+
+                    </h3>
+
+                    <p class="mt-3 text-sm text-neutral-500 leading-7">
+
+                        Crear una nueva orden de producción a partir de un pedido.
+
+                    </p>
+
+                </div>
+
+                <div class="arrow text-2xl text-neutral-300">
+
+                    →
+
+                </div>
+
+            </div>
+
+        </a>
+
+        <a href="#" class="action card rounded-[30px] border border-neutral-200 bg-white/80 p-8">
+
+            <div class="flex justify-between">
+
+                <div>
+
+                    <div class="text-4xl">
+
+                        📦
+
+                    </div>
+
+                    <h3 class="mt-8 text-xl font-semibold">
+
+                        Órdenes
+
+                    </h3>
+
+                    <p class="mt-3 text-sm text-neutral-500 leading-7">
+
+                        Consultar y administrar órdenes existentes.
+
+                    </p>
+
+                </div>
+
+                <div class="arrow text-2xl text-neutral-300">
+
+                    →
+
+                </div>
+
+            </div>
+
+        </a>
+
+        <a href="#" class="action card rounded-[30px] border border-neutral-200 bg-white/80 p-8">
+
+            <div class="flex justify-between">
+
+                <div>
+
+                    <div class="text-4xl">
+
+                        📑
+
+                    </div>
+
+                    <h3 class="mt-8 text-xl font-semibold">
+
+                        BOM
+
+                    </h3>
+
+                    <p class="mt-3 text-sm text-neutral-500 leading-7">
+
+                        Administrar listas de materiales.
+
+                    </p>
+
+                </div>
+
+                <div class="arrow text-2xl text-neutral-300">
+
+                    →
+
+                </div>
+
+            </div>
+
+        </a>
+
+        <a href="#" class="action card rounded-[30px] border border-neutral-200 bg-white/80 p-8">
+
+            <div class="flex justify-between">
+
+                <div>
+
+                    <div class="text-4xl">
+
+                        🛣️
+
+                    </div>
+
+                    <h3 class="mt-8 text-xl font-semibold">
+
+                        Rutas
+
+                    </h3>
+
+                    <p class="mt-3 text-sm text-neutral-500 leading-7">
+
+                        Configuración de rutas de producción.
+
+                    </p>
+
+                </div>
+
+                <div class="arrow text-2xl text-neutral-300">
+
+                    →
+
+                </div>
+
+            </div>
+
+        </a>
+
+        <a href="#" class="action card rounded-[30px] border border-neutral-200 bg-white/80 p-8">
+
+            <div class="flex justify-between">
+
+                <div>
+
+                    <div class="text-4xl">
+
+                        🧵
+
+                    </div>
+
+                    <h3 class="mt-8 text-xl font-semibold">
+
+                        Procesos Especiales
+
+                    </h3>
+
+                    <p class="mt-3 text-sm text-neutral-500 leading-7">
+
+                        Bordado, reflejante y corte de manga.
+
+                    </p>
+
+                </div>
+
+                <div class="arrow text-2xl text-neutral-300">
+
+                    →
+
+                </div>
+
+            </div>
+
+        </a>
+
+        <a href="#" class="action card rounded-[30px] border border-neutral-200 bg-white/80 p-8">
+
+            <div class="flex justify-between">
+
+                <div>
+
+                    <div class="text-4xl">
+
+                        📊
+
+                    </div>
+
+                    <h3 class="mt-8 text-xl font-semibold">
+
+                        Reportes
+
+                    </h3>
+
+                    <p class="mt-3 text-sm text-neutral-500 leading-7">
+
+                        Indicadores y estadísticas de producción.
+
+                    </p>
+
+                </div>
+
+                <div class="arrow text-2xl text-neutral-300">
+
+                    →
+
+                </div>
+
+            </div>
+
+        </a>
+
+    </div>
+
+</div>
+
+</body>
+
+</html>
