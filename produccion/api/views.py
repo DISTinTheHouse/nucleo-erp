@@ -22,6 +22,7 @@ from produccion.models import (
 from produccion.api.serializers import (
     ListaMaterialBomSerializer,
     BomDetalleSerializer,
+    BomBulkItemSerializer,
     OrdenProduccionSerializer,
     OrdenProduccionOnboardingSerializer,
     ConsumoProduccionSerializer,
@@ -52,16 +53,63 @@ class ListaMaterialBomViewSet(viewsets.ModelViewSet):
         )
 
         producto_variante_id = self.request.query_params.get('producto_variante_id')
-        
+
         if producto_variante_id is not None:
             try:
                 producto_variante_id = int(producto_variante_id)
             except ValueError:
                 raise ValidationError({"producto_variante_id": "Must be an integer."})
-        
+
             queryset = queryset.filter(producto_variante_id=producto_variante_id)
-            
+
         return queryset
+
+    @action(detail=False, methods=['get'], url_path='bulk')
+    def bulk(self, request):
+        raw = request.query_params.get('producto_variante_ids', '').strip()
+        if not raw:
+            raise ValidationError({'producto_variante_ids': 'This parameter is required.'})
+
+        try:
+            ids = [int(v.strip()) for v in raw.split(',') if v.strip()]
+        except ValueError:
+            raise ValidationError({'producto_variante_ids': 'All values must be integers.'})
+
+        if not ids:
+            raise ValidationError({'producto_variante_ids': 'This parameter is required.'})
+
+        empresa = getattr(request.user, 'empresa', None)
+        if empresa is None:
+            return Response([], status=status.HTTP_200_OK)
+
+        boms = ListaMaterialBom.objects.filter(
+            producto_variante_id__in=ids,
+            activo=True,
+            empresa=empresa,
+        )
+        bom_by_variante = {bom.producto_variante_id: bom for bom in boms}
+
+        all_detalles = BomDetalle.objects.filter(
+            bom_id__in=[bom.bom_id for bom in bom_by_variante.values()],
+            activo=True,
+        ).select_related('componente', 'unidad')
+
+        detalles_by_bom = {}
+        for detalle in all_detalles:
+            detalles_by_bom.setdefault(detalle.bom_id, []).append(detalle)
+
+        result = []
+        for variante_id in ids:
+            bom = bom_by_variante.get(variante_id)
+            if bom is None:
+                continue
+            result.append({
+                'producto_variante_id': variante_id,
+                'bom_id': bom.bom_id,
+                'detalles': detalles_by_bom.get(bom.bom_id, []),
+            })
+
+        return Response(BomBulkItemSerializer(result, many=True).data)
 
 class BomDetalleViewSet(viewsets.ModelViewSet):
     serializer_class = BomDetalleSerializer
