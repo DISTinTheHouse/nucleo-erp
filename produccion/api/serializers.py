@@ -35,6 +35,11 @@ class BomDetalleSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['bom', 'activo']
 
+class BomBulkItemSerializer(serializers.Serializer):
+    producto_variante_id = serializers.IntegerField()
+    bom_id = serializers.IntegerField(allow_null=True)
+    detalles = BomDetalleSerializer(many=True)
+
 class ListaMaterialBomSerializer(serializers.ModelSerializer):
     materia_prima_detalle = BomDetalleSerializer(many=True)
 
