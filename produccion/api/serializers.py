@@ -1,3 +1,4 @@
+from django.db import transaction
 from rest_framework import serializers
 
 from produccion.models import (
@@ -43,16 +44,47 @@ class ListaMaterialBomSerializer(serializers.ModelSerializer):
         read_only_fields = ['activo', 'bom_id']
     
     def create(self, validated_data):
-        detallles_data = validated_data.pop('materia_prima_detalle')
+        detalles_data = validated_data.pop('materia_prima_detalle')
+        producto_variante = validated_data.get('producto_variante')
 
         try:
-            bom = ListaMaterialBom.objects.create(**validated_data)
-            detalles = [
-                BomDetalle(bom=bom, **detalle)
-                for detalle in detallles_data
-            ]
-            BomDetalle.objects.bulk_create(detalles)
-            
+            with transaction.atomic():
+                # Buscar un BOM existente para la misma variante de producto
+                # dentro de la empresa (un BOM por producto_variante).
+                bom = None
+                if producto_variante is not None:
+                    bom = ListaMaterialBom.objects.filter(
+                        empresa=validated_data.get('empresa'),
+                        producto_variante=producto_variante,
+                    ).first()
+
+                if bom is None:
+                    # No existe BOM -> crear el BOM y todos sus detalles.
+                    bom = ListaMaterialBom.objects.create(**validated_data)
+                    detalles = [
+                        BomDetalle(bom=bom, **detalle)
+                        for detalle in detalles_data
+                    ]
+                    BomDetalle.objects.bulk_create(detalles)
+                else:
+                    # Ya existe BOM -> fusionar detalles por (bom, componente).
+                    for detalle in detalles_data:
+                        existente = bom.materia_prima_detalle.filter(
+                            componente=detalle.get('componente')
+                        ).first()
+                        if existente is not None:
+                            # Mismo (bom, componente): acumular la cantidad y
+                            # refrescar unidad, desperdicio y obligatorio con
+                            # los valores del detalle entrante.
+                            existente.cantidad = existente.cantidad + detalle['cantidad']
+                            existente.unidad = detalle.get('unidad', existente.unidad)
+                            existente.desperdicio = detalle.get('desperdicio', existente.desperdicio)
+                            existente.obligatorio = detalle.get('obligatorio', existente.obligatorio)
+                            existente.save(update_fields=['cantidad', 'unidad', 'desperdicio', 'obligatorio'])
+                        else:
+                            # Componente nuevo para este BOM: crear el detalle.
+                            BomDetalle.objects.create(bom=bom, **detalle)
+
             return bom
         except Exception as e:
             raise serializers.ValidationError("Error creating bom")
