@@ -162,11 +162,11 @@
 
 <script>
     document.addEventListener('DOMContentLoaded', function() {
-        // Datos de Django
+        // Obtenemos los datos de Django
         const recetasDataScript = document.getElementById('recetas-data');
         const recetasData = recetasDataScript ? JSON.parse(recetasDataScript.textContent) : {};
         
-        // Nodos Principales
+        // Elementos principales del DOM
         const tablaMateriales = document.getElementById('tabla-materiales');
         const resumenProductos = document.getElementById('resumen-productos');
         const resumenPiezas = document.getElementById('resumen-piezas');
@@ -180,7 +180,6 @@
             let totalProductos = 0;
             let totalPiezas = 0;
 
-            // Buscamos dinámicamente los inputs que existan en ese momento
             const inputsActivos = document.querySelectorAll('.js-cantidad');
 
             inputsActivos.forEach(input => {
@@ -242,23 +241,23 @@
         btnAgregar.addEventListener('click', function() {
             const selectedOption = selectorVariante.options[selectorVariante.selectedIndex];
             
-            if (!selectedOption.value) return; // Si no ha seleccionado nada, salir.
+            if (!selectedOption.value) return;
 
             const varianteId = selectedOption.value;
             const nombre = selectedOption.getAttribute('data-nombre');
             const sku = selectedOption.getAttribute('data-sku');
 
-            // Validar si ya se agregó a la lista
+            // Validar duplicados
             if (document.querySelector(`input[name="variante_ids"][value="${varianteId}"]`)) {
                 alert("Esta variante ya fue agregada a la lista de producción.");
                 return;
             }
 
-            // Quitar el mensaje de "Vacío"
+            // Quitar el estado vacío
             const emptyState = document.getElementById('empty-variantes');
             if (emptyState) emptyState.remove();
 
-            // Crear el elemento HTML de forma segura (sin innerHTML)
+            // Construir el nuevo elemento de forma segura
             const productDiv = document.createElement('div');
             productDiv.className = 'product border border-gray-200 rounded-2xl p-4 flex justify-between items-center bg-white shadow-sm';
 
@@ -305,27 +304,25 @@
             productDiv.appendChild(leftDiv);
             productDiv.appendChild(rightDiv);
             
-            contenedorVariantes.prepend(productDiv); // Insertar arriba
+            contenedorVariantes.prepend(productDiv);
 
-            // Añadir evento al nuevo input para que calcule al escribir
+            // Listeners dinámicos
             const newInput = productDiv.querySelector('.js-cantidad');
             newInput.addEventListener('input', calcularTodo);
             
-            // Añadir evento al botón de eliminar
             const btnEliminar = productDiv.querySelector('.js-eliminar');
             btnEliminar.addEventListener('click', function() {
                 productDiv.remove();
-                calcularTodo(); // Recalcular al borrar
+                calcularTodo();
                 
-                // Si la lista queda vacía, restaurar el mensaje original
                 if (contenedorVariantes.children.length === 0) {
                     contenedorVariantes.innerHTML = `<div id="empty-variantes" class="text-center py-10 border-2 border-dashed border-gray-200 rounded-2xl bg-gray-50"><p class="text-gray-500 text-sm">Selecciona una variante arriba y haz clic en "Agregar".</p></div>`;
                 }
             });
 
-            // Resetear el selector para la siguiente búsqueda
+            // Reiniciar y enfocar
             selectorVariante.selectedIndex = 0;
-            newInput.focus(); // Enfocar automáticamente el input de cantidad
+            newInput.focus();
         });
     });
 </script>

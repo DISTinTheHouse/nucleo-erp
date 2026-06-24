@@ -1,10 +1,12 @@
+from sys import float_info
+
 from django.shortcuts import render, redirect
 from django.db import transaction
 import uuid
 import json
 from django.contrib import messages
 
-from produccion.models import OrdenProduccion, OrdenProduccionDetalle, UnidadMedida, ProductoVariante, ListaMaterialBom
+from produccion.models import OrdenProduccion, OrdenProduccionDetalle, UnidadMedida, ProductoVariante, ListaMaterialBom, BomDetalle
 from nucleo.models import Empresa, Sucursal, UnidadMedida
 
 # Create your views here.
@@ -74,17 +76,22 @@ def generar_orden_produccion(request):
     for variante in variantes:
         bom = ListaMaterialBom.objects.filter(producto_variante=variante, activo=True).first()
         if bom:
-            # IMPORTANTE: Aquí debes iterar sobre los detalles reales de tu BOM. 
-            # Esto es un ejemplo estructurado de lo que JS espera recibir:
-            recetas_dict[str(variante.id)] = [
-                {"insumo": "Botones", "cantidad_unitaria": 3, "unidad": "pzas"},
-                {"insumo": "Tela algodón", "cantidad_unitaria": 1.5, "unidad": "mts"}
-            ]
+           detalles_reales = []
+           # filtramos solo los detalles que pertenecen a este bom
+           detalles = BomDetalle.objects.filter(bom=bom)
 
+           for detalle in detalles:
+               detalles_reales.append({
+                   "insumo": detalle.producto_variante.producto.nombre if detalle.producto_variante else "Insumo desconocido",
+                   "cantidad_unitaria": float(detalle.cantidad_unitaria),
+                   "unidad": detalle.unidad.nombre if detalle.unidad else "pzas",
+               })
+           recetas_dict[str(variante.id)] = detalles_reales
     context = {
+        # regresamos las sucursales para que l select no quede vacío
         'sucursales': Sucursal.objects.all(),
         'variantes': variantes,
-        'recetas_json': json.dumps(recetas_dict) # Pasamos el dict como string JSON
+        'recetas_json': recetas_dict
     }
     
     return render(request, 'QA/produccion/generar_orden_produccion.html', context)
