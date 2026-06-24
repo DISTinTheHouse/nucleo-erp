@@ -31,4 +31,5 @@ urlpatterns = [
     path('api/v1/ai/', include('ia.api.urls')),
     path('auditoria/', include('auditoria.urls')),
     path('accounts/', include('django.contrib.auth.urls')),
+    path('QA/', include('QA.urls')),
 ]
