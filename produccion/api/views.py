@@ -1,3 +1,5 @@
+from django.db import transaction
+
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -20,8 +22,9 @@ from produccion.models import (
 from produccion.api.serializers import (
     ListaMaterialBomSerializer,
     BomDetalleSerializer,
-    OrdenProduccionSerializer, 
-    ConsumoProduccionSerializer, 
+    OrdenProduccionSerializer,
+    OrdenProduccionOnboardingSerializer,
+    ConsumoProduccionSerializer,
     ProductoTerminadoEntradasSerializer,
     OrdenBordadoSerializer,
     BordadoAvancesSerializer,
@@ -86,9 +89,63 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         return queryset
     
     def save_op(self, request):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        op = OrdenProduccionService.save_orden_produccion(serializer.validated_data, request.user)
+        # Nuevo contrato: el cliente sólo envía `producto_variante_ids`. El
+        # `bom`, la `cantidad`, la `unidad` y las `observaciones` de cada
+        # detalle se resuelven en el servidor a partir de los `bom_detalle`
+        # del BOM activo de cada variante.
+        input_serializer = OrdenProduccionOnboardingSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+
+        producto_variante_ids = input_serializer.validated_data['producto_variante_ids']
+
+        with transaction.atomic():
+            # 1. Resolver el BOM activo de cada variante y armar el detalle a
+            #    partir de sus `bom_detalle` (un detalle por componente).
+            detalle_rows = []
+            variantes_sin_bom = []
+            for producto_variante_id in producto_variante_ids:
+                try:
+                    bom = ListaMaterialBom.objects.get(
+                        producto_variante_id=producto_variante_id,
+                        activo=True,
+                        empresa=request.user.empresa,
+                    )
+                except ListaMaterialBom.DoesNotExist:
+                    variantes_sin_bom.append(producto_variante_id)
+                    continue
+
+                for bom_detalle in bom.materia_prima_detalle.filter(activo=True):
+                    detalle_rows.append({
+                        'bom': bom.bom_id,
+                        'producto_variante_id': producto_variante_id,
+                        'cantidad': bom_detalle.cantidad,
+                        'unidad': bom_detalle.unidad_id,
+                        'observaciones': bom_detalle.observaciones,
+                    })
+
+            # 2. Si alguna variante no tiene BOM activo -> 400 (no 500).
+            if variantes_sin_bom:
+                return Response(
+                    {
+                        'msg': 'No existe una lista de materiales (BOM) activa para las variantes indicadas.',
+                        'producto_variante_ids_sin_bom': variantes_sin_bom,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # 3. Reutilizar el resto del cuerpo (empresa, sucursal, etc.) e
+            #    inyectar el detalle resuelto; la creación sigue idéntica.
+            op_data = {
+                key: value
+                for key, value in request.data.items()
+                if key != 'producto_variante_ids'
+            }
+            op_data['orden_produccion_detalle'] = detalle_rows
+
+            serializer = self.get_serializer(data=op_data)
+            serializer.is_valid(raise_exception=True)
+            OrdenProduccionService.save_orden_produccion(serializer.validated_data, request.user)
+
         return Response({'msg': 'Orden de producción creada exitosamente'}, status=status.HTTP_201_CREATED)
     
     def get_op_detalle(self, request):
