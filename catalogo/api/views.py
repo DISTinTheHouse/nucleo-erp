@@ -1,7 +1,9 @@
+from django.db.models import Exists, OuterRef
 from rest_framework import viewsets
 from rest_framework.exceptions import ValidationError
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
 from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoVarianteSerializer
+from produccion.models import ListaMaterialBom
 
 class TipoProductoViewSet(viewsets.ModelViewSet):
     queryset = TipoProducto.objects.all()
@@ -57,5 +59,18 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
     # mismo JOIN -> una sola consulta, sin alterar la forma de la respuesta.
     queryset = ProductoVariante.objects.all().select_related("producto", "color", "talla")
     serializer_class = ProductoVarianteSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.request.query_params.get('con_bom', '').lower() == 'true':
+            bom_qs = ListaMaterialBom.objects.filter(
+                producto_variante=OuterRef('pk'),
+                activo=True,
+            )
+            empresa = getattr(self.request.user, 'empresa', None)
+            if empresa:
+                bom_qs = bom_qs.filter(empresa=empresa)
+            qs = qs.filter(Exists(bom_qs))
+        return qs
 
 
