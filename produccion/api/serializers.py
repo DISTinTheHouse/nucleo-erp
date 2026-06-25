@@ -110,7 +110,9 @@ class OrdenProduccionDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrdenProduccionDetalle
         fields = '__all__'
-        read_only_fields = ['activo', 'op']
+        # 'bom' ya no es parte del contrato del cliente: se resuelve en el
+        # servidor a partir del BOM activo de cada producto_variante.
+        read_only_fields = ['activo', 'op', 'bom']
 
 class OrdenProduccionSerializer(serializers.ModelSerializer):
     orden_produccion_detalle = OrdenProduccionDetalleSerializer(many=True)
@@ -119,22 +121,6 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         model = OrdenProduccion
         fields = '__all__'
         read_only_fields = ['folio_op', 'activo', 'usuario_asignado']
-
-class OrdenProduccionOnboardingSerializer(serializers.Serializer):
-    """
-    Valida el cuerpo simplificado del endpoint `onboarding` (POST).
-
-    `producto_variante_ids` es el único campo que envía el cliente. El
-    servidor resuelve el BOM activo de cada variante y arma cada
-    `orden_produccion_detalle` leyendo `cantidad`, `unidad` y `observaciones`
-    directamente de los `bom_detalle` de ese BOM (ver
-    `OrdenProduccionViewSet.save_op`).
-    """
-    producto_variante_ids = serializers.ListField(
-        child=serializers.IntegerField(),
-        allow_empty=False,
-        write_only=True,
-    )
 
 class ConsumoProduccionSerializer(serializers.ModelSerializer):
     class Meta:
