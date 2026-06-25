@@ -35,7 +35,7 @@ def generar_orden_produccion(request):
         try:
             with transaction.atomic():
                 empresa_default = Empresa.objects.first() 
-                sucursal = Sucursal.objects.get(id=sucursal_id)
+                sucursal = Sucursal.objects.get(pk=sucursal_id)
                 unidad_default = UnidadMedida.objects.first()
                 
                 nueva_op = OrdenProduccion.objects.create(
@@ -86,7 +86,7 @@ def generar_orden_produccion(request):
                    "cantidad_unitaria": float(detalle.cantidad),
                    "unidad": detalle.unidad.nombre if detalle.unidad else "pzas",
                })
-           recetas_dict[str(variante.id)] = detalles_reales
+           recetas_dict[str(variante.pk)] = detalles_reales
     context = {
         # regresamos las sucursales para que l select no quede vacío
         'sucursales': Sucursal.objects.all(),

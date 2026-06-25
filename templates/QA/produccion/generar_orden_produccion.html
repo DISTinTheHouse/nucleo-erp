@@ -81,7 +81,7 @@
                             <select id="selector-variante" class="w-full bg-white border border-gray-300">
                                 <option value="" disabled selected>Selecciona una variante...</option>
                                 {% for variante in variantes %}
-                                    <option value="{{ variante.id }}" 
+                                    <option value="{{ variante.pk }}" 
                                             data-nombre="{{ variante.nombre }}" 
                                             data-sku="{{ variante.sku|default:'N/A' }}">
                                         {{ variante.nombre }} - SKU: {{ variante.sku|default:'N/A' }}
