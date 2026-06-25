@@ -82,8 +82,8 @@ def generar_orden_produccion(request):
 
            for detalle in detalles:
                detalles_reales.append({
-                   "insumo": detalle.producto_variante.producto.nombre if detalle.producto_variante else "Insumo desconocido",
-                   "cantidad_unitaria": float(detalle.cantidad_unitaria),
+                   "insumo": detalle.componente.nombre if detalle.componente else "Insumo desconocido",
+                   "cantidad_unitaria": float(detalle.cantidad),
                    "unidad": detalle.unidad.nombre if detalle.unidad else "pzas",
                })
            recetas_dict[str(variante.id)] = detalles_reales
