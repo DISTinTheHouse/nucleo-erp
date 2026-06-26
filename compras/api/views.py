@@ -334,6 +334,116 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({"orden_compra": OrdenCompraSerializer(oc).data}, status=status.HTTP_200_OK)
 
+    def update(self, request, pk=None, *args, **kwargs):
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+
+        raw = request.data or {}
+        serializer = OrdenCompraOnboardingSerializer(data=raw)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        header = data.get("orden_compra") or raw
+        detalle = data.get("detalle") or data.get("detalles")
+
+        with transaction.atomic():
+            oc = (
+                OrdenCompra.objects.select_for_update()
+                .filter(pk=pk, empresa=empresa, activo=True)
+                .first()
+            )
+            if not oc:
+                return Response(
+                    {"detail": "Orden de compra no encontrada."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            if oc.estatus == OrdenCompra.EstatusOrdenCompra.RECIBIDA:
+                raise ValidationError(
+                    {"estatus": "Una orden recibida no puede ser modificada."}
+                )
+
+            has_sucursal = "sucursal" in header
+            has_proveedor = "proveedor" in header
+            has_moneda = "moneda" in header
+            has_fecha_oc = "fecha_oc" in header
+
+            sucursal_id = header.get("sucursal")
+            proveedor_id = header.get("proveedor")
+            moneda_id = header.get("moneda")
+            fecha_oc = header.get("fecha_oc")
+
+            oc.usuario = user
+            if has_sucursal and sucursal_id:
+                oc.sucursal_id = sucursal_id
+            if has_proveedor:
+                oc.proveedor_id = proveedor_id
+            if has_moneda and moneda_id:
+                oc.moneda_id = moneda_id
+            if has_fecha_oc and fecha_oc:
+                oc.fecha_oc = fecha_oc
+            if "referencia" in header:
+                oc.referencia = header.get("referencia") or None
+            if "observaciones" in header:
+                oc.observaciones = header.get("observaciones") or None
+
+            # Cualquier edición invalida una autorización previa: vuelve a BORRADOR
+            # para forzar una nueva aprobación.
+            oc.estatus = OrdenCompra.EstatusOrdenCompra.BORRADOR
+            oc.save()
+
+            if detalle is not None:
+                OrdenCompraDetalle.objects.filter(orden_compra=oc).delete()
+                for it in detalle:
+                    producto_id = it.get("producto")
+                    cantidad = int(it.get("cantidad") or 0)
+                    precio = it.get("precio")
+                    if precio in (None, ""):
+                        precio = Decimal("0")
+                    else:
+                        precio = Decimal(str(precio))
+                    descuento = Decimal("0")
+                    importe = (Decimal(cantidad) * precio) - descuento
+                    OrdenCompraDetalle.objects.create(
+                        orden_compra=oc,
+                        producto_id=producto_id,
+                        solicitud_compra_detalle=None,
+                        requisicion_detalle=None,
+                        descripcion=(it.get("descripcion") or None),
+                        cantidad=cantidad,
+                        precio=precio,
+                        descuento=descuento,
+                        importe=importe,
+                        sucursal_id=oc.sucursal_id,
+                        piezas=cantidad,
+                    )
+                self._recalcular_totales(oc)
+
+        detalles_qs = OrdenCompraDetalle.objects.filter(orden_compra=oc).order_by("id")
+        return Response(
+            {
+                "orden_compra": OrdenCompraSerializer(oc).data,
+                "detalle": OrdenCompraDetalleSerializer(detalles_qs, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def destroy(self, request, pk=None, *args, **kwargs):
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+
+        oc = (
+            OrdenCompra.objects.filter(pk=pk, empresa=empresa, activo=True).first()
+        )
+        if not oc:
+            return Response(
+                {"detail": "Orden de compra no encontrada."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        oc.soft_delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Recepcion.objects.all().select_related(
         "orden_compra",
