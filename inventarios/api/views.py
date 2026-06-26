@@ -630,6 +630,78 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
 
         before_items = (movimiento.antes_json or {}).get("items") or []
         after_items = (movimiento.despues_json or {}).get("items") or []
+        items = after_items or before_items
+
+        despues = movimiento.despues_json or {}
+        almacen_id = despues.get("almacen_id")
+        sucursal_id = despues.get("sucursal_id")
+
+        def _safe_int(v):
+            try:
+                return int(v) if v is not None else None
+            except (ValueError, TypeError):
+                return None
+
+        # Single lookups for top-level names (one record — no N+1 risk)
+        almacen_obj = (
+            Almacen.objects.filter(pk=almacen_id).only("nombre").first()
+            if almacen_id else None
+        )
+        sucursal_obj = (
+            Sucursal.objects.filter(pk=sucursal_id).only("nombre").first()
+            if sucursal_id else None
+        )
+        empresa_nombre = getattr(movimiento.empresa, "razon_social", None)
+
+        # Collect IDs from all items for a single bulk fetch each (avoids N+1)
+        variante_ids, producto_ids, ubicacion_ids = set(), set(), set()
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            v = _safe_int(it.get("producto_variante_id") or it.get("producto_variante"))
+            p = _safe_int(it.get("producto_id") or it.get("producto"))
+            u = _safe_int(it.get("ubicacion_id") or it.get("ubicacion"))
+            if v:
+                variante_ids.add(v)
+            if p:
+                producto_ids.add(p)
+            if u:
+                ubicacion_ids.add(u)
+
+        variantes = {
+            obj.pk: obj
+            for obj in ProductoVariante.objects.filter(pk__in=variante_ids).only("id", "nombre")
+        } if variante_ids else {}
+        productos = {
+            obj.pk: obj
+            for obj in Producto.objects.filter(pk__in=producto_ids).only("id", "nombre")
+        } if producto_ids else {}
+        ubicaciones = {
+            obj.pk: obj
+            for obj in Ubicacion.objects.select_related("almacen").filter(pk__in=ubicacion_ids)
+        } if ubicacion_ids else {}
+
+        enriched_items = []
+        for it in items:
+            if not isinstance(it, dict):
+                enriched_items.append(it)
+                continue
+            item = dict(it)
+            v_id = _safe_int(it.get("producto_variante_id") or it.get("producto_variante"))
+            p_id = _safe_int(it.get("producto_id") or it.get("producto"))
+            u_id = _safe_int(it.get("ubicacion_id") or it.get("ubicacion"))
+
+            if v_id and v_id in variantes:
+                item["producto_nombre"] = variantes[v_id].nombre
+            elif p_id and p_id in productos:
+                item["producto_nombre"] = productos[p_id].nombre
+            else:
+                item["producto_nombre"] = None
+
+            item["ubicacion_nombre"] = (
+                str(ubicaciones[u_id]) if u_id and u_id in ubicaciones else None
+            )
+            enriched_items.append(item)
 
         return Response(
             {
@@ -642,11 +714,14 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
                     if getattr(movimiento, "usuario", None)
                     else None
                 ),
-                "almacen_id": (movimiento.despues_json or {}).get("almacen_id"),
-                "sucursal_id": (movimiento.despues_json or {}).get("sucursal_id"),
+                "almacen_id": almacen_id,
+                "almacen_nombre": getattr(almacen_obj, "nombre", None),
+                "sucursal_id": sucursal_id,
+                "sucursal_nombre": getattr(sucursal_obj, "nombre", None),
                 "empresa_id": movimiento.empresa_id,
-                "detalle_count": len(after_items or before_items),
-                "detalle": after_items or before_items,
+                "empresa_nombre": empresa_nombre,
+                "detalle_count": len(enriched_items),
+                "detalle": enriched_items,
                 "antes_json": movimiento.antes_json,
                 "despues_json": movimiento.despues_json,
             },
