@@ -66,6 +66,71 @@ El backend actúa como una "Caja Negra" segura para el Frontend (Next.js).
 - **`/api/v1/auth/`**: Gestión de sesión.
 - **`/api/v1/sat/`**: Servicios fiscales y catálogos.
 - **`/api/v1/inventarios/`**: Almacenes y Ubicaciones (scoping por Empresa/Sucursales; CRUD para admin_empresa/superuser).
+- **`/api/v1/compras/`**: Flujo de órdenes de compra y recepciones.
+- **`/api/v1/produccion/`**: Lista de materiales, órdenes de producción y procesos productivos.
+
+### Endpoints Operativos Relevantes
+
+- **Inventarios**:
+  - `GET /api/v1/inventarios/existencias/`
+  - `GET /api/v1/inventarios/movimientos/`
+  - `GET /api/v1/inventarios/movimientos/{id}/detalles/`
+  - `POST /api/v1/inventarios/operaciones/entrada`
+  - `POST /api/v1/inventarios/operaciones/salida`
+  - `POST /api/v1/inventarios/operaciones/ajuste`
+- **Compras**:
+  - `GET|POST /api/v1/compras/ordenes/onboarding/`
+  - `GET|POST /api/v1/compras/recepciones/onboarding/`
+- **Producción**:
+  - `GET|POST /api/v1/produccion/orden-produccion/onboarding/`
+  - `GET|POST /api/v1/produccion/lista-material/`
+  - `PUT|PATCH /api/v1/produccion/lista-material/{bom_id}/`
+
+## 5. Arquitectura Operativa por Módulo
+
+### A. Inventarios
+
+- **Fuente de verdad de stock**: el modelo `Existencia`.
+- **Compatibilidad funcional**: `Existencia` soporta `producto` de forma directa y `producto_variante` como opcional.
+- **Reglas operativas**:
+  - `ENTRADA` suma cantidad.
+  - `SALIDA` resta cantidad sin permitir valores negativos.
+  - `AJUSTE` reemplaza la cantidad final.
+- **Persistencia de movimientos**:
+  - Se registra auditoría para consumo del frontend actual.
+  - También se persiste en `MovimientoInventario` y `MovimientoInventarioDetalle` para trazabilidad formal.
+- **Lectura de historial**:
+  - El listado actual de movimientos sigue siendo compatible con el frontend.
+  - El detalle del movimiento ya se expone por endpoint específico.
+
+### B. Compras y Recepciones
+
+- **Orden de compra**:
+  - Se trabaja con onboarding simplificado.
+  - El folio se asigna al aceptar la orden.
+  - La orden de compra no afecta existencias.
+- **Recepción**:
+  - Es el evento que realmente incrementa inventario.
+  - Soporta recepción parcial o total.
+  - Trabaja por `producto` tomado desde `OrdenCompraDetalle`.
+  - `producto_variante` no es requisito para este flujo.
+  - Usa series de folio de recepción como `RC`, `RT` o `RZ`.
+- **Persistencia**:
+  - La recepción actualiza `Existencia`.
+  - Genera auditoría.
+  - Genera también `MovimientoInventario` y `MovimientoInventarioDetalle`.
+
+### C. Producción
+
+- **BOM / Lista de Materiales**:
+  - Se administra desde `ListaMaterialBom` y `BomDetalle`.
+  - El endpoint soporta lectura individual, consulta masiva (`bulk`) y edición.
+- **Edición de BOM**:
+  - `PUT/PATCH` sobre `lista-material/{bom_id}` actualiza encabezado.
+  - Si se envía `materia_prima_detalle`, el backend reemplaza la composición actual por la nueva.
+- **Orden de Producción**:
+  - El frontend no necesita enviar `bom` en cada detalle.
+  - El backend resuelve el BOM activo por `producto_variante` dentro de la empresa del usuario.
 
 ## 6. Responsabilidades UI vs Backend
 
@@ -73,12 +138,24 @@ El backend actúa como una "Caja Negra" segura para el Frontend (Next.js).
 - **Next.js (Frontend)**: Toda la interacción de usuario final (CRUD de Inventarios, Usuarios, etc.) contra APIs DRF.
 - **Permisos y Alcance**: Aplicados en el backend; el frontend no puede elevar privilegios ni salir de su empresa/sucursales.
 
-## 5. Auditoría
+## 6.1 Contrato Frontend-Backend
+
+- **Frontend**:
+  - Envía JSON simple y desacoplado de detalles internos de persistencia.
+  - No necesita conocer si el backend guarda auditoría, movimientos formales o ambos.
+  - No resuelve reglas de negocio como folios, BOM activo o validaciones de stock.
+- **Backend**:
+  - Resuelve folios y series.
+  - Valida empresa, sucursal, almacén, cantidades y relaciones.
+  - Persiste encabezados, detalles, auditoría y movimientos formales sin exponer complejidad adicional al cliente.
+
+## 7. Auditoría
 Cada escritura crítica genera un rastro:
 - **Logs de API**: Tiempos de respuesta, usuario y status code.
 - **Logs de Auditoría**: Cambios en modelos sensibles (quién cambió qué valor).
+- **Movimientos de inventario**: además del log de auditoría, existen registros formales en tablas de movimientos para seguimiento operativo.
 
-## 7. Sistema de Permisos (RBAC + Overrides)
+## 8. Sistema de Permisos (RBAC + Overrides)
 
 El sistema implementa un control de acceso robusto y flexible:
 
