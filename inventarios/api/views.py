@@ -535,6 +535,37 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
         limit = max(1, min(limit, 2000))
         return qs[:limit]
 
+    @action(detail=True, methods=["get"], url_path="detalles")
+    def detalles(self, request, pk=None):
+        movimiento = self.get_queryset().filter(pk=pk).first()
+        if not movimiento:
+            raise ValidationError({"movimiento": "Movimiento no encontrado."})
+
+        before_items = (movimiento.antes_json or {}).get("items") or []
+        after_items = (movimiento.despues_json or {}).get("items") or []
+
+        return Response(
+            {
+                "id": movimiento.id_evento,
+                "tipo_movimiento": movimiento.accion,
+                "fecha": movimiento.created_at,
+                "usuario": getattr(movimiento.usuario, "pk", None),
+                "usuario_nombre": (
+                    movimiento.usuario.get_full_name().strip() or movimiento.usuario.email
+                    if getattr(movimiento, "usuario", None)
+                    else None
+                ),
+                "almacen_id": (movimiento.despues_json or {}).get("almacen_id"),
+                "sucursal_id": (movimiento.despues_json or {}).get("sucursal_id"),
+                "empresa_id": movimiento.empresa_id,
+                "detalle_count": len(after_items or before_items),
+                "detalle": after_items or before_items,
+                "antes_json": movimiento.antes_json,
+                "despues_json": movimiento.despues_json,
+            },
+            status=status.HTTP_200_OK,
+        )
+
 class MovimientoInventarioViewSet(viewsets.ModelViewSet):
     queryset = MovimientoInventario.objects.filter(activo=True).select_related('empresa', 'sucursal', 'pedido', 'entrega', 'devolucion', 'ajuste_inventario')
     serializer_class = MovimientoInventarioSerializer
