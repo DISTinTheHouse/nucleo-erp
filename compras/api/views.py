@@ -21,7 +21,13 @@ from compras.api.serializers import (
     RecepcionOnboardingSerializer,
     RecepcionSerializer,
 )
-from inventarios.models import Almacen, Existencia, Ubicacion
+from inventarios.models import (
+    Almacen,
+    Existencia,
+    MovimientoInventario,
+    MovimientoInventarioDetalle,
+    Ubicacion,
+)
 from nucleo.models import Moneda, SerieFolio, Sucursal
 from terceros.models import Proveedor, Transportista
 
@@ -478,12 +484,44 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     "orden_compra_detalle_id": oc_detalle.pk,
                     "producto_id": oc_detalle.producto_id,
                     "ubicacion_id": existencia.ubicacion_id,
+                    "lote_id": detalle.lote_id,
+                    "serie_id": detalle.serie_id,
                     "cantidad_before": str(cantidad_antes),
                     "cantidad_after": str(cantidad_despues),
                     "delta": str(cantidad),
                 }
             )
         return movimientos
+
+    def _crear_movimiento_formal_recepcion(self, recepcion, movimientos):
+        movimiento = MovimientoInventario.objects.create(
+            empresa=recepcion.empresa,
+            sucursal=recepcion.sucursal,
+            pedido_id=None,
+            entrega_id=None,
+            devolucion_id=None,
+            ajuste_inventario_id=None,
+            tipo_movimiento="ENTRADA",
+            usuario=recepcion.usuario,
+            observaciones=recepcion.observaciones,
+            recepcion=recepcion,
+            transferencia_id=None,
+            op_id=None,
+        )
+
+        for item in movimientos:
+            MovimientoInventarioDetalle.objects.create(
+                movimiento_inventario=movimiento,
+                producto_id=item["producto_id"],
+                ubicacion_origen_id=None,
+                ubicacion_destino_id=item["ubicacion_id"],
+                lote_id=item.get("lote_id"),
+                serie_id=item.get("serie_id"),
+                cantidad=Decimal(str(item["delta"] or 0)),
+                costo_unitario=Decimal("0"),
+            )
+
+        return movimiento
 
     def _actualizar_estatus_oc(self, oc):
         detalles = OrdenCompraDetalle.objects.filter(orden_compra=oc).only("id", "cantidad")
@@ -771,6 +809,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 recepcion.save()
 
                 movimientos = self._actualizar_existencias(recepcion, detalle_payload)
+                movimiento_formal = self._crear_movimiento_formal_recepcion(recepcion, movimientos)
 
                 orden_completa = True
                 for detalle in detalles_oc.values():
@@ -815,6 +854,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     "recepcion": RecepcionSerializer(recepcion).data,
                     "detalle": RecepcionDetalleSerializer(detalles_recepcion, many=True).data,
                     "movimiento_id": ev.id_evento,
+                    "movimiento_inventario_id": movimiento_formal.pk,
                 },
                 status=status.HTTP_200_OK,
             )
