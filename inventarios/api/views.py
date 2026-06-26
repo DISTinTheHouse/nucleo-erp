@@ -588,12 +588,15 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AuditoriaMovimientoSerializer
     permission_classes = [IsAuthenticatedAndScoped]
 
-    def get_queryset(self):
-        qs = (
+    def _base_queryset(self):
+        return (
             AuditoriaEvento.objects.filter(modulo="inventarios", tabla="existencias")
             .select_related("empresa", "usuario")
             .order_by("-created_at", "-id_evento")
         )
+
+    def get_queryset(self):
+        qs = self._base_queryset()
         qp = self.request.query_params
         try:
             empresa_id = int(qp.get("empresa_id") or qp.get("empresa") or 0)
@@ -604,18 +607,24 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
         accion = (qp.get("accion") or qp.get("tipo") or "").strip().upper()
         if accion in {"ENTRADA", "SALIDA", "AJUSTE"}:
             qs = qs.filter(accion=accion)
+        return qs
 
-        limit_raw = (qp.get("limit") or "").strip()
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        limit_raw = (request.query_params.get("limit") or "").strip()
         try:
             limit = int(limit_raw) if limit_raw else 200
         except Exception:
             limit = 200
         limit = max(1, min(limit, 2000))
-        return qs[:limit]
+
+        serializer = self.get_serializer(queryset[:limit], many=True)
+        return Response(serializer.data)
 
     @action(detail=True, methods=["get"], url_path="detalles")
     def detalles(self, request, pk=None):
-        movimiento = self.get_queryset().filter(pk=pk).first()
+        movimiento = self.get_queryset().filter(id_evento=pk).first()
         if not movimiento:
             raise ValidationError({"movimiento": "Movimiento no encontrado."})
 
