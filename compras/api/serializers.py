@@ -5,7 +5,7 @@ from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, Recepcion
 class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrdenCompraDetalle
-        fields = ['descripcion', 'cantidad', 'descuento', 'importe', 'piezas', 'precio']
+        fields = ['producto_id', 'descripcion', 'cantidad', 'descuento', 'importe', 'piezas', 'precio']
 
 
 class OrdenCompraSerializer(serializers.ModelSerializer):
@@ -103,6 +103,7 @@ class OrdenCompraOnboardingSerializer(serializers.Serializer):
     orden_compra_id = serializers.IntegerField(required=False)
     orden_compra = OrdenCompraOnboardingHeaderSerializer(required=False)
     detalle = OrdenCompraOnboardingDetalleInputSerializer(many=True, required=False)
+    detalles = OrdenCompraOnboardingDetalleInputSerializer(many=True, required=False)
 
 
 class RecepcionDetalleSerializer(serializers.ModelSerializer):
