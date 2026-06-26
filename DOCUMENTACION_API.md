@@ -547,6 +547,12 @@ Permite consultar el inventario actual.
       "producto": {
         "id": 1,
         "nombre": "Camiseta Básica",
+        "sku": "CAM-BAS-NEG-M",
+        "tipo": "PT",
+        "tipo_id": 2
+      },
+      "producto_variante": {
+        "id": 15,
         "sku": "CAM-BAS-NEG-M"
       },
       "almacen": {
@@ -557,17 +563,20 @@ Permite consultar el inventario actual.
         "id": 10,
         "nombre": "Pasillo 1, Rack 3, Nivel 2"
       },
-      "lote": null,
-      "serie": null,
-      "cantidad": 50.0
+      "stock": 50,
+      "cantidad": "50.0000",
+      "fecha_actualizacion": "2026-06-27T09:00:00Z"
     }
   ]
   ```
-- **Crear/Editar**: `POST/PATCH` (Restringido a Admin Empresa/Superusuario. Valida que el almacén pertenezca al scope del usuario).
+- **Notas**:
+  - `Existencia` soporta `producto` de forma directa.
+  - `producto_variante` queda como opcional para escenarios donde sí aplique.
+  - Las existencias se afectan por operaciones o recepciones, no por crear una orden de compra.
 
 ### Movimientos de Inventario
 
-Historial de entradas y salidas de mercancía.
+Historial operativo de entradas, salidas y ajustes.
 **Nota de Seguridad**: Filtrado por scope de usuario.
 
 - **Listar**: `GET /api/v1/inventarios/movimientos/`
@@ -579,58 +588,91 @@ Historial de entradas y salidas de mercancía.
       "empresa": 1,
       "sucursal": 5,
       "tipo_movimiento": "ENTRADA",
-      "fecha": "2024-02-01T14:30:00Z",
-      "pedido": 1005,
-      "entrega": null,
-      "devolucion": null,
-      "ajuste_inventario": null,
-      "detalles": [{ "producto": "Camiseta Básica", "cantidad": 10 }]
+      "fecha": "2026-06-27T14:30:00Z",
+      "fecha_movimiento": "2026-06-27T14:30:00Z",
+      "created_at": "2026-06-27T14:30:00Z",
+      "usuario": 7,
+      "usuario_nombre": "Usuario Demo",
+      "almacen_id": 1,
+      "sucursal_id": 5,
+      "empresa_id": 1
     }
   ]
   ```
-- **Crear**: `POST /api/v1/inventarios/movimientos/` (Requiere permisos de escritura y valida scope de empresa/sucursal).
+- **Detalle**: `GET /api/v1/inventarios/movimientos/{id}/detalles/`
 
-### Detalles de Movimiento de Inventario
-
-Gestiona los productos individuales dentro de un movimiento de inventario.
-**Nota de Seguridad**: Valida estrictamente que la empresa y sucursal del movimiento coincidan con los permisos del usuario.
-
-- **Listar**: `GET /api/v1/inventarios/movimiento-detalle/`
-- **Crear**: `POST /api/v1/inventarios/movimiento-detalle/`
-  - **Body**:
-    ```json
-    {
-      "movimiento_inventario": 204,
-      "producto": 1,
-      "cantidad": 5,
-      "costo_unitario": "150.00",
-      "ubicacion_origen": 10,
-      "ubicacion_destino": 11
+- **Respuesta del detalle**:
+  ```json
+  {
+    "id": 204,
+    "tipo_movimiento": "ENTRADA",
+    "fecha": "2026-06-27T14:30:00Z",
+    "usuario": 7,
+    "usuario_nombre": "Usuario Demo",
+    "almacen_id": 1,
+    "sucursal_id": 5,
+    "empresa_id": 1,
+    "detalle_count": 2,
+    "detalle": [
+      {
+        "producto_id": 1,
+        "producto_variante_id": null,
+        "ubicacion_id": 10,
+        "cantidad_before": "5.0000",
+        "cantidad_after": "10.0000",
+        "delta": "5.0000"
+      }
+    ],
+    "antes_json": {
+      "items": []
+    },
+    "despues_json": {
+      "items": [
+        {
+          "producto_id": 1,
+          "producto_variante_id": null,
+          "ubicacion_id": 10,
+          "cantidad_before": "5.0000",
+          "cantidad_after": "10.0000",
+          "delta": "5.0000"
+        }
+      ]
     }
-    ```
-- **Editar**: `PATCH /api/v1/inventarios/movimiento-detalle/{id}/`
-- **Eliminar**: `DELETE /api/v1/inventarios/movimiento-detalle/{id}/`
+  }
+  ```
 
-### Ajustes de Inventario
+### Operaciones de Inventario
 
-Permite registrar ajustes manuales (positivos o negativos) al inventario por pérdidas, daños o conteos cíclicos.
+Operaciones oficiales del módulo. Este es el flujo recomendado para modificar existencias.
 **Nota de Seguridad**: Requiere permisos de escritura y valida scope de empresa/sucursal.
 
-- **Listar**: `GET /api/v1/inventarios/ajustes/`
-- **Crear**: `POST /api/v1/inventarios/ajustes/`
-  - **Body**:
-    ```json
-    {
-      "empresa": 1,
-      "sucursal": 5,
-      "almacen": 1,
-      "fecha_ajuste": "2024-02-10",
-      "motivo": "Daño en almacén",
-      "observaciones": "Caja mojada durante limpieza"
-    }
-    ```
-- **Editar**: `PATCH /api/v1/inventarios/ajustes/{id}/`
-- **Eliminar**: `DELETE /api/v1/inventarios/ajustes/{id}/`
+- **Entrada**: `POST /api/v1/inventarios/operaciones/entrada`
+- **Salida**: `POST /api/v1/inventarios/operaciones/salida`
+- **Ajuste**: `POST /api/v1/inventarios/operaciones/ajuste`
+
+- **Body base**:
+
+  ```json
+  {
+    "almacen": 1,
+    "observaciones": "Movimiento manual",
+    "items": [
+      {
+        "producto": 1,
+        "cantidad": "5.0000",
+        "ubicacion": 10,
+        "lote": null,
+        "serie": null
+      }
+    ]
+  }
+  ```
+
+- **Reglas**:
+  - `ENTRADA`: suma cantidad.
+  - `SALIDA`: resta cantidad y puede llegar a `0`, pero nunca a negativo.
+  - `AJUSTE`: reemplaza la cantidad final por el valor enviado.
+  - El backend registra auditoría y también persiste en `MovimientoInventario` y `MovimientoInventarioDetalle`.
 
 ---
 
@@ -1014,13 +1056,14 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 - La edición **no** modifica el `Pedido` automáticamente. El `Pedido` solo se actualiza si mesa de control ejecuta `aceptar-cambios`.
 - Para editar también el detalle (productos/tallas/bordado), re-envía `POST /api/v1/ventas/cotizaciones/onboarding/` agregando `cotizacion_id` (y el detalle completo actualizado).
 
---- 
+---
 
 ## 📦 11. Pedidos
 
 Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
 #### Automatización de Órdenes de Trabajo (Producción)
+
 Al autorizar una cotización (`/autorizar/`), el backend genera automáticamente las siguientes órdenes de trabajo según la configuración de los productos:
 
 1.  **Orden de Producción (OP)**: Se genera siempre por cada pedido autorizado.
@@ -1034,9 +1077,9 @@ Al autorizar una cotización (`/autorizar/`), el backend genera automáticamente
 
 Estas órdenes nacen en estado **PENDIENTE** y quedan vinculadas al pedido original.
 
-- **Listar**: `GET /api/v1/ventas/pedidos/` 
+- **Listar**: `GET /api/v1/ventas/pedidos/`
 
---- 
+---
 
 ## 🧮 Mesa de Control
 
@@ -1086,6 +1129,168 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 - Rechazar: no crea pedido y no gasta folio.
 - Solicitar cambios dentro de ventana: al re-enviar onboarding con `cotizacion_id`, cotización pasa a `Cambios Por Autorizar (5)`.
 - Aceptar cambios: sincroniza `pedido` con el nuevo detalle; Rechazar cambios: restaura la cotización al `aprobado_snapshot` y no toca `pedido`.
+
+---
+
+## 🧾 Compras - Recepciones (Onboarding)
+
+**Base URL**: `/api/v1/compras/`
+
+La recepción es el proceso que afecta existencias derivadas de una orden de compra.
+
+### 1) Obtener datos para el formulario
+
+- **Endpoint**: `GET /api/v1/compras/recepciones/onboarding/`
+- **Query Params (opcionales)**:
+  - `orden_compra_id`: si se envía, carga esa orden; si no, el backend puede seleccionar una disponible.
+- **Respuesta (resumen)**:
+  ```json
+  {
+    "orden_compra_id": 112,
+    "orden_compra": {
+      "id": 112,
+      "folio": "OC-000112"
+    },
+    "series_recepcion": [
+      { "codigo": "RC", "label": "Recepción compra" },
+      { "codigo": "RT", "label": "Recepción traslado" }
+    ],
+    "detalle": [
+      {
+        "orden_compra_detalle": 25,
+        "producto": 1,
+        "producto_nombre": "Tela gabardina",
+        "cantidad": "10.0000",
+        "cantidad_recibida": "4.0000",
+        "cantidad_pendiente": "6.0000"
+      }
+    ]
+  }
+  ```
+
+### 2) Registrar recepción
+
+- **Endpoint**: `POST /api/v1/compras/recepciones/onboarding/`
+
+**Reglas del flujo**
+
+- La recepción puede ser total o parcial.
+- El frontend no necesita enviar `producto_variante`.
+- El backend toma el `producto` desde `OrdenCompraDetalle`.
+- Si el almacén requiere ubicación, `ubicacion` es obligatoria.
+- La orden de compra no mueve inventario; la recepción sí.
+- La recepción genera folio con series como `RC`, `RT` o `RZ`.
+- Además de afectar `Existencia`, el backend genera auditoría y movimientos formales de inventario.
+
+**Body (ejemplo)**
+
+```json
+{
+  "recepcion": {
+    "orden_compra": 112,
+    "almacen": 8,
+    "serie_codigo": "RC",
+    "fecha_recepcion": "2026-06-16T21:16:14.968Z",
+    "remision": "R-01",
+    "factura_referencia": "F-01",
+    "observaciones": "",
+    "transportista": null
+  },
+  "detalle": [
+    {
+      "orden_compra_detalle": 25,
+      "cantidad_recibida": "1"
+    },
+    {
+      "orden_compra_detalle": 26,
+      "cantidad_recibida": "1",
+      "ubicacion": 12
+    }
+  ]
+}
+```
+
+**Respuesta (resumen)**
+
+```json
+{
+  "recepcion": {
+    "id": 33,
+    "folio": "RC-000033",
+    "estatus": 2
+  },
+  "detalle": [
+    {
+      "id": 101,
+      "recepcion": 33,
+      "orden_compra_detalle": 25,
+      "producto": 1,
+      "ubicacion": null,
+      "lote": null,
+      "serie": null,
+      "cantidad_recibida": "1.0000"
+    }
+  ],
+  "movimiento_id": 450,
+  "movimiento_inventario_id": 77
+}
+```
+
+---
+
+## 🏭 Producción - Lista de Materiales (BOM)
+
+**Base URL**: `/api/v1/produccion/`
+
+### 1) Listar BOM
+
+- **Endpoint**: `GET /api/v1/produccion/lista-material/`
+- **Query Params (opcionales)**:
+  - `producto_variante_id`
+
+### 2) Consulta masiva de BOM
+
+- **Endpoint**: `GET /api/v1/produccion/lista-material/bulk/?producto_variante_ids=1,2,3`
+
+### 3) Crear BOM
+
+- **Endpoint**: `POST /api/v1/produccion/lista-material/`
+
+```json
+{
+  "empresa": 1,
+  "producto_variante": 15,
+  "version": 1,
+  "observaciones": "BOM inicial",
+  "materia_prima_detalle": [
+    {
+      "componente": 101,
+      "cantidad": "2.50",
+      "unidad": 1,
+      "desperdicio": "0.00",
+      "obligatorio": true,
+      "observaciones": ""
+    }
+  ]
+}
+```
+
+### 4) Editar BOM
+
+- **Endpoint**: `PUT /api/v1/produccion/lista-material/{bom_id}/`
+- **Endpoint**: `PATCH /api/v1/produccion/lista-material/{bom_id}/`
+
+**Notas**
+
+- Si el request incluye `materia_prima_detalle`, el backend reemplaza el detalle actual por el nuevo arreglo enviado.
+- Si en `PATCH` no se envía `materia_prima_detalle`, se conserva el detalle existente.
+
+### 5) Orden de Producción (Onboarding)
+
+- **Endpoint**: `GET|POST /api/v1/produccion/orden-produccion/onboarding/`
+- **Regla**:
+  - El frontend no necesita enviar `bom` dentro de cada detalle.
+  - El backend resuelve automáticamente el BOM activo a partir de `producto_variante`.
 
 ---
 
