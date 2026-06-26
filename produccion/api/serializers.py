@@ -94,6 +94,25 @@ class ListaMaterialBomSerializer(serializers.ModelSerializer):
         except Exception as e:
             raise serializers.ValidationError("Error creating bom")
 
+    def update(self, instance, validated_data):
+        detalles_data = validated_data.pop('materia_prima_detalle', None)
+
+        try:
+            with transaction.atomic():
+                for attr, value in validated_data.items():
+                    setattr(instance, attr, value)
+                instance.save()
+
+                if detalles_data is not None:
+                    instance.materia_prima_detalle.all().delete()
+                    BomDetalle.objects.bulk_create(
+                        [BomDetalle(bom=instance, **detalle) for detalle in detalles_data]
+                    )
+
+            return instance
+        except Exception:
+            raise serializers.ValidationError("Error updating bom")
+
 class OrdenProduccionDetalleSerializer(serializers.ModelSerializer):
     producto_variante = ProductoVarianteSerializer(read_only=True)
     producto_variante_id = serializers.PrimaryKeyRelatedField(
