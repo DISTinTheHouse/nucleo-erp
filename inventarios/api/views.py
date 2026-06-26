@@ -260,6 +260,8 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             if qty is None:
                 raise ValidationError({"items": f"Item #{idx+1}: cantidad inválida."})
             ubicacion_id = self._to_int(it.get("ubicacion") or it.get("ubicacion_id"))
+            lote_id = self._to_int(it.get("lote") or it.get("lote_id"))
+            serie_id = self._to_int(it.get("serie") or it.get("serie_id"))
             if producto_id:
                 producto_ids.add(producto_id)
             if pv_id:
@@ -270,6 +272,8 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                     "producto_variante_id": pv_id,
                     "cantidad": qty,
                     "ubicacion_id": ubicacion_id,
+                    "lote_id": lote_id,
+                    "serie_id": serie_id,
                 }
             )
 
@@ -308,6 +312,57 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             if not item["producto_id"] or item["producto_id"] not in productos:
                 raise ValidationError({"items": f"Item #{idx+1}: producto no encontrado."})
         return normalized
+
+    def _resolve_empresa_sucursal(self, request, almacen):
+        user = request.user
+        empresa = (
+            getattr(almacen, "empresa", None)
+            or getattr(user, "empresa", None)
+            or Empresa.objects.filter(
+                pk=self._to_int(request.data.get("empresa") or request.data.get("empresa_id"))
+            ).first()
+        )
+        sucursal = (
+            getattr(almacen, "sucursal", None)
+            or getattr(user, "sucursal_default", None)
+            or Sucursal.objects.filter(
+                pk=self._to_int(request.data.get("sucursal") or request.data.get("sucursal_id"))
+            ).first()
+        )
+        return empresa, sucursal
+
+    def _crear_movimiento_formal(self, request, tipo, almacen, ajuste_id, detalle_movimientos):
+        empresa, sucursal = self._resolve_empresa_sucursal(request, almacen)
+        if not empresa or not sucursal:
+            return None
+
+        movimiento = MovimientoInventario.objects.create(
+            empresa=empresa,
+            sucursal=sucursal,
+            pedido_id=None,
+            entrega_id=None,
+            devolucion_id=None,
+            ajuste_inventario_id=ajuste_id,
+            tipo_movimiento=tipo,
+            usuario=request.user,
+            observaciones=(request.data.get("observaciones") or request.data.get("motivo") or None),
+            recepcion_id=None,
+            transferencia_id=None,
+            op_id=None,
+        )
+
+        for item in detalle_movimientos:
+            MovimientoInventarioDetalle.objects.create(
+                movimiento_inventario=movimiento,
+                producto_id=item["producto_id"],
+                ubicacion_origen_id=item["ubicacion_origen_id"],
+                ubicacion_destino_id=item["ubicacion_destino_id"],
+                lote_id=item["lote_id"],
+                serie_id=item["serie_id"],
+                cantidad=item["cantidad"],
+                costo_unitario=Decimal("0"),
+            )
+        return movimiento
 
     def _apply(self, request, tipo):
         tipo = (tipo or "").strip().upper()
@@ -356,6 +411,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         user = request.user
         results = []
         before_after = []
+        detalle_movimientos = []
         with transaction.atomic():
             for it in items:
                 ubicacion = None
@@ -411,6 +467,8 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
 
                 current = ex.cantidad or Decimal("0")
                 qty = it["cantidad"]
+                ubicacion_origen_id = ex.ubicacion_id if tipo in {"SALIDA", "AJUSTE"} else None
+                ubicacion_destino_id = ex.ubicacion_id if tipo == "ENTRADA" else None
 
                 if tipo == "ENTRADA":
                     new_qty = current + qty
@@ -418,6 +476,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                     new_qty = current - qty
                 else:
                     new_qty = qty
+                    ubicacion_destino_id = ex.ubicacion_id
 
                 if new_qty < 0:
                     raise ValidationError({"cantidad": "La operación deja stock negativo."})
@@ -437,6 +496,16 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                         "cantidad_before": str(current),
                         "cantidad_after": str(new_qty),
                         "delta": str(new_qty - current),
+                    }
+                )
+                detalle_movimientos.append(
+                    {
+                        "producto_id": ex.producto_id,
+                        "ubicacion_origen_id": ubicacion_origen_id,
+                        "ubicacion_destino_id": ubicacion_destino_id,
+                        "lote_id": it["lote_id"],
+                        "serie_id": it["serie_id"],
+                        "cantidad": qty if tipo != "AJUSTE" else new_qty,
                     }
                 )
                 results.append(
@@ -482,12 +551,21 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             else:
                 ev = None
 
+            movimiento_formal = self._crear_movimiento_formal(
+                request=request,
+                tipo=tipo,
+                almacen=almacen,
+                ajuste_id=ajuste_id,
+                detalle_movimientos=detalle_movimientos,
+            )
+
         return Response(
             {
                 "tipo": tipo,
                 "almacen_id": almacen.pk,
                 "ajuste_id": ajuste_id,
                 "movimiento_id": (getattr(ev, "id_evento", None) if ev else None),
+                "movimiento_inventario_id": (getattr(movimiento_formal, "pk", None) if movimiento_formal else None),
                 "result": results,
             },
             status=status.HTTP_200_OK,
