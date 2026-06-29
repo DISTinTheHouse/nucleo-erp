@@ -1,7 +1,7 @@
 from django.db import models
 from django.conf import settings
 from nucleo.models import StatusLifecycleModel
-from nucleo.models import Empresa, SatRegimenFiscal, SatUsoCfdi, SatFormaPago, SatMetodoPago, Moneda
+from nucleo.models import Empresa, SatRegimenFiscal, SatUsoCfdi, SatFormaPago, SatMetodoPago, Moneda, Sucursal
 
 class Cliente(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="clientes", null=True, blank=True)
@@ -21,6 +21,19 @@ class Cliente(StatusLifecycleModel):
     activo = models.BooleanField(default=True)
 
     sat_uso_cfdi = models.ForeignKey(SatUsoCfdi, on_delete=models.CASCADE, related_name="clientes", null=True, blank=True)
+
+    clave = models.CharField(max_length=20, blank=True, null=True)
+    numero_exterior = models.CharField(max_length=20, blank=True, null=True)
+    numero_interior = models.CharField(max_length=20, blank=True, null=True)
+    delegacion = models.CharField(max_length=120, blank=True, null=True)
+    contacto = models.CharField(max_length=150, blank=True, null=True)
+    telefono_2 = models.CharField(max_length=20, blank=True, null=True)
+    pais = models.CharField(max_length=3, default="MEX", blank=True, null=True)
+    curp = models.CharField(max_length=18, blank=True, null=True)
+    pais_cel = models.CharField(max_length=5, blank=True, null=True)
+    celular = models.CharField(max_length=20, blank=True, null=True)
+    web = models.URLField(max_length=255, blank=True, null=True)
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="clientes", null=True, blank=True)
 
     class Meta:
         db_table = "clientes"
