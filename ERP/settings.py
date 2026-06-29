@@ -68,6 +68,7 @@ INSTALLED_APPS = [
     'produccion',
     'wms',
     'logistica',
+    'finanzas',
     'allauth',
     'allauth.account',
     'auth_kit',
