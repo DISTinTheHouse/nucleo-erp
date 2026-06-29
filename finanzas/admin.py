@@ -1,0 +1,47 @@
+from django.contrib import admin
+from finanzas.models import (
+    CuentaContable,
+    CentroCosto,
+    Poliza,
+    Factura,
+    FacturaDetalle,
+    FacturaProveedor,
+    FacturaProveedorDetalle,
+    Banco,
+    CuentaBancaria,
+    CuentaPorCobrar,
+    CuentaPorPagar,
+    Cobro,
+    CobroDetalle,
+    Pago,
+    PagoDetalle,
+    MovimientoBancario,
+    PolizaDetalle,
+    ConciliacionBancaria,
+    ConciliacionDetalle,
+    NotaCredito,
+    NotaCreditoDetalle
+)
+
+admin.site.register(CuentaContable)
+admin.site.register(CentroCosto)
+admin.site.register(Poliza)
+admin.site.register(Factura)
+admin.site.register(FacturaDetalle)
+admin.site.register(FacturaProveedor)
+admin.site.register(FacturaProveedorDetalle)
+admin.site.register(Banco)
+admin.site.register(CuentaBancaria)
+admin.site
+admin.site.register(CuentaPorCobrar)
+admin.site.register(CuentaPorPagar)
+admin.site.register(Cobro)
+admin.site.register(CobroDetalle)
+admin.site.register(Pago)
+admin.site.register(PagoDetalle)
+admin.site.register(MovimientoBancario)
+admin.site.register(PolizaDetalle)
+admin.site.register(ConciliacionBancaria)
+admin.site.register(ConciliacionDetalle)
+admin.site.register(NotaCredito)
+admin.site.register(NotaCreditoDetalle)
