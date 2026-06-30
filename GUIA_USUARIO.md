@@ -119,6 +119,8 @@ Con la configuración lista, el usuario puede empezar a operar:
 3.  **Órdenes de Producción**:
     - El onboarding de producción ya no requiere que el cliente envíe el `bom` en cada detalle.
     - El backend resuelve automáticamente el BOM activo a partir del `producto_variante`.
+    - Al confirmar la orden, el sistema valida existencias de insumos y descuenta automáticamente el consumo desde inventario.
+    - Si no existe stock suficiente o el BOM está incompleto, la orden no se confirma.
 
 ---
 

@@ -131,6 +131,12 @@ El backend actúa como una "Caja Negra" segura para el Frontend (Next.js).
 - **Orden de Producción**:
   - El frontend no necesita enviar `bom` en cada detalle.
   - El backend resuelve el BOM activo por `producto_variante` dentro de la empresa del usuario.
+  - La creación de OP consume inventario automáticamente usando la lista de materiales.
+  - El contrato HTTP para frontend se mantiene en el mismo endpoint de onboarding.
+- **Consumo de Producción**:
+  - El backend crea `ConsumoProduccion` como encabezado de consumo.
+  - El detalle de insumos consumidos se persiste en `consumo_detalle`.
+  - También se registra la salida en `MovimientoInventario`, `MovimientoInventarioDetalle` y `AuditoriaEvento`.
 
 ## 6. Responsabilidades UI vs Backend
 

@@ -1291,6 +1291,62 @@ La recepción es el proceso que afecta existencias derivadas de una orden de com
 - **Regla**:
   - El frontend no necesita enviar `bom` dentro de cada detalle.
   - El backend resuelve automáticamente el BOM activo a partir de `producto_variante`.
+  - El contrato para frontend se mantiene: misma URL y mismo body base para crear la OP.
+
+### 6) Crear Orden de Producción con Consumo Automático
+
+- **Endpoint**: `POST /api/v1/produccion/orden-produccion/onboarding/`
+- **Compatibilidad**:
+  - No requiere cambios del frontend si ya consumía el onboarding de producción.
+  - El backend sigue resolviendo el BOM internamente.
+  - El descuento de inventario sucede automáticamente al confirmar la OP.
+
+**Reglas del flujo**
+
+- Se valida que cada `producto_variante` tenga un BOM activo en la empresa del usuario.
+- Se calculan los insumos requeridos tomando `BomDetalle.cantidad * cantidad_op`.
+- Si el BOM tiene `desperdicio`, se aplica al cálculo del consumo.
+- Antes de crear definitivamente la OP, el backend valida existencias suficientes de cada insumo.
+- Si hay inventario suficiente:
+  - crea `OrdenProduccion`
+  - crea `OrdenProduccionDetalle`
+  - descuenta `Existencia`
+  - registra `ConsumoProduccion` y `consumo_detalle`
+  - registra `MovimientoInventario` y `MovimientoInventarioDetalle`
+  - registra `AuditoriaEvento`
+- Si no hay inventario suficiente o el BOM está incompleto, responde `400` y no confirma la operación.
+
+**Body (sin cambios para frontend)**
+
+```json
+{
+  "empresa": 1,
+  "sucursal": 1,
+  "prioridad": 1,
+  "observaciones": "OP de prueba",
+  "orden_produccion_detalle": [
+    {
+      "producto_variante_id": 15,
+      "cantidad": "3.0000",
+      "unidad": 1,
+      "observaciones": ""
+    }
+  ]
+}
+```
+
+**Respuesta (resumen)**
+
+```json
+{
+  "msg": "Orden de producción creada exitosamente",
+  "op_id": 10,
+  "folio_op": "OP-000010",
+  "consumo_produccion_id": 3,
+  "movimiento_inventario_id": 25,
+  "movimiento_id": 901
+}
+```
 
 ---
 
