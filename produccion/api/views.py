@@ -135,10 +135,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         return queryset
     
     def save_op(self, request):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        op = OrdenProduccionService.save_orden_produccion(serializer.validated_data, request.user)
-        return Response({'msg': 'Orden de producción creada exitosamente'}, status=status.HTTP_201_CREATED)
+        return self._crear_op_desde_request(request)
     
     def get_op_detalle(self, request):
         op_id = request.query_params.get('op_id', None)
@@ -148,15 +145,8 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         if res_data is None:
             return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
         return Response(res_data)
-    
-    @action(detail=False, methods=['get', 'post'], url_path='onboarding')
-    def onboarding(self, request):
-        if request.method == 'GET':
-            return self.get_op_detalle(request)
 
-        # POST: el cliente ya no envía 'bom' en cada detalle. Resolvemos el BOM
-        # activo de cada producto_variante dentro de la empresa del usuario y lo
-        # inyectamos antes de crear la orden de producción.
+    def _crear_op_desde_request(self, request):
         empresa = getattr(request.user, 'empresa', None)
         if empresa is None:
             return Response(
@@ -186,19 +176,45 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                     })
                 detalle['bom'] = bom
 
-            OrdenProduccionService.save_orden_produccion(
-                serializer.validated_data, request.user
+            result = OrdenProduccionService.save_orden_produccion(
+                serializer.validated_data,
+                request.user,
+                request=request,
             )
 
+        op = result["op"]
         return Response(
-            {'msg': 'Orden de producción creada exitosamente'},
+            {
+                'msg': 'Orden de producción creada exitosamente',
+                'op_id': op.op_id,
+                'folio_op': op.folio_op,
+                'consumo_produccion_id': result["consumo_produccion"].consumo_produccion_id,
+                'movimiento_inventario_id': result["movimiento_inventario"].pk,
+                'movimiento_id': getattr(result["auditoria_evento"], 'id_evento', None),
+            },
             status=status.HTTP_201_CREATED,
         )
 
+    def create(self, request, *args, **kwargs):
+        return self._crear_op_desde_request(request)
+    
+    @action(detail=False, methods=['get', 'post'], url_path='onboarding')
+    def onboarding(self, request):
+        if request.method == 'GET':
+            return self.get_op_detalle(request)
+        return self._crear_op_desde_request(request)
+
 class ConsumoProduccionViewSet(viewsets.ModelViewSet):
-    queryset = ConsumoProduccion.objects.all()
+    queryset = ConsumoProduccion.objects.all().select_related('op').prefetch_related('detalles__producto')
     serializer_class = ConsumoProduccionSerializer
     http_method_names = ['get', 'post']
+
+    def get_queryset(self):
+        user = self.request.user
+        empresa = getattr(user, 'empresa', None)
+        if empresa is None:
+            return ConsumoProduccion.objects.none()
+        return self.queryset.filter(op__empresa=empresa)
 
     @action(detail=True, methods=['post'])
     def confirmar(self, request, pk=None):

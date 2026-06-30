@@ -120,6 +120,25 @@ class ConsumoProduccion(models.Model):
     def __str__(self):
         return str(self.consumo_produccion_id)
 
+
+class ConsumoProduccionDetalle(models.Model):
+    consumo_detalle_id = models.AutoField(primary_key=True)
+    consumo_produccion = models.ForeignKey(
+        ConsumoProduccion,
+        on_delete=models.CASCADE,
+        related_name='detalles',
+    )
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT)
+    cantidad = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+
+    class Meta:
+        db_table = 'consumo_detalle'
+        verbose_name = 'Consumo Produccion Detalle'
+        verbose_name_plural = 'Consumos Produccion Detalle'
+
+    def __str__(self):
+        return str(self.consumo_detalle_id)
+
 class ProductoTerminadoEntradas(models.Model):
     pt_entrada_id = models.AutoField(primary_key=True)
     op = models.ForeignKey(OrdenProduccion, on_delete=models.CASCADE)

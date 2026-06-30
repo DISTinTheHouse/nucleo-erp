@@ -5,7 +5,8 @@ from produccion.models import (
     RutaProduccion, 
     OrdenProduccion,
     OrdenProduccionDetalle,
-    ConsumoProduccion, 
+    ConsumoProduccion,
+    ConsumoProduccionDetalle,
     ProductoTerminadoEntradas, 
     OrdenesBordado,
     BordadoAvances,
@@ -65,6 +66,12 @@ class ConsumoProduccionInline(admin.TabularInline):
     model = ConsumoProduccion
     extra = 0
 
+
+class ConsumoProduccionDetalleInline(admin.TabularInline):
+    model = ConsumoProduccionDetalle
+    extra = 0
+    autocomplete_fields = ("producto",)
+
 @admin.register(OrdenProduccion)
 class OrdenProduccionAdmin(admin.ModelAdmin):
     list_display = ("op_id", "empresa", "sucursal", "pedido", "ruta_produccion")
@@ -92,6 +99,22 @@ class ConsumoProduccionAdmin(admin.ModelAdmin):
     ordering = ("-consumo_produccion_id",)
     autocomplete_fields = ("op",)
     list_select_related = ("op",)
+    inlines = (ConsumoProduccionDetalleInline,)
+
+
+@admin.register(ConsumoProduccionDetalle)
+class ConsumoProduccionDetalleAdmin(admin.ModelAdmin):
+    list_display = ("consumo_detalle_id", "consumo_produccion", "producto", "cantidad")
+    list_filter = ("consumo_produccion__op__empresa", "consumo_produccion__op__sucursal")
+    search_fields = (
+        "consumo_detalle_id",
+        "consumo_produccion__consumo_produccion_id",
+        "consumo_produccion__op__op_id",
+        "producto__nombre",
+    )
+    ordering = ("-consumo_detalle_id",)
+    autocomplete_fields = ("consumo_produccion", "producto")
+    list_select_related = ("consumo_produccion", "producto")
 
 @admin.register(ProductoTerminadoEntradas)
 class ProductoTerminadoEntradasAdmin(admin.ModelAdmin):

@@ -7,6 +7,7 @@ from produccion.models import (
     OrdenProduccion,
     OrdenProduccionDetalle,
     ConsumoProduccion, 
+    ConsumoProduccionDetalle,
     ProductoTerminadoEntradas, 
     OrdenesBordado,
     BordadoAvances,
@@ -142,9 +143,25 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         read_only_fields = ['folio_op', 'activo', 'usuario_asignado']
 
 class ConsumoProduccionSerializer(serializers.ModelSerializer):
+    detalles = serializers.SerializerMethodField()
+
     class Meta:
         model = ConsumoProduccion
-        fields = '__all__'
+        fields = ['consumo_produccion_id', 'op', 'detalles']
+
+    def get_detalles(self, obj):
+        detalles = getattr(obj, 'detalles', None)
+        if detalles is None:
+            return []
+        return [
+            {
+                'id': detalle.consumo_detalle_id,
+                'producto': detalle.producto_id,
+                'producto_nombre': getattr(detalle.producto, 'nombre', None),
+                'cantidad': str(detalle.cantidad),
+            }
+            for detalle in detalles.select_related('producto').all()
+        ]
 
 class ProductoTerminadoEntradasSerializer(serializers.ModelSerializer):
     class Meta: 
