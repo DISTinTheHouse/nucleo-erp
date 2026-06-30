@@ -35,11 +35,31 @@ class Poliza(models.Model):
         return str(self.id)
 
 class Factura(models.Model):
+    class FacturaStatus(models.TextChoices):
+        BORRADOR = 'Borrador', 'Borrador'
+        EMITIDA = 'Emitida', 'Emitida'
+        CANCELADA = 'Cancelada', 'Cancelada'
+        
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="facturas")
     sucursal = models.ForeignKey('nucleo.Sucursal', on_delete=models.CASCADE, related_name="facturas")
     cliente = models.ForeignKey('terceros.Cliente', on_delete=models.CASCADE, related_name="facturas")
     pedido = models.ForeignKey('ventas.Pedido', on_delete=models.CASCADE, related_name="facturas")
+    serie_folio = models.ForeignKey('nucleo.SerieFolio', on_delete=models.CASCADE, related_name="facturas", null=True, blank=True)
     moneda = models.ForeignKey('nucleo.Moneda', on_delete=models.CASCADE, related_name="facturas")
+
+    fecha_emision = models.DateField(auto_now=True)
+    fecha_vencimiento = models.DateField(null=True, blank=True)
+    folio = models.CharField(max_length=30, null=True, blank=True)
+
+    subtotal = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    descuento = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    impuestos = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+
+    estatus = models.CharField(max_length=30, choices=FacturaStatus.choices, default=FacturaStatus.BORRADOR)
+    observaciones = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "facturas"
@@ -53,6 +73,13 @@ class FacturaDetalle(models.Model):
     factura = models.ForeignKey(Factura, on_delete=models.CASCADE, related_name="factura_detalles")
     pedido_detalle = models.ForeignKey('ventas.PedidoDetalle', on_delete=models.CASCADE, related_name="factura_detalles")
     producto = models.ForeignKey('catalogo.Producto', on_delete=models.CASCADE, related_name="factura_detalles")
+
+    cantidad = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    precio_unitario = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    descuento = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    impuesto = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    subtotal = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     
     class Meta:
         db_table = "factura_detalle"
@@ -125,18 +152,11 @@ class CuentaPorCobrar(models.Model):
 
     cliente = models.ForeignKey('terceros.Cliente', on_delete=models.CASCADE, related_name="cuentas_por_cobrar")
     factura = models.ForeignKey(Factura, on_delete=models.CASCADE, related_name="cuentas_por_cobrar")
-
     fecha_emision = models.DateField(auto_now=True)
     fecha_vencimiento = models.DateField(null=True, blank=True)
-
-    subototal = models.DecimalField(max_digits=18, decimal_places=2, default=0)
-    impuesto = models.DecimalField(max_digits=18, decimal_places=2, default=0)
-    descuento = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     saldo = models.DecimalField(max_digits=18, decimal_places=2, default=0)
-    
     estatus = models.CharField(max_length=30, choices=EstatusCxC.choices, default=EstatusCxC.PENDIENTE)
-
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -171,7 +191,6 @@ class Cobro(models.Model):
         SPEI = 'SPEI', 'SPEI'
         CHEQUE = 'Cheque', 'Cheque'
         AUTORIZACION = 'Autorizacion TPV', 'Autorizacion TPV'
-
 
     cliente = models.ForeignKey('terceros.Cliente', on_delete=models.CASCADE, related_name="cobros")
     cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.CASCADE, related_name="cobros")
