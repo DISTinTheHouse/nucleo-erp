@@ -1,4 +1,5 @@
 from django.db import models
+from nucleo.models import StatusLifecycleModel
 
 class CuentaContable(models.Model):
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="cuentas_contables")
@@ -34,7 +35,7 @@ class Poliza(models.Model):
     def __str__(self):
         return str(self.id)
 
-class Factura(models.Model):
+class Factura(StatusLifecycleModel):
     class FacturaStatus(models.TextChoices):
         BORRADOR = 'Borrador', 'Borrador'
         EMITIDA = 'Emitida', 'Emitida'
