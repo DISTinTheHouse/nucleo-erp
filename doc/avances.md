@@ -40,11 +40,11 @@
 
 _(sin materia prima no hay maquila)_
 
-- [ ] ¿TERMINADO?
+- [x] ¿TERMINADO?
 - [x] proveedores
 - [x] direcciones_proveedor
 - [x] ordenes_compra
-- [ ] recepciones
+- [x] recepciones
 
 _// omitir por ahora calidad, facturas proveedor y pagos //_
 
@@ -55,23 +55,21 @@ _// omitir por ahora calidad, facturas proveedor y pagos //_
 (no empezar con todo producción)
 
 - [ ] ¿TERMINADO?
-- [ ] listas_materiales_bom
-- [ ] ordenes_produccion
-- [ ] consumos_produccion
+- [x] listas_materiales_bom
+- [x] ordenes_produccion
+- [x] consumos_produccion
 - [ ] producto_terminado_entradas
-- [ ] (meter seccion de corte)
-- [ ] (opcion de meter seccion de proveedor o simplemente ligarlo)
 
 **_Objetivo: Comsumir MP + Generar PT + ver transformación real_**
 
 ## Fase 5 - Clientes + pedidos (lado vendedor) |
 
-- [ ] ¿TERMINADO?
-- [ ] (cotizaciones en lugar de pedidos)
-- [ ] clientes
-- [ ] direcciones_cliente ← **sí, agrégar**
-- [ ] pedidos
-- [ ] pedido_detalle
+- [x] ¿TERMINADO?
+- [x] cotizaciones
+- [x] clientes
+- [x] direcciones_cliente ← **sí, agregar**
+- [x] pedidos
+- [x] pedido_detalle
 
 **_Objetivo: Un vendedor pueda capturar pedidos reales_**
 
