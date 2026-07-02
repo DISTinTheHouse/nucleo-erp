@@ -1,6 +1,16 @@
 from rest_framework import serializers
 from finanzas.models import Factura, FacturaDetalle
 
+
+class FacturaDesdePedidoInputSerializer(serializers.Serializer):
+    """
+    Entrada del endpoint `facturas/desde-pedido/`.
+    Solo recibe el id del Pedido; el detalle de la factura se arma
+    íntegramente en el servidor a partir del Pedido (facturación total).
+    """
+    pedido = serializers.IntegerField(min_value=1)
+
+
 class FacturaDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
 
