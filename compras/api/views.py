@@ -29,7 +29,7 @@ from inventarios.models import (
     Ubicacion,
 )
 from nucleo.models import Moneda, SerieFolio, Sucursal
-from produccion.models import OrdenProduccion
+from produccion.models import OrdenProduccion, OrdenProduccionDetalle
 from terceros.models import Proveedor, Transportista
 
 logger = logging.getLogger(__name__)
@@ -448,6 +448,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Recepcion.objects.all().select_related(
         "orden_compra",
+        "op",
         "empresa",
         "sucursal",
         "proveedor",
@@ -516,10 +517,22 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         serie_folio.save(update_fields=["folio_actual", "ultimo_anio", "updated_at"])
         recepcion.folio = folio_formateado
 
-    def _cantidad_recibida(self, orden_compra_detalle_id):
+    def _cantidad_recibida_oc(self, orden_compra_detalle_id):
         total = (
             RecepcionDetalle.objects.filter(
                 orden_compra_detalle_id=orden_compra_detalle_id,
+                recepcion__activo=True,
+            )
+            .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            .aggregate(total=Sum("cantidad_recibida"))
+            .get("total")
+        )
+        return Decimal(str(total or 0))
+
+    def _cantidad_recibida_op(self, orden_produccion_detalle_id):
+        total = (
+            RecepcionDetalle.objects.filter(
+                orden_produccion_detalle_id=orden_produccion_detalle_id,
                 recepcion__activo=True,
             )
             .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
@@ -547,14 +560,16 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         {"ubicacion": "La ubicación no pertenece al almacén seleccionado."}
                     )
 
-            oc_detalle = item["oc_detalle"]
             cantidad = item["cantidad_recibida"]
-            producto_id = oc_detalle.producto_id
+            producto = item["producto"]
+            producto_variante = item.get("producto_variante")
+            producto_id = producto.pk
 
             existencia = (
                 Existencia.objects.select_for_update()
                 .filter(
                     producto_id=producto_id,
+                    producto_variante_id=getattr(producto_variante, "pk", None),
                     almacen_id=recepcion.almacen_id,
                     ubicacion_id=(ubicacion.pk if ubicacion else None),
                 )
@@ -563,7 +578,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             )
             if not existencia:
                 existencia = Existencia.objects.create(
-                    producto_id=producto_id,
+                    producto=producto,
+                    producto_variante=producto_variante,
                     almacen=recepcion.almacen,
                     ubicacion=ubicacion,
                     stock=0,
@@ -581,8 +597,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
 
             detalle = RecepcionDetalle.objects.create(
                 recepcion=recepcion,
-                orden_compra_detalle=oc_detalle,
-                producto=oc_detalle.producto,
+                orden_compra_detalle=item.get("orden_compra_detalle"),
+                orden_produccion_detalle=item.get("orden_produccion_detalle"),
+                producto=producto,
+                producto_variante=producto_variante,
                 ubicacion=ubicacion,
                 lote_id=item.get("lote"),
                 serie_id=item.get("serie"),
@@ -592,8 +610,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             movimientos.append(
                 {
                     "recepcion_detalle_id": detalle.pk,
-                    "orden_compra_detalle_id": oc_detalle.pk,
-                    "producto_id": oc_detalle.producto_id,
+                    "orden_compra_detalle_id": item.get("orden_compra_detalle").pk if item.get("orden_compra_detalle") else None,
+                    "orden_produccion_detalle_id": item.get("orden_produccion_detalle").pk if item.get("orden_produccion_detalle") else None,
+                    "producto_id": producto.pk,
+                    "producto_variante_id": getattr(producto_variante, "pk", None),
                     "ubicacion_id": existencia.ubicacion_id,
                     "lote_id": detalle.lote_id,
                     "serie_id": detalle.serie_id,
@@ -617,7 +637,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             observaciones=recepcion.observaciones,
             recepcion=recepcion,
             transferencia_id=None,
-            op_id=None,
+            op_id=recepcion.op_id,
         )
 
         for item in movimientos:
@@ -642,7 +662,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         total_pendiente = Decimal("0")
         for detalle in detalles:
             ordered = Decimal(str(detalle.cantidad or 0))
-            recibido = self._cantidad_recibida(detalle.pk)
+            recibido = self._cantidad_recibida_oc(detalle.pk)
             pendiente = ordered - recibido
             if pendiente > 0:
                 total_pendiente += pendiente
@@ -767,27 +787,60 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             ).distinct()
 
         ordenes_produccion = []
-        for op in op_qs[:50]:
-            detalle = []
-            for op_detalle in op.orden_produccion_detalle.all():
+        ops_limitadas = list(op_qs[:50])
+        op_detalles_map = {}
+        op_ids = [op.pk for op in ops_limitadas]
+        if op_ids:
+            op_detalles_qs = (
+                OrdenProduccionDetalle.objects
+                .filter(op_id__in=op_ids, activo=True)
+                .select_related("producto_variante__producto")
+                .order_by("op_id", "op_detalle_id")
+            )
+            op_detalles_list = list(op_detalles_qs)
+
+            op_detalle_ids = [d.pk for d in op_detalles_list]
+            recibido_op_map = {}
+            if op_detalle_ids:
+                recibido_op_qs = (
+                    RecepcionDetalle.objects.filter(
+                        orden_produccion_detalle_id__in=op_detalle_ids,
+                        recepcion__activo=True,
+                    )
+                    .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+                    .values("orden_produccion_detalle_id")
+                    .annotate(total=Sum("cantidad_recibida"))
+                )
+                for row in recibido_op_qs:
+                    recibido_op_map[row["orden_produccion_detalle_id"]] = Decimal(str(row["total"] or 0))
+
+            for op_detalle in op_detalles_list:
                 producto_variante = op_detalle.producto_variante
                 producto = getattr(producto_variante, "producto", None)
                 cantidad = Decimal(str(op_detalle.cantidad or 0))
-                detalle.append(
-                    {
-                        "id": op_detalle.pk,
-                        "producto_id": getattr(producto, "pk", None),
-                        "producto_variante_id": getattr(producto_variante, "pk", None),
-                        "producto_nombre": (
-                            getattr(producto_variante, "nombre", None)
-                            or getattr(producto, "nombre", None)
-                        ),
-                        "cantidad_ordenada": str(cantidad),
-                        "cantidad_recibida": "0",
-                        "cantidad_pendiente": str(cantidad),
-                        "descripcion": op_detalle.observaciones,
-                    }
-                )
+                recibido = recibido_op_map.get(op_detalle.pk, Decimal("0"))
+                pendiente = cantidad - recibido
+                item = {
+                    "id": op_detalle.pk,
+                    "producto_id": getattr(producto, "pk", None),
+                    "producto_variante_id": getattr(producto_variante, "pk", None),
+                    "producto_nombre": (
+                        getattr(producto_variante, "nombre", None)
+                        or getattr(producto, "nombre", None)
+                    ),
+                    "cantidad_ordenada": str(cantidad),
+                    "cantidad_recibida": str(recibido),
+                    "cantidad_pendiente": str(max(pendiente, Decimal("0"))),
+                    "descripcion": op_detalle.observaciones,
+                }
+                op_detalles_map.setdefault(op_detalle.op_id, []).append(item)
+
+        for op in ops_limitadas:
+            detalle = []
+            for item in op_detalles_map.get(op.pk, []):
+                detalle.append(item)
+            if not any(Decimal(item["cantidad_pendiente"]) > 0 for item in detalle):
+                continue
 
             ordenes_produccion.append(
                 {
@@ -879,23 +932,55 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 raise ValidationError({"serie_codigo": "serie_codigo debe ser RC, RT o RZ."})
 
             with transaction.atomic():
-                oc = (
-                    OrdenCompra.objects.select_for_update(of=("self",))
-                    .select_related("empresa", "sucursal", "proveedor")
-                    .filter(pk=header["orden_compra"], activo=True)
-                    .first()
-                )
-                if not oc:
-                    raise ValidationError({"orden_compra": "Orden de compra no encontrada."})
-                if empresa and oc.empresa_id != empresa.pk:
-                    raise ValidationError({"orden_compra": "No tienes acceso a esta orden de compra."})
-                if oc.estatus not in {
-                    OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
-                    OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
-                }:
-                    raise ValidationError({"estatus": "La orden de compra no está disponible para recepción."})
-                if not oc.proveedor_id:
-                    raise ValidationError({"proveedor": "La orden de compra no tiene proveedor asignado."})
+                orden_compra_id = header.get("orden_compra")
+                orden_produccion_id = header.get("orden_produccion")
+                if bool(orden_compra_id) == bool(orden_produccion_id):
+                    raise ValidationError(
+                        {"recepcion": "Debes enviar exactamente uno de orden_compra u orden_produccion."}
+                    )
+
+                oc = None
+                op = None
+                detalles_oc = {}
+                detalles_op = {}
+                detalle_payload = []
+
+                if orden_compra_id:
+                    oc = (
+                        OrdenCompra.objects.select_for_update(of=("self",))
+                        .select_related("empresa", "sucursal", "proveedor")
+                        .filter(pk=orden_compra_id, activo=True)
+                        .first()
+                    )
+                    if not oc:
+                        raise ValidationError({"orden_compra": "Orden de compra no encontrada."})
+                    if empresa and oc.empresa_id != empresa.pk:
+                        raise ValidationError({"orden_compra": "No tienes acceso a esta orden de compra."})
+                    if oc.estatus not in {
+                        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+                        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+                    }:
+                        raise ValidationError({"estatus": "La orden de compra no está disponible para recepción."})
+                    if not oc.proveedor_id:
+                        raise ValidationError({"proveedor": "La orden de compra no tiene proveedor asignado."})
+                else:
+                    op = (
+                        OrdenProduccion.objects.select_for_update()
+                        .select_related("empresa", "sucursal")
+                        .filter(pk=orden_produccion_id, activo=True)
+                        .first()
+                    )
+                    if not op:
+                        raise ValidationError({"orden_produccion": "Orden de producción no encontrada."})
+                    if empresa and op.empresa_id != empresa.pk:
+                        raise ValidationError({"orden_produccion": "No tienes acceso a esta orden de producción."})
+                    if op.estatus_op not in {
+                        OrdenProduccion.EstatusOrdenProduccion.PENDIENTE,
+                        OrdenProduccion.EstatusOrdenProduccion.PREPARACION,
+                        OrdenProduccion.EstatusOrdenProduccion.BORDANDO,
+                        OrdenProduccion.EstatusOrdenProduccion.REVISION,
+                    }:
+                        raise ValidationError({"estatus": "La orden de producción no está disponible para recepción."})
 
                 almacen = (
                     Almacen.objects.select_related("empresa", "sucursal")
@@ -904,71 +989,164 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 )
                 if not almacen:
                     raise ValidationError({"almacen": "Almacén no encontrado."})
-                if oc.empresa_id and almacen.empresa_id and oc.empresa_id != almacen.empresa_id:
+                empresa_origen = oc.empresa if oc else op.empresa
+                sucursal_origen = oc.sucursal if oc else op.sucursal
+                proveedor_origen = oc.proveedor if oc else None
+                if empresa_origen.pk and almacen.empresa_id and empresa_origen.pk != almacen.empresa_id:
                     raise ValidationError({"almacen": "El almacén no pertenece a la empresa de la orden."})
-                if oc.sucursal_id and almacen.sucursal_id and oc.sucursal_id != almacen.sucursal_id:
+                if sucursal_origen.pk and almacen.sucursal_id and sucursal_origen.pk != almacen.sucursal_id:
                     raise ValidationError({"almacen": "El almacén no pertenece a la sucursal de la orden."})
                 transportista_id = header.get("transportista")
                 if transportista_id and not Transportista.objects.filter(pk=transportista_id).exists():
                     raise ValidationError({"transportista": "Transportista no encontrado."})
 
-                detalles_oc = {
-                    d.pk: d
-                    for d in OrdenCompraDetalle.objects.select_related("producto")
-                    .filter(orden_compra=oc)
-                    .order_by("id")
-                }
-                if not detalles_oc:
-                    raise ValidationError({"detalle": "La orden de compra no tiene productos para recibir."})
+                if oc:
+                    detalles_oc = {
+                        d.pk: d
+                        for d in OrdenCompraDetalle.objects.select_related("producto")
+                        .filter(orden_compra=oc)
+                        .order_by("id")
+                    }
+                    if not detalles_oc:
+                        raise ValidationError({"detalle": "La orden de compra no tiene productos para recibir."})
 
-                detalle_payload = []
-                for idx, item in enumerate(detalle_raw):
-                    oc_detalle = detalles_oc.get(item["orden_compra_detalle"])
-                    if not oc_detalle:
-                        raise ValidationError(
-                            {"detalle": f"El renglón #{idx + 1} no pertenece a la orden de compra."}
-                        )
+                    for idx, item in enumerate(detalle_raw):
+                        detalle_id = item.get("orden_compra_detalle")
+                        if not detalle_id:
+                            raise ValidationError(
+                                {"detalle": f"El renglón #{idx + 1} requiere orden_compra_detalle."}
+                            )
+                        if item.get("orden_produccion_detalle"):
+                            raise ValidationError(
+                                {"detalle": f"El renglón #{idx + 1} no debe enviar orden_produccion_detalle para una OC."}
+                            )
 
-                    cantidad = Decimal(str(item["cantidad_recibida"]))
-                    if cantidad <= 0:
-                        raise ValidationError(
-                            {"detalle": f"El renglón #{idx + 1} debe tener cantidad_recibida > 0."}
-                        )
+                        oc_detalle = detalles_oc.get(detalle_id)
+                        if not oc_detalle:
+                            raise ValidationError(
+                                {"detalle": f"El renglón #{idx + 1} no pertenece a la orden de compra."}
+                            )
 
-                    recibido = self._cantidad_recibida(oc_detalle.pk)
-                    ordered = Decimal(str(oc_detalle.cantidad or 0))
-                    pendiente = ordered - recibido
-                    if pendiente <= 0:
-                        raise ValidationError(
+                        cantidad = Decimal(str(item["cantidad_recibida"]))
+                        if cantidad <= 0:
+                            raise ValidationError(
+                                {"detalle": f"El renglón #{idx + 1} debe tener cantidad_recibida > 0."}
+                            )
+
+                        recibido = self._cantidad_recibida_oc(oc_detalle.pk)
+                        ordered = Decimal(str(oc_detalle.cantidad or 0))
+                        pendiente = ordered - recibido
+                        if pendiente <= 0:
+                            raise ValidationError(
+                                {
+                                    "detalle": (
+                                        f"El producto del renglón #{idx + 1} ya fue recibido completamente."
+                                    )
+                                }
+                            )
+                        if cantidad > pendiente:
+                            raise ValidationError(
+                                {
+                                    "detalle": (
+                                        f"El renglón #{idx + 1} excede la cantidad pendiente por recibir."
+                                    )
+                                }
+                            )
+                        detalle_payload.append(
                             {
-                                "detalle": (
-                                    f"El producto del renglón #{idx + 1} ya fue recibido completamente."
-                                )
+                                "orden_compra_detalle": oc_detalle,
+                                "orden_produccion_detalle": None,
+                                "producto": oc_detalle.producto,
+                                "producto_variante": None,
+                                "cantidad_recibida": cantidad,
+                                "ubicacion": item.get("ubicacion"),
+                                "lote": item.get("lote"),
+                                "serie": item.get("serie"),
                             }
                         )
-                    if cantidad > pendiente:
-                        raise ValidationError(
+                else:
+                    detalles_op = {
+                        d.pk: d
+                        for d in OrdenProduccionDetalle.objects.select_related("producto_variante__producto")
+                        .filter(op=op, activo=True)
+                        .order_by("op_detalle_id")
+                    }
+                    if not detalles_op:
+                        raise ValidationError({"detalle": "La orden de producción no tiene productos para recibir."})
+
+                    for idx, item in enumerate(detalle_raw):
+                        detalle_id = item.get("orden_produccion_detalle")
+                        if not detalle_id:
+                            raise ValidationError(
+                                {"detalle": f"El renglón #{idx + 1} requiere orden_produccion_detalle."}
+                            )
+                        if item.get("orden_compra_detalle"):
+                            raise ValidationError(
+                                {"detalle": f"El renglón #{idx + 1} no debe enviar orden_compra_detalle para una OP."}
+                            )
+
+                        op_detalle = detalles_op.get(detalle_id)
+                        if not op_detalle:
+                            raise ValidationError(
+                                {"detalle": f"El renglón #{idx + 1} no pertenece a la orden de producción."}
+                            )
+
+                        producto_variante = op_detalle.producto_variante
+                        producto = getattr(producto_variante, "producto", None)
+                        if not producto_variante or not producto:
+                            raise ValidationError(
+                                {"detalle": f"El renglón #{idx + 1} no tiene producto terminado configurado."}
+                            )
+
+                        cantidad = Decimal(str(item["cantidad_recibida"]))
+                        if cantidad <= 0:
+                            raise ValidationError(
+                                {"detalle": f"El renglón #{idx + 1} debe tener cantidad_recibida > 0."}
+                            )
+
+                        recibido = self._cantidad_recibida_op(op_detalle.pk)
+                        ordered = Decimal(str(op_detalle.cantidad or 0))
+                        pendiente = ordered - recibido
+                        if pendiente <= 0:
+                            raise ValidationError(
+                                {
+                                    "detalle": (
+                                        f"El producto del renglón #{idx + 1} ya fue recibido completamente."
+                                    )
+                                }
+                            )
+                        if cantidad > pendiente:
+                            raise ValidationError(
+                                {
+                                    "detalle": (
+                                        f"El renglón #{idx + 1} excede la cantidad pendiente por recibir."
+                                    )
+                                }
+                            )
+                        detalle_payload.append(
                             {
-                                "detalle": (
-                                    f"El renglón #{idx + 1} excede la cantidad pendiente por recibir."
-                                )
+                                "orden_compra_detalle": None,
+                                "orden_produccion_detalle": op_detalle,
+                                "producto": producto,
+                                "producto_variante": producto_variante,
+                                "cantidad_recibida": cantidad,
+                                "ubicacion": item.get("ubicacion"),
+                                "lote": item.get("lote"),
+                                "serie": item.get("serie"),
                             }
                         )
-                    detalle_payload.append(
-                        {
-                            "oc_detalle": oc_detalle,
-                            "cantidad_recibida": cantidad,
-                            "ubicacion": item.get("ubicacion"),
-                            "lote": item.get("lote"),
-                            "serie": item.get("serie"),
-                        }
-                    )
 
                 recepcion = Recepcion(
+                    tipo_origen=(
+                        Recepcion.TipoOrigen.ORDEN_COMPRA
+                        if oc
+                        else Recepcion.TipoOrigen.ORDEN_PRODUCCION
+                    ),
                     orden_compra=oc,
-                    empresa=oc.empresa,
-                    sucursal=oc.sucursal,
-                    proveedor=oc.proveedor,
+                    op=op,
+                    empresa=empresa_origen,
+                    sucursal=sucursal_origen,
+                    proveedor=proveedor_origen,
                     almacen=almacen,
                     transportista_id=transportista_id,
                     usuario=user,
@@ -986,9 +1164,14 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 movimiento_formal = self._crear_movimiento_formal_recepcion(recepcion, movimientos)
 
                 orden_completa = True
-                for detalle in detalles_oc.values():
+                detalles_origen = detalles_oc.values() if oc else detalles_op.values()
+                for detalle in detalles_origen:
                     ordered = Decimal(str(detalle.cantidad or 0))
-                    recibido = self._cantidad_recibida(detalle.pk)
+                    recibido = (
+                        self._cantidad_recibida_oc(detalle.pk)
+                        if oc
+                        else self._cantidad_recibida_op(detalle.pk)
+                    )
                     if recibido < ordered:
                         orden_completa = False
                         break
@@ -999,23 +1182,37 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     else Recepcion.EstatusRecepcion.PARCIAL
                 )
                 recepcion.save(update_fields=["estatus", "updated_at"])
-                self._actualizar_estatus_oc(oc)
+                if oc:
+                    self._actualizar_estatus_oc(oc)
+                elif orden_completa and op and op.cerrar_orden:
+                    op.estatus_op = OrdenProduccion.EstatusOrdenProduccion.COMPLETADO
+                    op.fecha_fin = op.fecha_fin or timezone.now()
+                    op.save(update_fields=["estatus_op", "fecha_fin"])
 
                 ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
                 ua = request.META.get("HTTP_USER_AGENT")
                 ev = AuditoriaEvento.objects.create(
-                    empresa=oc.empresa,
+                    empresa=empresa_origen,
                     usuario=user if getattr(user, "pk", None) else None,
                     modulo="inventarios",
                     accion="ENTRADA",
                     tabla="existencias",
                     id_registro=str(almacen.pk),
-                    antes_json={"items": movimientos, "recepcion_id": recepcion.pk},
+                    antes_json={
+                        "items": movimientos,
+                        "recepcion_id": recepcion.pk,
+                        "tipo_origen": recepcion.tipo_origen,
+                        "orden_compra_id": recepcion.orden_compra_id,
+                        "op_id": recepcion.op_id,
+                    },
                     despues_json={
                         "almacen_id": almacen.pk,
                         "sucursal_id": almacen.sucursal_id,
                         "empresa_id": almacen.empresa_id,
                         "recepcion_id": recepcion.pk,
+                        "tipo_origen": recepcion.tipo_origen,
+                        "orden_compra_id": recepcion.orden_compra_id,
+                        "op_id": recepcion.op_id,
                         "items": movimientos,
                     },
                     ip=ip,

@@ -62,6 +62,13 @@ _// omitir por ahora calidad, facturas proveedor y pagos //_
 
 **_Objetivo: Comsumir MP + Generar PT + ver transformación real_**
 
+### Nota operativa actual
+
+- La entrada formal de producto terminado ya queda centralizada en `compras/Recepcion`.
+- El onboarding `GET /api/v1/compras/recepciones/onboarding/` lista órdenes de compra y órdenes de producción.
+- El `POST /api/v1/compras/recepciones/onboarding/` soporta origen `OC` u `OP`, actualiza `Existencia`, genera `MovimientoInventario` y liga `op` cuando la recepción viene de producción.
+- `producto_terminado_entradas` queda como estructura redundante/no recomendada para seguir desarrollando.
+
 ## Fase 5 - Clientes + pedidos (lado vendedor) |
 
 - [x] ¿TERMINADO?

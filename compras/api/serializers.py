@@ -113,7 +113,9 @@ class RecepcionDetalleSerializer(serializers.ModelSerializer):
             "id",
             "recepcion",
             "orden_compra_detalle",
+            "orden_produccion_detalle",
             "producto",
+            "producto_variante",
             "ubicacion",
             "lote",
             "serie",
@@ -129,7 +131,8 @@ class RecepcionSerializer(serializers.ModelSerializer):
 
 
 class RecepcionOnboardingHeaderSerializer(serializers.Serializer):
-    orden_compra = serializers.IntegerField()
+    orden_compra = serializers.IntegerField(required=False, allow_null=True)
+    orden_produccion = serializers.IntegerField(required=False, allow_null=True)
     almacen = serializers.IntegerField()
     serie_codigo = serializers.CharField(required=False, allow_blank=True)
     fecha_recepcion = serializers.DateTimeField(required=False, allow_null=True)
@@ -140,7 +143,8 @@ class RecepcionOnboardingHeaderSerializer(serializers.Serializer):
 
 
 class RecepcionOnboardingDetalleInputSerializer(serializers.Serializer):
-    orden_compra_detalle = serializers.IntegerField()
+    orden_compra_detalle = serializers.IntegerField(required=False, allow_null=True)
+    orden_produccion_detalle = serializers.IntegerField(required=False, allow_null=True)
     cantidad_recibida = serializers.DecimalField(max_digits=18, decimal_places=4)
     ubicacion = serializers.IntegerField(required=False, allow_null=True)
     lote = serializers.IntegerField(required=False, allow_null=True)

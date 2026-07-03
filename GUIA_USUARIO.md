@@ -99,8 +99,11 @@ Con la configuración lista, el usuario puede empezar a operar:
 2.  **Recepción de Mercancía**:
     - La recepción es el proceso que realmente afecta existencias.
     - Puede ser **total** o **parcial**.
-    - El backend toma el **producto** desde el detalle de la orden de compra; no depende de `producto_variante` para este flujo.
+    - La recepción puede originarse desde una **Orden de Compra** o desde una **Orden de Producción**.
+    - Para `OC`, el backend toma el **producto** desde el detalle de compra.
+    - Para `OP`, el backend toma el **producto** y la **variante** desde el detalle de producción para alimentar inventario de producto terminado.
     - Si el almacén requiere ubicación, el usuario debe capturarla; si no, la recepción puede guardarse sin `ubicacion`.
+    - La entrada de producto terminado debe hacerse por **Recepciones**; `ProductoTerminadoEntradas` deja de ser el flujo operativo recomendado.
 
 3.  **Series de Recepción**:
     - Las recepciones trabajan con series de folio como `RC`, `RT` o `RZ`.
@@ -146,5 +149,5 @@ Para administradores del sistema.
 - **"No veo ninguna sucursal"**: Revisa que el usuario tenga asignada al menos una sucursal en el campo "Sucursales permitidas".
 - **"No hay Serie/Folio activa para recepción"**: Configura una serie activa de recepción (`RC`, `RT` o `RZ`) para la empresa y sucursal que está operando.
 - **"No puedo hacer salida de inventario"**: Revisa que exista cantidad suficiente; la salida nunca puede dejar la existencia en negativo.
-- **"La recepción no afecta existencias"**: Verifica que la recepción se haya guardado correctamente; la orden de compra por sí sola no mueve inventario.
+- **"La recepción no afecta existencias"**: Verifica que la recepción se haya guardado correctamente; ni la orden de compra ni la orden de producción mueven inventario por sí solas.
 - **"No veo detalle en movimientos"**: Usa el endpoint de detalle del movimiento para consultar el desglose por producto, cantidad y ubicaciones.
