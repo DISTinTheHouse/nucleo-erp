@@ -135,48 +135,39 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticatedAndScoped]
 
     def get_queryset(self):
-        qs = self.queryset
-
-        qp = self.request.query_params
-
         def to_int(v):
-            if v in (None, ""):
-                return None
+            if v in (None, ""): return None
             try:
                 return int(v)
             except Exception:
                 return None
+            
+        qs = self.queryset
+        qp = self.request.query_params
 
         empresa_id = to_int(qp.get("empresa_id") or qp.get("empresa"))
         sucursal_id = to_int(qp.get("sucursal_id") or qp.get("sucursal"))
         almacen_id = to_int(qp.get("almacen_id") or qp.get("almacen"))
-        producto_variante_id = to_int(
-            qp.get("producto_variante_id") or qp.get("producto_variante")
-        )
+        producto_variante_id = to_int(qp.get("producto_variante_id") or qp.get("producto_variante"))
         producto_id = to_int(qp.get("producto_id") or qp.get("producto"))
         color_id = to_int(qp.get("color_id") or qp.get("color"))
         talla_id = to_int(qp.get("talla_id") or qp.get("talla"))
         sku_q = (qp.get("sku") or qp.get("q") or "").strip()
+        almacen_id = to_int(qp.get("almacen_id") or qp.get("almacen"))
 
-        if empresa_id:
-            qs = qs.filter(almacen__empresa_id=empresa_id)
-        if sucursal_id:
-            qs = qs.filter(almacen__sucursal_id=sucursal_id)
-        if almacen_id:
-            qs = qs.filter(almacen_id=almacen_id)
-        if producto_variante_id:
-            qs = qs.filter(producto_variante_id=producto_variante_id)
+        if empresa_id: qs = qs.filter(almacen__empresa_id=empresa_id)
+        if sucursal_id: qs = qs.filter(almacen__sucursal_id=sucursal_id)
+        if almacen_id: qs = qs.filter(almacen_id=almacen_id)
+        if producto_variante_id: qs = qs.filter(producto_variante_id=producto_variante_id)
+        if almacen_id: qs = qs.filter(almacen_id=almacen_id)
         if producto_id:
             qs = qs.filter(
                 models.Q(producto_id=producto_id) |
                 models.Q(producto_variante__producto_id=producto_id)
             )
-        if color_id:
-            qs = qs.filter(producto_variante__color_id=color_id)
-        if talla_id:
-            qs = qs.filter(producto_variante__talla_id=talla_id)
-        if sku_q:
-            qs = qs.filter(producto_variante__sku__icontains=sku_q)
+        if color_id: qs = qs.filter(producto_variante__color_id=color_id)
+        if talla_id: qs = qs.filter(producto_variante__talla_id=talla_id)
+        if sku_q: qs = qs.filter(producto_variante__sku__icontains=sku_q)
 
         limit_raw = (qp.get("limit") or "").strip()
         limit = None
