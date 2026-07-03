@@ -29,6 +29,7 @@ from inventarios.models import (
     Ubicacion,
 )
 from nucleo.models import Moneda, SerieFolio, Sucursal
+from produccion.models import OrdenProduccion
 from terceros.models import Proveedor, Transportista
 
 logger = logging.getLogger(__name__)
@@ -741,6 +742,66 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 }
             )
 
+        op_qs = (
+            OrdenProduccion.objects.filter(
+                activo=True,
+                estatus_op__in=[
+                    OrdenProduccion.EstatusOrdenProduccion.PENDIENTE,
+                    OrdenProduccion.EstatusOrdenProduccion.PREPARACION,
+                    OrdenProduccion.EstatusOrdenProduccion.BORDANDO,
+                    OrdenProduccion.EstatusOrdenProduccion.REVISION,
+                ],
+            )
+            .select_related("pedido", "sucursal")
+            .prefetch_related("orden_produccion_detalle__producto_variante__producto")
+            .order_by("-fecha_inicio", "-op_id")
+        )
+        if empresa:
+            op_qs = op_qs.filter(empresa=empresa)
+        if oc_q:
+            op_qs = op_qs.filter(
+                Q(folio_op__icontains=oc_q)
+                | Q(pedido__folio__icontains=oc_q)
+                | Q(orden_produccion_detalle__producto_variante__sku__icontains=oc_q)
+                | Q(orden_produccion_detalle__producto_variante__producto__nombre__icontains=oc_q)
+            ).distinct()
+
+        ordenes_produccion = []
+        for op in op_qs[:50]:
+            detalle = []
+            for op_detalle in op.orden_produccion_detalle.all():
+                producto_variante = op_detalle.producto_variante
+                producto = getattr(producto_variante, "producto", None)
+                cantidad = Decimal(str(op_detalle.cantidad or 0))
+                detalle.append(
+                    {
+                        "id": op_detalle.pk,
+                        "producto_id": getattr(producto, "pk", None),
+                        "producto_variante_id": getattr(producto_variante, "pk", None),
+                        "producto_nombre": (
+                            getattr(producto_variante, "nombre", None)
+                            or getattr(producto, "nombre", None)
+                        ),
+                        "cantidad_ordenada": str(cantidad),
+                        "cantidad_recibida": "0",
+                        "cantidad_pendiente": str(cantidad),
+                        "descripcion": op_detalle.observaciones,
+                    }
+                )
+
+            ordenes_produccion.append(
+                {
+                    "id": op.pk,
+                    "folio": op.folio_op,
+                    "estatus": op.estatus_op,
+                    "pedido_id": op.pedido_id,
+                    "sucursal_id": op.sucursal_id,
+                    "fecha_inicio": op.fecha_inicio,
+                    "cerrar_orden": op.cerrar_orden,
+                    "detalle": detalle,
+                }
+            )
+
         almacenes_qs = Almacen.objects.filter(estatus="ACTIVO")
         if empresa:
             almacenes_qs = almacenes_qs.filter(empresa=empresa)
@@ -790,7 +851,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 "ubicaciones": ubicaciones,
                 "series_recepcion": series,
             },
-            "busqueda": {"ordenes_compra": ordenes},
+            "busqueda": {
+                "ordenes_compra": ordenes,
+                "ordenes_produccion": ordenes_produccion,
+            },
         }
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding")

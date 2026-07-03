@@ -78,6 +78,7 @@ class OrdenProduccion(models.Model):
     fecha_fin = models.DateTimeField(null=True, blank=True)
     usuario_asignado = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE, null=True, blank=True)
     observaciones = models.TextField(blank=True, null=True)
+    cerrar_orden = models.BooleanField(default=False)
     activo = models.BooleanField(default=True)
 
     class Meta:

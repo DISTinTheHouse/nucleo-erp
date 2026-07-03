@@ -4,6 +4,7 @@ from django.db import models, transaction
 from rest_framework.exceptions import ValidationError
 
 from auditoria.models import AuditoriaEvento
+from catalogo.models import ProductoVariante
 from inventarios.models import Existencia, MovimientoInventario, MovimientoInventarioDetalle, TipoMovimiento
 from produccion.models import (
     ConsumoProduccion,
@@ -93,18 +94,20 @@ class OrdenProduccionService:
         for item in plan:
             producto = item["producto"]
             cantidad_requerida = item["cantidad"].quantize(QTY_PRECISION, rounding=ROUND_HALF_UP)
+            variante_ids = list(
+                ProductoVariante.objects.filter(producto_id=producto.pk).values_list("pk", flat=True)
+            )
+            producto_filter = models.Q(producto_id=producto.pk)
+            if variante_ids:
+                producto_filter |= models.Q(producto_variante_id__in=variante_ids)
 
             existencias = list(
                 Existencia.objects.select_for_update()
-                .select_related("almacen", "ubicacion", "producto_variante")
                 .filter(
                     almacen__empresa_id=empresa.pk,
                     almacen__sucursal_id=sucursal.pk,
                 )
-                .filter(
-                    models.Q(producto_id=producto.pk)
-                    | models.Q(producto_variante__producto_id=producto.pk)
-                )
+                .filter(producto_filter)
                 .order_by("-cantidad", "id")
             )
 

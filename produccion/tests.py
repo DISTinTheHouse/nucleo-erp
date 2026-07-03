@@ -119,10 +119,11 @@ class OrdenProduccionOnboardingTests(TestCase):
             "sucursal": self.sucursal.pk,
             "prioridad": 1,
             "observaciones": "OP de prueba",
+            "cerrar_orden": True,
             "orden_produccion_detalle": [
                 {
                     "producto_variante_id": self.variante.pk,
-                    "cantidad": "3.0000",
+                    "cantidad": "3.00",
                     "unidad": self.unidad.pk,
                     "observaciones": "",
                 }
@@ -133,6 +134,7 @@ class OrdenProduccionOnboardingTests(TestCase):
             "/api/v1/produccion/orden-produccion/onboarding/",
             payload,
             format="json",
+            secure=True,
         )
 
         self.assertEqual(response.status_code, 201, response.data)
@@ -144,6 +146,7 @@ class OrdenProduccionOnboardingTests(TestCase):
 
         op = OrdenProduccion.objects.get(pk=response.data["op_id"])
         self.assertEqual(op.orden_produccion_detalle.count(), 1)
+        self.assertTrue(op.cerrar_orden)
 
         self.existencia.refresh_from_db()
         self.assertEqual(str(self.existencia.cantidad), "4.0000")
@@ -160,7 +163,7 @@ class OrdenProduccionOnboardingTests(TestCase):
             "orden_produccion_detalle": [
                 {
                     "producto_variante_id": self.variante.pk,
-                    "cantidad": "6.0000",
+                    "cantidad": "6.00",
                     "unidad": self.unidad.pk,
                 }
             ],
@@ -170,6 +173,7 @@ class OrdenProduccionOnboardingTests(TestCase):
             "/api/v1/produccion/orden-produccion/onboarding/",
             payload,
             format="json",
+            secure=True,
         )
 
         self.assertEqual(response.status_code, 400)
