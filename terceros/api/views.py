@@ -7,6 +7,18 @@ import base64
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
+class ClienteViewSetMesaControl(viewsets.ModelViewSet):
+    queryset = Cliente.objects.filter(activo=True)
+    serializer_class = ClienteSerializer
+    http_method_names = ['get']
+
+    def get_queryset(self):
+        user = self.request.user
+        empresa = getattr(user, 'empresa', None)
+        if empresa is None: return Cliente.objects.none()
+        queryset = Cliente.objects.filter(empresa=empresa)
+        return queryset
+
 class ClienteViewSet(viewsets.ModelViewSet):
     queryset = Cliente.objects.filter(activo=True)
     serializer_class = ClienteSerializer

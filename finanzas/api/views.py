@@ -15,6 +15,20 @@ from finanzas.api.serializers import (
 from finanzas.services.factura_service import FacturaService
 from finanzas.utils.folios import generate_factura_folio
 from ventas.models import Pedido, PedidoDetalle
+from terceros.models import Cliente
+from terceros.api.serializers import ClienteSerializer
+
+class ClienteViewSetContabilidad(viewsets.ModelViewSet):
+    queryset = Cliente.objects.filter(activo=True)
+    serializer_class = ClienteSerializer
+    http_method_names = ['get']
+
+    def get_queryset(self):
+        user = self.request.user
+        empresa = getattr(user, 'empresa', None)
+        if empresa is None: return Cliente.objects.none()
+        queryset = Cliente.objects.filter(empresa=empresa)
+        return queryset
 
 class FacturaViewSet(viewsets.ModelViewSet):
     serializer_class = FacturaSerializer
