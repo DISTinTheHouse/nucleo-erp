@@ -2175,7 +2175,7 @@ class MesaControlViewSet(CotizacionViewSet):
             return Cotizacion.objects.none()
 
         empresa = getattr(user, "empresa", None)
-        qs = Cotizacion.objects.filter(estatus=2)  # Solo EN REVISION
+        qs = Cotizacion.objects.filter(estatus__in=[2, 5])  # EN REVISION o CAMBIOS SOLICITADOS
         if empresa:
             qs = qs.filter(empresa=empresa)
 
