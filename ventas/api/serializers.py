@@ -30,6 +30,9 @@ class CotizacionSerializer(serializers.ModelSerializer):
 
 class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
     estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)
+    tipo_pedido_label = serializers.CharField(
+        source="get_tipo_pedido_display", read_only=True
+    )
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     cliente_razon_social = serializers.CharField(source="cliente.razon_social", read_only=True)
     pedido_id = serializers.IntegerField(read_only=True)
@@ -88,6 +91,8 @@ class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
             "id",
             "estatus",
             "estatus_label",
+            "tipo_pedido",
+            "tipo_pedido_label",
             "cliente",
             "cliente_nombre",
             "cliente_razon_social",

@@ -27,6 +27,7 @@ from ventas.models import (
     PedidoDetalle,
     PedidoDetalleTalla,
     PedidoServicioExtra,
+    TIPO_PEDIDO_CHOICES,
 )
 
 from ventas.api.serializers import (
@@ -1049,9 +1050,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             {"value": r["codigo"], "label": f"{r['codigo']} - {r['descripcion']}"}
             for r in regimenes_fiscales
         ]
-        tipos_pedido = [
-            {"value": tp[0], "label": tp[1]} for tp in Pedido.CHOICES_TIPO_PEDIDO
-        ]
+        tipos_pedido = [{"value": tp[0], "label": tp[1]} for tp in TIPO_PEDIDO_CHOICES]
         return  {
                 "vendedor": {
                     "id": getattr(user, "pk", None),
