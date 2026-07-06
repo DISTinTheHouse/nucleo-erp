@@ -1,5 +1,6 @@
 from django.db import models
 from nucleo.models import StatusLifecycleModel
+from simple_history.models import HistoricalRecords
 
 class CuentaContable(models.Model):
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="cuentas_contables")
@@ -61,6 +62,8 @@ class Factura(StatusLifecycleModel):
     observaciones = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "facturas"

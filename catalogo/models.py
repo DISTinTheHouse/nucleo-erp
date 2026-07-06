@@ -1,8 +1,11 @@
 from django.db import models
 from nucleo.models import Empresa, UnidadMedida, Impuesto, SatClaveProdServ, SatClaveUnidad
+from simple_history.models import HistoricalRecords
 
 class TipoProducto(models.Model):
     codigo = models.CharField(max_length=50)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "tipo_producto"
@@ -21,6 +24,8 @@ class CategoriaProducto(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    history = HistoricalRecords()
+
     class Meta:
         db_table = "categorias_producto"
         verbose_name = "Categoria Producto"
@@ -35,6 +40,8 @@ class Color(models.Model):
     codigo_hex = models.CharField(max_length=7)
     activo = models.BooleanField(default=True)
 
+    history = HistoricalRecords()
+
     class Meta:
         db_table = "colores"
         verbose_name = "Color"
@@ -46,6 +53,8 @@ class Color(models.Model):
 class Talla(models.Model):
     nombre = models.CharField(max_length=50)
     activo = models.BooleanField(default=True)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "tallas"
@@ -74,6 +83,8 @@ class Producto(models.Model):
     cod_proscai = models.CharField(max_length=50, blank=True, default="")
     codigo = models.CharField(max_length=4, null=True, blank=True)
 
+    history = HistoricalRecords()
+
     class Meta:
         db_table = "productos"
         verbose_name = "Producto"
@@ -91,6 +102,8 @@ class ProductoVariante(models.Model):
     sku = models.CharField(max_length=50, unique=True)
     precio_base = models.DecimalField(max_digits=10, decimal_places=2)
     activo = models.BooleanField(default=True)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "variantes_producto"
@@ -114,6 +127,8 @@ class VarianteProductoProduccion(models.Model):
     producto_base = models.ForeignKey(Producto, on_delete=models.CASCADE, null=True, blank=True, related_name="variantes_produccion")
     color = models.ForeignKey(Color, on_delete=models.CASCADE, null=True, blank=True, related_name="variantes_produccion")
     talla = models.ForeignKey(Talla, on_delete=models.CASCADE, null=True, blank=True, related_name="variantes_produccion")
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "variantes_producto_produccion"

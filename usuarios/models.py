@@ -1,6 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser
-
+from simple_history.models import HistoricalRecords
 
 class Usuario(AbstractUser):
     class Estatus(models.TextChoices):
@@ -62,6 +62,8 @@ class Usuario(AbstractUser):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "usuarios"

@@ -3,6 +3,7 @@ from nucleo.models import Empresa, Sucursal
 from catalogo.models import Producto, ProductoVariante
 from ventas.models import Pedido, Entrega, Devolucion
 from nucleo.models import StatusLifecycleModel
+from simple_history.models import HistoricalRecords
 
 class TipoAlmacen(models.TextChoices):
     MATERIA_PRIMA = "MP", "Materia Prima"
@@ -117,6 +118,8 @@ class AjusteInventario(StatusLifecycleModel):
     usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE)
     motivo = models.CharField(max_length=100)
     observaciones = models.TextField(max_length=150, null=True, blank=True)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "ajustes_inventario"

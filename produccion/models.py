@@ -3,6 +3,7 @@ from nucleo.models import Empresa, Sucursal, StatusLifecycleModel
 from catalogo.models import Producto, ProductoVariante, Talla, Color, UnidadMedida, VarianteProductoProduccion
 from ventas.models import Pedido, PedidoDetalle
 from inventarios.models import Almacen, Ubicacion
+from simple_history.models import HistoricalRecords
 
 class ListaMaterialBom(models.Model):
     bom_id = models.AutoField(primary_key=True)
@@ -81,6 +82,8 @@ class OrdenProduccion(models.Model):
     cerrar_orden = models.BooleanField(default=False)
     activo = models.BooleanField(default=True)
 
+    history = HistoricalRecords()
+
     class Meta:
         db_table = 'ordenes_produccion'
         verbose_name = 'Orden Produccion'
@@ -121,7 +124,6 @@ class ConsumoProduccion(models.Model):
     def __str__(self):
         return str(self.consumo_produccion_id)
 
-
 class ConsumoProduccionDetalle(models.Model):
     consumo_detalle_id = models.AutoField(primary_key=True)
     consumo_produccion = models.ForeignKey(
@@ -145,6 +147,8 @@ class ProductoTerminadoEntradas(models.Model):
     op = models.ForeignKey(OrdenProduccion, on_delete=models.CASCADE)
     almacen = models.ForeignKey(Almacen, on_delete=models.CASCADE)
     ubicacion = models.ForeignKey(Ubicacion, on_delete=models.CASCADE)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = 'producto_terminado_entradas'
