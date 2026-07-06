@@ -1090,6 +1090,8 @@ Estas órdenes nacen en estado **PENDIENTE** y quedan vinculadas al pedido origi
     - detalle (productos/tallas) + precios snapshot (`precio_lista` / `precio_unitario`)
     - servicios por talla (bordado/serigrafía + configs)
     - servicios extras ilimitados (`servicios_extras`)
+    - se descuenta inventario de las existencias de la misma empresa/sucursal según los productos y variantes del pedido
+    - se registra `MovimientoInventario` tipo `SALIDA` ligado al `pedido` y su `AuditoriaEvento`
     - se marca la cotización como `Autorizada (3)` y se guarda un `aprobado_snapshot` del estado aprobado.
 - Rechazar cotización:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar/`
@@ -1097,6 +1099,10 @@ Estas órdenes nacen en estado **PENDIENTE** y quedan vinculadas al pedido origi
 - Aceptar cambios:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/aceptar-cambios/`
   - Efecto: se **aplican** los cambios de la cotización al `Pedido` ya existente (detalle + `servicios_extras`) y la cotización vuelve a `Autorizada (3)` con `aprobado_snapshot` actualizado.
+  - Si cambian cantidades:
+    - el backend descuenta inventario adicional cuando el nuevo pedido aumenta cantidades
+    - el backend regresa inventario cuando el nuevo pedido reduce cantidades
+    - cada ajuste genera su `MovimientoInventario` (`SALIDA` o `ENTRADA`) y auditoría correspondiente
 - Rechazar cambios:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar-cambios/`
   - Efecto: se **revierte** la cotización al `aprobado_snapshot` (incluye detalle y `servicios_extras`) y vuelve a `Autorizada (3)`; el `Pedido` no se modifica.

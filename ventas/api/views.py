@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction
 from django.db.models import OuterRef, Prefetch, Q, Subquery, Sum
 from django.db.models.functions import Coalesce
@@ -10,6 +11,13 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from django.conf import settings
 
+from auditoria.models import AuditoriaEvento
+from inventarios.models import (
+    Existencia,
+    MovimientoInventario,
+    MovimientoInventarioDetalle,
+    TipoMovimiento,
+)
 from ventas.models import (
     Cotizacion,
     CotizacionDetalle,
@@ -48,6 +56,7 @@ from produccion.models import (
 from ventas.utils.helpers import _save_cotizacion_detalle, _save_servicios_extras
 
 logger = logging.getLogger(__name__)
+QTY_PRECISION = Decimal("0.0001")
 
 
 class CotizacionViewSet(viewsets.ModelViewSet):
@@ -280,6 +289,534 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 )
             ),
         }
+
+    def _to_decimal_inventory(self, value):
+        return Decimal(str(value or 0)).quantize(
+            QTY_PRECISION, rounding=ROUND_HALF_UP
+        )
+
+    def _build_inventory_plan_from_rows(self, rows, producto_attr, variante_attr, cantidad_attr):
+        plan = {}
+        for row in rows:
+            producto = getattr(row, producto_attr)
+            variante = getattr(row, variante_attr)
+            cantidad = self._to_decimal_inventory(getattr(row, cantidad_attr))
+            key = (
+                "variante",
+                variante.pk,
+            ) if variante else (
+                "producto",
+                producto.pk,
+            )
+
+            if key not in plan:
+                plan[key] = {
+                    "producto": producto,
+                    "producto_id": producto.pk,
+                    "producto_variante_id": getattr(variante, "pk", None),
+                    "cantidad": Decimal("0.0000"),
+                }
+            plan[key]["cantidad"] += cantidad
+
+        return list(plan.values())
+
+    def _build_pedido_inventory_plan(self, pedido):
+        detalles_talla = (
+            PedidoDetalleTalla.objects.filter(
+                pedido_detalle__pedido=pedido,
+                cantidad__gt=0,
+            )
+            .select_related("pedido_detalle__producto", "variante")
+            .order_by("id")
+        )
+        plan = {}
+        for row in detalles_talla:
+            producto = row.pedido_detalle.producto
+            variante = row.variante
+            cantidad = self._to_decimal_inventory(row.cantidad)
+            key = (
+                "variante",
+                variante.pk,
+            ) if variante else (
+                "producto",
+                producto.pk,
+            )
+
+            if key not in plan:
+                plan[key] = {
+                    "producto": producto,
+                    "producto_id": producto.pk,
+                    "producto_variante_id": getattr(variante, "pk", None),
+                    "cantidad": Decimal("0.0000"),
+                }
+            plan[key]["cantidad"] += cantidad
+
+        return list(plan.values())
+
+    def _build_cotizacion_inventory_plan(self, cotizacion):
+        detalles_talla = (
+            CotizacionDetalleTalla.objects.filter(
+                cotizacion_detalle__cotizacion=cotizacion,
+                cantidad__gt=0,
+            )
+            .select_related("cotizacion_detalle__producto", "variante")
+            .order_by("id")
+        )
+        plan = {}
+        for row in detalles_talla:
+            producto = row.cotizacion_detalle.producto
+            variante = row.variante
+            cantidad = self._to_decimal_inventory(row.cantidad)
+            key = (
+                "variante",
+                variante.pk,
+            ) if variante else (
+                "producto",
+                producto.pk,
+            )
+
+            if key not in plan:
+                plan[key] = {
+                    "producto": producto,
+                    "producto_id": producto.pk,
+                    "producto_variante_id": getattr(variante, "pk", None),
+                    "cantidad": Decimal("0.0000"),
+                }
+            plan[key]["cantidad"] += cantidad
+
+        return list(plan.values())
+
+    def _compute_inventory_delta(self, current_plan, target_plan):
+        current_map = {
+            (item["producto_id"], item["producto_variante_id"]): item
+            for item in current_plan
+        }
+        target_map = {
+            (item["producto_id"], item["producto_variante_id"]): item
+            for item in target_plan
+        }
+        keys = set(current_map.keys()) | set(target_map.keys())
+
+        salidas = []
+        entradas = []
+        for key in keys:
+            current_item = current_map.get(key)
+            target_item = target_map.get(key)
+            producto = (
+                (target_item or current_item)["producto"]
+            )
+            delta = self._to_decimal_inventory(
+                (target_item or {}).get("cantidad", 0)
+            ) - self._to_decimal_inventory(
+                (current_item or {}).get("cantidad", 0)
+            )
+            if delta > 0:
+                salidas.append(
+                    {
+                        "producto": producto,
+                        "producto_id": key[0],
+                        "producto_variante_id": key[1],
+                        "cantidad": delta,
+                    }
+                )
+            elif delta < 0:
+                entradas.append(
+                    {
+                        "producto": producto,
+                        "producto_id": key[0],
+                        "producto_variante_id": key[1],
+                        "cantidad": abs(delta),
+                    }
+                )
+        return salidas, entradas
+
+    def _update_existencia_quantity(self, existencia, nueva_cantidad):
+        nueva_cantidad = self._to_decimal_inventory(nueva_cantidad)
+        existencia.cantidad = nueva_cantidad
+        existencia.stock = max(int(nueva_cantidad), 0)
+        existencia.save(update_fields=["cantidad", "stock", "fecha_actualizacion"])
+
+    def _get_request_meta(self, request=None):
+        if request is None:
+            return None, None
+        ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get(
+            "REMOTE_ADDR"
+        )
+        user_agent = request.META.get("HTTP_USER_AGENT")
+        return ip, user_agent
+
+    def _get_pedido_inventory_location_balance(self, pedido, producto_id, producto_variante_id):
+        balance = {}
+        eventos = AuditoriaEvento.objects.filter(
+            modulo="inventarios",
+            tabla="existencias",
+            id_registro=str(pedido.pk),
+        ).order_by("id_evento")
+
+        for evento in eventos:
+            payload = evento.despues_json or {}
+            for item in payload.get("items", []):
+                if item.get("producto_id") != producto_id:
+                    continue
+                if item.get("producto_variante_id") != producto_variante_id:
+                    continue
+                key = (
+                    item.get("almacen_id"),
+                    item.get("ubicacion_id"),
+                )
+                balance.setdefault(key, Decimal("0.0000"))
+                balance[key] += -self._to_decimal_inventory(item.get("delta", 0))
+
+        return [
+            {
+                "almacen_id": almacen_id,
+                "ubicacion_id": ubicacion_id,
+                "cantidad_disponible_retorno": cantidad,
+            }
+            for (almacen_id, ubicacion_id), cantidad in sorted(
+                balance.items(),
+                key=lambda entry: (-entry[1], entry[0][0] or 0, entry[0][1] or 0),
+            )
+            if cantidad > 0
+        ]
+
+
+    def _discount_existencias_pedido(self, plan, empresa, sucursal):
+        consumos = []
+
+        for item in plan:
+            producto = item["producto"]
+            producto_variante_id = item["producto_variante_id"]
+            cantidad_requerida = item["cantidad"].quantize(
+                QTY_PRECISION, rounding=ROUND_HALF_UP
+            )
+
+            existencias = (
+                Existencia.objects.select_for_update()
+                .filter(
+                    almacen__empresa_id=empresa.pk,
+                    almacen__sucursal_id=sucursal.pk,
+                )
+                .order_by("-cantidad", "id")
+            )
+            if producto_variante_id:
+                existencias = existencias.filter(
+                    producto_variante_id=producto_variante_id
+                )
+            else:
+                existencias = existencias.filter(
+                    producto_id=producto.pk,
+                    producto_variante__isnull=True,
+                )
+            existencias = list(existencias)
+
+            disponible = sum(
+                (
+                    self._to_decimal_inventory(existencia.cantidad)
+                    for existencia in existencias
+                ),
+                Decimal("0.0000"),
+            )
+            if disponible < cantidad_requerida:
+                raise ValidationError(
+                    {
+                        "inventario": (
+                            f"Existencia insuficiente para {producto.nombre}. "
+                            f"Requerido: {cantidad_requerida}, disponible: {disponible}."
+                        )
+                    }
+                )
+
+            restante = cantidad_requerida
+            for existencia in existencias:
+                if restante <= 0:
+                    break
+
+                cantidad_actual = self._to_decimal_inventory(existencia.cantidad)
+                if cantidad_actual <= 0:
+                    continue
+
+                cantidad_consumida = min(cantidad_actual, restante).quantize(
+                    QTY_PRECISION, rounding=ROUND_HALF_UP
+                )
+                cantidad_nueva = (cantidad_actual - cantidad_consumida).quantize(
+                    QTY_PRECISION, rounding=ROUND_HALF_UP
+                )
+
+                self._update_existencia_quantity(existencia, cantidad_nueva)
+
+                consumos.append(
+                    {
+                        "producto": producto,
+                        "producto_id": producto.pk,
+                        "producto_variante_id": existencia.producto_variante_id,
+                        "existencia_id": existencia.pk,
+                        "almacen_id": existencia.almacen_id,
+                        "ubicacion_id": existencia.ubicacion_id,
+                        "cantidad_before": cantidad_actual,
+                        "cantidad_after": cantidad_nueva,
+                        "cantidad_movimiento": cantidad_consumida,
+                        "cantidad_consumida": cantidad_consumida,
+                        "delta": -cantidad_consumida,
+                    }
+                )
+                restante -= cantidad_consumida
+
+        return consumos
+
+    def _restore_existencias_pedido(self, pedido, plan):
+        entradas = []
+
+        for item in plan:
+            producto = item["producto"]
+            producto_id = item["producto_id"]
+            producto_variante_id = item["producto_variante_id"]
+            restante = self._to_decimal_inventory(item["cantidad"])
+            targets = self._get_pedido_inventory_location_balance(
+                pedido=pedido,
+                producto_id=producto_id,
+                producto_variante_id=producto_variante_id,
+            )
+
+            if not targets:
+                raise ValidationError(
+                    {
+                        "inventario": (
+                            f"No se pudo determinar la ubicación para devolver existencias de {producto.nombre}."
+                        )
+                    }
+                )
+
+            for target in targets:
+                if restante <= 0:
+                    break
+
+                capacidad = self._to_decimal_inventory(
+                    target["cantidad_disponible_retorno"]
+                )
+                if capacidad <= 0:
+                    continue
+
+                cantidad_retorno = min(capacidad, restante).quantize(
+                    QTY_PRECISION, rounding=ROUND_HALF_UP
+                )
+                existencia = (
+                    Existencia.objects.select_for_update()
+                    .filter(
+                        producto_id=producto_id,
+                        producto_variante_id=producto_variante_id,
+                        almacen_id=target["almacen_id"],
+                        ubicacion_id=target["ubicacion_id"],
+                    )
+                    .first()
+                )
+                if existencia is None:
+                    existencia = Existencia.objects.create(
+                        producto_id=producto_id,
+                        producto_variante_id=producto_variante_id,
+                        almacen_id=target["almacen_id"],
+                        ubicacion_id=target["ubicacion_id"],
+                        cantidad=Decimal("0.0000"),
+                        stock=0,
+                    )
+
+                cantidad_actual = self._to_decimal_inventory(existencia.cantidad)
+                cantidad_nueva = (cantidad_actual + cantidad_retorno).quantize(
+                    QTY_PRECISION, rounding=ROUND_HALF_UP
+                )
+                self._update_existencia_quantity(existencia, cantidad_nueva)
+
+                entradas.append(
+                    {
+                        "producto": producto,
+                        "producto_id": producto_id,
+                        "producto_variante_id": producto_variante_id,
+                        "existencia_id": existencia.pk,
+                        "almacen_id": existencia.almacen_id,
+                        "ubicacion_id": existencia.ubicacion_id,
+                        "cantidad_before": cantidad_actual,
+                        "cantidad_after": cantidad_nueva,
+                        "cantidad_movimiento": cantidad_retorno,
+                        "delta": cantidad_retorno,
+                    }
+                )
+                restante -= cantidad_retorno
+
+            if restante > 0:
+                raise ValidationError(
+                    {
+                        "inventario": (
+                            f"No se pudo devolver completamente el inventario de {producto.nombre}. "
+                            f"Pendiente por regresar: {restante}."
+                        )
+                    }
+                )
+
+        return entradas
+
+    def _registrar_movimiento_inventario_pedido(
+        self,
+        pedido,
+        user,
+        items,
+        tipo_movimiento,
+        observaciones,
+    ):
+        movimiento = MovimientoInventario.objects.create(
+            empresa=pedido.empresa,
+            sucursal=pedido.sucursal,
+            pedido=pedido,
+            entrega_id=None,
+            devolucion_id=None,
+            ajuste_inventario_id=None,
+            tipo_movimiento=tipo_movimiento,
+            usuario=user,
+            observaciones=observaciones,
+            recepcion_id=None,
+            transferencia_id=None,
+            op_id=None,
+        )
+
+        MovimientoInventarioDetalle.objects.bulk_create(
+            [
+                MovimientoInventarioDetalle(
+                    movimiento_inventario=movimiento,
+                    producto_id=item["producto_id"],
+                    ubicacion_origen_id=item["ubicacion_id"],
+                    ubicacion_destino_id=None,
+                    lote_id=None,
+                    serie_id=None,
+                    cantidad=item["cantidad_movimiento"],
+                    costo_unitario=Decimal("0"),
+                )
+                for item in items
+            ]
+        )
+        return movimiento
+
+    def _registrar_auditoria_inventario_pedido(
+        self,
+        pedido,
+        user,
+        items,
+        accion,
+        request=None,
+    ):
+        items = [
+            {
+                "producto_id": item["producto_id"],
+                "producto_variante_id": item["producto_variante_id"],
+                "almacen_id": item["almacen_id"],
+                "ubicacion_id": item["ubicacion_id"],
+                "cantidad_before": str(item["cantidad_before"]),
+                "cantidad_after": str(item["cantidad_after"]),
+                "delta": str(item["delta"]),
+            }
+            for item in items
+        ]
+
+        ip, user_agent = self._get_request_meta(request)
+
+        return AuditoriaEvento.objects.create(
+            empresa=pedido.empresa,
+            usuario=user if getattr(user, "pk", None) else None,
+            modulo="inventarios",
+            accion=accion,
+            tabla="existencias",
+            id_registro=str(pedido.pk),
+            antes_json={"items": items, "pedido_id": pedido.pk, "folio": pedido.folio},
+            despues_json={
+                "empresa_id": pedido.empresa_id,
+                "sucursal_id": pedido.sucursal_id,
+                "pedido_id": pedido.pk,
+                "folio": pedido.folio,
+                "items": items,
+            },
+            ip=ip,
+            user_agent=user_agent,
+        )
+
+    def _descontar_existencias_pedido(self, pedido, user, request=None):
+        plan = self._build_pedido_inventory_plan(pedido)
+        if not plan:
+            return None, None
+
+        consumos = self._discount_existencias_pedido(
+            plan=plan,
+            empresa=pedido.empresa,
+            sucursal=pedido.sucursal,
+        )
+        movimiento = self._registrar_movimiento_inventario_pedido(
+            pedido=pedido,
+            user=user,
+            items=consumos,
+            tipo_movimiento=TipoMovimiento.SALIDA,
+            observaciones=(
+                f"Descuento automático por autorización de pedido {pedido.folio or pedido.pk}"
+            ),
+        )
+        auditoria = self._registrar_auditoria_inventario_pedido(
+            pedido=pedido,
+            user=user,
+            items=consumos,
+            accion="SALIDA",
+            request=request,
+        )
+        return movimiento, auditoria
+
+    def _ajustar_existencias_cambios_pedido(self, cotizacion, pedido, user, request=None):
+        plan_actual = self._build_pedido_inventory_plan(pedido)
+        plan_objetivo = self._build_cotizacion_inventory_plan(cotizacion)
+        salidas, entradas = self._compute_inventory_delta(plan_actual, plan_objetivo)
+
+        resultados = {"salida": None, "entrada": None}
+        if entradas:
+            items_entrada = self._restore_existencias_pedido(pedido=pedido, plan=entradas)
+            resultados["entrada"] = (
+                self._registrar_movimiento_inventario_pedido(
+                    pedido=pedido,
+                    user=user,
+                    items=items_entrada,
+                    tipo_movimiento=TipoMovimiento.ENTRADA,
+                    observaciones=(
+                        f"Reintegro automático por cambios aceptados en pedido {pedido.folio or pedido.pk}"
+                    ),
+                ),
+                self._registrar_auditoria_inventario_pedido(
+                    pedido=pedido,
+                    user=user,
+                    items=items_entrada,
+                    accion="ENTRADA",
+                    request=request,
+                ),
+            )
+
+        if salidas:
+            items_salida = self._discount_existencias_pedido(
+                plan=salidas,
+                empresa=pedido.empresa,
+                sucursal=pedido.sucursal,
+            )
+            resultados["salida"] = (
+                self._registrar_movimiento_inventario_pedido(
+                    pedido=pedido,
+                    user=user,
+                    items=items_salida,
+                    tipo_movimiento=TipoMovimiento.SALIDA,
+                    observaciones=(
+                        f"Descuento automático por cambios aceptados en pedido {pedido.folio or pedido.pk}"
+                    ),
+                ),
+                self._registrar_auditoria_inventario_pedido(
+                    pedido=pedido,
+                    user=user,
+                    items=items_salida,
+                    accion="SALIDA",
+                    request=request,
+                ),
+            )
+
+        return resultados
 
     def handle_get_onboarding(self, request):
         from catalogo.models import Producto, Color
@@ -790,7 +1327,6 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     corte_manga_config=t.corte_manga_config,
                     lleva_cambio_talla=t.lleva_cambio_talla,
                     cambio_talla_config=t.cambio_talla_config,
-                    sku=getattr(t, "sku", None),
                     variante=t.variante,
                 )
                 
@@ -1171,7 +1707,6 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     corte_manga_config=t.corte_manga_config,
                     lleva_cambio_talla=t.lleva_cambio_talla,
                     cambio_talla_config=t.cambio_talla_config,
-                    sku=getattr(t, "sku", None),
                     variante=t.variante,
                 )
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by(
@@ -1251,6 +1786,11 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 raise ValidationError({"cotizacion": "La cotización ya tiene un pedido generado."})
 
             pedido = self._copiar_cotizacion_a_pedido(cotizacion, empresa)
+            self._descontar_existencias_pedido(
+                pedido=pedido,
+                user=user,
+                request=request,
+            )
             cotizacion.estatus = 3
             cotizacion.autorizada_at = timezone.now()
             cotizacion.cambios_solicitados_at = None
@@ -1318,6 +1858,12 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 raise ValidationError(
                     {"cotizacion": "No existe pedido para aplicar cambios."}
                 )
+            self._ajustar_existencias_cambios_pedido(
+                cotizacion=cotizacion,
+                pedido=pedido,
+                user=user,
+                request=request,
+            )
             self._aplicar_cotizacion_a_pedido(cotizacion, pedido)
             cotizacion.estatus = 3
             cotizacion.cambios_solicitados_at = None
