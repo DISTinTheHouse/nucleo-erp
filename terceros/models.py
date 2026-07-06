@@ -2,6 +2,7 @@ from django.db import models
 from django.conf import settings
 from nucleo.models import StatusLifecycleModel
 from nucleo.models import Empresa, SatRegimenFiscal, SatUsoCfdi, SatFormaPago, SatMetodoPago, Moneda, Sucursal
+from simple_history.models import HistoricalRecords
 
 class Cliente(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="clientes", null=True, blank=True)
@@ -34,6 +35,8 @@ class Cliente(StatusLifecycleModel):
     celular = models.CharField(max_length=20, blank=True, null=True)
     web = models.URLField(max_length=255, blank=True, null=True)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="clientes", null=True, blank=True)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "clientes"
@@ -97,6 +100,7 @@ class Proveedor(StatusLifecycleModel):
     saldo_actual = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     saldo_acumulado = models.DecimalField(max_digits=15, decimal_places=2, default=0)
 
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "proveedores"
@@ -121,6 +125,8 @@ class DireccionCliente(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="direcciones_clientes")
     is_default = models.BooleanField(default=False)
     activo = models.BooleanField(default=True, blank=True)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "direcciones_cliente"

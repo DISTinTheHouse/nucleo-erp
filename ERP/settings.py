@@ -74,6 +74,7 @@ INSTALLED_APPS = [
     'auth_kit',
     'auth_kit.mfa',
     'drf_spectacular',
+    'simple_history'
 ]
 
 AUTH_KIT = {
@@ -104,6 +105,7 @@ MIDDLEWARE = [
     'nucleo.middleware.APILoggingMiddleware',
     'nucleo.middleware.NoCacheMiddleware',
     'allauth.account.middleware.AccountMiddleware',
+    'simple_history.middleware.HistoryRequestMiddleware',
 ]
 
 

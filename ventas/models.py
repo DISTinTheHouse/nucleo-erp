@@ -3,6 +3,7 @@ from django.conf import settings
 from nucleo.models import Empresa, Sucursal, Moneda, SerieFolio, StatusLifecycleModel, SatRegimenFiscal
 from terceros.models import Cliente, DireccionCliente
 from catalogo.models import Producto, Talla, Color, ProductoVariante
+from simple_history.models import HistoricalRecords
 
 class Prospecto(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="prospectos")
@@ -122,6 +123,8 @@ class Cotizacion(models.Model):
     ieps = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     iva = models.IntegerField(default=16)
     gran_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "cotizaciones"
@@ -309,6 +312,8 @@ class Pedido(StatusLifecycleModel):
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
     fecha_confirmacion = models.DateTimeField(null=True, blank=True)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "pedidos"

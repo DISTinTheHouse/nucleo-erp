@@ -8,10 +8,15 @@ from ventas.models import Pedido
 from inventarios.models import Almacen, Ubicacion, Lote, Serie
 from produccion.models import OrdenProduccion, OrdenProduccionDetalle
 
+from simple_history.models import HistoricalRecords
+
+
 class Requisicion(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
     departamento = models.ForeignKey(Departamento, on_delete=models.CASCADE)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = 'requisiciones'
@@ -24,6 +29,8 @@ class Requisicion(models.Model):
 class RequisicionDetalle(models.Model):
     requisicion = models.ForeignKey(Requisicion, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = 'requisicion_detalle'
@@ -38,6 +45,8 @@ class CotizacionProveedor(models.Model):
     requisicion = models.ForeignKey(Requisicion, on_delete=models.CASCADE)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE)
 
+    history = HistoricalRecords()
+
     class Meta:
         db_table = 'cotizaciones_proveedor'
         verbose_name = 'Cotización Proveedor'
@@ -50,6 +59,8 @@ class CotizacionProveedorDetalle(models.Model):
     cotizacion_proveedor = models.ForeignKey(CotizacionProveedor, on_delete=models.CASCADE)
     requisicion_detalle = models.ForeignKey(RequisicionDetalle, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = 'cotizacion_proveedor_detalle'
@@ -65,6 +76,8 @@ class SolicitudCompra(models.Model):
     departamento = models.ForeignKey(Departamento, on_delete=models.CASCADE)
     requisicion = models.ForeignKey(Requisicion, on_delete=models.CASCADE)
 
+    history = HistoricalRecords()
+
     class Meta:
         db_table = 'solicitudes_compra'
         verbose_name = 'Solicitud Compra'
@@ -77,6 +90,8 @@ class SolicitudCompraDetalle(models.Model):
     solicitud_compra = models.ForeignKey(SolicitudCompra, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
     requisicion_detalle = models.ForeignKey(RequisicionDetalle, on_delete=models.CASCADE)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = 'solicitud_compra_detalle'
@@ -136,6 +151,8 @@ class OrdenCompra(StatusLifecycleModel):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    history = HistoricalRecords()
+
     class Meta:
         db_table = 'ordenes_compra'
         verbose_name = 'Orden Compra'
@@ -156,6 +173,8 @@ class OrdenCompraDetalle(models.Model):
     importe = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE, related_name='ordenes_compra_detalle')
     piezas = models.IntegerField(default=0)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = 'orden_compra_detalle'
@@ -206,6 +225,8 @@ class Recepcion(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    history = HistoricalRecords()
+
     class Meta:
         db_table = 'recepciones'
         verbose_name = 'Recepcion'
@@ -224,6 +245,8 @@ class RecepcionDetalle(models.Model):
     lote = models.ForeignKey(Lote, on_delete=models.CASCADE, null=True, blank=True)
     serie = models.ForeignKey(Serie, on_delete=models.CASCADE, null=True, blank=True)
     cantidad_recibida = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = 'recepcion_detalle'

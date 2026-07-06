@@ -1,4 +1,5 @@
 from django.db import models
+from simple_history.models import HistoricalRecords
 
 class Picking(models.Model):
     pedido = models.ForeignKey('ventas.Pedido', on_delete=models.CASCADE, related_name='pickings')
@@ -96,6 +97,8 @@ class ConteoCiclicoDetalle(models.Model):
 class Transferencia(models.Model):
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name='transferencias')
     sucursal= models.ForeignKey('nucleo.Sucursal', on_delete=models.CASCADE, related_name='transferencias')
+
+    history = HistoricalRecords()
 
     class Meta:
         db_table = 'transferencias'
