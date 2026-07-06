@@ -5,6 +5,12 @@ from terceros.models import Cliente, DireccionCliente
 from catalogo.models import Producto, Talla, Color, ProductoVariante
 from simple_history.models import HistoricalRecords
 
+TIPO_PEDIDO_CHOICES = (
+    (1, "PEDIDO DE VENTA"),
+    (2, "MUESTRA"),
+    (3, "PEDIDO DE ERROR"),
+)
+
 class Prospecto(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="prospectos")
     
@@ -57,6 +63,7 @@ class Cotizacion(models.Model):
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="cotizacion", null=True, blank=True)
     oportunidad = models.ForeignKey(Oportunidad, on_delete=models.CASCADE, related_name="cotizacion", null=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="cotizacion", null=True, blank=True)
+    tipo_pedido = models.SmallIntegerField(default=1, choices=TIPO_PEDIDO_CHOICES)
     estatus = models.SmallIntegerField(default=1, choices=CHOICES_ESTATUS, db_index=True)
     autorizada_at = models.DateTimeField(null=True, blank=True)
     cambios_solicitados_at = models.DateTimeField(null=True, blank=True)
@@ -221,12 +228,6 @@ class Pedido(StatusLifecycleModel):
         (5, "CANCELADO"),
     )
 
-    CHOICES_TIPO_PEDIDO = (
-        (1, "PEDIDO DE VENTA"),
-        (2, "MUESTRA"),
-        (3, "PEDIDO DE ERROR"),
-    )
-        
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="pedidos")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="pedidos")
     serie_folio = models.ForeignKey(SerieFolio, on_delete=models.PROTECT, related_name="pedidos", null=True, blank=True)
@@ -235,7 +236,7 @@ class Pedido(StatusLifecycleModel):
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="pedidos")
     cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="pedidos", null=True, blank=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="pedidos")
-    tipo_pedido = models.SmallIntegerField(default=1, choices=CHOICES_TIPO_PEDIDO)
+    tipo_pedido = models.SmallIntegerField(default=1, choices=TIPO_PEDIDO_CHOICES)
     estatus = models.SmallIntegerField(default=1, choices=CHOICES_ESTATUS)
     # Origen
     recompra = models.BooleanField(default=False)

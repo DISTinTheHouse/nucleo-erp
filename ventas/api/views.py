@@ -445,6 +445,51 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         user_agent = request.META.get("HTTP_USER_AGENT")
         return ip, user_agent
 
+    def _get_existencias_queryset(
+        self,
+        empresa,
+        sucursal,
+        producto_id,
+        producto_variante_id=None,
+        for_update=False,
+    ):
+        queryset = Existencia.objects.filter(
+            almacen__empresa_id=empresa.pk,
+            almacen__sucursal_id=sucursal.pk,
+        )
+        if for_update:
+            queryset = queryset.select_for_update()
+        if producto_variante_id:
+            return queryset.filter(producto_variante_id=producto_variante_id)
+        return queryset.filter(
+            producto_id=producto_id,
+            producto_variante__isnull=True,
+        )
+
+    def _get_total_disponible(
+        self,
+        empresa,
+        sucursal,
+        producto_id,
+        producto_variante_id=None,
+    ):
+        total = (
+            self._get_existencias_queryset(
+                empresa=empresa,
+                sucursal=sucursal,
+                producto_id=producto_id,
+                producto_variante_id=producto_variante_id,
+            ).aggregate(total=Sum("cantidad"))["total"]
+            or Decimal("0.0000")
+        )
+        return self._to_decimal_inventory(total)
+
+    def _serialize_inventory_quantity(self, value):
+        value = self._to_decimal_inventory(value)
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+
     def _get_pedido_inventory_location_balance(self, pedido, producto_id, producto_variante_id):
         balance = {}
         eventos = AuditoriaEvento.objects.filter(
@@ -492,22 +537,15 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             )
 
             existencias = (
-                Existencia.objects.select_for_update()
-                .filter(
-                    almacen__empresa_id=empresa.pk,
-                    almacen__sucursal_id=sucursal.pk,
+                self._get_existencias_queryset(
+                    empresa=empresa,
+                    sucursal=sucursal,
+                    producto_id=producto.pk,
+                    producto_variante_id=producto_variante_id,
+                    for_update=True,
                 )
                 .order_by("-cantidad", "id")
             )
-            if producto_variante_id:
-                existencias = existencias.filter(
-                    producto_variante_id=producto_variante_id
-                )
-            else:
-                existencias = existencias.filter(
-                    producto_id=producto.pk,
-                    producto_variante__isnull=True,
-                )
             existencias = list(existencias)
 
             disponible = sum(
@@ -1233,7 +1271,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             cliente=cotizacion.cliente,
             cotizacion=cotizacion,
             moneda=cotizacion.moneda,
-            tipo_pedido=1,
+            tipo_pedido=cotizacion.tipo_pedido,
             estatus=3,
             recompra=cotizacion.recompra,
             chat_online=cotizacion.chat_online,
@@ -1616,6 +1654,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         pedido.sucursal = cotizacion.sucursal
         pedido.cliente = cotizacion.cliente
         pedido.moneda = cotizacion.moneda
+        pedido.tipo_pedido = cotizacion.tipo_pedido
         pedido.recompra = cotizacion.recompra
         pedido.chat_online = cotizacion.chat_online
         pedido.pedido_online = cotizacion.pedido_online
@@ -2163,8 +2202,6 @@ class MesaControlViewSet(CotizacionViewSet):
         Consulta el stock actual de cada producto/talla de la cotización.
         """
         cotizacion = self.get_object()
-        from inventarios.models import Existencia
-        from catalogo.models import ProductoVariante
 
         resultados = []
         detalles = CotizacionDetalle.objects.filter(
@@ -2178,24 +2215,21 @@ class MesaControlViewSet(CotizacionViewSet):
                 "tallas": [],
             }
             for ct in det.tallas.all():
-                # Usar el vínculo directo a la variante para obtener stock
-                variante = ct.variante
-
-                stock_total = 0
-                if variante:
-                    stock_total = (
-                        Existencia.objects.filter(producto_variante=variante).aggregate(
-                            total=Sum("stock")
-                        )["total"]
-                        or 0
-                    )
+                stock_total = self._get_total_disponible(
+                    empresa=cotizacion.empresa,
+                    sucursal=cotizacion.sucursal,
+                    producto_id=det.producto_id,
+                    producto_variante_id=ct.variante_id,
+                )
+                cantidad_pedida = self._to_decimal_inventory(ct.cantidad)
+                diferencia = stock_total - cantidad_pedida
 
                 item["tallas"].append(
                     {
                         "talla": ct.talla.nombre,
                         "cantidad_pedida": ct.cantidad,
-                        "stock_actual": stock_total,
-                        "diferencia": stock_total - ct.cantidad,
+                        "stock_actual": self._serialize_inventory_quantity(stock_total),
+                        "diferencia": self._serialize_inventory_quantity(diferencia),
                     }
                 )
             resultados.append(item)

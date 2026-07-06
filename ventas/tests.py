@@ -96,6 +96,7 @@ class CotizacionAutorizarInventarioTests(TestCase):
             sucursal=self.sucursal,
             cliente=self.cliente,
             moneda=self.moneda,
+            tipo_pedido=1,
             estatus=2,
             persona_pagos="Tesoreria",
             correo_facturas="facturas@example.com",
@@ -158,6 +159,14 @@ class CotizacionAutorizarInventarioTests(TestCase):
         self.assertEqual(auditoria.empresa_id, self.empresa.pk)
         self.assertEqual(auditoria.despues_json["pedido_id"], pedido.pk)
         self.assertEqual(auditoria.despues_json["items"][0]["producto_variante_id"], self.variante.pk)
+
+    def test_autorizar_copia_tipo_pedido_desde_cotizacion(self):
+        self.cotizacion.tipo_pedido = 2
+        self.cotizacion.save(update_fields=["tipo_pedido", "updated_at"])
+
+        pedido = self._autorizar_cotizacion()
+
+        self.assertEqual(pedido.tipo_pedido, 2)
 
     def test_aceptar_cambios_incrementa_salida_por_delta(self):
         pedido = self._autorizar_cotizacion()
@@ -231,3 +240,85 @@ class CotizacionAutorizarInventarioTests(TestCase):
             id_registro=str(pedido.pk),
         ).latest("id_evento")
         self.assertEqual(auditoria.despues_json["items"][0]["delta"], "2.0000")
+
+    def test_stock_detalle_usa_mismo_scope_que_autorizar(self):
+        self.existencia.cantidad = "1.0000"
+        self.existencia.stock = 1
+        self.existencia.save(update_fields=["cantidad", "stock", "fecha_actualizacion"])
+
+        sucursal_otra = Sucursal.objects.create(
+            empresa=self.empresa,
+            codigo="GDL",
+            nombre="Sucursal GDL",
+        )
+        almacen_otro = Almacen.objects.create(
+            empresa=self.empresa,
+            sucursal=sucursal_otra,
+            codigo="PT-GDL",
+            nombre="Almacen PT GDL",
+            estatus="ACTIVO",
+            permite_salida=True,
+        )
+        Existencia.objects.create(
+            producto=self.producto,
+            producto_variante=self.variante,
+            almacen=almacen_otro,
+            ubicacion=None,
+            stock=25,
+            cantidad="25.0000",
+        )
+
+        response = self.client.get(
+            f"/api/v1/ventas/mesa-control/{self.cotizacion.pk}/stock-detalle/",
+            secure=True,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data[0]["tallas"][0]["stock_actual"], 1)
+        self.assertEqual(response.data[0]["tallas"][0]["diferencia"], -2)
+
+    def test_onboarding_guarda_tipo_pedido_en_cotizacion(self):
+        payload = {
+            "cotizacion": {
+                "sucursal": self.sucursal.pk,
+                "cliente": self.cliente.pk,
+                "moneda": self.moneda.pk,
+                "tipo_pedido": 2,
+                "persona_pagos": "Tesoreria",
+                "correo_facturas": "facturas@example.com",
+                "telefono_pagos": "8110000000",
+                "forma_pago": Cotizacion.FormaPago.TRANSFERENCIA,
+                "metodo_pago": Cotizacion.MetodoPago.PUE,
+                "uso_cfdi": Cotizacion.UsoCfdi.GO3,
+                "subtotal": "200.00",
+                "gran_total": "232.00",
+            },
+            "detalle": [
+                {
+                    "producto": self.producto.pk,
+                    "color": self.color.pk,
+                    "precio_unitario": "100.00",
+                    "tallas": [
+                        {
+                            "talla": self.talla.pk,
+                            "cantidad": 2,
+                        }
+                    ],
+                }
+            ],
+            "servicios_extras": [],
+        }
+
+        response = self.client.post(
+            "/api/v1/ventas/cotizaciones/onboarding/",
+            payload,
+            format="json",
+            secure=True,
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        cotizacion_id = response.data["cotizacion"]["id"]
+        cotizacion = Cotizacion.objects.get(pk=cotizacion_id)
+
+        self.assertEqual(cotizacion.tipo_pedido, 2)
+        self.assertEqual(response.data["cotizacion"]["tipo_pedido"], 2)
