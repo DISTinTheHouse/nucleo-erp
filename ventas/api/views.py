@@ -47,6 +47,9 @@ from produccion.models import (
 
 from ventas.utils.helpers import _save_cotizacion_detalle, _save_servicios_extras
 
+from terceros.models import Cliente
+from terceros.api.serializers import ClienteSerializer
+
 logger = logging.getLogger(__name__)
 
 
@@ -1655,3 +1658,14 @@ class MesaControlViewSet(CotizacionViewSet):
             resultados.append(item)
 
         return Response(resultados)
+
+class ClienteViewSet(viewsets.ModelViewSet):
+    serializer_class = ClienteSerializer
+    http_method_names = ['get']
+
+    def get_queryset(self):
+        user = self.request.user
+        empresa = getattr(user, 'empresa', None)
+        if empresa is None: return Cliente.objects.none()
+        queryset = Cliente.objects.filter(empresa=empresa)
+        return queryset

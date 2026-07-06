@@ -4,6 +4,19 @@ from rest_framework.response import Response
 from finanzas.models import Factura
 from finanzas.api.serializers import FacturaSerializer, FacturaDetalleSerializer
 from finanzas.services.factura_service import FacturaService
+from terceros.models import Cliente
+from terceros.api.serializers import ClienteSerializer
+
+class ClienteViewSet(viewsets.ModelViewSet):
+    serializer_class = ClienteSerializer
+    http_method_names = ['get']
+
+    def get_queryset(self):
+        user = self.request.user
+        empresa = getattr(user, 'empresa', None)
+        if empresa is None: return Cliente.objects.none()
+        queryset = Cliente.objects.filter(empresa=empresa)
+        return queryset
 
 class FacturaViewSet(viewsets.ModelViewSet):
     serializer_class = FacturaSerializer
