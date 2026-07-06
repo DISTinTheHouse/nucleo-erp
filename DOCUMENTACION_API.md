@@ -1136,7 +1136,7 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 
 **Base URL**: `/api/v1/compras/`
 
-La recepción es el proceso que afecta existencias derivadas de una orden de compra.
+La recepción es el proceso unificado que afecta existencias tanto para órdenes de compra (`OC`) como para órdenes de producción (`OP`).
 
 ### 1) Obtener datos para el formulario
 
@@ -1146,25 +1146,49 @@ La recepción es el proceso que afecta existencias derivadas de una orden de com
 - **Respuesta (resumen)**:
   ```json
   {
-    "orden_compra_id": 112,
-    "orden_compra": {
-      "id": 112,
-      "folio": "OC-000112"
+    "catalogos": {
+      "almacenes": [],
+      "ubicaciones": [],
+      "series_recepcion": [
+        { "id_serie_folio": 1, "tipo_documento": "RECEPCION", "serie": "RC", "sucursal_id": 2 }
+      ]
     },
-    "series_recepcion": [
-      { "codigo": "RC", "label": "Recepción compra" },
-      { "codigo": "RT", "label": "Recepción traslado" }
-    ],
-    "detalle": [
-      {
-        "orden_compra_detalle": 25,
-        "producto": 1,
-        "producto_nombre": "Tela gabardina",
-        "cantidad": "10.0000",
-        "cantidad_recibida": "4.0000",
-        "cantidad_pendiente": "6.0000"
-      }
-    ]
+    "busqueda": {
+      "ordenes_compra": [
+        {
+          "id": 112,
+          "folio": "OC-000112",
+          "detalle": [
+            {
+              "id": 25,
+              "producto_id": 1,
+              "producto_nombre": "Tela gabardina",
+              "cantidad_ordenada": "10.0000",
+              "cantidad_recibida": "4.0000",
+              "cantidad_pendiente": "6.0000"
+            }
+          ]
+        }
+      ],
+      "ordenes_produccion": [
+        {
+          "id": 88,
+          "folio": "OP-000088",
+          "cerrar_orden": true,
+          "detalle": [
+            {
+              "id": 14,
+              "producto_id": 9,
+              "producto_variante_id": 31,
+              "producto_nombre": "Playera Negra M",
+              "cantidad_ordenada": "5.00",
+              "cantidad_recibida": "2.0000",
+              "cantidad_pendiente": "3.0000"
+            }
+          ]
+        }
+      ]
+    }
   }
   ```
 
@@ -1175,12 +1199,15 @@ La recepción es el proceso que afecta existencias derivadas de una orden de com
 **Reglas del flujo**
 
 - La recepción puede ser total o parcial.
-- El frontend no necesita enviar `producto_variante`.
-- El backend toma el `producto` desde `OrdenCompraDetalle`.
+- Debe enviarse exactamente un origen: `orden_compra` o `orden_produccion`.
+- Para `OC`, el backend toma el `producto` desde `OrdenCompraDetalle`.
+- Para `OP`, el backend toma `producto` y `producto_variante` desde `OrdenProduccionDetalle`.
 - Si el almacén requiere ubicación, `ubicacion` es obligatoria.
-- La orden de compra no mueve inventario; la recepción sí.
+- Ni la orden de compra ni la orden de producción mueven inventario por sí mismas; la recepción sí.
 - La recepción genera folio con series como `RC`, `RT` o `RZ`.
 - Además de afectar `Existencia`, el backend genera auditoría y movimientos formales de inventario.
+- Si la recepción viene de producción, `MovimientoInventario.op` queda ligado a la `OP`.
+- El flujo de recepción centraliza la entrada de inventario; `ProductoTerminadoEntradas` queda redundante para este caso de uso.
 
 **Body (ejemplo)**
 
@@ -1210,6 +1237,25 @@ La recepción es el proceso que afecta existencias derivadas de una orden de com
 }
 ```
 
+**Body (ejemplo OP)**
+
+```json
+{
+  "recepcion": {
+    "orden_produccion": 88,
+    "almacen": 8,
+    "serie_codigo": "RC",
+    "observaciones": "Entrada de producto terminado desde OP"
+  },
+  "detalle": [
+    {
+      "orden_produccion_detalle": 14,
+      "cantidad_recibida": "4.0000"
+    }
+  ]
+}
+```
+
 **Respuesta (resumen)**
 
 ```json
@@ -1224,7 +1270,9 @@ La recepción es el proceso que afecta existencias derivadas de una orden de com
       "id": 101,
       "recepcion": 33,
       "orden_compra_detalle": 25,
+      "orden_produccion_detalle": null,
       "producto": 1,
+      "producto_variante": null,
       "ubicacion": null,
       "lote": null,
       "serie": null,
@@ -1291,6 +1339,62 @@ La recepción es el proceso que afecta existencias derivadas de una orden de com
 - **Regla**:
   - El frontend no necesita enviar `bom` dentro de cada detalle.
   - El backend resuelve automáticamente el BOM activo a partir de `producto_variante`.
+  - El contrato para frontend se mantiene: misma URL y mismo body base para crear la OP.
+
+### 6) Crear Orden de Producción con Consumo Automático
+
+- **Endpoint**: `POST /api/v1/produccion/orden-produccion/onboarding/`
+- **Compatibilidad**:
+  - No requiere cambios del frontend si ya consumía el onboarding de producción.
+  - El backend sigue resolviendo el BOM internamente.
+  - El descuento de inventario sucede automáticamente al confirmar la OP.
+
+**Reglas del flujo**
+
+- Se valida que cada `producto_variante` tenga un BOM activo en la empresa del usuario.
+- Se calculan los insumos requeridos tomando `BomDetalle.cantidad * cantidad_op`.
+- Si el BOM tiene `desperdicio`, se aplica al cálculo del consumo.
+- Antes de crear definitivamente la OP, el backend valida existencias suficientes de cada insumo.
+- Si hay inventario suficiente:
+  - crea `OrdenProduccion`
+  - crea `OrdenProduccionDetalle`
+  - descuenta `Existencia`
+  - registra `ConsumoProduccion` y `consumo_detalle`
+  - registra `MovimientoInventario` y `MovimientoInventarioDetalle`
+  - registra `AuditoriaEvento`
+- Si no hay inventario suficiente o el BOM está incompleto, responde `400` y no confirma la operación.
+
+**Body (sin cambios para frontend)**
+
+```json
+{
+  "empresa": 1,
+  "sucursal": 1,
+  "prioridad": 1,
+  "observaciones": "OP de prueba",
+  "orden_produccion_detalle": [
+    {
+      "producto_variante_id": 15,
+      "cantidad": "3.0000",
+      "unidad": 1,
+      "observaciones": ""
+    }
+  ]
+}
+```
+
+**Respuesta (resumen)**
+
+```json
+{
+  "msg": "Orden de producción creada exitosamente",
+  "op_id": 10,
+  "folio_op": "OP-000010",
+  "consumo_produccion_id": 3,
+  "movimiento_inventario_id": 25,
+  "movimiento_id": 901
+}
+```
 
 ---
 

@@ -112,13 +112,15 @@ El backend actúa como una "Caja Negra" segura para el Frontend (Next.js).
 - **Recepción**:
   - Es el evento que realmente incrementa inventario.
   - Soporta recepción parcial o total.
-  - Trabaja por `producto` tomado desde `OrdenCompraDetalle`.
-  - `producto_variante` no es requisito para este flujo.
+  - Centraliza la entrada de inventario para `OC` y `OP`.
+  - Para `OC`, trabaja por `producto` tomado desde `OrdenCompraDetalle`.
+  - Para `OP`, toma `producto` y `producto_variante` desde `OrdenProduccionDetalle`.
   - Usa series de folio de recepción como `RC`, `RT` o `RZ`.
 - **Persistencia**:
   - La recepción actualiza `Existencia`.
   - Genera auditoría.
   - Genera también `MovimientoInventario` y `MovimientoInventarioDetalle`.
+  - Cuando el origen es producción, persiste también la relación en `MovimientoInventario.op`.
 
 ### C. Producción
 
@@ -131,6 +133,13 @@ El backend actúa como una "Caja Negra" segura para el Frontend (Next.js).
 - **Orden de Producción**:
   - El frontend no necesita enviar `bom` en cada detalle.
   - El backend resuelve el BOM activo por `producto_variante` dentro de la empresa del usuario.
+  - La entrada de producto terminado ya no requiere un flujo paralelo; se formaliza mediante `GET|POST /api/v1/compras/recepciones/onboarding/`.
+  - La creación de OP consume inventario automáticamente usando la lista de materiales.
+  - El contrato HTTP para frontend se mantiene en el mismo endpoint de onboarding.
+- **Consumo de Producción**:
+  - El backend crea `ConsumoProduccion` como encabezado de consumo.
+  - El detalle de insumos consumidos se persiste en `consumo_detalle`.
+  - También se registra la salida en `MovimientoInventario`, `MovimientoInventarioDetalle` y `AuditoriaEvento`.
 
 ## 6. Responsabilidades UI vs Backend
 

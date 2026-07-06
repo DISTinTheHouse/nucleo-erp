@@ -6,6 +6,7 @@ from catalogo.models import Producto, ProductoVariante
 from ventas.models import Pedido
 
 from inventarios.models import Almacen, Ubicacion, Lote, Serie
+from produccion.models import OrdenProduccion, OrdenProduccionDetalle
 
 class Requisicion(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
@@ -165,6 +166,10 @@ class OrdenCompraDetalle(models.Model):
         return str(self.id)
 
 class Recepcion(models.Model):
+    class TipoOrigen(models.TextChoices):
+        ORDEN_COMPRA = "OC", "Orden de compra"
+        ORDEN_PRODUCCION = "OP", "Orden de produccion"
+
     class EstatusRecepcion(models.IntegerChoices):
         BORRADOR = 1, 'Borrador'
         RECIBIDA = 2, 'Recibida'
@@ -173,10 +178,16 @@ class Recepcion(models.Model):
         CERRADA = 5, 'Cerrada'
         CANCELADA = 6, 'Cancelada'
     
-    orden_compra = models.ForeignKey(OrdenCompra, on_delete=models.CASCADE)
+    tipo_origen = models.CharField(
+        max_length=2,
+        choices=TipoOrigen.choices,
+        default=TipoOrigen.ORDEN_COMPRA,
+    )
+    orden_compra = models.ForeignKey(OrdenCompra, on_delete=models.CASCADE, null=True, blank=True)
+    op = models.ForeignKey(OrdenProduccion, on_delete=models.CASCADE, null=True, blank=True)
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name='recepciones')
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE, related_name='recepciones')
-    proveedor = models.ForeignKey(Proveedor, on_delete=models.CASCADE, related_name='recepciones')
+    proveedor = models.ForeignKey(Proveedor, on_delete=models.CASCADE, related_name='recepciones', null=True, blank=True)
     almacen = models.ForeignKey(Almacen, on_delete=models.CASCADE)
     transportista = models.ForeignKey(Transportista, on_delete=models.CASCADE, related_name='recepciones', null=True)
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='recepciones')
@@ -205,7 +216,8 @@ class Recepcion(models.Model):
 
 class RecepcionDetalle(models.Model):
     recepcion = models.ForeignKey(Recepcion, on_delete=models.CASCADE)
-    orden_compra_detalle = models.ForeignKey(OrdenCompraDetalle, on_delete=models.CASCADE)
+    orden_compra_detalle = models.ForeignKey(OrdenCompraDetalle, on_delete=models.CASCADE, null=True, blank=True)
+    orden_produccion_detalle = models.ForeignKey(OrdenProduccionDetalle, on_delete=models.CASCADE, null=True, blank=True)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
     producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.CASCADE, null=True, blank=True)
     ubicacion = models.ForeignKey(Ubicacion, on_delete=models.CASCADE, null=True, blank=True)

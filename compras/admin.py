@@ -218,7 +218,9 @@ class RecepcionDetalleInline(admin.TabularInline):
 class RecepcionAdmin(admin.ModelAdmin):
     list_display = (
         "folio",
+        "tipo_origen",
         "orden_compra",
+        "op",
         "empresa",
         "sucursal",
         "proveedor",
@@ -227,12 +229,13 @@ class RecepcionAdmin(admin.ModelAdmin):
         "fecha_recepcion",
         "activo",
     )
-    list_filter = ("empresa", "sucursal", "proveedor", "almacen", "estatus", "activo")
+    list_filter = ("tipo_origen", "empresa", "sucursal", "proveedor", "almacen", "estatus", "activo")
     search_fields = (
         "folio",
         "remision",
         "factura_referencia",
         "orden_compra__folio",
+        "op__folio_op",
         "proveedor__codigo",
         "proveedor__nombre",
         "proveedor__rfc",
@@ -241,6 +244,7 @@ class RecepcionAdmin(admin.ModelAdmin):
     ordering = ("-fecha_recepcion", "-id")
     autocomplete_fields = (
         "orden_compra",
+        "op",
         "empresa",
         "sucursal",
         "proveedor",
@@ -250,6 +254,7 @@ class RecepcionAdmin(admin.ModelAdmin):
     )
     list_select_related = (
         "orden_compra",
+        "op",
         "empresa",
         "sucursal",
         "proveedor",
@@ -262,12 +267,23 @@ class RecepcionAdmin(admin.ModelAdmin):
 
 @admin.register(RecepcionDetalle)
 class RecepcionDetalleAdmin(admin.ModelAdmin):
-    list_display = ("id", "recepcion", "orden_compra_detalle", "producto", "ubicacion", "lote", "serie")
+    list_display = (
+        "id",
+        "recepcion",
+        "orden_compra_detalle",
+        "orden_produccion_detalle",
+        "producto",
+        "producto_variante",
+        "ubicacion",
+        "lote",
+        "serie",
+    )
     list_filter = ("recepcion__empresa", "recepcion__sucursal", "producto", "ubicacion__almacen")
     search_fields = (
         "id",
         "recepcion__folio",
         "orden_compra_detalle__orden_compra__folio",
+        "orden_produccion_detalle__op__folio_op",
         "producto__nombre",
         "producto__id",
         "ubicacion__pasillo",
@@ -279,5 +295,14 @@ class RecepcionDetalleAdmin(admin.ModelAdmin):
     )
     ordering = ("-id",)
     autocomplete_fields = ("recepcion", "orden_compra_detalle", "producto", "ubicacion", "lote", "serie")
-    list_select_related = ("recepcion", "orden_compra_detalle", "producto", "ubicacion", "lote", "serie")
+    list_select_related = (
+        "recepcion",
+        "orden_compra_detalle",
+        "orden_produccion_detalle",
+        "producto",
+        "producto_variante",
+        "ubicacion",
+        "lote",
+        "serie",
+    )
 
