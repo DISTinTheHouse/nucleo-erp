@@ -157,6 +157,12 @@ class OrdenCompraOnboardingHeaderSerializer(serializers.Serializer):
     proveedor = serializers.IntegerField(required=False, allow_null=True)
     moneda = serializers.IntegerField(required=False, allow_null=True)
     fecha_oc = serializers.DateField(required=False, allow_null=True)
+    porcentaje_iva = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+    )
     referencia = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     observaciones = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 

@@ -128,13 +128,19 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             subtotal += Decimal(str(getattr(d, "importe", 0) or 0))
             piezas += int(getattr(d, "piezas", 0) or getattr(d, "cantidad", 0) or 0)
 
+        porcentaje_iva = Decimal(str(getattr(oc, "porcentaje_iva", 0) or 0))
+        total_iva = (subtotal * porcentaje_iva / Decimal("100")).quantize(
+            Decimal("0.01")
+        )
+        gran_total = subtotal + total_iva
         updates = {
             "subtotal": subtotal,
-            "gran_total": subtotal,
+            "gran_total": gran_total,
             "total": subtotal,
             "total_piezas": piezas,
-            "total_iva": Decimal("0"),
-            "porcentaje_iva": Decimal("0"),
+            "impuestos": total_iva,
+            "total_iva": total_iva,
+            "porcentaje_iva": porcentaje_iva,
         }
         for k, v in updates.items():
             setattr(oc, k, v)
@@ -248,11 +254,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             has_proveedor = "proveedor" in header
             has_moneda = "moneda" in header
             has_fecha_oc = "fecha_oc" in header
+            has_porcentaje_iva = "porcentaje_iva" in header
 
             sucursal_id = header.get("sucursal")
             proveedor_id = header.get("proveedor")
             moneda_id = header.get("moneda")
             fecha_oc = header.get("fecha_oc") or timezone.now().date()
+            porcentaje_iva = header.get("porcentaje_iva")
 
             if not sucursal_id:
                 suc = self._get_default_sucursal(user, empresa)
@@ -276,6 +284,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 oc.moneda_id = moneda_id
             if not oc.pk or has_fecha_oc:
                 oc.fecha_oc = fecha_oc
+            if not oc.pk or has_porcentaje_iva:
+                oc.porcentaje_iva = Decimal(str(porcentaje_iva or 0))
             if "referencia" in header:
                 oc.referencia = header.get("referencia") or None
             if "observaciones" in header:
@@ -389,11 +399,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             has_proveedor = "proveedor" in header
             has_moneda = "moneda" in header
             has_fecha_oc = "fecha_oc" in header
+            has_porcentaje_iva = "porcentaje_iva" in header
 
             sucursal_id = header.get("sucursal")
             proveedor_id = header.get("proveedor")
             moneda_id = header.get("moneda")
             fecha_oc = header.get("fecha_oc")
+            porcentaje_iva = header.get("porcentaje_iva")
 
             oc.usuario = user
             if has_sucursal and sucursal_id:
@@ -404,6 +416,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 oc.moneda_id = moneda_id
             if has_fecha_oc and fecha_oc:
                 oc.fecha_oc = fecha_oc
+            if has_porcentaje_iva:
+                oc.porcentaje_iva = Decimal(str(porcentaje_iva or 0))
             if "referencia" in header:
                 oc.referencia = header.get("referencia") or None
             if "observaciones" in header:
