@@ -205,6 +205,34 @@ class RecepcionSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+class RecepcionListSerializer(RecepcionSerializer):
+    """Listado de recepciones para el módulo de Compras.
+
+    Conserva intacta la forma plana de ``RecepcionSerializer`` (``fields='__all__'``,
+    consumida hoy por WMS) y solo AÑADE campos legibles resueltos a través de las FK
+    que el queryset del viewset ya trae con ``select_related`` — sin consultas extra:
+
+      - ``almacen_nombre``: siempre presente (``almacen`` es NOT NULL).
+      - ``proveedor_nombre``: ``null`` cuando la recepción no tiene proveedor (p. ej. OP).
+      - ``orden_compra_folio``: ``null`` salvo que la recepción provenga de una
+        orden de compra (``tipo_origen == 'OC'``).
+
+    El enriquecimiento del lado OP (folio/referencia de la orden de producción) queda
+    fuera de este paso; puede sumarse aquí después con el mismo patrón (``op_folio``…).
+    """
+
+    almacen_nombre = serializers.CharField(source="almacen.nombre", read_only=True)
+    proveedor_nombre = serializers.CharField(
+        source="proveedor.nombre", read_only=True, default=None
+    )
+    orden_compra_folio = serializers.CharField(
+        source="orden_compra.folio", read_only=True, default=None
+    )
+
+    class Meta(RecepcionSerializer.Meta):
+        pass
+
+
 class RecepcionOnboardingHeaderSerializer(serializers.Serializer):
     orden_compra = serializers.IntegerField(required=False, allow_null=True)
     orden_produccion = serializers.IntegerField(required=False, allow_null=True)

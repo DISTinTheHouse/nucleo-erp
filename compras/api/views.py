@@ -18,6 +18,7 @@ from compras.api.serializers import (
     OrdenCompraSerializer,
     OrdenCompraDetalleSerializer,
     RecepcionDetalleSerializer,
+    RecepcionListSerializer,
     RecepcionOnboardingSerializer,
     RecepcionSerializer,
 )
@@ -499,12 +500,36 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = self.queryset.filter(activo=True).order_by("-fecha_recepcion", "-id")
+
+        # Filtro opcional por origen (OC / OP). Sigue la convención del proyecto:
+        # query param manual validado en get_queryset (no se usa django-filter).
+        # Omitirlo devuelve todas las recepciones, exactamente como antes.
+        tipo_origen = (self.request.query_params.get("tipo_origen") or "").strip().upper()
+        if tipo_origen:
+            validos = {
+                Recepcion.TipoOrigen.ORDEN_COMPRA,
+                Recepcion.TipoOrigen.ORDEN_PRODUCCION,
+            }
+            if tipo_origen not in validos:
+                raise ValidationError(
+                    {"tipo_origen": "Valor inválido. Usa OC (orden de compra) u OP (orden de producción)."}
+                )
+            qs = qs.filter(tipo_origen=tipo_origen)
+
         empresa = getattr(user, "empresa", None)
         if empresa:
             return qs.filter(empresa=empresa)
         if getattr(user, "is_superuser", False):
             return qs
         return qs.none()
+
+    def get_serializer_class(self):
+        # list/retrieve devuelven la forma enriquecida (aditiva sobre la plana);
+        # el resto (p. ej. la respuesta de onboarding, que instancia
+        # RecepcionSerializer directamente) conserva la forma plana original.
+        if self.action in ("list", "retrieve"):
+            return RecepcionListSerializer
+        return RecepcionSerializer
 
     def _serie_folio_recepcion(self, empresa, sucursal, serie_codigo):
         qs = SerieFolio.objects.select_for_update().filter(
