@@ -25,6 +25,7 @@ from datetime import date
 from datetime import timedelta
 from email.message import EmailMessage
 import base64
+import binascii
 import urllib.parse
 from ia.models import CloudIntegration
 from ia.views import GOOGLE_DRIVE_SCOPE, _google_drive_credentials_configured, _google_drive_refresh_token, _http_json
@@ -1467,6 +1468,84 @@ class GoogleGmailMessageDetailAPIView(APIView):
         )
 
 
+# Gmail impone un tope de ~25 MB por mensaje. Aplicamos el límite sobre el
+# contenido decodificado de los adjuntos para rechazar payloads excesivos
+# antes de construir el mensaje y evitar un fallo opaco en la API de Gmail.
+GMAIL_MAX_ATTACHMENTS_BYTES = 25 * 1024 * 1024  # 25 MiB
+
+
+def _parse_gmail_attachments(raw_attachments):
+    """Valida y decodifica los adjuntos de la petición de envío de Gmail.
+
+    Devuelve una tupla (parsed, error):
+      - En éxito, `parsed` es una lista de tuplas
+        (filename, maintype, subtype, data_bytes) y `error` es None.
+      - Si algo falla, `parsed` es None y `error` es un dict listo para
+        responder con HTTP 400.
+
+    Un `raw_attachments` ausente/None/vacío devuelve ([], None) — es decir,
+    no altera en absoluto el comportamiento actual del endpoint.
+    """
+    if raw_attachments in (None, ""):
+        return [], None
+    if not isinstance(raw_attachments, (list, tuple)):
+        return None, {"ok": False, "error": "attachments debe ser una lista."}
+
+    parsed = []
+    total_bytes = 0
+    for idx, item in enumerate(raw_attachments, start=1):
+        if not isinstance(item, dict):
+            return None, {"ok": False, "error": f"El adjunto #{idx} es inválido: se esperaba un objeto."}
+
+        filename = item.get("filename")
+        mime_type = item.get("mimeType")
+        content = item.get("content")
+
+        if not isinstance(filename, str) or not filename.strip():
+            return None, {"ok": False, "error": f"El adjunto #{idx} requiere 'filename' (texto)."}
+        if not isinstance(mime_type, str) or not mime_type.strip():
+            return None, {"ok": False, "error": f"El adjunto #{idx} ('{filename}') requiere 'mimeType' (texto)."}
+        if not isinstance(content, str) or not content.strip():
+            return None, {"ok": False, "error": f"El adjunto #{idx} ('{filename}') requiere 'content' (base64)."}
+
+        # Acepta base64 puro o un data URI ("data:application/pdf;base64,....").
+        b64 = content.strip()
+        if b64.startswith("data:") and "base64," in b64:
+            b64 = b64.split("base64,", 1)[1]
+        b64 = "".join(b64.split())  # elimina espacios y saltos de línea
+
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            return None, {
+                "ok": False,
+                "error": f"No se pudo decodificar el adjunto #{idx} ('{filename}'): contenido base64 inválido.",
+            }
+        if not data:
+            return None, {
+                "ok": False,
+                "error": f"El adjunto #{idx} ('{filename}') está vacío tras decodificar.",
+            }
+
+        total_bytes += len(data)
+        if total_bytes > GMAIL_MAX_ATTACHMENTS_BYTES:
+            return None, {
+                "ok": False,
+                "error": (
+                    "Los adjuntos superan el límite de 25 MB por mensaje que impone Gmail "
+                    f"(máximo {GMAIL_MAX_ATTACHMENTS_BYTES} bytes decodificados)."
+                ),
+            }
+
+        maintype, _, subtype = mime_type.strip().partition("/")
+        if not subtype:
+            maintype, subtype = "application", "octet-stream"
+
+        parsed.append((filename.strip(), maintype, subtype, data))
+
+    return parsed, None
+
+
 class GoogleGmailSendAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1485,6 +1564,10 @@ class GoogleGmailSendAPIView(APIView):
         if not to_email or not str(body).strip():
             return Response({"ok": False, "error": "to y body son requeridos."}, status=status.HTTP_400_BAD_REQUEST)
 
+        attachments, attach_error = _parse_gmail_attachments(request.data.get("attachments"))
+        if attach_error:
+            return Response(attach_error, status=status.HTTP_400_BAD_REQUEST)
+
         try:
             message = EmailMessage()
             message["To"] = to_email
@@ -1496,6 +1579,11 @@ class GoogleGmailSendAPIView(APIView):
                 message.add_alternative(str(html_body), subtype='html')
             else:
                 message.set_content(str(body))
+
+            # add_attachment promueve automáticamente el mensaje a
+            # multipart/mixed, conservando el cuerpo texto/HTML como primera parte.
+            for filename, maintype, subtype, data in attachments:
+                message.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
 
             encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
 
