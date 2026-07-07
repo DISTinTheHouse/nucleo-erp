@@ -557,27 +557,6 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 Decimal("0.0000"),
             )
             if disponible < cantidad_requerida:
-                logger.warning(
-                    "DEBUG autorizar inventario insuficiente | empresa=%s sucursal=%s producto=%s producto_id=%s variante_id=%s requerido=%s disponible=%s existencias=%s",
-                    getattr(empresa, "pk", None),
-                    getattr(sucursal, "pk", None),
-                    producto.nombre,
-                    producto.pk,
-                    producto_variante_id,
-                    cantidad_requerida,
-                    disponible,
-                    [
-                        {
-                            "existencia_id": existencia.pk,
-                            "almacen_id": existencia.almacen_id,
-                            "ubicacion_id": existencia.ubicacion_id,
-                            "cantidad": str(
-                                self._to_decimal_inventory(existencia.cantidad)
-                            ),
-                        }
-                        for existencia in existencias
-                    ],
-                )
                 raise ValidationError(
                     {
                         "inventario": (
@@ -1821,73 +1800,52 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         cotizacion = self.get_object()
         empresa = cotizacion.empresa
 
-        try:
-            with transaction.atomic():
-                cotizacion = (
-                    Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
-                )
-                logger.warning(
-                    "DEBUG autorizar start | cotizacion=%s empresa=%s encontrada=%s estatus=%s sucursal=%s tipo_pedido=%s",
-                    pk,
-                    getattr(empresa, "pk", None),
-                    bool(cotizacion),
-                    getattr(cotizacion, "estatus", None),
-                    getattr(cotizacion, "sucursal_id", None),
-                    getattr(cotizacion, "tipo_pedido", None),
-                )
-
-                if not cotizacion:
-                    raise ValidationError(
-                        {"cotizacion": "No se encontró la cotización para autorizar."}
-                    )
-
-                if cotizacion.estatus != 2:
-                    raise ValidationError({"cotizacion": "La cotización debe estar EN REVISION para ser autorizada."})
-
-                pedido_existente = (
-                    Pedido.objects.select_for_update()
-                    .filter(cotizacion=cotizacion, activo=True)
-                    .order_by("-id")
-                    .first()
-                )
-                
-                if pedido_existente:
-                    raise ValidationError({"cotizacion": "La cotización ya tiene un pedido generado."})
-
-                pedido = self._copiar_cotizacion_a_pedido(cotizacion, empresa)
-                self._descontar_existencias_pedido(
-                    pedido=pedido,
-                    user=user,
-                    request=request,
-                )
-                cotizacion.estatus = 3
-                cotizacion.autorizada_at = timezone.now()
-                cotizacion.cambios_solicitados_at = None
-                cotizacion.aprobado_snapshot = self._snapshot_cotizacion(cotizacion)
-                cotizacion.save(
-                    update_fields=[
-                        "estatus",
-                        "autorizada_at",
-                        "cambios_solicitados_at",
-                        "aprobado_snapshot",
-                        "updated_at",
-                    ]
-                )
-        except ValidationError as exc:
-            logger.warning(
-                "DEBUG autorizar validation_error | cotizacion=%s detail=%s",
-                pk,
-                exc.detail,
+        with transaction.atomic():
+            cotizacion = (
+                Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
             )
-            raise
-        except Exception as exc:
-            logger.exception(
-                "DEBUG autorizar exception | cotizacion=%s error_type=%s error=%s",
-                pk,
-                type(exc).__name__,
-                str(exc),
+
+            if not cotizacion:
+                raise ValidationError(
+                    {"cotizacion": "No se encontró la cotización para autorizar."}
+                )
+
+            if cotizacion.estatus != 2:
+                raise ValidationError(
+                    {"cotizacion": "La cotización debe estar EN REVISION para ser autorizada."}
+                )
+
+            pedido_existente = (
+                Pedido.objects.select_for_update()
+                .filter(cotizacion=cotizacion, activo=True)
+                .order_by("-id")
+                .first()
             )
-            raise
+
+            if pedido_existente:
+                raise ValidationError(
+                    {"cotizacion": "La cotización ya tiene un pedido generado."}
+                )
+
+            pedido = self._copiar_cotizacion_a_pedido(cotizacion, empresa)
+            self._descontar_existencias_pedido(
+                pedido=pedido,
+                user=user,
+                request=request,
+            )
+            cotizacion.estatus = 3
+            cotizacion.autorizada_at = timezone.now()
+            cotizacion.cambios_solicitados_at = None
+            cotizacion.aprobado_snapshot = self._snapshot_cotizacion(cotizacion)
+            cotizacion.save(
+                update_fields=[
+                    "estatus",
+                    "autorizada_at",
+                    "cambios_solicitados_at",
+                    "aprobado_snapshot",
+                    "updated_at",
+                ]
+            )
 
         pedido = (
             Pedido.objects.filter(pk=pedido.pk)
