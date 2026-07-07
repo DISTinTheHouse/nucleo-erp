@@ -292,7 +292,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 oc.observaciones = header.get("observaciones") or None
             oc.folio = None
             if not oc.pk:
-                oc.estatus = OrdenCompra.EstatusOrdenCompra.BORRADOR
+                oc.estatus = OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR
             oc.save()
 
             if detalle is not None:
@@ -390,9 +390,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            if oc.estatus == OrdenCompra.EstatusOrdenCompra.RECIBIDA:
+            if oc.estatus in {
+                OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+                OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+                OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+            }:
                 raise ValidationError(
-                    {"estatus": "Una orden recibida no puede ser modificada."}
+                    {"estatus": "Una orden autorizada o recibida no puede ser modificada."}
                 )
 
             has_sucursal = "sucursal" in header
@@ -423,9 +427,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             if "observaciones" in header:
                 oc.observaciones = header.get("observaciones") or None
 
-            # Cualquier edición invalida una autorización previa: vuelve a BORRADOR
-            # para forzar una nueva aprobación.
-            oc.estatus = OrdenCompra.EstatusOrdenCompra.BORRADOR
+            oc.estatus = OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR
             oc.save()
 
             if detalle is not None:

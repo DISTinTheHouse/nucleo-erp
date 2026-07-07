@@ -104,7 +104,7 @@ class SolicitudCompraDetalle(models.Model):
 class OrdenCompra(StatusLifecycleModel):
     class EstatusOrdenCompra(models.IntegerChoices):
         BORRADOR = 1, 'Borrador'
-        POR_AUTORIZAR = 2, 'Por autorizar'
+        POR_AUTORIZAR = 2, 'Pendiente a confirmar'
         AUTORIZADA = 3, 'Autorizada'
         PARCIALMENTE_RECIBIDA = 4, 'Parcialmente recibida'
         RECIBIDA = 5, 'Recibida'
