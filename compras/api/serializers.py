@@ -76,11 +76,80 @@ class OrdenCompraDetalleSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    ubicacion_nombre = serializers.CharField(
+        source="ubicacion.nombre", read_only=True, default=None
+    )
+
+    class Meta:
+        model = RecepcionDetalle
+        fields = [
+            "id",
+            "orden_compra_detalle",
+            "producto",
+            "producto_nombre",
+            "producto_variante",
+            "ubicacion",
+            "ubicacion_nombre",
+            "lote",
+            "serie",
+            "cantidad_recibida",
+        ]
+
+
+class RecepcionRelacionadaSerializer(serializers.ModelSerializer):
+    estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)
+    sucursal_nombre = serializers.CharField(source="sucursal.nombre", read_only=True)
+    proveedor_nombre = serializers.CharField(
+        source="proveedor.nombre", read_only=True, default=None
+    )
+    almacen_nombre = serializers.CharField(source="almacen.nombre", read_only=True)
+    transportista_nombre = serializers.CharField(
+        source="transportista.nombre", read_only=True, default=None
+    )
+    detalles = RecepcionDetalleResumenSerializer(
+        many=True,
+        read_only=True,
+        source="recepciondetalle_set",
+    )
+
+    class Meta:
+        model = Recepcion
+        fields = [
+            "id",
+            "tipo_origen",
+            "folio",
+            "remision",
+            "factura_referencia",
+            "fecha_recepcion",
+            "estatus",
+            "estatus_label",
+            "sucursal",
+            "sucursal_nombre",
+            "proveedor",
+            "proveedor_nombre",
+            "almacen",
+            "almacen_nombre",
+            "transportista",
+            "transportista_nombre",
+            "observaciones",
+            "created_at",
+            "updated_at",
+            "detalles",
+        ]
+
+
 class OrdenCompraRetrieveSerializer(OrdenCompraSerializer):
     detalles = OrdenCompraDetalleReadSerializer(many=True, read_only=True, source='ordencompradetalle_set')
+    recepciones = RecepcionRelacionadaSerializer(
+        many=True,
+        read_only=True,
+        source="recepcion_set",
+    )
 
     class Meta(OrdenCompraSerializer.Meta):
-        fields = OrdenCompraSerializer.Meta.fields + ['detalles']
+        fields = OrdenCompraSerializer.Meta.fields + ['detalles', 'recepciones']
 
 
 class OrdenCompraOnboardingHeaderSerializer(serializers.Serializer):

@@ -2,7 +2,7 @@ import logging
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Q, Sum
+from django.db.models import Prefetch, Q, Sum
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -47,7 +47,28 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         else:
             return qs.none()
         if self.action == 'retrieve':
-            qs = qs.prefetch_related('ordencompradetalle_set')
+            recepciones_qs = (
+                Recepcion.objects.filter(
+                    activo=True,
+                    tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
+                )
+                .select_related("sucursal", "proveedor", "almacen", "transportista")
+                .prefetch_related(
+                    Prefetch(
+                        "recepciondetalle_set",
+                        queryset=RecepcionDetalle.objects.select_related(
+                            "producto",
+                            "producto_variante",
+                            "ubicacion",
+                        ).order_by("id"),
+                    )
+                )
+                .order_by("-fecha_recepcion", "-id")
+            )
+            qs = qs.prefetch_related(
+                'ordencompradetalle_set',
+                Prefetch("recepcion_set", queryset=recepciones_qs),
+            )
         return qs
 
     def get_serializer_class(self):

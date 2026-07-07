@@ -1138,6 +1138,75 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 
 ---
 
+## 🧾 Compras - Órdenes de Compra
+
+**Base URL**: `/api/v1/compras/`
+
+### Ver una orden de compra con recepciones relacionadas
+
+- **Endpoint**: `GET /api/v1/compras/ordenes/{id}/`
+- **Respuesta**:
+  - conserva el bloque `detalles` de la orden de compra
+  - agrega el bloque `recepciones` con todas las recepciones activas ligadas a esa `orden_compra`
+  - cada recepción incluye su información general y su `detalles`
+
+**Respuesta (resumen)**
+
+```json
+{
+  "id": 112,
+  "folio": "OC-000112",
+  "estatus": 4,
+  "estatus_label": "Parcialmente recibida",
+  "detalles": [
+    {
+      "producto_id": 1,
+      "descripcion": "Tela gabardina",
+      "cantidad": 10,
+      "precio": "150.00",
+      "importe": "1500.00"
+    }
+  ],
+  "recepciones": [
+    {
+      "id": 35,
+      "tipo_origen": "OC",
+      "folio": "RC-000035",
+      "remision": "REM-102",
+      "factura_referencia": "FAC-9001",
+      "fecha_recepcion": "2026-07-07T12:00:00Z",
+      "estatus": 2,
+      "estatus_label": "Recibida",
+      "sucursal": 1,
+      "sucursal_nombre": "Matriz",
+      "proveedor": 8,
+      "proveedor_nombre": "Proveedor Demo",
+      "almacen": 3,
+      "almacen_nombre": "Almacen General",
+      "transportista": null,
+      "transportista_nombre": null,
+      "observaciones": "Recepcion parcial",
+      "detalles": [
+        {
+          "id": 77,
+          "orden_compra_detalle": 25,
+          "producto": 1,
+          "producto_nombre": "Tela gabardina",
+          "producto_variante": null,
+          "ubicacion": 12,
+          "ubicacion_nombre": "Rack A1",
+          "lote": null,
+          "serie": null,
+          "cantidad_recibida": "4.0000"
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
 ## 🧾 Compras - Recepciones (Onboarding)
 
 **Base URL**: `/api/v1/compras/`
