@@ -20,6 +20,7 @@ from compras.api.serializers import (
     RecepcionDetalleSerializer,
     RecepcionListSerializer,
     RecepcionOnboardingSerializer,
+    RecepcionRetrieveSerializer,
     RecepcionSerializer,
 )
 from inventarios.models import (
@@ -501,6 +502,22 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         user = self.request.user
         qs = self.queryset.filter(activo=True).order_by("-fecha_recepcion", "-id")
 
+        # Solo el retrieve individual anida ``detalles``: se traen los renglones
+        # con sus FK en un único prefetch (producto/producto_variante/ubicacion)
+        # para evitar el N+1 que tendría el shape anidado. El list no lo necesita
+        # y se mantiene ligero.
+        if self.action == "retrieve":
+            qs = qs.prefetch_related(
+                Prefetch(
+                    "recepciondetalle_set",
+                    queryset=RecepcionDetalle.objects.select_related(
+                        "producto",
+                        "producto_variante",
+                        "ubicacion",
+                    ).order_by("id"),
+                )
+            )
+
         # Filtro opcional por origen (OC / OP). Sigue la convención del proyecto:
         # query param manual validado en get_queryset (no se usa django-filter).
         # Omitirlo devuelve todas las recepciones, exactamente como antes.
@@ -524,10 +541,13 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         return qs.none()
 
     def get_serializer_class(self):
-        # list/retrieve devuelven la forma enriquecida (aditiva sobre la plana);
-        # el resto (p. ej. la respuesta de onboarding, que instancia
-        # RecepcionSerializer directamente) conserva la forma plana original.
-        if self.action in ("list", "retrieve"):
+        # retrieve → forma anidada dedicada (con ``detalles[]``); list conserva la
+        # forma enriquecida plana intacta; el resto (p. ej. la respuesta de
+        # onboarding, que instancia RecepcionSerializer directamente) conserva la
+        # forma plana original.
+        if self.action == "retrieve":
+            return RecepcionRetrieveSerializer
+        if self.action == "list":
             return RecepcionListSerializer
         return RecepcionSerializer
 
