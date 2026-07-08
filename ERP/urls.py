@@ -1,11 +1,23 @@
+from pathlib import Path
+
 from django.contrib import admin
+from django.http import FileResponse, Http404
 from django.urls import path, include
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 from django.contrib.auth.views import LoginView
 from terceros.views import RfcStatusView, ClientCreateView
 
+
+def serve_favicon(_request):
+    favicon_path = Path(__file__).resolve().parent.parent / "favicon.ico"
+    if not favicon_path.exists():
+        raise Http404("Favicon no encontrado.")
+    return FileResponse(open(favicon_path, "rb"), content_type="image/x-icon")
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('favicon.ico', serve_favicon, name='favicon-ico'),
+    path('favicon.png', serve_favicon, name='favicon-png'),
     # ...
     # Swagger / OpenAPI
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
