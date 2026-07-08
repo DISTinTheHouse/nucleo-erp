@@ -81,7 +81,7 @@ AUTH_KIT = {
     'USE_MFA': True,
     'USER_SERIALIZER': 'usuarios.api.serializers.UsuarioSerializer',
     'AUTH_COOKIE_SECURE': config('AUTH_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool),
-    'AUTH_COOKIE_SAMESITE': 'None',
+    'AUTH_COOKIE_SAMESITE': config('AUTH_COOKIE_SAMESITE', default='None'),
 }
 
 AUTH_USER_MODEL = "usuarios.Usuario"
