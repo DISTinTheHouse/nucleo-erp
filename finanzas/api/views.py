@@ -30,6 +30,10 @@ class ClienteViewSetContabilidad(viewsets.ModelViewSet):
         queryset = Cliente.objects.filter(empresa=empresa)
         return queryset
 
+
+# Compatibilidad temporal para imports antiguos en despliegues o rutas rezagadas.
+ClienteViewSet = ClienteViewSetContabilidad
+
 class FacturaViewSet(viewsets.ModelViewSet):
     serializer_class = FacturaSerializer
     http_method_names = ['delete', 'get', 'post']
