@@ -98,6 +98,16 @@ class Transferencia(models.Model):
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name='transferencias')
     sucursal= models.ForeignKey('nucleo.Sucursal', on_delete=models.CASCADE, related_name='transferencias')
 
+    almacen_origen = models.ForeignKey('inventarios.Almacen', on_delete=models.CASCADE, related_name='transferencias_origen')
+    almacen_destino = models.ForeignKey('inventarios.Almacen', on_delete=models.CASCADE, related_name='transferencias_destino')
+
+    folio = models.CharField(max_length=50)
+
+    usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE, related_name='transferencias')
+    observaciones = models.TextField(blank=True, null=True)
+    fecha_creacion = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=50, blank=True, null=True)
+
     history = HistoricalRecords()
 
     class Meta:
@@ -110,7 +120,9 @@ class Transferencia(models.Model):
 
 class TransferenciaDetalle(models.Model):
     transferencia = models.ForeignKey(Transferencia, on_delete=models.CASCADE, related_name='transferencia_detalle')
-    producto = models.ForeignKey('catalogo.Producto', on_delete=models.CASCADE, related_name='transferencia_detalle')
+    producto = models.ForeignKey('catalogo.Producto', on_delete=models.CASCADE, related_name='transferencia_detalle', blank=True, null=True)
+    producto_variante = models.ForeignKey('catalogo.ProductoVariante', on_delete=models.CASCADE, related_name='transferencia_detalle_variante', blank=True, null=True)
+    cantidad = models.DecimalField(max_digits=18, decimal_places=4)
     ubicacion_origen = models.ForeignKey('inventarios.Ubicacion', on_delete=models.CASCADE, related_name='transferencia_detalle_origen')
     ubicacion_destino = models.ForeignKey('inventarios.Ubicacion', on_delete=models.CASCADE, related_name='transferencia_detalle_destino')
     lote = models.ForeignKey('inventarios.Lote', on_delete=models.CASCADE, related_name='transferencia_detalle')

@@ -195,6 +195,7 @@ class MovimientoInventario(StatusLifecycleModel):
 class MovimientoInventarioDetalle(models.Model):
     movimiento_inventario = models.ForeignKey(MovimientoInventario, on_delete=models.CASCADE, related_name="detalles")
     producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle")
+    producto_variante = models.ForeignKey('catalogo.ProductoVariante', on_delete=models.CASCADE, related_name='transferencia_detalle', blank=True, null=True)
     ubicacion_origen = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle_origen", null=True, blank=True)
     ubicacion_destino = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle_destino", null=True, blank=True)
     lote = models.ForeignKey(Lote, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle", null=True, blank=True)
