@@ -54,11 +54,11 @@ _// omitir por ahora calidad, facturas proveedor y pagos //_
 
 (no empezar con todo producción)
 
-- [ ] ¿TERMINADO?
+- [x] ¿TERMINADO?
 - [x] listas_materiales_bom
 - [x] ordenes_produccion
 - [x] consumos_produccion
-- [ ] producto_terminado_entradas
+- [-] producto_terminado_entradas
 
 **_Objetivo: Comsumir MP + Generar PT + ver transformación real_**
 
@@ -87,9 +87,9 @@ Recomendación: Pedidos simples, sin backorders, sin entregas parciales
 _// en esta fase el ERP ya debe sentirse "PRO"_
 
 - TERMINADO
-- [ ] Pedido de stock → baja inventario
-- [ ] Pedido de fabricación → genera OP
-- [ ] Pedido mixto → split automático
+- [x] Pedido de stock → baja inventario
+- [x] Pedido de fabricación → genera OP
+- [-] Pedido mixto → split automático (aun no se aclara la idea y no se ha implementado)
 
 **_Objetivo: 'El PEDIDO' será nuestro 'DOCUMENTO MAESTRO' para detonar ordenes de producción,
 ordenes de bordado, ordenes de compra, una factura, descuento de inventario_**

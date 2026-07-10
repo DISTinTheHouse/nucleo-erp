@@ -1,6 +1,10 @@
+from collections import defaultdict
+from datetime import datetime, time
 from decimal import Decimal
 
 from django.db import models, transaction
+from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -197,6 +201,392 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 if almacen.empresa_id:
                     if user.empresa_id and almacen.empresa_id != user.empresa_id and not user.empresas.filter(pk=almacen.empresa_id).exists():
                         raise PermissionDenied("No tiene acceso a la empresa de este almacén")
+
+    def _report_to_int(self, value):
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _report_to_decimal(self, value):
+        try:
+            return Decimal(str(value or 0))
+        except Exception:
+            return Decimal("0")
+
+    def _quantize_qty(self, value):
+        return self._report_to_decimal(value).quantize(Decimal("0.0001"))
+
+    def _quantize_money(self, value):
+        return self._report_to_decimal(value).quantize(Decimal("0.01"))
+
+    def _build_report_almacenes_queryset(self):
+        user = self.request.user
+        qp = self.request.query_params
+        qs = Almacen.objects.select_related("empresa", "sucursal").all()
+
+        if not user.is_superuser:
+            empresa_ids = []
+            if getattr(user, "empresa_id", None):
+                empresa_ids.append(user.empresa_id)
+            empresa_ids += list(user.empresas.values_list("pk", flat=True))
+            sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+            qs = qs.filter(
+                models.Q(empresa_id__in=empresa_ids)
+                & models.Q(sucursal_id__in=sucursal_ids)
+            )
+
+        empresa_id = self._report_to_int(qp.get("empresa") or qp.get("empresa_id"))
+        sucursal_id = self._report_to_int(qp.get("sucursal") or qp.get("sucursal_id"))
+        almacen_id = self._report_to_int(qp.get("almacen") or qp.get("almacen_id"))
+
+        if empresa_id:
+            qs = qs.filter(empresa_id=empresa_id)
+        if sucursal_id:
+            qs = qs.filter(sucursal_id=sucursal_id)
+        if almacen_id:
+            qs = qs.filter(pk=almacen_id)
+        return qs
+
+    def _parse_report_dates(self):
+        fecha_inicio_raw = (self.request.query_params.get("fecha_inicio") or "").strip()
+        fecha_final_raw = (self.request.query_params.get("fecha_final") or "").strip()
+        fecha_inicio = parse_date(fecha_inicio_raw)
+        fecha_final = parse_date(fecha_final_raw)
+
+        if not fecha_inicio:
+            raise ValidationError({"fecha_inicio": "fecha_inicio es requerida con formato YYYY-MM-DD."})
+        if not fecha_final:
+            raise ValidationError({"fecha_final": "fecha_final es requerida con formato YYYY-MM-DD."})
+        if fecha_final < fecha_inicio:
+            raise ValidationError({"fecha_final": "fecha_final no puede ser menor a fecha_inicio."})
+
+        tz = timezone.get_current_timezone()
+        inicio_dt = timezone.make_aware(datetime.combine(fecha_inicio, time.min), tz)
+        final_dt = timezone.make_aware(datetime.combine(fecha_final, time.max), tz)
+        return fecha_inicio, fecha_final, inicio_dt, final_dt
+
+    def _iter_auditoria_items(self, eventos, allowed_almacen_ids, producto_id=None, producto_variante_id=None):
+        for evento in eventos.iterator():
+            payload = evento.despues_json or evento.antes_json or {}
+            for item in payload.get("items", []) or []:
+                almacen_id = self._report_to_int(item.get("almacen_id"))
+                if not almacen_id or almacen_id not in allowed_almacen_ids:
+                    continue
+
+                item_producto_id = self._report_to_int(item.get("producto_id"))
+                item_variante_id = self._report_to_int(item.get("producto_variante_id"))
+
+                if producto_variante_id and item_variante_id != producto_variante_id:
+                    continue
+                if producto_id and item_producto_id != producto_id:
+                    continue
+
+                yield {
+                    "almacen_id": almacen_id,
+                    "producto_id": item_producto_id,
+                    "producto_variante_id": item_variante_id,
+                    "delta": self._report_to_decimal(item.get("delta")),
+                }
+
+    def _movement_almacen_ids(self, detalle):
+        movimiento = detalle.movimiento_inventario
+        origen_id = (
+            getattr(detalle.ubicacion_origen, "almacen_id", None)
+            or getattr(getattr(movimiento, "transferencia", None), "almacen_origen_id", None)
+            or getattr(getattr(movimiento, "ajuste_inventario", None), "almacen_id", None)
+        )
+        destino_id = (
+            getattr(detalle.ubicacion_destino, "almacen_id", None)
+            or getattr(getattr(movimiento, "recepcion", None), "almacen_id", None)
+            or getattr(getattr(movimiento, "transferencia", None), "almacen_destino_id", None)
+            or getattr(getattr(movimiento, "ajuste_inventario", None), "almacen_id", None)
+        )
+        return origen_id, destino_id
+
+    @action(detail=False, methods=["get"], url_path="reporte-existencias-periodo")
+    def reporte_existencias_periodo(self, request):
+        fecha_inicio, fecha_final, inicio_dt, final_dt = self._parse_report_dates()
+        qp = request.query_params
+        producto_id = self._report_to_int(qp.get("producto") or qp.get("producto_id"))
+        producto_variante_id = self._report_to_int(
+            qp.get("producto_variante") or qp.get("producto_variante_id")
+        )
+
+        almacenes_qs = self._build_report_almacenes_queryset()
+        almacenes = list(
+            almacenes_qs.values(
+                "id_almacen",
+                "codigo",
+                "nombre",
+                "empresa_id",
+                "sucursal_id",
+            )
+        )
+        allowed_almacen_ids = {row["id_almacen"] for row in almacenes}
+
+        if not allowed_almacen_ids:
+            return Response(
+                {
+                    "fecha_inicio": str(fecha_inicio),
+                    "fecha_final": str(fecha_final),
+                    "filtros": {
+                        "producto_id": producto_id,
+                        "producto_variante_id": producto_variante_id,
+                    },
+                    "resumen": {
+                        "existencia_inicial": "0.0000",
+                        "entradas": "0.0000",
+                        "salidas": "0.0000",
+                        "existencia_final": "0.0000",
+                        "costo_total_existencia_final": "0.00",
+                    },
+                    "resumen_por_almacen": [],
+                    "detalle": [],
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        almacen_map = {row["id_almacen"]: row for row in almacenes}
+        empresa_ids = {row["empresa_id"] for row in almacenes if row["empresa_id"]}
+
+        current_map = defaultdict(lambda: Decimal("0"))
+        keys = set()
+
+        current_qs = Existencia.objects.select_related(
+            "producto",
+            "producto_variante",
+            "producto_variante__producto",
+            "producto_variante__color",
+            "producto_variante__talla",
+            "almacen",
+        ).filter(almacen_id__in=allowed_almacen_ids)
+
+        if producto_variante_id:
+            current_qs = current_qs.filter(producto_variante_id=producto_variante_id)
+        if producto_id:
+            current_qs = current_qs.filter(
+                models.Q(producto_id=producto_id)
+                | models.Q(producto_variante__producto_id=producto_id)
+            )
+
+        for ex in current_qs:
+            key = (
+                ex.almacen_id,
+                getattr(ex, "producto_id", None)
+                or getattr(getattr(ex, "producto_variante", None), "producto_id", None),
+                ex.producto_variante_id,
+            )
+            current_map[key] += self._report_to_decimal(ex.cantidad)
+            keys.add(key)
+
+        auditoria_base = AuditoriaEvento.objects.filter(
+            modulo="inventarios",
+            tabla="existencias",
+            empresa_id__in=empresa_ids,
+        ).order_by("created_at", "id_evento")
+
+        period_delta_map = defaultdict(lambda: Decimal("0"))
+        period_in_map = defaultdict(lambda: Decimal("0"))
+        period_out_map = defaultdict(lambda: Decimal("0"))
+        post_end_delta_map = defaultdict(lambda: Decimal("0"))
+
+        period_events = auditoria_base.filter(created_at__gte=inicio_dt, created_at__lte=final_dt)
+        for item in self._iter_auditoria_items(
+            period_events,
+            allowed_almacen_ids=allowed_almacen_ids,
+            producto_id=producto_id,
+            producto_variante_id=producto_variante_id,
+        ):
+            key = (item["almacen_id"], item["producto_id"], item["producto_variante_id"])
+            delta = item["delta"]
+            period_delta_map[key] += delta
+            if delta >= 0:
+                period_in_map[key] += delta
+            else:
+                period_out_map[key] += abs(delta)
+            keys.add(key)
+
+        post_end_events = auditoria_base.filter(created_at__gt=final_dt)
+        for item in self._iter_auditoria_items(
+            post_end_events,
+            allowed_almacen_ids=allowed_almacen_ids,
+            producto_id=producto_id,
+            producto_variante_id=producto_variante_id,
+        ):
+            key = (item["almacen_id"], item["producto_id"], item["producto_variante_id"])
+            post_end_delta_map[key] += item["delta"]
+            keys.add(key)
+
+        product_ids = {key[1] for key in keys if key[1]}
+        variante_ids = {key[2] for key in keys if key[2]}
+
+        productos_map = {
+            producto.pk: producto
+            for producto in Producto.objects.filter(pk__in=product_ids).only(
+                "id", "nombre", "precio_base"
+            )
+        }
+        variantes_map = {
+            variante.pk: variante
+            for variante in ProductoVariante.objects.select_related("producto", "color", "talla")
+            .filter(pk__in=variante_ids)
+        }
+
+        cost_map = {}
+        if keys:
+            movement_cost_qs = (
+                MovimientoInventarioDetalle.objects.select_related(
+                    "movimiento_inventario",
+                    "movimiento_inventario__recepcion",
+                    "movimiento_inventario__ajuste_inventario",
+                    "movimiento_inventario__transferencia",
+                    "ubicacion_origen",
+                    "ubicacion_destino",
+                )
+                .filter(
+                    movimiento_inventario__fecha_movimiento__lte=final_dt,
+                    costo_unitario__gt=0,
+                )
+                .filter(
+                    models.Q(ubicacion_origen__almacen_id__in=allowed_almacen_ids)
+                    | models.Q(ubicacion_destino__almacen_id__in=allowed_almacen_ids)
+                    | models.Q(movimiento_inventario__recepcion__almacen_id__in=allowed_almacen_ids)
+                    | models.Q(movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids)
+                    | models.Q(movimiento_inventario__transferencia__almacen_origen_id__in=allowed_almacen_ids)
+                    | models.Q(movimiento_inventario__transferencia__almacen_destino_id__in=allowed_almacen_ids)
+                )
+                .order_by("-movimiento_inventario__fecha_movimiento", "-id")
+            )
+            if producto_variante_id:
+                movement_cost_qs = movement_cost_qs.filter(producto_variante_id=producto_variante_id)
+            if producto_id:
+                movement_cost_qs = movement_cost_qs.filter(producto_id=producto_id)
+
+            for detalle in movement_cost_qs:
+                producto_key_id = detalle.producto_id
+                variante_key_id = detalle.producto_variante_id
+                origen_id, destino_id = self._movement_almacen_ids(detalle)
+                for almacen_id in {origen_id, destino_id}:
+                    key = (almacen_id, producto_key_id, variante_key_id)
+                    if almacen_id and key in keys and key not in cost_map:
+                        cost_map[key] = self._report_to_decimal(detalle.costo_unitario)
+                if len(cost_map) >= len(keys):
+                    break
+
+        detalle = []
+        resumen_por_almacen = defaultdict(
+            lambda: {
+                "existencia_inicial": Decimal("0"),
+                "entradas": Decimal("0"),
+                "salidas": Decimal("0"),
+                "existencia_final": Decimal("0"),
+                "costo_total_existencia_final": Decimal("0"),
+            }
+        )
+        resumen_total = {
+            "existencia_inicial": Decimal("0"),
+            "entradas": Decimal("0"),
+            "salidas": Decimal("0"),
+            "existencia_final": Decimal("0"),
+            "costo_total_existencia_final": Decimal("0"),
+        }
+
+        for key in sorted(keys, key=lambda row: (row[0], row[1] or 0, row[2] or 0)):
+            almacen_id, producto_key_id, variante_key_id = key
+            current_qty = current_map[key]
+            period_delta = period_delta_map[key]
+            entradas = period_in_map[key]
+            salidas = period_out_map[key]
+            existencia_final = current_qty - post_end_delta_map[key]
+            existencia_inicial = existencia_final - period_delta
+            costo_unitario = cost_map.get(key, Decimal("0"))
+            costo_existencia_final = self._quantize_money(existencia_final * costo_unitario)
+
+            variante = variantes_map.get(variante_key_id)
+            producto = variantes_map[variante_key_id].producto if variante else productos_map.get(producto_key_id)
+            almacen = almacen_map.get(almacen_id, {})
+
+            row = {
+                "almacen_id": almacen_id,
+                "almacen_codigo": almacen.get("codigo"),
+                "almacen_nombre": almacen.get("nombre"),
+                "producto_id": producto_key_id,
+                "producto_variante_id": variante_key_id,
+                "producto_nombre": getattr(producto, "nombre", None),
+                "sku": getattr(variante, "sku", None) if variante else None,
+                "color": getattr(getattr(variante, "color", None), "nombre", None) if variante else None,
+                "talla": getattr(getattr(variante, "talla", None), "nombre", None) if variante else None,
+                "existencia_inicial": str(self._quantize_qty(existencia_inicial)),
+                "entradas": str(self._quantize_qty(entradas)),
+                "salidas": str(self._quantize_qty(salidas)),
+                "existencia_final": str(self._quantize_qty(existencia_final)),
+                "costo_unitario_final": str(self._quantize_money(costo_unitario)),
+                "costo_existencia_final": str(costo_existencia_final),
+            }
+            detalle.append(row)
+
+            resumen_por_almacen[almacen_id]["existencia_inicial"] += existencia_inicial
+            resumen_por_almacen[almacen_id]["entradas"] += entradas
+            resumen_por_almacen[almacen_id]["salidas"] += salidas
+            resumen_por_almacen[almacen_id]["existencia_final"] += existencia_final
+            resumen_por_almacen[almacen_id]["costo_total_existencia_final"] += self._report_to_decimal(
+                costo_existencia_final
+            )
+
+            resumen_total["existencia_inicial"] += existencia_inicial
+            resumen_total["entradas"] += entradas
+            resumen_total["salidas"] += salidas
+            resumen_total["existencia_final"] += existencia_final
+            resumen_total["costo_total_existencia_final"] += self._report_to_decimal(
+                costo_existencia_final
+            )
+
+        resumen_almacenes_payload = []
+        for almacen_id, totals in sorted(resumen_por_almacen.items(), key=lambda item: item[0]):
+            almacen = almacen_map.get(almacen_id, {})
+            resumen_almacenes_payload.append(
+                {
+                    "almacen_id": almacen_id,
+                    "almacen_codigo": almacen.get("codigo"),
+                    "almacen_nombre": almacen.get("nombre"),
+                    "existencia_inicial": str(self._quantize_qty(totals["existencia_inicial"])),
+                    "entradas": str(self._quantize_qty(totals["entradas"])),
+                    "salidas": str(self._quantize_qty(totals["salidas"])),
+                    "existencia_final": str(self._quantize_qty(totals["existencia_final"])),
+                    "costo_total_existencia_final": str(
+                        self._quantize_money(totals["costo_total_existencia_final"])
+                    ),
+                }
+            )
+
+        return Response(
+            {
+                "fecha_inicio": str(fecha_inicio),
+                "fecha_final": str(fecha_final),
+                "filtros": {
+                    "empresa_id": self._report_to_int(qp.get("empresa") or qp.get("empresa_id")),
+                    "sucursal_id": self._report_to_int(qp.get("sucursal") or qp.get("sucursal_id")),
+                    "almacen_id": self._report_to_int(qp.get("almacen") or qp.get("almacen_id")),
+                    "producto_id": producto_id,
+                    "producto_variante_id": producto_variante_id,
+                },
+                "resumen": {
+                    "existencia_inicial": str(self._quantize_qty(resumen_total["existencia_inicial"])),
+                    "entradas": str(self._quantize_qty(resumen_total["entradas"])),
+                    "salidas": str(self._quantize_qty(resumen_total["salidas"])),
+                    "existencia_final": str(self._quantize_qty(resumen_total["existencia_final"])),
+                    "costo_total_existencia_final": str(
+                        self._quantize_money(resumen_total["costo_total_existencia_final"])
+                    ),
+                },
+                "resumen_por_almacen": resumen_almacenes_payload,
+                "detalle": detalle,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class OperacionInventarioViewSet(viewsets.ViewSet):
