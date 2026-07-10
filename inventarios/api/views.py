@@ -8,6 +8,7 @@ from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from inventarios.models import (
@@ -122,6 +123,14 @@ class UbicacionViewSet(viewsets.ModelViewSet):
                 if user.empresa_id and empresa.pk != user.empresa_id and not user.empresas.filter(pk=empresa.pk).exists():
                     raise PermissionDenied("No tiene acceso a esta empresa")
         serializer.save()
+
+class ReporteExistenciasPeriodoPagination(PageNumberPagination):
+    # Instantiated explicitly inside the action, not set as pagination_class
+    # on the ViewSet, so list()/other actions are unaffected.
+    page_size = 200
+    page_size_query_param = "page_size"
+    max_page_size = 2000
+
 
 class ExistenciaViewSet(viewsets.ModelViewSet):
     queryset = Existencia.objects.all().select_related(
@@ -345,7 +354,10 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                         "costo_total_existencia_final": "0.00",
                     },
                     "resumen_por_almacen": [],
-                    "detalle": [],
+                    "count": 0,
+                    "next": None,
+                    "previous": None,
+                    "results": [],
                 },
                 status=status.HTTP_200_OK,
             )
@@ -563,27 +575,26 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 }
             )
 
-        return Response(
-            {
-                "fecha_inicio": str(fecha_inicio),
-                "fecha_final": str(fecha_final),
-                "filtros": {
-                    "almacen_id": almacen_id,
-                },
-                "resumen": {
-                    "existencia_inicial": str(self._quantize_qty(resumen_total["existencia_inicial"])),
-                    "entradas": str(self._quantize_qty(resumen_total["entradas"])),
-                    "salidas": str(self._quantize_qty(resumen_total["salidas"])),
-                    "existencia_final": str(self._quantize_qty(resumen_total["existencia_final"])),
-                    "costo_total_existencia_final": str(
-                        self._quantize_money(resumen_total["costo_total_existencia_final"])
-                    ),
-                },
-                "resumen_por_almacen": resumen_almacenes_payload,
-                "detalle": detalle,
-            },
-            status=status.HTTP_200_OK,
-        )
+        paginator = ReporteExistenciasPeriodoPagination()
+        page = paginator.paginate_queryset(detalle, request, view=self)
+
+        response = paginator.get_paginated_response(page)
+        response.data["fecha_inicio"] = str(fecha_inicio)
+        response.data["fecha_final"] = str(fecha_final)
+        response.data["filtros"] = {
+            "almacen_id": almacen_id,
+        }
+        response.data["resumen"] = {
+            "existencia_inicial": str(self._quantize_qty(resumen_total["existencia_inicial"])),
+            "entradas": str(self._quantize_qty(resumen_total["entradas"])),
+            "salidas": str(self._quantize_qty(resumen_total["salidas"])),
+            "existencia_final": str(self._quantize_qty(resumen_total["existencia_final"])),
+            "costo_total_existencia_final": str(
+                self._quantize_money(resumen_total["costo_total_existencia_final"])
+            ),
+        }
+        response.data["resumen_por_almacen"] = resumen_almacenes_payload
+        return response
 
 
 class OperacionInventarioViewSet(viewsets.ViewSet):
