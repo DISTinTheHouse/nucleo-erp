@@ -584,15 +584,40 @@ Permite consultar el inventario actual.
   - `fecha_inicio`: requerido, formato `YYYY-MM-DD`
   - `fecha_final`: requerido, formato `YYYY-MM-DD`
   - `almacen_id`: opcional si el usuario quiere un almacén específico; si se omite, regresa todos los almacenes visibles para el usuario
+- **Paginación**: aplica únicamente sobre `results` (el detalle por almacén/producto/variante). `fecha_inicio`, `fecha_final`, `filtros`, `resumen` y `resumen_por_almacen` son agregados de todo el periodo/consulta, no solo de la página actual.
+  - `page`: opcional, número de página (default `1`)
+  - `page_size`: opcional, tamaño de página (default `200`, máximo `2000`)
 - **Fórmula de cierre**:
   - `existencia_final = existencia_inicial + entradas - salidas`
   - `costo_total_existencia_final = sum(existencia_final * costo_unitario_final)`
   - En la respuesta, `salidas` se entrega como valor positivo para facilitar la lectura del reporte.
 - **Ejemplo**:
-  - `GET /api/v1/inventarios/existencias/reporte-existencias-periodo/?fecha_inicio=2026-07-01&fecha_final=2026-07-31&almacen_id=1`
+  - `GET /api/v1/inventarios/existencias/reporte-existencias-periodo/?fecha_inicio=2026-07-01&fecha_final=2026-07-31&almacen_id=1&page=1&page_size=200`
 - **Respuesta**:
   ```json
   {
+    "count": 450,
+    "next": "https://.../reporte-existencias-periodo/?almacen_id=1&fecha_final=2026-07-31&fecha_inicio=2026-07-01&page=2",
+    "previous": null,
+    "results": [
+      {
+        "almacen_id": 1,
+        "almacen_codigo": "PT-MTY",
+        "almacen_nombre": "Almacén PT Monterrey",
+        "producto_id": 8275,
+        "producto_variante_id": 2284,
+        "producto_nombre": "GORRA CAZADOR",
+        "sku": "GOR-CAZ-NEG-UNI",
+        "color": "NEGRO",
+        "talla": "UNITALLA",
+        "existencia_inicial": "10.0000",
+        "entradas": "5.0000",
+        "salidas": "2.0000",
+        "existencia_final": "13.0000",
+        "costo_unitario_final": "140.00",
+        "costo_existencia_final": "1820.00"
+      }
+    ],
     "fecha_inicio": "2026-07-01",
     "fecha_final": "2026-07-31",
     "filtros": {
@@ -616,28 +641,11 @@ Permite consultar el inventario actual.
         "existencia_final": "135.0000",
         "costo_total_existencia_final": "18900.00"
       }
-    ],
-    "detalle": [
-      {
-        "almacen_id": 1,
-        "almacen_codigo": "PT-MTY",
-        "almacen_nombre": "Almacén PT Monterrey",
-        "producto_id": 8275,
-        "producto_variante_id": 2284,
-        "producto_nombre": "GORRA CAZADOR",
-        "sku": "GOR-CAZ-NEG-UNI",
-        "color": "NEGRO",
-        "talla": "UNITALLA",
-        "existencia_inicial": "10.0000",
-        "entradas": "5.0000",
-        "salidas": "2.0000",
-        "existencia_final": "13.0000",
-        "costo_unitario_final": "140.00",
-        "costo_existencia_final": "1820.00"
-      }
     ]
   }
   ```
+  - `count`/`next`/`previous`/`results` son la paginación estándar de DRF sobre el arreglo de detalle (antes expuesto como `detalle`).
+  - `fecha_inicio`, `fecha_final`, `filtros`, `resumen` y `resumen_por_almacen` se mantienen igual que antes de paginar: reflejan todo el resultado filtrado, no cambian entre páginas.
 
 ### Movimientos de Inventario
 
