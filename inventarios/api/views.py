@@ -310,6 +310,7 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
     def reporte_existencias_periodo(self, request):
         fecha_inicio, fecha_final, inicio_dt, final_dt = self._parse_report_dates()
         qp = request.query_params
+        almacen_id = self._report_to_int(qp.get("almacen") or qp.get("almacen_id"))
         producto_id = self._report_to_int(qp.get("producto") or qp.get("producto_id"))
         producto_variante_id = self._report_to_int(
             qp.get("producto_variante") or qp.get("producto_variante_id")
@@ -567,11 +568,7 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 "fecha_inicio": str(fecha_inicio),
                 "fecha_final": str(fecha_final),
                 "filtros": {
-                    "empresa_id": self._report_to_int(qp.get("empresa") or qp.get("empresa_id")),
-                    "sucursal_id": self._report_to_int(qp.get("sucursal") or qp.get("sucursal_id")),
-                    "almacen_id": self._report_to_int(qp.get("almacen") or qp.get("almacen_id")),
-                    "producto_id": producto_id,
-                    "producto_variante_id": producto_variante_id,
+                    "almacen_id": almacen_id,
                 },
                 "resumen": {
                     "existencia_inicial": str(self._quantize_qty(resumen_total["existencia_inicial"])),

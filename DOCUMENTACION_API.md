@@ -574,6 +574,71 @@ Permite consultar el inventario actual.
   - `producto_variante` queda como opcional para escenarios donde sí aplique.
   - Las existencias se afectan por operaciones o recepciones, no por crear una orden de compra.
 
+- **Reporte de cierre por periodo**: `GET /api/v1/inventarios/existencias/reporte-existencias-periodo/`
+- **Uso esperado en frontend**:
+  - Seleccionar `fecha_inicio`
+  - Seleccionar `fecha_final`
+  - Seleccionar `almacen_id`
+  - Clic en generar reporte
+- **Query params mínimos**:
+  - `fecha_inicio`: requerido, formato `YYYY-MM-DD`
+  - `fecha_final`: requerido, formato `YYYY-MM-DD`
+  - `almacen_id`: opcional si el usuario quiere un almacén específico; si se omite, regresa todos los almacenes visibles para el usuario
+- **Fórmula de cierre**:
+  - `existencia_final = existencia_inicial + entradas - salidas`
+  - `costo_total_existencia_final = sum(existencia_final * costo_unitario_final)`
+  - En la respuesta, `salidas` se entrega como valor positivo para facilitar la lectura del reporte.
+- **Ejemplo**:
+  - `GET /api/v1/inventarios/existencias/reporte-existencias-periodo/?fecha_inicio=2026-07-01&fecha_final=2026-07-31&almacen_id=1`
+- **Respuesta**:
+  ```json
+  {
+    "fecha_inicio": "2026-07-01",
+    "fecha_final": "2026-07-31",
+    "filtros": {
+      "almacen_id": 1
+    },
+    "resumen": {
+      "existencia_inicial": "120.0000",
+      "entradas": "35.0000",
+      "salidas": "20.0000",
+      "existencia_final": "135.0000",
+      "costo_total_existencia_final": "18900.00"
+    },
+    "resumen_por_almacen": [
+      {
+        "almacen_id": 1,
+        "almacen_codigo": "PT-MTY",
+        "almacen_nombre": "Almacén PT Monterrey",
+        "existencia_inicial": "120.0000",
+        "entradas": "35.0000",
+        "salidas": "20.0000",
+        "existencia_final": "135.0000",
+        "costo_total_existencia_final": "18900.00"
+      }
+    ],
+    "detalle": [
+      {
+        "almacen_id": 1,
+        "almacen_codigo": "PT-MTY",
+        "almacen_nombre": "Almacén PT Monterrey",
+        "producto_id": 8275,
+        "producto_variante_id": 2284,
+        "producto_nombre": "GORRA CAZADOR",
+        "sku": "GOR-CAZ-NEG-UNI",
+        "color": "NEGRO",
+        "talla": "UNITALLA",
+        "existencia_inicial": "10.0000",
+        "entradas": "5.0000",
+        "salidas": "2.0000",
+        "existencia_final": "13.0000",
+        "costo_unitario_final": "140.00",
+        "costo_existencia_final": "1820.00"
+      }
+    ]
+  }
+  ```
+
 ### Movimientos de Inventario
 
 Historial operativo de entradas, salidas y ajustes.
