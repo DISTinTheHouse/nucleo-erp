@@ -714,6 +714,73 @@ Historial operativo de entradas, salidas y ajustes.
   }
   ```
 
+- **Reporte por tipo y rango**: `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/`
+- **Uso esperado en frontend**:
+  - Seleccionar `tipo_movimiento`
+  - Seleccionar `fecha_inicio`
+  - Seleccionar `fecha_final`
+  - Seleccionar `almacen_id` si se quiere filtrar un almacén específico
+  - O usar la opción `TODOS LOS ALMACENES` dejando `almacen_id` vacío o sin enviarlo
+  - Clic en buscar
+  - Con la misma respuesta generar PDF
+- **Query params**:
+  - `tipo_movimiento`: requerido, `ENTRADA`, `SALIDA` o `AJUSTE`
+  - `fecha_inicio`: requerido, formato `YYYY-MM-DD`
+  - `fecha_final`: requerido, formato `YYYY-MM-DD`
+  - `almacen_id`: opcional; si no se envía, el reporte incluye todos los almacenes visibles para el usuario
+- **Ejemplo**:
+  - `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/?tipo_movimiento=SALIDA&fecha_inicio=2026-07-01&fecha_final=2026-07-31&almacen_id=1`
+  - `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/?tipo_movimiento=SALIDA&fecha_inicio=2026-07-01&fecha_final=2026-07-31`
+- **Respuesta**:
+  ```json
+  {
+    "tipo_movimiento": "SALIDA",
+    "fecha_inicio": "2026-07-01",
+    "fecha_final": "2026-07-31",
+    "filtros": {
+      "almacen_id": 1
+    },
+    "resumen": {
+      "total_movimientos": 12,
+      "total_registros": 18,
+      "total_cantidad": "85.0000"
+    },
+    "resultados": [
+      {
+        "movimiento_inventario_id": 245,
+        "movimiento_detalle_id": 810,
+        "tipo_movimiento": "SALIDA",
+        "fecha_movimiento": "2026-07-12T16:40:00Z",
+        "almacen_id": 1,
+        "almacen_codigo": "PT-MTY",
+        "almacen_nombre": "Almacén PT Monterrey",
+        "ubicacion_id": 5,
+        "ubicacion_nombre": "Almacén PT Monterrey - A-1-1-1",
+        "producto_id": 8275,
+        "producto_variante_id": 2284,
+        "sku": "GOR-CAZ-NEG-UNI",
+        "producto_nombre": "GORRA CAZADOR - NEGRO - UNITALLA",
+        "producto_base_nombre": "GORRA CAZADOR",
+        "color": "NEGRO",
+        "talla": "UNITALLA",
+        "cantidad": "10.0000",
+        "costo_unitario": "140.00",
+        "costo_total": "1400.00",
+        "pedido_id": 49,
+        "pedido_folio": "PED-49",
+        "recepcion_id": null,
+        "ajuste_inventario_id": null,
+        "op_id": null,
+        "usuario_id": 3,
+        "usuario_nombre": "Desarrollo",
+        "observaciones": "Salida por pedido autorizado",
+        "comentarios": "Salida por pedido autorizado",
+        "motivo_ajuste": null
+      }
+    ]
+  }
+  ```
+
 ### Operaciones de Inventario
 
 Operaciones oficiales del módulo. Este es el flujo recomendado para modificar existencias.

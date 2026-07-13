@@ -996,6 +996,249 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
             .order_by("-created_at", "-id_evento")
         )
 
+    def _report_to_int(self, value):
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _report_to_decimal(self, value):
+        try:
+            return Decimal(str(value or 0))
+        except Exception:
+            return Decimal("0")
+
+    def _movement_report_allowed_almacen_ids(self, request):
+        qp = request.query_params
+        almacen_id = self._report_to_int(qp.get("almacen") or qp.get("almacen_id"))
+        qs = Almacen.objects.all()
+        user = request.user
+
+        if not user.is_superuser:
+            empresa_ids = []
+            if getattr(user, "empresa_id", None):
+                empresa_ids.append(user.empresa_id)
+            empresa_ids += list(user.empresas.values_list("pk", flat=True))
+            sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+            qs = qs.filter(
+                models.Q(empresa_id__in=empresa_ids)
+                & models.Q(sucursal_id__in=sucursal_ids)
+            )
+
+        if almacen_id:
+            qs = qs.filter(pk=almacen_id)
+        return set(qs.values_list("pk", flat=True)), almacen_id
+
+    def _movement_report_parse_dates(self, request):
+        fecha_inicio_raw = (request.query_params.get("fecha_inicio") or "").strip()
+        fecha_final_raw = (request.query_params.get("fecha_final") or "").strip()
+        fecha_inicio = parse_date(fecha_inicio_raw)
+        fecha_final = parse_date(fecha_final_raw)
+
+        if not fecha_inicio:
+            raise ValidationError(
+                {"fecha_inicio": "fecha_inicio es requerida con formato YYYY-MM-DD."}
+            )
+        if not fecha_final:
+            raise ValidationError(
+                {"fecha_final": "fecha_final es requerida con formato YYYY-MM-DD."}
+            )
+        if fecha_final < fecha_inicio:
+            raise ValidationError(
+                {"fecha_final": "fecha_final no puede ser menor a fecha_inicio."}
+            )
+
+        tz = timezone.get_current_timezone()
+        inicio_dt = timezone.make_aware(datetime.combine(fecha_inicio, time.min), tz)
+        final_dt = timezone.make_aware(datetime.combine(fecha_final, time.max), tz)
+        return fecha_inicio, fecha_final, inicio_dt, final_dt
+
+    @action(detail=False, methods=["get"], url_path="reporte-movimientos-periodo")
+    def reporte_movimientos_periodo(self, request):
+        tipo_movimiento = (request.query_params.get("tipo_movimiento") or "").strip().upper()
+        if tipo_movimiento not in {"ENTRADA", "SALIDA", "AJUSTE"}:
+            raise ValidationError(
+                {
+                    "tipo_movimiento": (
+                        "tipo_movimiento es requerido y debe ser ENTRADA, SALIDA o AJUSTE."
+                    )
+                }
+            )
+
+        fecha_inicio, fecha_final, inicio_dt, final_dt = self._movement_report_parse_dates(
+            request
+        )
+        allowed_almacen_ids, almacen_id = self._movement_report_allowed_almacen_ids(request)
+
+        if not allowed_almacen_ids:
+            return Response(
+                {
+                    "tipo_movimiento": tipo_movimiento,
+                    "fecha_inicio": str(fecha_inicio),
+                    "fecha_final": str(fecha_final),
+                    "filtros": {"almacen_id": almacen_id},
+                    "resumen": {
+                        "total_movimientos": 0,
+                        "total_registros": 0,
+                        "total_cantidad": "0.0000",
+                    },
+                    "resultados": [],
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        detalles_qs = (
+            MovimientoInventarioDetalle.objects.select_related(
+                "movimiento_inventario",
+                "movimiento_inventario__usuario",
+                "movimiento_inventario__pedido",
+                "movimiento_inventario__recepcion",
+                "movimiento_inventario__ajuste_inventario",
+                "movimiento_inventario__op",
+                "producto",
+                "producto_variante",
+                "producto_variante__producto",
+                "producto_variante__color",
+                "producto_variante__talla",
+                "ubicacion_origen",
+                "ubicacion_origen__almacen",
+                "ubicacion_destino",
+                "ubicacion_destino__almacen",
+            )
+            .filter(
+                movimiento_inventario__activo=True,
+                movimiento_inventario__tipo_movimiento=tipo_movimiento,
+                movimiento_inventario__fecha_movimiento__gte=inicio_dt,
+                movimiento_inventario__fecha_movimiento__lte=final_dt,
+            )
+            .order_by("-movimiento_inventario__fecha_movimiento", "-id")
+        )
+
+        if tipo_movimiento == "ENTRADA":
+            detalles_qs = detalles_qs.filter(
+                models.Q(ubicacion_destino__almacen_id__in=allowed_almacen_ids)
+                | models.Q(
+                    movimiento_inventario__recepcion__almacen_id__in=allowed_almacen_ids
+                )
+                | models.Q(
+                    movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids
+                )
+            )
+        elif tipo_movimiento == "SALIDA":
+            detalles_qs = detalles_qs.filter(
+                models.Q(ubicacion_origen__almacen_id__in=allowed_almacen_ids)
+                | models.Q(
+                    movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids
+                )
+            )
+        else:
+            detalles_qs = detalles_qs.filter(
+                movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids
+            )
+
+        resultados = []
+        total_cantidad = Decimal("0")
+        movimiento_ids = set()
+
+        for detalle in detalles_qs:
+            movimiento = detalle.movimiento_inventario
+            variante = detalle.producto_variante
+            producto = getattr(variante, "producto", None) if variante else detalle.producto
+
+            if tipo_movimiento == "ENTRADA":
+                almacen = (
+                    getattr(detalle.ubicacion_destino, "almacen", None)
+                    or getattr(movimiento, "recepcion", None) and movimiento.recepcion.almacen
+                    or getattr(movimiento, "ajuste_inventario", None)
+                    and movimiento.ajuste_inventario.almacen
+                )
+                ubicacion = detalle.ubicacion_destino
+            elif tipo_movimiento == "SALIDA":
+                almacen = (
+                    getattr(detalle.ubicacion_origen, "almacen", None)
+                    or getattr(movimiento, "ajuste_inventario", None)
+                    and movimiento.ajuste_inventario.almacen
+                )
+                ubicacion = detalle.ubicacion_origen
+            else:
+                almacen = getattr(movimiento, "ajuste_inventario", None) and movimiento.ajuste_inventario.almacen
+                ubicacion = detalle.ubicacion_destino or detalle.ubicacion_origen
+
+            usuario = getattr(movimiento, "usuario", None)
+            pedido = getattr(movimiento, "pedido", None)
+            cantidad = self._report_to_decimal(detalle.cantidad)
+            costo_unitario = self._report_to_decimal(detalle.costo_unitario)
+            total_cantidad += cantidad
+            movimiento_ids.add(movimiento.pk)
+
+            resultados.append(
+                {
+                    "movimiento_inventario_id": movimiento.pk,
+                    "movimiento_detalle_id": detalle.pk,
+                    "tipo_movimiento": movimiento.tipo_movimiento,
+                    "fecha_movimiento": movimiento.fecha_movimiento,
+                    "almacen_id": getattr(almacen, "pk", None),
+                    "almacen_codigo": getattr(almacen, "codigo", None),
+                    "almacen_nombre": getattr(almacen, "nombre", None),
+                    "ubicacion_id": getattr(ubicacion, "pk", None),
+                    "ubicacion_nombre": str(ubicacion) if ubicacion else None,
+                    "producto_id": getattr(producto, "pk", None),
+                    "producto_variante_id": getattr(variante, "pk", None),
+                    "sku": getattr(variante, "sku", None),
+                    "producto_nombre": (
+                        getattr(variante, "nombre", None)
+                        or getattr(producto, "nombre", None)
+                    ),
+                    "producto_base_nombre": getattr(producto, "nombre", None),
+                    "color": getattr(getattr(variante, "color", None), "nombre", None)
+                    if variante
+                    else None,
+                    "talla": getattr(getattr(variante, "talla", None), "nombre", None)
+                    if variante
+                    else None,
+                    "cantidad": str(cantidad.quantize(Decimal("0.0001"))),
+                    "costo_unitario": str(costo_unitario.quantize(Decimal("0.01"))),
+                    "costo_total": str((cantidad * costo_unitario).quantize(Decimal("0.01"))),
+                    "pedido_id": getattr(pedido, "pk", None),
+                    "pedido_folio": getattr(pedido, "folio", None),
+                    "recepcion_id": getattr(movimiento, "recepcion_id", None),
+                    "ajuste_inventario_id": getattr(movimiento, "ajuste_inventario_id", None),
+                    "op_id": getattr(movimiento, "op_id", None),
+                    "usuario_id": getattr(usuario, "pk", None),
+                    "usuario_nombre": (
+                        usuario.get_full_name().strip() or usuario.email
+                        if usuario
+                        else None
+                    ),
+                    "observaciones": movimiento.observaciones,
+                    "comentarios": (
+                        getattr(getattr(movimiento, "ajuste_inventario", None), "observaciones", None)
+                        or movimiento.observaciones
+                    ),
+                    "motivo_ajuste": getattr(
+                        getattr(movimiento, "ajuste_inventario", None), "motivo", None
+                    ),
+                }
+            )
+
+        return Response(
+            {
+                "tipo_movimiento": tipo_movimiento,
+                "fecha_inicio": str(fecha_inicio),
+                "fecha_final": str(fecha_final),
+                "filtros": {"almacen_id": almacen_id},
+                "resumen": {
+                    "total_movimientos": len(movimiento_ids),
+                    "total_registros": len(resultados),
+                    "total_cantidad": str(total_cantidad.quantize(Decimal("0.0001"))),
+                },
+                "resultados": resultados,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     def get_queryset(self):
         qs = self._base_queryset()
         qp = self.request.query_params
