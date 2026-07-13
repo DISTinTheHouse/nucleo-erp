@@ -22,6 +22,7 @@ from inventarios.models import (
 from catalogo.models import Producto, ProductoVariante
 from auditoria.models import AuditoriaEvento
 from nucleo.models import Empresa, Sucursal
+from ventas.models import Pedido
 from .serializers import (
     AlmacenSerializer,
     UbicacionSerializer,
@@ -641,6 +642,33 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             raise ValidationError({"almacen": "Almacén no encontrado."})
         return almacen
 
+    def _get_pedido(self, request, almacen):
+        """
+        Resuelve un pedido OPCIONAL del body (acepta `pedido` o `pedido_id`,
+        replicando el patrón de `almacen`/`almacen_id`).
+
+        - Omitido/None/"" -> None (comportamiento actual: sin vínculo).
+        - Presente pero inválido -> 400 (no se ignora silenciosamente).
+        - Presente y válido pero de otra empresa (o inexistente) -> 400
+          (aislamiento multi-tenant: un pedido de otra empresa se trata como
+          no encontrado, nunca se vincula).
+        """
+        raw = request.data.get("pedido")
+        if raw is None:
+            raw = request.data.get("pedido_id")
+        if raw in (None, ""):
+            return None
+        pedido_id = self._to_int(raw)
+        if not pedido_id:
+            raise ValidationError({"pedido": "pedido inválido."})
+        # Validar contra la MISMA empresa que usará el movimiento formal
+        # (idéntica resolución que _crear_movimiento_formal).
+        empresa, _sucursal = self._resolve_empresa_sucursal(request, almacen)
+        pedido = Pedido.objects.filter(pk=pedido_id, empresa=empresa).first()
+        if not pedido:
+            raise ValidationError({"pedido": "Pedido no encontrado."})
+        return pedido
+
     def _get_items(self, request):
         items = request.data.get("items") or request.data.get("detalle") or []
         if not isinstance(items, list) or not items:
@@ -732,7 +760,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         )
         return empresa, sucursal
 
-    def _crear_movimiento_formal(self, request, tipo, almacen, ajuste_id, detalle_movimientos):
+    def _crear_movimiento_formal(self, request, tipo, almacen, ajuste_id, detalle_movimientos, pedido=None):
         empresa, sucursal = self._resolve_empresa_sucursal(request, almacen)
         if not empresa or not sucursal:
             return None
@@ -740,7 +768,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         movimiento = MovimientoInventario.objects.create(
             empresa=empresa,
             sucursal=sucursal,
-            pedido_id=None,
+            pedido=pedido,
             entrega_id=None,
             devolucion_id=None,
             ajuste_inventario_id=ajuste_id,
@@ -772,6 +800,8 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
 
         almacen = self._get_almacen(request)
         items = self._get_items(request)
+        # Pedido OPCIONAL: validado (y aislado por empresa) antes de tocar la BD.
+        pedido = self._get_pedido(request, almacen)
 
         if tipo in {"ENTRADA", "SALIDA"}:
             for it in items:
@@ -958,6 +988,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 almacen=almacen,
                 ajuste_id=ajuste_id,
                 detalle_movimientos=detalle_movimientos,
+                pedido=pedido,
             )
 
         return Response(
