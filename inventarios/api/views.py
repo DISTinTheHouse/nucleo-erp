@@ -129,7 +129,6 @@ class ReporteExistenciasPeriodoPagination(PageNumberPagination):
     # on the ViewSet, so list()/other actions are unaffected.
     page_size = 200
     page_size_query_param = "page_size"
-    max_page_size = 2000
 
 
 class ExistenciaViewSet(viewsets.ModelViewSet):
@@ -280,8 +279,12 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
     def _iter_auditoria_items(self, eventos, allowed_almacen_ids, producto_id=None, producto_variante_id=None):
         for evento in eventos.iterator():
             payload = evento.despues_json or evento.antes_json or {}
+            evento_almacen_id = self._report_to_int(payload.get("almacen_id"))
             for item in payload.get("items", []) or []:
-                almacen_id = self._report_to_int(item.get("almacen_id"))
+                # Most audit writers (inventarios manual, compras) store almacen_id
+                # only at the event level, not per item; fall back to it so those
+                # movements aren't silently dropped from the period aggregation.
+                almacen_id = self._report_to_int(item.get("almacen_id")) or evento_almacen_id
                 if not almacen_id or almacen_id not in allowed_almacen_ids:
                     continue
 
@@ -368,14 +371,11 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         current_map = defaultdict(lambda: Decimal("0"))
         keys = set()
 
-        current_qs = Existencia.objects.select_related(
-            "producto",
-            "producto_variante",
-            "producto_variante__producto",
-            "producto_variante__color",
-            "producto_variante__talla",
-            "almacen",
-        ).filter(almacen_id__in=allowed_almacen_ids)
+        # Only the identity keys and cantidad are consumed here, so fetch scalar
+        # tuples via values_list instead of materializing full Existencia + related
+        # model graphs for thousands of rows (producto/variante display detail is
+        # resolved later via productos_map/variantes_map).
+        current_qs = Existencia.objects.filter(almacen_id__in=allowed_almacen_ids)
 
         if producto_variante_id:
             current_qs = current_qs.filter(producto_variante_id=producto_variante_id)
@@ -385,14 +385,26 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 | models.Q(producto_variante__producto_id=producto_id)
             )
 
-        for ex in current_qs:
+        current_rows = current_qs.values_list(
+            "almacen_id",
+            "producto_id",
+            "producto_variante_id",
+            "producto_variante__producto_id",
+            "cantidad",
+        )
+        for (
+            row_almacen_id,
+            row_producto_id,
+            row_variante_id,
+            row_variante_producto_id,
+            row_cantidad,
+        ) in current_rows.iterator():
             key = (
-                ex.almacen_id,
-                getattr(ex, "producto_id", None)
-                or getattr(getattr(ex, "producto_variante", None), "producto_id", None),
-                ex.producto_variante_id,
+                row_almacen_id,
+                row_producto_id or row_variante_producto_id,
+                row_variante_id,
             )
-            current_map[key] += self._report_to_decimal(ex.cantidad)
+            current_map[key] += self._report_to_decimal(row_cantidad)
             keys.add(key)
 
         auditoria_base = AuditoriaEvento.objects.filter(
