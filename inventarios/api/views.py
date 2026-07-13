@@ -1016,6 +1016,15 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         return self._apply(request, "AJUSTE")
 
 
+class ReporteMovimientosPeriodoPagination(PageNumberPagination):
+    # Instantiated explicitly inside reporte_movimientos_periodo, not set as
+    # pagination_class on the ViewSet, so list()/detalles()/other actions are
+    # unaffected. Mirrors ReporteExistenciasPeriodoPagination's final config
+    # (page_size 200, client-overridable, no max cap).
+    page_size = 200
+    page_size_query_param = "page_size"
+
+
 class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AuditoriaMovimientoSerializer
     permission_classes = [IsAuthenticatedAndScoped]
@@ -1115,7 +1124,10 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
                         "total_registros": 0,
                         "total_cantidad": "0.0000",
                     },
-                    "resultados": [],
+                    "count": 0,
+                    "next": None,
+                    "previous": None,
+                    "results": [],
                 },
                 status=status.HTTP_200_OK,
             )
@@ -1254,21 +1266,20 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
                 }
             )
 
-        return Response(
-            {
-                "tipo_movimiento": tipo_movimiento,
-                "fecha_inicio": str(fecha_inicio),
-                "fecha_final": str(fecha_final),
-                "filtros": {"almacen_id": almacen_id},
-                "resumen": {
-                    "total_movimientos": len(movimiento_ids),
-                    "total_registros": len(resultados),
-                    "total_cantidad": str(total_cantidad.quantize(Decimal("0.0001"))),
-                },
-                "resultados": resultados,
-            },
-            status=status.HTTP_200_OK,
-        )
+        paginator = ReporteMovimientosPeriodoPagination()
+        page = paginator.paginate_queryset(resultados, request, view=self)
+
+        response = paginator.get_paginated_response(page)
+        response.data["tipo_movimiento"] = tipo_movimiento
+        response.data["fecha_inicio"] = str(fecha_inicio)
+        response.data["fecha_final"] = str(fecha_final)
+        response.data["filtros"] = {"almacen_id": almacen_id}
+        response.data["resumen"] = {
+            "total_movimientos": len(movimiento_ids),
+            "total_registros": len(resultados),
+            "total_cantidad": str(total_cantidad.quantize(Decimal("0.0001"))),
+        }
+        return response
 
     def get_queryset(self):
         qs = self._base_queryset()
