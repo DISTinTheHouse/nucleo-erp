@@ -1623,7 +1623,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 `GET /api/v1/finanzas/cuentas-por-cobrar/?saldo_pendiente=true&vencidas=true`
 
-**Respuesta (200 OK)**
+**Respuesta de listado (200 OK)**
 
 ```json
 [
@@ -1649,10 +1649,76 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 ]
 ```
 
+**Respuesta de detalle (200 OK)**
+
+```json
+{
+  "id": 22,
+  "cliente": 15,
+  "cliente_nombre": "Cliente Demo",
+  "factura_id": 48,
+  "factura_folio": "FAC-PEND-001",
+  "moneda_id": 1,
+  "moneda_codigo": "MXN",
+  "fecha_emision": "2026-07-14",
+  "fecha_vencimiento": "2026-07-31",
+  "total": "1160.00",
+  "saldo": "660.00",
+  "total_pagado": "500.00",
+  "estatus": "Parcial",
+  "referencia": "PENDIENTE-JULIO",
+  "fecha_ultimo_pago": "2026-07-20",
+  "observaciones": "Factura pendiente por cobrar registrada manualmente",
+  "factura": {
+    "id": 48,
+    "folio": "FAC-PEND-001",
+    "estatus": "Emitida",
+    "cliente": 15,
+    "cliente_nombre": "Cliente Demo",
+    "moneda": 1,
+    "moneda_nombre": "MXN",
+    "subtotal": "1000.00",
+    "descuento": "0.00",
+    "impuestos": "160.00",
+    "total": "1160.00",
+    "factura_detalles": []
+  },
+  "polizas": [
+    {
+      "id": 9,
+      "folio": "POL-000009",
+      "tipo": "Ingreso",
+      "fecha": "2026-07-14",
+      "concepto": "Factura por cobrar FAC-PEND-001 - Cliente Demo",
+      "estatus": "Activo",
+      "total_cargos": "1160.00",
+      "total_abonos": "1160.00",
+      "detalles": [
+        {
+          "id": 31,
+          "cuenta_contable_id": 4,
+          "cuenta_contable_codigo": "105-01",
+          "cuenta_contable_nombre": "Clientes",
+          "centro_costo_id": 1,
+          "centro_costo_nombre": "General",
+          "cargo": "1160.00",
+          "abono": "0.00",
+          "referencia": "PENDIENTE-JULIO",
+          "observaciones": "Cargo por cuenta por cobrar de factura FAC-PEND-001.",
+          "orden": 1
+        }
+      ]
+    }
+  ]
+}
+```
+
 **Notas**
 
 - El backend devuelve únicamente cuentas por cobrar ligadas a facturas activas de la empresa del usuario autenticado.
 - Este endpoint es solo lectura; no crea ni modifica registros.
+- El listado devuelve un resumen ligero.
+- El detalle `GET /api/v1/finanzas/cuentas-por-cobrar/{id}/` devuelve la factura relacionada, el `total_pagado` y las pólizas asociadas a esa factura con sus partidas.
 
 ---
 

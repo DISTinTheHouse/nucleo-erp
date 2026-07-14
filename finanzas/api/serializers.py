@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from rest_framework import serializers
-from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
+from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle, PolizaDetalle
 
 
 class FacturaDesdePedidoInputSerializer(serializers.Serializer):
@@ -77,6 +77,30 @@ class CuentaPorCobrarSerializer(serializers.ModelSerializer):
         ]
 
 
+class PolizaDetalleRelacionadoSerializer(serializers.ModelSerializer):
+    cuenta_contable_id = serializers.IntegerField(source="cuenta_contable_id", read_only=True)
+    cuenta_contable_codigo = serializers.CharField(source="cuenta_contable.codigo", read_only=True)
+    cuenta_contable_nombre = serializers.CharField(source="cuenta_contable.nombre", read_only=True)
+    centro_costo_id = serializers.IntegerField(source="centro_costo_id", read_only=True)
+    centro_costo_nombre = serializers.CharField(source="centro_costo.nombre", read_only=True)
+
+    class Meta:
+        model = PolizaDetalle
+        fields = [
+            "id",
+            "cuenta_contable_id",
+            "cuenta_contable_codigo",
+            "cuenta_contable_nombre",
+            "centro_costo_id",
+            "centro_costo_nombre",
+            "cargo",
+            "abono",
+            "referencia",
+            "observaciones",
+            "orden",
+        ]
+
+
 class FacturaDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
 
@@ -115,4 +139,55 @@ class FacturaSerializer(serializers.ModelSerializer):
             'moneda'
         ]
         fields = '__all__'
+
+
+class CuentaPorCobrarDetalleSerializer(CuentaPorCobrarSerializer):
+    factura = FacturaSerializer(read_only=True)
+    total_pagado = serializers.SerializerMethodField()
+    polizas = serializers.SerializerMethodField()
+
+    class Meta(CuentaPorCobrarSerializer.Meta):
+        fields = CuentaPorCobrarSerializer.Meta.fields + [
+            "factura",
+            "total_pagado",
+            "polizas",
+        ]
+
+    def get_total_pagado(self, obj):
+        total = Decimal(str(obj.total or 0))
+        saldo = Decimal(str(obj.saldo or 0))
+        return str((total - saldo).quantize(Decimal("0.01")))
+
+    def get_polizas(self, obj):
+        detalles = (
+            PolizaDetalle.objects.filter(factura=obj.factura)
+            .select_related("poliza", "cuenta_contable", "centro_costo")
+            .order_by("poliza_id", "orden", "id")
+        )
+        polizas_map = {}
+        for detalle in detalles:
+            poliza = detalle.poliza
+            if poliza.pk not in polizas_map:
+                polizas_map[poliza.pk] = {
+                    "id": poliza.pk,
+                    "folio": poliza.folio,
+                    "tipo": poliza.tipo,
+                    "fecha": poliza.fecha,
+                    "concepto": poliza.concepto,
+                    "estatus": poliza.estatus,
+                    "total_cargos": Decimal("0.00"),
+                    "total_abonos": Decimal("0.00"),
+                    "detalles": [],
+                }
+
+            row = polizas_map[poliza.pk]
+            row["total_cargos"] += Decimal(str(detalle.cargo or 0))
+            row["total_abonos"] += Decimal(str(detalle.abono or 0))
+            row["detalles"].append(PolizaDetalleRelacionadoSerializer(detalle).data)
+
+        for row in polizas_map.values():
+            row["total_cargos"] = str(row["total_cargos"].quantize(Decimal("0.01")))
+            row["total_abonos"] = str(row["total_abonos"].quantize(Decimal("0.01")))
+
+        return list(polizas_map.values())
 

@@ -18,6 +18,7 @@ from finanzas.models import (
     PolizaDetalle,
 )
 from finanzas.api.serializers import (
+    CuentaPorCobrarDetalleSerializer,
     CuentaPorCobrarSerializer,
     FacturaSerializer,
     FacturaDetalleSerializer,
@@ -52,6 +53,11 @@ class CuentaPorCobrarViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CuentaPorCobrarSerializer
     http_method_names = ['get']
 
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return CuentaPorCobrarDetalleSerializer
+        return CuentaPorCobrarSerializer
+
     def get_queryset(self):
         user = self.request.user
         empresa = getattr(user, 'empresa', None)
@@ -63,6 +69,8 @@ class CuentaPorCobrarViewSet(viewsets.ReadOnlyModelViewSet):
                 'cliente',
                 'factura',
                 'factura__moneda',
+                'factura__cliente',
+                'factura__sucursal',
             )
             .filter(factura__empresa=empresa, factura__activo=True)
             .order_by('-fecha_emision', '-id')
