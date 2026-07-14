@@ -49,7 +49,7 @@ class FacturaPendienteCobroInputSerializer(serializers.Serializer):
 
 class CuentaPorCobrarSerializer(serializers.ModelSerializer):
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
-    factura_id = serializers.IntegerField(source="factura_id", read_only=True)
+    factura_id = serializers.IntegerField(read_only=True)
     factura_folio = serializers.CharField(source="factura.folio", read_only=True)
     moneda_id = serializers.IntegerField(source="factura.moneda_id", read_only=True)
     moneda_codigo = serializers.CharField(source="factura.moneda.codigo_iso", read_only=True)

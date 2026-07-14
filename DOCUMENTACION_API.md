@@ -594,6 +594,7 @@ Permite consultar el inventario actual.
 - **Ejemplo**:
   - `GET /api/v1/inventarios/existencias/reporte-existencias-periodo/?fecha_inicio=2026-07-01&fecha_final=2026-07-31&almacen_id=1&page=1&page_size=200`
 - **Respuesta**:
+
   ```json
   {
     "count": 450,
@@ -1512,7 +1513,7 @@ La recepción es el proceso unificado que afecta existencias tanto para órdenes
 
 **Base URL**: `/api/v1/finanzas/`
 
-Endpoint directo para registrar una factura manual pendiente de cobro para un cliente y crear automáticamente su cuenta por cobrar.
+Endpoint directo para registrar una factura manual pendiente de cobro para un cliente y crear automáticamente su cuenta por cobrar y su póliza contable con detalle.
 
 ### 1) Registrar factura pendiente
 
@@ -1574,6 +1575,13 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
     "saldo": "1160.00",
     "referencia": "PENDIENTE-JULIO",
     "fecha_vencimiento": "2026-07-31"
+  },
+  "poliza": {
+    "id": 9,
+    "folio": "POL-000009",
+    "tipo": "Ingreso",
+    "estatus": "Activo",
+    "detalles": 3
   }
 }
 ```
@@ -1587,12 +1595,17 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 - `total`: el total no coincide con `subtotal - descuento + impuestos`.
 - `empresa`: el usuario no tiene empresa asignada.
 - `sucursal`: el usuario no tiene una sucursal disponible para registrar la factura.
+- `centro_costo`: no existe un centro de costo activo para generar la póliza.
+- `cuenta_contable_cxc`: no existe una cuenta contable activa de tipo `Activo`.
+- `cuenta_contable_ingreso`: no existe una cuenta contable activa de tipo `Ingreso`.
+- `cuenta_contable_impuesto`: no existe una cuenta contable activa de tipo `Pasivo` cuando la factura incluye impuestos.
 
 **Notas para Frontend (Next.js)**
 
 - No es necesario enviar `empresa` ni `sucursal`; el backend las resuelve con el contexto del usuario autenticado.
 - Si el frontend no quiere manejar folios manuales, puede enviar `folio` vacío y el backend lo genera.
-- Este endpoint registra la factura con estatus `Emitida` y la cuenta por cobrar con estatus `Pendiente`.
+- Este endpoint registra la factura con estatus `Emitida`, la cuenta por cobrar con estatus `Pendiente` y la póliza contable en la misma transacción.
+- La póliza genera trazabilidad mínima para contabilidad: cargo a cuenta por cobrar, abono a ingreso neto y abono a impuestos cuando aplique.
 
 ### 2) Consultar cuentas por cobrar
 

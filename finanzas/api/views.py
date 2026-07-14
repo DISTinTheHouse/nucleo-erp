@@ -8,7 +8,15 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 
-from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
+from finanzas.models import (
+    CentroCosto,
+    CuentaContable,
+    CuentaPorCobrar,
+    Factura,
+    FacturaDetalle,
+    Poliza,
+    PolizaDetalle,
+)
 from finanzas.api.serializers import (
     CuentaPorCobrarSerializer,
     FacturaSerializer,
@@ -102,6 +110,117 @@ class FacturaViewSet(viewsets.ModelViewSet):
             return sucursal
         return Sucursal.objects.filter(empresa=empresa, activo=True).order_by("codigo").first()
 
+    def _get_default_centro_costo(self, empresa):
+        return (
+            CentroCosto.objects.filter(empresa=empresa, activo=True)
+            .order_by("codigo", "id")
+            .first()
+        )
+
+    def _get_poliza_folio(self, empresa, sucursal):
+        ultima = (
+            Poliza.objects.filter(empresa=empresa, sucursal=sucursal)
+            .order_by("-folio_consecutivo", "-id")
+            .first()
+        )
+        consecutivo = (getattr(ultima, "folio_consecutivo", 0) or 0) + 1
+        return f"POL-{consecutivo:06d}", consecutivo
+
+    def _get_poliza_cuentas(self, empresa, impuestos):
+        cuentas = CuentaContable.objects.filter(
+            empresa=empresa,
+            activo=True,
+            acepta_movimientos=True,
+        )
+        cuenta_cxc = cuentas.filter(tipo=CuentaContable.CuentaTipo.ACTIVO).order_by("codigo", "id").first()
+        cuenta_ingreso = cuentas.filter(tipo=CuentaContable.CuentaTipo.INGRESO).order_by("codigo", "id").first()
+        cuenta_impuesto = None
+        if impuestos > Decimal("0"):
+            cuenta_impuesto = cuentas.filter(tipo=CuentaContable.CuentaTipo.PASIVO).order_by("codigo", "id").first()
+
+        errores = {}
+        if cuenta_cxc is None:
+            errores["cuenta_contable_cxc"] = "No existe una cuenta contable activa de tipo Activo para registrar cuentas por cobrar."
+        if cuenta_ingreso is None:
+            errores["cuenta_contable_ingreso"] = "No existe una cuenta contable activa de tipo Ingreso para registrar la factura."
+        if impuestos > Decimal("0") and cuenta_impuesto is None:
+            errores["cuenta_contable_impuesto"] = "No existe una cuenta contable activa de tipo Pasivo para registrar impuestos."
+        if errores:
+            raise ValidationError(errores)
+
+        return cuenta_cxc, cuenta_ingreso, cuenta_impuesto
+
+    def _crear_poliza_factura_pendiente(self, *, empresa, sucursal, user, factura, cxc):
+        centro_costo = self._get_default_centro_costo(empresa)
+        if centro_costo is None:
+            raise ValidationError(
+                {"centro_costo": "No existe un centro de costo activo para generar la póliza contable."}
+            )
+
+        cuenta_cxc, cuenta_ingreso, cuenta_impuesto = self._get_poliza_cuentas(
+            empresa,
+            factura.impuestos or Decimal("0"),
+        )
+        folio_poliza, folio_consecutivo = self._get_poliza_folio(empresa, sucursal)
+        referencia = cxc.referencia or factura.folio or str(factura.pk)
+        ingreso_neto = (factura.subtotal or Decimal("0")) - (factura.descuento or Decimal("0"))
+
+        poliza = Poliza.objects.create(
+            empresa=empresa,
+            sucursal=sucursal,
+            centro_costo=centro_costo,
+            folio=folio_poliza,
+            folio_consecutivo=folio_consecutivo,
+            tipo=Poliza.PolizaTipo.INGRESO,
+            concepto=f"Factura por cobrar {factura.folio or factura.pk} - {factura.cliente.nombre}"[:200],
+            usuario_creacion=user,
+        )
+
+        detalles = [
+            PolizaDetalle(
+                poliza=poliza,
+                cuenta_contable=cuenta_cxc,
+                centro_costo=centro_costo,
+                factura=factura,
+                cargo=factura.total,
+                abono=Decimal("0.00"),
+                referencia=referencia,
+                observaciones=f"Cargo por cuenta por cobrar de factura {factura.folio or factura.pk}.",
+                orden=1,
+            )
+        ]
+        if ingreso_neto > Decimal("0"):
+            detalles.append(
+                PolizaDetalle(
+                    poliza=poliza,
+                    cuenta_contable=cuenta_ingreso,
+                    centro_costo=centro_costo,
+                    factura=factura,
+                    cargo=Decimal("0.00"),
+                    abono=ingreso_neto,
+                    referencia=referencia,
+                    observaciones=f"Abono por ingreso de factura {factura.folio or factura.pk}.",
+                    orden=2,
+                )
+            )
+        if (factura.impuestos or Decimal("0")) > Decimal("0"):
+            detalles.append(
+                PolizaDetalle(
+                    poliza=poliza,
+                    cuenta_contable=cuenta_impuesto,
+                    centro_costo=centro_costo,
+                    factura=factura,
+                    cargo=Decimal("0.00"),
+                    abono=factura.impuestos,
+                    referencia=referencia,
+                    observaciones=f"Abono por impuestos de factura {factura.folio or factura.pk}.",
+                    orden=len(detalles) + 1,
+                )
+            )
+
+        PolizaDetalle.objects.bulk_create(detalles)
+        return poliza
+
     @action(detail=False, methods=['post'], url_path='registrar-pendiente-cobro')
     def registrar_pendiente_cobro(self, request):
         serializer = FacturaPendienteCobroInputSerializer(data=request.data)
@@ -177,6 +296,13 @@ class FacturaViewSet(viewsets.ModelViewSet):
                 referencia=(data.get('referencia') or folio or None),
                 observaciones=data.get('observaciones') or None,
             )
+            poliza = self._crear_poliza_factura_pendiente(
+                empresa=empresa,
+                sucursal=sucursal,
+                user=user,
+                factura=factura,
+                cxc=cxc,
+            )
 
         return Response(
             {
@@ -187,6 +313,13 @@ class FacturaViewSet(viewsets.ModelViewSet):
                     'saldo': str(cxc.saldo),
                     'referencia': cxc.referencia,
                     'fecha_vencimiento': cxc.fecha_vencimiento,
+                },
+                'poliza': {
+                    'id': poliza.pk,
+                    'folio': poliza.folio,
+                    'tipo': poliza.tipo,
+                    'estatus': poliza.estatus,
+                    'detalles': poliza.poliza_detalles.count(),
                 },
             },
             status=status.HTTP_201_CREATED,
