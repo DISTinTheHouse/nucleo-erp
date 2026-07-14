@@ -106,7 +106,13 @@ class FacturaViewSet(viewsets.ModelViewSet):
         user = self.request.user
         empresa = getattr(user, 'empresa', None)
         if empresa is None: return Factura.objects.none()
-        queryset = Factura.objects.filter(empresa=empresa)
+        # select_related evita N+1 al resolver los campos derivados del
+        # serializer: correo_facturas (pedido -> cliente), cliente_nombre
+        # (cliente) y moneda_nombre (moneda).
+        queryset = (
+            Factura.objects.filter(empresa=empresa)
+            .select_related('pedido', 'cliente', 'moneda')
+        )
         return queryset
 
     def perform_destroy(self, instance):
