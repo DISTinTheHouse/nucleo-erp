@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from finanzas.models import Factura, FacturaDetalle
 
@@ -9,6 +11,40 @@ class FacturaDesdePedidoInputSerializer(serializers.Serializer):
     íntegramente en el servidor a partir del Pedido (facturación total).
     """
     pedido = serializers.IntegerField(min_value=1)
+
+
+class FacturaPendienteCobroInputSerializer(serializers.Serializer):
+    cliente = serializers.IntegerField(min_value=1)
+    moneda = serializers.IntegerField(min_value=1)
+    pedido = serializers.IntegerField(min_value=1, required=False, allow_null=True)
+    folio = serializers.CharField(max_length=30, required=False, allow_blank=True)
+    fecha_vencimiento = serializers.DateField(required=False, allow_null=True)
+    subtotal = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=Decimal("0"))
+    descuento = serializers.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        min_value=Decimal("0"),
+        required=False,
+        default=Decimal("0.00"),
+    )
+    impuestos = serializers.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        min_value=Decimal("0"),
+        required=False,
+        default=Decimal("0.00"),
+    )
+    total = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=Decimal("0.01"))
+    referencia = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    observaciones = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def validate(self, attrs):
+        expected_total = attrs["subtotal"] - attrs["descuento"] + attrs["impuestos"]
+        if expected_total != attrs["total"]:
+            raise serializers.ValidationError(
+                {"total": "El total debe ser igual a subtotal - descuento + impuestos."}
+            )
+        return attrs
 
 
 class FacturaDetalleSerializer(serializers.ModelSerializer):

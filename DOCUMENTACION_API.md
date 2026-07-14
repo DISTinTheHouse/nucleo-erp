@@ -1501,6 +1501,94 @@ La recepción es el proceso unificado que afecta existencias tanto para órdenes
 
 ---
 
+## 💰 Finanzas - Registrar Factura Pendiente por Cobrar
+
+**Base URL**: `/api/v1/finanzas/`
+
+Endpoint directo para registrar una factura manual pendiente de cobro para un cliente y crear automáticamente su cuenta por cobrar.
+
+### 1) Registrar factura pendiente
+
+- **Endpoint**: `POST /api/v1/finanzas/facturas/registrar-pendiente-cobro/`
+- **Uso**: el frontend envía la información base de la factura; el backend valida, genera la factura y deja creada la cuenta por cobrar.
+
+**Body (ejemplo)**
+
+```json
+{
+  "cliente": 15,
+  "moneda": 1,
+  "pedido": null,
+  "folio": "FAC-PEND-001",
+  "fecha_vencimiento": "2026-07-31",
+  "subtotal": "1000.00",
+  "descuento": "0.00",
+  "impuestos": "160.00",
+  "total": "1160.00",
+  "referencia": "PENDIENTE-JULIO",
+  "observaciones": "Factura pendiente por cobrar registrada manualmente"
+}
+```
+
+**Campos**
+
+- `cliente`: obligatorio, debe pertenecer a la empresa del usuario.
+- `moneda`: obligatorio, debe estar activa y disponible para la empresa.
+- `pedido`: opcional; si se envía, debe pertenecer a la empresa y coincidir con el mismo cliente y moneda.
+- `folio`: opcional; si no se envía, el backend genera uno automáticamente.
+- `fecha_vencimiento`: opcional.
+- `subtotal`: obligatorio.
+- `descuento`: opcional, default `0.00`.
+- `impuestos`: opcional, default `0.00`.
+- `total`: obligatorio y debe cumplir `subtotal - descuento + impuestos`.
+- `referencia`: opcional.
+- `observaciones`: opcional.
+
+**Respuesta exitosa (201 Created)**
+
+```json
+{
+  "factura": {
+    "id": 48,
+    "folio": "FAC-PEND-001",
+    "estatus": "Emitida",
+    "cliente": 15,
+    "moneda": 1,
+    "pedido": null,
+    "subtotal": "1000.00",
+    "descuento": "0.00",
+    "impuestos": "160.00",
+    "total": "1160.00",
+    "fecha_vencimiento": "2026-07-31"
+  },
+  "cuenta_por_cobrar": {
+    "id": 22,
+    "estatus": "Pendiente",
+    "saldo": "1160.00",
+    "referencia": "PENDIENTE-JULIO",
+    "fecha_vencimiento": "2026-07-31"
+  }
+}
+```
+
+**Errores comunes (400)**
+
+- `cliente`: cliente no encontrado o sin acceso.
+- `moneda`: moneda no encontrada o sin acceso.
+- `pedido`: pedido no encontrado, o no corresponde al cliente o moneda enviados.
+- `folio`: ya existe una factura activa con ese folio.
+- `total`: el total no coincide con `subtotal - descuento + impuestos`.
+- `empresa`: el usuario no tiene empresa asignada.
+- `sucursal`: el usuario no tiene una sucursal disponible para registrar la factura.
+
+**Notas para Frontend (Next.js)**
+
+- No es necesario enviar `empresa` ni `sucursal`; el backend las resuelve con el contexto del usuario autenticado.
+- Si el frontend no quiere manejar folios manuales, puede enviar `folio` vacío y el backend lo genera.
+- Este endpoint registra la factura con estatus `Emitida` y la cuenta por cobrar con estatus `Pendiente`.
+
+---
+
 ## 🏭 Producción - Lista de Materiales (BOM)
 
 **Base URL**: `/api/v1/produccion/`

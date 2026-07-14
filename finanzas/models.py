@@ -97,7 +97,7 @@ class Factura(StatusLifecycleModel):
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="facturas")
     sucursal = models.ForeignKey('nucleo.Sucursal', on_delete=models.CASCADE, related_name="facturas")
     cliente = models.ForeignKey('terceros.Cliente', on_delete=models.CASCADE, related_name="facturas")
-    pedido = models.ForeignKey('ventas.Pedido', on_delete=models.CASCADE, related_name="facturas")
+    pedido = models.ForeignKey('ventas.Pedido', on_delete=models.CASCADE, related_name="facturas", null=True, blank=True)
     serie_folio = models.ForeignKey('nucleo.SerieFolio', on_delete=models.CASCADE, related_name="facturas", null=True, blank=True)
     moneda = models.ForeignKey('nucleo.Moneda', on_delete=models.CASCADE, related_name="facturas")
 

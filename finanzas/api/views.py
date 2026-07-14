@@ -1,19 +1,22 @@
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Q
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 
-from finanzas.models import Factura, FacturaDetalle
+from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
 from finanzas.api.serializers import (
     FacturaSerializer,
     FacturaDetalleSerializer,
     FacturaDesdePedidoInputSerializer,
+    FacturaPendienteCobroInputSerializer,
 )
 from finanzas.services.factura_service import FacturaService
 from finanzas.utils.folios import generate_factura_folio
+from nucleo.models import Moneda, Sucursal
 from ventas.models import Pedido, PedidoDetalle
 from terceros.models import Cliente
 from terceros.api.serializers import ClienteSerializer
@@ -47,6 +50,102 @@ class FacturaViewSet(viewsets.ModelViewSet):
 
     def perform_destroy(self, instance):
         instance.soft_delete()
+
+    def _get_default_sucursal(self, user, empresa):
+        sucursal = getattr(user, "sucursal_default", None)
+        if sucursal and getattr(sucursal, "empresa_id", None) == getattr(empresa, "pk", None):
+            return sucursal
+        return Sucursal.objects.filter(empresa=empresa, activo=True).order_by("codigo").first()
+
+    @action(detail=False, methods=['post'], url_path='registrar-pendiente-cobro')
+    def registrar_pendiente_cobro(self, request):
+        serializer = FacturaPendienteCobroInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        user = request.user
+        empresa = getattr(user, 'empresa', None)
+        if empresa is None:
+            raise ValidationError({'empresa': 'El usuario no tiene empresa asignada.'})
+
+        sucursal = self._get_default_sucursal(user, empresa)
+        if sucursal is None:
+            raise ValidationError({'sucursal': 'No hay una sucursal disponible para registrar la factura.'})
+
+        cliente = Cliente.objects.filter(
+            pk=data['cliente'],
+            empresa=empresa,
+            activo=True,
+        ).first()
+        if cliente is None:
+            raise ValidationError({'cliente': 'Cliente no encontrado o sin acceso.'})
+
+        moneda = Moneda.objects.filter(
+            pk=data['moneda'],
+            activo=True,
+        ).filter(
+            Q(empresa__isnull=True) | Q(empresa=empresa)
+        ).first()
+        if moneda is None:
+            raise ValidationError({'moneda': 'Moneda no encontrada o sin acceso.'})
+
+        pedido = None
+        pedido_id = data.get('pedido')
+        if pedido_id:
+            pedido = Pedido.objects.filter(pk=pedido_id, empresa=empresa).first()
+            if pedido is None:
+                raise ValidationError({'pedido': 'Pedido no encontrado o sin acceso.'})
+            if pedido.cliente_id != cliente.pk:
+                raise ValidationError({'pedido': 'El pedido no corresponde al cliente indicado.'})
+            if pedido.moneda_id != moneda.pk:
+                raise ValidationError({'pedido': 'El pedido no corresponde a la moneda indicada.'})
+
+        folio = (data.get('folio') or '').strip()
+        if folio and Factura.objects.filter(empresa=empresa, folio=folio, activo=True).exists():
+            raise ValidationError({'folio': 'Ya existe una factura activa con ese folio.'})
+        if not folio:
+            folio = generate_factura_folio(empresa, sucursal)
+
+        with transaction.atomic():
+            factura = Factura.objects.create(
+                empresa=empresa,
+                sucursal=sucursal,
+                cliente=cliente,
+                pedido=pedido,
+                moneda=moneda,
+                folio=folio,
+                fecha_vencimiento=data.get('fecha_vencimiento'),
+                subtotal=data['subtotal'],
+                descuento=data['descuento'],
+                impuestos=data['impuestos'],
+                total=data['total'],
+                estatus=Factura.FacturaStatus.EMITIDA,
+                observaciones=data.get('observaciones') or None,
+            )
+            cxc = CuentaPorCobrar.objects.create(
+                cliente=cliente,
+                factura=factura,
+                fecha_vencimiento=data.get('fecha_vencimiento'),
+                total=data['total'],
+                saldo=data['total'],
+                estatus=CuentaPorCobrar.EstatusCxC.PENDIENTE,
+                referencia=(data.get('referencia') or folio or None),
+                observaciones=data.get('observaciones') or None,
+            )
+
+        return Response(
+            {
+                'factura': FacturaSerializer(factura).data,
+                'cuenta_por_cobrar': {
+                    'id': cxc.pk,
+                    'estatus': cxc.estatus,
+                    'saldo': str(cxc.saldo),
+                    'referencia': cxc.referencia,
+                    'fecha_vencimiento': cxc.fecha_vencimiento,
+                },
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=False, methods=['get', 'post'], url_path='onboarding', url_name='onboarding')
     def onboarding(self, request):
