@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, ValidationError
@@ -9,6 +10,7 @@ from rest_framework.response import Response
 
 from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
 from finanzas.api.serializers import (
+    CuentaPorCobrarSerializer,
     FacturaSerializer,
     FacturaDetalleSerializer,
     FacturaDesdePedidoInputSerializer,
@@ -36,6 +38,49 @@ class ClienteViewSetContabilidad(viewsets.ModelViewSet):
 
 # Compatibilidad temporal para imports antiguos en despliegues o rutas rezagadas.
 ClienteViewSet = ClienteViewSetContabilidad
+
+
+class CuentaPorCobrarViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = CuentaPorCobrarSerializer
+    http_method_names = ['get']
+
+    def get_queryset(self):
+        user = self.request.user
+        empresa = getattr(user, 'empresa', None)
+        if empresa is None:
+            return CuentaPorCobrar.objects.none()
+
+        qs = (
+            CuentaPorCobrar.objects.select_related(
+                'cliente',
+                'factura',
+                'factura__moneda',
+            )
+            .filter(factura__empresa=empresa, factura__activo=True)
+            .order_by('-fecha_emision', '-id')
+        )
+
+        qp = self.request.query_params
+        cliente_id = qp.get('cliente') or qp.get('cliente_id')
+        estatus = (qp.get('estatus') or '').strip()
+        saldo_pendiente = (qp.get('saldo_pendiente') or '').strip().lower()
+        vencidas = (qp.get('vencidas') or '').strip().lower()
+
+        if cliente_id:
+            qs = qs.filter(cliente_id=cliente_id)
+        if estatus:
+            qs = qs.filter(estatus=estatus)
+        if saldo_pendiente in {'1', 'true', 'si', 'sí'}:
+            qs = qs.filter(saldo__gt=0)
+        if vencidas in {'1', 'true', 'si', 'sí'}:
+            qs = qs.filter(
+                fecha_vencimiento__isnull=False,
+                fecha_vencimiento__lt=timezone.localdate(),
+                saldo__gt=0,
+            ).exclude(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA)
+
+        return qs
+
 
 class FacturaViewSet(viewsets.ModelViewSet):
     serializer_class = FacturaSerializer

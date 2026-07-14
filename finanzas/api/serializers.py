@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from rest_framework import serializers
-from finanzas.models import Factura, FacturaDetalle
+from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
 
 
 class FacturaDesdePedidoInputSerializer(serializers.Serializer):
@@ -45,6 +45,36 @@ class FacturaPendienteCobroInputSerializer(serializers.Serializer):
                 {"total": "El total debe ser igual a subtotal - descuento + impuestos."}
             )
         return attrs
+
+
+class CuentaPorCobrarSerializer(serializers.ModelSerializer):
+    cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
+    factura_id = serializers.IntegerField(source="factura_id", read_only=True)
+    factura_folio = serializers.CharField(source="factura.folio", read_only=True)
+    moneda_id = serializers.IntegerField(source="factura.moneda_id", read_only=True)
+    moneda_codigo = serializers.CharField(source="factura.moneda.codigo_iso", read_only=True)
+
+    class Meta:
+        model = CuentaPorCobrar
+        fields = [
+            "id",
+            "cliente",
+            "cliente_nombre",
+            "factura_id",
+            "factura_folio",
+            "moneda_id",
+            "moneda_codigo",
+            "fecha_emision",
+            "fecha_vencimiento",
+            "total",
+            "saldo",
+            "estatus",
+            "referencia",
+            "fecha_ultimo_pago",
+            "observaciones",
+            "created_at",
+            "updated_at",
+        ]
 
 
 class FacturaDetalleSerializer(serializers.ModelSerializer):

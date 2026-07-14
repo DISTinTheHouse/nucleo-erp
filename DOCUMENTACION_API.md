@@ -644,6 +644,7 @@ Permite consultar el inventario actual.
     ]
   }
   ```
+
   - `count`/`next`/`previous`/`results` son la paginación estándar de DRF sobre el arreglo de detalle (antes expuesto como `detalle`).
   - `fecha_inicio`, `fecha_final`, `filtros`, `resumen` y `resumen_por_almacen` se mantienen igual que antes de paginar: reflejan todo el resultado filtrado, no cambian entre páginas.
 
@@ -675,6 +676,7 @@ Historial operativo de entradas, salidas y ajustes.
 - **Detalle**: `GET /api/v1/inventarios/movimientos/{id}/detalles/`
 
 - **Respuesta del detalle**:
+
   ```json
   {
     "id": 204,
@@ -1365,7 +1367,12 @@ La recepción es el proceso unificado que afecta existencias tanto para órdenes
       "almacenes": [],
       "ubicaciones": [],
       "series_recepcion": [
-        { "id_serie_folio": 1, "tipo_documento": "RECEPCION", "serie": "RC", "sucursal_id": 2 }
+        {
+          "id_serie_folio": 1,
+          "tipo_documento": "RECEPCION",
+          "serie": "RC",
+          "sucursal_id": 2
+        }
       ]
     },
     "busqueda": {
@@ -1586,6 +1593,53 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 - No es necesario enviar `empresa` ni `sucursal`; el backend las resuelve con el contexto del usuario autenticado.
 - Si el frontend no quiere manejar folios manuales, puede enviar `folio` vacío y el backend lo genera.
 - Este endpoint registra la factura con estatus `Emitida` y la cuenta por cobrar con estatus `Pendiente`.
+
+### 2) Consultar cuentas por cobrar
+
+- **Endpoint**: `GET /api/v1/finanzas/cuentas-por-cobrar/`
+- **Detalle**: `GET /api/v1/finanzas/cuentas-por-cobrar/{id}/`
+
+**Query Params (opcionales)**
+
+- `cliente` o `cliente_id`: filtra por cliente.
+- `estatus`: filtra por estatus exacto (`Pendiente`, `Parcial`, `Pagada`, `Cancelada`, `Vencida`).
+- `saldo_pendiente=true`: devuelve solo registros con `saldo > 0`.
+- `vencidas=true`: devuelve solo cuentas vencidas con saldo pendiente.
+
+**Ejemplo**
+
+`GET /api/v1/finanzas/cuentas-por-cobrar/?saldo_pendiente=true&vencidas=true`
+
+**Respuesta (200 OK)**
+
+```json
+[
+  {
+    "id": 22,
+    "cliente": 15,
+    "cliente_nombre": "Cliente Demo",
+    "factura_id": 48,
+    "factura_folio": "FAC-PEND-001",
+    "moneda_id": 1,
+    "moneda_codigo": "MXN",
+    "fecha_emision": "2026-07-14",
+    "fecha_vencimiento": "2026-07-31",
+    "total": "1160.00",
+    "saldo": "1160.00",
+    "estatus": "Pendiente",
+    "referencia": "PENDIENTE-JULIO",
+    "fecha_ultimo_pago": null,
+    "observaciones": "Factura pendiente por cobrar registrada manualmente",
+    "created_at": "2026-07-14T18:10:00Z",
+    "updated_at": "2026-07-14T18:10:00Z"
+  }
+]
+```
+
+**Notas**
+
+- El backend devuelve únicamente cuentas por cobrar ligadas a facturas activas de la empresa del usuario autenticado.
+- Este endpoint es solo lectura; no crea ni modifica registros.
 
 ---
 
