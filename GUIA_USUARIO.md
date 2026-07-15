@@ -1,153 +1,260 @@
 # 📘 Guía de Uso e Implementación Inicial
 
-Esta guía detalla el flujo lógico paso a paso para configurar y comenzar a utilizar el sistema ERP desde cero. Sigue este orden para garantizar la integridad de los datos.
+Esta guía describe el flujo recomendado para poner en marcha el ERP y operar los módulos principales con orden, trazabilidad y consistencia de datos.
 
 ## 🚀 Fase 1: Configuración Global (Super Admin)
 
-Antes de crear cualquier empresa, el sistema debe tener los cimientos listos.
+Antes de crear empresas y usuarios, el sistema debe tener listos sus catálogos base.
 
-1.  **Carga de Catálogos Globales**:
-    - Asegúrate de que las **Monedas** (MXN, USD) estén creadas.
-    - Verifica los **Impuestos** base (IVA 16%, ISR).
-    - Carga las **Unidades de Medida** (Pieza, Servicio, Kilo).
-    - _Nota_: Los catálogos del SAT ya están precargados (Régimen Fiscal, Uso CFDI, etc.).
+1. **Carga de catálogos globales**:
+   - Verifica que existan las **Monedas** necesarias, por ejemplo `MXN` y `USD`.
+   - Verifica los **Impuestos** base, como `IVA 16%`.
+   - Carga las **Unidades de Medida** que se utilizarán en productos, compras y producción.
+   - Los catálogos del SAT se consideran parte del entorno base del sistema.
+
+2. **Revisión de documentación técnica y endpoints**:
+   - La referencia funcional para frontend se concentra en `DOCUMENTACION_API.md`.
+   - La documentación interactiva de API está disponible en `/api/docs/`.
 
 ---
 
 ## 🏢 Fase 2: Alta de Organización (Empresa)
 
-Ahora crearemos la entidad principal.
+En esta fase se crea la estructura operativa de cada empresa.
 
-1.  **Crear Empresa**:
-    - Ve a _Organización > Empresas > Nueva_.
-    - Llena Razón Social, RFC y selecciona la **Moneda Base**.
-    - **Validación Automática**: El sistema validará que el RFC tenga el formato correcto y coincida con su dígito verificador.
+1. **Crear empresa**:
+   - Ve a _Organización > Empresas > Nueva_.
+   - Captura razón social, RFC, moneda base y datos generales.
+   - El sistema valida formato y consistencia del RFC.
 
-2.  **Configuración Fiscal (SAT)**:
-    - Ve a _Organización > Empresas > Configuración SAT_.
-    - **Carga de CSD**: Sube tus archivos `.cer` y `.key` junto con la contraseña.
-    - El sistema validará automáticamente:
-      - Que los archivos correspondan entre sí.
-      - Que la contraseña sea correcta.
-      - Que el RFC del certificado coincida con el de la empresa.
-      - La vigencia del certificado.
+2. **Configuración fiscal (SAT)**:
+   - Ve a _Organización > Empresas > Configuración SAT_.
+   - Carga los archivos `.cer` y `.key` con su contraseña.
+   - El sistema valida:
+     - correspondencia entre archivos
+     - contraseña correcta
+     - RFC del certificado
+     - vigencia del certificado
 
-3.  **Crear Sucursales**:
-    - Ve a _Organización > Sucursales_.
-    - Crea al menos una sucursal (ej. "Matriz").
-    - Asigna la dirección y código postal (crucial para el timbrado 4.0).
+3. **Crear sucursales**:
+   - Ve a _Organización > Sucursales_.
+   - Crea al menos una sucursal operativa, por ejemplo `Matriz`.
+   - Define dirección, código postal y datos de contacto.
 
-4.  **Crear Departamentos**:
-    - Ve a _Organización > Departamentos_.
-    - Define las áreas operativas por sucursal (ej. "Ventas Matriz", "Almacén Norte").
-    - Usa códigos estándar (ej. "VENTAS", "ALMACEN") para facilitar la asignación de roles automática.
+4. **Crear departamentos**:
+   - Ve a _Organización > Departamentos_.
+   - Define áreas operativas por sucursal, por ejemplo `Ventas`, `Almacén`, `Producción`.
+   - Usa códigos claros para facilitar asignaciones y filtros por rol.
+
+5. **Configurar series y folios**:
+   - Define series para documentos operativos como pedidos, facturas y recepciones.
+   - Para recepciones, configura al menos una serie activa como `RC`, `RT` o `RZ`.
 
 ---
 
 ## 🛡️ Fase 3: Seguridad y Accesos
 
-Configura quién puede hacer qué.
+Aquí se define quién puede operar en cada empresa, sucursal y módulo.
 
-1.  **Definir Roles**:
-    - Ve a _Seguridad > Roles_.
-    - Crea roles operativos (ej. "Vendedor Mostrador", "Gerente de Tienda").
-    - **Tip Pro**: Si asignas una `Clave Departamento` (ej. "VENTAS") al rol, los usuarios con este rol solo verán información de ese departamento automáticamente.
+1. **Definir roles**:
+   - Ve a _Seguridad > Roles_.
+   - Crea roles operativos, por ejemplo `Vendedor`, `Compras`, `Mesa de Control`, `Gerencia`.
+   - Si usas clave de departamento, el sistema puede acotar visibilidad automáticamente.
 
-2.  **Alta de Usuarios**:
-    - Ve a _Seguridad > Usuarios_.
-    - Crea el usuario con su correo y contraseña.
-    - **Asignaciones Críticas**:
-      - **Empresa**: Asigna la empresa a la que pertenece.
-      - **Sucursal Default**: Su ubicación principal.
-      - **Sucursales (Acceso)**: Marca todas las sucursales donde puede operar.
-      - **Roles**: Asigna el rol correspondiente (ej. "Vendedor").
+2. **Alta de usuarios**:
+   - Ve a _Seguridad > Usuarios_.
+   - Asigna:
+     - empresa
+     - sucursal default
+     - sucursales permitidas
+     - roles
+
+3. **Permisos en frontend**:
+   - El frontend utiliza los permisos devueltos por login para habilitar acciones de lectura, edición y eliminación por módulo.
+   - Si un usuario no tiene acceso a una empresa o sucursal, no debe ver información de ese contexto.
 
 ---
 
 ## ✅ Fase 4: Operación Diaria
 
-Con la configuración lista, el usuario puede empezar a operar:
+Con la configuración inicial terminada, el usuario puede empezar a operar.
 
-1.  **Login**: El usuario ingresa sus credenciales.
-    68→2. **Dashboard**: Verá la información filtrada según sus permisos y sucursales asignadas. El frontend (Next.js) utiliza los permisos devueltos por el login para habilitar solo las acciones permitidas (lectura, edición y eliminación por módulo).
-2.  **Transacciones**: Al crear documentos (Ventas, Compras), el sistema tomará automáticamente la serie/folio de su sucursal activa.
+1. **Login**:
+   - El usuario inicia sesión con sus credenciales.
+
+2. **Dashboard**:
+   - El sistema muestra información según empresa, sucursal, rol y permisos asignados.
+
+3. **Transacciones**:
+   - Los documentos toman automáticamente el contexto del usuario autenticado.
+   - Cuando aplica, el sistema genera folios desde la serie configurada de la sucursal.
 
 ### 📦 Inventarios
 
-1.  **Consultar Existencias**:
-    - Ve a la sección de _Inventarios > Existencias_.
-    - El sistema consulta existencias por **producto** de forma directa y mantiene compatibilidad con `producto_variante` cuando aplique.
-    - La existencia nunca debe quedar en negativo.
+1. **Consultar existencias**:
+   - Ve a _Inventarios > Existencias_.
+   - El sistema consulta existencias por producto y mantiene compatibilidad con variantes.
+   - La existencia nunca debe quedar en negativo.
 
-2.  **Operaciones de Inventario**:
-    - Las operaciones válidas son **ENTRADA**, **SALIDA** y **AJUSTE**.
-    - **ENTRADA**: suma cantidad al inventario.
-    - **SALIDA**: resta cantidad; permite llegar a `0`, pero nunca a negativo.
-    - **AJUSTE**: reemplaza la cantidad final por el valor enviado.
+2. **Operaciones manuales de inventario**:
+   - Las operaciones válidas son **ENTRADA**, **SALIDA** y **AJUSTE**.
+   - **ENTRADA**: incrementa la existencia.
+   - **SALIDA**: disminuye la existencia; puede llegar a `0`, pero nunca a negativo.
+   - **AJUSTE**: reemplaza la cantidad final por el valor indicado.
+   - Los movimientos pueden relacionarse opcionalmente con pedido, recepción u observaciones para mantener trazabilidad.
 
-3.  **Historial de Movimientos**:
-    - La sección de _Movimientos_ muestra el historial operativo del inventario.
-    - Ya existe opción para consultar el detalle de cada movimiento desde el endpoint de detalle.
-    - El backend guarda auditoría y también registros formales de movimiento para trazabilidad.
+3. **Historial de movimientos**:
+   - La sección de _Movimientos_ concentra el historial operativo del inventario.
+   - Cada movimiento puede consultarse a detalle con producto, almacén, sucursal, ubicación, usuario y cantidades.
+   - El backend registra auditoría y movimientos formales de inventario.
+
+4. **Reporte de existencias por periodo**:
+   - Ya existe un reporte para conocer cómo cerró el inventario entre dos fechas.
+   - Permite filtrar por almacén o consultar todos los almacenes visibles para el usuario.
+   - El reporte muestra:
+     - existencia inicial
+     - entradas
+     - salidas
+     - existencia final
+     - costo de la existencia final
+
+5. **Reporte de movimientos por periodo**:
+   - Ya existe un reporte por tipo de movimiento: **ENTRADA**, **SALIDA** y **AJUSTE**.
+   - Permite filtrar por rango de fechas y por almacén, incluyendo opción de todos los almacenes.
+   - Devuelve información lista para pantalla o exportación, incluyendo SKU, producto, variante, color, talla, usuario, pedido relacionado, observaciones y costo.
 
 ### 🧾 Compras y Recepciones
 
-1.  **Órdenes de Compra**:
-    - El flujo recomendado es tipo onboarding: primero encabezado, después productos.
-    - El folio se genera cuando la orden se **acepta**, no cuando se guarda como borrador.
+1. **Órdenes de compra**:
+   - El flujo recomendado es tipo onboarding: primero encabezado y después productos.
+   - El estatus inicial es **Pendiente a confirmar**.
+   - La acción de autorizar sigue existiendo.
+   - Una orden autorizada o ya recibida no debe editarse.
+   - El detalle de una orden de compra ya puede mostrar las recepciones relacionadas.
 
-2.  **Recepción de Mercancía**:
-    - La recepción es el proceso que realmente afecta existencias.
-    - Puede ser **total** o **parcial**.
-    - La recepción puede originarse desde una **Orden de Compra** o desde una **Orden de Producción**.
-    - Para `OC`, el backend toma el **producto** desde el detalle de compra.
-    - Para `OP`, el backend toma el **producto** y la **variante** desde el detalle de producción para alimentar inventario de producto terminado.
-    - Si el almacén requiere ubicación, el usuario debe capturarla; si no, la recepción puede guardarse sin `ubicacion`.
-    - La entrada de producto terminado debe hacerse por **Recepciones**; `ProductoTerminadoEntradas` deja de ser el flujo operativo recomendado.
+2. **Impuestos en compras**:
+   - La orden de compra ya soporta porcentaje de IVA.
+   - El sistema recalcula subtotal, impuestos y gran total al guardar o actualizar la compra.
 
-3.  **Series de Recepción**:
-    - Las recepciones trabajan con series de folio como `RC`, `RT` o `RZ`.
-    - Debe existir al menos una serie activa configurada para recepción en la sucursal/empresa correspondiente.
+3. **Recepción de mercancía**:
+   - La recepción es el proceso que realmente afecta existencias.
+   - Puede ser **total** o **parcial**.
+   - La recepción puede originarse desde una **Orden de Compra** o desde una **Orden de Producción**.
+   - Para `OC`, el sistema toma el producto desde el detalle de compra.
+   - Para `OP`, el sistema toma producto y variante desde el detalle de producción.
+   - Si el almacén requiere ubicación, el usuario debe capturarla.
+   - La recepción genera folio, actualiza existencias, crea movimiento de inventario y deja auditoría.
+   - Si la recepción viene de producción, el movimiento queda ligado también a la orden de producción.
+
+4. **Entrada de producto terminado**:
+   - El flujo operativo recomendado es por **Recepciones**.
+   - `ProductoTerminadoEntradas` ya no es el flujo principal recomendado para alimentar inventario.
 
 ### 🏭 Producción
 
-1.  **Lista de Materiales (BOM)**:
-    - Cada BOM se relaciona con un `producto_variante` y su detalle de materias primas.
-    - Ya se puede **crear**, **consultar** y **editar** desde API.
+1. **Lista de materiales (BOM)**:
+   - Cada BOM se relaciona con un `producto_variante`.
+   - Ya se puede crear, consultar y editar desde API.
 
-2.  **Edición de BOM**:
-    - Al editar una lista de materiales, el encabezado se actualiza normalmente.
-    - Si se envía `materia_prima_detalle`, el backend toma ese arreglo como la nueva composición del BOM.
+2. **Edición de BOM**:
+   - Si se envía `materia_prima_detalle`, el sistema toma ese arreglo como la nueva composición del BOM.
+   - Si no se envía, conserva el detalle anterior.
 
-3.  **Órdenes de Producción**:
-    - El onboarding de producción ya no requiere que el cliente envíe el `bom` en cada detalle.
-    - El backend resuelve automáticamente el BOM activo a partir del `producto_variante`.
-    - Al confirmar la orden, el sistema valida existencias de insumos y descuenta automáticamente el consumo desde inventario.
-    - Si no existe stock suficiente o el BOM está incompleto, la orden no se confirma.
+3. **Órdenes de producción**:
+   - El usuario ya no necesita enviar el BOM manualmente en cada renglón.
+   - El sistema resuelve automáticamente el BOM activo por producto variante.
+   - Antes de confirmar la orden, el sistema valida:
+     - que exista BOM activo
+     - que tenga insumos configurados
+     - que exista inventario suficiente
+   - Si todo es correcto:
+     - descuenta insumos
+     - registra consumo de producción
+     - registra movimiento de inventario
+     - deja auditoría
+   - Si no hay stock suficiente o el BOM está incompleto, la orden no se confirma.
+
+### 🛒 Ventas, Cotizaciones y Pedidos
+
+1. **Cotizaciones**:
+   - La cotización funciona como onboarding comercial completo.
+   - Permite capturar cliente, productos, variantes, tallas, direcciones de envío y observaciones.
+   - El campo `tipo_pedido` ya forma parte del flujo y se conserva hacia pedido.
+
+2. **Envío a revisión y autorización**:
+   - El vendedor genera la cotización y la envía a revisión.
+   - La mesa de control valida la información y puede autorizar.
+   - Antes de autorizar, ya se puede consultar stock por talla y detalle de disponibilidad.
+
+3. **Conversión a pedido**:
+   - Al autorizar una cotización:
+     - se crea el pedido
+     - se asigna folio
+     - se descuentan existencias automáticamente
+   - Si no existe inventario suficiente, la autorización se bloquea.
+
+4. **Cambios sobre cotizaciones autorizadas**:
+   - Si una cotización autorizada entra a cambios solicitados dentro de la ventana permitida, la mesa de control puede aceptar o rechazar cambios.
+   - Cuando cambian cantidades, el sistema recalcula el delta y ajusta inventario de forma automática.
+
+### 💰 Finanzas
+
+1. **Facturación desde pedido**:
+   - El sistema ya soporta facturación total del pedido en una sola exhibición.
+   - Un pedido no debe facturarse más de una vez mientras exista una factura activa.
+
+2. **Facturas pendientes por cobrar**:
+   - Ya se pueden registrar facturas pendientes de cobro aunque no provengan de pedido.
+   - Si el usuario no captura folio, el sistema lo genera automáticamente.
+   - Al guardar, el sistema crea en una sola operación:
+     - la factura
+     - la cuenta por cobrar
+     - la póliza contable relacionada
+
+3. **Cuentas por cobrar**:
+   - Ya existe consulta de cuentas por cobrar por cliente, estatus, saldo pendiente y vencidas.
+   - El detalle de una cuenta por cobrar ya devuelve:
+     - la factura relacionada
+     - el total pagado
+     - las pólizas asociadas con sus detalles contables
+   - Esto permite seguimiento administrativo y trazabilidad para contabilidad.
+
+4. **Trazabilidad contable**:
+   - Al registrar una factura pendiente por cobrar, el sistema genera póliza de ingreso con sus partidas.
+   - La intención es que contabilidad pueda rastrear cada cuenta por cobrar desde su origen documental.
 
 ---
 
 ## 🔍 Fase 5: Monitoreo y Auditoría
 
-Para administradores del sistema.
+Para administradores y responsables del sistema.
 
-1.  **Logs de Sistema**:
-    - Revisa `sistema.log` para errores técnicos.
-    - Revisa `api.log` para trazar peticiones lentas o sospechosas.
-2.  **Auditoría de Cambios**:
-    - Cada cambio importante (ej. cambiar un precio, editar un usuario) queda registrado con el "antes" y "después".
-    - Disponible en el módulo de _Sistemas > Auditoría_.
-3.  **Seguridad (Bloqueos)**:
-    - Si un usuario reporta "Acceso Denegado" tras varios intentos, verifica la tabla de bloqueos (`axes`). El bloqueo dura 1 hora por defecto.
+1. **Logs de sistema**:
+   - Revisa `sistema.log` para errores técnicos.
+   - Revisa `api.log` para comportamiento anómalo, tiempos y fallas operativas.
+
+2. **Auditoría de cambios**:
+   - Los cambios relevantes quedan registrados con trazabilidad del antes y después.
+   - Esto aplica especialmente a operaciones sensibles de inventario, ventas, compras y finanzas.
+
+3. **Seguridad**:
+   - Si un usuario reporta bloqueo o acceso denegado tras múltiples intentos, revisa la política de bloqueos activa.
+
+4. **Documentación API**:
+   - Si frontend requiere validar contratos, endpoints o ejemplos, la fuente principal es `DOCUMENTACION_API.md`.
+   - Para pruebas manuales rápidas, usa `/api/docs/`.
 
 ---
 
 ## 🆘 Solución de Problemas Comunes
 
-- **"RFC Inválido al crear empresa"**: Verifica que el RFC cumpla con el formato oficial y el dígito verificador. Usa un validador en línea del SAT para confirmar.
-- **"Error al cargar CSD"**: Asegúrate de que la contraseña sea la correcta para la llave privada (`.key`) y no la contraseña del portal del SAT (CIEC). Son diferentes.
-- **"No veo ninguna sucursal"**: Revisa que el usuario tenga asignada al menos una sucursal en el campo "Sucursales permitidas".
-- **"No hay Serie/Folio activa para recepción"**: Configura una serie activa de recepción (`RC`, `RT` o `RZ`) para la empresa y sucursal que está operando.
-- **"No puedo hacer salida de inventario"**: Revisa que exista cantidad suficiente; la salida nunca puede dejar la existencia en negativo.
-- **"La recepción no afecta existencias"**: Verifica que la recepción se haya guardado correctamente; ni la orden de compra ni la orden de producción mueven inventario por sí solas.
-- **"No veo detalle en movimientos"**: Usa el endpoint de detalle del movimiento para consultar el desglose por producto, cantidad y ubicaciones.
+- **"RFC inválido al crear empresa"**: Verifica formato y dígito verificador del RFC.
+- **"Error al cargar CSD"**: Asegúrate de usar la contraseña correcta de la llave privada `.key`.
+- **"No veo ninguna sucursal"**: Revisa que el usuario tenga sucursal default y sucursales permitidas asignadas.
+- **"No hay serie activa para recepción"**: Configura una serie como `RC`, `RT` o `RZ` para la empresa y sucursal.
+- **"No puedo hacer salida de inventario"**: Revisa que exista cantidad suficiente; la salida nunca puede dejar stock negativo.
+- **"La recepción no afecta existencias"**: Verifica que la recepción realmente se haya guardado; ni la OC ni la OP mueven inventario por sí solas.
+- **"No veo detalle en movimientos"**: Usa el detalle del movimiento para consultar desglose por producto, ubicación y cantidades.
+- **"No puedo autorizar una cotización"**: Revisa stock disponible real; el sistema bloquea autorización si la existencia no alcanza.
+- **"No puedo editar una orden de compra"**: Verifica si ya fue autorizada o recibida; en ese estado deja de ser editable.
+- **"No veo cuentas por cobrar o pólizas"**: Revisa que la factura pertenezca a la empresa del usuario y que existan cuentas contables y centro de costo activos para el flujo financiero.
