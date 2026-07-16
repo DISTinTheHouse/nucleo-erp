@@ -1,4 +1,5 @@
 from django.db import transaction
+from rest_framework.exceptions import ValidationError
 from wms.models import Transferencia, TransferenciaDetalle
 from inventarios.models import Existencia
 from wms.utils.folios import generate_transferencia_folio
@@ -14,6 +15,9 @@ class TransferenciaService:
         almacen_destino = data["almacen_destino"]
         empresa = user.empresa
         sucursal = user.sucursal_default
+
+        if sucursal is None:
+            raise ValidationError("El usuario no tiene una sucursal asignada.")
 
         transferencia_detalle_rows = data.pop("transferencia_detalle")
 
@@ -33,13 +37,13 @@ class TransferenciaService:
 
             if not existencia_origen:
                 producto_id = producto.id if producto else producto_variante.id
-                raise Exception(
-                    f"No fue posible comprobar el stock del producto/variante con id {producto_id}"
+                raise ValidationError(
+                    f"No hay existencia del producto/variante con id {producto_id} en el almacén de origen."
                 )
 
             if existencia_origen.cantidad < cantidad:
                 producto_id = producto.id if producto else producto_variante.id
-                raise Exception(
+                raise ValidationError(
                     f"Inventario insuficiente del producto/variante con id {producto_id}"
                 )
 
@@ -83,9 +87,11 @@ class TransferenciaService:
                 existencia_destino.cantidad += cantidad
             else:
                 existencia_destino = Existencia(
+                    producto=row.get("producto"),
+                    producto_variante=row.get("producto_variante"),
                     almacen=almacen_destino,
-                    stock=cantidad,
-                    **row,
+                    stock=0,
+                    cantidad=cantidad,
                 )
 
             existencia_origen.save(update_fields=["cantidad"])
