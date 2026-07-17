@@ -83,9 +83,7 @@ class OrdenCompraDetalleSerializer(serializers.ModelSerializer):
 
 class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
-    ubicacion_nombre = serializers.CharField(
-        source="ubicacion.nombre", read_only=True, default=None
-    )
+    ubicacion_nombre = serializers.SerializerMethodField()
 
     class Meta:
         model = RecepcionDetalle
@@ -101,6 +99,9 @@ class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
             "serie",
             "cantidad_recibida",
         ]
+
+    def get_ubicacion_nombre(self, obj):
+        return str(obj.ubicacion) if obj.ubicacion_id else None
 
 
 class RecepcionRelacionadaSerializer(serializers.ModelSerializer):
@@ -256,9 +257,7 @@ class RecepcionDetalleRetrieveSerializer(serializers.ModelSerializer):
     """
 
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
-    ubicacion_nombre = serializers.CharField(
-        source="ubicacion.nombre", read_only=True, default=None
-    )
+    ubicacion_nombre = serializers.SerializerMethodField()
 
     class Meta:
         model = RecepcionDetalle
@@ -274,6 +273,9 @@ class RecepcionDetalleRetrieveSerializer(serializers.ModelSerializer):
             "serie",
             "cantidad_recibida",
         ]
+
+    def get_ubicacion_nombre(self, obj):
+        return str(obj.ubicacion) if obj.ubicacion_id else None
 
 
 class RecepcionRetrieveSerializer(serializers.ModelSerializer):
