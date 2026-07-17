@@ -95,7 +95,8 @@ class Ubicacion(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.almacen.nombre} - {self.pasillo}-{self.rack}-{self.nivel}-{self.posicion}"
+        almacen_nombre = self.almacen.nombre if self.almacen_id else "(sin almacén)"
+        return f"{almacen_nombre} - {self.pasillo}-{self.rack}-{self.nivel}-{self.posicion}"
 
 class Lote(models.Model):
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="lotes", null=True, blank=True)

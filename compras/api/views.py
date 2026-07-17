@@ -62,6 +62,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                             "producto",
                             "producto_variante",
                             "ubicacion",
+                            "ubicacion__almacen",
                         ).order_by("id"),
                     )
                 )
@@ -514,6 +515,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         "producto",
                         "producto_variante",
                         "ubicacion",
+                        "ubicacion__almacen",
                     ).order_by("id"),
                 )
             )
