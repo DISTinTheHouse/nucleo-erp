@@ -1,11 +1,123 @@
 from django.db import models
 from simple_history.models import HistoricalRecords
 
+class LotePicking(models.Model):
+    class Estado(models.TextChoices):
+        PENDIENTE = "PENDIENTE", "Pendiente"
+        ASIGNADO = "ASIGNADO", "Asignado"
+        EN_PROCESO = "EN_PROCESO", "En proceso"
+        EN_SORTING = "EN_SORTING", "En clasificación"  # separando cantidades recolectadas por pedido
+        COMPLETADO = "COMPLETADO", "Completado"
+        CANCELADO = "CANCELADO", "Cancelado"
+
+    almacen = models.ForeignKey("inventarios.Almacen", on_delete=models.CASCADE, related_name="lotes_picking")
+    operador = models.ForeignKey("usuarios.Usuario", on_delete=models.CASCADE, related_name="lotes_picking", blank=True, null=True)
+
+    estado = models.CharField(max_length=50, choices=Estado.choices, default=Estado.PENDIENTE)
+
+    total_pedidos = models.IntegerField(default=0)
+    total_lineas = models.IntegerField(default=0)
+
+    #estacion_sorting = models.CharField(max_length=50, blank=True, null=True)  # dónde se clasifica lo recolectado
+    #ruta_optimizada = models.JSONField(blank=True, null=True)  # secuencia de ubicaciones calculada, si aplica
+    fecha_inicio = models.DateTimeField(blank=True, null=True)
+    fecha_fin = models.DateTimeField(blank=True, null=True)
+
+    usuario = models.ForeignKey("usuarios.Usuario", on_delete=models.CASCADE, related_name="lotes_picking_creados")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "lotes_picking"
+        verbose_name = "Lote Picking"
+        verbose_name_plural = "Lotes Picking"
+
+    def __str__(self):
+        return f"Lote #{self.id} ({self.estado})"
+    
+class ZonaAlmacen(models.Model):
+    nombre = models.CharField(max_length=50)
+    almacen = models.ForeignKey("inventarios.Almacen", on_delete=models.CASCADE, related_name="zonas_almacen")
+    tipo_zona = models.CharField(max_length=50)
+
+    class Meta:
+        db_table = "zonas_almacen"
+        verbose_name = "Zona Almacen"
+        verbose_name_plural = "Zonas Almacen"
+
+    def __str__(self):
+        return self.nombre
+
+class Oleada(models.Model):
+    class Estado(models.TextChoices):
+        ABIERTA = "ABIERTA", "Abierta"
+        LIBERADA = "LIBERADA", "Liberada"
+        EN_PROCESO = "EN_PROCESO", "En proceso"
+        CERRADA = "CERRADA", "Cerrada"
+        CANCELADA = "CANCELADA", "Cancelada"
+
+    fecha_creacion = models.DateTimeField(auto_now_add=True)
+    fecha_liberacion = models.DateTimeField(blank=True, null=True)
+
+    criterio_agrupacion = models.CharField(max_length=50)
+    estado = models.CharField(max_length=50, choices=Estado.choices, default=Estado.ABIERTA)
+    total_pedidos = models.IntegerField(default=0)
+    total_lineas = models.IntegerField(default=0)
+    usuario = models.ForeignKey("usuarios.Usuario", on_delete=models.CASCADE, related_name="oleadas")
+
+    class Meta:
+        db_table = "oleadas"
+        verbose_name = "Oleada"
+        verbose_name_plural = "Oleadas"
+
+    def __str__(self):
+        return f"Oleada #{str(self.id)} ({self.estado})"
 
 class Picking(models.Model):
-    pedido = models.ForeignKey(
-        "ventas.Pedido", on_delete=models.CASCADE, related_name="pickings"
-    )
+    class Prioridad(models.TextChoices):
+        BAJA = "BAJA", "Baja"
+        MEDIA = "MEDIA", "Media"
+        ALTA = "ALTA", "Alta"
+    
+    class TipoPicking(models.TextChoices):
+        ORDER_PICKING = "ORDER_PICKING", "Por pedido"
+        BATCH_PICKING = "BATCH_PICKING", "Por lote"
+        WAVE_PICKING = "WAVE_PICKING", "Por oleadas"
+        ZONE_PICKING = "ZONE_PICKING", "Por zonas"
+
+    class Estado(models.TextChoices):
+        PENDIENTE = "Pendiente", "Pendiente"
+        ASIGNADO = "Asignado", "Asignado"
+        EN_PROCESO = "En proceso", "En proceso"
+        PAUSADO = "Pausado", "Pausado"
+        COMPLETADO = "Completado", "Completado"
+        PARCIAL = "Parcial", "Parcial"
+        CANCELADO = "Cancelado", "Cancelado"
+
+    pedido = models.ForeignKey("ventas.Pedido", on_delete=models.CASCADE, related_name="pickings")
+    operador = models.ForeignKey("usuarios.Usuario", on_delete=models.CASCADE, related_name="pickings_operadores")
+    almacen = models.ForeignKey("inventarios.Almacen", on_delete=models.CASCADE, related_name="pickings")
+
+    oleada = models.ForeignKey(Oleada, on_delete=models.CASCADE, related_name="pickings", blank=True, null=True)
+    zona_almacen = models.ForeignKey(ZonaAlmacen, on_delete=models.CASCADE, related_name="pickings", blank=True, null=True)
+    lote = models.ForeignKey(LotePicking, on_delete=models.CASCADE, related_name="pickings", blank=True, null=True)
+
+    prioridad = models.CharField(max_length=50, choices=Prioridad.choices, default=Prioridad.MEDIA)
+    tipo = models.CharField(max_length=50, choices=TipoPicking.choices, default=TipoPicking.ORDER_PICKING)
+    estado = models.CharField(max_length=50, choices=Estado.choices, default=Estado.PENDIENTE)
+
+    fecha_inicio = models.DateTimeField(blank=True, null=True)
+    fecha_fin = models.DateTimeField(blank=True, null=True)
+    fecha_limite = models.DateTimeField(blank=True, null=True)
+
+    total_lineas = models.IntegerField(default=0)
+    total_lineas_completas = models.IntegerField(default=0)
+
+    observaciones = models.TextField(blank=True, null=True)
+
+    usuario = models.ForeignKey("usuarios.Usuario", on_delete=models.CASCADE, related_name="pickings_usuarios")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "picking"
@@ -15,14 +127,36 @@ class Picking(models.Model):
     def __str__(self):
         return str(self.id)
 
-
 class PickingDetalle(models.Model):
-    picking = models.ForeignKey(
-        Picking, on_delete=models.CASCADE, related_name="picking_detalle"
-    )
-    pedido_detalle = models.ForeignKey(
-        "ventas.PedidoDetalle", on_delete=models.CASCADE, related_name="picking_detalle"
-    )
+    class EstadoLinea(models.TextChoices):
+        PENDIENTE = "PENDIENTE", "Pendiente"
+        SURTIDA = "SURTIDA", "Surtida"
+        PARCIAL = "PARCIAL", "Parcial"
+        FALTANTE = "FALTANTE", "Faltante"
+        CANCELADA = "CANCELADA", "Cancelada"
+
+    picking = models.ForeignKey(Picking, on_delete=models.CASCADE, related_name="picking_detalle")
+    pedido_detalle = models.ForeignKey("ventas.PedidoDetalle", on_delete=models.CASCADE, related_name="picking_detalle")
+
+    producto = models.ForeignKey("catalogo.Producto", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
+    producto_variante = models.ForeignKey("catalogo.ProductoVariante", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
+    ubicacion = models.ForeignKey("inventarios.Ubicacion", on_delete=models.CASCADE, related_name="picking_detalle")
+    lote = models.ForeignKey("inventarios.Lote", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
+
+    cantidad_solicitada = models.DecimalField(max_digits=18, decimal_places=4)
+    cantidad_asignada = models.DecimalField(max_digits=18, decimal_places=4)
+    cantidad_surtida = models.DecimalField(max_digits=18, decimal_places=4)
+
+    unidad_medida = models.ForeignKey("nucleo.UnidadMedida", on_delete=models.CASCADE, related_name="picking_detalle")
+    estado = models.CharField(max_length=50, choices=EstadoLinea.choices, default=EstadoLinea.PENDIENTE)
+    operador = models.ForeignKey("usuarios.Usuario", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
+
+    fecha_surtido = models.DateTimeField(blank=True, null=True)
+    
+    diferencia = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    motivo_diferencia = models.CharField(max_length=100, blank=True, null=True)
+
+    observaciones = models.TextField(blank=True, null=True)
 
     class Meta:
         db_table = "picking_detalle"
@@ -31,7 +165,6 @@ class PickingDetalle(models.Model):
 
     def __str__(self):
         return str(self.id)
-
 
 class Packing(models.Model):
     picking = models.ForeignKey(
@@ -45,7 +178,6 @@ class Packing(models.Model):
 
     def __str__(self):
         return str(self.id)
-
 
 class PackingDetalle(models.Model):
     packing = models.ForeignKey(
@@ -63,7 +195,6 @@ class PackingDetalle(models.Model):
     def __str__(self):
         return str(self.id)
 
-
 class Despacho(models.Model):
     packing = models.ForeignKey(
         Packing, on_delete=models.CASCADE, related_name="despachos"
@@ -79,7 +210,6 @@ class Despacho(models.Model):
 
     def __str__(self):
         return str(self.id)
-
 
 class DespachoDetalle(models.Model):
     despacho = models.ForeignKey(
@@ -97,7 +227,6 @@ class DespachoDetalle(models.Model):
     def __str__(self):
         return str(self.id)
 
-
 class ConteoCiclico(models.Model):
     almacen = models.ForeignKey(
         "inventarios.Almacen", on_delete=models.CASCADE, related_name="conteo_ciclico"
@@ -110,7 +239,6 @@ class ConteoCiclico(models.Model):
 
     def __str__(self):
         return str(self.id)
-
 
 class ConteoCiclicoDetalle(models.Model):
     conteo_ciclico = models.ForeignKey(
@@ -129,7 +257,6 @@ class ConteoCiclicoDetalle(models.Model):
 
     def __str__(self):
         return str(self.id)
-
 
 class Transferencia(models.Model):
     class TransferenciaStatus(models.TextChoices):
@@ -181,7 +308,6 @@ class Transferencia(models.Model):
 
     def __str__(self):
         return str(self.id)
-
 
 class TransferenciaDetalle(models.Model):
     transferencia = models.ForeignKey(
