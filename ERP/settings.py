@@ -31,6 +31,10 @@ DEBUG = config('DEBUG', default=False, cast=bool)
 ENVIRONMENT = config('ENVIRONMENT', default='development')
 IS_VERCEL = os.environ.get('VERCEL') == '1'
 
+
+def _csv_env(name, default=''):
+    return [item.strip() for item in config(name, default=default).split(',') if item.strip()]
+
 # ALLOWED_HOSTS defined in environment
 ALLOWED_HOSTS = [h.strip() for h in config('ALLOWED_HOSTS', default='localhost,127.0.0.1').split(',') if h.strip()]
 if IS_VERCEL:
@@ -82,6 +86,7 @@ AUTH_KIT = {
     'USER_SERIALIZER': 'usuarios.api.serializers.UsuarioSerializer',
     'AUTH_COOKIE_SECURE': config('AUTH_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool),
     'AUTH_COOKIE_SAMESITE': config('AUTH_COOKIE_SAMESITE', default='None'),
+    'AUTH_COOKIE_DOMAIN': (config('AUTH_COOKIE_DOMAIN', default='').strip() or None),
 }
 
 AUTH_USER_MODEL = "usuarios.Usuario"
@@ -296,14 +301,20 @@ SPECTACULAR_SETTINGS = {
 # =========================
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = config('CORS_ALLOW_CREDENTIALS', default=True, cast=bool)
-CORS_ALLOWED_ORIGINS = [o.strip() for o in config('CORS_ALLOWED_ORIGINS', default='http://localhost:3000,https://localhost:3000').split(',') if o.strip()]
+CORS_ALLOWED_ORIGINS = _csv_env(
+    'CORS_ALLOWED_ORIGINS',
+    default='http://localhost:3000,https://localhost:3000',
+)
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r'^https://.*\.onrender\.com$',
     r'^https://.*\.vercel\.app$',
-]
+] + _csv_env('CORS_ALLOWED_ORIGIN_REGEXES_EXTRA')
 CORS_URLS_REGEX = r'^/api/.*$'
 
-CSRF_TRUSTED_ORIGINS = [o.strip() for o in config('CSRF_TRUSTED_ORIGINS', default='https://*.onrender.com,https://*.vercel.app,https://localhost:3000,http://localhost:3000').split(',') if o.strip()]
+CSRF_TRUSTED_ORIGINS = _csv_env(
+    'CSRF_TRUSTED_ORIGINS',
+    default='https://*.onrender.com,https://*.vercel.app,https://localhost:3000,http://localhost:3000',
+)
 if IS_VERCEL:
     vercel_url = os.environ.get('VERCEL_URL')
     if vercel_url:
