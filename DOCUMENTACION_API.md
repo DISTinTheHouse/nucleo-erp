@@ -3,7 +3,9 @@
 ## 🌐 Configuración Base
 
 - **Base URL Desarrollo**: `http://localhost:8003` (o tu IP local `192.168.0.X:8003`)
-- **Autenticación**: Header `Authorization: Bearer <tu_token>` (Excepto Login)
+- **Autenticación Web Oficial**: `JWT` con cookies seguras (`auth-jwt` y `auth-refresh-jwt`)
+- **Next.js**: usar `credentials: "include"` en login, refresh, logout y peticiones autenticadas
+- **Bearer Token**: opcional solo para integraciones o pruebas manuales; para frontend web el flujo oficial es por cookies
 - **Content-Type**: `application/json` (excepto para subida de archivos)
 
 ## 🏢 Aislamiento por Empresa (Multi-tenant) — Notas Importantes
@@ -19,9 +21,32 @@ La mayoría de endpoints operativos están **acotados por la empresa del usuario
 
 ## 🔐 1. Autenticación y Sesión
 
-### Login
+### Login JWT Oficial
 
-Obtén el token de sesión para el usuario.
+El flujo oficial para frontend web es `JWT + cookies` por medio de `auth_kit`.
+
+- **Rutas nativas Auth Kit**:
+  - `POST /api/auth/login/`
+  - `POST /api/auth/login/verify/`
+  - `POST /api/auth/logout/`
+  - `GET /api/auth/user/`
+  - `POST /api/auth/token/refresh/`
+- **Rutas alias compatibles bajo `api/v1`**:
+  - `POST /api/v1/login/`
+  - `POST /api/v1/login/verify/`
+  - `POST /api/v1/login/change-method/`
+  - `POST /api/v1/login/resend/`
+  - `POST /api/v1/logout/`
+  - `GET /api/v1/me/`
+  - `POST /api/v1/token/refresh/`
+- **Importante para Next.js**:
+  - usar siempre `credentials: "include"`
+  - no depender del `token` DRF anterior; ese flujo deja de ser el oficial
+  - el backend autentica con cookie JWT y también acepta header Bearer, pero para web el camino recomendado es cookie
+
+### Login Paso 1
+
+Inicia autenticación con correo y contraseña.
 
 - **Endpoint**: `POST /api/v1/login/`
 - **Body**:
@@ -31,32 +56,125 @@ Obtén el token de sesión para el usuario.
     "password": "password123"
   }
   ```
+
+#### Respuesta si el usuario NO requiere MFA
+
 - **Respuesta (200 OK)**:
   ```json
   {
-    "token": "d834958c281321...",
-    "user_id": 1,
-    "email": "admin@empresa.com",
-    "username": "admin",
-    "nombre_completo": "Administrador Sistema",
-    "es_admin": true,
-    "is_superuser": true,
-    "is_admin_empresa": true,
-    "empresa_id": 1,
-    "permisos": ["R-CONF", "E-CONF", "D-CONF", "R-USU", "..."]
+    "user": {
+      "id": 1,
+      "username": "admin",
+      "email": "admin@empresa.com",
+      "empresa_id": 1,
+      "nombre_completo": "Administrador Sistema",
+      "es_admin": true,
+      "is_superuser": true,
+      "is_admin_empresa": true,
+      "permisos": []
+    },
+    "access": "<jwt_access>",
+    "refresh": "",
+    "access_expiration": "2026-07-14T20:00:00Z",
+    "refresh_expiration": "2026-07-15T19:00:00Z",
+    "mfa_enabled": false
   }
   ```
-- **Notas importantes para Frontend**:
-  - `permisos` es un arreglo de claves de permiso efectivas para el usuario.
-  - Incluye automáticamente:
-    1. Permisos asignados por Roles.
-    2. Overrides de tipo GRANT (UsuarioPermiso).
-    3. Excluye Overrides de tipo DENY.
-  - Las claves siguen el patrón `X-MODULO`, por ejemplo para el módulo Configuración:
-    - `R-CONF` → Lectura
-    - `E-CONF` → Edición
-    - `D-CONF` → Eliminación
-  - Para usuarios `is_superuser=true` o `is_admin_empresa=true`, el backend concede acceso amplio por rol; el frontend puede tratarlos como “tienen todo”, aunque la lista `permisos` pueda estar vacía.
+- **Comportamiento**:
+  - el backend setea automáticamente las cookies `auth-jwt` y `auth-refresh-jwt`
+  - el frontend no necesita guardar manualmente el refresh token
+  - a partir de este punto las peticiones autenticadas deben enviarse con `credentials: "include"`
+
+#### Respuesta si el usuario SÍ requiere MFA
+
+- **Respuesta (200 OK)**:
+  ```json
+  {
+    "ephemeral_token": "<token_temporal>",
+    "method": "email",
+    "mfa_enabled": true
+  }
+  ```
+- **Comportamiento**:
+  - todavía no existe sesión autenticada
+  - el frontend debe pedir el código MFA al usuario y completar el paso 2
+
+### Login Paso 2: Verificar MFA
+
+Completa autenticación cuando el usuario tiene MFA habilitado.
+
+- **Endpoint**: `POST /api/v1/login/verify/`
+- **Body**:
+  ```json
+  {
+    "ephemeral_token": "<token_temporal>",
+    "code": "123456"
+  }
+  ```
+- **Respuesta (200 OK)**:
+  - misma estructura que el login exitoso sin MFA
+  - también setea cookies JWT automáticamente
+
+### Cambiar Método MFA Durante Login
+
+- **Endpoint**: `POST /api/v1/login/change-method/`
+- **Body**:
+  ```json
+  {
+    "ephemeral_token": "<token_temporal>",
+    "new_method": "email"
+  }
+  ```
+
+### Reenviar Código MFA
+
+- **Endpoint**: `POST /api/v1/login/resend/`
+- **Body**:
+  ```json
+  {
+    "ephemeral_token": "<token_temporal>"
+  }
+  ```
+
+### Usuario Autenticado
+
+Obtiene el perfil actual con permisos y contexto del usuario autenticado.
+
+- **Endpoint**: `GET /api/v1/me/`
+- **Equivalente nativo**: `GET /api/auth/user/`
+- **Notas**:
+  - usar `credentials: "include"`
+  - la respuesta usa `UsuarioSerializer`
+  - `permisos` es un arreglo de claves efectivas del usuario
+  - `empresa_id` se toma desde `user.empresa_id`; el frontend no debe inventarlo ni alterarlo
+
+### Refresh de JWT
+
+Renueva el access token usando la cookie refresh.
+
+- **Endpoint**: `POST /api/v1/token/refresh/`
+- **Equivalente nativo**: `POST /api/auth/token/refresh/`
+- **Body**:
+  ```json
+  {}
+  ```
+- **Notas**:
+  - con cookies activas no hace falta enviar el refresh token en el body
+  - usar `credentials: "include"`
+
+### Logout
+
+Cierra la sesión y limpia cookies JWT.
+
+- **Endpoint**: `POST /api/v1/logout/`
+- **Equivalente nativo**: `POST /api/auth/logout/`
+- **Body**:
+  ```json
+  {}
+  ```
+- **Notas**:
+  - usar `credentials: "include"`
+  - invalida el refresh token cuando el blacklist está activo
 
 ---
 

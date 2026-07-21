@@ -81,6 +81,8 @@ Con la configuración inicial terminada, el usuario puede empezar a operar.
 
 1. **Login**:
    - El usuario inicia sesión con sus credenciales.
+   - Para frontend web el flujo oficial usa `JWT` con cookies seguras.
+   - En integraciones Next.js se debe trabajar con `credentials: "include"` para conservar la sesión autenticada.
 
 2. **Dashboard**:
    - El sistema muestra información según empresa, sucursal, rol y permisos asignados.
