@@ -1,7 +1,7 @@
 from django.db import models
 from nucleo.models import Empresa, Sucursal
 from catalogo.models import Producto, ProductoVariante
-from ventas.models import Pedido, Entrega, Devolucion
+from ventas.models import Pedido, Entrega, Devolucion, PedidoDetalle, PedidoDetalleTalla
 from nucleo.models import StatusLifecycleModel
 from simple_history.models import HistoricalRecords
 
@@ -212,3 +212,23 @@ class MovimientoInventarioDetalle(models.Model):
 
     def __str__(self):
         return str(self.id)
+
+class inventario_reservas(models.Model):
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="inventario_reservas")
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="inventario_reservas")
+    pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE, related_name="inventario_reservas")
+    pedido_detalle_talla = models.ForeignKey(PedidoDetalleTalla, on_delete=models.CASCADE, related_name="inventario_reservas")
+
+    cantidad = models.DecimalField(max_digits=18, decimal_places=4)
+    
+    fecha_reserva = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+    fecha_devolucion = models.DateTimeField(auto_now=True, null=True, blank=True)
+    usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE)
+    class Meta:
+        db_table = "inventario_reservas"
+        verbose_name = "Inventario Reserva"
+        verbose_name_plural = "Inventario Reservas"
+
+    def __str__(self):
+        return str(self.id)
+   
