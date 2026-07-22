@@ -94,6 +94,10 @@ class Picking(models.Model):
         PARCIAL = "Parcial", "Parcial"
         CANCELADO = "Cancelado", "Cancelado"
 
+    folio = models.CharField(max_length=50)
+    empresa = models.ForeignKey("nucleo.Empresa", on_delete=models.CASCADE, related_name="pickings")
+    sucursal = models.ForeignKey("nucleo.Sucursal", on_delete=models.CASCADE, related_name="pickings")
+
     pedido = models.ForeignKey("ventas.Pedido", on_delete=models.CASCADE, related_name="pickings")
     operador = models.ForeignKey("usuarios.Usuario", on_delete=models.CASCADE, related_name="pickings_operadores")
     almacen = models.ForeignKey("inventarios.Almacen", on_delete=models.CASCADE, related_name="pickings")
@@ -140,14 +144,13 @@ class PickingDetalle(models.Model):
 
     producto = models.ForeignKey("catalogo.Producto", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
     producto_variante = models.ForeignKey("catalogo.ProductoVariante", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
-    ubicacion = models.ForeignKey("inventarios.Ubicacion", on_delete=models.CASCADE, related_name="picking_detalle")
+    ubicacion = models.ForeignKey("inventarios.Ubicacion", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
     lote = models.ForeignKey("inventarios.Lote", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
 
     cantidad_solicitada = models.DecimalField(max_digits=18, decimal_places=4)
-    cantidad_asignada = models.DecimalField(max_digits=18, decimal_places=4)
-    cantidad_surtida = models.DecimalField(max_digits=18, decimal_places=4)
+    cantidad_asignada = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    cantidad_surtida = models.DecimalField(max_digits=18, decimal_places=4, default=0)
 
-    unidad_medida = models.ForeignKey("nucleo.UnidadMedida", on_delete=models.CASCADE, related_name="picking_detalle")
     estado = models.CharField(max_length=50, choices=EstadoLinea.choices, default=EstadoLinea.PENDIENTE)
     operador = models.ForeignKey("usuarios.Usuario", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
 

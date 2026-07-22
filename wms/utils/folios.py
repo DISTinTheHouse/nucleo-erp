@@ -3,11 +3,11 @@ from rest_framework.exceptions import ValidationError
 from nucleo.models import SerieFolio
 
 @transaction.atomic
-def generate_transferencia_folio(empresa_id, sucursal_id):
+def generate_folio(empresa_id, sucursal_id, tipo_documento:str):
     serie_folio = SerieFolio.objects.select_for_update().filter(
         empresa=empresa_id,
         sucursal=sucursal_id,
-        tipo_documento__iexact='Transferencia',
+        tipo_documento__iexact=tipo_documento,
         activo=True
     ).order_by('id_serie_folio').first()
 

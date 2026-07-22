@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from wms.models import Transferencia, TransferenciaDetalle
+from wms.models import Transferencia, TransferenciaDetalle, Picking, PickingDetalle
 
 class TransferenciaDetalleSerializer(serializers.ModelSerializer):
     class Meta:
@@ -155,3 +155,27 @@ class TransferenciaRetrieveSerializer(TransferenciaListSerializer):
 
     class Meta(TransferenciaListSerializer.Meta):
         fields = TransferenciaListSerializer.Meta.fields + ["transferencia_detalle"]
+
+class PickingDetalleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PickingDetalle
+        fields = "__all__"
+        read_only_fields = ["picking"]
+
+
+class PickingSerializer(serializers.ModelSerializer):
+    picking_detalle = PickingDetalleSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Picking
+        fields = "__all__"
+        read_only_fields = [
+            "folio",
+            "total_lineas",
+            "total_lineas_completas",
+            "usuario",
+            "created_at",
+            "updated_at",
+            "empresa",
+            "sucursal",
+        ]
