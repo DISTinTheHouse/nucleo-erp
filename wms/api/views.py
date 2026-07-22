@@ -10,7 +10,7 @@ from wms.api.serializers import (
 )
 from wms.models import Transferencia, TransferenciaDetalle
 from wms.services.transferencia_service import TransferenciaService
-from wms.models import Picking
+from wms.models import Picking, PickingDetalle
 from wms.services.picking_service import PickingService
 
 class TransferenciaViewSet(
@@ -90,10 +90,61 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset()
+        # Las FK del encabezado que PickingSerializer resuelve a nombre viajan en
+        # un solo select_related (oleada/zona_almacen/lote solo usan campos
+        # locales para su etiqueta, no hace falta profundizar más).
+        #
+        # A diferencia de TransferenciaViewSet (que solo anida renglones en el
+        # retrieve), PickingSerializer es compartido y anida ``picking_detalle``
+        # también en el list, así que el prefetch aplica a ambas acciones.
+        # ``ubicacion__almacen`` viaja en el select_related porque la etiqueta de
+        # una Ubicacion se compone con ``almacen.nombre``.
+        qs = (
+            super()
+            .get_queryset()
+            .select_related(
+                "pedido",
+                "operador",
+                "almacen",
+                "usuario",
+                "oleada",
+                "zona_almacen",
+                "lote",
+            )
+            .prefetch_related(
+                Prefetch(
+                    "picking_detalle",
+                    queryset=PickingDetalle.objects.select_related(
+                        "producto",
+                        "producto_variante",
+                        "ubicacion",
+                        "ubicacion__almacen",
+                        "operador",
+                    ).order_by("id"),
+                )
+            )
+        )
+
+        # Aislamiento multi-tenant: sin empresa no se ve nada. list devuelve 200 []
+        # fuera de alcance; retrieve de otra empresa/sucursal devuelve 404 (no 403).
+        # Mismo criterio que TransferenciaViewSet.get_queryset().
+        if getattr(user, "is_superuser", False):
+            return qs
         empresa = getattr(user, "empresa", None)
-        if not empresa: return qs.none()
-        return qs.filter(empresa=empresa)
+        if not empresa:
+            return qs.none()
+        qs = qs.filter(empresa=empresa)
+
+        # Scope por sucursal dentro de la empresa: el admin de empresa ve todas sus
+        # sucursales; el resto solo las asignadas en el M2M ``usuario.sucursales``
+        # —mismo criterio que ``TransferenciaViewSet.get_queryset()``—. Sin
+        # sucursales asignadas no ve nada, igual que un usuario sin empresa: se
+        # falla cerrado. Se filtra por ``Picking.sucursal`` (la dueña del
+        # documento), no por la sucursal del almacén, que puede diferir.
+        if getattr(user, "is_admin_empresa", False):
+            return qs
+        sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+        return qs.filter(sucursal_id__in=sucursal_ids)
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
