@@ -2,7 +2,7 @@ from django.db import transaction
 from rest_framework.exceptions import ValidationError
 from wms.models import Transferencia, TransferenciaDetalle
 from inventarios.models import Existencia
-from wms.utils.folios import generate_transferencia_folio
+from wms.utils.folios import generate_folio
 from wms.services.existencia_service import ExistenciaService
 from wms.services.movimiento_inventario_service import MovimientoInventarioService
 
@@ -117,7 +117,7 @@ class TransferenciaService:
         transferencia = Transferencia.objects.create(
             empresa=empresa,
             sucursal=sucursal,
-            folio=generate_transferencia_folio(empresa, sucursal),
+            folio=generate_folio(empresa, sucursal, 'Transferencia'),
             usuario=user,
             **data,
         )
