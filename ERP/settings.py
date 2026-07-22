@@ -274,7 +274,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # =========================
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'auth_kit.authentication.JWTCookieAuthentication',
+        # Envuelve JWTCookieAuthentication con validación del header Origin
+        # (anti-CSRF) para escrituras autenticadas por cookie. Ver nucleo/authentication.py.
+        'nucleo.authentication.OriginEnforcedJWTCookieAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
