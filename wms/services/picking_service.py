@@ -25,8 +25,7 @@ class PickingService:
             "variante_id",
         )
 
-        almacen_apartados = Almacen.objects.get(nombre="APARTADOS")
-
+        almacen_apartados = Almacen.objects.filter(nombre="APARTADOS").first()
         if not almacen_apartados: raise ValidationError("No existe el almacen APARTADOS")
 
         # Crear transferencia

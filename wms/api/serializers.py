@@ -157,6 +157,9 @@ class TransferenciaRetrieveSerializer(TransferenciaListSerializer):
         fields = TransferenciaListSerializer.Meta.fields + ["transferencia_detalle"]
 
 class PickingDetalleSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    producto_variante_nombre = serializers.CharField(source="producto_variante.nombre", read_only=True)
+
     class Meta:
         model = PickingDetalle
         fields = "__all__"
@@ -165,6 +168,21 @@ class PickingDetalleSerializer(serializers.ModelSerializer):
 
 class PickingSerializer(serializers.ModelSerializer):
     picking_detalle = PickingDetalleSerializer(many=True, read_only=True)
+    almacen_nombre = serializers.CharField(source="almacen.nombre", read_only=True)
+    usuario_nombre = serializers.SerializerMethodField()
+    operador_nombre = serializers.SerializerMethodField()
+
+    def get_usuario_nombre(self, obj):
+        usuario = obj.usuario
+        if not usuario:
+            return None
+        return usuario.get_full_name().strip() or usuario.email
+
+    def get_operador_nombre(self, obj):
+        operador = obj.operador
+        if not operador:
+            return None
+        return operador.get_full_name().strip() or operador.email
 
     class Meta:
         model = Picking
