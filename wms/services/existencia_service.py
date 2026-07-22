@@ -8,9 +8,9 @@ class ExistenciaService:
             "almacen": almacen,
         }
 
-        if producto:
-            filters["producto"] = producto
-        else:
+        if producto_variante:
             filters["producto_variante"] = producto_variante
+        else:
+            filters["producto"] = producto
 
         return Existencia.objects.select_for_update().filter(**filters).first()
