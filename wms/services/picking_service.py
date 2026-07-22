@@ -25,7 +25,10 @@ class PickingService:
             "variante_id",
         )
 
-        almacen_apartados = Almacen.objects.get(nombre="APARTADOS")
+        # .filter().first() en lugar de .get(): un .get() sin el almacén lanza
+        # Almacen.DoesNotExist sin capturar (500) y el check de abajo nunca corre.
+        # Mismo patrón que TransferenciaService: ValidationError -> 400 limpio.
+        almacen_apartados = Almacen.objects.filter(nombre="APARTADOS").first()
 
         if not almacen_apartados: raise ValidationError("No existe el almacen APARTADOS")
 
