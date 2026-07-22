@@ -22,9 +22,22 @@ class IsSuperUserOrReadOnly(permissions.BasePermission):
         return request.user and request.user.is_superuser
 
 class LoginAPIView(APIView):
+    """
+    DESHABILITADO: este endpoint legado saltaba el flujo de MFA y emitía
+    tokens de authtoken sin expiración. Se conserva la clase y la ruta
+    (usuarios/urls.py) para no romper referencias existentes, pero
+    responde 403 antes de tocar cualquier credencial. Usa el flujo
+    estándar de auth_kit (/api/auth/) en su lugar.
+    """
     permission_classes = [AllowAny]
 
     def post(self, request):
+        return Response(
+            {'error': 'Este endpoint ha sido deshabilitado. Usa el flujo de autenticación estándar.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    def _legacy_post(self, request):
         email = request.data.get('email')
         password = request.data.get('password')
 
