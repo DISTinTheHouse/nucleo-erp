@@ -198,10 +198,62 @@ class CotizacionFullSerializer(serializers.ModelSerializer):
         model = Cotizacion
         fields = "__all__"
 
+class PedidoDetalleTallaReadSerializer(serializers.ModelSerializer):
+    """Talla anidada de un renglón de pedido (solo lectura).
+
+    Resuelve los nombres a través de las FK que el ``prefetch_related`` del
+    viewset ya trae con ``select_related`` — sin consultas por fila, misma
+    convención que ``TransferenciaDetalleReadSerializer`` en WMS.
+
+    ``variante`` (``ProductoVariante``) es opcional por talla; cuando falta,
+    ``variante_nombre``/``variante_sku`` quedan en ``null``. Como
+    ``ProductoVariante.nombre`` puede venir vacío, ``variante_nombre`` cae al
+    ``sku`` (que es único y siempre existe).
+    """
+
+    talla_nombre = serializers.CharField(source="talla.nombre", read_only=True)
+    variante_nombre = serializers.SerializerMethodField()
+    variante_sku = serializers.CharField(source="variante.sku", read_only=True, default=None)
+
+    class Meta:
+        model = PedidoDetalleTalla
+        fields = "__all__"
+
+    def get_variante_nombre(self, obj):
+        if not obj.variante_id:
+            return None
+        return obj.variante.nombre or obj.variante.sku
+
+class PedidoDetalleReadSerializer(serializers.ModelSerializer):
+    """Renglón anidado (``detalles``) de un pedido (solo lectura).
+
+    A diferencia de Transferencias/Picking en WMS, ``PedidoDetalle`` NO tiene
+    ``producto_variante`` ni ``cantidad`` propios: la variante y la cantidad
+    viven por talla (``PedidoDetalleTalla``), así que aquí se anidan las
+    ``tallas`` y se agrega ``cantidad_total`` como suma de sus cantidades ya
+    prefetcheadas — mismo criterio que ``get_piezas`` en cotizaciones.
+    """
+
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    color_nombre = serializers.CharField(source="color.nombre", read_only=True, default=None)
+    color_codigo_hex = serializers.CharField(source="color.codigo_hex", read_only=True, default=None)
+    tallas = PedidoDetalleTallaReadSerializer(many=True, read_only=True)
+    cantidad_total = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PedidoDetalle
+        fields = "__all__"
+
+    def get_cantidad_total(self, obj):
+        return sum(int(t.cantidad or 0) for t in obj.tallas.all())
+
 class PedidoSerializer(serializers.ModelSerializer):
     folio = serializers.CharField(read_only=True)
     folio_consecutivo = serializers.IntegerField(read_only=True)
     servicios_extras = serializers.SerializerMethodField()
+    # Solo lectura: no cambia el contrato de escritura de ningún endpoint de
+    # Pedido (POST/PATCH ignoran ``detalles``).
+    detalles = PedidoDetalleReadSerializer(many=True, read_only=True)
 
     def get_servicios_extras(self, obj):
         try:

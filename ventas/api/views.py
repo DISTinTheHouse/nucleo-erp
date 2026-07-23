@@ -60,6 +60,27 @@ logger = logging.getLogger(__name__)
 QTY_PRECISION = Decimal("0.0001")
 
 
+def _pedido_detalles_prefetch():
+    """Prefetch de ``detalles`` (+``tallas``) con las FK que
+    ``PedidoDetalleReadSerializer`` resuelve a nombre — un único set de
+    consultas, sin N+1 por renglón; misma convención que
+    ``PickingViewSet``/``TransferenciaViewSet`` en WMS.
+    """
+    return Prefetch(
+        "detalles",
+        queryset=PedidoDetalle.objects.select_related("producto", "color")
+        .prefetch_related(
+            Prefetch(
+                "tallas",
+                queryset=PedidoDetalleTalla.objects.select_related(
+                    "talla", "variante"
+                ).order_by("id"),
+            )
+        )
+        .order_by("id"),
+    )
+
+
 class CotizacionViewSet(viewsets.ModelViewSet):
     queryset = Cotizacion.objects.all()
     serializer_class = CotizacionSerializer
@@ -1849,7 +1870,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
         pedido = (
             Pedido.objects.filter(pk=pedido.pk)
-            .prefetch_related("detalles__tallas")
+            .prefetch_related(_pedido_detalles_prefetch())
             .first()
         )
         return Response(
@@ -2127,7 +2148,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset()
+        # ``PedidoSerializer`` es compartido (list/retrieve) y anida ``detalles``
+        # con nombres resueltos: los renglones y sus tallas viajan en un único
+        # prefetch para evitar el N+1 del shape anidado — misma convención que
+        # ``PickingViewSet.get_queryset()`` en WMS.
+        qs = super().get_queryset().prefetch_related(_pedido_detalles_prefetch())
         if not getattr(user, "is_superuser", False) and getattr(user, "empresa", None):
             qs = qs.filter(empresa=user.empresa)
         q = self.request.query_params.get("q") or self.request.query_params.get("folio")
