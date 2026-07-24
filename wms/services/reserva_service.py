@@ -7,7 +7,7 @@ from wms.services.existencia_service import ExistenciaService
 
 class ReservaInventarioService:
     @staticmethod
-    def create_for_picking(pedido, almacen, tallas, user):
+    def create_for_picking(pedido, almacen, requested_items, user):
         reserva_activa = inventario_reservas.objects.filter(
             pedido_detalle__pedido=pedido,
             estado=inventario_reservas.Estado.ACTIVA,
@@ -18,7 +18,9 @@ class ReservaInventarioService:
             )
 
         reservas = []
-        for talla in tallas:
+        for item in requested_items:
+            talla = item["talla"]
+            cantidad = item["cantidad"]
             existencia = ExistenciaService.get_existencia(
                 almacen=almacen,
                 producto=talla.pedido_detalle.producto,
@@ -52,7 +54,7 @@ class ReservaInventarioService:
                     existencia=existencia,
                     almacen=almacen,
                     ubicacion=existencia.ubicacion,
-                    cantidad=talla.cantidad,
+                    cantidad=cantidad,
                     usuario=user,
                     observaciones="Reserva generada automáticamente desde picking.",
                 )

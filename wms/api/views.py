@@ -1,6 +1,7 @@
 from django.db.models import Prefetch
-from rest_framework.response import Response
 from rest_framework import mixins, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 from wms.api.serializers import (
     TransferenciaListSerializer,
@@ -118,6 +119,9 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
                     queryset=PickingDetalle.objects.select_related(
                         "producto",
                         "producto_variante",
+                        "pedido_detalle_talla",
+                        "pedido_detalle_talla__variante",
+                        "pedido_detalle_talla__variante__talla",
                         "ubicacion",
                         "ubicacion__almacen",
                         "operador",
@@ -148,9 +152,24 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
         return qs.filter(sucursal_id__in=sucursal_ids)
 
     def get_serializer_class(self):
-        if self.action == "create":
+        if self.action in {"create", "onboarding"} and self.request.method == "POST":
             return PickingCreateSerializer
         return PickingSerializer
+
+    @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
+    def onboarding(self, request):
+        if request.method == "GET":
+            pedido_id = request.query_params.get("pedido") or request.query_params.get("pedido_id")
+            payload = PickingService.onboarding_payload(
+                request.user,
+                pedido_id=pedido_id,
+            )
+            return Response(payload)
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        res = PickingService.handle_store(serializer.validated_data, request.user)
+        return Response(PickingSerializer(res).data, status=status.HTTP_201_CREATED)
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)

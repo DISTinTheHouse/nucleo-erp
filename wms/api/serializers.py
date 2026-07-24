@@ -1,4 +1,7 @@
+from decimal import Decimal
+
 from rest_framework import serializers
+
 from wms.models import Transferencia, TransferenciaDetalle, Picking, PickingDetalle
 
 
@@ -193,6 +196,12 @@ class PickingDetalleSerializer(serializers.ModelSerializer):
     producto_variante_nombre = serializers.CharField(
         source="producto_variante.nombre", read_only=True, default=None
     )
+    talla_id = serializers.IntegerField(
+        source="pedido_detalle_talla.variante.talla_id", read_only=True
+    )
+    talla_nombre = serializers.CharField(
+        source="pedido_detalle_talla.variante.talla.nombre", read_only=True, default=None
+    )
     ubicacion_nombre = serializers.SerializerMethodField()
     operador_nombre = serializers.SerializerMethodField()
 
@@ -282,12 +291,23 @@ class PickingSerializer(serializers.ModelSerializer):
 
 
 class PickingCreateSerializer(serializers.ModelSerializer):
-    """Alta simplificada de picking.
+    """Alta de picking parcial.
 
-    El frontend solo envía el encabezado: el backend genera ``picking_detalle``
-    automáticamente a partir de las líneas/tallas del ``Pedido``. Esto evita
-    duplicar en el request información que ya vive en ventas.
+    El frontend envía encabezado + las cantidades reales por línea/talla que se
+    surtirán en este picking. El backend valida contra el pendiente calculado a
+    partir del historial de ``PickingDetalle``.
     """
+
+    class PickingCreateDetalleInputSerializer(serializers.Serializer):
+        pedido_detalle_talla = serializers.IntegerField(min_value=1)
+        cantidad_asignada = serializers.DecimalField(
+            max_digits=18,
+            decimal_places=4,
+            min_value=Decimal("0.0001"),
+        )
+        observaciones = serializers.CharField(required=False, allow_blank=True)
+
+    picking_detalle = PickingCreateDetalleInputSerializer(many=True)
 
     class Meta:
         model = Picking
@@ -304,4 +324,5 @@ class PickingCreateSerializer(serializers.ModelSerializer):
             "fecha_fin",
             "fecha_limite",
             "observaciones",
+            "picking_detalle",
         ]

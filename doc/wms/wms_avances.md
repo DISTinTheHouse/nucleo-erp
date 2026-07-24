@@ -119,12 +119,14 @@ Convertir un Pedido en mercancía preparada para empaque.
 Estado actual:
 
 - Ya existe endpoint para crear, listar y consultar pickings.
-- El alta quedó simplificada: frontend solo envía encabezado (`pedido`, `operador`, `almacen` y opcionales).
-- Antes de crear el picking, el backend genera reservas de inventario por cada talla/línea del pedido.
-- El backend genera automáticamente `picking_detalle` a partir del `Pedido`.
+- Ya existe onboarding para consultar pedido, operadores, almacenes y cantidades pendientes por talla.
+- El frontend define las cantidades reales a surtir por cada línea/talla.
+- El backend valida que cada cantidad no exceda lo pendiente según el historial de `PickingDetalle`.
+- Antes de crear el picking, el backend genera reservas de inventario solo por las cantidades seleccionadas.
 - Al crear el picking, el sistema genera una transferencia al almacén `APARTADOS` del mismo contexto para preparar surtido.
-- Se valida empresa, sucursal, operador activo, pedido con líneas y que no exista otro picking activo para el mismo pedido.
-- La Fase WMS 2 queda conectada con la Fase WMS 3: reserva primero, mueve después, y deja trazabilidad de la mercancía apartada para surtido.
+- El `Pedido` permanece como referencia comercial y no guarda el avance del surtido.
+- El avance se calcula consultando el historial de `PickingDetalle`.
+- La Fase WMS 2 queda conectada con la Fase WMS 3: reserva primero, mueve después, y deja trazabilidad de la mercancía apartada para surtido parcial o total.
 
 ---
 
