@@ -4,6 +4,7 @@ from rest_framework.exceptions import ValidationError
 from inventarios.models import Almacen
 from ventas.models import PedidoDetalleTalla
 from wms.models import Picking, PickingDetalle
+from wms.services.reserva_service import ReservaInventarioService
 from wms.services.transferencia_service import TransferenciaService
 from wms.utils.folios import generate_folio
 
@@ -75,8 +76,16 @@ class PickingService:
                 "No existe el almacén APARTADOS para la empresa y sucursal del pedido."
             )
 
+        reservas = ReservaInventarioService.create_for_picking(
+            pedido=pedido,
+            almacen=almacen,
+            tallas=tallas,
+            user=user,
+        )
+
         # Crear transferencia
-        # Al crear la transferencia se valida el stock y se genera el movimiento en inventario
+        # Al crear la transferencia se valida el stock y se genera el movimiento en inventario.
+        # La reserva nace primero y, si la transferencia falla, toda la transacción se revierte.
         transferencia_data = {
             "almacen_origen": almacen,
             "almacen_destino": almacen_apartados,
@@ -91,7 +100,7 @@ class PickingService:
             ],
         }
 
-        TransferenciaService.handle_store(transferencia_data, user)
+        transferencia = TransferenciaService.handle_store(transferencia_data, user)
         
         folio = generate_folio(pedido.empresa, pedido.sucursal, "Picking")
         picking = Picking.objects.create(
@@ -120,4 +129,5 @@ class PickingService:
         ]
 
         PickingDetalle.objects.bulk_create(picking_rows)
+        ReservaInventarioService.apply_to_picking(reservas, picking, transferencia)
         return picking

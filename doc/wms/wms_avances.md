@@ -72,11 +72,24 @@ Todo movimiento deberá generar automáticamente un MovimientoInventario para ma
 Apartar mercancía antes del surtido.
 
 - [ ] ¿TERMINADO?
-- [ ] inventario_reservas
+- [x] inventario_reservas
 
 Objetivo:
 
 Evitar sobreventa y garantizar disponibilidad para pedidos autorizados.
+
+Estado actual:
+
+- Ya existe la tabla `inventario_reservas`.
+- La reserva se genera automáticamente al crear un `Picking`.
+- Cada reserva queda ligada a:
+  - `pedido_detalle`
+  - `pedido_detalle_talla`
+  - `existencia`
+  - `almacen`
+  - `ubicacion`
+- La reserva nace en estado `ACTIVA`.
+- Cuando el picking se genera correctamente y la transferencia a `APARTADOS` se completa, la reserva se marca como `APLICADA`.
 
 ---
 
@@ -107,9 +120,11 @@ Estado actual:
 
 - Ya existe endpoint para crear, listar y consultar pickings.
 - El alta quedó simplificada: frontend solo envía encabezado (`pedido`, `operador`, `almacen` y opcionales).
+- Antes de crear el picking, el backend genera reservas de inventario por cada talla/línea del pedido.
 - El backend genera automáticamente `picking_detalle` a partir del `Pedido`.
 - Al crear el picking, el sistema genera una transferencia al almacén `APARTADOS` del mismo contexto para preparar surtido.
 - Se valida empresa, sucursal, operador activo, pedido con líneas y que no exista otro picking activo para el mismo pedido.
+- La Fase WMS 2 queda conectada con la Fase WMS 3: reserva primero, mueve después, y deja trazabilidad de la mercancía apartada para surtido.
 
 ---
 
