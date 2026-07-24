@@ -1,11 +1,11 @@
-from rest_framework.exceptions import ValidationError
 from django.db import transaction
-from wms.models import Picking, PickingDetalle
-from ventas.models import PedidoDetalleTalla
+from rest_framework.exceptions import ValidationError
+
 from inventarios.models import Almacen
-from catalogo.models import Producto, ProductoVariante
-from wms.utils.folios import generate_folio
+from ventas.models import PedidoDetalleTalla
+from wms.models import Picking, PickingDetalle
 from wms.services.transferencia_service import TransferenciaService
+from wms.utils.folios import generate_folio
 
 class PickingService:
     @staticmethod
@@ -14,28 +14,66 @@ class PickingService:
         pedido = data.pop("pedido")
         almacen = data.pop("almacen")
         operador = data.pop("operador")
-        picking_detalle = data.pop("picking_detalle")
-        
-        cantidades_asignadas = {
-            str(detalle["pedido_detalle"]): detalle["cantidad_asignada"]
-            for detalle in picking_detalle
-        }
+        empresa = getattr(user, "empresa", None)
 
-        # Obtener cantidad requerida
-        tallas = PedidoDetalleTalla.objects.filter(
-            pedido_detalle__pedido=pedido
-        ).values(
-            "pedido_detalle__producto_id",
-            "pedido_detalle__id",
-            "cantidad",
-            "variante_id",
+        if empresa is None:
+            raise ValidationError("El usuario no tiene una empresa asignada.")
+        if pedido.empresa_id != empresa.pk:
+            raise ValidationError("El pedido no pertenece a la empresa del usuario.")
+        if almacen.empresa_id and almacen.empresa_id != pedido.empresa_id:
+            raise ValidationError("El almacén no pertenece a la empresa del pedido.")
+        if almacen.sucursal_id and almacen.sucursal_id != pedido.sucursal_id:
+            raise ValidationError("El almacén no pertenece a la sucursal del pedido.")
+        if getattr(operador, "empresa_id", None) != pedido.empresa_id:
+            raise ValidationError("El operador no pertenece a la empresa del pedido.")
+        if not getattr(operador, "is_active", False):
+            raise ValidationError("El operador no está activo.")
+
+        es_staff = getattr(user, "is_superuser", False) or getattr(
+            user, "is_admin_empresa", False
         )
+        if not es_staff:
+            sucursales_permitidas = set(user.sucursales.values_list("pk", flat=True))
+            if user.sucursal_default_id:
+                sucursales_permitidas.add(user.sucursal_default_id)
+            if pedido.sucursal_id not in sucursales_permitidas:
+                raise ValidationError(
+                    "No tiene acceso a la sucursal del pedido para generar el picking."
+                )
+            if almacen.sucursal_id and almacen.sucursal_id not in sucursales_permitidas:
+                raise ValidationError(
+                    "No tiene acceso a la sucursal del almacén seleccionado."
+                )
 
-        # .filter().first() en lugar de .get(): un .get() sin el almacén lanza
-        # Almacen.DoesNotExist sin capturar (500) y el check de abajo nunca corre.
-        # Mismo patrón que TransferenciaService: ValidationError -> 400 limpio.
-        almacen_apartados = Almacen.objects.filter(nombre="APARTADOS").first()
-        if not almacen_apartados: raise ValidationError("No existe el almacen APARTADOS")
+        picking_existente = (
+            Picking.objects.filter(pedido=pedido)
+            .exclude(estado=Picking.Estado.CANCELADO)
+            .exists()
+        )
+        if picking_existente:
+            raise ValidationError("El pedido ya tiene un picking activo.")
+
+        tallas = list(
+            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
+            .select_related("pedido_detalle__producto", "variante")
+            .order_by("pedido_detalle_id", "id")
+        )
+        if not tallas:
+            raise ValidationError("El pedido no tiene líneas para generar picking.")
+
+        almacen_apartados = (
+            Almacen.objects.filter(
+                nombre="APARTADOS",
+                empresa_id=pedido.empresa_id,
+                sucursal_id=pedido.sucursal_id,
+            )
+            .order_by("id_almacen")
+            .first()
+        )
+        if not almacen_apartados:
+            raise ValidationError(
+                "No existe el almacén APARTADOS para la empresa y sucursal del pedido."
+            )
 
         # Crear transferencia
         # Al crear la transferencia se valida el stock y se genera el movimiento en inventario
@@ -45,9 +83,9 @@ class PickingService:
             "observaciones": "Generada desde picking",
             "transferencia_detalle": [
                 {
-                    "producto": Producto.objects.filter(pk=talla["pedido_detalle__producto_id"]).first(),
-                    "producto_variante": ProductoVariante.objects.filter(pk=talla["variante_id"]).first(),
-                    "cantidad": talla["cantidad"],
+                    "producto": talla.pedido_detalle.producto,
+                    "producto_variante": talla.variante,
+                    "cantidad": talla.cantidad,
                 }
                 for talla in tallas
             ],
@@ -55,12 +93,11 @@ class PickingService:
 
         TransferenciaService.handle_store(transferencia_data, user)
         
-        # TODO: Generar picking
-        folio = generate_folio(user.empresa, user.sucursal_default, "Picking")
+        folio = generate_folio(pedido.empresa, pedido.sucursal, "Picking")
         picking = Picking.objects.create(
             folio=folio,
-            empresa=user.empresa,
-            sucursal=user.sucursal_default,
+            empresa=pedido.empresa,
+            sucursal=pedido.sucursal,
             pedido=pedido,
             operador=operador, 
             almacen=almacen, 
@@ -72,11 +109,12 @@ class PickingService:
         picking_rows = [
             PickingDetalle(
                 picking=picking,
-                pedido_detalle_id=talla["pedido_detalle__id"],
-                producto_id=talla["pedido_detalle__producto_id"],
-                producto_variante_id=talla["variante_id"],
-                cantidad_asignada=cantidades_asignadas.get(str(talla["pedido_detalle__id"]), 0),
-                cantidad_solicitada=talla["cantidad"],
+                pedido_detalle=talla.pedido_detalle,
+                producto=talla.pedido_detalle.producto,
+                producto_variante=talla.variante,
+                cantidad_asignada=talla.cantidad,
+                cantidad_solicitada=talla.cantidad,
+                operador=operador,
             )
             for talla in tallas
         ]

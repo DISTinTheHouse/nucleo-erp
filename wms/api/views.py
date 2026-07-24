@@ -6,7 +6,8 @@ from wms.api.serializers import (
     TransferenciaListSerializer,
     TransferenciaRetrieveSerializer,
     TransferenciaSerializer,
-    PickingSerializer
+    PickingCreateSerializer,
+    PickingSerializer,
 )
 from wms.models import Transferencia, TransferenciaDetalle
 from wms.services.transferencia_service import TransferenciaService
@@ -145,6 +146,11 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
             return qs
         sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
         return qs.filter(sucursal_id__in=sucursal_ids)
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return PickingCreateSerializer
+        return PickingSerializer
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)

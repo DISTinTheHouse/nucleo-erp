@@ -279,3 +279,29 @@ class PickingSerializer(serializers.ModelSerializer):
 
     def get_lote_nombre(self, obj):
         return str(obj.lote) if obj.lote_id else None
+
+
+class PickingCreateSerializer(serializers.ModelSerializer):
+    """Alta simplificada de picking.
+
+    El frontend solo envía el encabezado: el backend genera ``picking_detalle``
+    automáticamente a partir de las líneas/tallas del ``Pedido``. Esto evita
+    duplicar en el request información que ya vive en ventas.
+    """
+
+    class Meta:
+        model = Picking
+        fields = [
+            "pedido",
+            "operador",
+            "almacen",
+            "oleada",
+            "zona_almacen",
+            "lote",
+            "prioridad",
+            "tipo",
+            "fecha_inicio",
+            "fecha_fin",
+            "fecha_limite",
+            "observaciones",
+        ]

@@ -1834,6 +1834,123 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 ---
 
+## 📦 WMS - Picking
+
+### 1) Crear Picking desde Pedido
+
+- **Endpoint**: `POST /api/v1/wms/pickings/`
+- **Objetivo**: generar el surtido de un pedido sin que frontend tenga que reconstruir las líneas.
+
+**Flujo actual simplificado**
+
+- Next.js solo envía el encabezado del picking.
+- El backend toma el `Pedido` y genera automáticamente `picking_detalle` con sus líneas/tallas.
+- Antes de crear el picking, el sistema mueve la mercancía al almacén `APARTADOS` del mismo contexto mediante una transferencia interna.
+- Si el pedido ya tiene un picking activo, el backend responde `400`.
+
+**Body**
+
+```json
+{
+  "pedido": 125,
+  "operador": 8,
+  "almacen": 3,
+  "prioridad": "MEDIA",
+  "tipo": "ORDER_PICKING",
+  "observaciones": "Surtido de pedido urgente"
+}
+```
+
+**Campos requeridos**
+
+- `pedido`
+- `operador`
+- `almacen`
+
+**Campos opcionales**
+
+- `prioridad`: `BAJA`, `MEDIA`, `ALTA`
+- `tipo`: `ORDER_PICKING`, `BATCH_PICKING`, `WAVE_PICKING`, `ZONE_PICKING`
+- `oleada`
+- `zona_almacen`
+- `lote`
+- `fecha_inicio`
+- `fecha_fin`
+- `fecha_limite`
+- `observaciones`
+
+**Validaciones principales**
+
+- El pedido debe pertenecer a la empresa del usuario.
+- El almacén debe pertenecer a la misma empresa y sucursal del pedido.
+- El operador debe estar activo y pertenecer a la misma empresa.
+- El pedido debe tener líneas/tallas para generar el surtido.
+- Debe existir un almacén `APARTADOS` en la misma empresa y sucursal del pedido.
+- No puede existir otro picking activo para el mismo pedido.
+- La transferencia interna valida inventario suficiente antes de crear el picking.
+
+**Respuesta**
+
+```json
+{
+  "id": 14,
+  "folio": "PICK-000014",
+  "pedido": 125,
+  "pedido_folio": "PD-000125",
+  "operador": 8,
+  "operador_nombre": "Juan Perez",
+  "almacen": 3,
+  "almacen_nombre": "Almacén PT Monterrey",
+  "prioridad": "MEDIA",
+  "tipo": "ORDER_PICKING",
+  "estado": "Pendiente",
+  "total_lineas": 4,
+  "total_lineas_completas": 0,
+  "observaciones": "Surtido de pedido urgente",
+  "picking_detalle": [
+    {
+      "id": 51,
+      "pedido_detalle": 301,
+      "producto": 22,
+      "producto_nombre": "Playera Dry Fit",
+      "producto_variante": 91,
+      "producto_variante_nombre": "Playera Dry Fit Negra M",
+      "cantidad_solicitada": "10.0000",
+      "cantidad_asignada": "10.0000",
+      "cantidad_surtida": "0.0000",
+      "estado": "PENDIENTE",
+      "operador": 8,
+      "operador_nombre": "Juan Perez",
+      "ubicacion": null,
+      "ubicacion_nombre": null,
+      "lote": null,
+      "fecha_surtido": null,
+      "diferencia": "0.0000",
+      "motivo_diferencia": null,
+      "observaciones": null
+    }
+  ]
+}
+```
+
+**Notas para Next.js**
+
+- Ya no es necesario enviar `picking_detalle` en el `POST`.
+- El detalle del picking se genera desde el pedido para evitar duplicidad de datos.
+- Si frontend necesita mostrar el surtido creado, puede usar la respuesta del `POST` o consultar el `GET` de detalle.
+
+### 2) Listar Pickings
+
+- **Endpoint**: `GET /api/v1/wms/pickings/`
+- **Descripción**: devuelve los pickings visibles para la empresa y sucursales del usuario autenticado.
+
+### 3) Detalle de Picking
+
+- **Endpoint**: `GET /api/v1/wms/pickings/{id}/`
+- **Descripción**: devuelve encabezado y `picking_detalle` del surtido.
+
+---
+
 ## 🤖 Asistente IA (Chat)
 
 Asistente conversacional para ejecutar consultas y acciones controladas desde el frontend (próxima integración en Next.js).

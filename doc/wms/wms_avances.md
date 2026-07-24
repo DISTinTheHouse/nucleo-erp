@@ -87,21 +87,29 @@ Evitar sobreventa y garantizar disponibilidad para pedidos autorizados.
 Surtir pedidos.
 
 - [ ] ¿TERMINADO?
-- [ ] picking
-- [ ] picking_detalle
+- [x] picking
+- [x] picking_detalle
 
 Funciones
 
-- generar picking desde Pedido
-- surtido por operador
+- [x] generar picking desde Pedido
+- [x] surtido por operador
 - surtido por zonas
-- surtido por prioridad
+- [x] surtido por prioridad
 - surtido por oleadas (Wave Picking)
 - validación de cantidades
 
 Objetivo:
 
 Convertir un Pedido en mercancía preparada para empaque.
+
+Estado actual:
+
+- Ya existe endpoint para crear, listar y consultar pickings.
+- El alta quedó simplificada: frontend solo envía encabezado (`pedido`, `operador`, `almacen` y opcionales).
+- El backend genera automáticamente `picking_detalle` a partir del `Pedido`.
+- Al crear el picking, el sistema genera una transferencia al almacén `APARTADOS` del mismo contexto para preparar surtido.
+- Se valida empresa, sucursal, operador activo, pedido con líneas y que no exista otro picking activo para el mismo pedido.
 
 ---
 
