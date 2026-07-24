@@ -29,9 +29,11 @@ python manage.py axes_reset                # clear brute-force lockouts (run aft
 python manage.py populate_sat_catalogs     # seed SAT fiscal catalogs (regímenes, uso CFDI, métodos/formas de pago)
 python manage.py collectstatic --noinput
 
-# Docker (full local stack with Postgres)
+# Docker (single `web` service on port 8000; runs `migrate` then `runserver`)
 docker compose up --build
 ```
+
+Note: `docker-compose.yml` defines **only** the `web` container — there is no bundled Postgres. It builds from the `Dockerfile`, reads config from a `.env` file, and expects a reachable DB (host Postgres or remote Supabase) per the env vars below.
 
 There are **no real tests** — every `tests.py` is the Django placeholder stub. (`def test_func` matches are `UserPassesTestMixin` permission checks, not tests.) Do not assume a test suite exists; the CI gate is `manage.py check` + migration-drift check.
 
@@ -55,7 +57,9 @@ DB selection is driven by env vars, not Django settings files (`ERP/settings.py`
 - **`auditoria`** — audit trail (`AuditoriaEvento`) of critical writes.
 - **`terceros`** — clients/suppliers; RFC validation (SAT checksum) and Facturama (CFDI invoicing) integration.
 - **`catalogo`**, **`inventarios`**, **`compras`**, **`ventas`**, **`produccion`**, **`wms`**, **`logistica`** — business modules. Sales = `Cotizacion`/`Pedido`; production = embroidery/reflejante/corte-manga orders + BOM.
-- **`ia`** — AI assistant (OpenAI) and Google Drive (OAuth 2.0) integration.
+- **`finanzas`** — accounting & treasury: chart of accounts (`CuentaContable`), cost centers, journal entries (`Poliza`/`PolizaDetalle`), customer/supplier invoices (`Factura`/`FacturaProveedor`), AR/AP (`CuentaPorCobrar`/`CuentaPorPagar`), collections/payments (`Cobro`/`Pago`), banks & bank movements, reconciliation, credit notes. API at `/api/v1/finanzas/`.
+- **`QA`** — quality module; currently a stub (empty models, HTML urls under `/QA/`).
+- **`ia`** — AI assistant (OpenAI) and Google Drive (OAuth 2.0) integration. Note the API mounts at **`/api/v1/ai/`**, not `/api/v1/ia/`.
 
 ### Two distinct auth surfaces — keep them straight
 1. **Web Core (HTML, internal)**: session auth + `django-axes` brute-force lockout + optional email/SMS 2FA. Login at `/`, 2FA at `/two-factor/`. Protected with `LoginRequiredMixin` + `UserPassesTestMixin`/`SuperuserRequiredMixin`. **Gotcha:** login is by email (`USERNAME_FIELD = 'email'`) but the POST field and axes config use the name `username` (`AXES_USERNAME_FORM_FIELD = 'username'`), and a custom `usuarios.backends.EmailBackend` resolves it.
