@@ -9,8 +9,10 @@ from ventas.models import (
     EntregaDetalle,
     Devolucion,
     DevolucionDetalle,
+    PedidoDetalleTalla
 )
 
+admin.site.register(PedidoDetalleTalla)
 
 @admin.register(Prospecto)
 class ProspectoAdmin(admin.ModelAdmin):
@@ -18,7 +20,7 @@ class ProspectoAdmin(admin.ModelAdmin):
     list_filter = ("empresa",)
     search_fields = ("id", "empresa__codigo", "empresa__razon_social")
     ordering = ("-id",)
-    autocomplete_fields = ("empresa",)
+    autocomplete_fields = ("empresa",)  
     list_select_related = ("empresa",)
 
 
