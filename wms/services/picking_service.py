@@ -14,6 +14,12 @@ class PickingService:
         pedido = data.pop("pedido")
         almacen = data.pop("almacen")
         operador = data.pop("operador")
+        picking_detalle = data.pop("picking_detalle")
+        
+        cantidades_asignadas = {
+            str(detalle["pedido_detalle"]): detalle["cantidad_asignada"]
+            for detalle in picking_detalle
+        }
 
         # Obtener cantidad requerida
         tallas = PedidoDetalleTalla.objects.filter(
@@ -29,7 +35,6 @@ class PickingService:
         # Almacen.DoesNotExist sin capturar (500) y el check de abajo nunca corre.
         # Mismo patrón que TransferenciaService: ValidationError -> 400 limpio.
         almacen_apartados = Almacen.objects.filter(nombre="APARTADOS").first()
-
         if not almacen_apartados: raise ValidationError("No existe el almacen APARTADOS")
 
         # Crear transferencia
@@ -70,6 +75,7 @@ class PickingService:
                 pedido_detalle_id=talla["pedido_detalle__id"],
                 producto_id=talla["pedido_detalle__producto_id"],
                 producto_variante_id=talla["variante_id"],
+                cantidad_asignada=cantidades_asignadas.get(str(talla["pedido_detalle__id"]), 0),
                 cantidad_solicitada=talla["cantidad"],
             )
             for talla in tallas
