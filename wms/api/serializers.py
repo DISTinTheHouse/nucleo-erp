@@ -3,6 +3,8 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from wms.models import (
+    Despacho,
+    DespachoDetalle,
     Packing,
     PackingDetalle,
     Picking,
@@ -461,5 +463,114 @@ class PackingCreateSerializer(serializers.ModelSerializer):
             "fecha_fin",
             "observaciones",
             "packing_detalle",
+        ]
+
+
+class DespachoDetalleReadSerializer(serializers.ModelSerializer):
+    picking_detalle = serializers.IntegerField(
+        source="packing_detalle.picking_detalle_id", read_only=True
+    )
+    pedido_detalle = serializers.IntegerField(
+        source="packing_detalle.picking_detalle.pedido_detalle_id", read_only=True
+    )
+    pedido_detalle_talla = serializers.IntegerField(
+        source="packing_detalle.picking_detalle.pedido_detalle_talla_id", read_only=True
+    )
+    producto = serializers.IntegerField(
+        source="packing_detalle.picking_detalle.producto_id", read_only=True
+    )
+    producto_nombre = serializers.CharField(
+        source="packing_detalle.picking_detalle.producto.nombre", read_only=True, default=None
+    )
+    producto_variante = serializers.IntegerField(
+        source="packing_detalle.picking_detalle.producto_variante_id", read_only=True
+    )
+    producto_variante_nombre = serializers.CharField(
+        source="packing_detalle.picking_detalle.producto_variante.nombre",
+        read_only=True,
+        default=None,
+    )
+    talla_id = serializers.IntegerField(
+        source="packing_detalle.picking_detalle.pedido_detalle_talla.variante.talla_id",
+        read_only=True,
+    )
+    talla_nombre = serializers.CharField(
+        source="packing_detalle.picking_detalle.pedido_detalle_talla.variante.talla.nombre",
+        read_only=True,
+        default=None,
+    )
+    color_id = serializers.IntegerField(
+        source="packing_detalle.picking_detalle.pedido_detalle_talla.variante.color_id",
+        read_only=True,
+    )
+    color_nombre = serializers.CharField(
+        source="packing_detalle.picking_detalle.pedido_detalle_talla.variante.color.nombre",
+        read_only=True,
+        default=None,
+    )
+    ubicacion = serializers.IntegerField(
+        source="packing_detalle.picking_detalle.ubicacion_id", read_only=True
+    )
+    ubicacion_nombre = serializers.SerializerMethodField()
+    caja = serializers.IntegerField(source="packing_detalle.caja_id", read_only=True)
+    caja_numero = serializers.IntegerField(
+        source="packing_detalle.caja.numero", read_only=True, default=None
+    )
+    cantidad_empacada = serializers.DecimalField(
+        source="packing_detalle.cantidad_empacada",
+        max_digits=18,
+        decimal_places=4,
+        read_only=True,
+    )
+    estado = serializers.CharField(source="packing_detalle.estado", read_only=True)
+
+    class Meta:
+        model = DespachoDetalle
+        fields = "__all__"
+        read_only_fields = ["despacho"]
+
+    def get_ubicacion_nombre(self, obj):
+        ubicacion = getattr(obj.packing_detalle.picking_detalle, "ubicacion", None)
+        return str(ubicacion) if ubicacion else None
+
+
+class DespachoSerializer(serializers.ModelSerializer):
+    despacho_detalle = DespachoDetalleReadSerializer(many=True, read_only=True)
+    packing_folio = serializers.CharField(source="packing.folio", read_only=True)
+    packing_estado = serializers.CharField(source="packing.estado", read_only=True)
+    pedido = serializers.IntegerField(source="packing.pedido_id", read_only=True)
+    pedido_folio = serializers.CharField(source="packing.pedido.folio", read_only=True)
+    cliente = serializers.IntegerField(source="packing.pedido.cliente_id", read_only=True)
+    cliente_nombre = serializers.CharField(
+        source="packing.pedido.cliente.nombre", read_only=True, default=None
+    )
+    sucursal = serializers.IntegerField(source="packing.sucursal_id", read_only=True)
+    sucursal_nombre = serializers.CharField(
+        source="packing.sucursal.nombre", read_only=True, default=None
+    )
+    envio_transportista = serializers.IntegerField(
+        source="envio.transportista_id", read_only=True
+    )
+    envio_transportista_nombre = serializers.CharField(
+        source="envio.transportista.nombre", read_only=True, default=None
+    )
+
+    class Meta:
+        model = Despacho
+        fields = "__all__"
+
+
+class DespachoCreateSerializer(serializers.ModelSerializer):
+    class DespachoCreateDetalleInputSerializer(serializers.Serializer):
+        packing_detalle = serializers.IntegerField(min_value=1)
+
+    despacho_detalle = DespachoCreateDetalleInputSerializer(many=True)
+
+    class Meta:
+        model = Despacho
+        fields = [
+            "packing",
+            "envio",
+            "despacho_detalle",
         ]
 

@@ -2253,6 +2253,216 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 ---
 
+## 📦 WMS - Despacho
+
+### 1) Onboarding de Despacho
+
+- **Endpoint**: `GET /api/v1/wms/despachos/onboarding/`
+- **Objetivo**: dar a frontend los `packings` disponibles para despacho y, al seleccionar uno, devolver los `envios` del mismo pedido y las líneas `packing_detalle` que siguen pendientes por despachar.
+
+**Ligado al modelo**
+
+- `despacho` va ligado a `packing` y `envio`
+- `despacho_detalle` va ligado a `despacho` y `packing_detalle`
+- esto sigue exactamente la estructura de `doc/dbdiagram.io.md`
+
+**Flujo**
+
+- Si se consulta sin `packing`, regresa el catálogo base de `packings` visibles para el usuario.
+- Si se envía `packing` o `packing_id`, además regresa:
+  - encabezado del `packing`
+  - `envios` del mismo pedido
+  - líneas `despacho_detalle` candidatas
+  - bandera `ya_despachado`
+  - bandera `disponible_para_despacho`
+
+**Ejemplo**
+
+- `GET /api/v1/wms/despachos/onboarding/?packing_id=7`
+
+**Respuesta resumida**
+
+```json
+{
+  "packings": [
+    {
+      "id": 7,
+      "folio": "PAC-000007",
+      "pedido": 125,
+      "pedido_folio": "PD-000125",
+      "cliente_nombre": "Cliente Demo",
+      "sucursal": 1,
+      "sucursal_nombre": "Matriz",
+      "picking": 14,
+      "picking_folio": "PICK-000014",
+      "almacen": 3,
+      "almacen_nombre": "Almacén PT Monterrey",
+      "estado": "PENDIENTE"
+    }
+  ],
+  "envios": [
+    {
+      "id": 5,
+      "pedido": 125,
+      "transportista": 2,
+      "transportista_nombre": "Transportes Demo"
+    }
+  ],
+  "packing": {
+    "id": 7,
+    "folio": "PAC-000007",
+    "pedido": 125,
+    "pedido_folio": "PD-000125",
+    "cliente": 15,
+    "cliente_nombre": "Cliente Demo",
+    "sucursal": 1,
+    "sucursal_nombre": "Matriz",
+    "picking": 14,
+    "picking_folio": "PICK-000014",
+    "almacen": 3,
+    "almacen_nombre": "Almacén PT Monterrey",
+    "estado": "PENDIENTE"
+  },
+  "despacho_detalle": [
+    {
+      "packing_detalle": 21,
+      "picking_detalle": 51,
+      "pedido_detalle": 301,
+      "pedido_detalle_talla": 990,
+      "producto": 22,
+      "producto_nombre": "Playera Dry Fit",
+      "producto_variante": 91,
+      "producto_variante_nombre": "Playera Dry Fit Negra M",
+      "talla": 4,
+      "talla_nombre": "M",
+      "color": 2,
+      "color_nombre": "Negro",
+      "ubicacion": null,
+      "ubicacion_nombre": null,
+      "caja": null,
+      "caja_numero": null,
+      "cantidad_empacada": "3.0000",
+      "estado": "PENDIENTE",
+      "ya_despachado": false,
+      "disponible_para_despacho": true
+    }
+  ]
+}
+```
+
+### 2) Crear Despacho desde Onboarding
+
+- **Endpoint**: `POST /api/v1/wms/despachos/onboarding/`
+- **Objetivo**: registrar qué líneas empacadas salen hacia logística, ligándolas a un `envio` del mismo pedido.
+
+**Flujo actual**
+
+- Next.js consulta primero el onboarding `GET`.
+- El usuario selecciona un `packing`.
+- El frontend obtiene los `envios` del mismo pedido y las líneas `packing_detalle` disponibles.
+- El backend valida:
+  - empresa y sucursal del `packing`
+  - acceso del usuario a la sucursal
+  - que el `envio` pertenezca al mismo pedido del `packing`
+  - que cada `packing_detalle` pertenezca al `packing`
+  - que la línea no haya sido despachada antes
+- Si todo es válido, el backend crea `despacho` y sus renglones `despacho_detalle`.
+
+**Body**
+
+```json
+{
+  "packing": 7,
+  "envio": 5,
+  "despacho_detalle": [
+    {
+      "packing_detalle": 21
+    },
+    {
+      "packing_detalle": 22
+    }
+  ]
+}
+```
+
+**Campos requeridos**
+
+- `packing`
+- `envio`
+- `despacho_detalle`
+
+**Validaciones principales**
+
+- El `packing` debe pertenecer a la empresa del usuario.
+- El `envio` debe pertenecer a la misma empresa del usuario.
+- El `envio` debe corresponder al mismo `pedido` y `sucursal` del `packing`.
+- No se puede despachar un `packing` cancelado.
+- Cada línea debe incluir `packing_detalle`.
+- Cada `packing_detalle` debe pertenecer al `packing` seleccionado.
+- No se puede volver a despachar una línea ya registrada en otro `despacho`.
+
+**Respuesta**
+
+```json
+{
+  "id": 3,
+  "packing": 7,
+  "packing_folio": "PAC-000007",
+  "packing_estado": "PENDIENTE",
+  "pedido": 125,
+  "pedido_folio": "PD-000125",
+  "cliente": 15,
+  "cliente_nombre": "Cliente Demo",
+  "sucursal": 1,
+  "sucursal_nombre": "Matriz",
+  "envio": 5,
+  "envio_transportista": 2,
+  "envio_transportista_nombre": "Transportes Demo",
+  "despacho_detalle": [
+    {
+      "id": 8,
+      "despacho": 3,
+      "packing_detalle": 21,
+      "picking_detalle": 51,
+      "pedido_detalle": 301,
+      "pedido_detalle_talla": 990,
+      "producto": 22,
+      "producto_nombre": "Playera Dry Fit",
+      "producto_variante": 91,
+      "producto_variante_nombre": "Playera Dry Fit Negra M",
+      "talla_id": 4,
+      "talla_nombre": "M",
+      "color_id": 2,
+      "color_nombre": "Negro",
+      "ubicacion": null,
+      "ubicacion_nombre": null,
+      "caja": null,
+      "caja_numero": null,
+      "cantidad_empacada": "3.0000",
+      "estado": "PENDIENTE"
+    }
+  ]
+}
+```
+
+**Notas para Next.js**
+
+- El flujo recomendado es `GET /despachos/onboarding/` -> seleccionar `packing` -> seleccionar `envio` -> `POST /despachos/onboarding/`.
+- El frontend no necesita recalcular si una línea ya fue despachada; el backend ya devuelve `ya_despachado` y `disponible_para_despacho`.
+- `despacho` está ligado a `packing` y `envio`; `despacho_detalle` está ligado a `packing_detalle`.
+
+### 3) Listar Despachos
+
+- **Endpoint**: `GET /api/v1/wms/despachos/`
+- **Descripción**: devuelve los despachos visibles para la empresa y sucursales del usuario autenticado.
+
+### 4) Detalle de Despacho
+
+- **Endpoint**: `GET /api/v1/wms/despachos/{id}/`
+- **Descripción**: devuelve encabezado y `despacho_detalle` del despacho registrado.
+
+---
+
 ## 🧪 QA RFID Workspace
 
 Flujo de pruebas locales para validar impresión Zebra y captura de lecturas desde dispositivos Zebra sin afectar inventario.

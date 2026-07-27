@@ -162,13 +162,27 @@ Preparar físicamente la mercancía para embarque.
 
 Liberar mercancía hacia logística.
 
-- [ ] ¿TERMINADO?
-- [ ] despachos
-- [ ] despacho_detalle
+- [x] ¿TERMINADO?
+- [x] despachos
+- [x] despacho_detalle
 
 Objetivo:
 
 Cerrar la operación del almacén y entregar la mercancía al módulo de Logística.
+
+Estado actual:
+
+- Ya existe endpoint para crear, listar y consultar despachos.
+- El flujo queda ligado exactamente como en `dbdiagram.io`: `packing -> despacho -> despacho_detalle -> envio`.
+- El onboarding de despacho trabaja desde un `packing` y devuelve:
+  - `envios` disponibles del mismo pedido
+  - líneas `packing_detalle` pendientes por despachar
+  - validación para evitar redespachar la misma línea
+- El frontend solo envía:
+  - `packing`
+  - `envio`
+  - las líneas `packing_detalle` que realmente saldrán en ese despacho
+- El backend valida empresa, sucursal y que el `envio` corresponda al mismo `pedido` del `packing`.
 
 ---
 

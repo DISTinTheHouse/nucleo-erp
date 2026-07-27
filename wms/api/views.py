@@ -4,6 +4,8 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 from wms.api.serializers import (
+    DespachoCreateSerializer,
+    DespachoSerializer,
     PackingCreateSerializer,
     TransferenciaListSerializer,
     TransferenciaRetrieveSerializer,
@@ -12,7 +14,15 @@ from wms.api.serializers import (
     PickingSerializer,
     PackingSerializer,
 )
-from wms.models import Packing, PackingDetalle, Transferencia, TransferenciaDetalle
+from wms.models import (
+    Despacho,
+    DespachoDetalle,
+    Packing,
+    PackingDetalle,
+    Transferencia,
+    TransferenciaDetalle,
+)
+from wms.services.despacho_service import DespachoService
 from wms.services.transferencia_service import TransferenciaService
 from wms.models import Picking, PickingDetalle
 from wms.services.picking_service import PickingService
@@ -250,3 +260,83 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
         serializer.is_valid(raise_exception=True)
         packing_instance = PackingService.handle_store(serializer.validated_data, request.user)
         return Response(PackingSerializer(packing_instance).data, status=status.HTTP_201_CREATED)
+
+
+class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
+    queryset = Despacho.objects.all()
+    serializer_class = DespachoSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = (
+            super()
+            .get_queryset()
+            .select_related(
+                "packing",
+                "packing__pedido",
+                "packing__pedido__cliente",
+                "packing__sucursal",
+                "envio",
+                "envio__transportista",
+            )
+            .prefetch_related(
+                Prefetch(
+                    "despacho_detalle",
+                    queryset=DespachoDetalle.objects.select_related(
+                        "packing_detalle",
+                        "packing_detalle__caja",
+                        "packing_detalle__picking_detalle",
+                        "packing_detalle__picking_detalle__producto",
+                        "packing_detalle__picking_detalle__producto_variante",
+                        "packing_detalle__picking_detalle__pedido_detalle_talla",
+                        "packing_detalle__picking_detalle__pedido_detalle_talla__variante",
+                        "packing_detalle__picking_detalle__pedido_detalle_talla__variante__talla",
+                        "packing_detalle__picking_detalle__pedido_detalle_talla__variante__color",
+                        "packing_detalle__picking_detalle__ubicacion",
+                        "packing_detalle__picking_detalle__ubicacion__almacen",
+                    ).order_by("id"),
+                )
+            )
+            .order_by("-id")
+        )
+
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        qs = qs.filter(packing__empresa=empresa)
+        if getattr(user, "is_admin_empresa", False):
+            return qs
+        sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+        if getattr(user, "sucursal_default_id", None):
+            sucursal_ids.append(user.sucursal_default_id)
+        return qs.filter(packing__sucursal_id__in=sucursal_ids)
+
+    def get_serializer_class(self):
+        if self.action in {"create", "onboarding"} and self.request.method == "POST":
+            return DespachoCreateSerializer
+        return DespachoSerializer
+
+    @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
+    def onboarding(self, request):
+        if request.method == "GET":
+            packing_id = request.query_params.get("packing") or request.query_params.get(
+                "packing_id"
+            )
+            payload = DespachoService.onboarding_payload(
+                request.user,
+                packing_id=packing_id,
+            )
+            return Response(payload)
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        despacho_instance = DespachoService.handle_store(serializer.validated_data, request.user)
+        return Response(DespachoSerializer(despacho_instance).data, status=status.HTTP_201_CREATED)
+
+    def create(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        despacho_instance = DespachoService.handle_store(serializer.validated_data, request.user)
+        return Response(DespachoSerializer(despacho_instance).data, status=status.HTTP_201_CREATED)
