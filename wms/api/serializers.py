@@ -1,7 +1,15 @@
 from decimal import Decimal
 
 from rest_framework import serializers
-from wms.models import Transferencia, TransferenciaDetalle, Picking, PickingDetalle, Packing, PackingDetalle
+
+from wms.models import (
+    Packing,
+    PackingDetalle,
+    Picking,
+    PickingDetalle,
+    Transferencia,
+    TransferenciaDetalle,
+)
 
 class TransferenciaDetalleSerializer(serializers.ModelSerializer):
     class Meta:
@@ -325,17 +333,74 @@ class PickingCreateSerializer(serializers.ModelSerializer):
             "picking_detalle",
         ]
 
-class PackingDetalleSerializer(serializers.ModelSerializer):
+class PackingDetalleReadSerializer(serializers.ModelSerializer):
+    producto = serializers.IntegerField(
+        source="picking_detalle.producto_id", read_only=True
+    )
+    producto_nombre = serializers.CharField(
+        source="picking_detalle.producto.nombre", read_only=True, default=None
+    )
+    producto_variante = serializers.IntegerField(
+        source="picking_detalle.producto_variante_id", read_only=True
+    )
+    producto_variante_nombre = serializers.CharField(
+        source="picking_detalle.producto_variante.nombre", read_only=True, default=None
+    )
+    pedido_detalle = serializers.IntegerField(
+        source="picking_detalle.pedido_detalle_id", read_only=True
+    )
+    pedido_detalle_talla = serializers.IntegerField(
+        source="picking_detalle.pedido_detalle_talla_id", read_only=True
+    )
+    talla_id = serializers.IntegerField(
+        source="picking_detalle.pedido_detalle_talla.variante.talla_id", read_only=True
+    )
+    talla_nombre = serializers.CharField(
+        source="picking_detalle.pedido_detalle_talla.variante.talla.nombre",
+        read_only=True,
+        default=None,
+    )
+    cantidad_asignada = serializers.DecimalField(
+        source="picking_detalle.cantidad_asignada",
+        max_digits=18,
+        decimal_places=4,
+        read_only=True,
+    )
+    cantidad_solicitada = serializers.DecimalField(
+        source="picking_detalle.cantidad_solicitada",
+        max_digits=18,
+        decimal_places=4,
+        read_only=True,
+    )
+    cantidad_surtida = serializers.DecimalField(
+        source="picking_detalle.cantidad_surtida",
+        max_digits=18,
+        decimal_places=4,
+        read_only=True,
+    )
+    ubicacion = serializers.IntegerField(
+        source="picking_detalle.ubicacion_id", read_only=True
+    )
+    ubicacion_nombre = serializers.SerializerMethodField()
+    caja_numero = serializers.IntegerField(source="caja.numero", read_only=True, default=None)
 
     class Meta:
         model = PackingDetalle
         fields = "__all__"
-        read_only_fields = ["packing", "estado"]
+        read_only_fields = ["packing"]
+
+    def get_ubicacion_nombre(self, obj):
+        return str(obj.picking_detalle.ubicacion) if obj.picking_detalle.ubicacion_id else None
 
 class PackingSerializer(serializers.ModelSerializer):
-    packing_detalle = PackingDetalleSerializer(many=True)
+    packing_detalle = PackingDetalleReadSerializer(many=True, read_only=True)
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
     picking_folio = serializers.CharField(source="picking.folio", read_only=True)
+    picking_estado = serializers.CharField(source="picking.estado", read_only=True)
+    picking_almacen = serializers.IntegerField(source="picking.almacen_id", read_only=True)
+    picking_almacen_nombre = serializers.CharField(
+        source="picking.almacen.nombre", read_only=True, default=None
+    )
     operador_nombre = serializers.SerializerMethodField()
     usuario_nombre = serializers.SerializerMethodField()
 
@@ -350,18 +415,51 @@ class PackingSerializer(serializers.ModelSerializer):
             "operador", 
             "usuario", 
             "created_at", 
-            "updated_at"
+            "updated_at",
         ]
 
         
     def _nombre_usuario(self, usuario):
-            if not usuario:
-                return None
-            return usuario.get_full_name().strip() or usuario.email
+        if not usuario:
+            return None
+        return usuario.get_full_name().strip() or usuario.email
 
     def get_operador_nombre(self, obj):
-            return self._nombre_usuario(obj.operador)
+        return self._nombre_usuario(obj.operador)
     
     def get_usuario_nombre(self, obj):
-            return self._nombre_usuario(obj.usuario)
+        return self._nombre_usuario(obj.usuario)
+
+
+class PackingCreateSerializer(serializers.ModelSerializer):
+    """Alta de packing guiada por picking.
+
+    El frontend envía el ``picking`` origen y las líneas concretas que va a
+    empacar. El backend valida contra lo ya registrado históricamente para
+    evitar sobre-empaque.
+    """
+
+    class PackingCreateDetalleInputSerializer(serializers.Serializer):
+        picking_detalle = serializers.IntegerField(min_value=1)
+        cantidad_empacada = serializers.DecimalField(
+            max_digits=18,
+            decimal_places=4,
+            min_value=Decimal("0.0001"),
+        )
+        observaciones = serializers.CharField(required=False, allow_blank=True)
+
+    packing_detalle = PackingCreateDetalleInputSerializer(many=True)
+
+    class Meta:
+        model = Packing
+        fields = [
+            "picking",
+            "numero_cajas",
+            "peso_total",
+            "volumen_total",
+            "fecha_inicio",
+            "fecha_fin",
+            "observaciones",
+            "packing_detalle",
+        ]
 

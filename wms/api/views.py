@@ -4,14 +4,15 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 from wms.api.serializers import (
+    PackingCreateSerializer,
     TransferenciaListSerializer,
     TransferenciaRetrieveSerializer,
     TransferenciaSerializer,
     PickingCreateSerializer,
     PickingSerializer,
-    PackingSerializer
+    PackingSerializer,
 )
-from wms.models import Transferencia, TransferenciaDetalle, Packing
+from wms.models import Packing, PackingDetalle, Transferencia, TransferenciaDetalle
 from wms.services.transferencia_service import TransferenciaService
 from wms.models import Picking, PickingDetalle
 from wms.services.picking_service import PickingService
@@ -185,8 +186,29 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
     serializer_class = PackingSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
         user = self.request.user
+        qs = (
+            super()
+            .get_queryset()
+            .select_related("pedido", "picking", "picking__almacen", "operador", "usuario")
+            .prefetch_related(
+                Prefetch(
+                    "packing_detalle",
+                    queryset=PackingDetalle.objects.select_related(
+                        "caja",
+                        "picking_detalle",
+                        "picking_detalle__producto",
+                        "picking_detalle__producto_variante",
+                        "picking_detalle__pedido_detalle_talla",
+                        "picking_detalle__pedido_detalle_talla__variante",
+                        "picking_detalle__pedido_detalle_talla__variante__talla",
+                        "picking_detalle__ubicacion",
+                        "picking_detalle__ubicacion__almacen",
+                    ).order_by("id"),
+                )
+            )
+            .order_by("-created_at", "-id")
+        )
 
         if getattr(user, "is_superuser", False):
             return qs
@@ -194,6 +216,34 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
         if not empresa:
             return qs.none()
         qs = qs.filter(empresa=empresa)
+        if getattr(user, "is_admin_empresa", False):
+            return qs
+        sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+        if getattr(user, "sucursal_default_id", None):
+            sucursal_ids.append(user.sucursal_default_id)
+        return qs.filter(sucursal_id__in=sucursal_ids)
+
+    def get_serializer_class(self):
+        if self.action in {"create", "onboarding"} and self.request.method == "POST":
+            return PackingCreateSerializer
+        return PackingSerializer
+
+    @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
+    def onboarding(self, request):
+        if request.method == "GET":
+            picking_id = request.query_params.get("picking") or request.query_params.get(
+                "picking_id"
+            )
+            payload = PackingService.onboarding_payload(
+                request.user,
+                picking_id=picking_id,
+            )
+            return Response(payload)
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        packing_instance = PackingService.handle_store(serializer.validated_data, request.user)
+        return Response(PackingSerializer(packing_instance).data, status=status.HTTP_201_CREATED)
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)

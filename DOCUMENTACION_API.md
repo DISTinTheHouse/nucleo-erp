@@ -2041,6 +2041,218 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 ---
 
+## 📦 WMS - Packing
+
+### 1) Onboarding de Packing
+
+- **Endpoint**: `GET /api/v1/wms/packings/onboarding/`
+- **Objetivo**: dar a frontend los `pickings` disponibles para empacar y, al seleccionar uno, devolver exactamente qué líneas siguen pendientes.
+
+**Flujo**
+
+- Si se consulta sin `picking`, regresa el catálogo base de `pickings` visibles para el usuario.
+- Si se envía `picking` o `picking_id`, además regresa:
+  - encabezado del `picking`
+  - líneas `packing_detalle` candidatas
+  - cantidad ya empacada históricamente
+  - cantidad pendiente por empacar por cada `picking_detalle`
+
+**Ejemplo**
+
+- `GET /api/v1/wms/packings/onboarding/?picking_id=14`
+
+**Respuesta resumida**
+
+```json
+{
+  "pickings": [
+    {
+      "id": 14,
+      "folio": "PICK-000014",
+      "pedido": 125,
+      "pedido_folio": "PD-000125",
+      "cliente_nombre": "Cliente Demo",
+      "sucursal": 1,
+      "sucursal_nombre": "Matriz",
+      "operador": 8,
+      "operador_nombre": "Juan Perez",
+      "almacen": 3,
+      "almacen_nombre": "Almacén PT Monterrey",
+      "estado": "Pendiente"
+    }
+  ],
+  "picking": {
+    "id": 14,
+    "folio": "PICK-000014",
+    "pedido": 125,
+    "pedido_folio": "PD-000125",
+    "cliente": 15,
+    "cliente_nombre": "Cliente Demo",
+    "sucursal": 1,
+    "sucursal_nombre": "Matriz",
+    "operador": 8,
+    "operador_nombre": "Juan Perez",
+    "almacen": 3,
+    "almacen_nombre": "Almacén PT Monterrey",
+    "estado": "Pendiente"
+  },
+  "packing_detalle": [
+    {
+      "picking_detalle": 51,
+      "pedido_detalle": 301,
+      "pedido_detalle_talla": 990,
+      "producto": 22,
+      "producto_nombre": "Playera Dry Fit",
+      "producto_variante": 91,
+      "producto_variante_nombre": "Playera Dry Fit Negra M",
+      "talla": 4,
+      "talla_nombre": "M",
+      "color": 2,
+      "color_nombre": "Negro",
+      "ubicacion": null,
+      "ubicacion_nombre": null,
+      "cantidad_solicitada": "4.0000",
+      "cantidad_asignada": "4.0000",
+      "cantidad_surtida": "0.0000",
+      "cantidad_ya_empacada": "1.0000",
+      "cantidad_pendiente_empacar": "3.0000",
+      "estado": "PENDIENTE"
+    }
+  ]
+}
+```
+
+### 2) Crear Packing desde Onboarding
+
+- **Endpoint**: `POST /api/v1/wms/packings/onboarding/`
+- **Objetivo**: registrar el empaque real de una o más líneas de un `picking`, validando contra el pendiente histórico para evitar sobre-empaque.
+
+**Flujo actual**
+
+- Next.js consulta primero el onboarding `GET`.
+- El usuario selecciona un `picking` y decide cuánto empacar por cada `picking_detalle`.
+- El backend valida:
+  - empresa y sucursal del `picking`
+  - acceso del usuario a la sucursal
+  - que cada `picking_detalle` pertenezca al `picking`
+  - que la suma enviada no exceda la cantidad pendiente por empacar
+- Si todo es válido, el backend genera el `packing` con su `folio` y crea sus renglones `packing_detalle`.
+
+**Body**
+
+```json
+{
+  "picking": 14,
+  "numero_cajas": 2,
+  "peso_total": "12.500",
+  "volumen_total": "0.850",
+  "observaciones": "Empaque parcial para salida urgente",
+  "packing_detalle": [
+    {
+      "picking_detalle": 51,
+      "cantidad_empacada": "3.0000"
+    },
+    {
+      "picking_detalle": 52,
+      "cantidad_empacada": "2.0000",
+      "observaciones": "Caja separada"
+    }
+  ]
+}
+```
+
+**Campos requeridos**
+
+- `picking`
+- `packing_detalle`
+
+**Campos opcionales**
+
+- `numero_cajas`
+- `peso_total`
+- `volumen_total`
+- `fecha_inicio`
+- `fecha_fin`
+- `observaciones`
+
+**Validaciones principales**
+
+- El `picking` debe pertenecer a la empresa del usuario.
+- El usuario debe tener acceso a la sucursal del `picking`.
+- No se puede empacar un `picking` cancelado.
+- Cada línea debe incluir `picking_detalle` y `cantidad_empacada > 0`.
+- Cada `picking_detalle` debe pertenecer al `picking` seleccionado.
+- La suma enviada por línea no puede exceder la cantidad pendiente histórica.
+- El backend contabiliza como histórico todos los `packing_detalle` no cancelados del mismo `picking`.
+
+**Respuesta**
+
+```json
+{
+  "id": 7,
+  "folio": "PAC-000007",
+  "pedido": 125,
+  "pedido_folio": "PD-000125",
+  "picking": 14,
+  "picking_folio": "PICK-000014",
+  "picking_estado": "Pendiente",
+  "picking_almacen": 3,
+  "picking_almacen_nombre": "Almacén PT Monterrey",
+  "operador": 8,
+  "operador_nombre": "Juan Perez",
+  "usuario": 3,
+  "usuario_nombre": "Desarrollo",
+  "numero_cajas": 2,
+  "peso_total": "12.500",
+  "volumen_total": "0.850",
+  "observaciones": "Empaque parcial para salida urgente",
+  "packing_detalle": [
+    {
+      "id": 21,
+      "packing": 7,
+      "picking_detalle": 51,
+      "pedido_detalle": 301,
+      "pedido_detalle_talla": 990,
+      "producto": 22,
+      "producto_nombre": "Playera Dry Fit",
+      "producto_variante": 91,
+      "producto_variante_nombre": "Playera Dry Fit Negra M",
+      "talla_id": 4,
+      "talla_nombre": "M",
+      "cantidad_solicitada": "4.0000",
+      "cantidad_asignada": "4.0000",
+      "cantidad_surtida": "0.0000",
+      "cantidad_empacada": "3.0000",
+      "ubicacion": null,
+      "ubicacion_nombre": null,
+      "caja": null,
+      "caja_numero": null,
+      "estado": "PENDIENTE",
+      "observaciones": null
+    }
+  ]
+}
+```
+
+**Notas para Next.js**
+
+- El flujo recomendado es `GET /packings/onboarding/` -> seleccionar `picking` -> `POST /packings/onboarding/`.
+- `POST /api/v1/wms/packings/` sigue funcionando, pero para onboarding conviene usar la misma URL `/onboarding/` para mantener el mismo patrón mental que `picking`.
+- El frontend no necesita recalcular cantidades históricas; el backend devuelve `cantidad_ya_empacada` y `cantidad_pendiente_empacar`.
+- Si un usuario tiene acceso a varias sucursales, el backend valida contra sus sucursales permitidas, no solo contra `sucursal_default`.
+
+### 3) Listar Packings
+
+- **Endpoint**: `GET /api/v1/wms/packings/`
+- **Descripción**: devuelve los packings visibles para la empresa y sucursales del usuario autenticado.
+
+### 4) Detalle de Packing
+
+- **Endpoint**: `GET /api/v1/wms/packings/{id}/`
+- **Descripción**: devuelve encabezado y `packing_detalle` del empaque registrado.
+
+---
+
 ## 🤖 Asistente IA (Chat)
 
 Asistente conversacional para ejecutar consultas y acciones controladas desde el frontend (próxima integración en Next.js).
