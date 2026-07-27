@@ -4,10 +4,10 @@
 
 Definir una ruta clara y escalable para incorporar:
 
-1. Impresion de etiquetas Zebra normales
-2. Impresion de etiquetas RFID
-3. Lectura de tags RFID
-4. Automatizacion de flujos WMS con RFID
+- [x] Impresion de etiquetas Zebra normales
+- [ ] Impresion de etiquetas RFID
+- [ ] Lectura de tags RFID
+- [ ] Automatizacion de flujos WMS con RFID
 
 La idea es implementarlo por fases, sin mezclar todo desde el inicio.
 
@@ -50,30 +50,30 @@ Poder imprimir etiquetas desde Next.js usando Zebra Browser Print.
 
 ### Alcance
 
-- etiqueta de producto
-- etiqueta de ubicacion
-- etiqueta de picking
-- etiqueta de caja o packing
+- [ ] etiqueta de producto
+- [ ] etiqueta de ubicacion
+- [ ] etiqueta de picking
+- [ ] etiqueta de caja o packing
 
 ### Flujo
 
-1. frontend solicita datos o ZPL al backend
-2. backend responde ZPL listo
-3. frontend usa Browser Print
-4. Zebra imprime localmente
+- [x] frontend solicita datos o ZPL al backend
+- [x] backend responde ZPL listo
+- [x] frontend usa Browser Print
+- [x] Zebra imprime localmente
 
 ### Entregables
 
-- endpoint para obtener ZPL
-- plantilla base de etiquetas
-- boton de impresion en frontend
-- validacion de impresora disponible
+- [x] endpoint para obtener ZPL
+- [x] plantilla base de etiquetas
+- [x] boton de impresion en frontend
+- [x] validacion de impresora disponible
 
 ### Ejemplos de endpoints
 
-- `GET /api/v1/wms/etiquetas/producto/{id}/zpl/`
-- `GET /api/v1/wms/etiquetas/ubicacion/{id}/zpl/`
-- `GET /api/v1/wms/etiquetas/picking/{id}/zpl/`
+- [ ] `GET /api/v1/wms/etiquetas/producto/{id}/zpl/`
+- [ ] `GET /api/v1/wms/etiquetas/ubicacion/{id}/zpl/`
+- [ ] `GET /api/v1/wms/etiquetas/picking/{id}/zpl/`
 
 ### Meta de esta fase
 
@@ -81,17 +81,17 @@ Resolver impresion real sin entrar todavia a RFID.
 
 ### Validacion QA completada
 
-- Se habilito `GET /QA/imprimir_etiqueta/` para pruebas locales con Zebra Browser Print.
-- La pantalla permite buscar por `sku`, `codigo`, `cod_proscai` y nombre.
-- Si no existen variantes, la impresion puede hacerse desde `Producto` usando codigo base.
-- Se valido impresion real de una etiqueta para `AMBASSADOR` con codigo `93E0`.
-- Se habilito el retorno directo a `GET /QA/rfid/recepciones/?encuadre={id}` para cerrar el ciclo de prueba.
+- [x] Se habilito `GET /QA/imprimir_etiqueta/` para pruebas locales con Zebra Browser Print.
+- [x] La pantalla permite buscar por `sku`, `codigo`, `cod_proscai` y nombre.
+- [x] Si no existen variantes, la impresion puede hacerse desde `Producto` usando codigo base.
+- [x] Se valido impresion real de una etiqueta para `AMBASSADOR` con codigo `93E0`.
+- [x] Se habilito el retorno directo a `GET /QA/rfid/recepciones/?encuadre={id}` para cerrar el ciclo de prueba.
 
 ### Aprendizajes de implementacion
 
-- En entorno local conviene servir Browser Print desde rutas QA dedicadas para no depender de `collectstatic`.
-- El Zebra `MC3300X` pudo participar en el flujo actual como lector de codigo de barras enviando el valor al input web.
-- Esta validacion confirma la fase de impresion y captura asistida, pero todavia no constituye lectura RFID real.
+- [x] En entorno local conviene servir Browser Print desde rutas QA dedicadas para no depender de `collectstatic`.
+- [x] El Zebra `MC3300X` pudo participar en el flujo actual como lector de codigo de barras enviando el valor al input web.
+- [x] Esta validacion confirma la fase de impresion y captura asistida, pero todavia no constituye lectura RFID real.
 
 ---
 
@@ -103,9 +103,9 @@ Grabar tags RFID y al mismo tiempo imprimir la etiqueta fisica.
 
 ### Alcance
 
-- definir estructura EPC
-- generar ZPL compatible con RFID
-- relacionar etiqueta impresa con producto o unidad logistica
+- [ ] definir estructura EPC
+- [ ] generar ZPL compatible con RFID
+- [ ] relacionar etiqueta impresa con producto o unidad logistica
 
 ### Decisiones necesarias
 
@@ -124,9 +124,9 @@ Grabar tags RFID y al mismo tiempo imprimir la etiqueta fisica.
 
 ### Entregables
 
-- generador de ZPL RFID
-- estrategia de EPC
-- registro de etiqueta RFID emitida
+- [ ] generador de ZPL RFID
+- [ ] estrategia de EPC
+- [ ] registro de etiqueta RFID emitida
 
 ### Modelo sugerido
 
@@ -154,10 +154,10 @@ Poder registrar lecturas RFID dentro del ERP.
 
 ### Alcance
 
-- recibir EPC leido
-- identificar a que producto o unidad corresponde
-- registrar evento
-- mostrar lectura en frontend
+- [ ] recibir EPC leido
+- [ ] identificar a que producto o unidad corresponde
+- [ ] registrar evento
+- [ ] mostrar lectura en frontend
 
 ### Flujo
 
@@ -168,15 +168,15 @@ Poder registrar lecturas RFID dentro del ERP.
 
 ### Estado actual
 
-- Ya existe una prueba funcional de lectura en `QA/rfid/recepciones/`, pero hoy resuelve por `sku`, `codigo` o `cod_proscai`.
-- El siguiente paso para RFID real es sustituir ese valor por `EPC` leido desde hardware RFID o middleware Zebra compatible.
+- [x] Ya existe una prueba funcional de lectura en `QA/rfid/recepciones/`, pero hoy resuelve por `sku`, `codigo` o `cod_proscai`.
+- [ ] El siguiente paso para RFID real es sustituir ese valor por `EPC` leido desde hardware RFID o middleware Zebra compatible.
 
 ### Entregables
 
-- endpoint para registrar lectura RFID
-- historial de lecturas
-- consulta de EPC
-- validaciones de tags no registrados
+- [ ] endpoint para registrar lectura RFID
+- [ ] historial de lecturas
+- [ ] consulta de EPC
+- [ ] validaciones de tags no registrados
 
 ### Modelos sugeridos
 
@@ -208,12 +208,12 @@ Usar RFID para mover procesos del WMS con menos captura manual.
 
 ### Casos de uso
 
-- recepcion automatica
-- transferencias automatizadas
-- picking asistido por RFID
-- packing con validacion por lectura
-- despacho con confirmacion RFID
-- conteos ciclicos automatizados
+- [ ] recepcion automatica
+- [ ] transferencias automatizadas
+- [ ] picking asistido por RFID
+- [ ] packing con validacion por lectura
+- [ ] despacho con confirmacion RFID
+- [ ] conteos ciclicos automatizados
 
 ### Integracion con WMS
 
@@ -236,10 +236,10 @@ Reducir errores, mejorar velocidad y aumentar trazabilidad en almacen.
 
 ## Orden Recomendado de Implementacion
 
-1. Impresion Zebra normal
-2. ZPL RFID + grabacion de tags
-3. Lectura RFID + registro de eventos
-4. Automatizacion WMS por etapas
+1. [x] Impresion Zebra normal
+2. [ ] ZPL RFID + grabacion de tags
+3. [ ] Lectura RFID + registro de eventos
+4. [ ] Automatizacion WMS por etapas
 
 ---
 
@@ -247,20 +247,20 @@ Reducir errores, mejorar velocidad y aumentar trazabilidad en almacen.
 
 ### Corto plazo
 
-- Django genera ZPL
-- Next.js imprime con Browser Print
-- Zebra imprime localmente
+- [x] Django genera ZPL
+- [x] Next.js imprime con Browser Print
+- [x] Zebra imprime localmente
 
 ### Mediano plazo
 
-- Django genera ZPL RFID
-- Next.js imprime y graba tags
-- backend registra etiqueta RFID emitida
+- [ ] Django genera ZPL RFID
+- [ ] Next.js imprime y graba tags
+- [ ] backend registra etiqueta RFID emitida
 
 ### Largo plazo
 
-- lector RFID o middleware envia eventos al backend
-- backend conecta lecturas con WMS
+- [ ] lector RFID o middleware envia eventos al backend
+- [ ] backend conecta lecturas con WMS
 
 ---
 
@@ -278,19 +278,19 @@ Reducir errores, mejorar velocidad y aumentar trazabilidad en almacen.
 
 ### MVP 1
 
-- imprimir etiqueta Zebra normal desde Next.js
+- [x] imprimir etiqueta Zebra normal desde Next.js
 
 ### MVP 2
 
-- imprimir etiqueta RFID con EPC generado por backend
+- [ ] imprimir etiqueta RFID con EPC generado por backend
 
 ### MVP 3
 
-- registrar lectura de EPC y mostrar historial
+- [ ] registrar lectura de EPC y mostrar historial
 
 ### MVP 4
 
-- usar RFID en picking o despacho
+- [ ] usar RFID en picking o despacho
 
 ---
 
@@ -298,9 +298,9 @@ Reducir errores, mejorar velocidad y aumentar trazabilidad en almacen.
 
 La ruta correcta para este proyecto es:
 
-1. imprimir bien
-2. grabar RFID
-3. leer RFID
-4. automatizar WMS
+1. [x] imprimir bien
+2. [ ] grabar RFID
+3. [ ] leer RFID
+4. [ ] automatizar WMS
 
 Ese orden reduce riesgo, facilita mantenimiento y permite avanzar con valor real desde la primera fase.
