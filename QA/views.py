@@ -1,11 +1,14 @@
-from decimal import Decimal
 import uuid
+from decimal import Decimal
+from pathlib import Path
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.db.models import Q
+from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404, redirect, render
+from django.template.defaultfilters import truncatechars
 from django.urls import reverse
 from django.utils import timezone
 
@@ -30,6 +33,114 @@ def _empresa_qa(request):
 
 def _redirect_rfid(encuadre_id):
     return redirect(f"{reverse('qa_recepcion_rfid_workspace')}?encuadre={encuadre_id}")
+
+
+def _build_producto_label_zpl(variante):
+    producto = variante.producto
+    nombre_producto = truncatechars((producto.nombre or "").upper(), 32)
+    sku = (variante.sku or "").upper()
+    color = getattr(variante.color, "nombre", "")
+    talla = getattr(variante.talla, "nombre", "")
+    linea_secundaria = " / ".join(
+        [value for value in [color.upper(), talla.upper()] if value]
+    )
+    codigo = (producto.codigo or producto.cod_proscai or "").upper()
+
+    lines = [
+        "^XA",
+        "^PW799",
+        "^LL400",
+        "^CI28",
+        "^LH0,0",
+        "^FO40,30^A0N,34,34^FDQA RFID - ETIQUETA PRUEBA^FS",
+        f"^FO40,85^A0N,32,32^FD{nombre_producto}^FS",
+        f"^FO40,130^A0N,28,28^FDSKU: {sku}^FS",
+    ]
+    if linea_secundaria:
+        lines.append(f"^FO40,168^A0N,28,28^FD{linea_secundaria}^FS")
+    if codigo:
+        lines.append(f"^FO40,206^A0N,26,26^FDCOD: {codigo}^FS")
+    lines.extend(
+        [
+            f"^FO40,245^BY3,3,90^BCN,90,Y,N,N^FD{sku}^FS",
+            "^FO40,360^A0N,22,22^FDImpresion QA para prueba de escaneo local.^FS",
+            "^XZ",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_producto_base_label_zpl(producto):
+    nombre_producto = truncatechars((producto.nombre or "").upper(), 32)
+    codigo_impresion = (producto.codigo or producto.cod_proscai or f"PROD-{producto.pk}").upper()
+    codigo_auxiliar = (producto.cod_proscai or "").upper()
+
+    lines = [
+        "^XA",
+        "^PW799",
+        "^LL400",
+        "^CI28",
+        "^LH0,0",
+        "^FO40,30^A0N,34,34^FDQA RFID - ETIQUETA PRUEBA^FS",
+        f"^FO40,85^A0N,32,32^FD{nombre_producto}^FS",
+        f"^FO40,130^A0N,28,28^FDCODIGO: {codigo_impresion}^FS",
+    ]
+    if codigo_auxiliar and codigo_auxiliar != codigo_impresion:
+        lines.append(f"^FO40,168^A0N,26,26^FDPROSCAI: {codigo_auxiliar}^FS")
+    lines.extend(
+        [
+            f"^FO40,245^BY3,3,90^BCN,90,Y,N,N^FD{codigo_impresion}^FS",
+            "^FO40,360^A0N,22,22^FDImpresion QA desde catalogo de productos.^FS",
+            "^XZ",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_label_preview(variante=None, producto=None):
+    if variante is not None:
+        producto_base = variante.producto
+        return {
+            "header": f"SKU {variante.sku} · {producto_base.nombre}",
+            "title": producto_base.nombre,
+            "primary_line": f"SKU: {variante.sku}",
+            "secondary_line": f"{variante.color.nombre} / {variante.talla.nombre}",
+            "meta_line": (
+                f"COD: {producto_base.codigo or producto_base.cod_proscai}"
+                if (producto_base.codigo or producto_base.cod_proscai)
+                else ""
+            ),
+            "barcode_value": variante.sku,
+        }
+
+    if producto is not None:
+        codigo_impresion = producto.codigo or producto.cod_proscai or str(producto.pk)
+        meta_line = ""
+        if producto.cod_proscai and producto.cod_proscai != producto.codigo:
+            meta_line = f"PROSCAI: {producto.cod_proscai}"
+        return {
+            "header": f"COD {codigo_impresion} · {producto.nombre}",
+            "title": producto.nombre,
+            "primary_line": f"COD: {codigo_impresion}",
+            "secondary_line": "",
+            "meta_line": meta_line,
+            "barcode_value": codigo_impresion,
+        }
+
+    return None
+
+
+def _browserprint_asset_path(filename):
+    allowed_files = {
+        "BrowserPrint-3.1.250.min.js",
+        "BrowserPrint-Zebra-1.1.250.min.js",
+    }
+    if filename not in allowed_files:
+        raise Http404("Asset no permitido.")
+    asset_path = Path(__file__).resolve().parent / "static" / "QA" / "js" / filename
+    if not asset_path.exists():
+        raise Http404("Asset no encontrado.")
+    return asset_path
 
 
 def _lookup_tokens(raw_tag):
@@ -400,3 +511,97 @@ def recepcion_rfid_workspace(request):
         ),
     }
     return render(request, "QA/rfid/recepcion_rfid_workspace.html", context)
+
+
+@login_required
+def qa_browserprint_asset(request, filename):
+    asset_path = _browserprint_asset_path(filename)
+    return FileResponse(asset_path.open("rb"), content_type="application/javascript; charset=utf-8")
+
+
+@login_required
+def imprimir_etiqueta_workspace(request):
+    empresa = _empresa_qa(request)
+    if empresa is None:
+        messages.error(request, "No hay empresa disponible para la prueba de impresión.")
+        return redirect("index_QA")
+
+    q = (request.GET.get("q") or request.POST.get("q") or "").strip()
+    encuadre_id = (request.GET.get("encuadre") or request.POST.get("encuadre") or "").strip()
+    variante_id = request.GET.get("variante") or request.POST.get("variante_id")
+    producto_id = request.GET.get("producto") or request.POST.get("producto_id")
+
+    variantes_qs = (
+        ProductoVariante.objects.select_related("producto", "color", "talla")
+        .filter(empresa=empresa, activo=True)
+        .order_by("sku")
+    )
+    productos_qs = Producto.objects.filter(empresa=empresa, activo=True).order_by("nombre")
+    if q:
+        variantes_qs = variantes_qs.filter(
+            Q(sku__icontains=q)
+            | Q(nombre__icontains=q)
+            | Q(producto__nombre__icontains=q)
+            | Q(producto__codigo__icontains=q)
+            | Q(producto__cod_proscai__icontains=q)
+        )
+        productos_qs = productos_qs.filter(
+            Q(nombre__icontains=q)
+            | Q(codigo__icontains=q)
+            | Q(cod_proscai__icontains=q)
+        )
+
+    variantes = list(variantes_qs[:30])
+    variante_seleccionada = None
+    producto_seleccionado = None
+    if variante_id:
+        variante_seleccionada = get_object_or_404(
+            ProductoVariante.objects.select_related("producto", "color", "talla"),
+            pk=variante_id,
+            empresa=empresa,
+            activo=True,
+        )
+        if not q:
+            variantes = [variante_seleccionada] + [
+                item for item in variantes if item.pk != variante_seleccionada.pk
+            ]
+    elif producto_id:
+        producto_seleccionado = get_object_or_404(
+            Producto.objects,
+            pk=producto_id,
+            empresa=empresa,
+            activo=True,
+        )
+
+    producto_ids_con_variantes = {item.producto_id for item in variantes}
+    productos = [
+        producto for producto in productos_qs[:30]
+        if producto.pk not in producto_ids_con_variantes
+    ]
+    if producto_seleccionado and not any(item.pk == producto_seleccionado.pk for item in productos):
+        productos = [producto_seleccionado] + productos
+    if not variante_seleccionada and not producto_seleccionado and len(productos) == 1 and not variantes:
+        producto_seleccionado = productos[0]
+
+    preview_data = _build_label_preview(
+        variante=variante_seleccionada,
+        producto=producto_seleccionado,
+    )
+
+    context = {
+        "q": q,
+        "encuadre_id": encuadre_id,
+        "variantes": variantes,
+        "productos": productos,
+        "variante_seleccionada": variante_seleccionada,
+        "producto_seleccionado": producto_seleccionado,
+        "preview_data": preview_data,
+        "zpl_preview": (
+            _build_producto_label_zpl(variante_seleccionada)
+            if variante_seleccionada
+            else _build_producto_base_label_zpl(producto_seleccionado)
+            if producto_seleccionado
+            else ""
+        ),
+    }
+    return render(request, "QA/rfid/imprimir_etiqueta_workspace.html", context)

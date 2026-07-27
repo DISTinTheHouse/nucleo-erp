@@ -122,11 +122,21 @@
                     </div>
 
                     <div class="mt-6 rounded-2xl border border-indigo-200 bg-indigo-50 p-5">
-                        <h3 class="text-sm font-semibold uppercase tracking-wide text-indigo-700">Escanear tag</h3>
-                        <p class="mt-2 text-sm text-indigo-700">
-                            Coloca el cursor en el campo, escanea con el Zebra y presiona Enter. En esta primera prueba el sistema intenta
-                            asignar el tag por `sku`, `codigo` o `cod_proscai`. Si no coincide, lo guarda como lectura sin asignar.
-                        </p>
+                        <div class="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                            <div>
+                                <h3 class="text-sm font-semibold uppercase tracking-wide text-indigo-700">Escanear tag</h3>
+                                <p class="mt-2 text-sm text-indigo-700">
+                                    Coloca el cursor en el campo, escanea con el Zebra y presiona Enter. En esta primera prueba el sistema intenta
+                                    asignar el tag por `sku`, `codigo` o `cod_proscai`. Si no coincide, lo guarda como lectura sin asignar.
+                                </p>
+                            </div>
+                            <a
+                                href="{% url 'qa_imprimir_etiqueta_workspace' %}?encuadre={{ selected_encuadre.pk }}"
+                                class="rounded-xl border border-indigo-300 bg-white px-4 py-2.5 text-sm font-medium text-indigo-700 hover:bg-indigo-100"
+                            >
+                                Imprimir etiqueta QA
+                            </a>
+                        </div>
                         <form method="post" class="mt-4 flex flex-col gap-3 md:flex-row">
                             {% csrf_token %}
                             <input type="hidden" name="action" value="registrar_lectura">

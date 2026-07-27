@@ -2253,6 +2253,66 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 ---
 
+## 🧪 QA RFID Workspace
+
+Flujo de pruebas locales para validar impresión Zebra y captura de lecturas desde dispositivos Zebra sin afectar inventario.
+
+### 1) Workspace de Recepciones RFID
+
+- **URL**: `GET /QA/rfid/recepciones/`
+- **Descripción**: permite crear un encuadre QA, registrar lecturas y comparar lo esperado vs lo leído antes de pasar a una recepción formal.
+
+#### Query params
+
+- `encuadre` opcional: abre un encuadre existente para seguir escaneando.
+
+#### Notas operativas
+
+- El flujo QA no genera movimientos de stock.
+- La captura actual acepta valores por `sku`, `codigo` o `cod_proscai`.
+- Si el código no se puede resolver, la lectura queda registrada como no asignada.
+
+### 2) Workspace de Impresión QA
+
+- **URL**: `GET /QA/imprimir_etiqueta/`
+- **Alias tolerado**: `GET /QA/imrpimir_etiqueta/`
+- **Descripción**: busca variantes o productos base, genera un ZPL de prueba y permite imprimirlo vía Zebra Browser Print local.
+
+#### Query params
+
+- `q` opcional: busca por `sku`, nombre, `codigo` o `cod_proscai`.
+- `variante` opcional: selecciona una `ProductoVariante`.
+- `producto` opcional: selecciona un `Producto` cuando no existen variantes.
+- `encuadre` opcional: conserva el retorno al workspace de recepción QA.
+
+#### Comportamiento
+
+- Si la búsqueda encuentra variantes, se puede imprimir por `sku`.
+- Si la búsqueda encuentra un producto sin variantes, se puede imprimir por `codigo` o `cod_proscai`.
+- Si solo existe un producto coincidente y no hay variantes, la pantalla lo selecciona automáticamente.
+- El frontend carga Browser Print desde rutas QA dedicadas para no depender de `collectstatic` durante pruebas locales.
+
+#### Assets locales usados por Browser Print
+
+- `GET /QA/browserprint/BrowserPrint-3.1.250.min.js`
+- `GET /QA/browserprint/BrowserPrint-Zebra-1.1.250.min.js`
+
+### 3) Flujo validado en pruebas
+
+1. Crear o abrir un encuadre en `GET /QA/rfid/recepciones/?encuadre={id}`.
+2. Ir a `GET /QA/imprimir_etiqueta/?encuadre={id}`.
+3. Buscar una variante o un producto base, por ejemplo `93E0`.
+4. Imprimir la etiqueta desde la PC con Zebra Browser Print.
+5. Abrir el encuadre en el Zebra `MC3300X`.
+6. Escanear el código impreso para registrar la lectura en QA.
+
+### 4) Alcance actual
+
+- La validación completada en QA corresponde a lectura por código de barras enviado por el Zebra como entrada de teclado.
+- La lectura RFID real será una fase posterior, donde el dispositivo deberá enviar `EPC` u otro identificador RFID al backend.
+
+---
+
 ## 🤖 Asistente IA (Chat)
 
 Asistente conversacional para ejecutar consultas y acciones controladas desde el frontend (próxima integración en Next.js).
