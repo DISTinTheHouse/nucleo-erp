@@ -255,3 +255,142 @@ class RecepcionDetalle(models.Model):
 
     def __str__(self):
         return str(self.id)
+
+
+class RecepcionRFIDEncuadre(models.Model):
+    class Estatus(models.TextChoices):
+        PENDIENTE = "PENDIENTE", "Pendiente"
+        ACEPTADO = "ACEPTADO", "Aceptado"
+        CANCELADO = "CANCELADO", "Cancelado"
+
+    tipo_origen = models.CharField(
+        max_length=2,
+        choices=Recepcion.TipoOrigen.choices,
+        default=Recepcion.TipoOrigen.ORDEN_COMPRA,
+    )
+    orden_compra = models.ForeignKey(
+        OrdenCompra,
+        on_delete=models.CASCADE,
+        related_name="rfid_encuadres",
+        null=True,
+        blank=True,
+    )
+    op = models.ForeignKey(
+        OrdenProduccion,
+        on_delete=models.CASCADE,
+        related_name="rfid_encuadres",
+        null=True,
+        blank=True,
+    )
+    recepcion = models.ForeignKey(
+        Recepcion,
+        on_delete=models.SET_NULL,
+        related_name="rfid_encuadres",
+        null=True,
+        blank=True,
+    )
+    empresa = models.ForeignKey(
+        Empresa,
+        on_delete=models.CASCADE,
+        related_name="rfid_encuadres_recepcion",
+    )
+    sucursal = models.ForeignKey(
+        Sucursal,
+        on_delete=models.CASCADE,
+        related_name="rfid_encuadres_recepcion",
+    )
+    proveedor = models.ForeignKey(
+        Proveedor,
+        on_delete=models.CASCADE,
+        related_name="rfid_encuadres_recepcion",
+        null=True,
+        blank=True,
+    )
+    almacen = models.ForeignKey(
+        Almacen,
+        on_delete=models.CASCADE,
+        related_name="rfid_encuadres_recepcion",
+    )
+    transportista = models.ForeignKey(
+        Transportista,
+        on_delete=models.CASCADE,
+        related_name="rfid_encuadres_recepcion",
+        null=True,
+        blank=True,
+    )
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="rfid_encuadres_recepcion",
+    )
+    serie_codigo = models.CharField(max_length=2, default="RC")
+    fecha_recepcion = models.DateTimeField(null=True, blank=True)
+    remision = models.CharField(max_length=50, null=True, blank=True)
+    factura_referencia = models.CharField(max_length=50, null=True, blank=True)
+    observaciones = models.TextField(blank=True, null=True)
+    estatus = models.CharField(
+        max_length=20,
+        choices=Estatus.choices,
+        default=Estatus.PENDIENTE,
+    )
+    activo = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "recepcion_rfid_encuadre"
+        verbose_name = "Recepcion RFID Encuadre"
+        verbose_name_plural = "Recepciones RFID Encuadre"
+
+    def __str__(self):
+        return f"Encuadre RFID {self.pk}"
+
+
+class RecepcionRFIDLectura(models.Model):
+    encuadre = models.ForeignKey(
+        RecepcionRFIDEncuadre,
+        on_delete=models.CASCADE,
+        related_name="lecturas",
+    )
+    codigo_tag = models.CharField(max_length=120)
+    orden_compra_detalle = models.ForeignKey(
+        OrdenCompraDetalle,
+        on_delete=models.CASCADE,
+        related_name="rfid_lecturas_recepcion",
+        null=True,
+        blank=True,
+    )
+    orden_produccion_detalle = models.ForeignKey(
+        OrdenProduccionDetalle,
+        on_delete=models.CASCADE,
+        related_name="rfid_lecturas_recepcion",
+        null=True,
+        blank=True,
+    )
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, null=True, blank=True)
+    producto_variante = models.ForeignKey(
+        ProductoVariante,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+    )
+    ubicacion = models.ForeignKey(Ubicacion, on_delete=models.CASCADE, null=True, blank=True)
+    lote = models.ForeignKey(Lote, on_delete=models.CASCADE, null=True, blank=True)
+    serie = models.ForeignKey(Serie, on_delete=models.CASCADE, null=True, blank=True)
+    cantidad_leida = models.DecimalField(max_digits=18, decimal_places=4, default=1)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "recepcion_rfid_lectura"
+        verbose_name = "Recepcion RFID Lectura"
+        verbose_name_plural = "Recepciones RFID Lecturas"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("encuadre", "codigo_tag"),
+                name="uq_recepcion_rfid_lectura_encuadre_tag",
+            )
+        ]
+
+    def __str__(self):
+        return self.codigo_tag

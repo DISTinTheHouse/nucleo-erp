@@ -6,4 +6,5 @@ urlpatterns = [
     # PRODUCCION
     path('produccion_workspace/', views.produccion_workspace, name='produccion_workspace'),
     path('generar_orden_produccion/', views.generar_orden_produccion, name='generar_orden_produccion'),
+    path('rfid/recepciones/', views.recepcion_rfid_workspace, name='qa_recepcion_rfid_workspace'),
 ]
