@@ -1836,17 +1836,90 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 ## 📦 WMS - Picking
 
-### 1) Crear Picking desde Pedido
+### 1) Onboarding de Picking
 
-- **Endpoint**: `POST /api/v1/wms/pickings/`
-- **Objetivo**: generar el surtido de un pedido sin que frontend tenga que reconstruir las líneas.
+- **Endpoint**: `GET /api/v1/wms/pickings/onboarding/`
+- **Objetivo**: dar al frontend todo lo necesario para preparar un surtido parcial o total.
 
-**Flujo actual simplificado**
+**Flujo**
 
-- Next.js solo envía el encabezado del picking.
-- El backend toma el `Pedido` y genera automáticamente `picking_detalle` con sus líneas/tallas.
+- Si se consulta sin `pedido`, regresa catálogos base:
+  - `pedidos`
+  - `operadores`
+  - `almacenes`
+- Si se envía `pedido` o `pedido_id`, además regresa las líneas/tallas del pedido con:
+  - cantidad pedida
+  - cantidad ya asignada en pickings previos
+  - cantidad ya surtida
+  - cantidad pendiente
+
+**Ejemplo**
+
+- `GET /api/v1/wms/pickings/onboarding/?pedido_id=125`
+
+**Respuesta resumida**
+
+```json
+{
+  "pedidos": [
+    {
+      "id": 125,
+      "folio": "PD-000125",
+      "cliente": 15,
+      "cliente_nombre": "Cliente Demo",
+      "sucursal": 1,
+      "sucursal_nombre": "Matriz"
+    }
+  ],
+  "operadores": [{ "id": 8, "nombre": "Juan Perez" }],
+  "almacenes": [
+    {
+      "id": 3,
+      "codigo": "PT-MTY",
+      "nombre": "Almacén PT Monterrey",
+      "sucursal": 1
+    }
+  ],
+  "pedido": {
+    "id": 125,
+    "folio": "PD-000125",
+    "cliente": 15,
+    "cliente_nombre": "Cliente Demo",
+    "sucursal": 1,
+    "sucursal_nombre": "Matriz"
+  },
+  "picking_detalle": [
+    {
+      "pedido_detalle": 301,
+      "pedido_detalle_talla": 990,
+      "producto": 22,
+      "producto_nombre": "Playera Dry Fit",
+      "producto_variante": 91,
+      "producto_variante_nombre": "Playera Dry Fit - Negro - M",
+      "talla": 4,
+      "talla_nombre": "M",
+      "color": 2,
+      "color_nombre": "Negro",
+      "cantidad_pedida": "10.0000",
+      "cantidad_ya_asignada": "4.0000",
+      "cantidad_ya_surtida": "3.0000",
+      "cantidad_pendiente": "6.0000"
+    }
+  ]
+}
+```
+
+### 2) Crear Picking desde Onboarding
+
+- **Endpoint**: `POST /api/v1/wms/pickings/onboarding/`
+- **Objetivo**: generar un picking parcial o total tomando exactamente las cantidades que frontend decide surtir.
+
+**Flujo actual**
+
+- Next.js envía encabezado + `picking_detalle` con las cantidades reales a surtir por línea/talla.
+- Antes de crear el picking, el backend genera reservas de inventario por cada talla/línea seleccionada.
 - Antes de crear el picking, el sistema mueve la mercancía al almacén `APARTADOS` del mismo contexto mediante una transferencia interna.
-- Si el pedido ya tiene un picking activo, el backend responde `400`.
+- El backend valida que cada cantidad no exceda lo pendiente según el historial de `PickingDetalle`.
 
 **Body**
 
@@ -1857,7 +1930,17 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
   "almacen": 3,
   "prioridad": "MEDIA",
   "tipo": "ORDER_PICKING",
-  "observaciones": "Surtido de pedido urgente"
+  "observaciones": "Surtido parcial de pedido urgente",
+  "picking_detalle": [
+    {
+      "pedido_detalle_talla": 990,
+      "cantidad_asignada": "4.0000"
+    },
+    {
+      "pedido_detalle_talla": 991,
+      "cantidad_asignada": "2.0000"
+    }
+  ]
 }
 ```
 
@@ -1866,6 +1949,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 - `pedido`
 - `operador`
 - `almacen`
+- `picking_detalle`
 
 **Campos opcionales**
 
@@ -1884,10 +1968,11 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 - El pedido debe pertenecer a la empresa del usuario.
 - El almacén debe pertenecer a la misma empresa y sucursal del pedido.
 - El operador debe estar activo y pertenecer a la misma empresa.
-- El pedido debe tener líneas/tallas para generar el surtido.
+- Cada renglón debe incluir `pedido_detalle_talla` y `cantidad_asignada > 0`.
+- Cada cantidad enviada no puede exceder lo pendiente del pedido para esa talla.
 - Debe existir un almacén `APARTADOS` en la misma empresa y sucursal del pedido.
-- No puede existir otro picking activo para el mismo pedido.
-- La transferencia interna valida inventario suficiente antes de crear el picking.
+- La reserva y la transferencia interna validan inventario suficiente antes de crear el picking.
+- El avance del surtido no se guarda en `Pedido`; se calcula desde `PickingDetalle`.
 
 **Respuesta**
 
@@ -1911,12 +1996,15 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
     {
       "id": 51,
       "pedido_detalle": 301,
+      "pedido_detalle_talla": 990,
       "producto": 22,
       "producto_nombre": "Playera Dry Fit",
       "producto_variante": 91,
       "producto_variante_nombre": "Playera Dry Fit Negra M",
-      "cantidad_solicitada": "10.0000",
-      "cantidad_asignada": "10.0000",
+      "talla_id": 4,
+      "talla_nombre": "M",
+      "cantidad_solicitada": "4.0000",
+      "cantidad_asignada": "4.0000",
       "cantidad_surtida": "0.0000",
       "estado": "PENDIENTE",
       "operador": 8,
@@ -1935,16 +2023,18 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 **Notas para Next.js**
 
-- Ya no es necesario enviar `picking_detalle` en el `POST`.
-- El detalle del picking se genera desde el pedido para evitar duplicidad de datos.
+- Sí es necesario enviar `picking_detalle` en el onboarding `POST`.
+- El frontend decide qué tallas y cantidades se surtirán en ese picking.
+- No es necesario crear reservas manualmente: el backend las genera y las aplica dentro del flujo de `picking`.
+- El `Pedido` es solo referencia comercial; el avance real se consulta desde el historial de `PickingDetalle`.
 - Si frontend necesita mostrar el surtido creado, puede usar la respuesta del `POST` o consultar el `GET` de detalle.
 
-### 2) Listar Pickings
+### 3) Listar Pickings
 
 - **Endpoint**: `GET /api/v1/wms/pickings/`
 - **Descripción**: devuelve los pickings visibles para la empresa y sucursales del usuario autenticado.
 
-### 3) Detalle de Picking
+### 4) Detalle de Picking
 
 - **Endpoint**: `GET /api/v1/wms/pickings/{id}/`
 - **Descripción**: devuelve encabezado y `picking_detalle` del surtido.

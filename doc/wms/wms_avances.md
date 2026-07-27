@@ -72,11 +72,24 @@ Todo movimiento deberá generar automáticamente un MovimientoInventario para ma
 Apartar mercancía antes del surtido.
 
 - [ ] ¿TERMINADO?
-- [ ] inventario_reservas
+- [x] inventario_reservas
 
 Objetivo:
 
 Evitar sobreventa y garantizar disponibilidad para pedidos autorizados.
+
+Estado actual:
+
+- Ya existe la tabla `inventario_reservas`.
+- La reserva se genera automáticamente al crear un `Picking`.
+- Cada reserva queda ligada a:
+  - `pedido_detalle`
+  - `pedido_detalle_talla`
+  - `existencia`
+  - `almacen`
+  - `ubicacion`
+- La reserva nace en estado `ACTIVA`.
+- Cuando el picking se genera correctamente y la transferencia a `APARTADOS` se completa, la reserva se marca como `APLICADA`.
 
 ---
 
@@ -106,10 +119,14 @@ Convertir un Pedido en mercancía preparada para empaque.
 Estado actual:
 
 - Ya existe endpoint para crear, listar y consultar pickings.
-- El alta quedó simplificada: frontend solo envía encabezado (`pedido`, `operador`, `almacen` y opcionales).
-- El backend genera automáticamente `picking_detalle` a partir del `Pedido`.
+- Ya existe onboarding para consultar pedido, operadores, almacenes y cantidades pendientes por talla.
+- El frontend define las cantidades reales a surtir por cada línea/talla.
+- El backend valida que cada cantidad no exceda lo pendiente según el historial de `PickingDetalle`.
+- Antes de crear el picking, el backend genera reservas de inventario solo por las cantidades seleccionadas.
 - Al crear el picking, el sistema genera una transferencia al almacén `APARTADOS` del mismo contexto para preparar surtido.
-- Se valida empresa, sucursal, operador activo, pedido con líneas y que no exista otro picking activo para el mismo pedido.
+- El `Pedido` permanece como referencia comercial y no guarda el avance del surtido.
+- El avance se calcula consultando el historial de `PickingDetalle`.
+- La Fase WMS 2 queda conectada con la Fase WMS 3: reserva primero, mueve después, y deja trazabilidad de la mercancía apartada para surtido parcial o total.
 
 ---
 

@@ -214,15 +214,29 @@ class MovimientoInventarioDetalle(models.Model):
         return str(self.id)
 
 class inventario_reservas(models.Model):
+    class Estado(models.TextChoices):
+        ACTIVA = "ACTIVA", "Activa"
+        APLICADA = "APLICADA", "Aplicada"
+        LIBERADA = "LIBERADA", "Liberada"
+        CANCELADA = "CANCELADA", "Cancelada"
+
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="inventario_reservas")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="inventario_reservas")
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE, related_name="inventario_reservas")
     pedido_detalle_talla = models.ForeignKey(PedidoDetalleTalla, on_delete=models.CASCADE, related_name="inventario_reservas")
+    existencia = models.ForeignKey("Existencia", on_delete=models.PROTECT, related_name="inventario_reservas", null=True, blank=True)
+    almacen = models.ForeignKey(Almacen, on_delete=models.PROTECT, related_name="inventario_reservas", null=True, blank=True)
+    ubicacion = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="inventario_reservas", null=True, blank=True)
+    picking = models.ForeignKey("wms.Picking", on_delete=models.CASCADE, related_name="reservas_inventario", null=True, blank=True)
+    transferencia = models.ForeignKey("wms.Transferencia", on_delete=models.CASCADE, related_name="reservas_inventario", null=True, blank=True)
 
     cantidad = models.DecimalField(max_digits=18, decimal_places=4)
+    estado = models.CharField(max_length=20, choices=Estado.choices, default=Estado.ACTIVA)
+    observaciones = models.TextField(max_length=150, null=True, blank=True)
     
     fecha_reserva = models.DateTimeField(auto_now_add=True, null=True, blank=True)
-    fecha_devolucion = models.DateTimeField(auto_now=True, null=True, blank=True)
+    fecha_aplicacion = models.DateTimeField(null=True, blank=True)
+    fecha_devolucion = models.DateTimeField(null=True, blank=True)
     usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE)
     class Meta:
         db_table = "inventario_reservas"

@@ -147,6 +147,13 @@ class PickingDetalle(models.Model):
 
     picking = models.ForeignKey(Picking, on_delete=models.CASCADE, related_name="picking_detalle")
     pedido_detalle = models.ForeignKey("ventas.PedidoDetalle", on_delete=models.CASCADE, related_name="picking_detalle")
+    pedido_detalle_talla = models.ForeignKey(
+        "ventas.PedidoDetalleTalla",
+        on_delete=models.CASCADE,
+        related_name="picking_detalle",
+        null=True,
+        blank=True,
+    )
 
     producto = models.ForeignKey("catalogo.Producto", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
     producto_variante = models.ForeignKey("catalogo.ProductoVariante", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
