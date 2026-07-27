@@ -1,6 +1,12 @@
 from django.db import models
 from simple_history.models import HistoricalRecords
 
+class Estado(models.TextChoices):
+    PENDIENTE = "PENDIENTE", "Pendiente"
+    EN_PROCESO = "EN_PROCESO", "En proceso"
+    COMPLETADO = "COMPLETADO", "Completado"
+    CANCELADO = "CANCELADO", "Cancelado"
+
 class LotePicking(models.Model):
     class Estado(models.TextChoices):
         PENDIENTE = "PENDIENTE", "Pendiente"
@@ -129,7 +135,7 @@ class Picking(models.Model):
         verbose_name_plural = "Pickings"
 
     def __str__(self):
-        return str(self.id)
+        return self.folio
 
 class PickingDetalle(models.Model):
     class EstadoLinea(models.TextChoices):
@@ -177,9 +183,26 @@ class PickingDetalle(models.Model):
         return str(self.id)
 
 class Packing(models.Model):
-    picking = models.ForeignKey(
-        Picking, on_delete=models.CASCADE, related_name="packings"
-    )
+    folio = models.CharField(max_length=50)
+    empresa = models.ForeignKey("nucleo.Empresa", on_delete=models.CASCADE, related_name="packings")
+    sucursal = models.ForeignKey("nucleo.Sucursal", on_delete=models.CASCADE, related_name="packings")
+
+    pedido = models.ForeignKey("ventas.Pedido", on_delete=models.CASCADE, related_name="packings")
+    picking = models.ForeignKey(Picking, on_delete=models.CASCADE, related_name="packings")
+    operador = models.ForeignKey("usuarios.Usuario", on_delete=models.CASCADE, related_name="packings_operadores")
+    estado = models.CharField(max_length=50, choices=Estado.choices, default=Estado.PENDIENTE)
+
+    numero_cajas = models.PositiveIntegerField(default=0)
+    peso_total = models.DecimalField(max_digits=18, decimal_places=3, default=0)
+    volumen_total = models.DecimalField(max_digits=18, decimal_places=3, default=0)
+
+    observaciones = models.TextField(blank=True, null=True)
+    fecha_inicio = models.DateTimeField(blank=True, null=True)
+    fecha_fin = models.DateTimeField(blank=True, null=True)
+
+    usuario = models.ForeignKey("usuarios.Usuario", on_delete=models.CASCADE, related_name="packings_usuarios")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "packing"
@@ -187,15 +210,29 @@ class Packing(models.Model):
         verbose_name_plural = "Packings"
 
     def __str__(self):
-        return str(self.id)
+        return self.folio
+
+class PackingCaja(models.Model):
+    packing = models.ForeignKey(Packing, on_delete=models.CASCADE, related_name="packing_cajas")
+    numero = models.PositiveIntegerField()
+
+    peso = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+
+    largo = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    ancho = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    alto = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+
+    observaciones = models.TextField(blank=True, null=True)
 
 class PackingDetalle(models.Model):
-    packing = models.ForeignKey(
-        Packing, on_delete=models.CASCADE, related_name="packing_detalle"
-    )
-    picking_detalle = models.ForeignKey(
-        PickingDetalle, on_delete=models.CASCADE, related_name="packing_detalle"
-    )
+    packing = models.ForeignKey(Packing, on_delete=models.CASCADE, related_name="packing_detalle")
+    caja = models.ForeignKey(PackingCaja, on_delete=models.CASCADE, related_name="packing_detalle", blank=True, null=True)
+    picking_detalle = models.ForeignKey(PickingDetalle, on_delete=models.CASCADE, related_name="packing_detalle")
+
+    cantidad_empacada = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    estado = models.CharField(max_length=50, choices=Estado.choices, default=Estado.PENDIENTE)
+
+    observaciones = models.TextField(blank=True, null=True)
 
     class Meta:
         db_table = "packing_detalle"
