@@ -8,11 +8,14 @@ from wms.api.serializers import (
     TransferenciaSerializer,
     PickingCreateSerializer,
     PickingSerializer,
+    PackingSerializer
 )
-from wms.models import Transferencia, TransferenciaDetalle
+from wms.models import Transferencia, TransferenciaDetalle, Packing
 from wms.services.transferencia_service import TransferenciaService
 from wms.models import Picking, PickingDetalle
 from wms.services.picking_service import PickingService
+from wms.services.packing_service import PackingService
+
 
 class TransferenciaViewSet(
     mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet
@@ -157,3 +160,13 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
         serializer.is_valid(raise_exception=True)
         res = PickingService.handle_store(serializer.validated_data, request.user)
         return Response(PickingSerializer(res).data, status=status.HTTP_201_CREATED)
+
+class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
+    queryset = Packing.objects.all()
+    serializer_class = PackingSerializer
+
+    def create(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        packing_instance = PackingService.handle_store(serializer.validated_data, request.user)
+        return Response(PackingSerializer(packing_instance).data, status=status.HTTP_201_CREATED)

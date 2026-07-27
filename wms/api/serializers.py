@@ -1,5 +1,13 @@
 from rest_framework import serializers
-from wms.models import Transferencia, TransferenciaDetalle, Picking, PickingDetalle
+from wms.models import (
+    Transferencia, 
+    TransferenciaDetalle, 
+    Picking, 
+    PickingDetalle, 
+    Packing, 
+    PackingDetalle
+)
+
 
 
 class TransferenciaDetalleSerializer(serializers.ModelSerializer):
@@ -305,3 +313,44 @@ class PickingCreateSerializer(serializers.ModelSerializer):
             "fecha_limite",
             "observaciones",
         ]
+
+class PackingDetalleSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = PackingDetalle
+        fields = "__all__"
+        read_only_fields = ["packing", "estado"]
+
+class PackingSerializer(serializers.ModelSerializer):
+    packing_detalle = PackingDetalleSerializer(many=True)
+    pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
+    picking_folio = serializers.CharField(source="picking.folio", read_only=True)
+    operador_nombre = serializers.SerializerMethodField()
+    usuario_nombre = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Packing
+        fields = "__all__"
+        read_only_fields = [
+            "folio", 
+            "empresa", 
+            "sucursal", 
+            "pedido", 
+            "operador", 
+            "usuario", 
+            "created_at", 
+            "updated_at"
+        ]
+
+        
+    def _nombre_usuario(self, usuario):
+            if not usuario:
+                return None
+            return usuario.get_full_name().strip() or usuario.email
+
+    def get_operador_nombre(self, obj):
+            return self._nombre_usuario(obj.operador)
+    
+    def get_usuario_nombre(self, obj):
+            return self._nombre_usuario(obj.usuario)
+
