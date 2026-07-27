@@ -2262,7 +2262,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 **Ligado al modelo**
 
-- `despacho` va ligado a `packing` y `envio`
+- `despacho` va ligado a `packing` y opcionalmente a `envio`
 - `despacho_detalle` va ligado a `despacho` y `packing_detalle`
 - esto sigue exactamente la estructura de `doc/dbdiagram.io.md`
 
@@ -2353,7 +2353,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 ### 2) Crear Despacho desde Onboarding
 
 - **Endpoint**: `POST /api/v1/wms/despachos/onboarding/`
-- **Objetivo**: registrar qué líneas empacadas salen hacia logística, ligándolas a un `envio` del mismo pedido.
+- **Objetivo**: registrar qué líneas empacadas salen hacia logística, con o sin `envio` asociado en ese momento.
 
 **Flujo actual**
 
@@ -2363,12 +2363,12 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 - El backend valida:
   - empresa y sucursal del `packing`
   - acceso del usuario a la sucursal
-  - que el `envio` pertenezca al mismo pedido del `packing`
+  - si `envio` viene informado, que pertenezca al mismo pedido y sucursal del `packing`
   - que cada `packing_detalle` pertenezca al `packing`
   - que la línea no haya sido despachada antes
 - Si todo es válido, el backend crea `despacho` y sus renglones `despacho_detalle`.
 
-**Body**
+**Body con envío**
 
 ```json
 {
@@ -2385,17 +2385,36 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 }
 ```
 
+**Body sin envío**
+
+```json
+{
+  "packing": 7,
+  "despacho_detalle": [
+    {
+      "packing_detalle": 21
+    },
+    {
+      "packing_detalle": 22
+    }
+  ]
+}
+```
+
 **Campos requeridos**
 
 - `packing`
-- `envio`
 - `despacho_detalle`
+
+**Campo opcional**
+
+- `envio`
 
 **Validaciones principales**
 
 - El `packing` debe pertenecer a la empresa del usuario.
-- El `envio` debe pertenecer a la misma empresa del usuario.
-- El `envio` debe corresponder al mismo `pedido` y `sucursal` del `packing`.
+- Si se envía `envio`, debe pertenecer a la misma empresa del usuario.
+- Si se envía `envio`, debe corresponder al mismo `pedido` y `sucursal` del `packing`.
 - No se puede despachar un `packing` cancelado.
 - Cada línea debe incluir `packing_detalle`.
 - Cada `packing_detalle` debe pertenecer al `packing` seleccionado.
@@ -2448,8 +2467,9 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 **Notas para Next.js**
 
 - El flujo recomendado es `GET /despachos/onboarding/` -> seleccionar `packing` -> seleccionar `envio` -> `POST /despachos/onboarding/`.
+- Si todavía no existe `envio`, frontend puede crear el `despacho` solo con `packing` + `despacho_detalle` y asociar el envío después en otro paso operativo.
 - El frontend no necesita recalcular si una línea ya fue despachada; el backend ya devuelve `ya_despachado` y `disponible_para_despacho`.
-- `despacho` está ligado a `packing` y `envio`; `despacho_detalle` está ligado a `packing_detalle`.
+- `despacho` está ligado a `packing` y opcionalmente a `envio`; `despacho_detalle` está ligado a `packing_detalle`.
 
 ### 3) Listar Despachos
 

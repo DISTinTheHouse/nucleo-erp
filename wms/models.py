@@ -243,12 +243,8 @@ class PackingDetalle(models.Model):
         return str(self.id)
 
 class Despacho(models.Model):
-    packing = models.ForeignKey(
-        Packing, on_delete=models.CASCADE, related_name="despachos"
-    )
-    envio = models.ForeignKey(
-        "logistica.Envio", on_delete=models.CASCADE, related_name="despachos"
-    )
+    packing = models.ForeignKey(Packing, on_delete=models.CASCADE, related_name="despachos")
+    envio = models.ForeignKey("logistica.Envio", on_delete=models.CASCADE, related_name="despachos", null=True, blank=True)
 
     class Meta:
         db_table = "despachos"

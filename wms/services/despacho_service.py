@@ -219,12 +219,6 @@ class DespachoService:
             raise ValidationError("El usuario no tiene una empresa asignada.")
         if packing.empresa_id != empresa.pk:
             raise ValidationError("El packing no pertenece a la empresa del usuario.")
-        if envio.empresa_id != empresa.pk:
-            raise ValidationError("El envío no pertenece a la empresa del usuario.")
-        if packing.pedido_id != envio.pedido_id:
-            raise ValidationError("El envío no corresponde al pedido del packing.")
-        if packing.sucursal_id != envio.sucursal_id:
-            raise ValidationError("El envío no corresponde a la sucursal del packing.")
         if packing.estado == "CANCELADO":
             raise ValidationError("No se puede despachar un packing cancelado.")
 
@@ -237,6 +231,16 @@ class DespachoService:
                 raise ValidationError(
                     "No tiene acceso a la sucursal del packing para generar el despacho."
                 )
+
+        if envio is None:
+            return
+
+        if envio.empresa_id != empresa.pk:
+            raise ValidationError("El envío no pertenece a la empresa del usuario.")
+        if packing.pedido_id != envio.pedido_id:
+            raise ValidationError("El envío no corresponde al pedido del packing.")
+        if packing.sucursal_id != envio.sucursal_id:
+            raise ValidationError("El envío no corresponde a la sucursal del packing.")
 
     @classmethod
     def _resolve_requested_rows(cls, packing, requested_rows):
@@ -293,9 +297,12 @@ class DespachoService:
             .select_related("empresa", "sucursal", "pedido", "picking", "picking__almacen")
             .get(pk=data.pop("packing").pk)
         )
-        envio = Envio.objects.select_for_update().select_related("transportista").get(
-            pk=data.pop("envio").pk
-        )
+        envio_input = data.pop("envio", None)
+        envio = None
+        if envio_input is not None:
+            envio = Envio.objects.select_for_update().select_related("transportista").get(
+                pk=envio_input.pk
+            )
         despacho_detalle = data.pop("despacho_detalle")
 
         DespachoService._validate_context(packing, envio, user)

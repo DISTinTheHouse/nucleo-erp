@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
+from logistica.models import Envio
 from wms.models import (
     Despacho,
     DespachoDetalle,
@@ -549,7 +550,7 @@ class DespachoSerializer(serializers.ModelSerializer):
         source="packing.sucursal.nombre", read_only=True, default=None
     )
     envio_transportista = serializers.IntegerField(
-        source="envio.transportista_id", read_only=True
+        source="envio.transportista_id", read_only=True, default=None
     )
     envio_transportista_nombre = serializers.CharField(
         source="envio.transportista.nombre", read_only=True, default=None
@@ -564,6 +565,11 @@ class DespachoCreateSerializer(serializers.ModelSerializer):
     class DespachoCreateDetalleInputSerializer(serializers.Serializer):
         packing_detalle = serializers.IntegerField(min_value=1)
 
+    envio = serializers.PrimaryKeyRelatedField(
+        queryset=Envio.objects.all(),
+        required=False,
+        allow_null=True,
+    )
     despacho_detalle = DespachoCreateDetalleInputSerializer(many=True)
 
     class Meta:
