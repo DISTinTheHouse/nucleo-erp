@@ -19,12 +19,14 @@ from wms.models import (
     DespachoDetalle,
     Packing,
     PackingDetalle,
+    Picking,
+    PickingDetalle,
+    PickingOrdenTrabajo,
     Transferencia,
     TransferenciaDetalle,
 )
 from wms.services.despacho_service import DespachoService
 from wms.services.transferencia_service import TransferenciaService
-from wms.models import Picking, PickingDetalle
 from wms.services.picking_service import PickingService
 from wms.services.packing_service import PackingService
 
@@ -141,7 +143,15 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
                         "ubicacion__almacen",
                         "operador",
                     ).order_by("id"),
-                )
+                ),
+                Prefetch(
+                    "ordenes_trabajo",
+                    queryset=PickingOrdenTrabajo.objects.select_related(
+                        "orden_bordado",
+                        "orden_reflejante",
+                        "orden_corte_manga",
+                    ).order_by("id"),
+                ),
             )
         )
 

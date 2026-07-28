@@ -1,9 +1,8 @@
 from collections import defaultdict
-from datetime import datetime
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Sum, Q as QModel
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -22,7 +21,7 @@ from wms.models import Picking, PickingDetalle, PickingOrdenTrabajo
 from wms.services.existencia_service import ExistenciaService
 from wms.services.reserva_service import ReservaInventarioService
 from wms.services.transferencia_service import TransferenciaService
-from wms.utils.folios import generate_folio
+from wms.utils.folios import generate_folio, safe_generate_folio
 
 
 class PickingService:
@@ -59,29 +58,37 @@ class PickingService:
         return asignado_map, surtido_map
 
     @classmethod
-    def _folio_preview(cls, empresa, sucursal):
+    def _folio_preview(cls, empresa, sucursal, tipo_documento="Picking"):
         serie_folio = (
             SerieFolio.objects.filter(
                 empresa=empresa,
                 sucursal=sucursal,
-                tipo_documento__iexact="Picking",
+                tipo_documento__iexact=tipo_documento,
                 activo=True,
             )
             .order_by("id_serie_folio")
-            .only("prefijo", "sufijo", "folio_actual", "longitud_consecutivo")
+            .only(
+                "serie",
+                "folio_actual",
+                "prefijo",
+                "sufijo",
+                "relleno_ceros",
+                "separador",
+                "incluir_anio",
+                "reiniciar_anual",
+                "ultimo_anio",
+                "folio_inicial",
+                "folio_final",
+            )
             .first()
         )
         if not serie_folio:
             return None
-        actual = int(getattr(serie_folio, "folio_actual", 0) or 0)
-        siguiente = actual + 1
-        prefijo = (getattr(serie_folio, "prefijo", "") or "")
-        sufijo = (getattr(serie_folio, "sufijo", "") or "")
-        longitud = int(getattr(serie_folio, "longitud_consecutivo", 0) or 0)
-        consecutivo = str(siguiente).zfill(longitud) if longitud else str(siguiente)
-        if sufijo:
-            return f"{prefijo}{consecutivo}-{sufijo}"
-        return f"{prefijo}{consecutivo}"
+        try:
+            folio_formateado, _, _ = serie_folio.get_siguiente_folio()
+            return folio_formateado
+        except Exception:
+            return None
 
     @staticmethod
     def _parse_almacen_id(raw):
@@ -233,14 +240,30 @@ class PickingService:
         header["folio_sugerido_preview"] = folio_sugerido_preview
 
         if almacen_origen is None and payload["almacen_origen"] is None:
+            almacen_destino_candidato = almacen_destino or cls._resolve_apartados_safe(
+                pedido.empresa_id, pedido.sucursal_id
+            )
+            exclude_pks = []
+            if almacen_destino_candidato:
+                exclude_pks.append(almacen_destino_candidato.pk)
             almacen_origen_candidato = (
                 Almacen.objects.filter(
                     empresa_id=pedido.empresa_id,
                     sucursal_id=pedido.sucursal_id,
                 )
+                .exclude(pk__in=exclude_pks)
                 .order_by("pk")
                 .first()
             )
+            if not almacen_origen_candidato and almacen_destino_candidato:
+                almacen_origen_candidato = (
+                    Almacen.objects.filter(
+                        empresa_id=pedido.empresa_id,
+                        sucursal_id=pedido.sucursal_id,
+                    )
+                    .order_by("pk")
+                    .first()
+                )
             if almacen_origen_candidato:
                 payload["almacen_origen"] = {
                     "id": almacen_origen_candidato.pk,
@@ -501,8 +524,49 @@ class PickingService:
                     "generar_orden_reflejante": extras.get("generar_orden_reflejante", False),
                     "generar_orden_corte_manga": extras.get("generar_orden_corte_manga", False),
                     "observaciones": extras.get("observaciones") or "",
+                    "_clave_stock": (
+                        getattr(talla.pedido_detalle, "producto_id", None),
+                        getattr(talla, "variante_id", None),
+                    ),
                 }
             )
+
+        if almacen_origen:
+            solicitado_por_clave = defaultdict(lambda: Decimal("0"))
+            disponible_por_clave = {}
+            for item in requested_items:
+                clave = item["_clave_stock"]
+                solicitado_por_clave[clave] += item["cantidad"]
+                if clave not in disponible_por_clave:
+                    fis, res, dis = ExistenciaService.get_existencia_agregada(
+                        almacen=almacen_origen,
+                        producto=clave[0],
+                        producto_variante=clave[1],
+                    )
+                    disponible_por_clave[clave] = cls._normalize_quantity(dis)
+            for clave, total_solicitado in solicitado_por_clave.items():
+                total_disponible = disponible_por_clave.get(clave, Decimal("0"))
+                if total_solicitado > total_disponible:
+                    producto_id, variante_id = clave
+                    if variante_id:
+                        raise ValidationError(
+                            {
+                                "picking_detalle": (
+                                    f"La suma de cantidades para el producto_variante {variante_id} "
+                                    f"({total_solicitado}) excede la existencia disponible agregada "
+                                    f"({total_disponible}). Varias líneas del pedido comparten el mismo stock."
+                                )
+                            }
+                        )
+                    raise ValidationError(
+                        {
+                            "picking_detalle": (
+                                f"La suma de cantidades para el producto {producto_id} "
+                                f"({total_solicitado}) excede la existencia disponible agregada "
+                                f"({total_disponible}). Varias líneas del pedido comparten el mismo stock."
+                            )
+                        }
+                    )
 
         return requested_items
 
@@ -554,7 +618,7 @@ class PickingService:
     def _resolve_apartados(pedido):
         almacen_apartados = (
             Almacen.objects.filter(
-                nombre="APARTADOS",
+                nombre__iexact="APARTADOS",
                 empresa_id=pedido.empresa_id,
                 sucursal_id=pedido.sucursal_id,
             )
@@ -572,20 +636,30 @@ class PickingService:
         bordado_items = [it for it in requested_items if it["generar_orden_bordado"]]
         reflejante_items = [it for it in requested_items if it["generar_orden_reflejante"]]
         corte_items = [it for it in requested_items if it["generar_orden_corte_manga"]]
+        fallback_ref = picking.pedido.folio or picking.pedido.id
 
         resultado = []
         enlaces = []
 
         if bordado_items:
-            folio = generate_folio(picking.empresa, picking.sucursal, "Bordado")
+            folio = safe_generate_folio(
+                picking.empresa_id,
+                picking.sucursal_id,
+                tipos_documento=[
+                    "ORDEN_BORDADO",
+                    "Orden de Bordado",
+                    "Bordado",
+                ],
+                fallback_prefix="OB",
+                fallback_reference=fallback_ref,
+            )
             orden = OrdenesBordado.objects.create(
                 empresa=picking.empresa,
                 sucursal=picking.sucursal,
                 pedido=picking.pedido,
                 folio_bordado=folio,
                 prioridad=1,
-                fecha_inicio=timezone.now(),
-                usuario_asignado=getattr(user, "pk", None) or None,
+                usuario_asignado=user if getattr(user, "pk", None) else None,
                 observaciones=f"Generada automáticamente desde picking {picking.folio}.",
                 activo=True,
             )
@@ -627,15 +701,24 @@ class PickingService:
             ))
 
         if reflejante_items:
-            folio = generate_folio(picking.empresa, picking.sucursal, "Reflejante")
+            folio = safe_generate_folio(
+                picking.empresa_id,
+                picking.sucursal_id,
+                tipos_documento=[
+                    "ORDEN_REFLEJANTE",
+                    "Orden de Reflejante",
+                    "Reflejante",
+                ],
+                fallback_prefix="ORF",
+                fallback_reference=fallback_ref,
+            )
             orden = OrdenesReflejante.objects.create(
                 empresa=picking.empresa,
                 sucursal=picking.sucursal,
                 pedido=picking.pedido,
                 folio_reflejante=folio,
                 prioridad=1,
-                fecha_inicio=timezone.now(),
-                usuario_asignado=getattr(user, "pk", None) or None,
+                usuario_asignado=user if getattr(user, "pk", None) else None,
                 observaciones=f"Generada automáticamente desde picking {picking.folio}.",
                 activo=True,
             )
@@ -666,15 +749,25 @@ class PickingService:
             ))
 
         if corte_items:
-            folio = generate_folio(picking.empresa, picking.sucursal, "CorteManga")
+            folio = safe_generate_folio(
+                picking.empresa_id,
+                picking.sucursal_id,
+                tipos_documento=[
+                    "ORDEN_CORTE_MANGA",
+                    "Orden Corte de Manga",
+                    "Orden de Corte de Manga",
+                    "CorteManga",
+                ],
+                fallback_prefix="OCM",
+                fallback_reference=fallback_ref,
+            )
             orden = OrdenesCorteManga.objects.create(
                 empresa=picking.empresa,
                 sucursal=picking.sucursal,
                 pedido=picking.pedido,
                 folio_ocm=folio,
                 prioridad=1,
-                fecha_inicio=timezone.now(),
-                usuario_asignado=getattr(user, "pk", None) or None,
+                usuario_asignado=user if getattr(user, "pk", None) else None,
                 observaciones=f"Generada automáticamente desde picking {picking.folio}.",
                 activo=True,
             )

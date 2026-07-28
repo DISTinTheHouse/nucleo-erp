@@ -10,6 +10,7 @@ from wms.models import (
     PackingDetalle,
     Picking,
     PickingDetalle,
+    PickingOrdenTrabajo,
     Transferencia,
     TransferenciaDetalle,
 )
@@ -197,6 +198,10 @@ class PickingDetalleSerializer(serializers.ModelSerializer):
     ``lote`` (``inventarios.Lote``) se expone solo como id: el modelo únicamente
     tiene ``id`` y una FK a ``producto``, sin ningún campo identificador que
     resolver (misma convención que ``lote``/``serie`` en transferencias).
+
+    ``oleada`` y ``lote_picking`` usan ``__str__`` null-safe como etiqueta porque
+    sus modelos no tienen un campo ``nombre`` natural (su ``__str__`` compone id
+    + estado), al igual que ``TransferenciaDetalleReadSerializer`` con ``Ubicacion``.
     """
 
     producto_nombre = serializers.CharField(
@@ -231,22 +236,79 @@ class PickingDetalleSerializer(serializers.ModelSerializer):
         operador = obj.operador
         if not operador:
             return None
-        # Mismo fallback que ``TransferenciaListSerializer.usuario_nombre``:
-        # nombre completo y, si el usuario no tiene first/last name, el email.
         return operador.get_full_name().strip() or operador.email
 
 
+class PickingOrdenTrabajoReadSerializer(serializers.ModelSerializer):
+    """Renglón de vínculo entre un picking y una orden de trabajo generada.
+
+    Se adjunta nested en el list/retrieve de ``Picking`` para que Next.js pueda
+    recuperar la relación sin un endpoint adicional —la relación de Django se
+    prefetchcea desde ``PickingViewSet.get_queryset``.
+    """
+
+    orden_bordado_folio = serializers.CharField(
+        source="orden_bordado.folio_bordado", read_only=True, default=None
+    )
+    orden_reflejante_folio = serializers.CharField(
+        source="orden_reflejante.folio_reflejante", read_only=True, default=None
+    )
+    orden_corte_manga_folio = serializers.CharField(
+        source="orden_corte_manga.folio_ocm", read_only=True, default=None
+    )
+    tipo_orden_label = serializers.CharField(
+        source="get_tipo_orden_display", read_only=True
+    )
+
+    class Meta:
+        model = PickingOrdenTrabajo
+        fields = [
+            "id",
+            "tipo_orden",
+            "tipo_orden_label",
+            "orden_bordado",
+            "orden_bordado_folio",
+            "orden_reflejante",
+            "orden_reflejante_folio",
+            "orden_corte_manga",
+            "orden_corte_manga_folio",
+        ]
+
+
 class PickingSerializer(serializers.ModelSerializer):
+    """Serializer compartido de picking (``list``, ``retrieve`` y respuesta del
+    ``create``).
+
+    Además de las FK crudas expone los nombres resueltos —misma convención que
+    ``TransferenciaListSerializer``—. Todos los ``*_nombre`` son de solo lectura,
+    así que el contrato de escritura del ``POST /pickings/`` no cambia.
+
+    ``pedido``/``operador``/``almacen``/``almacen_destino``/``usuario`` son NOT NULL
+    en el modelo (``pedido_folio`` aun así puede ser ``null``: ``Pedido.folio`` es
+    nullable). ``oleada``/``zona_almacen``/``lote`` son FK opcionales y resuelven
+    a ``null`` cuando faltan. ``Oleada`` y ``LotePicking`` no tienen campo
+    ``nombre``: su etiqueta se compone en ``__str__`` (id + estado), por eso se
+    resuelven con ``str()`` null-safe, igual que ``Ubicacion`` en transferencias.
+
+    ``ordenes_trabajo`` está nested y prefetchceado para que el GET recupere la
+    trazabilidad contra producción; el POST además inyecta un arreglo plano
+    ``ordenes_trabajo_generadas`` con resumen ``{tipo, id, folio}``.
+    """
 
     picking_detalle = PickingDetalleSerializer(many=True)
+    ordenes_trabajo = PickingOrdenTrabajoReadSerializer(many=True, read_only=True)
 
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
     operador_nombre = serializers.SerializerMethodField()
     almacen_nombre = serializers.CharField(source="almacen.nombre", read_only=True)
-    almacen_destino_nombre = serializers.CharField(source="almacen_destino.nombre", read_only=True, default=None)
+    almacen_destino_nombre = serializers.CharField(
+        source="almacen_destino.nombre", read_only=True, default=None
+    )
     usuario_nombre = serializers.SerializerMethodField()
     oleada_nombre = serializers.SerializerMethodField()
-    zona_almacen_nombre = serializers.CharField(source="zona_almacen.nombre", read_only=True, default=None)
+    zona_almacen_nombre = serializers.CharField(
+        source="zona_almacen.nombre", read_only=True, default=None
+    )
     lote_nombre = serializers.SerializerMethodField()
 
     class Meta:

@@ -1850,11 +1850,11 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 **Query params**
 
-| Param | Requerido | Descripción |
-|---|---|---|
-| `pedido` / `pedido_id` | No | Activa la precarga del pedido y sus líneas de talla. |
-| `almacen_origen` / `almacen_origen_id` | No | Preselecciona el almacén de origen; usado para calcular existencia disponible. |
-| `almacen_destino` / `almacen_destino_id` | No | Preselecciona el almacén destino (si no se envía se sugiere `APARTADOS`). |
+| Param                                    | Requerido | Descripción                                                                    |
+| ---------------------------------------- | --------- | ------------------------------------------------------------------------------ |
+| `pedido` / `pedido_id`                   | No        | Activa la precarga del pedido y sus líneas de talla.                           |
+| `almacen_origen` / `almacen_origen_id`   | No        | Preselecciona el almacén de origen; usado para calcular existencia disponible. |
+| `almacen_destino` / `almacen_destino_id` | No        | Preselecciona el almacén destino (si no se envía se sugiere `APARTADOS`).      |
 
 **Ejemplo**
 
@@ -1950,21 +1950,27 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 **Notas sobre existencia y picking parcial**
 
-- `existencia_fisica`: lo que físicamente hay en el almacén origen.
-- `existencia_reservada`: lo que ya está reservado por otros pickings/documents activos.
+- `existencia_fisica`: lo que físicamente hay en el almacén origen (suma de **todas las ubicaciones** del mismo producto/variante).
+- `existencia_reservada`: lo que ya está reservado por **cualquier otro picking/documento** (misma empresa/sucursal, mismo almacén). Incluye reservas en estado **`ACTIVA` y `APLICADA`**, y no se limita a las tallas del pedido actual (todos los pedidos que compiten por el mismo stock suman).
 - `existencia_disponible` = `existencia_fisica` - `existencia_reservada`.
 - `maximo_picking_permitido` = `min(cantidad_pendiente, existencia_disponible)`.
   - Ejemplo: si el pedido pide 50 pz y solo hay 30 disponibles, el máximo que podrá enviarse en `cantidad_asignada` es 30 (picking parcial).
+- **Validación agregada por clave de stock**: cuando varias líneas/tallas del pedido tienen `variante = null` y comparten el mismo `producto`, todas consumen la misma clave `(producto_id, None)`. El backend suma todas las `cantidad_asignada` de esa clave y valida el conjunto contra la existencia agregada (no solo línea por línea). El frontend puede asumir que cada línea individual cumple, pero el total de líneas con la misma clave no excederá el stock real.
+
+**Notas sobre `header.folio_sugerido_preview`**
+
+- El preview usa la misma lógica de formato que `SerieFolio.get_siguiente_folio()` (incluye `serie`, `relleno_ceros`, `separador`, `incluir_anio` y reinicios anuales), por lo que coincide con el folio real asignado en el POST.
+- **No es vinculante**: es solo una sugerencia pre-visualización. Dos usuarios que hagan el GET onboarding simultáneamente verán el mismo preview; el consecutivo real y definitivo se reserva de forma transaccional dentro del `POST` de creación del picking.
 
 **Indicadores de órdenes de trabajo**
 
 Por cada línea/talla se exponen tres booleanos:
 
-| Campo | Significado | UI sugerida |
-|---|---|---|
-| `requiere_bordado` | La prenda del pedido incluye bordado. | Mostrar indicador visual (badge/ícono). |
-| `requiere_reflejante` | La prenda incluye reflejante. | Mostrar indicador visual. |
-| `requiere_corte_manga` | La prenda requiere corte de manga. | Mostrar indicador visual. |
+| Campo                  | Significado                           | UI sugerida                             |
+| ---------------------- | ------------------------------------- | --------------------------------------- |
+| `requiere_bordado`     | La prenda del pedido incluye bordado. | Mostrar indicador visual (badge/ícono). |
+| `requiere_reflejante`  | La prenda incluye reflejante.         | Mostrar indicador visual.               |
+| `requiere_corte_manga` | La prenda requiere corte de manga.    | Mostrar indicador visual.               |
 
 Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los parámetros operativos (posición, colores, puntadas, etc.) para que Next.js muestre el detalle al usuario.
 
@@ -1980,7 +1986,8 @@ Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los par
 1. Next.js envía encabezado + `picking_detalle` con las cantidades reales a surtir por línea/talla.
 2. El backend valida:
    - `cantidad_asignada` ≤ `cantidad_pendiente` de la talla.
-   - `cantidad_asignada` ≤ `existencia_disponible` en el almacén origen (no se permite sobrepasar existencia).
+   - `cantidad_asignada` ≤ `existencia_disponible` en el almacén origen (no se permite sobrepasar existencia). La comparación se hace contra la existencia agregada (suma de todas las ubicaciones del mismo producto/variante) y validada por clave de stock, no solo por fila de `Existencia` individual.
+   - **Validación agregada por clave**: la suma de `cantidad_asignada` de todas las líneas que comparten la misma clave `(producto_id, variante_id)` (incluyendo `variante_id = null`) debe ser ≤ la existencia disponible agregada de esa clave. Esto previene que múltiples tallas de un mismo producto sin variante agoten colectivamente el stock.
    - Si una línea marca `generar_orden_* = true` pero la talla NO requiere ese trabajo, se rechaza.
 3. Se generan **reservas de inventario** por cada talla/línea seleccionada.
 4. Se genera una **transferencia interna** del almacén origen hacia el `almacen_destino` (por defecto `APARTADOS`).
@@ -2116,19 +2123,23 @@ Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los par
 - No es necesario crear reservas manualmente: el backend las genera y las aplica dentro del flujo de `picking`.
 - El `Pedido` es solo referencia comercial; el avance real se consulta desde el historial de `PickingDetalle`.
 - Si frontend necesita mostrar el surtido creado, puede usar la respuesta del `POST` o consultar el `GET` de detalle.
-- Las órdenes de trabajo generadas se reportan en `ordenes_trabajo_generadas` (arreglo con `tipo`, `id`, `folio`); cada una está enlazada al picking mediante `PickingOrdenTrabajo`.
+- Las órdenes de trabajo generadas se reportan en `ordenes_trabajo_generadas` (arreglo con `tipo`, `id`, `folio`) en la respuesta del `POST`; cada una está enlazada al picking mediante `PickingOrdenTrabajo`. Los mismos vínculos están disponibles como **nested `ordenes_trabajo[]`** (read-only) en el `GET` list/retrieve del `PickingSerializer` (ver detalle en la sección 4).
 
 ### 3) Listar Pickings
 
 - **Endpoint**: `GET /api/v1/wms/pickings/`
 - **Descripción**: devuelve los pickings visibles para la empresa y sucursales del usuario autenticado.
-- **Nota**: cada registro incluye `almacen_destino` y `almacen_destino_nombre`.
+- **Nota**: cada registro incluye `almacen_destino`, `almacen_destino_nombre` y el nested `ordenes_trabajo[]` cuando existen vínculos.
 
 ### 4) Detalle de Picking
 
 - **Endpoint**: `GET /api/v1/wms/pickings/{id}/`
 - **Descripción**: devuelve encabezado y `picking_detalle` del surtido.
-- **Nota**: incluye `almacen_destino`, `almacen_destino_nombre` y (en su caso) las `ordenes_trabajo_generadas` se pueden consultar desde el detalle de la relación `PickingOrdenTrabajo` o directamente en los módulos de producción.
+- **Nota**: incluye `almacen_destino`, `almacen_destino_nombre` y expone el nested **`ordenes_trabajo[]`** (read-only, `related_name="ordenes_trabajo"` del modelo `PickingOrdenTrabajo`). Cada renglón contiene:
+  - `tipo_orden`: `BORDADO` | `REFLEJANTE` | `CORTE_MANGA` (enum).
+  - `tipo_orden_label`: label humano del tipo (ej: `"Bordado"`).
+  - `orden_bordado` / `orden_reflejante` / `orden_corte_manga`: FK id al módulo de producción correspondiente (dos serán `null`, uno tendrá valor).
+  - `orden_bordado_folio` / `orden_reflejante_folio` / `orden_corte_manga_folio`: folio formateado de la OT asociada (o `null`).
 
 ---
 
