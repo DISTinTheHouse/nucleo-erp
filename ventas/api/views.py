@@ -215,10 +215,11 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             field = part[1:] if desc else part
             if field in allowed:
                 ordering_fields.append(part)
-        if ordering_fields:
-            qs = qs.order_by(*ordering_fields)
-        else:
-            qs = qs.order_by("-created_at")
+        if not ordering_fields:
+            ordering_fields = ["-created_at"]
+        if not any(f.lstrip("-") == "id" for f in ordering_fields):
+            ordering_fields.append("-id")
+        qs = qs.order_by(*ordering_fields)
 
         return qs
 
