@@ -122,6 +122,7 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
                 "pedido",
                 "operador",
                 "almacen",
+                "almacen_destino",
                 "usuario",
                 "oleada",
                 "zona_almacen",
@@ -174,22 +175,30 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
     def onboarding(self, request):
         if request.method == "GET":
             pedido_id = request.query_params.get("pedido") or request.query_params.get("pedido_id")
+            almacen_origen_id = request.query_params.get("almacen_origen") or request.query_params.get("almacen_origen_id")
+            almacen_destino_id = request.query_params.get("almacen_destino") or request.query_params.get("almacen_destino_id")
             payload = PickingService.onboarding_payload(
                 request.user,
                 pedido_id=pedido_id,
+                almacen_origen_id=almacen_origen_id,
+                almacen_destino_id=almacen_destino_id,
             )
             return Response(payload)
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        res = PickingService.handle_store(serializer.validated_data, request.user)
-        return Response(PickingSerializer(res).data, status=status.HTTP_201_CREATED)
+        picking, ordenes_trabajo = PickingService.handle_store(serializer.validated_data, request.user)
+        response_data = PickingSerializer(picking).data
+        response_data["ordenes_trabajo_generadas"] = ordenes_trabajo
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        res = PickingService.handle_store(serializer.validated_data, request.user)
-        return Response(PickingSerializer(res).data, status=status.HTTP_201_CREATED)
+        picking, ordenes_trabajo = PickingService.handle_store(serializer.validated_data, request.user)
+        response_data = PickingSerializer(picking).data
+        response_data["ordenes_trabajo_generadas"] = ordenes_trabajo
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
     queryset = Packing.objects.all()

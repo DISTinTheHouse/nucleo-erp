@@ -107,6 +107,7 @@ class Picking(models.Model):
     pedido = models.ForeignKey("ventas.Pedido", on_delete=models.CASCADE, related_name="pickings")
     operador = models.ForeignKey("usuarios.Usuario", on_delete=models.CASCADE, related_name="pickings_operadores")
     almacen = models.ForeignKey("inventarios.Almacen", on_delete=models.CASCADE, related_name="pickings")
+    almacen_destino = models.ForeignKey("inventarios.Almacen", on_delete=models.CASCADE, related_name="pickings_destino", blank=True, null=True,)
 
     oleada = models.ForeignKey(Oleada, on_delete=models.CASCADE, related_name="pickings", blank=True, null=True)
     zona_almacen = models.ForeignKey(ZonaAlmacen, on_delete=models.CASCADE, related_name="pickings", blank=True, null=True)
@@ -300,6 +301,28 @@ class ConteoCiclicoDetalle(models.Model):
 
     def __str__(self):
         return str(self.id)
+
+class PickingOrdenTrabajo(models.Model):
+    class TipoOrden(models.TextChoices):
+        BORDADO = "BORDADO", "Bordado"
+        REFLEJANTE = "REFLEJANTE", "Reflejante"
+        CORTE_MANGA = "CORTE_MANGA", "Corte de manga"
+
+    picking = models.ForeignKey(Picking, on_delete=models.CASCADE, related_name="ordenes_trabajo",)
+    tipo_orden = models.CharField(max_length=30, choices=TipoOrden.choices)
+    orden_bordado = models.ForeignKey("produccion.OrdenesBordado", on_delete=models.SET_NULL, related_name="picking_ordenes_trabajo", blank=True, null=True,)
+    orden_reflejante = models.ForeignKey("produccion.OrdenesReflejante", on_delete=models.SET_NULL, related_name="picking_ordenes_trabajo", blank=True, null=True,)
+    orden_corte_manga = models.ForeignKey("produccion.OrdenesCorteManga", on_delete=models.SET_NULL, related_name="picking_ordenes_trabajo", blank=True, null=True,)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "picking_orden_trabajo"
+        verbose_name = "Picking Orden Trabajo"
+        verbose_name_plural = "Picking Ordenes Trabajo"
+
+    def __str__(self):
+        return f"Picking {self.picking_id} - {self.tipo_orden}"
+
 
 class Transferencia(models.Model):
     class TransferenciaStatus(models.TextChoices):

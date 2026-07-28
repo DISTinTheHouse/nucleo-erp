@@ -1839,23 +1839,26 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 ### 1) Onboarding de Picking
 
 - **Endpoint**: `GET /api/v1/wms/pickings/onboarding/`
-- **Objetivo**: dar al frontend todo lo necesario para preparar un surtido parcial o total.
+- **Objetivo**: dar al frontend todo lo necesario para preparar un surtido parcial o total mediante un flujo tipo onboarding de 4 pasos.
 
-**Flujo**
+**Flujo onboarding**
 
-- Si se consulta sin `pedido`, regresa catálogos base:
-  - `pedidos`
-  - `operadores`
-  - `almacenes`
-- Si se envía `pedido` o `pedido_id`, además regresa las líneas/tallas del pedido con:
-  - cantidad pedida
-  - cantidad ya asignada en pickings previos
-  - cantidad ya surtida
-  - cantidad pendiente
+1. Seleccionar el **pedido** (catalogo `pedidos`).
+2. Seleccionar **almacén origen** (de dónde se tomarán las prendas; catálogo `almacenes`).
+3. Seleccionar **almacén destino** (hacia dónde se moverá la mercancía; por defecto `APARTADOS`).
+4. Vista previa del encabezado (`header` con fecha sugerida y folio preview) + líneas con **existencia disponible** para picking parcial y flags de órdenes de trabajo (bordado / reflejante / corte de manga).
+
+**Query params**
+
+| Param | Requerido | Descripción |
+|---|---|---|
+| `pedido` / `pedido_id` | No | Activa la precarga del pedido y sus líneas de talla. |
+| `almacen_origen` / `almacen_origen_id` | No | Preselecciona el almacén de origen; usado para calcular existencia disponible. |
+| `almacen_destino` / `almacen_destino_id` | No | Preselecciona el almacén destino (si no se envía se sugiere `APARTADOS`). |
 
 **Ejemplo**
 
-- `GET /api/v1/wms/pickings/onboarding/?pedido_id=125`
+- `GET /api/v1/wms/pickings/onboarding/?pedido_id=125&almacen_origen=3&almacen_destino=10`
 
 **Respuesta resumida**
 
@@ -1878,8 +1881,30 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
       "codigo": "PT-MTY",
       "nombre": "Almacén PT Monterrey",
       "sucursal": 1
+    },
+    {
+      "id": 10,
+      "codigo": "APTOS",
+      "nombre": "APARTADOS",
+      "sucursal": 1
     }
   ],
+  "almacen_origen": {
+    "id": 3,
+    "codigo": "PT-MTY",
+    "nombre": "Almacén PT Monterrey",
+    "sucursal": 1
+  },
+  "almacen_destino": {
+    "id": 10,
+    "codigo": "APTOS",
+    "nombre": "APARTADOS",
+    "sucursal": 1
+  },
+  "header": {
+    "fecha_picking_sugerida": "2026-07-28T15:30:00.123456Z",
+    "folio_sugerido_preview": "PICK-000021"
+  },
   "pedido": {
     "id": 125,
     "folio": "PD-000125",
@@ -1900,26 +1925,68 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
       "talla_nombre": "M",
       "color": 2,
       "color_nombre": "Negro",
-      "cantidad_pedida": "10.0000",
-      "cantidad_ya_asignada": "4.0000",
-      "cantidad_ya_surtida": "3.0000",
-      "cantidad_pendiente": "6.0000"
+      "cantidad_pedida": "50.0000",
+      "cantidad_ya_asignada": "0.0000",
+      "cantidad_ya_surtida": "0.0000",
+      "cantidad_pendiente": "50.0000",
+      "existencia_fisica": "45.0000",
+      "existencia_reservada": "15.0000",
+      "existencia_disponible": "30.0000",
+      "maximo_picking_permitido": "30.0000",
+      "requiere_bordado": true,
+      "requiere_reflejante": false,
+      "requiere_corte_manga": false,
+      "bordado_config": {
+        "posicion": "PECHO",
+        "colores_hilo": 3,
+        "puntadas": 15000
+      },
+      "reflejante_config": null,
+      "corte_manga_config": null
     }
   ]
 }
 ```
 
+**Notas sobre existencia y picking parcial**
+
+- `existencia_fisica`: lo que físicamente hay en el almacén origen.
+- `existencia_reservada`: lo que ya está reservado por otros pickings/documents activos.
+- `existencia_disponible` = `existencia_fisica` - `existencia_reservada`.
+- `maximo_picking_permitido` = `min(cantidad_pendiente, existencia_disponible)`.
+  - Ejemplo: si el pedido pide 50 pz y solo hay 30 disponibles, el máximo que podrá enviarse en `cantidad_asignada` es 30 (picking parcial).
+
+**Indicadores de órdenes de trabajo**
+
+Por cada línea/talla se exponen tres booleanos:
+
+| Campo | Significado | UI sugerida |
+|---|---|---|
+| `requiere_bordado` | La prenda del pedido incluye bordado. | Mostrar indicador visual (badge/ícono). |
+| `requiere_reflejante` | La prenda incluye reflejante. | Mostrar indicador visual. |
+| `requiere_corte_manga` | La prenda requiere corte de manga. | Mostrar indicador visual. |
+
+Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los parámetros operativos (posición, colores, puntadas, etc.) para que Next.js muestre el detalle al usuario.
+
+---
+
 ### 2) Crear Picking desde Onboarding
 
-- **Endpoint**: `POST /api/v1/wms/pickings/onboarding/`
-- **Objetivo**: generar un picking parcial o total tomando exactamente las cantidades que frontend decide surtir.
+- **Endpoint**: `POST /api/v1/wms/pickings/onboarding/` (o `POST /api/v1/wms/pickings/`)
+- **Objetivo**: generar un picking parcial o total, con posibilidad de crear órdenes de trabajo (bordado / reflejante / corte de manga) desde el mismo request.
 
 **Flujo actual**
 
-- Next.js envía encabezado + `picking_detalle` con las cantidades reales a surtir por línea/talla.
-- Antes de crear el picking, el backend genera reservas de inventario por cada talla/línea seleccionada.
-- Antes de crear el picking, el sistema mueve la mercancía al almacén `APARTADOS` del mismo contexto mediante una transferencia interna.
-- El backend valida que cada cantidad no exceda lo pendiente según el historial de `PickingDetalle`.
+1. Next.js envía encabezado + `picking_detalle` con las cantidades reales a surtir por línea/talla.
+2. El backend valida:
+   - `cantidad_asignada` ≤ `cantidad_pendiente` de la talla.
+   - `cantidad_asignada` ≤ `existencia_disponible` en el almacén origen (no se permite sobrepasar existencia).
+   - Si una línea marca `generar_orden_* = true` pero la talla NO requiere ese trabajo, se rechaza.
+3. Se generan **reservas de inventario** por cada talla/línea seleccionada.
+4. Se genera una **transferencia interna** del almacén origen hacia el `almacen_destino` (por defecto `APARTADOS`).
+5. Se crea el `Picking` + `PickingDetalle`.
+6. Se aplican las reservas al picking y a la transferencia.
+7. Para cada línea con `generar_orden_* = true`, se crea su respectiva `OrdenesBordado` / `OrdenesReflejante` / `OrdenesCorteManga` con sus detalles, y se enlazan mediante `PickingOrdenTrabajo`.
 
 **Body**
 
@@ -1928,17 +1995,22 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
   "pedido": 125,
   "operador": 8,
   "almacen": 3,
+  "almacen_destino": 10,
   "prioridad": "MEDIA",
   "tipo": "ORDER_PICKING",
-  "observaciones": "Surtido parcial de pedido urgente",
+  "observaciones": "Surtido parcial + orden de bordado",
   "picking_detalle": [
     {
       "pedido_detalle_talla": 990,
-      "cantidad_asignada": "4.0000"
+      "cantidad_asignada": "30.0000",
+      "generar_orden_bordado": true,
+      "observaciones": "Bordado en pecho izquierdo"
     },
     {
       "pedido_detalle_talla": 991,
-      "cantidad_asignada": "2.0000"
+      "cantidad_asignada": "2.0000",
+      "generar_orden_reflejante": false,
+      "generar_orden_corte_manga": false
     }
   ]
 }
@@ -1948,31 +2020,36 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 - `pedido`
 - `operador`
-- `almacen`
-- `picking_detalle`
+- `almacen` (almacén origen)
+- `picking_detalle` (cada línea con `pedido_detalle_talla` y `cantidad_asignada > 0`)
 
 **Campos opcionales**
 
+- `almacen_destino`: si no se envía, se resuelve automáticamente el almacén `APARTADOS` de la misma empresa + sucursal.
 - `prioridad`: `BAJA`, `MEDIA`, `ALTA`
 - `tipo`: `ORDER_PICKING`, `BATCH_PICKING`, `WAVE_PICKING`, `ZONE_PICKING`
-- `oleada`
-- `zona_almacen`
-- `lote`
-- `fecha_inicio`
-- `fecha_fin`
-- `fecha_limite`
+- `oleada`, `zona_almacen`, `lote`
+- `fecha_inicio`, `fecha_fin`, `fecha_limite`
 - `observaciones`
+- Por cada línea en `picking_detalle`:
+  - `generar_orden_bordado` (solo permitido si la talla reportó `requiere_bordado = true`)
+  - `generar_orden_reflejante` (análogo)
+  - `generar_orden_corte_manga` (análogo)
+  - `observaciones`
 
 **Validaciones principales**
 
 - El pedido debe pertenecer a la empresa del usuario.
-- El almacén debe pertenecer a la misma empresa y sucursal del pedido.
+- El almacén origen y destino deben pertenecer a la misma empresa y sucursal del pedido.
+- El almacén origen y destino **no** pueden ser el mismo.
 - El operador debe estar activo y pertenecer a la misma empresa.
 - Cada renglón debe incluir `pedido_detalle_talla` y `cantidad_asignada > 0`.
-- Cada cantidad enviada no puede exceder lo pendiente del pedido para esa talla.
-- Debe existir un almacén `APARTADOS` en la misma empresa y sucursal del pedido.
+- Cada cantidad enviada **no** puede exceder lo pendiente del pedido para esa talla.
+- Cada cantidad enviada **no** puede exceder la `existencia_disponible` en el almacén origen (garantiza picking parcial real).
+- Si `almacen_destino` no se envía, debe existir un almacén `APARTADOS` en la misma empresa y sucursal del pedido.
 - La reserva y la transferencia interna validan inventario suficiente antes de crear el picking.
 - El avance del surtido no se guarda en `Pedido`; se calcula desde `PickingDetalle`.
+- `generar_orden_*` solo es válido si su correspondiente `requiere_*` es `true` en la talla.
 
 **Respuesta**
 
@@ -1986,12 +2063,21 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
   "operador_nombre": "Juan Perez",
   "almacen": 3,
   "almacen_nombre": "Almacén PT Monterrey",
+  "almacen_destino": 10,
+  "almacen_destino_nombre": "APARTADOS",
   "prioridad": "MEDIA",
   "tipo": "ORDER_PICKING",
   "estado": "Pendiente",
   "total_lineas": 4,
   "total_lineas_completas": 0,
-  "observaciones": "Surtido de pedido urgente",
+  "observaciones": "Surtido parcial + orden de bordado",
+  "ordenes_trabajo_generadas": [
+    {
+      "tipo": "BORDADO",
+      "id": 37,
+      "folio": "BORD-000037"
+    }
+  ],
   "picking_detalle": [
     {
       "id": 51,
@@ -2003,8 +2089,8 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
       "producto_variante_nombre": "Playera Dry Fit Negra M",
       "talla_id": 4,
       "talla_nombre": "M",
-      "cantidad_solicitada": "4.0000",
-      "cantidad_asignada": "4.0000",
+      "cantidad_solicitada": "30.0000",
+      "cantidad_asignada": "30.0000",
       "cantidad_surtida": "0.0000",
       "estado": "PENDIENTE",
       "operador": 8,
@@ -2015,7 +2101,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
       "fecha_surtido": null,
       "diferencia": "0.0000",
       "motivo_diferencia": null,
-      "observaciones": null
+      "observaciones": "Bordado en pecho izquierdo"
     }
   ]
 }
@@ -2024,20 +2110,25 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 **Notas para Next.js**
 
 - Sí es necesario enviar `picking_detalle` en el onboarding `POST`.
-- El frontend decide qué tallas y cantidades se surtirán en ese picking.
+- El frontend decide qué tallas y cantidades se surtirán en ese picking; debe **respetar** `maximo_picking_permitido` reportado por el GET onboarding (el backend lo validará de nuevo).
+- `almacen_destino` es opcional; si no se envía el backend resuelve `APARTADOS` y lo guarda.
+- Los checkbox de órdenes de trabajo (`generar_orden_*`) solo deben renderizarse si la línea reporta `requiere_* = true`.
 - No es necesario crear reservas manualmente: el backend las genera y las aplica dentro del flujo de `picking`.
 - El `Pedido` es solo referencia comercial; el avance real se consulta desde el historial de `PickingDetalle`.
 - Si frontend necesita mostrar el surtido creado, puede usar la respuesta del `POST` o consultar el `GET` de detalle.
+- Las órdenes de trabajo generadas se reportan en `ordenes_trabajo_generadas` (arreglo con `tipo`, `id`, `folio`); cada una está enlazada al picking mediante `PickingOrdenTrabajo`.
 
 ### 3) Listar Pickings
 
 - **Endpoint**: `GET /api/v1/wms/pickings/`
 - **Descripción**: devuelve los pickings visibles para la empresa y sucursales del usuario autenticado.
+- **Nota**: cada registro incluye `almacen_destino` y `almacen_destino_nombre`.
 
 ### 4) Detalle de Picking
 
 - **Endpoint**: `GET /api/v1/wms/pickings/{id}/`
 - **Descripción**: devuelve encabezado y `picking_detalle` del surtido.
+- **Nota**: incluye `almacen_destino`, `almacen_destino_nombre` y (en su caso) las `ordenes_trabajo_generadas` se pueden consultar desde el detalle de la relación `PickingOrdenTrabajo` o directamente en los módulos de producción.
 
 ---
 

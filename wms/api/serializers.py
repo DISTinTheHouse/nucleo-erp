@@ -238,31 +238,15 @@ class PickingDetalleSerializer(serializers.ModelSerializer):
 
 class PickingSerializer(serializers.ModelSerializer):
 
-    """Serializer compartido de picking (``list``, ``retrieve`` y respuesta del
-    ``create``).
-
-    Además de las FK crudas expone los nombres resueltos —misma convención que
-    ``TransferenciaListSerializer``—. Todos los ``*_nombre`` son de solo lectura,
-    así que el contrato de escritura del ``POST /pickings/`` no cambia.
-
-    ``pedido``/``operador``/``almacen``/``usuario`` son NOT NULL en el modelo
-    (``pedido_folio`` aun así puede ser ``null``: ``Pedido.folio`` es nullable).
-    ``oleada``/``zona_almacen``/``lote`` son FK opcionales y resuelven a ``null``
-    cuando faltan. ``Oleada`` y ``LotePicking`` no tienen campo ``nombre``: su
-    etiqueta se compone en ``__str__`` (id + estado), por eso se resuelven con
-    ``str()`` null-safe, igual que ``Ubicacion`` en transferencias.
-    """
-
     picking_detalle = PickingDetalleSerializer(many=True)
 
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
     operador_nombre = serializers.SerializerMethodField()
     almacen_nombre = serializers.CharField(source="almacen.nombre", read_only=True)
+    almacen_destino_nombre = serializers.CharField(source="almacen_destino.nombre", read_only=True, default=None)
     usuario_nombre = serializers.SerializerMethodField()
     oleada_nombre = serializers.SerializerMethodField()
-    zona_almacen_nombre = serializers.CharField(
-        source="zona_almacen.nombre", read_only=True, default=None
-    )
+    zona_almacen_nombre = serializers.CharField(source="zona_almacen.nombre", read_only=True, default=None)
     lote_nombre = serializers.SerializerMethodField()
 
     class Meta:
@@ -315,6 +299,9 @@ class PickingCreateSerializer(serializers.ModelSerializer):
             min_value=Decimal("0.0001"),
         )
         observaciones = serializers.CharField(required=False, allow_blank=True)
+        generar_orden_bordado = serializers.BooleanField(required=False, default=False)
+        generar_orden_reflejante = serializers.BooleanField(required=False, default=False)
+        generar_orden_corte_manga = serializers.BooleanField(required=False, default=False)
 
     picking_detalle = PickingCreateDetalleInputSerializer(many=True)
 
@@ -324,6 +311,7 @@ class PickingCreateSerializer(serializers.ModelSerializer):
             "pedido",
             "operador",
             "almacen",
+            "almacen_destino",
             "oleada",
             "zona_almacen",
             "lote",
