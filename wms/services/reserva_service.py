@@ -1,19 +1,16 @@
-from collections import defaultdict
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from inventarios.models import Existencia, inventario_reservas
-from wms.services.existencia_service import ExistenciaService
+from inventarios.models import inventario_reservas
+from wms.services.existencia_service import ExistenciaService, SaldoExistenciaAlmacen
+from wms.utils.decimales import normalizar_decimal
 
 
 class ReservaInventarioService:
-    @staticmethod
-    def _normalize(value):
-        return Decimal(str(value or "0"))
+    _normalize = staticmethod(normalizar_decimal)
 
     @classmethod
     @transaction.atomic
@@ -26,6 +23,13 @@ class ReservaInventarioService:
             raise ValidationError(
                 "El pedido ya tiene reservas de inventario activas."
             )
+
+        # Saldo compartido por todos los ítems: dos tallas pueden caer sobre la
+        # misma clave de stock (p.ej. ambas sin variante) y entonces compiten por
+        # las mismas filas de Existencia. Consultarlas por ítem hacía que el
+        # segundo volviera a ver el saldo original y se reservaran sobre una misma
+        # fila más unidades de las que contiene.
+        saldos = SaldoExistenciaAlmacen(almacen, lock=True)
 
         reservas = []
         for item in requested_items:
@@ -68,28 +72,29 @@ class ReservaInventarioService:
                     f"(disponible={existencia_disponible}, solicitado={cantidad})."
                 )
 
-            filters = {"almacen": almacen}
-            if talla.variante_id:
-                filters["producto_variante"] = talla.variante_id
-            else:
-                filters["producto"] = talla.pedido_detalle.producto_id
-            existencia_rows = list(
-                Existencia.objects.select_for_update()
-                .filter(**filters)
-                .order_by("pk")
+            # Mismas filas que sumó get_existencia_agregada: la selección de la
+            # clave de stock vive en ExistenciaService, para que validar y
+            # reservar no puedan usar criterios distintos. El reparto descuenta el
+            # saldo compartido, así que un ítem posterior de la misma clave ya ve
+            # lo que se llevó el anterior.
+            asignaciones, faltante = saldos.consumir(
+                talla.pedido_detalle.producto_id,
+                talla.variante_id,
+                cantidad,
             )
 
-            pendiente_asignar = cantidad
-            for existencia in existencia_rows:
-                if pendiente_asignar <= Decimal("0"):
-                    break
-                en_esta_ubicacion = min(
-                    cls._normalize(existencia.cantidad),
-                    pendiente_asignar,
+            if faltante > Decimal("0"):
+                producto_id = (
+                    talla.variante_id
+                    if talla.variante_id
+                    else talla.pedido_detalle.producto_id
                 )
-                if en_esta_ubicacion <= Decimal("0"):
-                    continue
+                raise ValidationError(
+                    f"No se pudo distribuir completamente la reserva para el producto/variante {producto_id} "
+                    f"(faltante por asignar={faltante})."
+                )
 
+            for existencia, en_esta_ubicacion in asignaciones:
                 reservas.append(
                     inventario_reservas(
                         empresa=pedido.empresa,
@@ -106,18 +111,6 @@ class ReservaInventarioService:
                             f"(distribuida en ubicaciones)."
                         ),
                     )
-                )
-                pendiente_asignar -= en_esta_ubicacion
-
-            if pendiente_asignar > Decimal("0"):
-                producto_id = (
-                    talla.variante_id
-                    if talla.variante_id
-                    else talla.pedido_detalle.producto_id
-                )
-                raise ValidationError(
-                    f"No se pudo distribuir completamente la reserva para el producto/variante {producto_id} "
-                    f"(faltante por asignar={pendiente_asignar})."
                 )
 
         return inventario_reservas.objects.bulk_create(reservas)

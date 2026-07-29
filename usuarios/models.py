@@ -86,6 +86,22 @@ class Usuario(AbstractUser):
     def __str__(self):
         return self.username
 
+    def sucursales_permitidas(self):
+        """Sucursales a las que el usuario tiene acceso operativo: el M2M
+        ``sucursales`` unido a ``sucursal_default``.
+
+        No contempla el atajo de superuser/``is_admin_empresa`` —eso lo decide
+        cada llamador antes de consultar esto—, sólo el conjunto de sucursales
+        que el M2M y la sucursal por defecto conceden. Sin esta unión, un
+        usuario cuyo único acceso fuera ``sucursal_default`` (M2M vacío) podía
+        crear un documento con esa sucursal pero no volver a verlo, porque el
+        lado de lectura sólo consultaba el M2M.
+        """
+        sucursal_ids = set(self.sucursales.values_list("pk", flat=True))
+        if self.sucursal_default_id:
+            sucursal_ids.add(self.sucursal_default_id)
+        return sucursal_ids
+
     def tiene_permiso(self, clave_permiso):
         """
         Verifica si el usuario tiene un permiso específico basado en sus roles asignados

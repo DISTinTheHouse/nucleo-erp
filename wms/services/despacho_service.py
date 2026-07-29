@@ -4,17 +4,10 @@ from django.db import transaction
 from rest_framework.exceptions import ValidationError
 
 from logistica.models import Envio
-from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle
+from wms.models import Despacho, DespachoDetalle, Packing
 
 
 class DespachoService:
-    @staticmethod
-    def _allowed_sucursal_ids(user):
-        sucursal_ids = set(user.sucursales.values_list("pk", flat=True))
-        if getattr(user, "sucursal_default_id", None):
-            sucursal_ids.add(user.sucursal_default_id)
-        return sucursal_ids
-
     @classmethod
     def _despachado_map(cls, packing, packing_detalle_ids=None):
         qs = DespachoDetalle.objects.filter(despacho__packing=packing)
@@ -40,7 +33,7 @@ class DespachoService:
         es_staff = getattr(user, "is_superuser", False) or getattr(
             user, "is_admin_empresa", False
         )
-        sucursal_ids = cls._allowed_sucursal_ids(user)
+        sucursal_ids = user.sucursales_permitidas()
 
         packings_qs = (
             Packing.objects.filter(empresa=empresa)
@@ -226,7 +219,7 @@ class DespachoService:
             user, "is_admin_empresa", False
         )
         if not es_staff:
-            sucursales_permitidas = cls._allowed_sucursal_ids(user)
+            sucursales_permitidas = user.sucursales_permitidas()
             if packing.sucursal_id not in sucursales_permitidas:
                 raise ValidationError(
                     "No tiene acceso a la sucursal del packing para generar el despacho."
