@@ -2,7 +2,7 @@ from collections import defaultdict
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum, Q as QModel
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -21,13 +21,38 @@ from wms.models import Picking, PickingDetalle, PickingOrdenTrabajo
 from wms.services.existencia_service import ExistenciaService
 from wms.services.reserva_service import ReservaInventarioService
 from wms.services.transferencia_service import TransferenciaService
-from wms.utils.folios import generate_folio, safe_generate_folio
+from wms.utils.decimales import normalizar_decimal
+from wms.utils.folios import generate_folio, generate_folio_multi_tipo
+
+
+def _bordado_detalle_extra(talla):
+    cfg = getattr(talla, "bordado_config", None)
+    cfg = cfg if isinstance(cfg, dict) else {}
+    return {
+        "posicion_bordado": cfg.get("posicion"),
+        "colores_hilo": int(cfg.get("colores_hilo", 0)),
+        "puntadas": int(cfg.get("puntadas", 0)),
+    }
+
+
+def _reflejante_detalle_extra(talla):
+    cfg = getattr(talla, "reflejante_config", None)
+    cfg = cfg if isinstance(cfg, dict) else {}
+    return {
+        "tipo_reflejante": cfg.get("tipo_reflejante"),
+        "posicion": cfg.get("posicion"),
+        "metros": float(cfg.get("metros") or 0.0),
+    }
+
+
+def _corte_manga_detalle_extra(talla):
+    cfg = getattr(talla, "corte_manga_config", None)
+    cfg = cfg if isinstance(cfg, dict) else {}
+    return {"configuracion": cfg or None}
 
 
 class PickingService:
-    @staticmethod
-    def _normalize_quantity(value):
-        return Decimal(str(value or "0"))
+    _normalize_quantity = staticmethod(normalizar_decimal)
 
     @classmethod
     def _picking_scope_queryset(cls, pedido):
@@ -126,9 +151,7 @@ class PickingService:
         es_staff = getattr(user, "is_superuser", False) or getattr(
             user, "is_admin_empresa", False
         )
-        sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
-        if user.sucursal_default_id and user.sucursal_default_id not in sucursal_ids:
-            sucursal_ids.append(user.sucursal_default_id)
+        sucursal_ids = user.sucursales_permitidas()
 
         pedido_qs = (
             Pedido.objects.filter(
@@ -598,9 +621,7 @@ class PickingService:
             user, "is_admin_empresa", False
         )
         if not es_staff:
-            sucursales_permitidas = set(user.sucursales.values_list("pk", flat=True))
-            if user.sucursal_default_id:
-                sucursales_permitidas.add(user.sucursal_default_id)
+            sucursales_permitidas = user.sucursales_permitidas()
             if pedido.sucursal_id not in sucursales_permitidas:
                 raise ValidationError(
                     "No tiene acceso a la sucursal del pedido para generar el picking."
@@ -631,168 +652,109 @@ class PickingService:
             )
         return almacen_apartados
 
+    #: Un renglón por tipo de orden de trabajo. Cada uno difiere sólo en el
+    #: tipo de documento del folio, el modelo de orden/detalle, el nombre del
+    #: campo de folio y del FK del detalle hacia la orden, y en qué columnas
+    #: de configuración extrae de la talla —el resto (folio, alta de la orden,
+    #: alta de los detalles, enlace con el picking) es idéntico y vive una
+    #: sola vez en ``_generar_ordenes_trabajo``.
+    _ORDENES_TRABAJO_CONFIG = (
+        {
+            "flag": "generar_orden_bordado",
+            "tipos_documento": ["ORDEN_BORDADO", "Orden de Bordado", "Bordado"],
+            "descripcion_documento": "las órdenes de bordado",
+            "orden_model": OrdenesBordado,
+            "folio_field": "folio_bordado",
+            "detalle_model": OrdenBordadoDetalle,
+            "detalle_fk": "ob",
+            "detalle_extra": _bordado_detalle_extra,
+            "tipo_orden": PickingOrdenTrabajo.TipoOrden.BORDADO,
+            "tipo_resultado": "BORDADO",
+            "enlace_field": "orden_bordado",
+        },
+        {
+            "flag": "generar_orden_reflejante",
+            "tipos_documento": ["ORDEN_REFLEJANTE", "Orden de Reflejante", "Reflejante"],
+            "descripcion_documento": "las órdenes de reflejante",
+            "orden_model": OrdenesReflejante,
+            "folio_field": "folio_reflejante",
+            "detalle_model": OrdenReflejanteDetalle,
+            "detalle_fk": "orden_r",
+            "detalle_extra": _reflejante_detalle_extra,
+            "tipo_orden": PickingOrdenTrabajo.TipoOrden.REFLEJANTE,
+            "tipo_resultado": "REFLEJANTE",
+            "enlace_field": "orden_reflejante",
+        },
+        {
+            "flag": "generar_orden_corte_manga",
+            "tipos_documento": [
+                "ORDEN_CORTE_MANGA",
+                "Orden Corte de Manga",
+                "Orden de Corte de Manga",
+                "CorteManga",
+            ],
+            "descripcion_documento": "las órdenes de corte de manga",
+            "orden_model": OrdenesCorteManga,
+            "folio_field": "folio_ocm",
+            "detalle_model": OrdenCorteMangaDetalle,
+            "detalle_fk": "ocm",
+            "detalle_extra": _corte_manga_detalle_extra,
+            "tipo_orden": PickingOrdenTrabajo.TipoOrden.CORTE_MANGA,
+            "tipo_resultado": "CORTE_MANGA",
+            "enlace_field": "orden_corte_manga",
+        },
+    )
+
     @classmethod
     def _generar_ordenes_trabajo(cls, picking, requested_items, user):
-        bordado_items = [it for it in requested_items if it["generar_orden_bordado"]]
-        reflejante_items = [it for it in requested_items if it["generar_orden_reflejante"]]
-        corte_items = [it for it in requested_items if it["generar_orden_corte_manga"]]
-        fallback_ref = picking.pedido.folio or picking.pedido.id
-
         resultado = []
         enlaces = []
 
-        if bordado_items:
-            folio = safe_generate_folio(
-                picking.empresa_id,
-                picking.sucursal_id,
-                tipos_documento=[
-                    "ORDEN_BORDADO",
-                    "Orden de Bordado",
-                    "Bordado",
-                ],
-                fallback_prefix="OB",
-                fallback_reference=fallback_ref,
-            )
-            orden = OrdenesBordado.objects.create(
-                empresa=picking.empresa,
-                sucursal=picking.sucursal,
-                pedido=picking.pedido,
-                folio_bordado=folio,
-                prioridad=1,
-                usuario_asignado=user if getattr(user, "pk", None) else None,
-                observaciones=f"Generada automáticamente desde picking {picking.folio}.",
-                activo=True,
-            )
-            detalles = []
-            for item in bordado_items:
-                talla = item["talla"]
-                variante = getattr(talla, "variante", None)
-                detalles.append(
-                    OrdenBordadoDetalle(
-                        ob=orden,
-                        pedido_detalle=talla.pedido_detalle,
-                        producto=talla.pedido_detalle.producto,
-                        cantidad=float(item["cantidad"]),
-                        posicion_bordado=(
-                            (getattr(talla, "bordado_config", None) or {}).get("posicion")
-                            if isinstance(getattr(talla, "bordado_config", None), dict)
-                            else None
-                        ),
-                        colores_hilo=int(
-                            (getattr(talla, "bordado_config", None) or {}).get("colores_hilo", 0)
-                            if isinstance(getattr(talla, "bordado_config", None), dict)
-                            else 0
-                        ),
-                        puntadas=int(
-                            (getattr(talla, "bordado_config", None) or {}).get("puntadas", 0)
-                            if isinstance(getattr(talla, "bordado_config", None), dict)
-                            else 0
-                        ),
-                        talla=getattr(variante, "talla", None),
-                        color=getattr(variante, "color", None),
-                    )
-                )
-            OrdenBordadoDetalle.objects.bulk_create(detalles)
-            resultado.append({"tipo": "BORDADO", "id": orden.pk, "folio": orden.folio_bordado})
-            enlaces.append(PickingOrdenTrabajo(
-                picking=picking,
-                tipo_orden=PickingOrdenTrabajo.TipoOrden.BORDADO,
-                orden_bordado=orden,
-            ))
+        for cfg in cls._ORDENES_TRABAJO_CONFIG:
+            items = [it for it in requested_items if it[cfg["flag"]]]
+            if not items:
+                continue
 
-        if reflejante_items:
-            folio = safe_generate_folio(
+            folio = generate_folio_multi_tipo(
                 picking.empresa_id,
                 picking.sucursal_id,
-                tipos_documento=[
-                    "ORDEN_REFLEJANTE",
-                    "Orden de Reflejante",
-                    "Reflejante",
-                ],
-                fallback_prefix="ORF",
-                fallback_reference=fallback_ref,
+                tipos_documento=cfg["tipos_documento"],
+                descripcion_documento=cfg["descripcion_documento"],
             )
-            orden = OrdenesReflejante.objects.create(
+            orden = cfg["orden_model"].objects.create(
                 empresa=picking.empresa,
                 sucursal=picking.sucursal,
                 pedido=picking.pedido,
-                folio_reflejante=folio,
                 prioridad=1,
                 usuario_asignado=user if getattr(user, "pk", None) else None,
                 observaciones=f"Generada automáticamente desde picking {picking.folio}.",
                 activo=True,
+                **{cfg["folio_field"]: folio},
             )
-            detalles = []
-            for item in reflejante_items:
-                talla = item["talla"]
-                variante = getattr(talla, "variante", None)
-                cfg = getattr(talla, "reflejante_config", None) if isinstance(getattr(talla, "reflejante_config", None), dict) else {}
-                detalles.append(
-                    OrdenReflejanteDetalle(
-                        orden_r=orden,
-                        pedido_detalle=talla.pedido_detalle,
-                        producto=talla.pedido_detalle.producto,
-                        cantidad=float(item["cantidad"]),
-                        tipo_reflejante=cfg.get("tipo_reflejante") if isinstance(cfg, dict) else None,
-                        posicion=cfg.get("posicion") if isinstance(cfg, dict) else None,
-                        metros=float((cfg.get("metros") if isinstance(cfg, dict) else cfg) or 0.0),
-                        talla=getattr(variante, "talla", None),
-                        color=getattr(variante, "color", None),
-                    )
-                )
-            OrdenReflejanteDetalle.objects.bulk_create(detalles)
-            resultado.append({"tipo": "REFLEJANTE", "id": orden.pk, "folio": orden.folio_reflejante})
-            enlaces.append(PickingOrdenTrabajo(
-                picking=picking,
-                tipo_orden=PickingOrdenTrabajo.TipoOrden.REFLEJANTE,
-                orden_reflejante=orden,
-            ))
 
-        if corte_items:
-            folio = safe_generate_folio(
-                picking.empresa_id,
-                picking.sucursal_id,
-                tipos_documento=[
-                    "ORDEN_CORTE_MANGA",
-                    "Orden Corte de Manga",
-                    "Orden de Corte de Manga",
-                    "CorteManga",
-                ],
-                fallback_prefix="OCM",
-                fallback_reference=fallback_ref,
-            )
-            orden = OrdenesCorteManga.objects.create(
-                empresa=picking.empresa,
-                sucursal=picking.sucursal,
-                pedido=picking.pedido,
-                folio_ocm=folio,
-                prioridad=1,
-                usuario_asignado=user if getattr(user, "pk", None) else None,
-                observaciones=f"Generada automáticamente desde picking {picking.folio}.",
-                activo=True,
-            )
             detalles = []
-            for item in corte_items:
+            for item in items:
                 talla = item["talla"]
                 variante = getattr(talla, "variante", None)
-                cfg = getattr(talla, "corte_manga_config", None) if isinstance(getattr(talla, "corte_manga_config", None), dict) else {}
                 detalles.append(
-                    OrdenCorteMangaDetalle(
-                        ocm=orden,
+                    cfg["detalle_model"](
                         pedido_detalle=talla.pedido_detalle,
                         producto=talla.pedido_detalle.producto,
                         cantidad=float(item["cantidad"]),
                         talla=getattr(variante, "talla", None),
                         color=getattr(variante, "color", None),
-                        configuracion=cfg or None,
+                        **{cfg["detalle_fk"]: orden},
+                        **cfg["detalle_extra"](talla),
                     )
                 )
-            OrdenCorteMangaDetalle.objects.bulk_create(detalles)
-            resultado.append({"tipo": "CORTE_MANGA", "id": orden.pk, "folio": orden.folio_ocm})
+            cfg["detalle_model"].objects.bulk_create(detalles)
+
+            folio_generado = getattr(orden, cfg["folio_field"])
+            resultado.append({"tipo": cfg["tipo_resultado"], "id": orden.pk, "folio": folio_generado})
             enlaces.append(PickingOrdenTrabajo(
                 picking=picking,
-                tipo_orden=PickingOrdenTrabajo.TipoOrden.CORTE_MANGA,
-                orden_corte_manga=orden,
+                tipo_orden=cfg["tipo_orden"],
+                **{cfg["enlace_field"]: orden},
             ))
 
         if enlaces:

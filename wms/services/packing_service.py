@@ -5,21 +5,13 @@ from django.db import transaction
 from django.db.models import Sum
 from rest_framework.exceptions import ValidationError
 
+from wms.utils.decimales import normalizar_decimal
 from wms.utils.folios import generate_folio
 from wms.models import Packing, PackingDetalle, Picking, PickingDetalle
 
 
 class PackingService:
-    @staticmethod
-    def _normalize_quantity(value):
-        return Decimal(str(value or "0"))
-
-    @staticmethod
-    def _allowed_sucursal_ids(user):
-        sucursal_ids = set(user.sucursales.values_list("pk", flat=True))
-        if user.sucursal_default_id:
-            sucursal_ids.add(user.sucursal_default_id)
-        return sucursal_ids
+    _normalize_quantity = staticmethod(normalizar_decimal)
 
     @classmethod
     def _packing_scope_queryset(cls, picking):
@@ -55,7 +47,7 @@ class PackingService:
         es_staff = getattr(user, "is_superuser", False) or getattr(
             user, "is_admin_empresa", False
         )
-        sucursal_ids = cls._allowed_sucursal_ids(user)
+        sucursal_ids = user.sucursales_permitidas()
 
         pickings_qs = (
             Picking.objects.filter(empresa=empresa)
@@ -214,7 +206,7 @@ class PackingService:
             user, "is_admin_empresa", False
         )
         if not es_staff:
-            sucursales_permitidas = cls._allowed_sucursal_ids(user)
+            sucursales_permitidas = user.sucursales_permitidas()
             if picking.sucursal_id not in sucursales_permitidas:
                 raise ValidationError(
                     "No tiene acceso a la sucursal del picking para generar el packing."

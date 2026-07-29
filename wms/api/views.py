@@ -76,16 +76,20 @@ class TransferenciaViewSet(
         qs = qs.filter(empresa=empresa)
 
         # Scope por sucursal dentro de la empresa: el admin de empresa ve todas sus
-        # sucursales; el resto solo las asignadas en el M2M ``usuario.sucursales``
-        # —mismo criterio que ``MovimientoInventarioViewSet`` en inventarios, que
-        # scope por ``sucursal_id__in`` el mismo tipo de dato—. Sin sucursales
-        # asignadas no ve nada, igual que un usuario sin empresa: se falla cerrado.
-        # Se filtra por ``Transferencia.sucursal`` (la dueña del documento), no por
-        # la sucursal de los almacenes origen/destino, que pueden diferir.
+        # sucursales; el resto ve las asignadas en el M2M ``usuario.sucursales``
+        # más su ``sucursal_default`` —mismo criterio que
+        # ``PickingViewSet``/``PackingViewSet``/``DespachoViewSet.get_queryset()``,
+        # y que ``TransferenciaService.handle_store()`` ya exige del lado de
+        # escritura (la transferencia se timbra con ``user.sucursal_default``)—.
+        # Sin esto un usuario cuyo único acceso fuera la sucursal por defecto podía
+        # crear la transferencia pero no volver a verla en list/retrieve. Sin
+        # sucursales asignadas no ve nada, igual que un usuario sin empresa: se
+        # falla cerrado. Se filtra por ``Transferencia.sucursal`` (la dueña del
+        # documento), no por la sucursal de los almacenes origen/destino, que
+        # pueden diferir.
         if getattr(user, "is_admin_empresa", False):
             return qs
-        sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
-        return qs.filter(sucursal_id__in=sucursal_ids)
+        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
 
     def get_serializer_class(self):
         # retrieve → encabezado + renglones anidados; list → forma plana ligera;
@@ -166,15 +170,19 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
         qs = qs.filter(empresa=empresa)
 
         # Scope por sucursal dentro de la empresa: el admin de empresa ve todas sus
-        # sucursales; el resto solo las asignadas en el M2M ``usuario.sucursales``
-        # —mismo criterio que ``TransferenciaViewSet.get_queryset()``—. Sin
-        # sucursales asignadas no ve nada, igual que un usuario sin empresa: se
-        # falla cerrado. Se filtra por ``Picking.sucursal`` (la dueña del
-        # documento), no por la sucursal del almacén, que puede diferir.
+        # sucursales; el resto ve las asignadas en el M2M ``usuario.sucursales``
+        # más su ``sucursal_default`` —mismo criterio que
+        # ``PackingViewSet``/``DespachoViewSet.get_queryset()``—. Sin esto un
+        # usuario cuyo único acceso fuera la sucursal por defecto podía completar
+        # el onboarding (que sí une ambos conjuntos, ver
+        # ``PickingService.onboarding_payload``) y crear el picking, pero no
+        # volver a verlo en list/retrieve. Sin sucursales asignadas no ve nada,
+        # igual que un usuario sin empresa: se falla cerrado. Se filtra por
+        # ``Picking.sucursal`` (la dueña del documento), no por la sucursal del
+        # almacén, que puede diferir.
         if getattr(user, "is_admin_empresa", False):
             return qs
-        sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
-        return qs.filter(sucursal_id__in=sucursal_ids)
+        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
 
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
@@ -247,10 +255,7 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
         qs = qs.filter(empresa=empresa)
         if getattr(user, "is_admin_empresa", False):
             return qs
-        sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
-        if getattr(user, "sucursal_default_id", None):
-            sucursal_ids.append(user.sucursal_default_id)
-        return qs.filter(sucursal_id__in=sucursal_ids)
+        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
 
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
@@ -327,10 +332,7 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
         qs = qs.filter(packing__empresa=empresa)
         if getattr(user, "is_admin_empresa", False):
             return qs
-        sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
-        if getattr(user, "sucursal_default_id", None):
-            sucursal_ids.append(user.sucursal_default_id)
-        return qs.filter(packing__sucursal_id__in=sucursal_ids)
+        return qs.filter(packing__sucursal_id__in=user.sucursales_permitidas())
 
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
