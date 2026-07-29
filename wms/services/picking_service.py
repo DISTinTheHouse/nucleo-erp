@@ -116,7 +116,14 @@ class PickingService:
             return None
 
     @staticmethod
-    def _parse_almacen_id(raw):
+    def _parse_pk(raw):
+        """Normaliza un id de query param: ausente/no numérico -> ``None``.
+
+        Mismo criterio para ``pedido``/``almacen_origen``/``almacen_destino``:
+        un valor no parseable se trata como ausente en vez de llegar crudo a un
+        ``filter(pk=...)``, donde Django lo deja pasar sin validar y el driver de
+        BD revienta con un ``ValueError`` no controlado (500) en lugar de un 400.
+        """
         if raw in (None, ""):
             return None
         try:
@@ -132,6 +139,7 @@ class PickingService:
         almacen_origen_id=None,
         almacen_destino_id=None,
     ):
+        pedido_id = cls._parse_pk(pedido_id)
         empresa = getattr(user, "empresa", None)
         if empresa is None:
             return {
@@ -206,8 +214,8 @@ class PickingService:
             for almacen in almacenes_qs[:100]
         ]
 
-        almacen_origen_id = cls._parse_almacen_id(almacen_origen_id)
-        almacen_destino_id = cls._parse_almacen_id(almacen_destino_id)
+        almacen_origen_id = cls._parse_pk(almacen_origen_id)
+        almacen_destino_id = cls._parse_pk(almacen_destino_id)
 
         almacen_origen = None
         almacen_destino = None
@@ -250,7 +258,7 @@ class PickingService:
             "picking_detalle": [],
         }
 
-        if not pedido_id:
+        if pedido_id is None:
             return payload
 
         pedido = pedido_qs.filter(pk=pedido_id).first()

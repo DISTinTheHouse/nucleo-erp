@@ -157,6 +157,7 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
                     ).order_by("id"),
                 ),
             )
+            .order_by("-created_at", "-id")
         )
 
         # Aislamiento multi-tenant: sin empresa no se ve nada. list devuelve 200 []
