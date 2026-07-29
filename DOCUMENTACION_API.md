@@ -1951,7 +1951,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 **Notas sobre existencia y picking parcial**
 
 - `existencia_fisica`: lo que físicamente hay en el almacén origen (suma de **todas las ubicaciones** del mismo producto/variante).
-- `existencia_reservada`: lo que ya está reservado por **cualquier otro picking/documento** (misma empresa/sucursal, mismo almacén). Incluye reservas en estado **`ACTIVA` y `APLICADA`**, y no se limita a las tallas del pedido actual (todos los pedidos que compiten por el mismo stock suman).
+- `existencia_reservada`: lo que ya está bloqueado por **reservas `ACTIVA`** de **cualquier otro picking/documento** (misma empresa/sucursal, mismo almacén). No incluye reservas `APLICADA` porque el paso de transferencia **ya descontó esas unidades de `Existencia.cantidad`** dentro de la misma transacción; volver a restarlas sería contarlas dos veces. No se limita a las tallas del pedido actual: todos los pedidos que compiten por la misma clave de stock suman.
 - `existencia_disponible` = `existencia_fisica` - `existencia_reservada`.
 - `maximo_picking_permitido` = `min(cantidad_pendiente, existencia_disponible)`.
   - Ejemplo: si el pedido pide 50 pz y solo hay 30 disponibles, el máximo que podrá enviarse en `cantidad_asignada` es 30 (picking parcial).
@@ -1973,6 +1973,25 @@ Por cada línea/talla se exponen tres booleanos:
 | `requiere_corte_manga` | La prenda requiere corte de manga.    | Mostrar indicador visual.               |
 
 Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los parámetros operativos (posición, colores, puntadas, etc.) para que Next.js muestre el detalle al usuario.
+
+> **⚠️ Requisito de configuración de folios (OT)**
+> Para que el backend pueda generar órdenes de bordado / reflejante / corte de manga,
+> **debe existir una `SerieFolio` activa** en `nucleo.SerieFolio` por empresa/sucursal
+> con `tipo_documento` que coincida (búsqueda `iexact`) con alguno de los siguientes
+> nombres (se prueban en este orden):
+>
+> | Tipo de orden    | `tipo_documento` probados por el backend                                                |
+> |------------------|-----------------------------------------------------------------------------------------|
+> | Bordado          | `ORDEN_BORDADO` | `Orden de Bordado` | `Bordado`                                           |
+> | Reflejante       | `ORDEN_REFLEJANTE` | `Orden de Reflejante` | `Reflejante`                                     |
+> | Corte de Manga   | `ORDEN_CORTE_MANGA` | `Orden Corte de Manga` | `Orden de Corte de Manga` | `CorteManga`    |
+>
+> Si no hay ninguna serie sembrada, el POST responde `400` con mensaje claro del tipo:
+> *"No se encontró una serie de folio activa para [documento] ... Configure la serie antes de generar el documento."*
+> No hay fallback silencioso: devolver un folio inventado (ej: `OB-{folio_pedido}`) rompía
+> la unicidad (`unique=True`) cuando el mismo pedido generaba una segunda orden por picking
+> parcial, y el backend no es dueño de un identificador de documento que no sale de su
+> propio maestro de series.
 
 ---
 
