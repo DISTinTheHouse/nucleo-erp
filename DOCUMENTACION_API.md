@@ -1832,6 +1832,51 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 }
 ```
 
+### 7) Orden de Bordado Onboarding (patrón sencillo / manual)
+
+- **Endpoints**:
+  - `GET /api/v1/produccion/orden-bordado/onboarding/`
+  - `POST /api/v1/produccion/orden-bordado/onboarding/`
+- **Objetivo**: patrón onboarding idéntico a WMS (picking / packing / despacho): catálogos precargados para que Next.js muestre selector de pedido + operadores + preview folio.
+
+**GET onboarding — shape**
+
+```json
+{
+  "pedidos": [
+    {
+      "id": 125,
+      "folio": "PD-000125",
+      "cliente": 15,
+      "cliente_nombre": "Cliente Demo",
+      "sucursal": 1,
+      "sucursal_nombre": "Matriz"
+    }
+  ],
+  "operadores": [{ "id": 8, "nombre": "Juan Pérez" }],
+  "preview": {
+    "folio_ob_sugerido": "OB-20260730-001"
+  }
+}
+```
+
+**Reglas del GET onboarding**
+
+| Campo                                  | Regla                                                                                                                                     |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_bordado=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario. |
+| `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                              |
+| `preview.folio_ob_sugerido`            | Llama a `produce.utils.folios.generate_ob_folio(empresa, sucursal_default)`; preview no vinculante.                                       |
+| Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                    |
+
+**POST onboarding**
+
+- **Mismo save que `create` tradicional** — usa el `OrdenBordadoSerializer` estándar.
+- Body requerido mínimo: `{ "pedido": 125 }`.
+- Opcionales: `prioridad`, `observaciones`.
+- Internamente: carga automáticamente **todas** las `PedidoDetalleTalla` del pedido con `lleva_bordado=True`, genera folio OB único y `bulk_create` de `OrdenBordadoDetalle` con la cantidad 100% de cada línea.
+- No depende de WMS ni de un picking existente; se genera completamente desde Producción.
+
 ---
 
 ## 📦 WMS - Picking
@@ -1843,7 +1888,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 **Flujo onboarding**
 
-1. Seleccionar el **pedido** (catalogo `pedidos`).
+1. Seleccionar el **pedido** (catálogo `pedidos`).
 2. Seleccionar **almacén origen** (de dónde se tomarán las prendas; catálogo `almacenes`).
 3. Seleccionar **almacén destino** (hacia dónde se moverá la mercancía; por defecto `APARTADOS`).
 4. Vista previa del encabezado (`header` con fecha sugerida y folio preview) + líneas con **existencia disponible** para picking parcial y flags de órdenes de trabajo (bordado / reflejante / corte de manga).
@@ -1951,7 +1996,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 **Notas sobre existencia y picking parcial**
 
 - `existencia_fisica`: lo que físicamente hay en el almacén origen (suma de **todas las ubicaciones** del mismo producto/variante).
-- `existencia_reservada`: lo que ya está bloqueado por **reservas `ACTIVA`** de **cualquier otro picking/documento** (misma empresa/sucursal, mismo almacén). No incluye reservas `APLICADA` porque el paso de transferencia **ya descontó esas unidades de `Existencia.cantidad`** dentro de la misma transacción; volver a restarlas sería contarlas dos veces. No se limita a las tallas del pedido actual: todos los pedidos que compiten por la misma clave de stock suman.
+- `existencia_reservada`: lo que ya está bloqueado por **reservas `ACTIVA`** de **cualquier otro picking/documento** (misma empresa/sucursal, mismo almacén). No incluye reservas `APLICADA` porque una reserva aplicada ya habría sido consumida en su movimiento físico correspondiente. No se limita a las tallas del pedido actual: todos los pedidos que compiten por la misma clave de stock suman.
 - `existencia_disponible` = `existencia_fisica` - `existencia_reservada`.
 - `maximo_picking_permitido` = `min(cantidad_pendiente, existencia_disponible)`.
   - Ejemplo: si el pedido pide 50 pz y solo hay 30 disponibles, el máximo que podrá enviarse en `cantidad_asignada` es 30 (picking parcial).
@@ -1964,7 +2009,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 **Indicadores de órdenes de trabajo**
 
-Por cada línea/talla se exponen tres booleanos:
+Por cada línea/talla se exponen tres booleanos + su JSON config:
 
 | Campo                  | Significado                           | UI sugerida                             |
 | ---------------------- | ------------------------------------- | --------------------------------------- |
@@ -1972,47 +2017,25 @@ Por cada línea/talla se exponen tres booleanos:
 | `requiere_reflejante`  | La prenda incluye reflejante.         | Mostrar indicador visual.               |
 | `requiere_corte_manga` | La prenda requiere corte de manga.    | Mostrar indicador visual.               |
 
-Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los parámetros operativos (posición, colores, puntadas, etc.) para que Next.js muestre el detalle al usuario.
-
-> **⚠️ Requisito de configuración de folios (OT)**
-> Para que el backend pueda generar órdenes de bordado / reflejante / corte de manga,
-> **debe existir una `SerieFolio` activa** en `nucleo.SerieFolio` por empresa/sucursal
-> con `tipo_documento` que coincida (búsqueda `iexact`) con alguno de los siguientes
-> nombres (se prueban en este orden):
->
-> | Tipo de orden    | `tipo_documento` probados por el backend                                                |
-> |------------------|-----------------------------------------------------------------------------------------|
-> | Bordado          | `ORDEN_BORDADO` | `Orden de Bordado` | `Bordado`                                           |
-> | Reflejante       | `ORDEN_REFLEJANTE` | `Orden de Reflejante` | `Reflejante`                                     |
-> | Corte de Manga   | `ORDEN_CORTE_MANGA` | `Orden Corte de Manga` | `Orden de Corte de Manga` | `CorteManga`    |
->
-> Si no hay ninguna serie sembrada, el POST responde `400` con mensaje claro del tipo:
-> *"No se encontró una serie de folio activa para [documento] ... Configure la serie antes de generar el documento."*
-> No hay fallback silencioso: devolver un folio inventado (ej: `OB-{folio_pedido}`) rompía
-> la unicidad (`unique=True`) cuando el mismo pedido generaba una segunda orden por picking
-> parcial, y el backend no es dueño de un identificador de documento que no sale de su
-> propio maestro de series.
+> Las órdenes de trabajo **no se generan automáticamente** en el POST de creación del picking. Si la prenda requiere bordado/reflejante/corte, se genera su orden correspondiente usando **los endpoints del módulo Producción** (ej: `POST /api/v1/produccion/orden-bordado/onboarding/`).
 
 ---
 
 ### 2) Crear Picking desde Onboarding
 
 - **Endpoint**: `POST /api/v1/wms/pickings/onboarding/` (o `POST /api/v1/wms/pickings/`)
-- **Objetivo**: generar un picking parcial o total, con posibilidad de crear órdenes de trabajo (bordado / reflejante / corte de manga) desde el mismo request.
+- **Objetivo (modelo tradicional)**: **solo crear el documento** `Picking` + `PickingDetalle` con su folio único. Este paso no mueve inventario, no crea transferencias, no crea reservas ni órdenes de producción.
 
-**Flujo actual**
+**Qué hace el POST (3 pasos)**
 
 1. Next.js envía encabezado + `picking_detalle` con las cantidades reales a surtir por línea/talla.
 2. El backend valida:
    - `cantidad_asignada` ≤ `cantidad_pendiente` de la talla.
-   - `cantidad_asignada` ≤ `existencia_disponible` en el almacén origen (no se permite sobrepasar existencia). La comparación se hace contra la existencia agregada (suma de todas las ubicaciones del mismo producto/variante) y validada por clave de stock, no solo por fila de `Existencia` individual.
-   - **Validación agregada por clave**: la suma de `cantidad_asignada` de todas las líneas que comparten la misma clave `(producto_id, variante_id)` (incluyendo `variante_id = null`) debe ser ≤ la existencia disponible agregada de esa clave. Esto previene que múltiples tallas de un mismo producto sin variante agoten colectivamente el stock.
-   - Si una línea marca `generar_orden_* = true` pero la talla NO requiere ese trabajo, se rechaza.
-3. Se generan **reservas de inventario** por cada talla/línea seleccionada.
-4. Se genera una **transferencia interna** del almacén origen hacia el `almacen_destino` (por defecto `APARTADOS`).
-5. Se crea el `Picking` + `PickingDetalle`.
-6. Se aplican las reservas al picking y a la transferencia.
-7. Para cada línea con `generar_orden_* = true`, se crea su respectiva `OrdenesBordado` / `OrdenesReflejante` / `OrdenesCorteManga` con sus detalles, y se enlazan mediante `PickingOrdenTrabajo`.
+   - `cantidad_asignada` ≤ `existencia_disponible` en el almacén origen (comparación contra existencia agregada por clave de stock).
+   - **Validación agregada por clave**: la suma de `cantidad_asignada` de todas las líneas que comparten la misma clave `(producto_id, variante_id)` (incluyendo `variante_id = null`) debe ser ≤ la existencia disponible agregada de esa clave. Previene que múltiples tallas de un mismo producto sin variante agoten colectivamente el stock.
+3. Crea el documento `Picking` + `PickingDetalle` (bulk_create), genera folio único y responde el picking.
+
+> La **operación física** (tomar prendas del almacén origen y depositarlas en el destino) queda **fuera de este endpoint**. Para el movimiento de inventario se usan los endpoints del módulo Transferencias; para órdenes de producción se usa el módulo Producción.
 
 **Body**
 
@@ -2024,19 +2047,16 @@ Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los par
   "almacen_destino": 10,
   "prioridad": "MEDIA",
   "tipo": "ORDER_PICKING",
-  "observaciones": "Surtido parcial + orden de bordado",
+  "observaciones": "Surtido parcial 30 pz (restante en próximo picking)",
   "picking_detalle": [
     {
       "pedido_detalle_talla": 990,
       "cantidad_asignada": "30.0000",
-      "generar_orden_bordado": true,
-      "observaciones": "Bordado en pecho izquierdo"
+      "observaciones": "Bordado especial — pasar a Produccion después"
     },
     {
       "pedido_detalle_talla": 991,
-      "cantidad_asignada": "2.0000",
-      "generar_orden_reflejante": false,
-      "generar_orden_corte_manga": false
+      "cantidad_asignada": "2.0000"
     }
   ]
 }
@@ -2049,7 +2069,7 @@ Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los par
 - `almacen` (almacén origen)
 - `picking_detalle` (cada línea con `pedido_detalle_talla` y `cantidad_asignada > 0`)
 
-**Campos opcionales**
+**Campos opcionales / low-noise**
 
 - `almacen_destino`: si no se envía, se resuelve automáticamente el almacén `APARTADOS` de la misma empresa + sucursal.
 - `prioridad`: `BAJA`, `MEDIA`, `ALTA`
@@ -2058,9 +2078,7 @@ Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los par
 - `fecha_inicio`, `fecha_fin`, `fecha_limite`
 - `observaciones`
 - Por cada línea en `picking_detalle`:
-  - `generar_orden_bordado` (solo permitido si la talla reportó `requiere_bordado = true`)
-  - `generar_orden_reflejante` (análogo)
-  - `generar_orden_corte_manga` (análogo)
+  - `generar_orden_bordado` / `generar_orden_reflejante` / `generar_orden_corte_manga`: **aceptados pero IGNORADOS en el v1 de create**. Las órdenes de trabajo se generan desde Produccion endpoints dedicados. No se rechazan para mantener bajo ruido con Next.js.
   - `observaciones`
 
 **Validaciones principales**
@@ -2071,11 +2089,9 @@ Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los par
 - El operador debe estar activo y pertenecer a la misma empresa.
 - Cada renglón debe incluir `pedido_detalle_talla` y `cantidad_asignada > 0`.
 - Cada cantidad enviada **no** puede exceder lo pendiente del pedido para esa talla.
-- Cada cantidad enviada **no** puede exceder la `existencia_disponible` en el almacén origen (garantiza picking parcial real).
+- Cada cantidad enviada **no** puede exceder la `existencia_disponible` en el almacén origen.
 - Si `almacen_destino` no se envía, debe existir un almacén `APARTADOS` en la misma empresa y sucursal del pedido.
-- La reserva y la transferencia interna validan inventario suficiente antes de crear el picking.
 - El avance del surtido no se guarda en `Pedido`; se calcula desde `PickingDetalle`.
-- `generar_orden_*` solo es válido si su correspondiente `requiere_*` es `true` en la talla.
 
 **Respuesta**
 
@@ -2094,16 +2110,10 @@ Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los par
   "prioridad": "MEDIA",
   "tipo": "ORDER_PICKING",
   "estado": "Pendiente",
-  "total_lineas": 4,
+  "total_lineas": 2,
   "total_lineas_completas": 0,
-  "observaciones": "Surtido parcial + orden de bordado",
-  "ordenes_trabajo_generadas": [
-    {
-      "tipo": "BORDADO",
-      "id": 37,
-      "folio": "BORD-000037"
-    }
-  ],
+  "observaciones": "Surtido parcial 30 pz",
+  "ordenes_trabajo_generadas": [],
   "picking_detalle": [
     {
       "id": 51,
@@ -2127,7 +2137,7 @@ Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los par
       "fecha_surtido": null,
       "diferencia": "0.0000",
       "motivo_diferencia": null,
-      "observaciones": "Bordado en pecho izquierdo"
+      "observaciones": "Bordado especial"
     }
   ]
 }
@@ -2138,17 +2148,16 @@ Junto a cada bandera se entrega la `*_config` correspondiente (JSON) con los par
 - Sí es necesario enviar `picking_detalle` en el onboarding `POST`.
 - El frontend decide qué tallas y cantidades se surtirán en ese picking; debe **respetar** `maximo_picking_permitido` reportado por el GET onboarding (el backend lo validará de nuevo).
 - `almacen_destino` es opcional; si no se envía el backend resuelve `APARTADOS` y lo guarda.
-- Los checkbox de órdenes de trabajo (`generar_orden_*`) solo deben renderizarse si la línea reporta `requiere_* = true`.
-- No es necesario crear reservas manualmente: el backend las genera y las aplica dentro del flujo de `picking`.
+- Los checkbox `generar_orden_*` pueden mandarse pero se ignoran en el POST de picking; la generación de OT se hace desde endpoints Produccion (ver sección `Orden de Bordado Onboarding`).
 - El `Pedido` es solo referencia comercial; el avance real se consulta desde el historial de `PickingDetalle`.
 - Si frontend necesita mostrar el surtido creado, puede usar la respuesta del `POST` o consultar el `GET` de detalle.
-- Las órdenes de trabajo generadas se reportan en `ordenes_trabajo_generadas` (arreglo con `tipo`, `id`, `folio`) en la respuesta del `POST`; cada una está enlazada al picking mediante `PickingOrdenTrabajo`. Los mismos vínculos están disponibles como **nested `ordenes_trabajo[]`** (read-only) en el `GET` list/retrieve del `PickingSerializer` (ver detalle en la sección 4).
+- `ordenes_trabajo_generadas` siempre devuelve `[]` en este endpoint. Las OT se vinculan desde sus endpoints de Producción.
 
 ### 3) Listar Pickings
 
 - **Endpoint**: `GET /api/v1/wms/pickings/`
 - **Descripción**: devuelve los pickings visibles para la empresa y sucursales del usuario autenticado.
-- **Nota**: cada registro incluye `almacen_destino`, `almacen_destino_nombre` y el nested `ordenes_trabajo[]` cuando existen vínculos.
+- **Nota**: cada registro incluye `almacen_destino`, `almacen_destino_nombre` y el nested `ordenes_trabajo[]` (vacío para pickings creados con el flujo tradicional; con valores cuando OT se vinculan manualmente por PickingOrdenTrabajo desde Producción).
 
 ### 4) Detalle de Picking
 
