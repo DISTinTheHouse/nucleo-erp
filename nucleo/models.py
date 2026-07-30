@@ -1,4 +1,4 @@
-from django.db import models
+from django.db import models, transaction
 from nucleo.choices import StatusChoices
 
 class StatusLifecycleModel(models.Model):
@@ -282,15 +282,102 @@ class SerieFolio(StatusLifecycleModel):
         folio_formateado = self.separador.join(partes)
         return folio_formateado, nuevo_consecutivo, anio_actual
 
+    @classmethod
+    def resolve(cls, empresa_id, sucursal_id, tipos_documento, *, lock=False):
+        """Busca SerieFolio activa probando uno o varios ``tipo_documento`` en orden.
+
+        ``tipos_documento`` puede ser ``str`` o lista/tupla (fallback ordenado).
+        ``lock=True`` agrega ``select_for_update()``: requiere TX activa (consumos).
+        ``lock=False`` es para previews sin persistencia.
+        """
+        from django.utils.functional import Promise
+
+        if isinstance(tipos_documento, (str, Promise)):
+            candidatos = [tipos_documento]
+        else:
+            candidatos = [t for t in tipos_documento if t]
+
+        qs = cls.objects.filter(empresa=empresa_id, sucursal=sucursal_id, activo=True)
+        if lock:
+            qs = qs.select_for_update()
+
+        for tipo in candidatos:
+            sf = (
+                qs.filter(tipo_documento__iexact=tipo)
+                .order_by("id_serie_folio")
+                .first()
+            )
+            if sf is not None:
+                return sf
+        return None
+
+    @classmethod
+    @transaction.atomic
+    def consumir_siguiente_folio(
+        cls,
+        empresa_id,
+        sucursal_id,
+        tipos_documento,
+        *,
+        descripcion_documento=None,
+    ):
+        """Resolve + lock TX + consume folio y persiste el consecutivo.
+
+        Lanza ``django.core.exceptions.ValidationError`` si:
+        - No existe ninguna SerieFolio activa para esos tipos_documento
+        - El rango de folios está agotado (ValueError de get_siguiente_folio)
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        serie_folio = cls.resolve(empresa_id, sucursal_id, tipos_documento, lock=True)
+        if serie_folio is None:
+            from django.utils.functional import Promise
+
+            if isinstance(tipos_documento, (str, Promise)):
+                candidatos = [tipos_documento]
+            else:
+                candidatos = [t for t in tipos_documento if t]
+            documento = descripcion_documento or " / ".join(str(t) for t in candidatos)
+            raise DjangoValidationError(
+                f"No se encontró una serie de folio activa para {documento} en la "
+                "empresa y sucursal indicadas. Configure la serie antes de generar "
+                "el documento."
+            )
+
+        try:
+            folio_formateado, nuevo_consecutivo, anio_actual = serie_folio.get_siguiente_folio()
+        except ValueError as e:
+            raise DjangoValidationError(str(e))
+
+        serie_folio.folio_actual = nuevo_consecutivo
+        serie_folio.ultimo_anio = anio_actual
+        serie_folio.save(update_fields=["folio_actual", "ultimo_anio", "updated_at"])
+        return folio_formateado
+
+    @classmethod
+    def preview_siguiente_folio(cls, empresa_id, sucursal_id, tipos_documento):
+        """Preview del siguiente folio sin lock ni persistencia. Devuelve str o None."""
+        serie_folio = cls.resolve(empresa_id, sucursal_id, tipos_documento, lock=False)
+        if serie_folio is None:
+            return None
+        try:
+            folio_formateado, _, _ = serie_folio.get_siguiente_folio()
+        except Exception:
+            return None
+        return folio_formateado
+
     def incrementar_folio(self):
+        """Incrementa folio en la instancia actual y devuelve (folio, consecutivo, anio).
+
+        ⚠️ Para nuevos desarrollos preferir ``SerieFolio.consumir_siguiente_folio()``
+        que incluye lookup por empresa/sucursal, ``select_for_update`` y TX atómica.
+        Este método se conserva para compatibilidad con código existente.
         """
-        Incrementa el folio y actualiza el último año.
-        """
-        _, nuevo_consecutivo, anio_actual = self.get_siguiente_folio()
+        folio_formateado, nuevo_consecutivo, anio_actual = self.get_siguiente_folio()
         self.folio_actual = nuevo_consecutivo
         self.ultimo_anio = anio_actual
         self.save()
-        return self.folio_actual
+        return folio_formateado, nuevo_consecutivo, anio_actual
 
 # =========================
 # CATÁLOGOS SAT (Globales)
