@@ -248,11 +248,28 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
     serializer_class = OrdenBordadoSerializer
 
     def get_queryset(self):
+        """Aislamiento multi-tenant: empresa + sucursal.
+
+        Mismo criterio que ``PickingViewSet``/``PackingViewSet``/
+        ``DespachoViewSet``/``TransferenciaViewSet``: sin empresa no se ve
+        nada, el superusuario ve todo y el admin de empresa ve todas las
+        sucursales de la suya; el resto queda acotado a
+        ``sucursales_permitidas()``. ``list`` devuelve ``200 []`` fuera de
+        alcance y ``retrieve`` de otra empresa/sucursal devuelve ``404``
+        (no ``403``): no se revela la existencia del documento.
+        """
         user = self.request.user
-        empresa = getattr(user, 'empresa', None)
-        if empresa is None: return OrdenesBordado.objects.none()
-        queryset = OrdenesBordado.objects.filter(empresa=empresa, activo=True)
-        return queryset
+        qs = OrdenesBordado.objects.filter(activo=True)
+
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        qs = qs.filter(empresa=empresa)
+        if getattr(user, "is_admin_empresa", False):
+            return qs
+        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
