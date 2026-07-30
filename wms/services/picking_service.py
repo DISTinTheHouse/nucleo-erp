@@ -7,8 +7,6 @@ from rest_framework.exceptions import ValidationError
 from ventas.models import PedidoDetalleTalla
 from wms.models import Picking, PickingDetalle
 from wms.services.existencia_service import ExistenciaService
-from wms.services.reserva_service import ReservaInventarioService
-from wms.services.transferencia_service import TransferenciaService
 from wms.services.picking_pipeline.catalogs import (
     armar_header_preview,
     armar_payload_vacio,
@@ -23,33 +21,29 @@ from wms.services.picking_pipeline.context import (
     validar_contexto_picking,
 )
 from wms.services.picking_pipeline.pendientes import build_snapshots
-from wms.services.picking_pipeline.work_orders import generar_ordenes
 from wms.utils.folios import generate_folio
 
 
 class PickingService:
     """Facade público del módulo de picking (WMS).
 
-    Antiguamente este archivo era un monolito de ~850 líneas con la lógica
-    del GET onboarding, la validación del POST, las órdenes de trabajo y el
-    pipeline transaccional mezclados. Se simplificó usando el patrón
-    **"service + sub-módulos en carpeta``"``**:
+    Modelo **tradicional** de picking:
+    - ``onboarding_payload``: catálogos + sugerencias + existencia
+      para que el usuario arma el documento.
+    - ``handle_store``: **solo crea el documento** ``Picking`` +
+      ``PickingDetalle`` + folio.
 
-    - ``wms/services/picking_pipeline/context.py``
-        ``parse_pk``, permisos y validación del encabezado.
-    - ``wms/services/picking_pipeline/catalogs.py``
-        Catálogos del onboarding, sugerencias de almacenes, preview folio.
-    - ``wms/services/picking_pipeline/pendientes.py``
-        Histórico de asignado/surtido, snapshots unificados GET+POST.
-    - ``wms/services/picking_pipeline/cantidad_validator.py``
-        Validación línea por línea + agregada por clave de stock.
-    - ``wms/services/picking_pipeline/work_orders.py``
-        Tabla dispatch y generación de OT (Bordado/Reflejante/CorteManga).
+    Flujo real operativo:
+      1. ``GET onboarding`` → seleccionar pedido / origen / destino / cantidades.
+      2. ``POST create`` → documento picking listo para operar.
+      3. **La operación física (tomar prendas del origen y moverlas al destino)
+      queda fuera del create del picking**, en pasos posteriores.
 
-    Mantener esta clase como **solo orquestador**: si necesitas añadir lógica
-    nueva (ej: validación, hook, variante de picking), agrégala en el
-    submódulo correspondiente —nunca inline aquí. Así ``handle_store`` y
-    ``onboarding_payload`` siguen siendo legibles y testeables por pieza.
+    No crea reservas, no crea transferencias ni órdenes de producción
+    dentro de este endpoint:
+    - Reservas, transferencias y órdenes de trabajo quedan en sus propios
+    endpoints/services de otros módulos (Produccion, Transferencias) cuando el
+    flujo de negocio lo necesite.
     """
 
     # ------------------------------------------------------------------
@@ -205,13 +199,18 @@ class PickingService:
         return payload
 
     # ------------------------------------------------------------------
-    # POST onboarding: pipeline transaccional completo
+    # POST onboarding: solo crear documento Picking + Detalle
     # ------------------------------------------------------------------
     @classmethod
     @transaction.atomic
     def handle_store(cls, data, user):
-        """Crea un picking (parcial o total), sus reservas, transferencia
-        y, opcionalmente, las órdenes de trabajo en una sola transacción.
+        """Crea el documento Picking (parcial o total) con sus detalles.
+
+        Modelo tradicional: este endpoint **solo registra la intención** de
+        surtir un pedido. No mueve inventario, no crea transferencias, no
+        genera reservas, no crea órdenes de trabajo. El movimiento físico
+        de prendas del almacén origen hacia el destino queda en flujos
+        posteriores o endpoints dedicados (Transferencias, Produccion).
         """
         pedido = data.pop("pedido")
         almacen = data.pop("almacen")
@@ -222,7 +221,7 @@ class PickingService:
         if almacen_destino is None:
             almacen_destino = resolver_apartados_obligatorio(pedido)
 
-        # 1. Contexto (scope empresa / sucursal / permisos)
+        # 1. Contexto (scope empresa / sucursal / permisos / origendestino)
         validar_contexto_picking(pedido, almacen, almacen_destino, operador, user)
 
         # 2. Resolución y validación de líneas (individual + agregada)
@@ -230,32 +229,10 @@ class PickingService:
             pedido, requested_rows, almacen_origen=almacen
         )
 
-        # 3. Reservas (distribuidas por ubicación, partial-aware)
-        reservas = ReservaInventarioService.create_for_picking(
-            pedido=pedido,
-            almacen=almacen,
-            requested_items=requested_items,
-            user=user,
-        )
-
-        # 4. Transferencia origen → destino (mismo orden de filas que reserva)
-        transferencia_data = {
-            "almacen_origen": almacen,
-            "almacen_destino": almacen_destino,
-            "observaciones": "Generada desde picking",
-            "transferencia_detalle": [
-                {
-                    "producto": item["talla"].pedido_detalle.producto,
-                    "producto_variante": item["talla"].variante,
-                    "cantidad": item["cantidad"],
-                }
-                for item in requested_items
-            ],
-        }
-        transferencia = TransferenciaService.handle_store(transferencia_data, user)
-
-        # 5. Picking encabezado + detalles
+        # 3. Folio picking
         folio = generate_folio(pedido.empresa, pedido.sucursal, "Picking")
+
+        # 4. Crear encabezado Picking
         picking = Picking.objects.create(
             folio=folio,
             empresa=pedido.empresa,
@@ -266,9 +243,11 @@ class PickingService:
             almacen_destino=almacen_destino,
             usuario=user,
             total_lineas=len(requested_items),
+            total_lineas_completas=0,
             **data,
         )
 
+        # 5. bulk_create PickingDetalle + contar líneas completas
         picking_rows = []
         lineas_completas = 0
         for item in requested_items:
@@ -296,9 +275,7 @@ class PickingService:
         picking.total_lineas_completas = lineas_completas
         picking.save(update_fields=["total_lineas_completas", "updated_at"])
 
-        # 6. Pasar reservas → APLICADA (ligadas al picking + transferencia)
-        ReservaInventarioService.apply_to_picking(reservas, picking, transferencia)
-
-        # 7. Órdenes de trabajo (opcionales, tabla dispatch)
-        ordenes_trabajo = generar_ordenes(picking, requested_items, user)
-        return picking, ordenes_trabajo
+        # 6. Return: ordenes_trabajo_generadas vacío (low-noise: las OT van por
+        #    módulo Produccion endpoints dedicados).
+        ordenes_trabajo_generadas = []
+        return picking, ordenes_trabajo_generadas

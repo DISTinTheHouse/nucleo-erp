@@ -16,7 +16,9 @@ def _agrupar_requested_rows(requested_rows):
     - ``quantity_by_talla``: suma de ``cantidad_asignada`` por talla
       (permitimos que el frontend envíe la misma talla en >1 renglón,
       aunque el serializer actual lo impida).
-    - ``extras_by_talla``: flags (generar_orden_*) + observaciones.
+    - ``extras_by_talla``: observaciones. Los flags ``generar_orden_*``
+      se aceptan pero se ignoran en este endpoint de ``create``; las OT
+      se generan mediante endpoints del módulo Producción.
     """
     quantity_by_talla = defaultdict(lambda: Decimal("0"))
     extras_by_talla = {}
@@ -41,13 +43,6 @@ def _agrupar_requested_rows(requested_rows):
         extras_by_talla.setdefault(
             key,
             {
-                "generar_orden_bordado": bool(row.get("generar_orden_bordado", False)),
-                "generar_orden_reflejante": bool(
-                    row.get("generar_orden_reflejante", False)
-                ),
-                "generar_orden_corte_manga": bool(
-                    row.get("generar_orden_corte_manga", False)
-                ),
                 "observaciones": row.get("observaciones") or "",
             },
         )
@@ -112,20 +107,6 @@ def _validar_linea_por_linea(snapshots_by_talla, quantity_by_talla, extras_by_ta
             )
 
         extras = extras_by_talla.get(talla.id, {})
-        for flag, attr, label in (
-            ("generar_orden_bordado", "lleva_bordado", "bordado"),
-            ("generar_orden_reflejante", "lleva_reflejante", "reflejante"),
-            ("generar_orden_corte_manga", "lleva_corte_manga", "corte de manga"),
-        ):
-            if extras.get(flag) and not getattr(talla, attr, False):
-                raise ValidationError(
-                    {
-                        "picking_detalle": (
-                            f"La línea de talla {talla.id} no requiere {label}; "
-                            f"no puede marcar {flag}."
-                        )
-                    }
-                )
 
         requested_items.append(
             {
@@ -136,11 +117,6 @@ def _validar_linea_por_linea(snapshots_by_talla, quantity_by_talla, extras_by_ta
                 "cantidad_surtida_historica": snap.cantidad_surtida_historica,
                 "cantidad_pendiente": snap.cantidad_pendiente,
                 "existencia_disponible": snap.existencia_disponible,
-                "generar_orden_bordado": extras.get("generar_orden_bordado", False),
-                "generar_orden_reflejante": extras.get("generar_orden_reflejante", False),
-                "generar_orden_corte_manga": extras.get(
-                    "generar_orden_corte_manga", False
-                ),
                 "observaciones": extras.get("observaciones") or "",
                 "_clave_stock": snap.clave_stock,
             }
@@ -200,7 +176,7 @@ def resolve_requested_items(pedido, requested_rows, almacen_origen=None):
       2. Carga las tallas del pedido (valida que todas pertenezcan).
       3. Construye ``PickingLineaSnapshot`` con histórico y existencias
          (mismo calculo que el GET onboarding).
-      4. Valida línea por línea (pendiente, existencia por línea, flags OT).
+      4. Valida línea por línea (pendiente, existencia por línea).
       5. Valida agregado por clave de stock (colapso variante=None).
     """
     if not requested_rows:
