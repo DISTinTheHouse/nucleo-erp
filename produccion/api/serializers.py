@@ -10,6 +10,7 @@ from produccion.models import (
     ConsumoProduccionDetalle,
     ProductoTerminadoEntradas, 
     OrdenesBordado,
+    OrdenBordadoDetalle,
     BordadoAvances,
     BordadoIncidencias,
     OrdenesReflejante,
@@ -168,10 +169,31 @@ class ProductoTerminadoEntradasSerializer(serializers.ModelSerializer):
         model = ProductoTerminadoEntradas
         fields = '__all__'
 
+class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
+    color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+
+    class Meta:
+        model = OrdenBordadoDetalle
+        fields = '__all__'
+
 class OrdenBordadoSerializer(serializers.ModelSerializer):
+    pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
+    detalles = OrdenBordadoDetalleSerializer(many=True, read_only=True)
+
     class Meta:
         model = OrdenesBordado
         fields = '__all__'
+        read_only_fields = [
+            'activo',
+            'usuario_asignado',
+            'estatus_bordado',
+            'folio_bordado',
+            'empresa',
+            'sucursal'
+        ]
+
 
 class BordadoAvancesSerializer(serializers.ModelSerializer):
     class Meta:
