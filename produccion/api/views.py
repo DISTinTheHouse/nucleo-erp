@@ -302,7 +302,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                     empresa=empresa,
                     sucursal_id__in=sucursal_ids,
                     activo=True,
-                    pedidodetalle__pedidodetalletalla__lleva_bordado=True,
+                    detalles__tallas__lleva_bordado=True,
                 )
                 .distinct()
                 .select_related("cliente", "sucursal")
