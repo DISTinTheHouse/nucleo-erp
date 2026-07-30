@@ -73,7 +73,7 @@ class PickingLineaSnapshot:
     @property
     def maximo_picking_permitido(self):
         m = min(self.cantidad_pendiente, self.existencia_disponible)
-        return m if m > Decimal("0") else Decimal("0")
+        return m if m >= Decimal("0") else Decimal("0")
 
     @property
     def clave_stock(self):
