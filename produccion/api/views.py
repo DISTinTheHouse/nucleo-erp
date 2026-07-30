@@ -301,9 +301,9 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
             sucursal_default = getattr(user, "sucursal_default", None)
             if sucursal_default is not None:
                 try:
-                    from produccion.utils.folios import generate_ob_folio
+                    from produccion.utils.folios import preview_ob_folio
 
-                    preview_folio = generate_ob_folio(empresa.pk, sucursal_default.pk)
+                    preview_folio = preview_ob_folio(empresa.pk, sucursal_default.pk)
                 except Exception:
                     preview_folio = None
 
