@@ -1,6 +1,7 @@
 from django.db import transaction
-from rest_framework import status, viewsets
+from rest_framework import status, viewsets, mixins
 from rest_framework.decorators import action
+from rest_framework.viewsets import GenericViewSet
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 
@@ -33,6 +34,7 @@ from produccion.api.serializers import (
     ReflejanteIncidenciasSerializer,
 )
 
+from produccion.services.orden_bordado_service import OrdenBordadoService
 from produccion.services.orden_produccion_service import OrdenProduccionService
 
 class ListaMaterialBomViewSet(viewsets.ModelViewSet):
@@ -237,12 +239,22 @@ class ProductoTerminadoEntradasViewSet(viewsets.ModelViewSet):
     def anular(self, request, pk=None):
         return Response({'msg': 'ProductoTerminadoEntradasViewSet.anular'}, status=status.HTTP_200_OK)
 
-class OrdenBordadoViewSet(viewsets.ModelViewSet):
-    queryset = OrdenesBordado.objects.filter(activo=True)
+class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, GenericViewSet):
+    queryset = OrdenesBordado.objects.filter()
     serializer_class = OrdenBordadoSerializer
 
-    def perform_destroy(self, instance):
-        instance.soft_delete()
+    def get_queryset(self):
+        user = self.request.user
+        empresa = getattr(user, 'empresa', None)
+        if empresa is None: return OrdenesBordado.objects.none()
+        queryset = OrdenesBordado.objects.filter(empresa=empresa, activo=True)
+        return queryset
+
+    def create(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        orden_bordado = OrdenBordadoService.save(serializer.validated_data, request.user)
+        return Response(OrdenBordadoSerializer(orden_bordado).data, status=status.HTTP_200_OK)
 
 class BordadoAvancesViewSet(viewsets.ModelViewSet):
     queryset = BordadoAvances.objects.filter(activo=True)
