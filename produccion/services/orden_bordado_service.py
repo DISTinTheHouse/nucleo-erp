@@ -7,9 +7,43 @@ from ventas.models import Pedido, PedidoDetalleTalla
 class OrdenBordadoService:
 
     @staticmethod
+    def _validar_contexto(pedido, user):
+        """Scope empresa/sucursal del pedido contra el usuario que solicita.
+
+        Mismo criterio y mismos mensajes que
+        ``wms.services.picking_pipeline.context.validar_contexto_picking``:
+        el ``pedido`` llega como id crudo desde el body y el serializer no lo
+        acota a la empresa del usuario, así que sin esta puerta un usuario de
+        la empresa A podía enviar un pedido de la empresa B y el service
+        estampaba la orden con ``pedido.empresa`` —creando documento, gastando
+        un folio de la serie ajena y devolviendo datos de negocio de B—.
+
+        Se ejecuta **antes de cualquier escritura** (en particular antes de
+        ``generate_ob_folio``) para que un rechazo no consuma consecutivo.
+        """
+        empresa = getattr(user, "empresa", None)
+
+        if empresa is None:
+            raise ValidationError("El usuario no tiene una empresa asignada.")
+        if pedido.empresa_id != empresa.pk:
+            raise ValidationError("El pedido no pertenece a la empresa del usuario.")
+
+        es_staff = getattr(user, "is_superuser", False) or getattr(
+            user, "is_admin_empresa", False
+        )
+        if not es_staff and pedido.sucursal_id not in user.sucursales_permitidas():
+            raise ValidationError(
+                "No tiene acceso a la sucursal del pedido para generar la orden "
+                "de bordado."
+            )
+
+    @staticmethod
     @transaction.atomic
     def save(data, user):
         pedido = data.get("pedido")
+
+        OrdenBordadoService._validar_contexto(pedido, user)
+
         sucursal = user.sucursal_default
 
         if sucursal is None:
