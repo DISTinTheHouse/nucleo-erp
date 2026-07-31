@@ -1397,24 +1397,22 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 visible_en_factura=s.visible_en_factura,
             )
 
-        # Generar Órdenes de Trabajo (Automáticas)
-        # Envolvemos en try/except para que un error en la generación de órdenes
-        # no detenga la autorización del pedido principal (fail-safe).
-        try:
-            from produccion.services.orden_bordado_service import OrdenBordadoService
-
-            if OrdenBordadoService.buscar_existente_full_match(pedido) is None:
-                # Generar Órdenes de Bordado (OB) automáticamente
-                self._generar_ordenes_bordado(pedido, empresa)
-            # Generar Órdenes de Reflejante (OR) automáticamente
-            self._generar_ordenes_reflejante(pedido, empresa)
-            # Generar Orden de Producción (OP) automáticamente
-            self._generar_orden_produccion(pedido, empresa)
-            # Generar Órdenes de Corte de Manga (OCM) automáticamente
-            self._generar_ordenes_corte_manga(pedido, empresa)
-        except Exception as e:
-            # Aquí se podría loguear el error: logger.error(f"Error generando órdenes: {e}")
-            pass
+        # Generar Órdenes de Trabajo al autorizar cotización -> crear pedido:
+        # DESHABILITADO por decisión de negocio (Presidencia, 2026-07-31).
+        # Las órdenes de trabajo (OB/OR/OP/OCM) se generan únicamente de forma
+        # manual desde sus módulos de Producción / WMS. Las funciones
+        # _generar_ordenes_* se conservan para re-usarse cuando se habilite un
+        # endpoint/action dedicado (sin acoplarse al flujo autorizar cotización).
+        #
+        # try:
+        #     from produccion.services.orden_bordado_service import OrdenBordadoService
+        #     if OrdenBordadoService.buscar_existente_full_match(pedido) is None:
+        #         self._generar_ordenes_bordado(pedido, empresa)
+        #     self._generar_ordenes_reflejante(pedido, empresa)
+        #     self._generar_orden_produccion(pedido, empresa)
+        #     self._generar_ordenes_corte_manga(pedido, empresa)
+        # except Exception as e:
+        #     pass
 
         return pedido
 
