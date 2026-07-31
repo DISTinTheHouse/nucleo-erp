@@ -14,6 +14,7 @@ from produccion.models import (
     BordadoAvances,
     BordadoIncidencias,
     OrdenesReflejante,
+    OrdenReflejanteDetalle,
     ReflejanteAvances,
     ReflejanteIncidencias
 )
@@ -194,7 +195,6 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
             'sucursal'
         ]
 
-
 class BordadoAvancesSerializer(serializers.ModelSerializer):
     class Meta:
         model = BordadoAvances
@@ -205,10 +205,35 @@ class BordadoIncidenciasSerializer(serializers.ModelSerializer):
         model = BordadoIncidencias
         fields = '__all__'
 
+class OrdenReflejanteDetalleSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
+    color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+
+    class Meta:
+        model = OrdenReflejanteDetalle
+        fields = '__all__'
+
 class OrdenReflejanteSerializer(serializers.ModelSerializer):
+    detalles = OrdenReflejanteDetalleSerializer(many=True, read_only=True)
+    pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
+    usuario_nombre = serializers.SerializerMethodField()
+
     class Meta:
         model = OrdenesReflejante
         fields = '__all__'
+        read_only_fields = [
+            'empresa',
+            'sucursal',
+            'folio_reflejante',
+            'usuario_asignado',
+            'activo'
+        ]
+
+    def get_usuario_nombre(self, obj):
+        usuario = obj.usuario_asignado
+        if not usuario: return None
+        return usuario.get_full_name().strip() or usuario.email
         
 class ReflejanteAvancesSerializer(serializers.ModelSerializer):
     class Meta:

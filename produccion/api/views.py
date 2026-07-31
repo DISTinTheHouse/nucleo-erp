@@ -39,6 +39,7 @@ from produccion.api.serializers import (
 )
 
 from produccion.services.orden_bordado_service import OrdenBordadoService
+from produccion.services.orden_reflejante_service import OrdenReflejanteService
 from produccion.services.orden_produccion_service import OrdenProduccionService
 
 class ListaMaterialBomViewSet(viewsets.ModelViewSet):
@@ -364,9 +365,34 @@ class BordadoIncidenciasViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         instance.soft_delete()
 
-class OrdenReflejanteViewSet(viewsets.ModelViewSet):
-    queryset = OrdenesReflejante.objects.filter(activo=True)
+class OrdenReflejanteViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.DestroyModelMixin,
+    mixins.CreateModelMixin, GenericViewSet
+    ):
+    queryset = OrdenesReflejante.objects.all()
     serializer_class = OrdenReflejanteSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = OrdenesReflejante.objects.filter(activo=True)
+
+        if getattr(user, "is_superuser", False): return qs
+
+        empresa = getattr(user, "empresa", None)
+        if not empresa: return qs.none()
+        qs = qs.filter(empresa=empresa)
+        if getattr(user, "is_admin_empresa", False):
+            return qs
+
+        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+
+    def create(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        orden_reflejante = OrdenReflejanteService.save(serializer.validated_data, request.user)
+        return Response(OrdenReflejanteSerializer(orden_reflejante).data, status=status.HTTP_200_OK)
 
     def perform_destroy(self, instance):
         instance.soft_delete()
