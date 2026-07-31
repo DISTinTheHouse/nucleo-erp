@@ -1401,8 +1401,11 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         # Envolvemos en try/except para que un error en la generación de órdenes
         # no detenga la autorización del pedido principal (fail-safe).
         try:
-            # Generar Órdenes de Bordado (OB) automáticamente
-            self._generar_ordenes_bordado(pedido, empresa)
+            from produccion.services.orden_bordado_service import OrdenBordadoService
+
+            if OrdenBordadoService.buscar_existente_full_match(pedido) is None:
+                # Generar Órdenes de Bordado (OB) automáticamente
+                self._generar_ordenes_bordado(pedido, empresa)
             # Generar Órdenes de Reflejante (OR) automáticamente
             self._generar_ordenes_reflejante(pedido, empresa)
             # Generar Orden de Producción (OP) automáticamente
@@ -1427,31 +1430,23 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             return
 
         with transaction.atomic():
-            serie_folio = (
-                SerieFolio.objects.select_for_update()
-                .filter(
-                    empresa=empresa,
-                    sucursal=pedido.sucursal,
-                    tipo_documento__iexact="ORDEN_CORTE_MANGA",
-                    activo=True,
-                )
-                .order_by("id_serie_folio")
-                .first()
-            )
+            try:
+                from nucleo.models import SerieFolio
 
-            folio_ocm = None
-            if serie_folio:
-                try:
-                    folio_ocm, nuevo_consecutivo, anio_actual = (
-                        serie_folio.get_siguiente_folio()
-                    )
-                    serie_folio.folio_actual = nuevo_consecutivo
-                    serie_folio.ultimo_anio = anio_actual
-                    serie_folio.save(
-                        update_fields=["folio_actual", "ultimo_anio", "updated_at"]
-                    )
-                except Exception:
-                    pass
+                folio_ocm = SerieFolio.consumir_siguiente_folio(
+                    empresa,
+                    pedido.sucursal_id,
+                    [
+                        "ORDEN_CORTE_MANGA",
+                        "Orden de Corte de Manga",
+                        "Orden Corte de Manga",
+                        "CorteManga",
+                        "OCM",
+                    ],
+                    descripcion_documento="Orden de Corte de Manga",
+                )
+            except Exception:
+                folio_ocm = None
 
             if not folio_ocm:
                 folio_ocm = f"OCM-{pedido.folio or pedido.id}"
@@ -1481,32 +1476,23 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         Genera una Orden de Producción (OP) para el pedido.
         """
         with transaction.atomic():
-            # Intentar obtener serie para ORDEN_PRODUCCION
-            serie_folio = (
-                SerieFolio.objects.select_for_update()
-                .filter(
-                    empresa=empresa,
-                    sucursal=pedido.sucursal,
-                    tipo_documento__iexact="ORDEN_PRODUCCION",
-                    activo=True,
-                )
-                .order_by("id_serie_folio")
-                .first()
-            )
+            try:
+                from nucleo.models import SerieFolio
 
-            folio_op = None
-            if serie_folio:
-                try:
-                    folio_op, nuevo_consecutivo, anio_actual = (
-                        serie_folio.get_siguiente_folio()
-                    )
-                    serie_folio.folio_actual = nuevo_consecutivo
-                    serie_folio.ultimo_anio = anio_actual
-                    serie_folio.save(
-                        update_fields=["folio_actual", "ultimo_anio", "updated_at"]
-                    )
-                except Exception:
-                    pass
+                folio_op = SerieFolio.consumir_siguiente_folio(
+                    empresa,
+                    pedido.sucursal_id,
+                    [
+                        "ORDEN_PRODUCCION",
+                        "Orden de Produccion",
+                        "Orden Produccion",
+                        "Orden de Producción",
+                        "OP",
+                    ],
+                    descripcion_documento="Orden de Producción",
+                )
+            except Exception:
+                folio_op = None
 
             if not folio_op:
                 # Fallback: Folio basado en el folio del pedido
@@ -1535,32 +1521,23 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             return
 
         with transaction.atomic():
-            # Intentar obtener serie para ORDEN_BORDADO
-            serie_folio = (
-                SerieFolio.objects.select_for_update()
-                .filter(
-                    empresa=empresa,
-                    sucursal=pedido.sucursal,
-                    tipo_documento__iexact="ORDEN_BORDADO",
-                    activo=True,
-                )
-                .order_by("id_serie_folio")
-                .first()
-            )
+            try:
+                from nucleo.models import SerieFolio
 
-            folio_ob = None
-            if serie_folio:
-                try:
-                    folio_ob, nuevo_consecutivo, anio_actual = (
-                        serie_folio.get_siguiente_folio()
-                    )
-                    serie_folio.folio_actual = nuevo_consecutivo
-                    serie_folio.ultimo_anio = anio_actual
-                    serie_folio.save(
-                        update_fields=["folio_actual", "ultimo_anio", "updated_at"]
-                    )
-                except Exception:
-                    pass
+                folio_ob = SerieFolio.consumir_siguiente_folio(
+                    empresa,
+                    pedido.sucursal_id,
+                    [
+                        "ORDEN_BORDADO",
+                        "Orden de Bordado",
+                        "Orden Bordado",
+                        "Bordado",
+                        "OB",
+                    ],
+                    descripcion_documento="Orden de Bordado",
+                )
+            except Exception:
+                folio_ob = None
 
             if not folio_ob:
                 # Fallback: Folio basado en el folio del pedido
@@ -1606,32 +1583,23 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             return
 
         with transaction.atomic():
-            # Intentar obtener serie para ORDEN_REFLEJANTE
-            serie_folio = (
-                SerieFolio.objects.select_for_update()
-                .filter(
-                    empresa=empresa,
-                    sucursal=pedido.sucursal,
-                    tipo_documento__iexact="ORDEN_REFLEJANTE",
-                    activo=True,
-                )
-                .order_by("id_serie_folio")
-                .first()
-            )
+            try:
+                from nucleo.models import SerieFolio
 
-            folio_or = None
-            if serie_folio:
-                try:
-                    folio_or, nuevo_consecutivo, anio_actual = (
-                        serie_folio.get_siguiente_folio()
-                    )
-                    serie_folio.folio_actual = nuevo_consecutivo
-                    serie_folio.ultimo_anio = anio_actual
-                    serie_folio.save(
-                        update_fields=["folio_actual", "ultimo_anio", "updated_at"]
-                    )
-                except Exception:
-                    pass
+                folio_or = SerieFolio.consumir_siguiente_folio(
+                    empresa,
+                    pedido.sucursal_id,
+                    [
+                        "ORDEN_REFLEJANTE",
+                        "Orden de Reflejante",
+                        "Orden Reflejante",
+                        "Reflejante",
+                        "OR",
+                    ],
+                    descripcion_documento="Orden de Reflejante",
+                )
+            except Exception:
+                folio_or = None
 
             if not folio_or:
                 # Fallback: Folio basado en el folio del pedido

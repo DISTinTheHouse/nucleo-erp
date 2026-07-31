@@ -1,8 +1,16 @@
 from django.db import transaction
-from rest_framework.exceptions import ValidationError
+from django.db.models import Count
+from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesBordado, OrdenBordadoDetalle
 from produccion.utils.folios import generate_ob_folio
 from ventas.models import Pedido, PedidoDetalleTalla
+
+
+class OrdenBordadoDuplicada409(APIException):
+    status_code = 409
+    default_detail = "Ya existe una orden de bordado activa para este pedido."
+    default_code = "orden_bordado_duplicada"
+
 
 class OrdenBordadoService:
 
@@ -38,6 +46,38 @@ class OrdenBordadoService:
             )
 
     @staticmethod
+    def buscar_existente_full_match(pedido):
+        """Devuelve OrdenesBordado activa si ya cubre 100% de las tallas con lleva_bordado.
+
+        Regla SAFE minimalista: misma cantidad de detalle_tallas que el pedido.
+        Si negocio decide habilitar fraccionamiento (OB parcial), esta función
+        regresa None y se permite una segunda OB.
+        """
+        tallas_esperadas_qty = (
+            PedidoDetalleTalla.objects.filter(
+                pedido_detalle__pedido=pedido,
+                lleva_bordado=True,
+                cantidad__gt=0,
+            ).count()
+        )
+        if tallas_esperadas_qty == 0:
+            return None
+
+        ob_match = (
+            OrdenesBordado.objects.filter(
+                empresa=pedido.empresa,
+                sucursal=pedido.sucursal,
+                pedido=pedido,
+                activo=True,
+            )
+            .annotate(detalle_count=Count("detalles"))
+            .filter(detalle_count=tallas_esperadas_qty)
+            .order_by("-id")
+            .first()
+        )
+        return ob_match
+
+    @staticmethod
     @transaction.atomic
     def save(data, user):
         pedido = data.get("pedido")
@@ -59,6 +99,23 @@ class OrdenBordadoService:
         if not detalle_tallas:
             raise ValidationError({
                  "err": "El pedido no tiene detalles con bordado para generar la orden."
+            })
+
+        existente = OrdenBordadoService.buscar_existente_full_match(pedido)
+        if existente is not None:
+            raise OrdenBordadoDuplicada409({
+                "err": (
+                    "Ya existe una orden de bordado activa para este pedido con el 100% "
+                    "de las prendas. Si requiere dividir el bordado, contacte a producción."
+                ),
+                "orden_bordado_existente": {
+                    "id": existente.id,
+                    "folio": existente.folio_bordado,
+                    "pedido": existente.pedido_id,
+                    "estado": existente.get_estatus_bordado_display()
+                    if hasattr(existente, "get_estatus_bordado_display")
+                    else existente.estatus_bordado,
+                },
             })
 
         folio_bordado = generate_ob_folio(pedido.empresa_id, pedido.sucursal_id)
@@ -87,3 +144,4 @@ class OrdenBordadoService:
         OrdenBordadoDetalle.objects.bulk_create(bulk_data)
 
         return orden_bordado
+
