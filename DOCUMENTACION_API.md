@@ -1207,18 +1207,17 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
 #### Automatización de Órdenes de Trabajo (Producción)
 
-Al autorizar una cotización (`/autorizar/`), el backend genera automáticamente las siguientes órdenes de trabajo según la configuración de los productos:
-
-1.  **Orden de Producción (OP)**: Se genera siempre por cada pedido autorizado.
-    - Nomenclatura: `OP-P-XXXX`
-2.  **Orden de Bordado (OB)**: Se genera si algún producto tiene `lleva_bordado: true`.
-    - Nomenclatura: `OB-P-XXXX`
-3.  **Orden de Reflejante (OR)**: Se genera si algún producto tiene `lleva_reflejante: true`.
-    - Nomenclatura: `OR-P-XXXX`
-4.  **Orden de Corte de Manga (OCM)**: Se genera si algún producto tiene `lleva_corte_manga: true`.
-    - Nomenclatura: `OCM-P-XXXX`
-
-Estas órdenes nacen en estado **PENDIENTE** y quedan vinculadas al pedido original.
+> 🚨 **Decisión de negocio (Presidencia) — v2 en producción**
+>
+> Al autorizar una cotización el backend **NO genera automáticamente** órdenes de trabajo. La sección anterior (OP / OB / OR / OCM automáticas) quedó **deshabilitada** por decisión de Presidencia y el código está preservado comentado para uso futuro.
+>
+> El flujo actual es manual / onboarding por módulo:
+>
+> - La cotización autorizada se convierte en **`Pedido`** con folio `P-xxxxxx`.
+> - Las órdenes de trabajo se crean **desde los endpoints onboarding de Producción**:
+>   - `POST /api/v1/produccion/orden-bordado/onboarding/` para bordado
+>   - Endpoints equivalentes para reflejante / corte de manga cuando estén disponibles.
+> - Para surtido de almacén se usa el flujo tradicional `WMS → Picking` (documento-only, sin transferencias ni OT automáticas).
 
 - **Listar**: `GET /api/v1/ventas/pedidos/`
 
@@ -1236,6 +1235,8 @@ Estas órdenes nacen en estado **PENDIENTE** y quedan vinculadas al pedido origi
     - se descuenta inventario de las existencias de la misma empresa/sucursal según los productos y variantes del pedido
     - se registra `MovimientoInventario` tipo `SALIDA` ligado al `pedido` y su `AuditoriaEvento`
     - se marca la cotización como `Autorizada (3)` y se guarda un `aprobado_snapshot` del estado aprobado.
+  - Regla crítica: **NO se generan órdenes de trabajo automáticamente** (OB/OR/OP/OCM). Las OT se crean de forma manual a través de los endpoints onboarding de Producción / WMS.
+  - Defaults de facturación: si `cotizacion.persona_pagos / correo_facturas / telefono_pagos / forma_pago / metodo_pago / uso_cfdi` vienen `null`, el backend usa sensible defaults derivados del cliente (`razon_social`/`email`/`telefono`) y los TextChoices de `Cotizacion.FormaPago.TRANSFERENCIA`, `MetodoPago.PUE`, `UsoCfdi.G03`. Esto garantiza que la conversión `Cotizacion → Pedido` nunca falle por campos `NOT NULL` de facturación.
 - Rechazar cotización:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar/`
   - Efecto: la cotización pasa a `Rechazada (4)`. **No** se crea pedido ni se gasta folio.
@@ -1862,12 +1863,12 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 **Reglas del GET onboarding**
 
-| Campo                                  | Regla                                                                                                                                     |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_bordado=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario. |
-| `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                              |
-| `preview.folio_ob_sugerido`            | Llama a `produce.utils.folios.generate_ob_folio(empresa, sucursal_default)`; preview no vinculante.                                       |
-| Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                    |
+| Campo                                  | Regla                                                                                                                                                              |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_bordado=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                          |
+| `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                       |
+| `preview.folio_ob_sugerido`            | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`). |
+| Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                                             |
 
 **POST onboarding**
 
@@ -1876,6 +1877,51 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 - Opcionales: `prioridad`, `observaciones`.
 - Internamente: carga automáticamente **todas** las `PedidoDetalleTalla` del pedido con `lleva_bordado=True`, genera folio OB único y `bulk_create` de `OrdenBordadoDetalle` con la cantidad 100% de cada línea.
 - No depende de WMS ni de un picking existente; se genera completamente desde Producción.
+
+**Respuesta 201 OK**
+
+```json
+{
+  "id": 38,
+  "pedido_folio": "PED-000001",
+  "folio_bordado": "2026-OB-00001",
+  "detalles": [
+    {
+      "id": 39,
+      "producto_nombre": "Gorra Legionario",
+      "talla_nombre": "CH",
+      "cantidad": 10.0
+    }
+  ]
+}
+```
+
+**Control anti-duplicado (HTTP 409 Conflict)**
+
+> Regla SSoT de negocio: no se permite crear más de una **OrdenBordado activa** para el mismo pedido si este ya cubre el 100% de las prendas con `lleva_bordado=True`. Evita doble consumo de folio OB y doble programación en taller.
+
+- **Trigger**: segundo `POST /api/v1/produccion/orden-bordado/onboarding/` con el mismo `pedido` y la primera OB aún activa (no cancelada).
+- **Status**: `409 Conflict`.
+- **Payload de error extend**:
+
+```json
+{
+  "err": "Ya existe una orden de bordado activa para este pedido con el 100% de las prendas. Si requiere dividir el bordado, contacte a producción.",
+  "orden_bordado_existente": {
+    "id": "38",
+    "folio": "2026-OB-00001",
+    "pedido": 125,
+    "estado": "PENDIENTE",
+    "url_detalle": "/api/v1/produccion/orden-bordado/38/"
+  }
+}
+```
+
+- **Garantía**: el consecutivo de `SerieFolio` para OrdenesBordado **no se consume** cuando responde 409. Antes del gasto transaccional de folio corre `OrdenBordadoService._validar_contexto` que incluye:
+  - Validación **cross-tenant**: `pedido.empresa_id == user.empresa_id` y acceso por `sucursales_permitidas()`; si no, retorna 403/409 según caso y no gasta folio.
+  - `buscar_existente_full_match()`: detecta OB activa para el mismo pedido con cobertura 100%.
+
+**Estados y cancelación**: Si se requiere reprocesar un pedido porque la OB original se canceló o cerró parcialmente, el `POST` volverá a permitir crear una nueva OB sin conflictos.
 
 ---
 

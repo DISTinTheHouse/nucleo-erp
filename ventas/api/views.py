@@ -1286,6 +1286,31 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         )
 
     def _copiar_cotizacion_a_pedido(self, cotizacion, empresa):
+        # Valores por omisión para campos NOT NULL de Pedido que cotización no
+        # siempre define. Elegidos alineados a los TextChoices de Cotizacion y
+        # a los defaults razonables usados en producción.
+        defaults = {
+            "forma_pago": getattr(cotizacion, "FormaPago", None)
+            and cotizacion.FormaPago.TRANSFERENCIA,
+            "metodo_pago": getattr(cotizacion, "MetodoPago", None)
+            and cotizacion.MetodoPago.PUE,
+            "uso_cfdi": getattr(cotizacion, "UsoCfdi", None)
+            and cotizacion.UsoCfdi.GO3,
+        }
+        cliente_email = (
+            getattr(cotizacion.cliente, "email", None) if cotizacion.cliente else None
+        )
+        cliente_tel = (
+            getattr(cotizacion.cliente, "telefono", None) if cotizacion.cliente else None
+        )
+        cliente_nombre = (
+            (
+                getattr(cotizacion.cliente, "razon_social", None)
+                or getattr(cotizacion.cliente, "nombre_comercial", None)
+            )
+            if cotizacion.cliente
+            else None
+        )
         pedido = Pedido.objects.create(
             empresa=empresa,
             sucursal=cotizacion.sucursal,
@@ -1306,13 +1331,16 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             redes_sociales=cotizacion.redes_sociales,
             otro=cotizacion.otro,
             mailing=cotizacion.mailing,
-            persona_pagos=cotizacion.persona_pagos,
-            correo_facturas=cotizacion.correo_facturas,
-            telefono_pagos=cotizacion.telefono_pagos,
+            persona_pagos=cotizacion.persona_pagos or cliente_nombre or "",
+            correo_facturas=cotizacion.correo_facturas or cliente_email or (
+                cliente_nombre and f"{cliente_nombre.lower().split()[0]}@example.com"
+                if cliente_nombre else ""
+            ) or "",
+            telefono_pagos=cotizacion.telefono_pagos or cliente_tel or "",
             oc=cotizacion.oc,
-            forma_pago=cotizacion.forma_pago,
-            metodo_pago=cotizacion.metodo_pago,
-            uso_cfdi=cotizacion.uso_cfdi,
+            forma_pago=cotizacion.forma_pago or defaults["forma_pago"],
+            metodo_pago=cotizacion.metodo_pago or defaults["metodo_pago"],
+            uso_cfdi=cotizacion.uso_cfdi or defaults["uso_cfdi"],
             anticipo_total=cotizacion.anticipo_total,
             anticipo_parcial=cotizacion.anticipo_parcial,
             vendedor_autoriza=cotizacion.vendedor_autoriza,
