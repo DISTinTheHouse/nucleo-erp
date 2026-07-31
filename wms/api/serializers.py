@@ -2,10 +2,13 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
+from catalogo.models import Producto, ProductoVariante
 from logistica.models import Envio
 from wms.models import (
     Despacho,
     DespachoDetalle,
+    EtiquetaRFIDDetalle,
+    EtiquetaRFIDImpresion,
     Packing,
     PackingDetalle,
     Picking,
@@ -629,4 +632,93 @@ class DespachoCreateSerializer(serializers.ModelSerializer):
             "envio",
             "despacho_detalle",
         ]
+
+
+class EtiquetaRFIDDetalleReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EtiquetaRFIDDetalle
+        fields = "__all__"
+        read_only_fields = ["impresion"]
+
+
+class EtiquetaRFIDSerializer(serializers.ModelSerializer):
+    folio = serializers.CharField(read_only=True)
+    etiquetas = EtiquetaRFIDDetalleReadSerializer(many=True, read_only=True)
+    empresa = serializers.IntegerField(source="empresa_id", read_only=True)
+    sucursal = serializers.IntegerField(source="sucursal_id", read_only=True, allow_null=True)
+    usuario = serializers.IntegerField(source="usuario_id", read_only=True, allow_null=True)
+    producto = serializers.IntegerField(source="producto_id", read_only=True, allow_null=True)
+    producto_variante = serializers.IntegerField(
+        source="producto_variante_id", read_only=True, allow_null=True
+    )
+    producto_nombre = serializers.CharField(
+        source="producto.nombre", read_only=True, default=None
+    )
+    producto_variante_nombre = serializers.CharField(
+        source="producto_variante.nombre", read_only=True, default=None
+    )
+    sku = serializers.CharField(
+        source="producto_variante.sku", read_only=True, default=None
+    )
+    codigo_producto = serializers.CharField(
+        source="producto.codigo", read_only=True, default=None
+    )
+
+    class Meta:
+        model = EtiquetaRFIDImpresion
+        fields = "__all__"
+
+
+class EtiquetaRFIDCreateSerializer(serializers.Serializer):
+    class EtiquetaRFIDDetalleInputSerializer(serializers.Serializer):
+        epc = serializers.CharField(max_length=64, required=False, allow_blank=True)
+        barcode_value = serializers.CharField(
+            max_length=128, required=False, allow_blank=True
+        )
+        serial = serializers.CharField(
+            max_length=64, required=False, allow_blank=True, allow_null=True
+        )
+
+    producto_variante = serializers.PrimaryKeyRelatedField(
+        queryset=ProductoVariante.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    producto = serializers.PrimaryKeyRelatedField(
+        queryset=Producto.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    cantidad = serializers.IntegerField(min_value=1, max_value=10000, required=False, default=1)
+    rfid_mode = serializers.BooleanField(required=False, default=True)
+    printer_name = serializers.CharField(
+        max_length=128, required=False, allow_blank=True, allow_null=True
+    )
+    printer_address = serializers.CharField(
+        max_length=128, required=False, allow_blank=True, allow_null=True
+    )
+    status = serializers.ChoiceField(
+        choices=EtiquetaRFIDImpresion.Estatus.choices, required=False
+    )
+    zpl_enviado = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True
+    )
+    observaciones = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True
+    )
+    etiquetas = EtiquetaRFIDDetalleInputSerializer(many=True, required=False)
+
+    def validate(self, attrs):
+        producto = attrs.get("producto")
+        producto_variante = attrs.get("producto_variante")
+        if not producto and not producto_variante:
+            raise serializers.ValidationError(
+                "Debe proporcionar 'producto' o 'producto_variante'."
+            )
+        if producto and producto_variante:
+            raise serializers.ValidationError(
+                "Solo puede proporcionar 'producto' o 'producto_variante'."
+            )
+        return attrs
+
 

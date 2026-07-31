@@ -430,3 +430,99 @@ class TransferenciaDetalle(models.Model):
 
     def __str__(self):
         return str(self.id)
+
+
+class EtiquetaRFIDImpresion(models.Model):
+    class Estatus(models.TextChoices):
+        PENDIENTE = "PENDIENTE", "Pendiente"
+        EXITO = "EXITO", "Éxito"
+        FALLIDO = "FALLIDO", "Fallido"
+
+    empresa = models.ForeignKey(
+        "nucleo.Empresa",
+        on_delete=models.CASCADE,
+        related_name="etiquetas_rfid_impresiones",
+    )
+    sucursal = models.ForeignKey(
+        "nucleo.Sucursal",
+        on_delete=models.CASCADE,
+        related_name="etiquetas_rfid_impresiones",
+        null=True,
+        blank=True,
+    )
+    usuario = models.ForeignKey(
+        "usuarios.Usuario",
+        on_delete=models.CASCADE,
+        related_name="etiquetas_rfid_impresiones",
+        null=True,
+        blank=True,
+    )
+    producto = models.ForeignKey(
+        "catalogo.Producto",
+        on_delete=models.CASCADE,
+        related_name="etiquetas_rfid_impresiones",
+        null=True,
+        blank=True,
+    )
+    producto_variante = models.ForeignKey(
+        "catalogo.ProductoVariante",
+        on_delete=models.CASCADE,
+        related_name="etiquetas_rfid_impresiones",
+        null=True,
+        blank=True,
+    )
+    cantidad = models.PositiveIntegerField(default=1)
+    rfid_mode = models.BooleanField(default=True)
+    printer_name = models.CharField(max_length=128, null=True, blank=True)
+    printer_address = models.CharField(max_length=128, null=True, blank=True)
+    status = models.CharField(
+        max_length=16, choices=Estatus.choices, default=Estatus.PENDIENTE
+    )
+    zpl_enviado = models.TextField(null=True, blank=True)
+    observaciones = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "etiquetas_rfid_impresiones"
+        verbose_name = "Impresión Etiqueta RFID"
+        verbose_name_plural = "Impresiones Etiquetas RFID"
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"LAB-{self.pk:06d}"
+
+    @property
+    def folio(self):
+        return f"LAB-{self.pk:06d}"
+
+
+class EtiquetaRFIDDetalle(models.Model):
+    class Estado(models.TextChoices):
+        PENDIENTE = "PENDIENTE", "Pendiente"
+        IMPRESO = "IMPRESO", "Impreso"
+        LEIDO = "LEIDO", "Leído"
+        CANCELADO = "CANCELADO", "Cancelado"
+
+    impresion = models.ForeignKey(
+        EtiquetaRFIDImpresion,
+        on_delete=models.CASCADE,
+        related_name="etiquetas",
+    )
+    epc = models.CharField(max_length=64, unique=True, db_index=True)
+    barcode_value = models.CharField(max_length=128)
+    serial = models.CharField(max_length=64, null=True, blank=True)
+    estado = models.CharField(
+        max_length=16, choices=Estado.choices, default=Estado.PENDIENTE
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "etiquetas_rfid_detalle"
+        verbose_name = "Detalle Etiqueta RFID"
+        verbose_name_plural = "Detalles Etiquetas RFID"
+        ordering = ["impresion_id", "id"]
+
+    def __str__(self):
+        return self.epc

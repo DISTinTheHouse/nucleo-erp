@@ -2659,6 +2659,203 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 
 ---
 
+## 🏷️ WMS - Etiquetas RFID
+
+Conector oficial para que Next.js genere etiquetas con ZPL (gráfico + barcode + EPC), y registre trazabilidad de cada impresión.
+La fuente de verdad (producto, SKU, EPC, ZPL, usuario, impresora, estatus) vive en backend.
+El frontend solo selecciona la impresora, envía el ZPL vía Zebra Browser Print y notifica el resultado.
+
+**Flujo recomendado**
+1. `GET /preview` → trae datos del producto + ZPL + arreglo de `etiquetas` con su EPC.
+2. El frontend itera `etiquetas` y envía a la impresora un ZPL por etiqueta (puedes usar `zpl_normal`, `zpl_rfid_first` como ejemplo o reconstruir el ZPL RFID usando el EPC de cada renglón).
+3. Cuando termina la impresión, el frontend manda `POST /registrar-impresion/` para dejar trazabilidad.
+
+---
+
+### 1) Preview de Etiquetas
+
+- **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/preview/`
+- **Descripción**: genera payload de preview para impresión de etiquetas (variante o producto base).
+- **Autenticación**: sesión/Token del usuario; respeta empresa y sucursales permitidas.
+
+**Query params**
+- `variante` o `variante_id`: ID de `ProductoVariante` (si el producto usa variantes).
+- `producto` o `producto_id`: ID de `Producto` (si no existen variantes).
+- `cantidad`: opcional, entero, default `1`.
+- `rfid_mode`: opcional, `true|false`, default `true`. Si `false`, solo gráfico + barcode.
+
+**Ejemplo**
+- `GET /api/v1/wms/etiquetas-rfid/preview/?variante=135&cantidad=2&rfid_mode=true`
+
+**Respuesta resumida**
+
+```json
+{
+  "empresa": 1,
+  "sucursal": 1,
+  "cantidad": 2,
+  "rfid_mode": true,
+  "producto": {
+    "id": 10,
+    "nombre": "CAMISA MANGA LARGA RAYAS THAI PREMIUM",
+    "codigo": "1000",
+    "cod_proscai": null
+  },
+  "producto_variante": {
+    "id": 135,
+    "sku": "1000700CH",
+    "nombre": null,
+    "color": "AZUL",
+    "talla": "CH"
+  },
+  "preview_data": {
+    "header": "SKU 1000700CH · CAMISA MANGA LARGA RAYAS THAI PREMIUM",
+    "title": "CAMISA MANGA LARGA RAYAS THAI PREMIUM",
+    "primary_line": "SKU: 1000700CH",
+    "secondary_line": "AZUL / CH",
+    "meta_line": "COD: 1000",
+    "barcode_value": "1000700CH"
+  },
+  "zpl_normal": "^XA\\n^PW799\\n...^XZ",
+  "zpl_rfid_first": "^XA\\n^PW799\\n...^RFW,E,,N\\n^FDE280...^FS\\n...^XZ",
+  "etiquetas": [
+    {
+      "n": 1,
+      "epc": "E2806894FFFFFFFF0001ABCD",
+      "serial": "0001",
+      "barcode_value": "1000700CH"
+    },
+    {
+      "n": 2,
+      "epc": "E2806894FFFFFFFF0002E123",
+      "serial": "0002",
+      "barcode_value": "1000700CH"
+    }
+  ]
+}
+```
+
+**Notas**
+- `zpl_normal`: ZPL sin RFID; solo gráfico y barcode. Útil para validar layout en impresoras no RFID.
+- `zpl_rfid_first`: ejemplo completo de la **primera** etiqueta con EPC codificado. Útil como referencia, pero para imprimir `cantidad > 1` el frontend debe generar un ZPL por etiqueta, usando el `epc` de cada renglón en `etiquetas[]`.
+- El backend valida acceso: si la variante/producto no pertenece a la empresa del usuario devuelve `400`.
+
+---
+
+### 2) Registrar Impresión (Trazabilidad)
+
+- **Endpoint**: `POST /api/v1/wms/etiquetas-rfid/registrar-impresion/`
+- **Alias**: `POST /api/v1/wms/etiquetas-rfid/`
+- **Descripción**: guarda en DB el encabezado de impresión + detalle de cada EPC, para trazabilidad y para que después Fase 4 cruce estas etiquetas con lecturas en recepciones/picking/packing.
+- **Autenticación**: sesión/Token del usuario.
+
+**Body mínimo (backend genera EPCs automáticamente)**
+```json
+{
+  "producto_variante": 135,
+  "cantidad": 2,
+  "rfid_mode": true,
+  "printer_name": "ZD621R-203dpi",
+  "printer_address": "192.168.1.154",
+  "status": "EXITO",
+  "zpl_enviado": "^XA...^XZ",
+  "observaciones": "Impreso desde Next.js vía Browser Print"
+}
+```
+
+**Body completo (frontend envía sus propios EPCs, recomendado para producción)**
+```json
+{
+  "producto_variante": 135,
+  "cantidad": 2,
+  "rfid_mode": true,
+  "printer_name": "ZD621R-203dpi",
+  "printer_address": "192.168.1.154",
+  "status": "EXITO",
+  "zpl_enviado": "^XA...^XZ",
+  "observaciones": "Reimpresión de etiquetas para pedido 125",
+  "etiquetas": [
+    {
+      "epc": "E2806894FFFFFFFF0001ABCD",
+      "barcode_value": "1000700CH",
+      "serial": "0001"
+    },
+    {
+      "epc": "E2806894FFFFFFFF0002E123",
+      "barcode_value": "1000700CH",
+      "serial": "0002"
+    }
+  ]
+}
+```
+
+**Campos**
+- `producto_variante` XOR `producto`: **obligatorio uno de los dos**.
+- `cantidad`: opcional, default `1`.
+- `rfid_mode`: opcional, default `true`. Si `false`, no se crean renglones en `etiquetas_rfid_detalle`.
+- `printer_name`, `printer_address`: opcionales, útiles para auditoría.
+- `status`: opcional, `PENDIENTE|EXITO|FALLIDO`, default `PENDIENTE`.
+- `zpl_enviado`, `observaciones`: opcionales.
+- `etiquetas[]`: opcional. Si lo envía el frontend, debe tener exactamente `cantidad` renglones y cada uno su `epc`. Si no lo envía, backend genera los EPCs automáticamente.
+
+**Respuesta 201**
+
+```json
+{
+  "id": 42,
+  "folio": "LAB-000042",
+  "empresa": 1,
+  "sucursal": 1,
+  "usuario": 5,
+  "producto": 10,
+  "producto_variante": 135,
+  "producto_nombre": "CAMISA MANGA LARGA RAYAS THAI PREMIUM",
+  "producto_variante_nombre": null,
+  "sku": "1000700CH",
+  "codigo_producto": "1000",
+  "cantidad": 2,
+  "rfid_mode": true,
+  "printer_name": "ZD621R-203dpi",
+  "printer_address": "192.168.1.154",
+  "status": "EXITO",
+  "observaciones": "Impreso desde Next.js vía Browser Print",
+  "created_at": "2026-07-31T20:30:00Z",
+  "etiquetas": [
+    {
+      "id": 101,
+      "impresion": 42,
+      "epc": "E2806894FFFFFFFF0001ABCD",
+      "barcode_value": "1000700CH",
+      "serial": "0001",
+      "estado": "IMPRESO"
+    }
+  ]
+}
+```
+
+---
+
+### 3) Listar Impresiones
+
+- **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/`
+- **Descripción**: devuelve encabezado + `etiquetas` (detalle EPC) de las impresiones visibles para la empresa/sucursales del usuario.
+
+### 4) Detalle de Impresión
+
+- **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/{id}/`
+- **Descripción**: detalle completo de una impresión, incluyendo sus EPCs individuales.
+
+---
+
+### 5) Mensaje corto para Next.js
+
+> 1. Llamas `GET preview?variante=135&cantidad=N` y obtienes `etiquetas[]` con cada EPC.
+> 2. Por cada renglón en `etiquetas[]`, armas un ZPL igual que `zpl_rfid_first` pero reemplazando el `EPC` por el de la etiqueta actual, y se lo mandas a la Zebra vía Browser Print (lo tienes en QA de referencia).
+> 3. Al terminar manda `POST registrar-impresion` con `status=EXITO|FALLIDO`, nombre de impresora, y opcionalmente el arreglo `etiquetas[]` con los EPCs reales que salieron.
+> 4. Ya tienes trazabilidad de cada EPC impreso por SKU/usuario/impresora/fecha.
+
+---
+
 ## 🧪 QA RFID Workspace
 
 Flujo de pruebas locales para validar impresión Zebra y captura de lecturas desde dispositivos Zebra sin afectar inventario.

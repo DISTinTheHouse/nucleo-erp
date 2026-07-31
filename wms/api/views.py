@@ -6,6 +6,8 @@ from rest_framework.viewsets import GenericViewSet
 from wms.api.serializers import (
     DespachoCreateSerializer,
     DespachoSerializer,
+    EtiquetaRFIDCreateSerializer,
+    EtiquetaRFIDSerializer,
     PackingCreateSerializer,
     TransferenciaListSerializer,
     TransferenciaRetrieveSerializer,
@@ -17,6 +19,8 @@ from wms.api.serializers import (
 from wms.models import (
     Despacho,
     DespachoDetalle,
+    EtiquetaRFIDDetalle,
+    EtiquetaRFIDImpresion,
     Packing,
     PackingDetalle,
     Picking,
@@ -29,6 +33,7 @@ from wms.services.despacho_service import DespachoService
 from wms.services.transferencia_service import TransferenciaService
 from wms.services.picking_service import PickingService
 from wms.services.packing_service import PackingService
+from wms.services.rfid_label_service import RFIDLabelService
 
 
 class TransferenciaViewSet(
@@ -362,3 +367,84 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
         serializer.is_valid(raise_exception=True)
         despacho_instance = DespachoService.handle_store(serializer.validated_data, request.user)
         return Response(DespachoSerializer(despacho_instance).data, status=status.HTTP_201_CREATED)
+
+
+class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
+    queryset = EtiquetaRFIDImpresion.objects.all()
+    serializer_class = EtiquetaRFIDSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = (
+            super()
+            .get_queryset()
+            .select_related("empresa", "sucursal", "usuario", "producto", "producto_variante")
+            .prefetch_related(
+                Prefetch(
+                    "etiquetas",
+                    queryset=EtiquetaRFIDDetalle.objects.order_by("id"),
+                )
+            )
+            .order_by("-created_at", "-id")
+        )
+
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        qs = qs.filter(empresa=empresa)
+        if getattr(user, "is_admin_empresa", False):
+            return qs
+        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+
+    def get_serializer_class(self):
+        if self.action in {"create", "registrar_impresion"} and self.request.method == "POST":
+            return EtiquetaRFIDCreateSerializer
+        return EtiquetaRFIDSerializer
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="preview",
+        url_name="preview",
+    )
+    def preview(self, request):
+        variante_id = request.query_params.get("variante") or request.query_params.get(
+            "variante_id"
+        )
+        producto_id = request.query_params.get("producto") or request.query_params.get(
+            "producto_id"
+        )
+        cantidad_raw = request.query_params.get("cantidad")
+        rfid_mode_raw = request.query_params.get("rfid_mode", "true")
+        cantidad = int(cantidad_raw) if (cantidad_raw and str(cantidad_raw).isdigit()) else 1
+        rfid_mode = str(rfid_mode_raw).lower() not in {"0", "false", "no", "off"}
+
+        payload = RFIDLabelService.onboarding_preview(
+            request.user,
+            variante_id=variante_id,
+            producto_id=producto_id,
+            cantidad=cantidad,
+            rfid_mode=rfid_mode,
+        )
+        return Response(payload)
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="registrar-impresion",
+        url_name="registrar_impresion",
+    )
+    def registrar_impresion(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        impresion = RFIDLabelService.store_impresion(
+            serializer.validated_data, request.user
+        )
+        return Response(
+            EtiquetaRFIDSerializer(impresion).data, status=status.HTTP_201_CREATED
+        )
+
+    def create(self, request):
+        return self.registrar_impresion(request)
