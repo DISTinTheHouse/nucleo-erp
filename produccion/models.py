@@ -173,7 +173,7 @@ class OrdenesBordado(StatusLifecycleModel):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE)
     folio_bordado = models.CharField(max_length=50, unique=True)
     estatus_bordado = models.IntegerField(default=EstatusBordado.PENDIENTE.value, choices=EstatusBordado.choices)
-    prioridad = models.IntegerField(default=1)
+    prioridad = models.IntegerField(default=1)  
     fecha_inicio = models.DateTimeField(auto_now_add=True)
     fecha_fin = models.DateTimeField(null=True, blank=True)
     usuario_asignado = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE, null=True, blank=True)

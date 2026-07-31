@@ -3,7 +3,7 @@ from django.db.models import Count
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesBordado, OrdenBordadoDetalle
 from produccion.utils.folios import generate_ob_folio
-from ventas.models import Pedido, PedidoDetalleTalla
+from ventas.models import PedidoDetalleTalla
 
 
 class OrdenBordadoDuplicada409(APIException):

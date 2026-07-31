@@ -25,6 +25,16 @@ def generate_ob_folio(empresa_id, sucursal_id):
     )
 
 
+@transaction.atomic
+def generate_or_folio(empresa_id, sucursal_id):
+    return SerieFolio.consumir_siguiente_folio(
+        empresa_id,
+        sucursal_id,
+        ["Orden de Reflejante", "ORDEN_REFLEJANTE", "Reflejante", "OR"],
+        descripcion_documento="Orden de Reflejante",
+    )
+
+@transaction.atomic
 def preview_ob_folio(empresa_id, sucursal_id):
     """Shim backward-compatible. Delegación a ``SerieFolio.preview_siguiente_folio``."""
     return SerieFolio.preview_siguiente_folio(
