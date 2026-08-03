@@ -33,12 +33,23 @@ def generate_or_folio(empresa_id, sucursal_id):
         descripcion_documento="Orden de Reflejante",
     )
 
+@transaction.atomic
 def generate_ocm_folio(empresa_id, sucursal_id):
     return SerieFolio.consumir_siguiente_folio(
         empresa_id,
         sucursal_id,
         ["Orden Corte de Manga", "ORDEN_CORTE_MANGA", "Corte de Manga", "OCM"],
         descripcion_documento="Orden de Corte de Manga",
+    )
+
+
+@transaction.atomic
+def preview_ocm_folio(empresa_id, sucursal_id):
+    """Shim backward-compatible. Delegación a ``SerieFolio.preview_siguiente_folio``."""
+    return SerieFolio.preview_siguiente_folio(
+        empresa_id,
+        sucursal_id,
+        ["Orden Corte de Manga", "ORDEN_CORTE_MANGA", "Corte de Manga", "OCM"],
     )
 
 @transaction.atomic

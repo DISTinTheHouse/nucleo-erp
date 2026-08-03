@@ -2012,6 +2012,95 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 **Estados y cancelación**: Si se requiere reprocesar un pedido porque la OR original se canceló o cerró parcialmente, el `POST` volverá a permitir crear una nueva OR sin conflictos.
 
+### 9) Orden de Corte de Manga Onboarding (patrón sencillo / manual)
+
+- **Endpoints**:
+  - `GET /api/v1/produccion/orden-corte-manga/onboarding/`
+  - `POST /api/v1/produccion/orden-corte-manga/onboarding/`
+- **Objetivo**: patrón onboarding idéntico a ÓrdenesBordado/ÓrdenesReflejante y WMS: catálogos precargados para que Next.js muestre selector de pedido + operadores + preview folio.
+
+**GET onboarding — shape**
+
+```json
+{
+  "pedidos": [
+    {
+      "id": 125,
+      "folio": "PD-000125",
+      "cliente": 15,
+      "cliente_nombre": "Cliente Demo",
+      "sucursal": 1,
+      "sucursal_nombre": "Matriz"
+    }
+  ],
+  "operadores": [{ "id": 8, "nombre": "Juan Pérez" }],
+  "preview": {
+    "folio_ocm_sugerido": "OCM-20260730-001"
+  }
+}
+```
+
+**Reglas del GET onboarding**
+
+| Campo                                  | Regla                                                                                                                                                                 |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_corte_manga=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                         |
+| `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                          |
+| `preview.folio_ocm_sugerido`           | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`).   |
+| Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                                                |
+
+**POST onboarding**
+
+- **Mismo save que `create` tradicional** — usa el `OrdenesCorteMangaSerializer` estándar.
+- Body requerido mínimo: `{ "pedido": 125 }`.
+- Opcionales: `prioridad`, `observaciones`.
+- Internamente: carga automáticamente **todas** las `PedidoDetalleTalla` del pedido con `lleva_corte_manga=True`, genera folio OCM único y `bulk_create` de `OrdenCorteMangaDetalle` con la cantidad 100% de cada línea.
+- No depende de WMS ni de un picking existente; se genera completamente desde Producción.
+
+**Respuesta 201 OK**
+
+```json
+{
+  "id": 14,
+  "pedido_folio": "PED-000001",
+  "folio_ocm": "2026-OCM-00001",
+  "detalles": [
+    {
+      "id": 30,
+      "producto_nombre": "Camisa Térmica",
+      "talla_nombre": "L",
+      "cantidad": 40.0
+    }
+  ]
+}
+```
+
+**Control anti-duplicado (HTTP 409 Conflict)**
+
+> Regla SSoT de negocio: no se permite crear más de una **OrdenesCorteManga activa** para el mismo pedido si este ya cubre el 100% de las prendas con `lleva_corte_manga=True`. Evita doble consumo de folio OCM y doble programación en taller.
+
+- **Trigger**: segundo `POST /api/v1/produccion/orden-corte-manga/onboarding/` con el mismo `pedido` y la primera OCM aún activa (no cancelada).
+- **Status**: `409 Conflict`.
+- **Payload de error extend**:
+
+```json
+{
+  "err": "Ya existe una orden de corte de manga activa para este pedido con el 100% de las prendas. Si requiere dividir el corte, contacte a producción.",
+  "orden_corte_manga_existente": {
+    "id": "14",
+    "folio": "2026-OCM-00001",
+    "pedido": 125,
+    "estado": "PENDIENTE"
+  }
+}
+```
+
+- **Garantía**: el consecutivo de `SerieFolio` para OrdenesCorteManga **no se consume** cuando responde 409. Antes del gasto transaccional de folio corre `OrdenCorteMangaService._validar_contexto` que incluye:
+  - Validación **cross-tenant**: `pedido.empresa_id == user.empresa_id` y acceso por `sucursales_permitidas()`; si no, retorna error y no gasta folio.
+  - `buscar_existente_full_match()`: detecta OCM activa para el mismo pedido con cobertura 100%.
+
+**Estados y cancelación**: Si se requiere reprocesar un pedido porque la OCM original se canceló o cerró parcialmente, el `POST` volverá a permitir crear una nueva OCM sin conflictos.
+
 ---
 
 ## 📦 WMS - Picking
