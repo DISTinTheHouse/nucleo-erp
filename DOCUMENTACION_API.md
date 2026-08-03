@@ -2841,36 +2841,44 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 
 Conector oficial para que Next.js genere etiquetas con ZPL (gráfico + barcode + EPC), y registre trazabilidad de cada impresión.
 La fuente de verdad (producto, SKU, EPC, ZPL, usuario, impresora, estatus) vive en backend.
-El frontend solo selecciona la impresora, envía el ZPL vía Zebra Browser Print y notifica el resultado.
+El frontend selecciona la impresora, envía el ZPL vía Zebra Browser Print y notifica el resultado.
 
-**FLUJO RECOMENDADO Y SIMPLIFICADO (1 endpoint onboarding / 1 modal)**
+**Integración del lado cliente (Zebra Browser Print)**
 
-> 🎯 **Esto es lo que tu compañero de Next.js tiene que armar.**
-> 1 botón `Imprimir etiqueta` → abre 1 modal → **usa 1 solo URL** `GET / POST /api/v1/wms/etiquetas-rfid/onboarding/` (patrón onboarding, igual que OrdenesBordado / OrdenesReflejante / OrdenesCorteManga / WMS picking packing despacho).
+- **Origen y descarga**: Zebra Browser Print es utilería de Zebra Technologies instalada localmente en la estación de trabajo.
+  - Instalador y documentación oficial: https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html
+- **Librería cliente servida por el backend Django**:
+  - Endpoint estático: `GET /QA/browserprint/BrowserPrint-3.1.250.min.js/`
+  - Implementación: vista `qa_browserprint_asset` en [QA/views.py](file:///c:/Users/Jes%C3%BAs%20Ibarra/Desktop/django-backend-v2/QA/views.py#L512-L520), URL registrada en [QA/urls.py](file:///c:/Users/Jes%C3%BAs%20Ibarra/Desktop/django-backend-v2/QA/urls.py).
+- **Modo de uso en Next.js**: cargar dicha librería en el contexto del modal y usar su API (`BrowserPrint.getDefaultDevice`, `device.send(zpl)`)
+  para enviar cada ZPL directamente a la impresora detectada (USB / red). El nombre y dirección de la impresora que devuelve Browser Print
+  se persisten en el backend a través del `POST onboarding`.
+
+**Flujo onboarding recomendado (1 endpoint / 1 modal)**
 
 ```
 ETAPAS DEL MISMO GET/POST:
   1) ABRIR MODAL SIN TEXTO
-       GET  onboarding() → {"tiene_seleccion": false, "resultados": [...60 sugeridos...]}
+       GET  onboarding() → {"tiene_seleccion": false, "resultados": [...primeros registros sugeridos...]}
 
-  2) USUARIO TECLEA SKU / TEXTO
+  2) USUARIO ESCRIBE SKU / TEXTO DE BUSQUEDA
        GET  onboarding(?q="RAYAS THAI") → {"tiene_seleccion":false, "resultados": [filtrados...]}
-       → pintas lista igual que la lista QA usando el campo "label"
+       → pinta la lista con el texto del campo "label"
 
-  3) CLICK EN UN RESULTADO + PONE CANTIDAD
+  3) SELECCIONAR UN PRODUCTO/VARIANTE + DEFINIR CANTIDAD
        GET  onboarding(?variante=155&cantidad=5&rfid_mode=true)
-       → RESPONSE TIENE YA TODO LISTO PARA IMPRIMIR:
+       → RESPONSE CONTIENE PREVIEW COMPLETO CON UN ZPL INDIVIDUAL YA ARMADO POR ETIQUETA:
           {"tiene_seleccion": true,
            "preview": {
               "preview_data": {...},
-              "zpl_individual": ["^XA...^FS...EPC1...^XZ", "^XA...EPC2...^XZ", ...5 ZPLs ya armados],
-              "etiquetas": [{"epc":"...","n":1,...}, {...5 renglones...}]
+              "zpl_individual": ["^XA...^FS...EPC1...^XZ", "^XA...EPC2...^XZ", ...],
+              "etiquetas": [{"epc":"...","n":1,...}, ...]
             }
           }
-       → FRONTEND NO RECONSTRUYE NINGÚN ZPL. SOLO ITERA preview.zpl_individual[]
-         y cada renglón se lo envía a Browser Print → `device.send(zpl)` 1 por 1.
+       → el frontend itera sobre preview.zpl_individual[] y envía cada cadena
+         a Browser Print vía `device.send(zpl)`.
 
-  4) AL TERMINAR IMPRESIÓN
+  4) AL TERMINAR IMPRESION
        POST onboarding(
          {"producto_variante":155, "cantidad":5, "rfid_mode":true,
           "printer_name":"ZD621R-203dpi", "printer_address":"192.168.1.154",
@@ -2878,8 +2886,8 @@ ETAPAS DEL MISMO GET/POST:
           "etiquetas": [opcional, mismo arreglo del preview con los EPC reales usados]
          }
        )
-       → 201 CREATED → se crea la impresión + sus detalles EPC.
-       → LA PANTALLA /wms/rfid-labels HACE GET /etiquetas-rfid/ Y AHORA SÍ MUESTRA DATOS ✔️
+       → 201 CREATED → se crea el registro de impresión + sus detalles EPC.
+       → el listado de impresiones `GET /api/v1/wms/etiquetas-rfid/` devuelve el nuevo registro.
 ```
 
 ---
@@ -3169,32 +3177,16 @@ La impresión ya quedó registrada y se verá en `GET /api/v1/wms/etiquetas-rfid
 
 ---
 
-### 5) Mensaje corto para Next.js
+### 5) Checklist de integración Next.js
 
-> Flujo **1 modal / 1 URL** (simplísimo, igual que ordenes de bordado/reflejante):
->
-> **1 button** "Imprimir etiqueta" → **1 modal** → pega todo a:
->
-> 1. `GET /api/v1/wms/etiquetas-rfid/onboarding/` (abrir modal vacío).
-> 2. Cuando el usuario escriba en el buscador: `GET /onboarding/?q=RAYAS+THAI` → pinta resultados con `resultados[].label`.
-> 3. Cuando seleccione 1 resultado + cantidad (ej 5):
->    - si es variante → `GET /onboarding/?variante=155&cantidad=5&rfid_mode=true`
->    - si es producto → `GET /onboarding/?producto=91&cantidad=5&rfid_mode=true`
->    - la respuesta te trae `preview.zpl_individual[]` (ARREGLO DE 5 ZPLs YA ARMADOS, CADA UNO CON SU EPC UNICO).
-> 4. **NO CONSTRUYAS ZPL TU MISMO**. Itera `preview.zpl_individual` y cada string se lo mandas a Zebra `device.send(zpl)` (usa la misma librería que QA: `/QA/browserprint/BrowserPrint-3.1.250.min.js/`). Detecta la impresora exactamente igual que QA.
-> 5. Al terminar la impresión (todas las etiquetas):
->    - `POST /api/v1/wms/etiquetas-rfid/onboarding/` con body:
->      ```json
->      {
->        "producto_variante": 155,
->        "cantidad": 5,
->        "rfid_mode": true,
->        "printer_name": "ZD621R-203dpi",
->        "printer_address": "192.168.1.154",
->        "status": "EXITO"
->      }
->      ```
-> 6. **Listo**. Ese POST crea la impresión en la tabla. Ahora cuando la pantalla `/wms/rfid-labels` haga `GET /api/v1/wms/etiquetas-rfid/` ya no vendrá vacía ✔️.
+| Paso | Acción                                                                                                                                                                                                                                                                                |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | Abrir modal y consultar `GET /api/v1/wms/etiquetas-rfid/onboarding/` para obtener resultados iniciales.                                                                                                                                                                               |
+| 2    | Buscar texto: `GET /api/v1/wms/etiquetas-rfid/onboarding/?q=<texto>`. Renderizar la lista con el campo `label`.                                                                                                                                                                       |
+| 3    | Seleccionar variante/producto y cantidad, consultar `GET /onboarding/?variante=X&cantidad=N&rfid_mode=true` (o `?producto=Y`). Usar `preview.zpl_individual[]` como fuente de ZPL.                                                                                                    |
+| 4    | Cargar Zebra Browser Print desde `GET /QA/browserprint/BrowserPrint-3.1.250.min.js/`, detectar impresora (`BrowserPrint.getDefaultDevice` o listado de dispositivos) y enviar cada ZPL individual con `device.send(zpl)`.                                                             |
+| 5    | Al finalizar el envío de las etiquetas, registrar la operación con `POST /api/v1/wms/etiquetas-rfid/onboarding/`: `producto_variante`, `cantidad`, `rfid_mode`, `printer_name`, `printer_address`, `status`. Enviar opcionalmente el arreglo `etiquetas[]` con los EPC reales usados. |
+| 6    | Actualizar el listado de impresiones en pantalla a partir de `GET /api/v1/wms/etiquetas-rfid/`.                                                                                                                                                                                       |
 
 ---
 
