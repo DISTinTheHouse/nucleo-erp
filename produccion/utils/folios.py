@@ -42,3 +42,13 @@ def preview_ob_folio(empresa_id, sucursal_id):
         sucursal_id,
         ["Orden de Bordado", "ORDEN_BORDADO", "Bordado", "OB"],
     )
+
+
+@transaction.atomic
+def preview_or_folio(empresa_id, sucursal_id):
+    """Shim backward-compatible. Delegación a ``SerieFolio.preview_siguiente_folio``."""
+    return SerieFolio.preview_siguiente_folio(
+        empresa_id,
+        sucursal_id,
+        ["Orden de Reflejante", "ORDEN_REFLEJANTE", "Reflejante", "OR"],
+    )

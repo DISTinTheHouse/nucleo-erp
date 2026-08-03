@@ -375,17 +375,21 @@ class OrdenReflejanteViewSet(
     serializer_class = OrdenReflejanteSerializer
 
     def get_queryset(self):
+        """Aislamiento multi-tenant: empresa + sucursal.
+
+        Mismo criterio que ``OrdenBordadoViewSet``/``PickingViewSet``.
+        """
         user = self.request.user
         qs = OrdenesReflejante.objects.filter(activo=True)
 
-        if getattr(user, "is_superuser", False): return qs
-
+        if getattr(user, "is_superuser", False):
+            return qs
         empresa = getattr(user, "empresa", None)
-        if not empresa: return qs.none()
+        if not empresa:
+            return qs.none()
         qs = qs.filter(empresa=empresa)
         if getattr(user, "is_admin_empresa", False):
             return qs
-
         return qs.filter(sucursal_id__in=user.sucursales_permitidas())
 
     def create(self, request):
@@ -396,6 +400,79 @@ class OrdenReflejanteViewSet(
 
     def perform_destroy(self, instance):
         instance.soft_delete()
+
+    @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
+    def onboarding(self, request):
+        """Onboarding para OrdenReflejante (patrón WMS picking/packing/despacho).
+
+        GET → catálogos de pedidos con prendas que requieren reflejante,
+        operadores de la empresa y preview del folio siguiente.
+
+        POST → mismo save que create() (comparte serializer y service).
+        """
+        if request.method == "GET":
+            user = request.user
+            empresa = getattr(user, "empresa", None)
+            empty = {"pedidos": [], "operadores": [], "preview": {"folio_or_sugerido": None}}
+            if empresa is None:
+                return Response(empty)
+
+            sucursal_ids = user.sucursales_permitidas()
+            if not sucursal_ids:
+                return Response(empty)
+
+            pedidos_qs = (
+                Pedido.objects.filter(
+                    empresa=empresa,
+                    sucursal_id__in=sucursal_ids,
+                    activo=True,
+                    detalles__tallas__lleva_reflejante=True,
+                )
+                .distinct()
+                .select_related("cliente", "sucursal")
+                .order_by("-created_at", "-id")
+            )
+
+            operadores_qs = (
+                Usuario.objects.filter(empresa=empresa, is_active=True)
+                .order_by("first_name", "last_name", "email")
+            )
+
+            preview_folio = None
+            sucursal_default = getattr(user, "sucursal_default", None)
+            if sucursal_default is not None:
+                try:
+                    from produccion.utils.folios import preview_or_folio
+
+                    preview_folio = preview_or_folio(empresa.pk, sucursal_default.pk)
+                except Exception:
+                    preview_folio = None
+
+            return Response({
+                "pedidos": [
+                    {
+                        "id": p.id,
+                        "folio": p.folio,
+                        "cliente": p.cliente_id,
+                        "cliente_nombre": getattr(p.cliente, "nombre", None),
+                        "sucursal": p.sucursal_id,
+                        "sucursal_nombre": getattr(p.sucursal, "nombre", None),
+                    }
+                    for p in pedidos_qs
+                ],
+                "operadores": [
+                    {"id": u.id, "nombre": u.get_full_name().strip() or u.email}
+                    for u in operadores_qs
+                ],
+                "preview": {"folio_or_sugerido": preview_folio},
+            })
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        orden_reflejante = OrdenReflejanteService.save(serializer.validated_data, request.user)
+        return Response(
+            OrdenReflejanteSerializer(orden_reflejante).data, status=status.HTTP_201_CREATED
+        )
 
 class ReflejanteAvancesViewSet(viewsets.ModelViewSet):
     queryset = ReflejanteAvances.objects.filter(activo=True)
