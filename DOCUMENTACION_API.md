@@ -1953,12 +1953,12 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 **Reglas del GET onboarding**
 
-| Campo                                  | Regla                                                                                                                                                               |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_reflejante=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                         |
-| `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                        |
-| `preview.folio_or_sugerido`            | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`).  |
-| Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                                              |
+| Campo                                  | Regla                                                                                                                                                              |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_reflejante=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                       |
+| `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                       |
+| `preview.folio_or_sugerido`            | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`). |
+| Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                                             |
 
 **POST onboarding**
 
@@ -2042,12 +2042,12 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 **Reglas del GET onboarding**
 
-| Campo                                  | Regla                                                                                                                                                                 |
-| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_corte_manga=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                         |
-| `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                          |
-| `preview.folio_ocm_sugerido`           | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`).   |
-| Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                                                |
+| Campo                                  | Regla                                                                                                                                                              |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_corte_manga=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                      |
+| `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                       |
+| `preview.folio_ocm_sugerido`           | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`). |
+| Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                                             |
 
 **POST onboarding**
 
@@ -2844,9 +2844,75 @@ La fuente de verdad (producto, SKU, EPC, ZPL, usuario, impresora, estatus) vive 
 El frontend solo selecciona la impresora, envía el ZPL vía Zebra Browser Print y notifica el resultado.
 
 **Flujo recomendado**
-1. `GET /preview` → trae datos del producto + ZPL + arreglo de `etiquetas` con su EPC.
-2. El frontend itera `etiquetas` y envía a la impresora un ZPL por etiqueta (puedes usar `zpl_normal`, `zpl_rfid_first` como ejemplo o reconstruir el ZPL RFID usando el EPC de cada renglón).
-3. Cuando termina la impresión, el frontend manda `POST /registrar-impresion/` para dejar trazabilidad.
+
+1. `GET /buscar` (input tipo QA: SKU / nombre / código / cod_proscai) → selecciona SKU/producto.
+2. `GET /preview` (con el `variante_id` o `producto_id` del paso 1) → trae datos del producto + ZPL + arreglo de `etiquetas` con su EPC.
+3. El frontend itera `etiquetas` y envía a la impresora un ZPL por etiqueta (puedes usar `zpl_normal`, `zpl_rfid_first` como ejemplo o reconstruir el ZPL RFID usando el EPC de cada renglón). Usa `BrowserPrint-3.1.250.min.js` disponible en `/QA/browserprint/BrowserPrint-3.1.250.min.js/`.
+4. Cuando termina la impresión, el frontend manda `POST /registrar-impresion/` para dejar trazabilidad → ahora **sí** aparecerá en `GET /api/v1/wms/etiquetas-rfid/`.
+
+---
+
+### 0) Buscador de SKU / Producto (mismo criterio que QA/imprimir_etiqueta)
+
+- **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/buscar/`
+- **Descripción**: buscador simple y ligero para que el WMS muestre el mismo selector de QA: escribe texto, sugiere resultados, usuario selecciona 1 → alimenta el `GET /preview`.
+- **Autenticación**: sesión/Token del usuario; respeta empresa (filtro por `empresa=user.empresa`) y scope multi-tenant.
+- **Basado en**: la misma lógica Q de `QA/views.py:imprimir_etiqueta_workspace()` con OR sobre sku/nombre/producto/código/cod_proscai.
+
+**Query params**
+
+- `q`: texto libre. Ej: `93EO`, `playera`, `1000`, `AMB-1000`.
+- Si `q` está vacío, devuelve primeras 60 entradas (30 variantes + 30 productos sin variantes) para scope empresa del usuario.
+
+**Ejemplos**
+
+- `GET /api/v1/wms/etiquetas-rfid/buscar/?q=RAYAS+THAI`
+- `GET /api/v1/wms/etiquetas-rfid/buscar/?q=10005032XC`
+- `GET /api/v1/wms/etiquetas-rfid/buscar/?q=`
+
+**Respuesta shape**
+
+```json
+{
+  "q": "10005032XC",
+  "sucursal_ids": null,
+  "resultados": [
+    {
+      "tipo": "variante",
+      "id": 155,
+      "producto_variante_id": 155,
+      "producto_id": 91,
+      "label": "10005032XC - CAMISA MANGA LARGA RAYAS THAI PREMIUM · VINO · 2XC",
+      "sku": "10005032XC",
+      "nombre": "CAMISA MANGA LARGA RAYAS THAI PREMIUM",
+      "color_nombre": "VINO",
+      "talla_nombre": "2XC",
+      "codigo": "1000",
+      "cod_proscai": null
+    },
+    {
+      "tipo": "producto",
+      "id": 211,
+      "producto_variante_id": null,
+      "producto_id": 211,
+      "label": "1050 - HILO 100% POLIESTER",
+      "sku": null,
+      "nombre": "HILO 100% POLIESTER",
+      "color_nombre": null,
+      "talla_nombre": null,
+      "codigo": "1050",
+      "cod_proscai": null
+    }
+  ]
+}
+```
+
+**Reglas para el frontend**
+
+- El campo `label` es el texto que se pinta en la lista de resultados (igual que la lista QA).
+- Si `tipo === "variante"`: pasa `producto_variante_id` al `GET /preview/?variante=`.
+- Si `tipo === "producto"`: pasa `producto_id` al `GET /preview/?producto=`.
+- `sucursal_ids` es `null` para admin/superuser, y un arreglo de IDs para operadores normales (por si el frontend quiere filtrar impresiones de solo sus sucursales).
 
 ---
 
@@ -2857,12 +2923,14 @@ El frontend solo selecciona la impresora, envía el ZPL vía Zebra Browser Print
 - **Autenticación**: sesión/Token del usuario; respeta empresa y sucursales permitidas.
 
 **Query params**
+
 - `variante` o `variante_id`: ID de `ProductoVariante` (si el producto usa variantes).
 - `producto` o `producto_id`: ID de `Producto` (si no existen variantes).
 - `cantidad`: opcional, entero, default `1`.
 - `rfid_mode`: opcional, `true|false`, default `true`. Si `false`, solo gráfico + barcode.
 
 **Ejemplo**
+
 - `GET /api/v1/wms/etiquetas-rfid/preview/?variante=135&cantidad=2&rfid_mode=true`
 
 **Respuesta resumida**
@@ -2914,6 +2982,7 @@ El frontend solo selecciona la impresora, envía el ZPL vía Zebra Browser Print
 ```
 
 **Notas**
+
 - `zpl_normal`: ZPL sin RFID; solo gráfico y barcode. Útil para validar layout en impresoras no RFID.
 - `zpl_rfid_first`: ejemplo completo de la **primera** etiqueta con EPC codificado. Útil como referencia, pero para imprimir `cantidad > 1` el frontend debe generar un ZPL por etiqueta, usando el `epc` de cada renglón en `etiquetas[]`.
 - El backend valida acceso: si la variante/producto no pertenece a la empresa del usuario devuelve `400`.
@@ -2928,6 +2997,7 @@ El frontend solo selecciona la impresora, envía el ZPL vía Zebra Browser Print
 - **Autenticación**: sesión/Token del usuario.
 
 **Body mínimo (backend genera EPCs automáticamente)**
+
 ```json
 {
   "producto_variante": 135,
@@ -2942,6 +3012,7 @@ El frontend solo selecciona la impresora, envía el ZPL vía Zebra Browser Print
 ```
 
 **Body completo (frontend envía sus propios EPCs, recomendado para producción)**
+
 ```json
 {
   "producto_variante": 135,
@@ -2968,6 +3039,7 @@ El frontend solo selecciona la impresora, envía el ZPL vía Zebra Browser Print
 ```
 
 **Campos**
+
 - `producto_variante` XOR `producto`: **obligatorio uno de los dos**.
 - `cantidad`: opcional, default `1`.
 - `rfid_mode`: opcional, default `true`. Si `false`, no se crean renglones en `etiquetas_rfid_detalle`.
@@ -3027,10 +3099,13 @@ El frontend solo selecciona la impresora, envía el ZPL vía Zebra Browser Print
 
 ### 5) Mensaje corto para Next.js
 
-> 1. Llamas `GET preview?variante=135&cantidad=N` y obtienes `etiquetas[]` con cada EPC.
-> 2. Por cada renglón en `etiquetas[]`, armas un ZPL igual que `zpl_rfid_first` pero reemplazando el `EPC` por el de la etiqueta actual, y se lo mandas a la Zebra vía Browser Print (lo tienes en QA de referencia).
-> 3. Al terminar manda `POST registrar-impresion` con `status=EXITO|FALLIDO`, nombre de impresora, y opcionalmente el arreglo `etiquetas[]` con los EPCs reales que salieron.
-> 4. Ya tienes trazabilidad de cada EPC impreso por SKU/usuario/impresora/fecha.
+> Flujo tipo QA, pero oficial y con trazabilidad:
+>
+> 1. **Buscador** → `GET /api/v1/wms/etiquetas-rfid/buscar/?q=texto` → pintas la lista de resultados usando el campo `label` (misma UX que lista QA).
+> 2. **Preview** → al seleccionar un renglón, si es `tipo=variante` llamas `GET /preview/?variante=producto_variante_id&cantidad=N`; si es `tipo=producto` llamas `GET /preview/?producto=producto_id&cantidad=N`. Obtienes `preview_data`, `zpl_rfid_first` y `etiquetas[]` con cada EPC.
+> 3. **Imprimir** → por cada renglón en `etiquetas[]`, armas un ZPL igual que `zpl_rfid_first` pero reemplazando el EPC por el de la etiqueta actual, y se lo mandas a la Zebra vía Browser Print (usa la misma librería de QA: `/QA/browserprint/BrowserPrint-3.1.250.min.js/`).
+> 4. **Registrar** → al terminar manda `POST /registrar-impresion` con `status=EXITO|FALLIDO`, nombre de impresora, y opcionalmente el arreglo `etiquetas[]` con los EPCs reales que salieron.
+> 5. Ahora **sí** se verán resultados en `GET /api/v1/wms/etiquetas-rfid/` (la lista que hoy está vacía en `lazzar-erp.vercel.app/wms/rfid-labels`).
 
 ---
 

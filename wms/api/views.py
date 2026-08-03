@@ -406,6 +406,124 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
     @action(
         detail=False,
         methods=["get"],
+        url_path="buscar",
+        url_name="buscar",
+    )
+    def buscar(self, request):
+        """Buscador simple de SKU/producto (mismo criterio que QA/imprimir_etiqueta).
+
+        Scope: multi-tenant por empresa + sucursales permitidas.
+        Filtra con OR por:
+          - ProductoVariante: sku, nombre, producto.nombre, producto.codigo, producto.cod_proscai
+          - Producto: nombre, codigo, cod_proscai
+
+        Respuesta lista simple tipo QA:
+        [{
+          "tipo": "variante" | "producto",
+          "id",
+          "producto_variante_id" | null,
+          "producto_id",
+          "label": "10005032XC - CAMISA MANGA LARGA THAI PREMIUM · VINO · 2XC",
+          "sku",
+          "nombre",
+          "color_nombre",
+          "talla_nombre",
+          "codigo",
+          "cod_proscai"
+        }]
+        """
+        from django.db.models import Q
+        from catalogo.models import Producto, ProductoVariante
+
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        q = (request.query_params.get("q") or "").strip()
+
+        empty = {"q": q, "resultados": []}
+        if empresa is None:
+            return Response(empty)
+
+        variantes_qs = (
+            ProductoVariante.objects.select_related("producto", "color", "talla")
+            .filter(empresa=empresa, activo=True)
+            .order_by("sku")
+        )
+        productos_qs = Producto.objects.filter(empresa=empresa, activo=True).order_by(
+            "nombre"
+        )
+
+        if q:
+            variantes_qs = variantes_qs.filter(
+                Q(sku__icontains=q)
+                | Q(nombre__icontains=q)
+                | Q(producto__nombre__icontains=q)
+                | Q(producto__codigo__icontains=q)
+                | Q(producto__cod_proscai__icontains=q)
+            )
+            productos_qs = productos_qs.filter(
+                Q(nombre__icontains=q)
+                | Q(codigo__icontains=q)
+                | Q(cod_proscai__icontains=q)
+            )
+
+        sucursal_ids = (
+            None
+            if (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False))
+            else user.sucursales_permitidas()
+        )
+        resultados = []
+
+        for v in variantes_qs[:30]:
+            p = v.producto
+            color_n = getattr(v.color, "nombre", None)
+            talla_n = getattr(v.talla, "nombre", None)
+            sec = " · ".join([x for x in [color_n, talla_n] if x])
+            label_prefix = f"{v.sku} - " if v.sku else ""
+            label = f"{label_prefix}{p.nombre}"
+            if sec:
+                label = f"{label} · {sec}"
+            resultados.append({
+                "tipo": "variante",
+                "id": v.pk,
+                "producto_variante_id": v.pk,
+                "producto_id": p.pk,
+                "label": label,
+                "sku": v.sku,
+                "nombre": p.nombre,
+                "color_nombre": color_n,
+                "talla_nombre": talla_n,
+                "codigo": p.codigo,
+                "cod_proscai": p.cod_proscai,
+            })
+
+        producto_ids_con_variantes = {item["producto_id"] for item in resultados}
+        for p in productos_qs[:30]:
+            if p.pk in producto_ids_con_variantes:
+                continue
+            codigo_impresion = p.codigo or p.cod_proscai or f"PROD-{p.pk}"
+            resultados.append({
+                "tipo": "producto",
+                "id": p.pk,
+                "producto_variante_id": None,
+                "producto_id": p.pk,
+                "label": f"{codigo_impresion} - {p.nombre}",
+                "sku": None,
+                "nombre": p.nombre,
+                "color_nombre": None,
+                "talla_nombre": None,
+                "codigo": p.codigo,
+                "cod_proscai": p.cod_proscai,
+            })
+
+        return Response({
+            "q": q,
+            "sucursal_ids": sucursal_ids,
+            "resultados": resultados,
+        })
+
+    @action(
+        detail=False,
+        methods=["get"],
         url_path="preview",
         url_name="preview",
     )
@@ -421,13 +539,7 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         cantidad = int(cantidad_raw) if (cantidad_raw and str(cantidad_raw).isdigit()) else 1
         rfid_mode = str(rfid_mode_raw).lower() not in {"0", "false", "no", "off"}
 
-        payload = RFIDLabelService.onboarding_preview(
-            request.user,
-            variante_id=variante_id,
-            producto_id=producto_id,
-            cantidad=cantidad,
-            rfid_mode=rfid_mode,
-        )
+        payload = RFIDLabelService.onboarding_preview(request.user, variante_id=variante_id, producto_id=producto_id, cantidad=cantidad, rfid_mode=rfid_mode)
         return Response(payload)
 
     @action(
