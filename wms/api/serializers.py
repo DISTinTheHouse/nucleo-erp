@@ -719,6 +719,40 @@ class EtiquetaRFIDCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 "Solo puede proporcionar 'producto' o 'producto_variante'."
             )
+
+        # Pre-chequeo de unicidad de EPC antes de tocar la BD. ``EtiquetaRFIDDetalle
+        # .epc`` es ``unique=True`` y el ``bulk_create`` del service no puede
+        # devolver un mensaje útil (Postgres aborta en la primera fila en conflicto),
+        # así que se rechaza aquí con 400 y cuerpo por campo —mismo estilo que el
+        # pre-chequeo de RFC duplicado en ``terceros.api.serializers``—.
+        #
+        # Se normaliza con ``.strip().upper()`` porque el service guarda
+        # ``epc.upper()``: sin normalizar, un reenvío en minúsculas se saltaría este
+        # filtro y terminaría chocando en el índice único de todas formas.
+        # Sólo aplica con ``rfid_mode`` activo: con él apagado ``store_impresion``
+        # se salta por completo la creación de ``EtiquetaRFIDDetalle``, así que no
+        # hay unicidad que violar. Sin esta condición, reimprimir etiquetas
+        # visuales de tags ya registrados —el preview devuelve ``etiquetas``
+        # siempre, sin importar ``rfid_mode``, y el front reenvía ese payload— se
+        # rechazaba con 400 por un conflicto que nunca habría ocurrido.
+        epcs = [
+            (item.get("epc") or "").strip().upper()
+            for item in (attrs.get("etiquetas") or [])
+        ]
+        epcs = [epc for epc in epcs if epc]
+        if epcs and attrs.get("rfid_mode", True):
+            if len(set(epcs)) != len(epcs):
+                raise serializers.ValidationError(
+                    {"etiquetas": "El arreglo enviado trae códigos EPC repetidos."}
+                )
+            # Sin filtrar por empresa: la constraint es global. Y el mensaje se
+            # mantiene genérico a propósito —no dice cuál EPC ni de qué empresa—
+            # porque delatar que un EPC existe en otro tenant es fuga cross-tenant.
+            if EtiquetaRFIDDetalle.objects.filter(epc__in=epcs).exists():
+                raise serializers.ValidationError(
+                    {"etiquetas": "Uno o más códigos EPC ya están registrados."}
+                )
+
         return attrs
 
 
