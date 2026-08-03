@@ -2843,39 +2843,69 @@ Conector oficial para que Next.js genere etiquetas con ZPL (gráfico + barcode +
 La fuente de verdad (producto, SKU, EPC, ZPL, usuario, impresora, estatus) vive en backend.
 El frontend solo selecciona la impresora, envía el ZPL vía Zebra Browser Print y notifica el resultado.
 
-**Flujo recomendado**
+**FLUJO RECOMENDADO Y SIMPLIFICADO (1 endpoint onboarding / 1 modal)**
 
-1. `GET /buscar` (input tipo QA: SKU / nombre / código / cod_proscai) → selecciona SKU/producto.
-2. `GET /preview` (con el `variante_id` o `producto_id` del paso 1) → trae datos del producto + ZPL + arreglo de `etiquetas` con su EPC.
-3. El frontend itera `etiquetas` y envía a la impresora un ZPL por etiqueta (puedes usar `zpl_normal`, `zpl_rfid_first` como ejemplo o reconstruir el ZPL RFID usando el EPC de cada renglón). Usa `BrowserPrint-3.1.250.min.js` disponible en `/QA/browserprint/BrowserPrint-3.1.250.min.js/`.
-4. Cuando termina la impresión, el frontend manda `POST /registrar-impresion/` para dejar trazabilidad → ahora **sí** aparecerá en `GET /api/v1/wms/etiquetas-rfid/`.
+> 🎯 **Esto es lo que tu compañero de Next.js tiene que armar.**
+> 1 botón `Imprimir etiqueta` → abre 1 modal → **usa 1 solo URL** `GET / POST /api/v1/wms/etiquetas-rfid/onboarding/` (patrón onboarding, igual que OrdenesBordado / OrdenesReflejante / OrdenesCorteManga / WMS picking packing despacho).
+
+```
+ETAPAS DEL MISMO GET/POST:
+  1) ABRIR MODAL SIN TEXTO
+       GET  onboarding() → {"tiene_seleccion": false, "resultados": [...60 sugeridos...]}
+
+  2) USUARIO TECLEA SKU / TEXTO
+       GET  onboarding(?q="RAYAS THAI") → {"tiene_seleccion":false, "resultados": [filtrados...]}
+       → pintas lista igual que la lista QA usando el campo "label"
+
+  3) CLICK EN UN RESULTADO + PONE CANTIDAD
+       GET  onboarding(?variante=155&cantidad=5&rfid_mode=true)
+       → RESPONSE TIENE YA TODO LISTO PARA IMPRIMIR:
+          {"tiene_seleccion": true,
+           "preview": {
+              "preview_data": {...},
+              "zpl_individual": ["^XA...^FS...EPC1...^XZ", "^XA...EPC2...^XZ", ...5 ZPLs ya armados],
+              "etiquetas": [{"epc":"...","n":1,...}, {...5 renglones...}]
+            }
+          }
+       → FRONTEND NO RECONSTRUYE NINGÚN ZPL. SOLO ITERA preview.zpl_individual[]
+         y cada renglón se lo envía a Browser Print → `device.send(zpl)` 1 por 1.
+
+  4) AL TERMINAR IMPRESIÓN
+       POST onboarding(
+         {"producto_variante":155, "cantidad":5, "rfid_mode":true,
+          "printer_name":"ZD621R-203dpi", "printer_address":"192.168.1.154",
+          "status":"EXITO", "zpl_enviado":"<primer zpl>", "observaciones":"",
+          "etiquetas": [opcional, mismo arreglo del preview con los EPC reales usados]
+         }
+       )
+       → 201 CREATED → se crea la impresión + sus detalles EPC.
+       → LA PANTALLA /wms/rfid-labels HACE GET /etiquetas-rfid/ Y AHORA SÍ MUESTRA DATOS ✔️
+```
 
 ---
 
-### 0) Buscador de SKU / Producto (mismo criterio que QA/imprimir_etiqueta)
+### 0) Onboarding IMPRESIÓN RÁPIDA (modal 1 URL)
 
-- **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/buscar/`
-- **Descripción**: buscador simple y ligero para que el WMS muestre el mismo selector de QA: escribe texto, sugiere resultados, usuario selecciona 1 → alimenta el `GET /preview`.
-- **Autenticación**: sesión/Token del usuario; respeta empresa (filtro por `empresa=user.empresa`) y scope multi-tenant.
-- **Basado en**: la misma lógica Q de `QA/views.py:imprimir_etiqueta_workspace()` con OR sobre sku/nombre/producto/código/cod_proscai.
+- **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/onboarding/`
+- **Alias de escritura**: `POST /api/v1/wms/etiquetas-rfid/onboarding/`
+- **Descripción**: flujo único simple de 4 pasos (abrir / buscar / preview / imprimir / registrar).
+  Internamente reúne: buscador de variantes/productos (mismos filtros Q de QA `imprimir_etiqueta_workspace`),
+  preview de ZPL completo y registro de trazabilidad (misma escritura de `registrar-impresion`).
 
-**Query params**
+**Query params GET**
 
-- `q`: texto libre. Ej: `93EO`, `playera`, `1000`, `AMB-1000`.
-- Si `q` está vacío, devuelve primeras 60 entradas (30 variantes + 30 productos sin variantes) para scope empresa del usuario.
+- `q`: texto libre, filtra buscador por SKU / nombre / código / cod_proscai.
+- `variante` o `variante_id`: ID de `ProductoVariante` seleccionada. Al mandar este param, el GET devuelve `tiene_seleccion=true` + `preview` completo.
+- `producto` o `producto_id`: ID de `Producto` si no hay variante.
+- `cantidad`: entero opcional, default `1`.
+- `rfid_mode`: boolean `true|false`, default `true`.
 
-**Ejemplos**
-
-- `GET /api/v1/wms/etiquetas-rfid/buscar/?q=RAYAS+THAI`
-- `GET /api/v1/wms/etiquetas-rfid/buscar/?q=10005032XC`
-- `GET /api/v1/wms/etiquetas-rfid/buscar/?q=`
-
-**Respuesta shape**
+**Respuestas GET shape**
 
 ```json
+// Caso 1) modal abierto sin seleccionar nada / solo busqueda
 {
-  "q": "10005032XC",
-  "sucursal_ids": null,
+  "q": "",
   "resultados": [
     {
       "tipo": "variante",
@@ -2884,35 +2914,77 @@ El frontend solo selecciona la impresora, envía el ZPL vía Zebra Browser Print
       "producto_id": 91,
       "label": "10005032XC - CAMISA MANGA LARGA RAYAS THAI PREMIUM · VINO · 2XC",
       "sku": "10005032XC",
-      "nombre": "CAMISA MANGA LARGA RAYAS THAI PREMIUM",
       "color_nombre": "VINO",
-      "talla_nombre": "2XC",
-      "codigo": "1000",
-      "cod_proscai": null
-    },
-    {
-      "tipo": "producto",
-      "id": 211,
-      "producto_variante_id": null,
-      "producto_id": 211,
-      "label": "1050 - HILO 100% POLIESTER",
-      "sku": null,
-      "nombre": "HILO 100% POLIESTER",
-      "color_nombre": null,
-      "talla_nombre": null,
-      "codigo": "1050",
-      "cod_proscai": null
+      "talla_nombre": "2XC"
     }
-  ]
+  ],
+  "sucursal_ids": null,
+  "tiene_seleccion": false,
+  "preview": null
+}
+
+// Caso 2) ya seleccionó variante=155 & cantidad=3 → preview COMPLETO CON ZPLs listos
+{
+  "q": "",
+  "resultados": [...resultados sugeridos...],
+  "tiene_seleccion": true,
+  "mensaje": "Next.js: iterar preview.zpl_individual[] y enviar cada ZPL a Browser Print. Al terminar hacer POST a este mismo endpoint.",
+  "preview": {
+    "cantidad": 3,
+    "rfid_mode": true,
+    "preview_data": { ... },
+    "zpl_normal": "...",
+    "zpl_rfid_first": "...",
+    "zpl_individual": [
+      "^XA...^FDEPC1...^XZ",
+      "^XA...^FDEPC2...^XZ",
+      "^XA...^FDEPC3...^XZ"
+    ],
+    "etiquetas": [
+      {"n": 1, "epc": "...", "serial": "0001", "barcode_value": "10005032XC"},
+      {"n": 2, "epc": "...", "serial": "0002", "barcode_value": "10005032XC"},
+      {"n": 3, "epc": "...", "serial": "0003", "barcode_value": "10005032XC"}
+    ]
+  }
 }
 ```
 
-**Reglas para el frontend**
+**POST onboarding (registrar impresión tras imprimir)**
 
-- El campo `label` es el texto que se pinta en la lista de resultados (igual que la lista QA).
-- Si `tipo === "variante"`: pasa `producto_variante_id` al `GET /preview/?variante=`.
-- Si `tipo === "producto"`: pasa `producto_id` al `GET /preview/?producto=`.
-- `sucursal_ids` es `null` para admin/superuser, y un arreglo de IDs para operadores normales (por si el frontend quiere filtrar impresiones de solo sus sucursales).
+Mismo save que `registrar-impresion` tradicional. Para que Next.js no tenga que armar nada raro,
+aquí está el body mínimo listo para pegar del modal:
+
+```json
+{
+  "producto_variante": 155,
+  "cantidad": 3,
+  "rfid_mode": true,
+  "printer_name": "ZD621R-203dpi",
+  "printer_address": "192.168.1.154",
+  "status": "EXITO",
+  "zpl_enviado": "^XA... (primer zpl que salió, opcional para auditoría)",
+  "observaciones": ""
+}
+```
+
+Campos opcionales avanzados (no necesarios para el flujo simple):
+
+- `producto`: XOR con `producto_variante`, para productos base sin variantes.
+- `etiquetas`: array de `{epc, barcode_value, serial}` con los EPC reales usados.
+  **Si no lo mandas backend genera los EPCs automáticamente igual que el preview.**
+- Si el frontend envía `etiquetas` debe traer exactamente `cantidad` renglones.
+
+**Respuesta 201 de POST**: mismo shape que `GET /api/v1/wms/etiquetas-rfid/{id}/`.
+La impresión ya quedó registrada y se verá en `GET /api/v1/wms/etiquetas-rfid/` (`/wms/rfid-labels` del ERP).
+
+---
+
+### 0-bis) Buscador de SKU / Producto (endpoint de bajo nivel; si no usas onboarding)
+
+- **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/buscar/`
+- **Descripción**: buscador simple y ligero (mismo criterio Q que QA onboarding).
+  El onboarding ya lo usa internamente, así que si armaste el modal de onboarding
+  **no necesitas llamarlo aparte**. Está expuesto por si algún día hacen otra UI más granular.
 
 ---
 
@@ -3099,13 +3171,30 @@ El frontend solo selecciona la impresora, envía el ZPL vía Zebra Browser Print
 
 ### 5) Mensaje corto para Next.js
 
-> Flujo tipo QA, pero oficial y con trazabilidad:
+> Flujo **1 modal / 1 URL** (simplísimo, igual que ordenes de bordado/reflejante):
 >
-> 1. **Buscador** → `GET /api/v1/wms/etiquetas-rfid/buscar/?q=texto` → pintas la lista de resultados usando el campo `label` (misma UX que lista QA).
-> 2. **Preview** → al seleccionar un renglón, si es `tipo=variante` llamas `GET /preview/?variante=producto_variante_id&cantidad=N`; si es `tipo=producto` llamas `GET /preview/?producto=producto_id&cantidad=N`. Obtienes `preview_data`, `zpl_rfid_first` y `etiquetas[]` con cada EPC.
-> 3. **Imprimir** → por cada renglón en `etiquetas[]`, armas un ZPL igual que `zpl_rfid_first` pero reemplazando el EPC por el de la etiqueta actual, y se lo mandas a la Zebra vía Browser Print (usa la misma librería de QA: `/QA/browserprint/BrowserPrint-3.1.250.min.js/`).
-> 4. **Registrar** → al terminar manda `POST /registrar-impresion` con `status=EXITO|FALLIDO`, nombre de impresora, y opcionalmente el arreglo `etiquetas[]` con los EPCs reales que salieron.
-> 5. Ahora **sí** se verán resultados en `GET /api/v1/wms/etiquetas-rfid/` (la lista que hoy está vacía en `lazzar-erp.vercel.app/wms/rfid-labels`).
+> **1 button** "Imprimir etiqueta" → **1 modal** → pega todo a:
+>
+> 1. `GET /api/v1/wms/etiquetas-rfid/onboarding/` (abrir modal vacío).
+> 2. Cuando el usuario escriba en el buscador: `GET /onboarding/?q=RAYAS+THAI` → pinta resultados con `resultados[].label`.
+> 3. Cuando seleccione 1 resultado + cantidad (ej 5):
+>    - si es variante → `GET /onboarding/?variante=155&cantidad=5&rfid_mode=true`
+>    - si es producto → `GET /onboarding/?producto=91&cantidad=5&rfid_mode=true`
+>    - la respuesta te trae `preview.zpl_individual[]` (ARREGLO DE 5 ZPLs YA ARMADOS, CADA UNO CON SU EPC UNICO).
+> 4. **NO CONSTRUYAS ZPL TU MISMO**. Itera `preview.zpl_individual` y cada string se lo mandas a Zebra `device.send(zpl)` (usa la misma librería que QA: `/QA/browserprint/BrowserPrint-3.1.250.min.js/`). Detecta la impresora exactamente igual que QA.
+> 5. Al terminar la impresión (todas las etiquetas):
+>    - `POST /api/v1/wms/etiquetas-rfid/onboarding/` con body:
+>      ```json
+>      {
+>        "producto_variante": 155,
+>        "cantidad": 5,
+>        "rfid_mode": true,
+>        "printer_name": "ZD621R-203dpi",
+>        "printer_address": "192.168.1.154",
+>        "status": "EXITO"
+>      }
+>      ```
+> 6. **Listo**. Ese POST crea la impresión en la tabla. Ahora cuando la pantalla `/wms/rfid-labels` haga `GET /api/v1/wms/etiquetas-rfid/` ya no vendrá vacía ✔️.
 
 ---
 

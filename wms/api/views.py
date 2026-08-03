@@ -399,7 +399,7 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         return qs.filter(sucursal_id__in=user.sucursales_permitidas())
 
     def get_serializer_class(self):
-        if self.action in {"create", "registrar_impresion"} and self.request.method == "POST":
+        if self.action in {"create", "registrar_impresion", "onboarding"} and self.request.method == "POST":
             return EtiquetaRFIDCreateSerializer
         return EtiquetaRFIDSerializer
 
@@ -520,6 +520,105 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             "sucursal_ids": sucursal_ids,
             "resultados": resultados,
         })
+
+    @action(
+        detail=False,
+        methods=["get", "post"],
+        url_path="onboarding",
+        url_name="onboarding",
+    )
+    def onboarding(self, request):
+        """Onboarding para Impresión de Etiquetas RFID (1 modal, 1 URL).
+
+        PATRÓN: mismo onboarding que WMS picking/packing/despacho / Producción
+        orden bordado/reflejante/corte-manga.
+
+        Qué hace internamente (le ahorra TODO este trabajo a Next.js):
+          - GET vacío              =>  devuelve buscador (resultados sugeridos),
+                                        sin preview (está abierto el modal sin
+                                        seleccionar SKU).
+          - GET ?q=XXXX            =>  corre BUSCADOR por texto (mismo filtro
+                                        Q de QA / imprimir_etiqueta).
+          - GET ?variante=X&cantidad=3
+                    o ?producto=Y  =>  devuelve buscador + **PREVIEW COMPLETO
+                                        CON TODOS LOS ZPL INDIVIDUALES YA ARMADOS
+                                        POR CADA ETIQUETA** (el frontend **no**
+                                        tiene que reconstruir ZPL ni reemplazar
+                                        EPCs —sólo itera zpl_individual[] y
+                                        se lo envía a Browser Print uno por uno).
+          - POST                   =>  misma escritura que registrar-impresion:
+                                        crea impresión + detalle EPCs, y así la
+                                        lista ``/api/v1/wms/etiquetas-rfid/``
+                                        deja de estar vacía.
+
+        Autenticación: sesión/token del usuario; scope empresa + sucursales.
+        """
+        if request.method == "GET":
+            user = request.user
+            empresa = getattr(user, "empresa", None)
+
+            q = (request.query_params.get("q") or "").strip()
+            variante_id = request.query_params.get("variante") or request.query_params.get("variante_id")
+            producto_id = request.query_params.get("producto") or request.query_params.get("producto_id")
+            cantidad_raw = request.query_params.get("cantidad")
+            rfid_mode_raw = request.query_params.get("rfid_mode", "true")
+            cantidad = int(cantidad_raw) if (cantidad_raw and str(cantidad_raw).isdigit()) else 1
+            rfid_mode = str(rfid_mode_raw).lower() not in {"0", "false", "no", "off"}
+
+            buscar_payload = self.buscar(request).data
+            if not isinstance(buscar_payload, dict):
+                buscar_payload = {"q": q, "resultados": []}
+
+            empty = {
+                "q": q,
+                "resultados": buscar_payload.get("resultados", []),
+                "sucursal_ids": buscar_payload.get("sucursal_ids"),
+                "tiene_seleccion": False,
+                "preview": None,
+            }
+            if empresa is None:
+                return Response(empty)
+            if not variante_id and not producto_id:
+                return Response(empty)
+
+            try:
+                preview_payload = RFIDLabelService.onboarding_preview(
+                    request.user,
+                    variante_id=variante_id,
+                    producto_id=producto_id,
+                    cantidad=cantidad,
+                    rfid_mode=rfid_mode,
+                )
+            except ValidationError as exc:
+                return Response(
+                    {
+                        **empty,
+                        "error": exc.detail if hasattr(exc, "detail") else str(exc),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            return Response({
+                "q": q,
+                "resultados": buscar_payload.get("resultados", []),
+                "sucursal_ids": buscar_payload.get("sucursal_ids"),
+                "tiene_seleccion": True,
+                "preview": preview_payload,
+                "mensaje": (
+                    "Next.js: iterar preview.zpl_individual[] y enviar cada ZPL "
+                    "a Browser Print. Al terminar hacer POST a este mismo "
+                    "endpoint con los campos de impresora/estatus/etiquetas."
+                ),
+            })
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        impresion = RFIDLabelService.store_impresion(
+            serializer.validated_data, request.user
+        )
+        return Response(
+            EtiquetaRFIDSerializer(impresion).data, status=status.HTTP_201_CREATED
+        )
 
     @action(
         detail=False,

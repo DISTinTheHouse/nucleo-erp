@@ -292,14 +292,26 @@ class RFIDLabelService:
         for item in etiquetas_metadata:
             item["barcode_value"] = barcode_value
 
+        # Armar ZPL individual por etiqueta (RFID si rfid_mode, si no normal).
+        # El frontend simplemente itera esta lista y envía cada zpl a Browser Print
+        # —sin necesidad de reconstruir/reemplazar nada del ZPL—.
+        zpls_individuales = []
+        if rfid_mode:
+            for row in etiquetas_metadata:
+                zpls_individuales.append(
+                    cls._build_zpl_rfid(
+                        row["epc"],
+                        variante=variante,
+                        producto=producto,
+                        barcode_value=barcode_value,
+                    )
+                )
+        else:
+            zpls_individuales = [zpl_normal] * len(etiquetas_metadata)
+
         zpl_rfid_first = ""
         if rfid_mode and etiquetas_metadata:
-            zpl_rfid_first = cls._build_zpl_rfid(
-                etiquetas_metadata[0]["epc"],
-                variante=variante,
-                producto=producto,
-                barcode_value=barcode_value,
-            )
+            zpl_rfid_first = zpls_individuales[0]
 
         payload = {
             "empresa": empresa.pk,
@@ -330,6 +342,7 @@ class RFIDLabelService:
             "preview_data": preview,
             "zpl_normal": zpl_normal,
             "zpl_rfid_first": zpl_rfid_first,
+            "zpl_individual": zpls_individuales,
             "etiquetas": etiquetas_metadata,
         }
         return payload
