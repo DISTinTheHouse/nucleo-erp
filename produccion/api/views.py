@@ -21,6 +21,7 @@ from produccion.models import (
     OrdenesReflejante,
     ReflejanteAvances,
     ReflejanteIncidencias,
+    OrdenesCorteManga
 )
 
 from produccion.api.serializers import (
@@ -36,11 +37,14 @@ from produccion.api.serializers import (
     OrdenReflejanteSerializer,
     ReflejanteAvancesSerializer,
     ReflejanteIncidenciasSerializer,
+    OrdenesCorteMangaSerializer
 )
 
 from produccion.services.orden_bordado_service import OrdenBordadoService
 from produccion.services.orden_reflejante_service import OrdenReflejanteService
 from produccion.services.orden_produccion_service import OrdenProduccionService
+from produccion.services.orden_corte_manga_service import OrdenCorteMangaService
+
 
 class ListaMaterialBomViewSet(viewsets.ModelViewSet):
     serializer_class = ListaMaterialBomSerializer
@@ -407,6 +411,39 @@ class ReflejanteAvancesViewSet(viewsets.ModelViewSet):
 class ReflejanteIncidenciasViewSet(viewsets.ModelViewSet):
     queryset = ReflejanteIncidencias.objects.filter(activo=True)
     serializer_class = ReflejanteIncidenciasSerializer
+
+    def perform_destroy(self, instance):
+        instance.soft_delete()
+
+class OrdenesCorteMangaViewSet(
+    mixins.RetrieveModelMixin, 
+    mixins.ListModelMixin, 
+    mixins.CreateModelMixin, 
+    mixins.DestroyModelMixin, 
+    GenericViewSet
+    ):
+    queryset = OrdenesCorteManga.objects.all()
+    serializer_class = OrdenesCorteMangaSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = OrdenesCorteManga.objects.filter(activo=True)
+        if getattr(user, "is_superuser", False): return qs
+
+        empresa = getattr(user, "empresa", False)
+        if not empresa: return qs.none()
+        qs = qs.filter(empresa=empresa)
+
+        if getattr(user, "is_admin_empresa", False):
+            return qs
+
+        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+
+    def create(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        orden_corte_manga = OrdenCorteMangaService.save(serializer.validated_data, request.user)
+        return Response(OrdenesCorteMangaSerializer(orden_corte_manga).data, status=status.HTTP_200_OK)
 
     def perform_destroy(self, instance):
         instance.soft_delete()

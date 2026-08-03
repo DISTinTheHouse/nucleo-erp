@@ -14,6 +14,8 @@ from produccion.models import (
     OrdenesReflejante,
     ReflejanteAvances,
     ReflejanteIncidencias,
+    OrdenesCorteManga,
+    OrdenCorteMangaDetalle
 )
 
 admin.site.register(OrdenesBordado)
@@ -23,6 +25,8 @@ admin.site.register(OrdenesReflejante)
 admin.site.register(ReflejanteAvances)
 admin.site.register(ReflejanteIncidencias)
 admin.site.register(OrdenProduccionDetalle)
+admin.site.register(OrdenesCorteManga)
+admin.site.register(OrdenCorteMangaDetalle)
 
 @admin.register(ListaMaterialBom)
 class ListaMaterialBomAdmin(admin.ModelAdmin):

@@ -16,7 +16,9 @@ from produccion.models import (
     OrdenesReflejante,
     OrdenReflejanteDetalle,
     ReflejanteAvances,
-    ReflejanteIncidencias
+    ReflejanteIncidencias,
+    OrdenesCorteManga,
+    OrdenCorteMangaDetalle
 )
 
 from catalogo.api.serializers import ProductoVarianteSerializer
@@ -166,7 +168,7 @@ class ConsumoProduccionSerializer(serializers.ModelSerializer):
         ]
 
 class ProductoTerminadoEntradasSerializer(serializers.ModelSerializer):
-    class Meta: 
+    class Meta:
         model = ProductoTerminadoEntradas
         fields = '__all__'
 
@@ -244,3 +246,34 @@ class ReflejanteIncidenciasSerializer(serializers.ModelSerializer):
     class Meta:
         model = ReflejanteIncidencias
         fields = '__all__'
+
+class OrdenCorteMangaDetalleSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
+    color = serializers.CharField(source='color.nombre', read_only=True)
+
+    class Meta:
+        model = OrdenCorteMangaDetalle
+        fields = '__all__'
+
+class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
+    pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
+    usuario_nombre = serializers.SerializerMethodField()
+    detalles = OrdenCorteMangaDetalleSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = OrdenesCorteManga
+        fields = '__all__'
+        read_only_fields = [
+            'empresa', 
+            'sucursal', 
+            'folio_ocm', 
+            'estatus_corte', 
+            'usuario_asignado', 
+            'activo'
+        ]
+
+    def get_usuario_nombre(self, obj):
+        usuario = obj.usuario_asignado
+        if not usuario: return None
+        return usuario.get_full_name().strip() or usuario.email
