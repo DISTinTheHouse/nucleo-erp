@@ -24,7 +24,6 @@ def generate_ob_folio(empresa_id, sucursal_id):
         descripcion_documento="Orden de Bordado",
     )
 
-
 @transaction.atomic
 def generate_or_folio(empresa_id, sucursal_id):
     return SerieFolio.consumir_siguiente_folio(
@@ -32,6 +31,14 @@ def generate_or_folio(empresa_id, sucursal_id):
         sucursal_id,
         ["Orden de Reflejante", "ORDEN_REFLEJANTE", "Reflejante", "OR"],
         descripcion_documento="Orden de Reflejante",
+    )
+
+def generate_ocm_folio(empresa_id, sucursal_id):
+    return SerieFolio.consumir_siguiente_folio(
+        empresa_id,
+        sucursal_id,
+        ["Orden Corte de Manga", "ORDEN_CORTE_MANGA", "Corte de Manga", "OCM"],
+        descripcion_documento="Orden de Corte de Manga",
     )
 
 @transaction.atomic
