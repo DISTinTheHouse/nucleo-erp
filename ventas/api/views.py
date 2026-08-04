@@ -1,5 +1,7 @@
+import json
 import logging
 from decimal import Decimal, ROUND_HALF_UP
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.db.models import OuterRef, Prefetch, Q, Subquery, Sum
 from django.db.models.functions import Coalesce
@@ -301,7 +303,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         servicios_extras_qs = CotizacionServicioExtra.objects.filter(
             cotizacion=cotizacion_obj
         ).order_by("id")
-        return {
+        snapshot = {
             "cotizacion": CotizacionSerializer(cotizacion_obj).data,
             "detalles": CotizacionDetalleWithTallasSerializer(
                 detalles_qs, many=True
@@ -312,6 +314,15 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 )
             ),
         }
+        # `servicios_extras` proviene de `.values("monto")`, que devuelve Decimal
+        # crudo, y `aprobado_snapshot` es un JSONField sin encoder: el serializador
+        # JSON por defecto no sabe convertir Decimal (ni fechas), por lo que el
+        # save() lanzaba "Object of type Decimal is not JSON serializable" (HTTP 500)
+        # al autorizar/aceptar-cambios cualquier cotización con servicios extra.
+        # Normalizamos todo el snapshot a tipos JSON nativos con DjangoJSONEncoder
+        # (Decimal -> str, datetime -> ISO), consistente con cómo DRF ya serializa
+        # el resto de importes del snapshot.
+        return json.loads(json.dumps(snapshot, cls=DjangoJSONEncoder))
 
     def _to_decimal_inventory(self, value):
         return Decimal(str(value or 0)).quantize(
