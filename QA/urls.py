@@ -10,4 +10,6 @@ urlpatterns = [
     path('browserprint/<str:filename>/', views.qa_browserprint_asset, name='qa_browserprint_asset'),
     path('imprimir_etiqueta/', views.imprimir_etiqueta_workspace, name='qa_imprimir_etiqueta_workspace'),
     path('imrpimir_etiqueta/', views.imprimir_etiqueta_workspace, name='qa_imrpimir_etiqueta_workspace'),
+    path('imprimir_orden_compra/', views.imprimir_orden_compra_workspace, name='qa_imprimir_orden_compra_workspace'),
+    path('imrpimir_orden_compra/', views.imprimir_orden_compra_workspace, name='qa_imrpimir_orden_compra_workspace'),
 ]

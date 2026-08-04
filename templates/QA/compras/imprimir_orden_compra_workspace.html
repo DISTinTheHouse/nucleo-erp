@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>QA Imprimir Orden de Compra</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @media print {
+            .no-print { display: none !important; }
+            .print-area { box-shadow: none !important; border: none !important; max-width: 100% !important; padding: 0 !important; }
+            .print-area table th, .print-area table td { font-size: 11px !important; padding: 6px 8px !important; }
+            body { background: #fff !important; }
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+    <div class="mx-auto max-w-7xl px-6 py-10">
+        <div class="mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between no-print">
+            <div>
+                <a href="{% url 'index_QA' %}" class="text-sm text-slate-500 hover:text-slate-800">← Volver a QA</a>
+                <h1 class="mt-3 text-3xl font-semibold">Imprimir Orden de Compra</h1>
+                <p class="mt-2 max-w-3xl text-sm text-slate-600">
+                    Busca la orden por folio, ID, referencia o proveedor; revisa el detalle y envía a la impresora seleccionada.
+                </p>
+            </div>
+        </div>
+
+        {% if messages %}
+        <div class="mb-6 space-y-3 no-print">
+            {% for message in messages %}
+            <div class="rounded-xl border px-4 py-3 text-sm {% if message.tags == 'error' %}border-red-200 bg-red-50 text-red-700{% elif message.tags == 'warning' %}border-amber-200 bg-amber-50 text-amber-700{% else %}border-emerald-200 bg-emerald-50 text-emerald-700{% endif %}">
+                {{ message }}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <div class="grid gap-6 lg:grid-cols-[420px,1fr]">
+            <section class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm no-print">
+                <h2 class="text-lg font-semibold">Buscar orden de compra</h2>
+                <p class="mt-1 text-sm text-slate-500">
+                    Puedes buscar por folio, ID interno, referencia o nombre de proveedor.
+                </p>
+
+                <form method="get" class="mt-5 space-y-4">
+                    <div>
+                        <label class="mb-1 block text-sm font-medium">Folio / ID / Referencia / Proveedor</label>
+                        <input type="text" name="q" value="{{ q }}" placeholder="Ej. OC-123, 550, REF-77, Suministros..."
+                            class="w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm">
+                    </div>
+                    <button type="submit"
+                        class="w-full rounded-xl bg-rose-700 px-4 py-3 text-sm font-medium text-white hover:bg-rose-800">
+                        Buscar
+                    </button>
+                </form>
+
+                <div class="mt-6">
+                    <h3 class="text-sm font-semibold text-slate-700">Resultados</h3>
+                    <div class="mt-3 space-y-2 max-h-[520px] overflow-y-auto pr-1">
+                        {% if selected_oc %}
+                        <a href="?id={{ selected_oc.id }}"
+                           class="block rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 hover:bg-rose-100">
+                            <div class="flex items-start justify-between gap-2">
+                                <div>
+                                    <div class="text-sm font-semibold text-rose-900">
+                                        {{ selected_oc.folio|default:"OC-"|add:selected_oc.id }}
+                                        <span class="ml-1 text-xs font-normal text-rose-700">#{{ selected_oc.id }}</span>
+                                    </div>
+                                    <div class="mt-0.5 text-xs text-rose-800">
+                                        {% if selected_oc.proveedor %}{{ selected_oc.proveedor.nombre }}{% else %}Sin proveedor{% endif %}
+                                    </div>
+                                </div>
+                                <span class="rounded-full bg-white px-2 py-0.5 text-xs text-rose-700 border border-rose-200">
+                                    Activa
+                                </span>
+                            </div>
+                        </a>
+                        {% endif %}
+                        {% for oc in resultados %}
+                        {% if selected_oc and selected_oc.id == oc.id %}{% continue %}{% endif %}
+                        <a href="?id={{ oc.id }}"
+                           class="block rounded-xl border border-slate-200 bg-white px-4 py-3 hover:bg-slate-50">
+                            <div class="flex items-start justify-between gap-2">
+                                <div>
+                                    <div class="text-sm font-semibold text-slate-800">
+                                        {{ oc.folio|default:"OC-"|add:oc.id }}
+                                        <span class="ml-1 text-xs font-normal text-slate-500">#{{ oc.id }}</span>
+                                    </div>
+                                    <div class="mt-0.5 text-xs text-slate-600">
+                                        {% if oc.proveedor %}{{ oc.proveedor.nombre }}{% else %}Sin proveedor{% endif %}
+                                    </div>
+                                    {% if oc.referencia %}
+                                    <div class="mt-0.5 text-xs text-slate-500">Ref: {{ oc.referencia }}</div>
+                                    {% endif %}
+                                </div>
+                                <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600 border border-slate-200">
+                                    {{ oc.get_estatus_display }}
+                                </span>
+                            </div>
+                        </a>
+                        {% empty %}
+                            {% if q %}
+                            <div class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+                                No se encontraron resultados para <span class="font-medium text-slate-700">{{ q }}</span>.
+                            </div>
+                            {% else %}
+                            <div class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+                                Escribe una búsqueda para ver resultados, o selecciona una de las sugerencias.
+                            </div>
+                            {% endif %}
+                        {% endfor %}
+                    </div>
+                </div>
+            </section>
+
+            <section class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm print-area">
+                {% if preview %}
+                <div class="flex flex-col gap-5 md:flex-row md:items-center md:justify-between no-print">
+                    <div>
+                        <h2 class="text-xl font-semibold">Orden de Compra {{ preview.folio }}</h2>
+                        <p class="mt-1 text-sm text-slate-500">
+                            Estatus: <span class="font-medium text-slate-700">{{ preview.estatus }}</span>
+                            · Sucursal: {{ preview.sucursal.nombre }}
+                        </p>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        <button type="button" id="btn-imprimir-navegador"
+                            class="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-800">
+                            Imprimir (navegador)
+                        </button>
+                        <button type="button" id="btn-copiar-texto"
+                            class="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                            Copiar texto
+                        </button>
+                    </div>
+                </div>
+
+                <div class="mt-6 grid gap-5 sm:grid-cols-2 md:grid-cols-3">
+                    <div class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                        <div class="text-xs uppercase tracking-wide text-slate-500">Folio</div>
+                        <div class="mt-1 text-lg font-semibold text-slate-800">{{ preview.folio }}</div>
+                        <div class="mt-1 text-xs text-slate-500">ID interno: {{ preview.id }}</div>
+                    </div>
+                    <div class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                        <div class="text-xs uppercase tracking-wide text-slate-500">Proveedor</div>
+                        <div class="mt-1 text-base font-semibold text-slate-800">
+                            {% if preview.proveedor %}{{ preview.proveedor.nombre }}{% else %}—{% endif %}
+                        </div>
+                        {% if preview.proveedor.rfc %}
+                        <div class="mt-1 text-xs text-slate-500">RFC: {{ preview.proveedor.rfc }}</div>
+                        {% endif %}
+                    </div>
+                    <div class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                        <div class="text-xs uppercase tracking-wide text-slate-500">Fechas</div>
+                        <ul class="mt-1 space-y-0.5 text-xs text-slate-700">
+                            <li><span class="font-medium">OC:</span> {{ preview.fecha_oc|default:"—" }}</li>
+                            <li><span class="font-medium">Entrega estimada:</span> {{ preview.fecha_entrega_estimada|default:"—" }}</li>
+                        </ul>
+                    </div>
+                    <div class="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                        <div class="text-xs uppercase tracking-wide text-slate-500">Moneda y usuario</div>
+                        <div class="mt-1 text-sm font-semibold text-slate-800">
+                            {% if preview.moneda.codigo %}{{ preview.moneda.codigo }} · {% endif %}{{ preview.moneda.nombre }}
+                        </div>
+                        <div class="mt-1 text-xs text-slate-500">Elaboró: {{ preview.usuario.nombre }}</div>
+                    </div>
+                    <div class="rounded-xl border border-slate-200 bg-slate-50/60 p-4 sm:col-span-2">
+                        <div class="text-xs uppercase tracking-wide text-slate-500">Totales</div>
+                        <div class="mt-2 grid grid-cols-2 gap-3 text-xs text-slate-700 md:grid-cols-4">
+                            <div>
+                                <div class="text-slate-500">Piezas</div>
+                                <div class="font-semibold text-slate-800">{{ preview.totales.total_piezas }}</div>
+                            </div>
+                            <div>
+                                <div class="text-slate-500">Subtotal</div>
+                                <div class="font-semibold text-slate-800">{{ preview.totales.subtotal }}</div>
+                            </div>
+                            <div>
+                                <div class="text-slate-500">IVA</div>
+                                <div class="font-semibold text-slate-800">{{ preview.totales.total_iva }}</div>
+                            </div>
+                            <div>
+                                <div class="text-slate-500">Gran total</div>
+                                <div class="font-semibold text-rose-700">{{ preview.totales.gran_total }}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                {% if preview.observaciones %}
+                <div class="mt-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                    <div class="text-xs uppercase tracking-wide text-amber-700">Observaciones</div>
+                    <div class="mt-1 text-sm text-amber-900 whitespace-pre-line">{{ preview.observaciones }}</div>
+                </div>
+                {% endif %}
+
+                <div class="mt-6 overflow-x-auto">
+                    <table class="min-w-full text-sm">
+                        <thead class="bg-slate-100 text-slate-700">
+                            <tr>
+                                <th class="rounded-l-xl px-3 py-2.5 text-left font-semibold">Producto</th>
+                                <th class="px-3 py-2.5 text-right font-semibold">Cantidad</th>
+                                <th class="px-3 py-2.5 text-right font-semibold">Piezas</th>
+                                <th class="px-3 py-2.5 text-right font-semibold">Precio</th>
+                                <th class="px-3 py-2.5 text-right font-semibold">Descuento</th>
+                                <th class="rounded-r-xl px-3 py-2.5 text-right font-semibold">Importe</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                            {% for d in preview.detalles %}
+                            <tr>
+                                <td class="px-3 py-2.5 align-top">
+                                    <div class="font-medium text-slate-800">{{ d.producto_nombre }}</div>
+                                    <div class="mt-0.5 text-xs text-slate-500">
+                                        {% if d.producto_codigo %}Cód: {{ d.producto_codigo }}{% endif %}
+                                        {% if d.producto_cod_proscai %} · Proscai: {{ d.producto_cod_proscai }}{% endif %}
+                                    </div>
+                                </td>
+                                <td class="px-3 py-2.5 text-right tabular-nums">{{ d.cantidad }}</td>
+                                <td class="px-3 py-2.5 text-right tabular-nums">{{ d.piezas }}</td>
+                                <td class="px-3 py-2.5 text-right tabular-nums">{{ d.precio }}</td>
+                                <td class="px-3 py-2.5 text-right tabular-nums">{{ d.descuento }}</td>
+                                <td class="px-3 py-2.5 text-right tabular-nums font-semibold text-slate-800">{{ d.importe }}</td>
+                            </tr>
+                            {% empty %}
+                            <tr>
+                                <td colspan="6" class="px-3 py-6 text-center text-sm text-slate-500">
+                                    Esta orden de compra no tiene líneas de detalle registradas.
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div id="oc-texto-plano" class="sr-only">
+ORDEN DE COMPRA: {{ preview.folio }}
+ID: {{ preview.id }}
+ESTATUS: {{ preview.estatus }}
+FECHA OC: {{ preview.fecha_oc|default:"" }}
+FECHA ENTREGA: {{ preview.fecha_entrega_estimada|default:"" }}
+PROVEEDOR: {% if preview.proveedor %}{{ preview.proveedor.nombre }} (RFC {% if preview.proveedor.rfc %}{{ preview.proveedor.rfc }}{% else %}-{% endif %}){% else %}-{% endif %}
+SUCURSAL: {{ preview.sucursal.nombre }}
+MONEDA: {% if preview.moneda.codigo %}{{ preview.moneda.codigo }} {% endif %}{{ preview.moneda.nombre }}
+ELABORO: {{ preview.usuario.nombre }}
+
+PIEZAS: {{ preview.totales.total_piezas }}
+SUBTOTAL: {{ preview.totales.subtotal }}
+DESCUENTO: {{ preview.totales.descuento }}
+FLETE: {{ preview.totales.flete }}
+SEGUROS: {{ preview.totales.seguros }}
+IVA ({{ preview.totales.porcentaje_iva }}%): {{ preview.totales.total_iva }}
+GRAN TOTAL: {{ preview.totales.gran_total }}
+A CUENTA: {{ preview.totales.a_cuenta }}
+
+DETALLE:
+{% for d in preview.detalles %}- {{ d.producto_nombre }} | cant={{ d.cantidad }} | pzas={{ d.piezas }} | precio={{ d.precio }} | desc={{ d.descuento }} | importe={{ d.importe }}{% endfor %}
+
+{% if preview.observaciones %}OBSERVACIONES:
+{{ preview.observaciones }}{% endif %}
+                </div>
+
+                {% else %}
+                <div class="flex h-[520px] items-center justify-center text-center">
+                    <div>
+                        <div class="inline-flex h-16 w-16 items-center justify-center rounded-full bg-rose-50 text-3xl text-rose-600 border border-rose-100">
+                            🧾
+                        </div>
+                        <h2 class="mt-6 text-xl font-semibold text-slate-800">Sin orden seleccionada</h2>
+                        <p class="mt-2 mx-auto max-w-md text-sm text-slate-500">
+                            Usa el buscador de la izquierda para localizar una orden de compra por folio, ID, referencia o proveedor.
+                        </p>
+                    </div>
+                </div>
+                {% endif %}
+            </section>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener("DOMContentLoaded", function () {
+            var btnPrint = document.getElementById("btn-imprimir-navegador");
+            if (btnPrint) {
+                btnPrint.addEventListener("click", function () {
+                    window.print();
+                });
+            }
+
+            var btnCopy = document.getElementById("btn-copiar-texto");
+            if (btnCopy) {
+                btnCopy.addEventListener("click", function () {
+                    var src = document.getElementById("oc-texto-plano");
+                    if (!src) return;
+                    var txt = (src.innerText || src.textContent || "").trim();
+                    if (!txt) return;
+                    navigator.clipboard.writeText(txt).then(function () {
+                        var old = btnCopy.textContent;
+                        btnCopy.textContent = "Copiado";
+                        setTimeout(function () { btnCopy.textContent = old; }, 1200);
+                    }, function () {
+                        alert("No se pudo copiar al portapapeles.");
+                    });
+                });
+            }
+        });
+    </script>
+</body>
+</html>

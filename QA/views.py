@@ -13,7 +13,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from catalogo.models import Producto, ProductoVariante
-from compras.models import OrdenCompra, RecepcionRFIDEncuadre, RecepcionRFIDLectura
+from compras.models import OrdenCompra, OrdenCompraDetalle, RecepcionRFIDEncuadre, RecepcionRFIDLectura
 from inventarios.models import Almacen
 from nucleo.models import Empresa, Sucursal, UnidadMedida
 from produccion.models import (
@@ -605,3 +605,122 @@ def imprimir_etiqueta_workspace(request):
         ),
     }
     return render(request, "QA/rfid/imprimir_etiqueta_workspace.html", context)
+
+
+@login_required
+def imprimir_orden_compra_workspace(request):
+    empresa = _empresa_qa(request)
+    if empresa is None:
+        messages.error(request, "No hay empresa disponible para la prueba de QA.")
+        return redirect("index_QA")
+
+    q = (request.GET.get("q") or request.GET.get("folio") or "").strip()
+    orden_compra_id = request.GET.get("id") or request.GET.get("orden_compra")
+    selected_oc = None
+    resultados = []
+
+    oc_qs = (
+        OrdenCompra.objects.select_related(
+            "empresa", "sucursal", "proveedor", "moneda", "usuario", "solicitud_compra", "pedido"
+        )
+        .prefetch_related(
+            "ordencompradetalle_set__producto",
+        )
+        .filter(empresa=empresa, activo=True)
+    )
+
+    if orden_compra_id and str(orden_compra_id).isdigit():
+        selected_oc = oc_qs.filter(pk=int(orden_compra_id)).first()
+        if selected_oc is None:
+            messages.warning(request, f"No se encontró la orden de compra ID {orden_compra_id}.")
+
+    if selected_oc is None and q:
+        q_search = oc_qs.filter(
+            Q(folio__icontains=q)
+            | Q(id__icontains=q)
+            | Q(referencia__icontains=q)
+            | Q(proveedor__nombre__icontains=q)
+        ).order_by("-id")[:30]
+        if len(q_search) == 1:
+            selected_oc = q_search[0]
+        else:
+            resultados = list(q_search)
+
+    if selected_oc is None and not q:
+        resultados = list(oc_qs.order_by("-id")[:30])
+
+    preview = None
+    if selected_oc is not None:
+        detalles = []
+        for d in OrdenCompraDetalle.objects.select_related("producto").filter(orden_compra=selected_oc):
+            detalles.append({
+                "id": d.pk,
+                "producto_codigo": getattr(d.producto, "codigo", None),
+                "producto_cod_proscai": getattr(d.producto, "cod_proscai", None),
+                "producto_nombre": d.descripcion or getattr(d.producto, "nombre", None),
+                "cantidad": d.cantidad,
+                "piezas": d.piezas,
+                "precio": float(d.precio) if d.precio is not None else 0.0,
+                "descuento": float(d.descuento) if d.descuento is not None else 0.0,
+                "importe": float(d.importe) if d.importe is not None else 0.0,
+            })
+
+        preview = {
+            "id": selected_oc.pk,
+            "folio": selected_oc.folio or f"OC-{selected_oc.pk}",
+            "referencia": selected_oc.referencia,
+            "fecha_oc": selected_oc.fecha_oc.isoformat() if selected_oc.fecha_oc else None,
+            "fecha_entrega_estimada": (
+                selected_oc.fecha_entrega_estimada.isoformat()
+                if selected_oc.fecha_entrega_estimada
+                else None
+            ),
+            "estatus": selected_oc.get_estatus_display(),
+            "proveedor": (
+                {
+                    "id": selected_oc.proveedor.pk,
+                    "nombre": selected_oc.proveedor.nombre,
+                    "rfc": getattr(selected_oc.proveedor, "rfc", None),
+                }
+                if selected_oc.proveedor
+                else None
+            ),
+            "sucursal": {
+                "id": selected_oc.sucursal.pk,
+                "nombre": selected_oc.sucursal.nombre,
+            },
+            "moneda": {
+                "id": selected_oc.moneda.pk,
+                "nombre": selected_oc.moneda.nombre,
+                "codigo": getattr(selected_oc.moneda, "codigo", None),
+            },
+            "usuario": {
+                "id": selected_oc.usuario.pk,
+                "nombre": (
+                    f"{selected_oc.usuario.get_full_name()}".strip()
+                    or selected_oc.usuario.email
+                    or selected_oc.usuario.username
+                ),
+            },
+            "totales": {
+                "total_piezas": int(selected_oc.total_piezas or 0),
+                "subtotal": float(selected_oc.subtotal or 0.0),
+                "descuento": float(selected_oc.descuento or 0.0),
+                "flete": float(selected_oc.flete or 0.0),
+                "seguros": float(selected_oc.seguros or 0.0),
+                "porcentaje_iva": float(selected_oc.porcentaje_iva or 0.0),
+                "total_iva": float(selected_oc.total_iva or 0.0),
+                "gran_total": float(selected_oc.gran_total or 0.0),
+                "a_cuenta": float(selected_oc.a_cuenta or 0.0),
+            },
+            "observaciones": selected_oc.observaciones,
+            "detalles": detalles,
+        }
+
+    context = {
+        "q": q,
+        "resultados": resultados,
+        "selected_oc": selected_oc,
+        "preview": preview,
+    }
+    return render(request, "QA/compras/imprimir_orden_compra_workspace.html", context)
