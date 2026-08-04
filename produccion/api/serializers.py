@@ -340,6 +340,12 @@ class OrdenReflejanteDetalleSerializer(serializers.ModelSerializer):
 class OrdenReflejanteSerializer(serializers.ModelSerializer):
     detalles = OrdenReflejanteDetalleSerializer(many=True, read_only=True)
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
+    # ``empresa``/``sucursal`` siguen viajando como id (read_only en Meta); estos
+    # dos son etiquetas legibles adicionales, mismo patrón ``source=`` que
+    # ``pedido_folio`` y que ``sucursal_nombre`` en compras/wms. ``Empresa`` no
+    # tiene campo ``nombre``: su nombre humano es ``razon_social``.
+    empresa_nombre = serializers.CharField(source='empresa.razon_social', read_only=True)
+    sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
 
     class Meta:
