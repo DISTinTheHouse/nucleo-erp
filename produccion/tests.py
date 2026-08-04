@@ -26,6 +26,7 @@ from produccion.models import (
     OrdenesBordado,
     OrdenesCorteManga,
     OrdenesReflejante,
+    OrdenReflejanteDetalle,
     ReflejanteAvances,
     ReflejanteIncidencias,
 )
@@ -1052,3 +1053,88 @@ class SatelitesOrdenPadreTenantTests(TestCase):
                 self.assertIn(cfg["fk"], payload)
                 self.assertNotIn("usuario", payload)
                 self.assertEqual(cfg["modelo"].objects.count(), 0)
+
+
+class OrdenReflejanteListShapeTests(TestCase):
+    """Etiquetas legibles ``empresa_nombre``/``sucursal_nombre`` en el shape.
+
+    Aditivo: los ids crudos ``empresa``/``sucursal`` siguen viajando igual; se
+    suman las etiquetas para que el frontend no muestre ``#1``. Mismo patrón
+    ``source=`` que ``pedido_folio``.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Monterrey"
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla = Talla.objects.create(nombre="CH")
+        cls.usuario = Usuario.objects.create(
+            username="operador",
+            email="operador@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
+        )
+
+    def _crear_orden(self, i, n_detalles=2):
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        pd = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
+        orden = OrdenesReflejante.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=pedido,
+            folio_reflejante=f"OR-{i}", usuario_asignado=self.usuario,
+        )
+        for _ in range(n_detalles):
+            OrdenReflejanteDetalle.objects.create(
+                orden_r=orden, pedido_detalle=pd, producto=self.producto,
+                cantidad=1, talla=self.talla,
+            )
+        return orden
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client
+
+    def test_list_expone_empresa_y_sucursal_con_id_y_nombre(self):
+        """Aditivo: los ids crudos siguen, más las etiquetas legibles."""
+        self._crear_orden(1)
+        fila = self._client().get("/api/v1/produccion/orden-reflejante/").json()[0]
+
+        self.assertEqual(fila["empresa"], self.empresa.pk)
+        self.assertEqual(fila["empresa_nombre"], "ACME SA")
+        self.assertEqual(fila["sucursal"], self.sucursal.pk)
+        self.assertEqual(fila["sucursal_nombre"], "Monterrey")
+        # No se rompió lo que ya resolvía el serializer.
+        self.assertIn("pedido_folio", fila)
+        self.assertIn("usuario_nombre", fila)
+
+    def test_retrieve_expone_los_mismos_campos_que_el_list(self):
+        orden = self._crear_orden(1)
+        detalle = self._client().get(
+            f"/api/v1/produccion/orden-reflejante/{orden.pk}/"
+        ).json()
+
+        self.assertEqual(detalle["empresa_nombre"], "ACME SA")
+        self.assertEqual(detalle["sucursal_nombre"], "Monterrey")
+
+    def test_varias_ordenes_resuelven_sus_etiquetas(self):
+        """Con varias órdenes en la lista, todas traen sus etiquetas."""
+        for i in range(3):
+            self._crear_orden(i)
+
+        filas = self._client().get("/api/v1/produccion/orden-reflejante/").json()
+
+        self.assertEqual(len(filas), 3)
+        for fila in filas:
+            self.assertEqual(fila["empresa_nombre"], "ACME SA")
+            self.assertEqual(fila["sucursal_nombre"], "Monterrey")
