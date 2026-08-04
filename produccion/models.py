@@ -184,6 +184,24 @@ class OrdenesBordado(StatusLifecycleModel):
         db_table = 'orden_bordado'
         verbose_name = 'Orden Bordado'
         verbose_name_plural = 'Ordenes Bordado'
+        constraints = [
+            # Una sola OB activa por pedido. Gemela de
+            # ``uq_orden_reflejante_activa_por_pedido``: el 409 de
+            # ``OrdenBordadoService`` es la puerta amable y esto es la red de
+            # seguridad, para dos POST concurrentes o para cualquier ruta que
+            # no pase por el service (admin, shell, script).
+            #
+            # La condición es el mismo criterio de vigencia que ya usa
+            # ``buscar_existente_full_match``: ``activo=True``. Sólo el soft
+            # delete libera el pedido; el estatus CANCELADO **no** lo libera
+            # hoy, ni aquí ni en el chequeo de Python. Cambiarlo requiere
+            # mover ambos lados a la vez.
+            models.UniqueConstraint(
+                fields=["pedido"],
+                condition=models.Q(activo=True),
+                name="uq_orden_bordado_activa_por_pedido",
+            ),
+        ]
 
     def __str__(self):
         return self.folio_bordado
@@ -265,6 +283,30 @@ class OrdenesReflejante(StatusLifecycleModel):
         db_table = 'orden_reflejante'
         verbose_name = 'Orden Reflejante'
         verbose_name_plural = 'Ordenes Reflejante'
+        constraints = [
+            # Una sola OR activa por pedido. El 409 de ``OrdenReflejanteService``
+            # es la puerta amable; esto es la red de seguridad: sin índice, dos
+            # POST concurrentes —o cualquier ruta que no pase por el service
+            # (admin, shell, script)— podían dejar dos OR cubriendo el mismo
+            # pedido y duplicar el trabajo de producción aguas abajo.
+            #
+            # La condición es exactamente el mismo criterio de vigencia que ya
+            # usa ``OrdenReflejanteService.buscar_existente_full_match``:
+            # ``activo=True``. Sólo el soft delete libera el pedido para una
+            # nueva OR; el estatus CANCELADO **no** lo libera hoy, ni aquí ni en
+            # el chequeo de Python. Si negocio quiere que cancelar libere el
+            # pedido, hay que cambiar los dos lados a la vez.
+            #
+            # Nota: hoy el service sólo emite OR de pedido completo, así que
+            # "una activa por pedido" y "una que cubra el 100%" son lo mismo. Si
+            # negocio habilita OR parciales (ver ``buscar_existente_full_match``)
+            # esta constraint hay que replantearla.
+            models.UniqueConstraint(
+                fields=["pedido"],
+                condition=models.Q(activo=True),
+                name="uq_orden_reflejante_activa_por_pedido",
+            ),
+        ]
 
     def __str__(self):
         return self.folio_reflejante
@@ -345,6 +387,16 @@ class OrdenesCorteManga(StatusLifecycleModel):
         db_table = 'orden_corte_manga'
         verbose_name = 'Orden Corte Manga'
         verbose_name_plural = 'Ordenes Corte Manga'
+        constraints = [
+            # Una sola OCM activa por pedido. Misma forma y mismo criterio de
+            # vigencia (``activo=True``, CANCELADO no libera) que las de
+            # Reflejante y Bordado; ver el comentario en ``OrdenesBordado``.
+            models.UniqueConstraint(
+                fields=["pedido"],
+                condition=models.Q(activo=True),
+                name="uq_orden_corte_manga_activa_por_pedido",
+            ),
+        ]
 
     def __str__(self):
         return self.folio_ocm

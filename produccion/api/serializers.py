@@ -23,6 +23,7 @@ from produccion.models import (
 
 from catalogo.api.serializers import ProductoVarianteSerializer
 from catalogo.models import ProductoVariante
+from produccion.services.common import revisar_empresa
 
 
 class BomDetalleSerializer(serializers.ModelSerializer):
@@ -197,15 +198,135 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
             'sucursal'
         ]
 
-class BordadoAvancesSerializer(serializers.ModelSerializer):
+class _OrdenPadreWriteOnceMixin:
+    """Endurece la superficie escribible de los serializers satélite
+    (Avances/Incidencias de Bordado y Reflejante), que declaran
+    ``fields = '__all__'``.
+
+    Dos candados, sobre la misma línea que ``OrdenReflejanteSerializer``:
+
+    - ``activo`` va en ``read_only_fields`` de cada ``Meta``: el borrado es
+      lógico y sólo lo togglea ``perform_destroy`` del ViewSet (soft delete).
+      No debe poder apagarse mandando ``activo=false`` en un PATCH.
+    - La FK a la orden padre (``ob`` / ``orden_r``) es **write-once**: se fija
+      al crear y se ignora en update. Mover un avance/incidencia a otra orden
+      —potencialmente de otro tenant, ya que aquí no se revalida la nueva FK—
+      no es una operación legítima. Sigue el idioma del repo de descartar
+      claves inmutables con ``validated_data.pop`` en ``update`` (ver
+      ``inventarios``/``ListaMaterialBomSerializer``).
+
+    ``usuario`` (autoría) se deja escribible a propósito —hay un flujo legítimo
+    de supervisor registrando en nombre de otro operador— pero debe pertenecer
+    a la misma empresa que la orden padre; ver ``validate()``.
+    """
+
+    #: Nombre de la FK a la orden padre en el modelo concreto.
+    orden_padre_field = None
+
+    def validate(self, attrs):
+        """Dos candados de tenant, en orden: la orden padre contra el
+        solicitante, y ``usuario`` contra la orden padre.
+
+        1) La orden padre (``ob``/``orden_r``) debe pertenecer a la empresa
+           de ``request.user``. Sólo aplica en **creación**: la FK es
+           write-once (ver ``update()`` abajo), así que en update ya es
+           estructuralmente imposible reasignarla a otro tenant —revalidarla
+           ahí sería además un falso rechazo, porque el cliente podría
+           reenviar por error un valor que ``update()`` va a descartar de
+           todas formas sin que afecte nada—.
+
+           Este es el gap que dejó abierto la sesión anterior: ``create()``
+           no pasa por ``get_queryset()`` (eso sólo filtra list/retrieve/
+           update/destroy vía ``get_object()``), así que sin este chequeo un
+           usuario de la empresa A podía crear un avance/incidencia apuntando
+           a una orden de la empresa B. Mismo criterio y mismo mensaje que
+           ``OrdenReflejanteService._validar_contexto`` para pedido vs.
+           empresa del solicitante —incluido el mismo tratamiento sin
+           excepción de superuser: ahí el chequeo de empresa corre
+           incondicional (sólo la sucursal tiene bypass de ``es_staff``,
+           fuera de alcance aquí), y aquí se replica igual: un superuser sin
+           ``empresa`` asignada también queda bloqueado por este path
+           —tiene la vía de Django admin si necesita alcance cross-tenant—.
+
+        2) ``usuario`` (autoría) debe pertenecer a la empresa de la orden
+           padre. No tiene por qué ser ``request.user`` (flujo de supervisor
+           registrando en nombre de otro operador, ya confirmado legítimo),
+           pero si pertenece a otra empresa que la orden, el registro queda
+           inconsistente —un empleado de la empresa B firmando trabajo de una
+           orden de la empresa A—. Se ancla contra la orden padre —no contra
+           ``request.user.empresa``— porque es lo único que garantiza esa
+           consistencia interna usuario↔orden incluso si (1) fallara por
+           algún motivo no cubierto. En update, la orden se lee siempre de
+           ``self.instance`` (inmutable), nunca de lo que el cliente haya
+           reenviado. Tampoco tiene excepción de superuser: es consistencia
+           interna entre dos valores del propio payload, no una pregunta de
+           alcance del solicitante.
+
+        Si (1) y (2) fallarían ambos, sólo se ve el error de (1): se
+        cortocircuita ahí y no se evalúa (2) — un solo error limpio, no una
+        combinación confusa.
+        """
+        attrs = super().validate(attrs)
+
+        if self.instance is None:
+            orden = attrs.get(self.orden_padre_field)
+            if orden is not None:
+                request = self.context.get('request')
+                user = getattr(request, 'user', None) if request else None
+                # Mismo núcleo de pertenencia a empresa que
+                # ``_validar_contexto`` de los services (ver
+                # ``produccion.services.common.revisar_empresa``); aquí con la
+                # convención de error del serializer (dict por campo).
+                resultado = revisar_empresa(user, orden)
+                if resultado == 'sin_empresa':
+                    raise serializers.ValidationError(
+                        {self.orden_padre_field: 'El usuario no tiene una empresa asignada.'}
+                    )
+                if resultado == 'otra_empresa':
+                    raise serializers.ValidationError(
+                        {self.orden_padre_field: 'La orden no pertenece a la empresa del usuario.'}
+                    )
+
+        if 'usuario' not in attrs:
+            return attrs
+
+        usuario = attrs['usuario']
+        orden = (
+            getattr(self.instance, self.orden_padre_field)
+            if self.instance is not None
+            else attrs.get(self.orden_padre_field)
+        )
+
+        if orden is not None and usuario.empresa_id != orden.empresa_id:
+            raise serializers.ValidationError(
+                {'usuario': 'El usuario asignado no pertenece a la empresa de la orden.'}
+            )
+
+        return attrs
+
+    def update(self, instance, validated_data):
+        validated_data.pop(self.orden_padre_field, None)
+        return super().update(instance, validated_data)
+
+
+class BordadoAvancesSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSerializer):
+    orden_padre_field = 'ob'
+
     class Meta:
         model = BordadoAvances
         fields = '__all__'
-        
-class BordadoIncidenciasSerializer(serializers.ModelSerializer):
+        # ``usuario`` queda escribible (client-supplied, flujo de supervisor
+        # en nombre de otro operador) pero validado contra la empresa de la
+        # orden padre en ``_OrdenPadreWriteOnceMixin.validate()``.
+        read_only_fields = ['activo']
+
+class BordadoIncidenciasSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSerializer):
+    orden_padre_field = 'ob'
+
     class Meta:
         model = BordadoIncidencias
         fields = '__all__'
+        read_only_fields = ['activo']
 
 class OrdenReflejanteDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
@@ -237,15 +358,22 @@ class OrdenReflejanteSerializer(serializers.ModelSerializer):
         if not usuario: return None
         return usuario.get_full_name().strip() or usuario.email
         
-class ReflejanteAvancesSerializer(serializers.ModelSerializer):
+class ReflejanteAvancesSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSerializer):
+    orden_padre_field = 'orden_r'
+
     class Meta:
         model = ReflejanteAvances
         fields = '__all__'
-        
-class ReflejanteIncidenciasSerializer(serializers.ModelSerializer):
+        # ``usuario`` client-supplied a propósito (ver BordadoAvancesSerializer).
+        read_only_fields = ['activo']
+
+class ReflejanteIncidenciasSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSerializer):
+    orden_padre_field = 'orden_r'
+
     class Meta:
         model = ReflejanteIncidencias
         fields = '__all__'
+        read_only_fields = ['activo']
 
 class OrdenCorteMangaDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)

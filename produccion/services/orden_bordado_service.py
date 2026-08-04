@@ -2,8 +2,13 @@ from django.db import transaction
 from django.db.models import Count
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesBordado, OrdenBordadoDetalle
+from produccion.services.common import (
+    crear_orden_con_guardia_duplicado,
+    payload_duplicada,
+    revisar_empresa,
+    tallas_orden_trabajo_qs,
+)
 from produccion.utils.folios import generate_ob_folio
-from ventas.models import PedidoDetalleTalla
 
 
 class OrdenBordadoDuplicada409(APIException):
@@ -29,11 +34,10 @@ class OrdenBordadoService:
         Se ejecuta **antes de cualquier escritura** (en particular antes de
         ``generate_ob_folio``) para que un rechazo no consuma consecutivo.
         """
-        empresa = getattr(user, "empresa", None)
-
-        if empresa is None:
+        resultado = revisar_empresa(user, pedido)
+        if resultado == "sin_empresa":
             raise ValidationError("El usuario no tiene una empresa asignada.")
-        if pedido.empresa_id != empresa.pk:
+        if resultado == "otra_empresa":
             raise ValidationError("El pedido no pertenece a la empresa del usuario.")
 
         es_staff = getattr(user, "is_superuser", False) or getattr(
@@ -46,6 +50,22 @@ class OrdenBordadoService:
             )
 
     @staticmethod
+    def _tallas_bordado_qs(pedido_id):
+        return tallas_orden_trabajo_qs(pedido_id, "lleva_bordado")
+
+    @staticmethod
+    def _payload_duplicada(existente):
+        return payload_duplicada(
+            existente,
+            folio_field="folio_bordado",
+            estatus_display="get_estatus_bordado_display",
+            estatus_field="estatus_bordado",
+            payload_key="orden_bordado_existente",
+            tipo_label="bordado",
+            dividir_label="el bordado",
+        )
+
+    @staticmethod
     def buscar_existente_full_match(pedido):
         """Devuelve OrdenesBordado activa si ya cubre 100% de las tallas con lleva_bordado.
 
@@ -53,13 +73,7 @@ class OrdenBordadoService:
         Si negocio decide habilitar fraccionamiento (OB parcial), esta función
         regresa None y se permite una segunda OB.
         """
-        tallas_esperadas_qty = (
-            PedidoDetalleTalla.objects.filter(
-                pedido_detalle__pedido=pedido,
-                lleva_bordado=True,
-                cantidad__gt=0,
-            ).count()
-        )
+        tallas_esperadas_qty = OrdenBordadoService._tallas_bordado_qs(pedido.id).count()
         if tallas_esperadas_qty == 0:
             return None
 
@@ -90,9 +104,8 @@ class OrdenBordadoService:
             raise ValidationError({"err": "El usuario no tiene una sucursal asignada."})
 
         detalle_tallas = list(
-            PedidoDetalleTalla.objects.select_related("pedido_detalle", "talla").filter(
-                pedido_detalle__pedido_id=pedido.id,
-                lleva_bordado=True,
+            OrdenBordadoService._tallas_bordado_qs(pedido.id).select_related(
+                "pedido_detalle", "talla"
             )
         )
 
@@ -103,31 +116,26 @@ class OrdenBordadoService:
 
         existente = OrdenBordadoService.buscar_existente_full_match(pedido)
         if existente is not None:
-            raise OrdenBordadoDuplicada409({
-                "err": (
-                    "Ya existe una orden de bordado activa para este pedido con el 100% "
-                    "de las prendas. Si requiere dividir el bordado, contacte a producción."
-                ),
-                "orden_bordado_existente": {
-                    "id": existente.id,
-                    "folio": existente.folio_bordado,
-                    "pedido": existente.pedido_id,
-                    "estado": existente.get_estatus_bordado_display()
-                    if hasattr(existente, "get_estatus_bordado_display")
-                    else existente.estatus_bordado,
-                },
-            })
+            raise OrdenBordadoDuplicada409(
+                OrdenBordadoService._payload_duplicada(existente)
+            )
 
         folio_bordado = generate_ob_folio(pedido.empresa_id, pedido.sucursal_id)
 
-        orden_bordado = OrdenesBordado.objects.create(
-            empresa=pedido.empresa,
-            sucursal=pedido.sucursal,
-            pedido=pedido,
-            folio_bordado=folio_bordado,
-            usuario_asignado=user,
-            prioridad=data.get("prioridad", 1),
-            observaciones=data.get("observaciones"),
+        orden_bordado = crear_orden_con_guardia_duplicado(
+            OrdenesBordado,
+            pedido,
+            dict(
+                empresa=pedido.empresa,
+                sucursal=pedido.sucursal,
+                pedido=pedido,
+                folio_bordado=folio_bordado,
+                usuario_asignado=user,
+                prioridad=data.get("prioridad", 1),
+                observaciones=data.get("observaciones"),
+            ),
+            OrdenBordadoDuplicada409,
+            OrdenBordadoService._payload_duplicada,
         )
 
         bulk_data = [
