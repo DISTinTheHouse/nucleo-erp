@@ -12,4 +12,8 @@ urlpatterns = [
     path('imrpimir_etiqueta/', views.imprimir_etiqueta_workspace, name='qa_imrpimir_etiqueta_workspace'),
     path('imprimir_orden_compra/', views.imprimir_orden_compra_workspace, name='qa_imprimir_orden_compra_workspace'),
     path('imrpimir_orden_compra/', views.imprimir_orden_compra_workspace, name='qa_imrpimir_orden_compra_workspace'),
+    path('scanner_rfid/', views.scanner_rfid_workspace, name='qa_scanner_rfid_workspace'),
+    path('scanner_rfid/receive/', views.scanner_rfid_receive, name='qa_scanner_rfid_receive'),
+    path('scanner_rfid/get/', views.scanner_rfid_get, name='qa_scanner_rfid_get'),
+    path('scanner_rfid/clear/', views.scanner_rfid_clear, name='qa_scanner_rfid_clear'),
 ]

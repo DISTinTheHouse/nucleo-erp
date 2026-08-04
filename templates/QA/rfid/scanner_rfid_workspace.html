@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Scanner RFID · QA</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  body { font-family: 'Inter', sans-serif; -webkit-user-select: none; user-select: none; overscroll-behavior: none; background-color: #000; color: #fff; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  .glass { background: rgba(255,255,255,0.03); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.08); }
+  .stat-card { background: radial-gradient(circle at top left, rgba(255,255,255,0.03), transparent); }
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
+  @keyframes subtle-float { 0%,100%{transform:translateY(0);} 50%{transform:translateY(-5px);} }
+  .float { animation: subtle-float 4s ease-in-out infinite; }
+</style>
+</head>
+<body class="flex flex-col h-screen overflow-hidden selection:bg-yellow-500/30">
+
+<header class="px-8 py-6 flex justify-between items-center border-b border-white/[0.08] bg-black/60 backdrop-blur-xl sticky top-0 z-50">
+  <div class="flex items-center gap-5">
+    <div class="w-11 h-11 bg-white text-black rounded-2xl flex items-center justify-center font-black text-xl shadow-[0_0_30px_rgba(255,255,255,0.15)]">
+      📡
+    </div>
+    <div>
+      <h1 class="text-sm font-extrabold tracking-[0.2em] uppercase text-white/90">RFID Edge</h1>
+      <p id="readerUrl" class="text-[10px] text-white/40 mono mt-1 tracking-wider break-all">POST /QA/scanner_rfid/receive/</p>
+    </div>
+  </div>
+  <div class="flex items-center gap-4">
+    <button id="copyUrlBtn" class="text-[10px] font-bold uppercase tracking-[0.2em] text-white/30 hover:text-white/70 border border-white/10 rounded-full px-4 py-2">Copiar URL</button>
+    <a href="{% url 'index_QA' %}" class="text-[10px] font-bold uppercase tracking-[0.2em] text-white/30 hover:text-white/70 border border-white/10 rounded-full px-4 py-2">← QA</a>
+    <div id="rfid-status-indicator" class="flex items-center gap-3 px-4 py-2 bg-white/[0.03] border border-white/[0.1] rounded-full shadow-inner">
+      <div id="status-dot" class="w-2 h-2 rounded-full bg-white/30"></div>
+      <span id="status-text" class="text-[9px] font-bold tracking-[0.2em] text-white/60 uppercase">Sistema listo</span>
+    </div>
+  </div>
+</header>
+
+<main class="flex-1 overflow-y-auto flex flex-col max-w-3xl mx-auto w-full">
+  <section class="p-8 grid grid-cols-2 gap-6">
+    <div class="glass stat-card rounded-[2.5rem] p-10 flex flex-col items-center justify-center text-center transition-transform hover:scale-[1.02] duration-500">
+      <span class="text-6xl font-extralight tracking-tighter leading-none" id="tag-count">0</span>
+      <span class="text-[10px] font-bold uppercase tracking-[0.3em] text-white/30 mt-5">Cumulative Tags</span>
+    </div>
+    <div class="glass stat-card rounded-[2.5rem] p-10 flex flex-col items-center justify-center text-center transition-transform hover:scale-[1.02] duration-500">
+      <span class="text-6xl font-extralight tracking-tighter leading-none text-white/60" id="read-rate">0.0</span>
+      <span class="text-[10px] font-bold uppercase tracking-[0.3em] text-white/30 mt-5">Scan Velocity</span>
+    </div>
+  </section>
+
+  <section class="px-8 pb-8">
+    <button id="scan-btn" class="w-full py-6 rounded-[2rem] bg-yellow-500 text-slate-900 text-xs font-black uppercase tracking-[0.3em] transition-all duration-300 hover:shadow-[0_0_60px_-15px_rgba(234,179,8,0.4)] active:scale-[0.97] border-b-4 border-yellow-700 active:border-b-0">
+      Iniciar Monitoreo
+    </button>
+  </section>
+
+  <section class="flex-1 flex flex-col min-h-0 px-8 pb-10">
+    <div class="flex justify-between items-center mb-6 px-4">
+      <div class="flex items-center gap-3">
+        <div class="w-1 h-4 bg-yellow-500 rounded-full"></div>
+        <h2 class="text-[10px] font-bold uppercase tracking-[0.3em] text-white/40">Inbound Stream</h2>
+      </div>
+      <button id="clear-btn" class="text-[9px] font-bold text-white/20 hover:text-white uppercase tracking-[0.2em] transition-all hover:tracking-[0.3em]">Purge List</button>
+    </div>
+
+    <div id="results-container" class="flex-1 glass rounded-[2.5rem] overflow-hidden flex flex-col shadow-2xl">
+      <div class="overflow-y-auto flex-1">
+        <ul id="tag-list" class="divide-y divide-white/[0.04]">
+          <li class="p-24 flex flex-col items-center justify-center text-center" id="empty-state">
+            <div class="w-16 h-16 border border-white/10 rounded-full mb-6 flex items-center justify-center float">
+              <div class="w-1.5 h-1.5 bg-yellow-500 rounded-full shadow-[0_0_12px_rgba(234,179,8,0.8)]"></div>
+            </div>
+            <span class="text-[10px] uppercase tracking-[0.4em] font-medium text-white/20">Esperando señal de hardware</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="px-8 py-6 text-center border-t border-white/[0.03] bg-black/40 backdrop-blur-md">
+  <p class="text-[9px] font-bold tracking-[0.3em] uppercase text-white/10">Zebra Enterprise System &bull; Secure Deployment</p>
+</footer>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  const readerUrlEl = document.getElementById('readerUrl');
+  const statusDot = document.getElementById('status-dot');
+  const statusText = document.getElementById('status-text');
+  const scanBtn = document.getElementById('scan-btn');
+  const clearBtn = document.getElementById('clear-btn');
+  const copyUrlBtn = document.getElementById('copyUrlBtn');
+  const tagList = document.getElementById('tag-list');
+  const emptyState = document.getElementById('empty-state');
+  const tagCountEl = document.getElementById('tag-count');
+  const readRateEl = document.getElementById('read-rate');
+
+  const BASE = "{% url 'qa_scanner_rfid_workspace' %}".replace(/\/$/, '');
+  const URL_GET = BASE + '/get/';
+  const URL_CLEAR = BASE + '/clear/';
+  const URL_RECEIVE = BASE + '/receive/';
+  const POST_URL = (window.location.origin || '') + URL_RECEIVE;
+  readerUrlEl.textContent = POST_URL;
+
+  let isScanning = false;
+  let tags = new Set();
+  let pollInterval = null;
+  let recentTimestamps = [];
+  const RATE_WINDOW_MS = 10 * 1000;
+  let lastMaxId = 0;
+
+  function updateRate() {
+    const cutoff = Date.now() - RATE_WINDOW_MS;
+    recentTimestamps = recentTimestamps.filter(t => t >= cutoff);
+    const rateSec = recentTimestamps.length / (RATE_WINDOW_MS / 1000);
+    readRateEl.textContent = rateSec.toFixed(1);
+  }
+  setInterval(updateRate, 500);
+
+  function setStatus(kind, label) {
+    statusText.textContent = label;
+    statusDot.className = 'w-2 h-2 rounded-full';
+    if (kind === 'active') {
+      statusDot.classList.add('bg-green-500', 'shadow-[0_0_15px_rgba(34,197,94,0.5)]');
+      statusDot.classList.add('animate-ping');
+    } else if (kind === 'warn') {
+      statusDot.classList.add('bg-amber-500');
+    } else if (kind === 'error') {
+      statusDot.classList.add('bg-red-500');
+    } else {
+      statusDot.classList.add('bg-white/30');
+    }
+  }
+
+  function toggleScan() {
+    isScanning = !isScanning;
+    if (isScanning) startScanning();
+    else stopScanning();
+  }
+
+  function startScanning() {
+    scanBtn.textContent = 'Detener Monitoreo';
+    scanBtn.classList.replace('bg-yellow-500', 'bg-red-600');
+    scanBtn.classList.replace('text-slate-900', 'text-white');
+    scanBtn.classList.remove('border-yellow-700');
+    scanBtn.classList.add('border-red-800');
+    setStatus('active', 'Escuchando hardware');
+    pollInterval = setInterval(fetchScans, 2000);
+    fetchScans();
+  }
+
+  function stopScanning() {
+    scanBtn.textContent = 'Iniciar Monitoreo';
+    scanBtn.classList.replace('bg-red-600', 'bg-yellow-500');
+    scanBtn.classList.replace('text-white', 'text-slate-900');
+    scanBtn.classList.remove('border-red-800');
+    scanBtn.classList.add('border-yellow-700');
+    setStatus('idle', 'Monitoreo detenido');
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+  }
+
+  async function fetchScans() {
+    try {
+      const res = await fetch(URL_GET);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const arr = Array.isArray(data.scans) ? data.scans : [];
+      if (!arr.length) return;
+
+      const sorted = arr.slice().sort((a, b) => (a.id || 0) - (b.id || 0));
+      const maxId = sorted[sorted.length - 1].id || 0;
+      const newOnes = sorted.filter(s => (s.id || 0) > lastMaxId);
+      if (!lastMaxId) for (const s of sorted) addTag(s);
+      else for (const s of newOnes) addTag(s);
+      lastMaxId = maxId;
+    } catch (e) {
+      console.error('fetch scans failed', e);
+      setStatus('error', 'Error al consultar lecturas');
+      setTimeout(() => { if (isScanning) setStatus('active', 'Escuchando hardware'); else setStatus('idle', 'Monitoreo detenido'); }, 1500);
+    }
+  }
+
+  async function clearBackend() {
+    try {
+      await fetch(URL_CLEAR);
+      tags.clear();
+      lastMaxId = 0;
+      recentTimestamps.length = 0;
+      tagCountEl.textContent = '0';
+      readRateEl.textContent = '0.0';
+      tagList.innerHTML = '';
+      const li = document.createElement('li');
+      li.className = 'p-24 flex flex-col items-center justify-center text-center';
+      li.id = 'empty-state';
+      li.innerHTML = `
+        <div class="w-16 h-16 border border-white/10 rounded-full mb-6 flex items-center justify-center float">
+          <div class="w-1.5 h-1.5 bg-yellow-500 rounded-full shadow-[0_0_12px_rgba(234,179,8,0.8)]"></div>
+        </div>
+        <span class="text-[10px] uppercase tracking-[0.4em] font-medium text-white/20">Esperando señal de hardware</span>`;
+      tagList.appendChild(li);
+    } catch (e) { console.error(e); }
+  }
+
+  function addTag(scan) {
+    if (!scan || !scan.epc) return;
+    const epc = String(scan.epc);
+    const nowMs = Date.now();
+    recentTimestamps.push(nowMs);
+    if (!tags.has(epc)) {
+      tags.add(epc);
+      tagCountEl.textContent = tags.size;
+      const emptyEl = document.getElementById('empty-state');
+      if (emptyEl) emptyEl.remove();
+      const li = document.createElement('li');
+      li.className = 'p-6 flex justify-between items-center transition-all duration-700';
+      li.innerHTML = `
+        <div class="flex flex-col gap-1.5">
+          <span class="text-[9px] font-bold text-white/30 uppercase tracking-[0.2em]">Tag ID</span>
+          <span class="mono text-sm font-bold text-yellow-500 tracking-tight break-all">${epc}</span>
+          <div class="flex gap-2 mt-1">
+            <span class="text-[8px] font-bold uppercase px-2 py-0.5 bg-white/5 rounded-full text-white/40 border border-white/10 tracking-widest">Ant: ${scan.antenna ?? '—'}</span>
+            <span class="text-[8px] font-bold uppercase px-2 py-0.5 bg-white/5 rounded-full text-white/40 border border-white/10 tracking-widest">RSSI: ${scan.rssi ?? 'N/A'}</span>
+          </div>
+        </div>
+        <div class="flex flex-col items-end gap-2">
+          <span class="text-[8px] bg-green-500/10 text-green-500 px-3 py-1 rounded-full border border-green-500/20 font-black tracking-[0.2em] uppercase shadow-[0_0_15px_rgba(34,197,94,0.1)]">Capturado</span>
+          <span class="text-[8px] text-white/20 mono tracking-tighter">${scan.timestamp ? new Date(scan.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString()}</span>
+        </div>`;
+      tagList.prepend(li);
+    }
+  }
+
+  async function copyUrl() {
+    try {
+      await navigator.clipboard.writeText(POST_URL);
+      const orig = copyUrlBtn.textContent;
+      copyUrlBtn.textContent = 'Copiado ✓';
+      setTimeout(() => copyUrlBtn.textContent = orig, 1500);
+    } catch (e) {
+      copyUrlBtn.textContent = 'Error';
+      setTimeout(() => copyUrlBtn.textContent = 'Copiar URL', 1600);
+    }
+  }
+
+  scanBtn.addEventListener('click', toggleScan);
+  clearBtn.addEventListener('click', clearBackend);
+  copyUrlBtn.addEventListener('click', copyUrl);
+  setStatus('idle', 'Sistema listo');
+});
+</script>
+</body>
+</html>

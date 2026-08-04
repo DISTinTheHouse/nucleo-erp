@@ -1,3 +1,5 @@
+import json
+import logging
 import uuid
 from decimal import Decimal
 from pathlib import Path
@@ -6,11 +8,12 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.db.models import Q
-from django.http import FileResponse, Http404
+from django.http import FileResponse, Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.defaultfilters import truncatechars
 from django.urls import reverse
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 
 from catalogo.models import Producto, ProductoVariante
 from compras.models import OrdenCompra, OrdenCompraDetalle, RecepcionRFIDEncuadre, RecepcionRFIDLectura
@@ -22,6 +25,9 @@ from produccion.models import (
     OrdenProduccion,
     OrdenProduccionDetalle,
 )
+from wms.models import RfidScan
+
+rfid_scanner_logger = logging.getLogger(__name__)
 
 
 def _empresa_qa(request):
@@ -679,3 +685,103 @@ def imprimir_orden_compra_workspace(request):
         "renglones": renglones,
     }
     return render(request, "QA/compras/imprimir_orden_compra_workspace.html", context)
+
+
+def _es_hexadecimal_epc(value):
+    s = (value or "").strip().replace(" ", "")
+    if not s:
+        return False
+    if len(s) < 8 or len(s) > 64:
+        return False
+    try:
+        int(s, 16)
+        return True
+    except ValueError:
+        return False
+
+
+@login_required
+def scanner_rfid_workspace(request):
+    empresa = _empresa_qa(request)
+    if empresa is None:
+        messages.error(request, "No hay empresa disponible para la prueba de QA.")
+        return redirect("index_QA")
+    return render(
+        request,
+        "QA/rfid/scanner_rfid_workspace.html",
+        {"empresa": empresa},
+    )
+
+
+@csrf_exempt
+def scanner_rfid_receive(request):
+    if request.method != "POST":
+        return JsonResponse({"status": "error", "message": "Method not allowed"}, status=405)
+    try:
+        remote_addr = request.META.get("REMOTE_ADDR")
+        raw_body = request.body.decode("utf-8", errors="replace")
+        rfid_scanner_logger.info("RFID receive from %s body[:160]=%s", remote_addr, raw_body[:160])
+
+        data = json.loads(raw_body) if raw_body else None
+        items = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("tagData") or data.get("tags") or [data]
+
+        if not isinstance(items, list):
+            return JsonResponse({"status": "error", "message": "Invalid data format"}, status=400)
+
+        tags_to_create = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("isHeartBeat") is True:
+                continue
+            epc = (
+                item.get("data")
+                or item.get("idHex")
+                or item.get("epc")
+                or item.get("tagID")
+            )
+            if not epc:
+                continue
+            tags_to_create.append(
+                RfidScan(
+                    epc=str(epc),
+                    reader_ip=remote_addr,
+                    antenna=item.get("antenna") or item.get("antennaID"),
+                    rssi=item.get("peakRssi") or item.get("rssi"),
+                )
+            )
+
+        if tags_to_create:
+            RfidScan.objects.bulk_create(tags_to_create, batch_size=200)
+        return JsonResponse({"status": "success", "count": len(tags_to_create)})
+    except json.JSONDecodeError as e:
+        return JsonResponse({"status": "error", "message": f"JSON invalido: {str(e)}"}, status=400)
+    except Exception as e:
+        rfid_scanner_logger.exception("RFID receive error")
+        return JsonResponse({"status": "error", "message": str(e)}, status=500)
+
+
+def scanner_rfid_get(request):
+    scans = RfidScan.objects.all()[:50]
+    data = [
+        {
+            "id": scan.pk,
+            "epc": scan.epc,
+            "timestamp": scan.created_at.isoformat(),
+            "antenna": scan.antenna,
+            "rssi": scan.rssi,
+            "reader_ip": scan.reader_ip,
+        }
+        for scan in scans
+    ]
+    return JsonResponse({"scans": data})
+
+
+def scanner_rfid_clear(request):
+    RfidScan.objects.all().delete()
+    return JsonResponse({"status": "success"})
+

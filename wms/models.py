@@ -526,3 +526,20 @@ class EtiquetaRFIDDetalle(models.Model):
 
     def __str__(self):
         return self.epc
+
+
+class RfidScan(models.Model):
+    epc = models.CharField(max_length=255, db_index=True)
+    reader_ip = models.GenericIPAddressField(null=True, blank=True)
+    antenna = models.IntegerField(null=True, blank=True)
+    rssi = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "rfid_scans"
+        verbose_name = "Lectura RFID"
+        verbose_name_plural = "Lecturas RFID"
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.epc} @ {self.created_at.isoformat()}"
