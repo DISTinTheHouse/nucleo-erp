@@ -2148,8 +2148,14 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # prefetch para evitar el N+1 del shape anidado — misma convención que
         # ``PickingViewSet.get_queryset()`` en WMS.
         qs = super().get_queryset().prefetch_related(_pedido_detalles_prefetch())
-        if not getattr(user, "is_superuser", False) and getattr(user, "empresa", None):
-            qs = qs.filter(empresa=user.empresa)
+        if not getattr(user, "is_superuser", False):
+            # Un usuario sin empresa asignada no cae en ninguna rama y se
+            # llevaba los pedidos de **todas** las empresas. Sin empresa no se
+            # ve nada, misma convención que ``OrdenReflejanteViewSet``.
+            empresa = getattr(user, "empresa", None)
+            if not empresa:
+                return qs.none()
+            qs = qs.filter(empresa=empresa)
         q = self.request.query_params.get("q") or self.request.query_params.get("folio")
         if q:
             qs = qs.filter(folio__icontains=q)

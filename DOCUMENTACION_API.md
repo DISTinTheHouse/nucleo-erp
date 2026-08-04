@@ -1921,7 +1921,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
   - Validación **cross-tenant**: `pedido.empresa_id == user.empresa_id` y acceso por `sucursales_permitidas()`; si no, retorna 403/409 según caso y no gasta folio.
   - `buscar_existente_full_match()`: detecta OB activa para el mismo pedido con cobertura 100%.
 
-**Estados y cancelación**: Si se requiere reprocesar un pedido porque la OB original se canceló o cerró parcialmente, el `POST` volverá a permitir crear una nueva OB sin conflictos.
+**Estados y cancelación**: El candado "una OB activa por pedido" (constraint `uq_orden_bordado_activa_por_pedido`) se libera **sólo** al dar de baja la OB (soft delete, `activo=false`). Cambiar el estatus a `CANCELADO` **no** libera el pedido por sí solo: la OB sigue `activo=true`, así que un segundo `POST` responderá `409` hasta que la OB previa se dé de baja.
 
 ### 8) Orden de Reflejante Onboarding (patrón sencillo / manual)
 
@@ -2010,7 +2010,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
   - Validación **cross-tenant**: `pedido.empresa_id == user.empresa_id` y acceso por `sucursales_permitidas()`; si no, retorna error y no gasta folio.
   - `buscar_existente_full_match()`: detecta OR activa para el mismo pedido con cobertura 100%.
 
-**Estados y cancelación**: Si se requiere reprocesar un pedido porque la OR original se canceló o cerró parcialmente, el `POST` volverá a permitir crear una nueva OR sin conflictos.
+**Estados y cancelación**: El candado "una OR activa por pedido" (constraint `uq_orden_reflejante_activa_por_pedido`) se libera **sólo** al dar de baja la OR (soft delete, `activo=false`). Cambiar el estatus a `CANCELADO` **no** libera el pedido por sí solo: la OR sigue `activo=true`, así que un segundo `POST` responderá `409` hasta que la OR previa se dé de baja.
 
 ### 9) Orden de Corte de Manga Onboarding (patrón sencillo / manual)
 
@@ -2099,7 +2099,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
   - Validación **cross-tenant**: `pedido.empresa_id == user.empresa_id` y acceso por `sucursales_permitidas()`; si no, retorna error y no gasta folio.
   - `buscar_existente_full_match()`: detecta OCM activa para el mismo pedido con cobertura 100%.
 
-**Estados y cancelación**: Si se requiere reprocesar un pedido porque la OCM original se canceló o cerró parcialmente, el `POST` volverá a permitir crear una nueva OCM sin conflictos.
+**Estados y cancelación**: El candado "una OCM activa por pedido" (constraint `uq_orden_corte_manga_activa_por_pedido`) se libera **sólo** al dar de baja la OCM (soft delete, `activo=false`). Cambiar el estatus a `CANCELADO` **no** libera el pedido por sí solo: la OCM sigue `activo=true`, así que un segundo `POST` responderá `409` hasta que la OCM previa se dé de baja.
 
 ---
 

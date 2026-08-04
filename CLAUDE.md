@@ -21,7 +21,7 @@ python manage.py makemigrations
 python manage.py migrate
 python manage.py makemigrations --dry-run --check   # what CI enforces — must report "No changes"
 
-# Validation (this is the full CI gate — there is no automated test suite)
+# Validation (this is the full CI gate — real tests exist locally but aren't run in CI, see note below)
 python manage.py check
 
 # Operational
@@ -35,7 +35,7 @@ docker compose up --build
 
 Note: `docker-compose.yml` defines **only** the `web` container — there is no bundled Postgres. It builds from the `Dockerfile`, reads config from a `.env` file, and expects a reachable DB (host Postgres or remote Supabase) per the env vars below.
 
-There are **no real tests** — every `tests.py` is the Django placeholder stub. (`def test_func` matches are `UserPassesTestMixin` permission checks, not tests.) Do not assume a test suite exists; the CI gate is `manage.py check` + migration-drift check.
+Test coverage is uneven — `produccion/tests.py` (58 tests), `ventas/tests.py` (7 tests), and `wms/tests.py` (25 tests) contain real tests; no other app has a `tests.py` file. (Grepping for `def test_func` elsewhere in the codebase will hit `UserPassesTestMixin` permission checks, not tests.) None of this runs in CI — the CI gate is still `manage.py check` + migration-drift check.
 
 ## Database & environments
 

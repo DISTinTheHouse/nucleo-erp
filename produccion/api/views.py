@@ -355,16 +355,48 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
             OrdenBordadoSerializer(orden_bordado).data, status=status.HTTP_201_CREATED
         )
 
-class BordadoAvancesViewSet(viewsets.ModelViewSet):
+class _OrdenPadreTenantScopedMixin:
+    """``get_queryset`` multi-tenant a través de la FK a la orden padre.
+
+    Los modelos satélite (Avances/Incidencias de Bordado y Reflejante) no
+    tienen ``empresa``/``sucursal`` propios: el tenant sólo se alcanza
+    atravesando ``orden_padre_field`` (``ob``/``orden_r``). Mismo criterio que
+    ``OrdenBordadoViewSet.get_queryset()``, pero sobre la orden padre. Una sola
+    definición para los cuatro ViewSets; cada uno declara su ``orden_padre_field``.
+    """
+
+    #: Nombre de la FK a la orden padre en el modelo satélite.
+    orden_padre_field = None
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = self.queryset.model.objects.filter(activo=True)
+
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        qs = qs.filter(**{f"{self.orden_padre_field}__empresa": empresa})
+        if getattr(user, "is_admin_empresa", False):
+            return qs
+        return qs.filter(
+            **{f"{self.orden_padre_field}__sucursal_id__in": user.sucursales_permitidas()}
+        )
+
+
+class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = BordadoAvances.objects.filter(activo=True)
     serializer_class = BordadoAvancesSerializer
+    orden_padre_field = "ob"
 
     def perform_destroy(self, instance):
         instance.soft_delete()
 
-class BordadoIncidenciasViewSet(viewsets.ModelViewSet):
+class BordadoIncidenciasViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = BordadoIncidencias.objects.filter(activo=True)
     serializer_class = BordadoIncidenciasSerializer
+    orden_padre_field = "ob"
 
     def perform_destroy(self, instance):
         instance.soft_delete()
@@ -478,16 +510,18 @@ class OrdenReflejanteViewSet(
             OrdenReflejanteSerializer(orden_reflejante).data, status=status.HTTP_201_CREATED
         )
 
-class ReflejanteAvancesViewSet(viewsets.ModelViewSet):
+class ReflejanteAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = ReflejanteAvances.objects.filter(activo=True)
     serializer_class = ReflejanteAvancesSerializer
+    orden_padre_field = "orden_r"
 
     def perform_destroy(self, instance):
         instance.soft_delete()
 
-class ReflejanteIncidenciasViewSet(viewsets.ModelViewSet):
+class ReflejanteIncidenciasViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = ReflejanteIncidencias.objects.filter(activo=True)
     serializer_class = ReflejanteIncidenciasSerializer
+    orden_padre_field = "orden_r"
 
     def perform_destroy(self, instance):
         instance.soft_delete()

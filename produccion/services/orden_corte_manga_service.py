@@ -1,8 +1,13 @@
 from django.db import transaction
 from django.db.models import Count
 from rest_framework.exceptions import ValidationError, APIException
-from ventas.models import PedidoDetalleTalla
 from produccion.models import OrdenesCorteManga, OrdenCorteMangaDetalle
+from produccion.services.common import (
+    crear_orden_con_guardia_duplicado,
+    payload_duplicada,
+    revisar_empresa,
+    tallas_orden_trabajo_qs,
+)
 from produccion.utils.folios import generate_ocm_folio
 
 
@@ -21,11 +26,10 @@ class OrdenCorteMangaService:
         Mismo criterio y mismos mensajes que
         ``OrdenBordadoService._validar_contexto`` / ``OrdenReflejanteService._validar_contexto``.
         """
-        empresa = getattr(user, "empresa", None)
-
-        if empresa is None:
+        resultado = revisar_empresa(user, pedido)
+        if resultado == "sin_empresa":
             raise ValidationError("El usuario no tiene una empresa asignada.")
-        if pedido.empresa_id != empresa.pk:
+        if resultado == "otra_empresa":
             raise ValidationError("El pedido no pertenece a la empresa del usuario.")
 
         es_staff = getattr(user, "is_superuser", False) or getattr(
@@ -38,6 +42,22 @@ class OrdenCorteMangaService:
             )
 
     @staticmethod
+    def _tallas_corte_manga_qs(pedido_id):
+        return tallas_orden_trabajo_qs(pedido_id, "lleva_corte_manga")
+
+    @staticmethod
+    def _payload_duplicada(existente):
+        return payload_duplicada(
+            existente,
+            folio_field="folio_ocm",
+            estatus_display="get_estatus_corte_display",
+            estatus_field="estatus_corte",
+            payload_key="orden_corte_manga_existente",
+            tipo_label="corte de manga",
+            dividir_label="el corte",
+        )
+
+    @staticmethod
     def buscar_existente_full_match(pedido):
         """Devuelve OrdenesCorteManga activa si ya cubre 100% de las tallas con lleva_corte_manga.
 
@@ -45,13 +65,9 @@ class OrdenCorteMangaService:
         Si negocio decide habilitar fraccionamiento (OCM parcial), esta función
         regresa None y se permite una segunda OCM.
         """
-        tallas_esperadas_qty = (
-            PedidoDetalleTalla.objects.filter(
-                pedido_detalle__pedido=pedido,
-                lleva_corte_manga=True,
-                cantidad__gt=0,
-            ).count()
-        )
+        tallas_esperadas_qty = OrdenCorteMangaService._tallas_corte_manga_qs(
+            pedido.id
+        ).count()
         if tallas_esperadas_qty == 0:
             return None
 
@@ -81,9 +97,8 @@ class OrdenCorteMangaService:
             raise ValidationError({"err": "El usuario no tiene una sucursal asignada."})
 
         detalle_tallas = list(
-            PedidoDetalleTalla.objects.select_related("pedido_detalle", "talla").filter(
-                pedido_detalle__pedido_id=pedido.id,
-                lleva_corte_manga=True,
+            OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id).select_related(
+                "pedido_detalle", "talla"
             )
         )
 
@@ -94,31 +109,26 @@ class OrdenCorteMangaService:
 
         existente = OrdenCorteMangaService.buscar_existente_full_match(pedido)
         if existente is not None:
-            raise OrdenCorteMangaDuplicada409({
-                "err": (
-                    "Ya existe una orden de corte de manga activa para este pedido con el 100% "
-                    "de las prendas. Si requiere dividir el corte, contacte a producción."
-                ),
-                "orden_corte_manga_existente": {
-                    "id": existente.id,
-                    "folio": existente.folio_ocm,
-                    "pedido": existente.pedido_id,
-                    "estado": existente.get_estatus_corte_display()
-                    if hasattr(existente, "get_estatus_corte_display")
-                    else existente.estatus_corte,
-                },
-            })
+            raise OrdenCorteMangaDuplicada409(
+                OrdenCorteMangaService._payload_duplicada(existente)
+            )
 
         folio_ocm = generate_ocm_folio(pedido.empresa_id, pedido.sucursal_id)
 
-        orden_corte_manga = OrdenesCorteManga.objects.create(
-            empresa=pedido.empresa,
-            sucursal=pedido.sucursal,
-            pedido=pedido,
-            folio_ocm=folio_ocm,
-            usuario_asignado=user,
-            prioridad=data.get("prioridad", 1),
-            observaciones=data.get("observaciones"),
+        orden_corte_manga = crear_orden_con_guardia_duplicado(
+            OrdenesCorteManga,
+            pedido,
+            dict(
+                empresa=pedido.empresa,
+                sucursal=pedido.sucursal,
+                pedido=pedido,
+                folio_ocm=folio_ocm,
+                usuario_asignado=user,
+                prioridad=data.get("prioridad", 1),
+                observaciones=data.get("observaciones"),
+            ),
+            OrdenCorteMangaDuplicada409,
+            OrdenCorteMangaService._payload_duplicada,
         )
 
         bulk_data = [
