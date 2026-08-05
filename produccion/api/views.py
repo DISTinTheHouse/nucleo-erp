@@ -576,9 +576,14 @@ class OrdenReflejanteViewSet(
         """Onboarding para OrdenReflejante (patrón WMS picking/packing/despacho).
 
         GET → catálogos de pedidos con prendas que requieren reflejante,
-        operadores de la empresa y preview del folio siguiente.
+        operadores de la empresa, preview del folio siguiente y detalle
+        por pedido con líneas elegibles (producto/talla/color y cantidad
+        del pedido + ubicaciones/foto de reflejante_config). El selector
+        de cantidades en Next.js usa este detalle para armar el POST.
 
         POST → mismo save que create() (comparte serializer y service).
+        Body opcional `detalles_override[]` permite seleccionar líneas
+        y cantidades para OR parciales.
         """
         if request.method == "GET":
             user = request.user
@@ -600,6 +605,13 @@ class OrdenReflejanteViewSet(
                 )
                 .distinct()
                 .select_related("cliente", "sucursal")
+                .prefetch_related(
+                    "detalles",
+                    "detalles__tallas",
+                    "detalles__tallas__talla",
+                    "detalles__producto",
+                    "detalles__color",
+                )
                 .order_by("-created_at", "-id")
             )
 
@@ -618,18 +630,59 @@ class OrdenReflejanteViewSet(
                 except Exception:
                     preview_folio = None
 
+            pedidos_payload = []
+            for p in pedidos_qs:
+                lineas = []
+                for det in p.detalles.all():
+                    for dt in det.tallas.filter(lleva_reflejante=True).select_related("talla"):
+                        cfg = dt.reflejante_config or {}
+                        ubicaciones = cfg.get("ubicaciones") or []
+                        if isinstance(ubicaciones, list) and ubicaciones:
+                            primera_ubic = ubicaciones[0] or {}
+                        else:
+                            primera_ubic = {}
+                        foto = None
+                        for k in ("foto", "imagen", "imagen_url", "foto_url"):
+                            v = cfg.get(k)
+                            if v:
+                                foto = {"url": v} if isinstance(v, str) else v
+                                break
+                        notas = next(
+                            (cfg[k] for k in ("notas", "observaciones", "comentarios") if cfg.get(k)),
+                            None,
+                        )
+                        lineas.append({
+                            "pedido_detalle_talla_id": dt.id,
+                            "pedido_detalle_id": det.id,
+                            "producto_id": det.producto_id,
+                            "producto_nombre": getattr(det.producto, "nombre", None),
+                            "talla_id": getattr(dt.talla, "id", None),
+                            "talla_nombre": getattr(dt.talla, "nombre", None),
+                            "color_id": getattr(det, "color_id", None),
+                            "color_nombre": getattr(getattr(det, "color", None), "nombre", None),
+                            "cantidad_pedido": float(dt.cantidad or 0),
+                            "posicion_sugerida": (
+                                cfg.get("posicion")
+                                or primera_ubic.get("codigo")
+                                or primera_ubic.get("nombre")
+                                or None
+                            ),
+                            "ubicaciones": ubicaciones if isinstance(ubicaciones, list) else [],
+                            "foto": foto,
+                            "notas": notas,
+                        })
+                pedidos_payload.append({
+                    "id": p.id,
+                    "folio": p.folio,
+                    "cliente": p.cliente_id,
+                    "cliente_nombre": getattr(p.cliente, "nombre", None),
+                    "sucursal": p.sucursal_id,
+                    "sucursal_nombre": getattr(p.sucursal, "nombre", None),
+                    "detalles": lineas,
+                })
+
             return Response({
-                "pedidos": [
-                    {
-                        "id": p.id,
-                        "folio": p.folio,
-                        "cliente": p.cliente_id,
-                        "cliente_nombre": getattr(p.cliente, "nombre", None),
-                        "sucursal": p.sucursal_id,
-                        "sucursal_nombre": getattr(p.sucursal, "nombre", None),
-                    }
-                    for p in pedidos_qs
-                ],
+                "pedidos": pedidos_payload,
                 "operadores": [
                     {"id": u.id, "nombre": u.get_full_name().strip() or u.email}
                     for u in operadores_qs
@@ -729,9 +782,14 @@ class OrdenesCorteMangaViewSet(
         """Onboarding para OrdenesCorteManga (patrón WMS picking/packing/despacho).
 
         GET → catálogos de pedidos con prendas que requieren corte de manga,
-        operadores de la empresa y preview del folio siguiente.
+        operadores de la empresa, preview del folio siguiente y detalle
+        por pedido con líneas elegibles (producto/talla/color, cantidad
+        del pedido y ubicaciones/foto de corte_manga_config). El selector
+        de cantidades en Next.js usa este detalle para armar el POST.
 
         POST → mismo save que create() (comparte serializer y service).
+        Body opcional `detalles_override[]` permite seleccionar líneas
+        y cantidades para OCM parciales.
         """
         if request.method == "GET":
             user = request.user
@@ -753,6 +811,13 @@ class OrdenesCorteMangaViewSet(
                 )
                 .distinct()
                 .select_related("cliente", "sucursal")
+                .prefetch_related(
+                    "detalles",
+                    "detalles__tallas",
+                    "detalles__tallas__talla",
+                    "detalles__producto",
+                    "detalles__color",
+                )
                 .order_by("-created_at", "-id")
             )
 
@@ -771,18 +836,59 @@ class OrdenesCorteMangaViewSet(
                 except Exception:
                     preview_folio = None
 
+            pedidos_payload = []
+            for p in pedidos_qs:
+                lineas = []
+                for det in p.detalles.all():
+                    for dt in det.tallas.filter(lleva_corte_manga=True).select_related("talla"):
+                        cfg = dt.corte_manga_config or {}
+                        ubicaciones = cfg.get("ubicaciones") or []
+                        if isinstance(ubicaciones, list) and ubicaciones:
+                            primera_ubic = ubicaciones[0] or {}
+                        else:
+                            primera_ubic = {}
+                        foto = None
+                        for k in ("foto", "imagen", "imagen_url", "foto_url"):
+                            v = cfg.get(k)
+                            if v:
+                                foto = {"url": v} if isinstance(v, str) else v
+                                break
+                        notas = next(
+                            (cfg[k] for k in ("notas", "observaciones", "comentarios") if cfg.get(k)),
+                            None,
+                        )
+                        lineas.append({
+                            "pedido_detalle_talla_id": dt.id,
+                            "pedido_detalle_id": det.id,
+                            "producto_id": det.producto_id,
+                            "producto_nombre": getattr(det.producto, "nombre", None),
+                            "talla_id": getattr(dt.talla, "id", None),
+                            "talla_nombre": getattr(dt.talla, "nombre", None),
+                            "color_id": getattr(det, "color_id", None),
+                            "color_nombre": getattr(getattr(det, "color", None), "nombre", None),
+                            "cantidad_pedido": float(dt.cantidad or 0),
+                            "posicion_sugerida": (
+                                cfg.get("posicion")
+                                or primera_ubic.get("codigo")
+                                or primera_ubic.get("nombre")
+                                or None
+                            ),
+                            "ubicaciones": ubicaciones if isinstance(ubicaciones, list) else [],
+                            "foto": foto,
+                            "notas": notas,
+                        })
+                pedidos_payload.append({
+                    "id": p.id,
+                    "folio": p.folio,
+                    "cliente": p.cliente_id,
+                    "cliente_nombre": getattr(p.cliente, "nombre", None),
+                    "sucursal": p.sucursal_id,
+                    "sucursal_nombre": getattr(p.sucursal, "nombre", None),
+                    "detalles": lineas,
+                })
+
             return Response({
-                "pedidos": [
-                    {
-                        "id": p.id,
-                        "folio": p.folio,
-                        "cliente": p.cliente_id,
-                        "cliente_nombre": getattr(p.cliente, "nombre", None),
-                        "sucursal": p.sucursal_id,
-                        "sucursal_nombre": getattr(p.sucursal, "nombre", None),
-                    }
-                    for p in pedidos_qs
-                ],
+                "pedidos": pedidos_payload,
                 "operadores": [
                     {"id": u.id, "nombre": u.get_full_name().strip() or u.email}
                     for u in operadores_qs

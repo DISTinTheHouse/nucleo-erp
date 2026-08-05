@@ -1865,7 +1865,12 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
           "cantidad_pedido": 25.0,
           "posicion_sugerida": "F",
           "ubicaciones": [
-            { "codigo": "F", "ancho_cm": 10, "alto_cm": 5, "color_hilo": "ROJO" }
+            {
+              "codigo": "F",
+              "ancho_cm": 10,
+              "alto_cm": 5,
+              "color_hilo": "ROJO"
+            }
           ],
           "foto": { "url": "https://cdn.empresa.com/ref/bordado_gorra.jpg" },
           "notas": "Centrado en pecho"
@@ -1882,13 +1887,13 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 **Reglas del GET onboarding**
 
-| Campo                                  | Regla                                                                                                                                                              |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_bordado=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                          |
+| Campo                                  | Regla                                                                                                                                                                                                     |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_bordado=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                                                                 |
 | `pedidos[].detalles[]`                 | Líneas del pedido que llevan servicio de bordado (una por cada combinación `producto + talla + color`). Incluye `cantidad_pedido` y el preview de ubicaciones/foto/notas extraído desde `bordado_config`. |
-| `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                       |
-| `preview.folio_ob_sugerido`            | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`). |
-| Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                                             |
+| `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                                                              |
+| `preview.folio_ob_sugerido`            | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`).                                        |
+| Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                                                                                    |
 
 **POST onboarding**
 
@@ -1915,24 +1920,27 @@ Ejemplo body con selección parcial:
 
 **Validaciones del serializer + service sobre `detalles_override[]` (y sin override)**
 
-| Error                                                                                                                                               | HTTP Status   |
-| --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| IDs `pedido_detalle_talla_id` repetidos, inválidos, o que no pertenecen al mismo `pedido` que el body                                               | 400           |
-| `cantidad` no numérica, `<= 0`, o mayor a `PedidoDetalleTalla.cantidad` del renglón del pedido                                                      | 400           |
-| Alguna línea enviada tiene `lleva_bordado=False`                                                                                                    | 400           |
-| `detalles_override[]` vacío (no se seleccionó nada)                                                                                                 | 400           |
-| Se intenta **crear sin override** una OB para un pedido que ya tiene una activa con el 100% de sus líneas                                           | 409 Conflict (mantiene la regla legacy SSoT, ver abajo) |
-| **`ya_asignado + nuevo > disponible`** por alguna línea combinando todas las OBs activas (regla nueva de fraccionamiento seguro)                    | 400           |
-| Se envía `detalles_override[]` seleccionando **solamente una parte** de las líneas y/o cantidades parciales **sin exceder el cupo restante**         | Se permite. **No dispara 409**; se pueden crear múltiples OBs parciales hasta completar el pedido. |
+| Error                                                                                                                                        | HTTP Status                                                                                        |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| IDs `pedido_detalle_talla_id` repetidos, inválidos, o que no pertenecen al mismo `pedido` que el body                                        | 400                                                                                                |
+| `cantidad` no numérica, `<= 0`, o mayor a `PedidoDetalleTalla.cantidad` del renglón del pedido                                               | 400                                                                                                |
+| Alguna línea enviada tiene `lleva_bordado=False`                                                                                             | 400                                                                                                |
+| `detalles_override[]` vacío (no se seleccionó nada)                                                                                          | 400                                                                                                |
+| Se intenta **crear sin override** una OB para un pedido que ya tiene una activa con el 100% de sus líneas                                    | 409 Conflict (mantiene la regla legacy SSoT, ver abajo)                                            |
+| **`ya_asignado + nuevo > disponible`** por alguna línea combinando todas las OBs activas (regla nueva de fraccionamiento seguro)             | 400                                                                                                |
+| Se envía `detalles_override[]` seleccionando **solamente una parte** de las líneas y/o cantidades parciales **sin exceder el cupo restante** | Se permite. **No dispara 409**; se pueden crear múltiples OBs parciales hasta completar el pedido. |
 
 > **Regla de fraccionamiento SSoT** (`OrdenBordadoService._cantidades_asignadas_por_linea`): la suma de todos los `OrdenBordadoDetalle` activos para el mismo `(pedido_detalle_id, talla_id)` **no puede superar** `PedidoDetalleTalla.cantidad`. El error 400 del caso de exceso retorna además `detalles_exceso[]` con la línea exacta, lo pedido, lo ya asignado, lo nuevo solicitado y el cupo restante:```json
-{
-  "err": "No se puede generar la orden de bordado...",
-  "detalles_exceso": [
+> {
+> "err": "No se puede generar la orden de bordado...",
+> "detalles_exceso": [
+
     "  - talla_id=4 pedido_detalle_id=3301: pedido=25.0, ya_asignado=15.0, solicitado=15.0, disponible_restante=10.0"
-  ]
+
+]
 }
-```
+
+````
 
 **SSoT de la configuración del bordado — SIN duplicación**
 
@@ -1975,16 +1983,16 @@ Ejemplo body con selección parcial:
     }
   ]
 }
-```
+````
 
 Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDetalleTalla.bordado_config`):
 
-| Campo            | Fuente / Regla                                                                                                                                  |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bordado_config` | JSON íntegro desde `PedidoDetalleTalla.bordado_config` (misma llave que usó Cotizaciones → Pedido). Retorna `null` si la talla no trae config. |
-| `ubicaciones[]`  | `bordado_config.ubicaciones` cuando es arreglo, de lo contrario `[]`.                                                                           |
+| Campo            | Fuente / Regla                                                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bordado_config` | JSON íntegro desde `PedidoDetalleTalla.bordado_config` (misma llave que usó Cotizaciones → Pedido). Retorna `null` si la talla no trae config.   |
+| `ubicaciones[]`  | `bordado_config.ubicaciones` cuando es arreglo, de lo contrario `[]`.                                                                            |
 | `foto`           | Busca la primera llave no vacía entre `foto / imagen / imagen_url / foto_url`. Si es string retorna `{ "url": string }`; si es dict lo deja así. |
-| `notas`          | Busca la primera llave no vacía entre `notas / observaciones / comentarios`; `null` si ninguna.                                                 |
+| `notas`          | Busca la primera llave no vacía entre `notas / observaciones / comentarios`; `null` si ninguna.                                                  |
 
 **Django Admin** — Producción
 
@@ -2036,7 +2044,31 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
       "cliente": 15,
       "cliente_nombre": "Cliente Demo",
       "sucursal": 1,
-      "sucursal_nombre": "Matriz"
+      "sucursal_nombre": "Matriz",
+      "detalles": [
+        {
+          "pedido_detalle_talla_id": 8821,
+          "pedido_detalle_id": 3301,
+          "producto_id": 9,
+          "producto_nombre": "Chamarra Industrial",
+          "talla_id": 4,
+          "talla_nombre": "M",
+          "color_id": 7,
+          "color_nombre": "Azul Marino",
+          "cantidad_pedido": 25.0,
+          "posicion_sugerida": "ESP",
+          "ubicaciones": [
+            {
+              "codigo": "ESP",
+              "ancho_cm": 30,
+              "alto_cm": 4,
+              "color_reflejante": "AMARILLO"
+            }
+          ],
+          "foto": { "url": "https://.../ref_espalda.jpg" },
+          "notas": "Banda reflejante completa en espalda"
+        }
+      ]
     }
   ],
   "operadores": [{ "id": 8, "nombre": "Juan Pérez" }],
@@ -2051,6 +2083,7 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
 | Campo                                  | Regla                                                                                                                                                              |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_reflejante=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                       |
+| `pedidos[].detalles`                   | Una fila por combinación `producto + talla + color` del pedido con `lleva_reflejante=True`. `pedido_detalle_talla_id` es el PK que usará el body de POST.          |
 | `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                       |
 | `preview.folio_or_sugerido`            | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`). |
 | Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                                             |
@@ -2059,9 +2092,37 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
 
 - **Mismo save que `create` tradicional** — usa el `OrdenReflejanteSerializer` estándar.
 - Body requerido mínimo: `{ "pedido": 125 }`.
-- Opcionales: `prioridad`, `observaciones`.
-- Internamente: carga automáticamente **todas** las `PedidoDetalleTalla` del pedido con `lleva_reflejante=True`, genera folio OR único y `bulk_create` de `OrdenReflejanteDetalle` con la cantidad 100% de cada línea.
+- Opcionales: `prioridad`, `observaciones`, `detalles_override[]`.
+- **Sin `detalles_override`** (backwards compat): carga **todas** las `PedidoDetalleTalla` del pedido con `lleva_reflejante=True` al 100% de su cantidad, genera folio OR único y `bulk_create` de `OrdenReflejanteDetalle`.
+- **Con `detalles_override[]`**: selector de líneas y cantidades para crear **OR parciales**. Cada renglón tiene `{ "pedido_detalle_talla_id": 8821, "cantidad": 10.0 }`. La suma de todas las ORs activas por línea está limitada por `PedidoDetalleTalla.cantidad` (SSoT).
+- Al crear cada detalle se persisten como snapshot los campos escalares: `color`, `tipo_reflejante`, `posicion`, `metros_reflejante` (derivados de `reflejante_config`); **no** se duplica `reflejante_config` completo (vía FK `pedido_detalle` + `talla` la consulta al serializer directamente desde `PedidoDetalleTalla`).
 - No depende de WMS ni de un picking existente; se genera completamente desde Producción.
+
+Ejemplo de body con OR parcial:
+
+```json
+{
+  "pedido": 125,
+  "prioridad": 2,
+  "observaciones": "Primera mitad para turno A",
+  "detalles_override": [
+    { "pedido_detalle_talla_id": 8821, "cantidad": 10.0 },
+    { "pedido_detalle_talla_id": 8822, "cantidad": 8.0 }
+  ]
+}
+```
+
+**Validaciones del serializer + service sobre `detalles_override[]`**
+
+| Error                                                                                                                                    | HTTP Status                                                                    |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| IDs `pedido_detalle_talla_id` repetidos, inválidos, o que no pertenecen al mismo `pedido` que el body                                    | 400                                                                            |
+| `cantidad` no numérica, `<= 0`, o mayor a `PedidoDetalleTalla.cantidad` del renglón del pedido                                           | 400                                                                            |
+| Alguna línea enviada tiene `lleva_reflejante=False`                                                                                      | 400                                                                            |
+| `detalles_override[]` vacío (no se seleccionó nada)                                                                                      | 400                                                                            |
+| Se intenta **crear sin override** una OR para un pedido que ya tiene una activa con el 100% de sus líneas                                | 409 Conflict                                                                   |
+| **`ya_asignado + nuevo > disponible`** por alguna línea combinando todas las ORs activas (regla de fraccionamiento seguro)               | 400                                                                            |
+| Se envía `detalles_override[]` seleccionando solamente una parte de las líneas y/o cantidades parciales **sin exceder el cupo restante** | Se permite. Se pueden crear múltiples ORs parciales hasta completar el pedido. |
 
 **Respuesta 201 OK**
 
@@ -2075,17 +2136,31 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
       "id": 41,
       "producto_nombre": "Chamarra Industrial",
       "talla_nombre": "M",
-      "cantidad": 25.0
+      "color_nombre": "Azul Marino",
+      "cantidad": 10.0,
+      "tipo_reflejante": "Alto brillo",
+      "posicion": "ESP",
+      "metros_reflejante": 30,
+      "reflejante_config": {
+        "ubicaciones": [{ "codigo": "ESP", "ancho_cm": 30 }],
+        "foto": { "url": "https://.../ref_espalda.jpg" },
+        "notas": "Banda reflejante completa en espalda"
+      },
+      "ubicaciones": [{ "codigo": "ESP", "ancho_cm": 30 }],
+      "foto": { "url": "https://.../ref_espalda.jpg" },
+      "notas": "Banda reflejante completa en espalda"
     }
   ]
 }
 ```
 
+> **Fuente de verdad única (SSoT)**: la configuración de reflejante (`ubicaciones`, `foto`, `notas`) **vive solo en `ventas.PedidoDetalleTalla.reflejante_config`**. `OrdenReflejanteDetalle` no la duplica; el serializer la lee haciendo join por `(pedido_detalle_id, talla_id)` → PK única de `PedidoDetalleTalla`. Solo persiste como snapshot los campos escalares `tipo_reflejante` / `posicion` / `metros_reflejante` y `color` para los listados/operaciones del área de taller.
+
 **Control anti-duplicado (HTTP 409 Conflict)**
 
-> Regla SSoT de negocio: no se permite crear más de una **OrdenesReflejante activa** para el mismo pedido si este ya cubre el 100% de las prendas con `lleva_reflejante=True`. Evita doble consumo de folio OR y doble programación en taller.
+> Regla SSoT de negocio: solo se dispara 409 cuando intentas **crear sin override** la cobertura 100% y ya existe una OR activa full-match. Cuando usas `detalles_override[]` para parcialidades, 409 no se activa; la protección contra repetir trabajo es el check `ya_asignado + nuevo <= disponible` (HTTP 400 con `detalles_exceso[]`).
 
-- **Trigger**: segundo `POST /api/v1/produccion/orden-reflejante/onboarding/` con el mismo `pedido` y la primera OR aún activa (no cancelada).
+- **Trigger**: segundo `POST /api/v1/produccion/orden-reflejante/onboarding/` con el mismo `pedido`, sin `detalles_override`, y la primera OR aún activa (no cancelada).
 - **Status**: `409 Conflict`.
 - **Payload de error extend**:
 
@@ -2101,11 +2176,23 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
 }
 ```
 
+Cuando la solicitud de OR parcial sí excede el cupo restante (validación de suma por línea), el error es **HTTP 400** con detalle desglosado:
+
+```json
+{
+  "err": "No se puede generar la orden de reflejante: una o más líneas exceden la cantidad disponible del pedido.",
+  "detalles_exceso": [
+    "  - talla_id=4 pedido_detalle_id=3301: pedido=25.0, ya_asignado=15.0, solicitado=15.0, disponible_restante=10.0"
+  ]
+}
+```
+
 - **Garantía**: el consecutivo de `SerieFolio` para OrdenesReflejante **no se consume** cuando responde 409. Antes del gasto transaccional de folio corre `OrdenReflejanteService._validar_contexto` que incluye:
   - Validación **cross-tenant**: `pedido.empresa_id == user.empresa_id` y acceso por `sucursales_permitidas()`; si no, retorna error y no gasta folio.
   - `buscar_existente_full_match()`: detecta OR activa para el mismo pedido con cobertura 100%.
+  - `_cantidades_asignadas_por_linea()` + check `ya_asignado + nuevo <= disponible` por cada `(pedido_detalle, talla)`.
 
-**Estados y cancelación**: El candado "una OR activa por pedido" (constraint `uq_orden_reflejante_activa_por_pedido`) se libera **sólo** al dar de baja la OR (soft delete, `activo=false`). Cambiar el estatus a `CANCELADO` **no** libera el pedido por sí solo: la OR sigue `activo=true`, así que un segundo `POST` responderá `409` hasta que la OR previa se dé de baja.
+**Estados y cancelación**: la protección de cupo se libera **sólo** al dar de baja la OR (soft delete, `activo=false`). Cambiar el estatus a `CANCELADO` **no** libera el pedido por sí solo: la OR sigue `activo=true`, así que sigue consumiendo cupo hasta que la OR previa se dé de baja. Se quitó la constraint `uq_orden_reflejante_activa_por_pedido` de Postgres para permitir múltiples ORs parciales por el mismo pedido; la guardia de consistencia ahora se valida en el service (suma por línea).
 
 ### 9) Orden de Corte de Manga Onboarding (patrón sencillo / manual)
 
@@ -2125,7 +2212,30 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
       "cliente": 15,
       "cliente_nombre": "Cliente Demo",
       "sucursal": 1,
-      "sucursal_nombre": "Matriz"
+      "sucursal_nombre": "Matriz",
+      "detalles": [
+        {
+          "pedido_detalle_talla_id": 9005,
+          "pedido_detalle_id": 3350,
+          "producto_id": 11,
+          "producto_nombre": "Camisa Térmica",
+          "talla_id": 6,
+          "talla_nombre": "L",
+          "color_id": 3,
+          "color_nombre": "Gris Oxford",
+          "cantidad_pedido": 40.0,
+          "posicion_sugerida": "CM",
+          "ubicaciones": [
+            {
+              "codigo": "CM",
+              "largo_cm": 15,
+              "tipo_remate": "dobladillo_doble"
+            }
+          ],
+          "foto": { "url": "https://.../corte_manga_ejemplo.jpg" },
+          "notas": "Remate doble en dobladillo"
+        }
+      ]
     }
   ],
   "operadores": [{ "id": 8, "nombre": "Juan Pérez" }],
@@ -2140,6 +2250,7 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
 | Campo                                  | Regla                                                                                                                                                              |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_corte_manga=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                      |
+| `pedidos[].detalles`                   | Una fila por combinación `producto + talla + color` del pedido con `lleva_corte_manga=True`. `pedido_detalle_talla_id` es el PK que usará el body de POST.         |
 | `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                       |
 | `preview.folio_ocm_sugerido`           | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`). |
 | Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                                             |
@@ -2148,9 +2259,34 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
 
 - **Mismo save que `create` tradicional** — usa el `OrdenesCorteMangaSerializer` estándar.
 - Body requerido mínimo: `{ "pedido": 125 }`.
-- Opcionales: `prioridad`, `observaciones`.
-- Internamente: carga automáticamente **todas** las `PedidoDetalleTalla` del pedido con `lleva_corte_manga=True`, genera folio OCM único y `bulk_create` de `OrdenCorteMangaDetalle` con la cantidad 100% de cada línea.
+- Opcionales: `prioridad`, `observaciones`, `detalles_override[]`.
+- **Sin `detalles_override`** (backwards compat): carga **todas** las `PedidoDetalleTalla` del pedido con `lleva_corte_manga=True` al 100% de su cantidad, genera folio OCM único y `bulk_create` de `OrdenCorteMangaDetalle`.
+- **Con `detalles_override[]`**: selector de líneas y cantidades para crear **OCM parciales**. Cada renglón tiene `{ "pedido_detalle_talla_id": 9005, "cantidad": 20.0 }`. La suma de todas las OCMs activas por línea está limitada por `PedidoDetalleTalla.cantidad` (SSoT).
+- Al crear cada detalle se persisten como snapshot: `color` y `configuracion` (JSON copiado de `corte_manga_config` de la PDT, por compatibilidad histórica del modelo); el serializer de detalle además lee `corte_manga_config` directamente desde `PedidoDetalleTalla` y hace merge con el `configuracion` del detalle para garantizar SSoT.
 - No depende de WMS ni de un picking existente; se genera completamente desde Producción.
+
+Ejemplo de body con OCM parcial:
+
+```json
+{
+  "pedido": 125,
+  "prioridad": 3,
+  "observaciones": "Entrega parcial para tienda Matriz",
+  "detalles_override": [{ "pedido_detalle_talla_id": 9005, "cantidad": 20.0 }]
+}
+```
+
+**Validaciones del serializer + service sobre `detalles_override[]`**
+
+| Error                                                                                                                                    | HTTP Status                                                                     |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| IDs `pedido_detalle_talla_id` repetidos, inválidos, o que no pertenecen al mismo `pedido` que el body                                    | 400                                                                             |
+| `cantidad` no numérica, `<= 0`, o mayor a `PedidoDetalleTalla.cantidad` del renglón del pedido                                           | 400                                                                             |
+| Alguna línea enviada tiene `lleva_corte_manga=False`                                                                                     | 400                                                                             |
+| `detalles_override[]` vacío (no se seleccionó nada)                                                                                      | 400                                                                             |
+| Se intenta **crear sin override** una OCM para un pedido que ya tiene una activa con el 100% de sus líneas                               | 409 Conflict                                                                    |
+| **`ya_asignado + nuevo > disponible`** por alguna línea combinando todas las OCMs activas (regla de fraccionamiento seguro)              | 400                                                                             |
+| Se envía `detalles_override[]` seleccionando solamente una parte de las líneas y/o cantidades parciales **sin exceder el cupo restante** | Se permite. Se pueden crear múltiples OCMs parciales hasta completar el pedido. |
 
 **Respuesta 201 OK**
 
@@ -2164,17 +2300,28 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
       "id": 30,
       "producto_nombre": "Camisa Térmica",
       "talla_nombre": "L",
-      "cantidad": 40.0
+      "color_nombre": "Gris Oxford",
+      "cantidad": 20.0,
+      "corte_manga_config": {
+        "ubicaciones": [{ "codigo": "CM", "largo_cm": 15 }],
+        "foto": { "url": "https://.../corte_manga_ejemplo.jpg" },
+        "notas": "Remate doble en dobladillo"
+      },
+      "ubicaciones": [{ "codigo": "CM", "largo_cm": 15 }],
+      "foto": { "url": "https://.../corte_manga_ejemplo.jpg" },
+      "notas": "Remate doble en dobladillo"
     }
   ]
 }
 ```
 
+> **Fuente de verdad única (SSoT)**: la configuración de corte de manga (`ubicaciones`, `foto`, `notas`) **vive solo en `ventas.PedidoDetalleTalla.corte_manga_config`**. El helper `get_corte_manga_config` del serializer hace merge con `OrdenCorteMangaDetalle.configuracion` (campo snapshot existente) para preservar compatibilidad con OCMs antiguas; los datos canonicales siguen siendo la PDT.
+
 **Control anti-duplicado (HTTP 409 Conflict)**
 
-> Regla SSoT de negocio: no se permite crear más de una **OrdenesCorteManga activa** para el mismo pedido si este ya cubre el 100% de las prendas con `lleva_corte_manga=True`. Evita doble consumo de folio OCM y doble programación en taller.
+> Regla SSoT de negocio: solo se dispara 409 cuando intentas **crear sin override** la cobertura 100% y ya existe una OCM activa full-match. Cuando usas `detalles_override[]` para parcialidades, 409 no se activa; la protección contra repetir trabajo es el check `ya_asignado + nuevo <= disponible` (HTTP 400 con `detalles_exceso[]`).
 
-- **Trigger**: segundo `POST /api/v1/produccion/orden-corte-manga/onboarding/` con el mismo `pedido` y la primera OCM aún activa (no cancelada).
+- **Trigger**: segundo `POST /api/v1/produccion/orden-corte-manga/onboarding/` con el mismo `pedido`, sin `detalles_override`, y la primera OCM aún activa (no cancelada).
 - **Status**: `409 Conflict`.
 - **Payload de error extend**:
 
@@ -2190,11 +2337,23 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
 }
 ```
 
+Cuando la solicitud de OCM parcial sí excede el cupo restante (validación de suma por línea), el error es **HTTP 400** con detalle desglosado:
+
+```json
+{
+  "err": "No se puede generar la orden de corte de manga: una o más líneas exceden la cantidad disponible del pedido.",
+  "detalles_exceso": [
+    "  - talla_id=6 pedido_detalle_id=3350: pedido=40.0, ya_asignado=25.0, solicitado=20.0, disponible_restante=15.0"
+  ]
+}
+```
+
 - **Garantía**: el consecutivo de `SerieFolio` para OrdenesCorteManga **no se consume** cuando responde 409. Antes del gasto transaccional de folio corre `OrdenCorteMangaService._validar_contexto` que incluye:
   - Validación **cross-tenant**: `pedido.empresa_id == user.empresa_id` y acceso por `sucursales_permitidas()`; si no, retorna error y no gasta folio.
   - `buscar_existente_full_match()`: detecta OCM activa para el mismo pedido con cobertura 100%.
+  - `_cantidades_asignadas_por_linea()` + check `ya_asignado + nuevo <= disponible` por cada `(pedido_detalle, talla)`.
 
-**Estados y cancelación**: El candado "una OCM activa por pedido" (constraint `uq_orden_corte_manga_activa_por_pedido`) se libera **sólo** al dar de baja la OCM (soft delete, `activo=false`). Cambiar el estatus a `CANCELADO` **no** libera el pedido por sí solo: la OCM sigue `activo=true`, así que un segundo `POST` responderá `409` hasta que la OCM previa se dé de baja.
+**Estados y cancelación**: la protección de cupo se libera **sólo** al dar de baja la OCM (soft delete, `activo=false`). Cambiar el estatus a `CANCELADO` **no** libera el pedido por sí solo: la OCM sigue `activo=true`, así que sigue consumiendo cupo hasta que la OCM previa se dé de baja. Se quitó la constraint `uq_orden_corte_manga_activa_por_pedido` de Postgres para permitir múltiples OCMs parciales por el mismo pedido; la guardia de consistencia ahora se valida en el service (suma por línea).
 
 ---
 

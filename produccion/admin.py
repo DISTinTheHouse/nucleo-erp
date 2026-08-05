@@ -13,6 +13,7 @@ from produccion.models import (
     BordadoAvances,
     BordadoIncidencias,
     OrdenesReflejante,
+    OrdenReflejanteDetalle,
     ReflejanteAvances,
     ReflejanteIncidencias,
     OrdenesCorteManga,
@@ -21,11 +22,9 @@ from produccion.models import (
 
 admin.site.register(BordadoAvances)
 admin.site.register(BordadoIncidencias)
-admin.site.register(OrdenesReflejante)
 admin.site.register(ReflejanteAvances)
 admin.site.register(ReflejanteIncidencias)
 admin.site.register(OrdenProduccionDetalle)
-admin.site.register(OrdenesCorteManga)
 admin.site.register(OrdenCorteMangaDetalle)
 
 @admin.register(ListaMaterialBom)
@@ -200,3 +199,75 @@ class OrdenBordadoDetalleAdmin(admin.ModelAdmin):
     ordering = ("-id",)
     autocomplete_fields = ("ob", "pedido_detalle", "producto", "talla", "color")
     list_select_related = ("ob", "producto", "talla", "color")
+
+class OrdenReflejanteDetalleInline(admin.TabularInline):
+    model = OrdenReflejanteDetalle
+    extra = 0
+    autocomplete_fields = ("producto", "talla", "color", "pedido_detalle")
+    list_select_related = ("producto", "talla", "color")
+    fields = (
+        "pedido_detalle",
+        "producto",
+        "talla",
+        "color",
+        "cantidad",
+        "tipo_reflejante",
+        "posicion",
+        "metros_reflejante",
+    )
+
+@admin.register(OrdenesReflejante)
+class OrdenesReflejanteAdmin(admin.ModelAdmin):
+    list_display = ("id", "folio_reflejante", "empresa", "sucursal", "pedido", "estatus_reflejante", "usuario_asignado", "prioridad")
+    list_filter = ("empresa", "sucursal", "estatus_reflejante", "prioridad")
+    search_fields = (
+        "folio_reflejante",
+        "pedido__folio",
+        "pedido__id",
+        "empresa__codigo",
+        "empresa__razon_social",
+        "sucursal__codigo",
+        "sucursal__nombre",
+        "usuario_asignado__email",
+        "usuario_asignado__first_name",
+        "usuario_asignado__last_name",
+    )
+    ordering = ("-id",)
+    autocomplete_fields = ("empresa", "sucursal", "pedido", "usuario_asignado")
+    list_select_related = ("empresa", "sucursal", "pedido", "usuario_asignado")
+    inlines = (OrdenReflejanteDetalleInline,)
+
+class OrdenCorteMangaDetalleInline(admin.TabularInline):
+    model = OrdenCorteMangaDetalle
+    extra = 0
+    autocomplete_fields = ("producto", "talla", "color", "pedido_detalle")
+    list_select_related = ("producto", "talla", "color")
+    fields = (
+        "pedido_detalle",
+        "producto",
+        "talla",
+        "color",
+        "cantidad",
+        "configuracion",
+    )
+
+@admin.register(OrdenesCorteManga)
+class OrdenesCorteMangaAdmin(admin.ModelAdmin):
+    list_display = ("id", "folio_ocm", "empresa", "sucursal", "pedido", "estatus_corte", "usuario_asignado", "prioridad")
+    list_filter = ("empresa", "sucursal", "estatus_corte", "prioridad")
+    search_fields = (
+        "folio_ocm",
+        "pedido__folio",
+        "pedido__id",
+        "empresa__codigo",
+        "empresa__razon_social",
+        "sucursal__codigo",
+        "sucursal__nombre",
+        "usuario_asignado__email",
+        "usuario_asignado__first_name",
+        "usuario_asignado__last_name",
+    )
+    ordering = ("-id",)
+    autocomplete_fields = ("empresa", "sucursal", "pedido", "usuario_asignado")
+    list_select_related = ("empresa", "sucursal", "pedido", "usuario_asignado")
+    inlines = (OrdenCorteMangaDetalleInline,)

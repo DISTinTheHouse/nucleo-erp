@@ -484,10 +484,61 @@ class OrdenReflejanteDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+    reflejante_config = serializers.SerializerMethodField()
+    ubicaciones = serializers.SerializerMethodField()
+    foto = serializers.SerializerMethodField()
+    notas = serializers.SerializerMethodField()
 
     class Meta:
         model = OrdenReflejanteDetalle
         fields = '__all__'
+
+    def _get_pedido_detalle_talla(self, obj):
+        if obj.pedido_detalle_id is None or obj.talla_id is None:
+            return None
+        if not hasattr(self, '_pdt_reflejante_cache'):
+            self._pdt_reflejante_cache = {}
+        key = (obj.pedido_detalle_id, obj.talla_id)
+        if key not in self._pdt_reflejante_cache:
+            from ventas.models import PedidoDetalleTalla
+            self._pdt_reflejante_cache[key] = (
+                PedidoDetalleTalla.objects
+                .filter(pedido_detalle_id=obj.pedido_detalle_id, talla_id=obj.talla_id)
+                .only('reflejante_config')
+                .first()
+            )
+        return self._pdt_reflejante_cache[key]
+
+    def _get_cfg(self, obj):
+        pdt = self._get_pedido_detalle_talla(obj)
+        return getattr(pdt, 'reflejante_config', None) or {}
+
+    def get_reflejante_config(self, obj):
+        cfg = self._get_cfg(obj)
+        return cfg or None
+
+    def get_ubicaciones(self, obj):
+        cfg = self._get_cfg(obj)
+        ubicaciones = cfg.get('ubicaciones')
+        return ubicaciones if isinstance(ubicaciones, list) else []
+
+    def get_foto(self, obj):
+        cfg = self._get_cfg(obj)
+        for key in ('foto', 'imagen', 'imagen_url', 'foto_url'):
+            value = cfg.get(key)
+            if value:
+                if isinstance(value, dict):
+                    return value
+                return {'url': value}
+        return None
+
+    def get_notas(self, obj):
+        cfg = self._get_cfg(obj)
+        for key in ('notas', 'observaciones', 'comentarios'):
+            value = cfg.get(key)
+            if value:
+                return value
+        return None
 
 class OrdenReflejanteSerializer(serializers.ModelSerializer):
     detalles = OrdenReflejanteDetalleSerializer(many=True, read_only=True)
@@ -499,6 +550,13 @@ class OrdenReflejanteSerializer(serializers.ModelSerializer):
     empresa_nombre = serializers.CharField(source='empresa.razon_social', read_only=True)
     sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
+
+    detalles_override = serializers.ListField(
+        child=serializers.JSONField(),
+        required=False,
+        write_only=True,
+        allow_null=True,
+    )
 
     class Meta:
         model = OrdenesReflejante
@@ -515,6 +573,70 @@ class OrdenReflejanteSerializer(serializers.ModelSerializer):
         usuario = obj.usuario_asignado
         if not usuario: return None
         return usuario.get_full_name().strip() or usuario.email
+
+    def validate(self, attrs):
+        detalles_override = attrs.get("detalles_override") or []
+        pedido = attrs.get("pedido")
+        if detalles_override:
+            from ventas.models import PedidoDetalleTalla
+
+            seen_ids = set()
+            for item in detalles_override:
+                if not isinstance(item, dict):
+                    raise serializers.ValidationError({
+                        "detalles_override": "Cada renglón debe ser un objeto."
+                    })
+                pdt_id = item.get("pedido_detalle_talla_id")
+                cantidad = item.get("cantidad")
+                if pdt_id is None:
+                    raise serializers.ValidationError({
+                        "detalles_override": "Falta `pedido_detalle_talla_id`."
+                    })
+                if pdt_id in seen_ids:
+                    raise serializers.ValidationError({
+                        "detalles_override": f"`pedido_detalle_talla_id={pdt_id}` repetido."
+                    })
+                seen_ids.add(pdt_id)
+                try:
+                    cantidad_num = float(cantidad)
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError({
+                        "detalles_override": f"`cantidad` inválida para `pedido_detalle_talla_id={pdt_id}`."
+                    })
+                if cantidad_num <= 0:
+                    raise serializers.ValidationError({
+                        "detalles_override": f"`cantidad` debe ser mayor a 0 para `pedido_detalle_talla_id={pdt_id}`."
+                    })
+                if pedido is not None:
+                    try:
+                        pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(pk=pdt_id)
+                    except PedidoDetalleTalla.DoesNotExist:
+                        raise serializers.ValidationError({
+                            "detalles_override": f"`pedido_detalle_talla_id={pdt_id}` no existe."
+                        })
+                    if pdt.pedido_detalle.pedido_id != pedido.pk:
+                        raise serializers.ValidationError({
+                            "detalles_override": (
+                                f"`pedido_detalle_talla_id={pdt_id}` no pertenece "
+                                f"al pedido `{pedido.pk}`."
+                            )
+                        })
+                    if not pdt.lleva_reflejante:
+                        raise serializers.ValidationError({
+                            "detalles_override": (
+                                f"`pedido_detalle_talla_id={pdt_id}` no lleva "
+                                "servicio de reflejante (`lleva_reflejante=False`)."
+                            )
+                        })
+                    if cantidad_num > float(pdt.cantidad or 0):
+                        raise serializers.ValidationError({
+                            "detalles_override": (
+                                f"`pedido_detalle_talla_id={pdt_id}`: la cantidad "
+                                f"{cantidad_num} excede la del pedido "
+                                f"({float(pdt.cantidad or 0)})."
+                            )
+                        })
+        return attrs
         
 class ReflejanteAvancesSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSerializer):
     orden_padre_field = 'orden_r'
@@ -537,10 +659,66 @@ class OrdenCorteMangaDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+    corte_manga_config = serializers.SerializerMethodField()
+    ubicaciones = serializers.SerializerMethodField()
+    foto = serializers.SerializerMethodField()
+    notas = serializers.SerializerMethodField()
 
     class Meta:
         model = OrdenCorteMangaDetalle
         fields = '__all__'
+
+    def _get_pedido_detalle_talla(self, obj):
+        if obj.pedido_detalle_id is None or obj.talla_id is None:
+            return None
+        if not hasattr(self, '_pdt_ocm_cache'):
+            self._pdt_ocm_cache = {}
+        key = (obj.pedido_detalle_id, obj.talla_id)
+        if key not in self._pdt_ocm_cache:
+            from ventas.models import PedidoDetalleTalla
+            self._pdt_ocm_cache[key] = (
+                PedidoDetalleTalla.objects
+                .filter(pedido_detalle_id=obj.pedido_detalle_id, talla_id=obj.talla_id)
+                .only('corte_manga_config')
+                .first()
+            )
+        return self._pdt_ocm_cache[key]
+
+    def _get_cfg(self, obj):
+        pdt = self._get_pedido_detalle_talla(obj)
+        return getattr(pdt, 'corte_manga_config', None) or {}
+
+    def get_corte_manga_config(self, obj):
+        cfg_pedido = self._get_cfg(obj)
+        if obj.configuracion:
+            merged = dict(cfg_pedido) if cfg_pedido else {}
+            if isinstance(obj.configuracion, dict):
+                merged.update(obj.configuracion)
+            return merged or None
+        return cfg_pedido or None
+
+    def get_ubicaciones(self, obj):
+        cfg = self.get_corte_manga_config(obj) or {}
+        ubicaciones = cfg.get('ubicaciones')
+        return ubicaciones if isinstance(ubicaciones, list) else []
+
+    def get_foto(self, obj):
+        cfg = self.get_corte_manga_config(obj) or {}
+        for key in ('foto', 'imagen', 'imagen_url', 'foto_url'):
+            value = cfg.get(key)
+            if value:
+                if isinstance(value, dict):
+                    return value
+                return {'url': value}
+        return None
+
+    def get_notas(self, obj):
+        cfg = self.get_corte_manga_config(obj) or {}
+        for key in ('notas', 'observaciones', 'comentarios'):
+            value = cfg.get(key)
+            if value:
+                return value
+        return None
 
 class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
@@ -552,6 +730,13 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
     sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
     detalles = OrdenCorteMangaDetalleSerializer(many=True, read_only=True)
+
+    detalles_override = serializers.ListField(
+        child=serializers.JSONField(),
+        required=False,
+        write_only=True,
+        allow_null=True,
+    )
 
     class Meta:
         model = OrdenesCorteManga
@@ -569,3 +754,67 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
         usuario = obj.usuario_asignado
         if not usuario: return None
         return usuario.get_full_name().strip() or usuario.email
+
+    def validate(self, attrs):
+        detalles_override = attrs.get("detalles_override") or []
+        pedido = attrs.get("pedido")
+        if detalles_override:
+            from ventas.models import PedidoDetalleTalla
+
+            seen_ids = set()
+            for item in detalles_override:
+                if not isinstance(item, dict):
+                    raise serializers.ValidationError({
+                        "detalles_override": "Cada renglón debe ser un objeto."
+                    })
+                pdt_id = item.get("pedido_detalle_talla_id")
+                cantidad = item.get("cantidad")
+                if pdt_id is None:
+                    raise serializers.ValidationError({
+                        "detalles_override": "Falta `pedido_detalle_talla_id`."
+                    })
+                if pdt_id in seen_ids:
+                    raise serializers.ValidationError({
+                        "detalles_override": f"`pedido_detalle_talla_id={pdt_id}` repetido."
+                    })
+                seen_ids.add(pdt_id)
+                try:
+                    cantidad_num = float(cantidad)
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError({
+                        "detalles_override": f"`cantidad` inválida para `pedido_detalle_talla_id={pdt_id}`."
+                    })
+                if cantidad_num <= 0:
+                    raise serializers.ValidationError({
+                        "detalles_override": f"`cantidad` debe ser mayor a 0 para `pedido_detalle_talla_id={pdt_id}`."
+                    })
+                if pedido is not None:
+                    try:
+                        pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(pk=pdt_id)
+                    except PedidoDetalleTalla.DoesNotExist:
+                        raise serializers.ValidationError({
+                            "detalles_override": f"`pedido_detalle_talla_id={pdt_id}` no existe."
+                        })
+                    if pdt.pedido_detalle.pedido_id != pedido.pk:
+                        raise serializers.ValidationError({
+                            "detalles_override": (
+                                f"`pedido_detalle_talla_id={pdt_id}` no pertenece "
+                                f"al pedido `{pedido.pk}`."
+                            )
+                        })
+                    if not pdt.lleva_corte_manga:
+                        raise serializers.ValidationError({
+                            "detalles_override": (
+                                f"`pedido_detalle_talla_id={pdt_id}` no lleva "
+                                "servicio de corte de manga (`lleva_corte_manga=False`)."
+                            )
+                        })
+                    if cantidad_num > float(pdt.cantidad or 0):
+                        raise serializers.ValidationError({
+                            "detalles_override": (
+                                f"`pedido_detalle_talla_id={pdt_id}`: la cantidad "
+                                f"{cantidad_num} excede la del pedido "
+                                f"({float(pdt.cantidad or 0)})."
+                            )
+                        })
+        return attrs
