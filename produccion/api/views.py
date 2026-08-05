@@ -1,4 +1,4 @@
-from django.db.models import Prefetch
+from django.db.models import Prefetch, prefetch_related_objects
 from django.db import transaction
 from rest_framework import status, viewsets, mixins
 from rest_framework.decorators import action
@@ -12,16 +12,19 @@ from usuarios.models import Usuario
 from produccion.models import (
     ListaMaterialBom,
     BomDetalle,
-    OrdenProduccion, 
-    ConsumoProduccion, 
-    ProductoTerminadoEntradas, 
-    OrdenesBordado, 
+    OrdenProduccion,
+    ConsumoProduccion,
+    ProductoTerminadoEntradas,
+    OrdenesBordado,
+    OrdenBordadoDetalle,
     BordadoAvances,
     BordadoIncidencias,
     OrdenesReflejante,
+    OrdenReflejanteDetalle,
     ReflejanteAvances,
     ReflejanteIncidencias,
-    OrdenesCorteManga
+    OrdenesCorteManga,
+    OrdenCorteMangaDetalle
 )
 
 from produccion.api.serializers import (
@@ -44,6 +47,33 @@ from produccion.services.orden_bordado_service import OrdenBordadoService
 from produccion.services.orden_reflejante_service import OrdenReflejanteService
 from produccion.services.orden_produccion_service import OrdenProduccionService
 from produccion.services.orden_corte_manga_service import OrdenCorteMangaService
+
+
+def _con_detalles_prefetcheados(orden, detalle_model):
+    """Prefetchea ``detalles`` sobre una orden recién creada, antes de serializarla.
+
+    El ``select_related``/``Prefetch`` de ``get_queryset()`` sólo cubre
+    ``list``/``retrieve``: las respuestas de ``create`` y del POST de
+    ``onboarding`` serializan el objeto que devuelve el service, que nunca pasa
+    por ese queryset. Como el service hace ``bulk_create`` de los renglones,
+    ``orden.detalles.all()`` volvía a consultar la BD y cada renglón resolvía
+    ``producto`` y ``talla`` por separado —2 queries extra por renglón—.
+
+    Se prefetchea sobre la instancia en vez de re-consultarla por
+    ``get_queryset()`` para no depender del filtro de tenant (la orden recién
+    creada siempre cae dentro, pero un ``.get()`` que fallara daría un 500 en
+    lugar de una respuesta válida). ``empresa``/``sucursal``/``pedido``/
+    ``usuario_asignado`` ya vienen cacheados como objetos desde el service, así
+    que no necesitan ``select_related`` aquí.
+    """
+    prefetch_related_objects(
+        [orden],
+        Prefetch(
+            "detalles",
+            queryset=detalle_model.objects.select_related("producto", "talla", "color"),
+        ),
+    )
+    return orden
 
 
 class ListaMaterialBomViewSet(viewsets.ModelViewSet):
@@ -262,9 +292,26 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         ``sucursales_permitidas()``. ``list`` devuelve ``200 []`` fuera de
         alcance y ``retrieve`` de otra empresa/sucursal devuelve ``404``
         (no ``403``): no se revela la existencia del documento.
+
+        ``select_related``/``prefetch_related`` cortan el N+1: el serializer
+        resuelve ``pedido`` (``pedido_folio``), ``usuario_asignado``
+        (``usuario_nombre``) y ``empresa``/``sucursal``
+        (``empresa_nombre``/``sucursal_nombre``) por orden, y por renglón de
+        ``detalles``, ``producto``/``talla``/``color``.
         """
         user = self.request.user
-        qs = OrdenesBordado.objects.filter(activo=True)
+        qs = (
+            OrdenesBordado.objects.filter(activo=True)
+            .select_related("pedido", "usuario_asignado", "empresa", "sucursal")
+            .prefetch_related(
+                Prefetch(
+                    "detalles",
+                    queryset=OrdenBordadoDetalle.objects.select_related(
+                        "producto", "talla", "color"
+                    ),
+                )
+            )
+        )
 
         if getattr(user, "is_superuser", False):
             return qs
@@ -280,7 +327,12 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         orden_bordado = OrdenBordadoService.save(serializer.validated_data, request.user)
-        return Response(OrdenBordadoSerializer(orden_bordado).data, status=status.HTTP_200_OK)
+        return Response(
+            OrdenBordadoSerializer(
+                _con_detalles_prefetcheados(orden_bordado, OrdenBordadoDetalle)
+            ).data,
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
     def onboarding(self, request):
@@ -352,7 +404,10 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         serializer.is_valid(raise_exception=True)
         orden_bordado = OrdenBordadoService.save(serializer.validated_data, request.user)
         return Response(
-            OrdenBordadoSerializer(orden_bordado).data, status=status.HTTP_201_CREATED
+            OrdenBordadoSerializer(
+                _con_detalles_prefetcheados(orden_bordado, OrdenBordadoDetalle)
+            ).data,
+            status=status.HTTP_201_CREATED,
         )
 
 class _OrdenPadreTenantScopedMixin:
@@ -414,9 +469,30 @@ class OrdenReflejanteViewSet(
         """Aislamiento multi-tenant: empresa + sucursal.
 
         Mismo criterio que ``OrdenBordadoViewSet``/``PickingViewSet``.
+
+        El ``select_related``/``prefetch_related`` corta el N+1 del serializer:
+        cada orden resolvía ``empresa``/``sucursal`` (``*_nombre``), ``pedido``
+        (``pedido_folio``) y ``usuario_asignado`` (``usuario_nombre``) en
+        consultas sueltas, y cada renglón de ``detalles`` resolvía
+        ``producto``/``talla``/``color`` en otras más. Contra el pooler de
+        Supabase cada ida y vuelta cuesta ~85 ms, así que el costo del endpoint
+        lo dominaba el **número** de queries, no su peso: 8 queries para 1 sola
+        orden. Con esto el list queda en 2 queries constantes, sin importar
+        cuántas órdenes o renglones traiga.
         """
         user = self.request.user
-        qs = OrdenesReflejante.objects.filter(activo=True)
+        qs = (
+            OrdenesReflejante.objects.filter(activo=True)
+            .select_related("empresa", "sucursal", "pedido", "usuario_asignado")
+            .prefetch_related(
+                Prefetch(
+                    "detalles",
+                    queryset=OrdenReflejanteDetalle.objects.select_related(
+                        "producto", "talla", "color"
+                    ),
+                )
+            )
+        )
 
         if getattr(user, "is_superuser", False):
             return qs
@@ -432,7 +508,12 @@ class OrdenReflejanteViewSet(
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         orden_reflejante = OrdenReflejanteService.save(serializer.validated_data, request.user)
-        return Response(OrdenReflejanteSerializer(orden_reflejante).data, status=status.HTTP_200_OK)
+        return Response(
+            OrdenReflejanteSerializer(
+                _con_detalles_prefetcheados(orden_reflejante, OrdenReflejanteDetalle)
+            ).data,
+            status=status.HTTP_200_OK,
+        )
 
     def perform_destroy(self, instance):
         instance.soft_delete()
@@ -507,7 +588,10 @@ class OrdenReflejanteViewSet(
         serializer.is_valid(raise_exception=True)
         orden_reflejante = OrdenReflejanteService.save(serializer.validated_data, request.user)
         return Response(
-            OrdenReflejanteSerializer(orden_reflejante).data, status=status.HTTP_201_CREATED
+            OrdenReflejanteSerializer(
+                _con_detalles_prefetcheados(orden_reflejante, OrdenReflejanteDetalle)
+            ).data,
+            status=status.HTTP_201_CREATED,
         )
 
 class ReflejanteAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
@@ -540,9 +624,28 @@ class OrdenesCorteMangaViewSet(
         """Aislamiento multi-tenant: empresa + sucursal.
 
         Mismo criterio que ``OrdenBordadoViewSet``/``OrdenReflejanteViewSet``.
+
+        ``select_related``/``prefetch_related`` cortan el N+1: el serializer
+        resuelve ``pedido`` (``pedido_folio``), ``usuario_asignado``
+        (``usuario_nombre``) y ``empresa``/``sucursal``
+        (``empresa_nombre``/``sucursal_nombre``) por orden, y por renglón de
+        ``detalles``, ``producto``/``talla``/``color``.
+        ``OrdenCorteMangaDetalle.configuracion`` es un ``JSONField`` plano (no
+        una FK), así que no necesita ``select_related``.
         """
         user = self.request.user
-        qs = OrdenesCorteManga.objects.filter(activo=True)
+        qs = (
+            OrdenesCorteManga.objects.filter(activo=True)
+            .select_related("pedido", "usuario_asignado", "empresa", "sucursal")
+            .prefetch_related(
+                Prefetch(
+                    "detalles",
+                    queryset=OrdenCorteMangaDetalle.objects.select_related(
+                        "producto", "talla", "color"
+                    ),
+                )
+            )
+        )
 
         if getattr(user, "is_superuser", False):
             return qs
@@ -558,7 +661,12 @@ class OrdenesCorteMangaViewSet(
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         orden_corte_manga = OrdenCorteMangaService.save(serializer.validated_data, request.user)
-        return Response(OrdenesCorteMangaSerializer(orden_corte_manga).data, status=status.HTTP_200_OK)
+        return Response(
+            OrdenesCorteMangaSerializer(
+                _con_detalles_prefetcheados(orden_corte_manga, OrdenCorteMangaDetalle)
+            ).data,
+            status=status.HTTP_200_OK,
+        )
 
     def perform_destroy(self, instance):
         instance.soft_delete()
@@ -633,5 +741,8 @@ class OrdenesCorteMangaViewSet(
         serializer.is_valid(raise_exception=True)
         orden_corte_manga = OrdenCorteMangaService.save(serializer.validated_data, request.user)
         return Response(
-            OrdenesCorteMangaSerializer(orden_corte_manga).data, status=status.HTTP_201_CREATED
+            OrdenesCorteMangaSerializer(
+                _con_detalles_prefetcheados(orden_corte_manga, OrdenCorteMangaDetalle)
+            ).data,
+            status=status.HTTP_201_CREATED,
         )

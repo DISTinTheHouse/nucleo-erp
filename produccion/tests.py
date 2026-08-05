@@ -23,7 +23,9 @@ from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal
 from produccion.models import (
     BordadoAvances,
     BordadoIncidencias,
+    OrdenBordadoDetalle,
     OrdenesBordado,
+    OrdenCorteMangaDetalle,
     OrdenesCorteManga,
     OrdenesReflejante,
     OrdenReflejanteDetalle,
@@ -1138,3 +1140,283 @@ class OrdenReflejanteListShapeTests(TestCase):
         for fila in filas:
             self.assertEqual(fila["empresa_nombre"], "ACME SA")
             self.assertEqual(fila["sucursal_nombre"], "Monterrey")
+
+    #: 1 query de órdenes (con los ``select_related`` en el JOIN) + 1 del
+    #: ``Prefetch`` de ``detalles``. No incluye las 2-3 queries de auth/sesión
+    #: del request, que se aíslan usando ``CaptureQueriesContext`` sólo sobre
+    #: el GET ya autenticado.
+    QUERIES_LIST = 2
+
+    def test_list_sin_n_mas_1_constante(self):
+        """El N+1 del serializer queda cortado: el nº de queries no crece con
+        la cantidad de órdenes ni de renglones de detalle.
+
+        El serializer resuelve por orden ``empresa``/``sucursal``/``pedido``/
+        ``usuario_asignado`` y por renglón ``producto``/``talla``/``color``;
+        sin el ``select_related``/``Prefetch`` del ViewSet cada uno dispararía
+        una query suelta.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        client = self._client()
+
+        for i in range(3):
+            self._crear_orden(i, n_detalles=2)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.get("/api/v1/produccion/orden-reflejante/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()), 3)
+        queries_con_3 = len(ctx.captured_queries)
+
+        # Cuádruple de órdenes y el doble de renglones por orden.
+        for i in range(3, 12):
+            self._crear_orden(i, n_detalles=4)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.get("/api/v1/produccion/orden-reflejante/")
+        self.assertEqual(len(resp.json()), 12)
+        queries_con_12 = len(ctx.captured_queries)
+
+        # Constante: mismo nº de queries con 3 y con 12 órdenes.
+        self.assertEqual(queries_con_3, queries_con_12)
+        # Y además fija el número exacto. Con ``force_authenticate`` no hay
+        # queries de auth, así que el total es el del ORM del list: 1 de
+        # órdenes + 1 del ``Prefetch`` de ``detalles``. Se asevera directo (no
+        # restando un "overhead" derivado de la propia medición) para que una
+        # query constante de más —un ``.count()`` colado, un prefetch sin
+        # batch— haga fallar el test en vez de absorberse.
+        self.assertEqual(queries_con_3, self.QUERIES_LIST)
+        self.assertEqual(queries_con_12, self.QUERIES_LIST)
+
+
+class OrdenBordadoListQueriesTests(TestCase):
+    """N+1 del list de orden-bordado, mismo diagnóstico que Reflejante.
+
+    ``OrdenBordadoSerializer`` resuelve ``pedido`` (``pedido_folio``),
+    ``usuario_asignado`` (``usuario_nombre``) y ``empresa``/``sucursal``
+    (``empresa_nombre``/``sucursal_nombre``) por orden, y
+    ``producto``/``talla``/``color`` por renglón de ``detalles``. Mismo shape
+    que Reflejante ahora; CorteManga sigue sin las etiquetas de
+    ``empresa``/``sucursal`` (gap reportado, no cubierto aquí).
+    """
+
+    #: 1 query de órdenes + 1 del ``Prefetch`` de ``detalles``.
+    QUERIES_LIST = 2
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Monterrey"
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla = Talla.objects.create(nombre="CH")
+        cls.usuario = Usuario.objects.create(
+            username="operador",
+            email="operador@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
+        )
+
+    def _crear_orden(self, i, n_detalles=2):
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        pd = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
+        orden = OrdenesBordado.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=pedido,
+            folio_bordado=f"OB-{i}", usuario_asignado=self.usuario,
+        )
+        for _ in range(n_detalles):
+            OrdenBordadoDetalle.objects.create(
+                ob=orden, pedido_detalle=pd, producto=self.producto,
+                cantidad=1, talla=self.talla,
+            )
+        return orden
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client
+
+    def test_list_expone_usuario_nombre(self):
+        """Campo nuevo: aparece en el list con el fallback get_full_name()/email."""
+        self._crear_orden(1)
+        fila = self._client().get("/api/v1/produccion/orden-bordado/").json()[0]
+
+        self.assertIn("usuario_nombre", fila)
+        self.assertEqual(fila["usuario_nombre"], self.usuario.get_full_name().strip() or self.usuario.email)
+        self.assertEqual(fila["usuario_asignado"], self.usuario.pk)
+
+    def test_retrieve_expone_usuario_nombre(self):
+        """Mismo shape en retrieve que en list (misma identidad de serializer)."""
+        orden = self._crear_orden(1)
+        detalle = self._client().get(f"/api/v1/produccion/orden-bordado/{orden.pk}/").json()
+
+        self.assertEqual(detalle["usuario_nombre"], self.usuario.get_full_name().strip() or self.usuario.email)
+
+    def test_list_expone_empresa_y_sucursal_con_id_y_nombre(self):
+        """Aditivo: los ids crudos siguen, más las etiquetas legibles."""
+        self._crear_orden(1)
+        fila = self._client().get("/api/v1/produccion/orden-bordado/").json()[0]
+
+        self.assertEqual(fila["empresa"], self.empresa.pk)
+        self.assertEqual(fila["empresa_nombre"], "ACME SA")
+        self.assertEqual(fila["sucursal"], self.sucursal.pk)
+        self.assertEqual(fila["sucursal_nombre"], "Monterrey")
+
+    def test_retrieve_expone_empresa_y_sucursal_con_id_y_nombre(self):
+        """Mismo shape en retrieve que en list (misma identidad de serializer)."""
+        orden = self._crear_orden(1)
+        detalle = self._client().get(f"/api/v1/produccion/orden-bordado/{orden.pk}/").json()
+
+        self.assertEqual(detalle["empresa_nombre"], "ACME SA")
+        self.assertEqual(detalle["sucursal_nombre"], "Monterrey")
+
+    def test_list_sin_n_mas_1_constante(self):
+        """El nº de queries no crece con la cantidad de órdenes ni de
+        renglones de detalle. Cada orden tiene ``usuario_asignado``/``empresa``/
+        ``sucursal`` poblados (ver ``_crear_orden``), así que esto ejercita
+        realmente el ``select_related`` agregado junto con ``usuario_nombre``/
+        ``empresa_nombre``/``sucursal_nombre`` — sin él, este test falla
+        (verificado manualmente: 5 vs. 14 queries al agregar
+        ``usuario_asignado``, y 8 vs. 26 al agregar ``empresa``/``sucursal``,
+        entre 3 y 12 órdenes en ambos casos)."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        client = self._client()
+
+        for i in range(3):
+            self._crear_orden(i, n_detalles=2)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.get("/api/v1/produccion/orden-bordado/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()), 3)
+        queries_con_3 = len(ctx.captured_queries)
+
+        for i in range(3, 12):
+            self._crear_orden(i, n_detalles=4)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.get("/api/v1/produccion/orden-bordado/")
+        self.assertEqual(len(resp.json()), 12)
+        queries_con_12 = len(ctx.captured_queries)
+
+        self.assertEqual(queries_con_3, queries_con_12)
+        overhead = queries_con_3 - self.QUERIES_LIST
+        self.assertGreaterEqual(overhead, 0)
+        self.assertEqual(queries_con_12 - overhead, self.QUERIES_LIST)
+
+
+class OrdenesCorteMangaListQueriesTests(TestCase):
+    """N+1 del list de orden-corte-manga, mismo diagnóstico que Reflejante.
+
+    ``OrdenesCorteMangaSerializer`` resuelve ``pedido`` (``pedido_folio``),
+    ``usuario_asignado`` (``usuario_nombre``) y ``empresa``/``sucursal``
+    (``empresa_nombre``/``sucursal_nombre``) por orden, y
+    ``producto``/``talla``/``color`` por renglón de ``detalles``.
+    ``OrdenCorteMangaDetalle.configuracion`` es un ``JSONField`` plano —no una
+    FK—, así que no necesita ``select_related``. Mismo shape que
+    Reflejante/Bordado ahora: paridad completa entre los tres serializers.
+    """
+
+    #: 1 query de órdenes + 1 del ``Prefetch`` de ``detalles``.
+    QUERIES_LIST = 2
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Monterrey"
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla = Talla.objects.create(nombre="CH")
+        cls.usuario = Usuario.objects.create(
+            username="operador",
+            email="operador@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
+        )
+
+    def _crear_orden(self, i, n_detalles=2):
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        pd = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
+        orden = OrdenesCorteManga.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=pedido,
+            folio_ocm=f"OCM-{i}", usuario_asignado=self.usuario,
+        )
+        for _ in range(n_detalles):
+            OrdenCorteMangaDetalle.objects.create(
+                ocm=orden, pedido_detalle=pd, producto=self.producto,
+                cantidad=1, talla=self.talla, configuracion={"nota": "test"},
+            )
+        return orden
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client
+
+    def test_list_expone_empresa_y_sucursal_con_id_y_nombre(self):
+        """Aditivo: los ids crudos siguen, más las etiquetas legibles."""
+        self._crear_orden(1)
+        fila = self._client().get("/api/v1/produccion/orden-corte-manga/").json()[0]
+
+        self.assertEqual(fila["empresa"], self.empresa.pk)
+        self.assertEqual(fila["empresa_nombre"], "ACME SA")
+        self.assertEqual(fila["sucursal"], self.sucursal.pk)
+        self.assertEqual(fila["sucursal_nombre"], "Monterrey")
+
+    def test_retrieve_expone_empresa_y_sucursal_con_id_y_nombre(self):
+        """Mismo shape en retrieve que en list (misma identidad de serializer)."""
+        orden = self._crear_orden(1)
+        detalle = self._client().get(f"/api/v1/produccion/orden-corte-manga/{orden.pk}/").json()
+
+        self.assertEqual(detalle["empresa_nombre"], "ACME SA")
+        self.assertEqual(detalle["sucursal_nombre"], "Monterrey")
+
+    def test_list_sin_n_mas_1_constante(self):
+        """El nº de queries no crece con la cantidad de órdenes ni de
+        renglones de detalle. Cada orden tiene ``usuario_asignado``/``empresa``/
+        ``sucursal`` poblados (ver ``_crear_orden``), así que esto ejercita
+        realmente el ``select_related`` completo — sin ``empresa``/``sucursal``
+        en él, este test falla (verificado manualmente: 8 vs. 26 queries entre
+        3 y 12 órdenes)."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        client = self._client()
+
+        for i in range(3):
+            self._crear_orden(i, n_detalles=2)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.get("/api/v1/produccion/orden-corte-manga/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()), 3)
+        queries_con_3 = len(ctx.captured_queries)
+
+        for i in range(3, 12):
+            self._crear_orden(i, n_detalles=4)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.get("/api/v1/produccion/orden-corte-manga/")
+        self.assertEqual(len(resp.json()), 12)
+        queries_con_12 = len(ctx.captured_queries)
+
+        self.assertEqual(queries_con_3, queries_con_12)
+        overhead = queries_con_3 - self.QUERIES_LIST
+        self.assertGreaterEqual(overhead, 0)
+        self.assertEqual(queries_con_12 - overhead, self.QUERIES_LIST)
