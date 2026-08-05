@@ -185,6 +185,13 @@ class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
 class OrdenBordadoSerializer(serializers.ModelSerializer):
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
     detalles = OrdenBordadoDetalleSerializer(many=True, read_only=True)
+    # ``empresa``/``sucursal`` siguen viajando como id (read_only en Meta); estos
+    # dos son etiquetas legibles adicionales, mismo patrón ``source=`` que
+    # ``pedido_folio`` (ver ``OrdenReflejanteSerializer``). ``Empresa`` no tiene
+    # campo ``nombre``: su nombre humano es ``razon_social``.
+    empresa_nombre = serializers.CharField(source='empresa.razon_social', read_only=True)
+    sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
+    usuario_nombre = serializers.SerializerMethodField()
 
     class Meta:
         model = OrdenesBordado
@@ -197,6 +204,11 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
             'empresa',
             'sucursal'
         ]
+
+    def get_usuario_nombre(self, obj):
+        usuario = obj.usuario_asignado
+        if not usuario: return None
+        return usuario.get_full_name().strip() or usuario.email
 
 class _OrdenPadreWriteOnceMixin:
     """Endurece la superficie escribible de los serializers satélite
@@ -392,6 +404,12 @@ class OrdenCorteMangaDetalleSerializer(serializers.ModelSerializer):
 
 class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
+    # ``empresa``/``sucursal`` siguen viajando como id (read_only en Meta); estos
+    # dos son etiquetas legibles adicionales, mismo patrón ``source=`` que
+    # ``pedido_folio`` (ver ``OrdenReflejanteSerializer``/``OrdenBordadoSerializer``).
+    # ``Empresa`` no tiene campo ``nombre``: su nombre humano es ``razon_social``.
+    empresa_nombre = serializers.CharField(source='empresa.razon_social', read_only=True)
+    sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
     detalles = OrdenCorteMangaDetalleSerializer(many=True, read_only=True)
 
