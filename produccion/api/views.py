@@ -339,9 +339,14 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         """Onboarding para OrdenBordado (patrón WMS picking/packing/despacho).
 
         GET → catálogos de pedidos con prendas que requieren bordado,
-        operadores de la empresa y preview del folio siguiente.
+        operadores de la empresa, preview del folio siguiente y un detalle
+        por pedido con las líneas elegibles (producto/talla/color/cantidad
+        + ubicaciones/foto del bordado_config). Este detalle permite al
+        frontend armar un selector de cantidades antes de crear la OB.
 
         POST → mismo save que create() (comparte serializer y service).
+        Body opcional `detalles_override[]` permite que el usuario elija
+        por cada línea qué cantidad incluir en la OB (en vez del 100%).
         """
         if request.method == "GET":
             user = request.user
@@ -363,6 +368,13 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 )
                 .distinct()
                 .select_related("cliente", "sucursal")
+                .prefetch_related(
+                    "detalles",
+                    "detalles__tallas",
+                    "detalles__tallas__talla",
+                    "detalles__producto",
+                    "detalles__color",
+                )
                 .order_by("-created_at", "-id")
             )
 
@@ -381,18 +393,59 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 except Exception:
                     preview_folio = None
 
+            pedidos_payload = []
+            for p in pedidos_qs:
+                lineas = []
+                for det in p.detalles.all():
+                    for dt in det.tallas.filter(lleva_bordado=True).select_related("talla"):
+                        cfg = dt.bordado_config or {}
+                        ubicaciones = cfg.get("ubicaciones") or []
+                        if isinstance(ubicaciones, list) and ubicaciones:
+                            primera_ubic = ubicaciones[0] or {}
+                        else:
+                            primera_ubic = {}
+                        foto = None
+                        for k in ("foto", "imagen", "imagen_url", "foto_url"):
+                            v = cfg.get(k)
+                            if v:
+                                foto = {"url": v} if isinstance(v, str) else v
+                                break
+                        notas = next(
+                            (cfg[k] for k in ("notas", "observaciones", "comentarios") if cfg.get(k)),
+                            None,
+                        )
+                        lineas.append({
+                            "pedido_detalle_talla_id": dt.id,
+                            "pedido_detalle_id": det.id,
+                            "producto_id": det.producto_id,
+                            "producto_nombre": getattr(det.producto, "nombre", None),
+                            "talla_id": getattr(dt.talla, "id", None),
+                            "talla_nombre": getattr(dt.talla, "nombre", None),
+                            "color_id": getattr(det, "color_id", None),
+                            "color_nombre": getattr(getattr(det, "color", None), "nombre", None),
+                            "cantidad_pedido": float(dt.cantidad or 0),
+                            "posicion_sugerida": (
+                                cfg.get("posicion")
+                                or primera_ubic.get("codigo")
+                                or primera_ubic.get("nombre")
+                                or None
+                            ),
+                            "ubicaciones": ubicaciones if isinstance(ubicaciones, list) else [],
+                            "foto": foto,
+                            "notas": notas,
+                        })
+                pedidos_payload.append({
+                    "id": p.id,
+                    "folio": p.folio,
+                    "cliente": p.cliente_id,
+                    "cliente_nombre": getattr(p.cliente, "nombre", None),
+                    "sucursal": p.sucursal_id,
+                    "sucursal_nombre": getattr(p.sucursal, "nombre", None),
+                    "detalles": lineas,
+                })
+
             return Response({
-                "pedidos": [
-                    {
-                        "id": p.id,
-                        "folio": p.folio,
-                        "cliente": p.cliente_id,
-                        "cliente_nombre": getattr(p.cliente, "nombre", None),
-                        "sucursal": p.sucursal_id,
-                        "sucursal_nombre": getattr(p.sucursal, "nombre", None),
-                    }
-                    for p in pedidos_qs
-                ],
+                "pedidos": pedidos_payload,
                 "operadores": [
                     {"id": u.id, "nombre": u.get_full_name().strip() or u.email}
                     for u in operadores_qs

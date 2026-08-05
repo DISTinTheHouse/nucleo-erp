@@ -244,6 +244,13 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
     sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
 
+    detalles_override = serializers.ListField(
+        child=serializers.JSONField(),
+        required=False,
+        write_only=True,
+        allow_null=True,
+    )
+
     class Meta:
         model = OrdenesBordado
         fields = '__all__'
@@ -260,6 +267,88 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
         usuario = obj.usuario_asignado
         if not usuario: return None
         return usuario.get_full_name().strip() or usuario.email
+
+    def validate(self, attrs):
+        """Valida que ``detalles_override[]`` (si viene) sea un arreglo válido
+        de renglones del tipo:
+
+            { "pedido_detalle_talla_id": 123, "cantidad": 25 }
+
+        Reglas:
+        - No puede haber IDs duplicados.
+        - Cada ID debe pertenecer al mismo ``pedido`` que el body (la FK que
+          viene en attrs["pedido"]).
+        - ``cantidad`` debe ser numérico y > 0.
+        - ``cantidad`` no puede ser mayor a ``PedidoDetalleTalla.cantidad``
+          original del pedido (SSoT); se permite parcial (<= 100%), pero nunca
+          exceder el total contratado.
+        """
+        detalles_override = attrs.get("detalles_override") or []
+        pedido = attrs.get("pedido")
+        if detalles_override:
+            from ventas.models import PedidoDetalleTalla
+
+            seen_ids = set()
+            for item in detalles_override:
+                if not isinstance(item, dict):
+                    raise serializers.ValidationError({
+                        "detalles_override": "Cada renglón debe ser un objeto."
+                    })
+
+                pdt_id = item.get("pedido_detalle_talla_id")
+                cantidad = item.get("cantidad")
+
+                if pdt_id is None:
+                    raise serializers.ValidationError({
+                        "detalles_override": "Falta `pedido_detalle_talla_id`."
+                    })
+                if pdt_id in seen_ids:
+                    raise serializers.ValidationError({
+                        "detalles_override": f"`pedido_detalle_talla_id={pdt_id}` repetido."
+                    })
+                seen_ids.add(pdt_id)
+
+                try:
+                    cantidad_num = float(cantidad)
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError({
+                        "detalles_override": f"`cantidad` inválida para `pedido_detalle_talla_id={pdt_id}`."
+                    })
+                if cantidad_num <= 0:
+                    raise serializers.ValidationError({
+                        "detalles_override": f"`cantidad` debe ser mayor a 0 para `pedido_detalle_talla_id={pdt_id}`."
+                    })
+
+                if pedido is not None:
+                    try:
+                        pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(pk=pdt_id)
+                    except PedidoDetalleTalla.DoesNotExist:
+                        raise serializers.ValidationError({
+                            "detalles_override": f"`pedido_detalle_talla_id={pdt_id}` no existe."
+                        })
+                    if pdt.pedido_detalle.pedido_id != pedido.pk:
+                        raise serializers.ValidationError({
+                            "detalles_override": (
+                                f"`pedido_detalle_talla_id={pdt_id}` no pertenece "
+                                f"al pedido `{pedido.pk}`."
+                            )
+                        })
+                    if not pdt.lleva_bordado:
+                        raise serializers.ValidationError({
+                            "detalles_override": (
+                                f"`pedido_detalle_talla_id={pdt_id}` no lleva "
+                                "servicio de bordado (`lleva_bordado=False`)."
+                            )
+                        })
+                    if cantidad_num > float(pdt.cantidad or 0):
+                        raise serializers.ValidationError({
+                            "detalles_override": (
+                                f"`pedido_detalle_talla_id={pdt_id}`: la cantidad "
+                                f"{cantidad_num} excede la del pedido "
+                                f"({float(pdt.cantidad or 0)})."
+                            )
+                        })
+        return attrs
 
 class _OrdenPadreWriteOnceMixin:
     """Endurece la superficie escribible de los serializers satélite

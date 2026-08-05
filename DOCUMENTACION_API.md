@@ -1851,7 +1851,26 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
       "cliente": 15,
       "cliente_nombre": "Cliente Demo",
       "sucursal": 1,
-      "sucursal_nombre": "Matriz"
+      "sucursal_nombre": "Matriz",
+      "detalles": [
+        {
+          "pedido_detalle_talla_id": 8821,
+          "pedido_detalle_id": 3301,
+          "producto_id": 77,
+          "producto_nombre": "Gorra Legionario",
+          "talla_id": 4,
+          "talla_nombre": "CH",
+          "color_id": 9,
+          "color_nombre": "Azul Marino",
+          "cantidad_pedido": 25.0,
+          "posicion_sugerida": "F",
+          "ubicaciones": [
+            { "codigo": "F", "ancho_cm": 10, "alto_cm": 5, "color_hilo": "ROJO" }
+          ],
+          "foto": { "url": "https://cdn.empresa.com/ref/bordado_gorra.jpg" },
+          "notas": "Centrado en pecho"
+        }
+      ]
     }
   ],
   "operadores": [{ "id": 8, "nombre": "Juan Pérez" }],
@@ -1866,6 +1885,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 | Campo                                  | Regla                                                                                                                                                              |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_bordado=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                          |
+| `pedidos[].detalles[]`                 | Líneas del pedido que llevan servicio de bordado (una por cada combinación `producto + talla + color`). Incluye `cantidad_pedido` y el preview de ubicaciones/foto/notas extraído desde `bordado_config`. |
 | `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                       |
 | `preview.folio_ob_sugerido`            | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`). |
 | Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                                             |
@@ -1875,8 +1895,44 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 - **Mismo save que `create` tradicional** — usa el `OrdenBordadoSerializer` estándar.
 - Body requerido mínimo: `{ "pedido": 125 }`.
 - Opcionales: `prioridad`, `observaciones`.
-- Internamente: carga automáticamente **todas** las `PedidoDetalleTalla` del pedido con `lleva_bordado=True`, genera folio OB único y `bulk_create` de `OrdenBordadoDetalle` con la cantidad 100% de cada línea.
-- No depende de WMS ni de un picking existente; se genera completamente desde Producción.
+- **Body opcional para selección de cantidades** (el ajuste nuevo): `detalles_override[]`. Si se envía, cada objeto del arreglo selecciona qué líneas y qué cantidades incluir en la OB.
+- **Sin `detalles_override[]` (backwards compatible)**: comportamiento actual, se crean todas las líneas con 100% de su cantidad.
+- **Con `detalles_override[]`**: solo se incluyen las líneas enviadas, con la cantidad solicitada. Nunca puede exceder `cantidad_pedido` (SSoT de `PedidoDetalleTalla.cantidad`).
+
+Ejemplo body con selección parcial:
+
+```json
+{
+  "pedido": 125,
+  "prioridad": 2,
+  "observaciones": "Primera mitad para taller A",
+  "detalles_override": [
+    { "pedido_detalle_talla_id": 8821, "cantidad": 15 },
+    { "pedido_detalle_talla_id": 8822, "cantidad": 10 }
+  ]
+}
+```
+
+**Validaciones del serializer + service sobre `detalles_override[]` (y sin override)**
+
+| Error                                                                                                                                               | HTTP Status   |
+| --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| IDs `pedido_detalle_talla_id` repetidos, inválidos, o que no pertenecen al mismo `pedido` que el body                                               | 400           |
+| `cantidad` no numérica, `<= 0`, o mayor a `PedidoDetalleTalla.cantidad` del renglón del pedido                                                      | 400           |
+| Alguna línea enviada tiene `lleva_bordado=False`                                                                                                    | 400           |
+| `detalles_override[]` vacío (no se seleccionó nada)                                                                                                 | 400           |
+| Se intenta **crear sin override** una OB para un pedido que ya tiene una activa con el 100% de sus líneas                                           | 409 Conflict (mantiene la regla legacy SSoT, ver abajo) |
+| **`ya_asignado + nuevo > disponible`** por alguna línea combinando todas las OBs activas (regla nueva de fraccionamiento seguro)                    | 400           |
+| Se envía `detalles_override[]` seleccionando **solamente una parte** de las líneas y/o cantidades parciales **sin exceder el cupo restante**         | Se permite. **No dispara 409**; se pueden crear múltiples OBs parciales hasta completar el pedido. |
+
+> **Regla de fraccionamiento SSoT** (`OrdenBordadoService._cantidades_asignadas_por_linea`): la suma de todos los `OrdenBordadoDetalle` activos para el mismo `(pedido_detalle_id, talla_id)` **no puede superar** `PedidoDetalleTalla.cantidad`. El error 400 del caso de exceso retorna además `detalles_exceso[]` con la línea exacta, lo pedido, lo ya asignado, lo nuevo solicitado y el cupo restante:```json
+{
+  "err": "No se puede generar la orden de bordado...",
+  "detalles_exceso": [
+    "  - talla_id=4 pedido_detalle_id=3301: pedido=25.0, ya_asignado=15.0, solicitado=15.0, disponible_restante=10.0"
+  ]
+}
+```
 
 **SSoT de la configuración del bordado — SIN duplicación**
 

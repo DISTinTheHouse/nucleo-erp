@@ -1,5 +1,5 @@
 from django.db import transaction
-from django.db.models import Count
+from django.db.models import Count, Sum
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesBordado, OrdenBordadoDetalle
 from produccion.services.common import (
@@ -92,6 +92,25 @@ class OrdenBordadoService:
         return ob_match
 
     @staticmethod
+    def _cantidades_asignadas_por_linea(pedido):
+        """Suma lo ya programado en OBs activas por cada línea (pedido_detalle, talla).
+
+        Retorna dict ``{(pedido_detalle_id, talla_id): cantidad_asignada}``.
+        Solo considera ``OrdenesBordado.activo=True`` — las OBs canceladas/soft-deleted
+        no consumen cupo del pedido.
+        """
+        filas = (
+            OrdenBordadoDetalle.objects
+            .filter(ob__pedido=pedido, ob__activo=True)
+            .values("pedido_detalle_id", "talla_id")
+            .annotate(asignado=Sum("cantidad"))
+        )
+        return {
+            (f["pedido_detalle_id"], f["talla_id"]): float(f["asignado"] or 0)
+            for f in filas
+        }
+
+    @staticmethod
     @transaction.atomic
     def save(data, user):
         pedido = data.get("pedido")
@@ -103,22 +122,89 @@ class OrdenBordadoService:
         if sucursal is None:
             raise ValidationError({"err": "El usuario no tiene una sucursal asignada."})
 
-        detalle_tallas = list(
+        detalle_tallas_raw = list(
             OrdenBordadoService._tallas_bordado_qs(pedido.id).select_related(
                 "pedido_detalle", "talla"
             )
         )
 
-        if not detalle_tallas:
+        if not detalle_tallas_raw:
             raise ValidationError({
                  "err": "El pedido no tiene detalles con bordado para generar la orden."
             })
 
-        existente = OrdenBordadoService.buscar_existente_full_match(pedido)
-        if existente is not None:
-            raise OrdenBordadoDuplicada409(
-                OrdenBordadoService._payload_duplicada(existente)
+        detalles_override = data.get("detalles_override") or []
+        if detalles_override:
+            by_id = {dt.id: dt for dt in detalle_tallas_raw}
+            override_by_id = {
+                int(item["pedido_detalle_talla_id"]): float(item["cantidad"])
+                for item in detalles_override
+                if item.get("pedido_detalle_talla_id") is not None
+                and item.get("cantidad") is not None
+            }
+
+            detalle_tallas_sel = []
+            for pdt_id, cantidad in override_by_id.items():
+                if pdt_id not in by_id:
+                    raise ValidationError({
+                        "err": (
+                            f"`pedido_detalle_talla_id={pdt_id}` no pertenece "
+                            "a este pedido o no lleva servicio de bordado."
+                        )
+                    })
+                dt = by_id[pdt_id]
+                dt.cantidad = cantidad
+                detalle_tallas_sel.append(dt)
+            detalle_tallas = detalle_tallas_sel
+        else:
+            detalle_tallas = list(detalle_tallas_raw)
+
+        if not detalle_tallas:
+            raise ValidationError({
+                "err": "No se seleccionaron líneas para generar la orden de bordado."
+            })
+
+        asignado_por_linea = OrdenBordadoService._cantidades_asignadas_por_linea(pedido)
+        errores_lineas = []
+        for dt in detalle_tallas:
+            key = (dt.pedido_detalle_id, getattr(dt.talla, "id", None))
+            disponible = float((getattr(dt, "cantidad", None) or 0))
+            nuevo = float(dt.cantidad or 0)
+            ya = asignado_por_linea.get(key, 0.0)
+            faltante = max(0.0, disponible - ya)
+            if nuevo > faltante:
+                errores_lineas.append(
+                    f"  - talla_id={key[1]} pedido_detalle_id={key[0]}: "
+                    f"pedido={disponible}, ya_asignado={ya}, solicitado={nuevo}, "
+                    f"disponible_restante={faltante}"
+                )
+        if errores_lineas:
+            raise ValidationError({
+                "err": (
+                    "No se puede generar la orden de bordado: una o más líneas "
+                    "exceden la cantidad disponible del pedido (ya asignado + nuevo "
+                    "> cantidad_pedido por línea)."
+                ),
+                "detalles_exceso": errores_lineas,
+            })
+
+        es_full_match = (
+            not detalles_override
+            and {dt.id for dt in detalle_tallas_raw} == {dt.id for dt in detalle_tallas}
+            and all(
+                float(dt.cantidad or 0) == float(raw.cantidad or 0)
+                for dt, raw in zip(
+                    sorted(detalle_tallas, key=lambda x: x.id),
+                    sorted(detalle_tallas_raw, key=lambda x: x.id),
+                )
             )
+        )
+        if es_full_match:
+            existente = OrdenBordadoService.buscar_existente_full_match(pedido)
+            if existente is not None:
+                raise OrdenBordadoDuplicada409(
+                    OrdenBordadoService._payload_duplicada(existente)
+                )
 
         folio_bordado = generate_ob_folio(pedido.empresa_id, pedido.sucursal_id)
 
