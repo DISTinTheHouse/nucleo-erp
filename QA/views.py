@@ -25,7 +25,7 @@ from produccion.models import (
     OrdenProduccion,
     OrdenProduccionDetalle,
 )
-from wms.models import RfidScan
+from wms.models import EtiquetaRFIDDetalle, RfidScan
 
 rfid_scanner_logger = logging.getLogger(__name__)
 
@@ -688,7 +688,13 @@ def imprimir_orden_compra_workspace(request):
 
 
 def _es_hexadecimal_epc(value):
-    s = (value or "").strip().replace(" ", "")
+    s = (value or "")
+    if isinstance(s, bytes):
+        try:
+            s = s.decode("utf-8", errors="replace")
+        except Exception:
+            s = ""
+    s = str(s).strip().replace(" ", "").replace(":", "").replace("-", "")
     if not s:
         return False
     if len(s) < 8 or len(s) > 64:
@@ -698,6 +704,90 @@ def _es_hexadecimal_epc(value):
         return True
     except ValueError:
         return False
+
+
+def _extract_epc_raw(item):
+    """Devuelve el EPC hex raw de un item de scan dict o string.
+    Soporta:
+      - str: hex directo
+      - dict: {'idHex':'..'} / {'data':'..'} / {'epc':'..'} / {'tagID':'..'}
+              tambien {'epc':{'idHex':'..'}} (anidado como en logs FX)
+    Devuelve None si no hay EPC valido.
+    Ademas retorna antenna/rssi extraidos del mismo item, separados.
+    """
+    if item is None:
+        return None
+    if isinstance(item, str):
+        return item.strip()
+
+    if not isinstance(item, dict):
+        return None
+
+    candidates = []
+    for key in ("idHex", "data", "epc", "tagID", "tidHex", "epcHex", "hex"):
+        v = item.get(key)
+        if v is None:
+            continue
+        if isinstance(v, dict):
+            for sub in ("idHex", "data", "epc", "tagID", "tidHex", "epcHex", "hex"):
+                sv = v.get(sub)
+                if sv:
+                    candidates.append(sv)
+        elif isinstance(v, (str, bytes)):
+            candidates.append(v)
+    for c in candidates:
+        if isinstance(c, bytes):
+            try:
+                c = c.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+        if isinstance(c, str):
+            s = c.strip()
+            if s:
+                return s
+    return None
+
+
+def _extract_int(value):
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_float(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_antenna_rssi(item, fallback_antenna=None, fallback_rssi=None):
+    antenna = None
+    rssi = None
+    if isinstance(item, dict):
+        antenna = _extract_int(
+            item.get("antenna")
+            or item.get("antennaID")
+            or item.get("antennaPort")
+            or item.get("antennaPortName")
+            or item.get("port")
+        )
+        rssi = _extract_float(
+            item.get("peakRssi")
+            or item.get("rssi")
+            or item.get("rssiDbm")
+            or item.get("peakRssiDbm")
+        )
+    if antenna is None:
+        antenna = _extract_int(fallback_antenna)
+    if rssi is None:
+        rssi = _extract_float(fallback_rssi)
+    return antenna, rssi
 
 
 @login_required
@@ -724,34 +814,67 @@ def scanner_rfid_receive(request):
 
         data = json.loads(raw_body) if raw_body else None
         items = []
+        fallback_antenna = None
+        fallback_rssi = None
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict):
-            items = data.get("tagData") or data.get("tags") or [data]
+            # Zebra FX puede mandar {tagData:[...]}, {tags:[...]}, {data:[...]}, {events:[...]}
+            items = (
+                data.get("tagData")
+                or data.get("tags")
+                or data.get("events")
+                or data.get("eventList")
+                or data.get("data")
+                or [data]
+            )
+            fallback_antenna = (
+                data.get("antenna")
+                or data.get("antennaID")
+                or data.get("antennaPort")
+                or data.get("port")
+            )
+            fallback_rssi = (
+                data.get("peakRssi")
+                or data.get("rssi")
+                or data.get("rssiDbm")
+                or data.get("peakRssiDbm")
+            )
 
         if not isinstance(items, list):
             return JsonResponse({"status": "error", "message": "Invalid data format"}, status=400)
 
         tags_to_create = []
+        seen_epcs_in_this_batch = set()
         for item in items:
-            if not isinstance(item, dict):
+            if isinstance(item, dict) and item.get("isHeartBeat") is True:
                 continue
-            if item.get("isHeartBeat") is True:
+            epc_raw = _extract_epc_raw(item)
+            if not epc_raw:
                 continue
-            epc = (
-                item.get("data")
-                or item.get("idHex")
-                or item.get("epc")
-                or item.get("tagID")
+            # limpia / normaliza hex (minusculas, sin separadores)
+            epc_norm = (
+                epc_raw.strip()
+                .replace(" ", "")
+                .replace(":", "")
+                .replace("-", "")
+                .lower()
             )
-            if not epc:
+            if not epc_norm or len(epc_norm) < 8:
                 continue
+            # Si ya estaba dentro del mismo request (duplicado fx reader), omitimos 2da insert
+            if epc_norm in seen_epcs_in_this_batch:
+                continue
+            seen_epcs_in_this_batch.add(epc_norm)
+            antenna, rssi = _extract_antenna_rssi(
+                item, fallback_antenna=fallback_antenna, fallback_rssi=fallback_rssi
+            )
             tags_to_create.append(
                 RfidScan(
-                    epc=str(epc),
+                    epc=epc_norm,
                     reader_ip=remote_addr,
-                    antenna=item.get("antenna") or item.get("antennaID"),
-                    rssi=item.get("peakRssi") or item.get("rssi"),
+                    antenna=antenna,
+                    rssi=rssi,
                 )
             )
 
@@ -766,18 +889,105 @@ def scanner_rfid_receive(request):
 
 
 def scanner_rfid_get(request):
-    scans = RfidScan.objects.all()[:50]
-    data = [
-        {
+    scans = list(
+        RfidScan.objects.select_related()
+        .order_by("-created_at", "-id")[:50]
+    )
+
+    # JOIN por epc contra EtiquetaRFIDDetalle (incluyendo impresion, producto, variante)
+    epc_list = [s.epc for s in scans if s.epc]
+    # Normalizamos para match tanto mayus como minus: guardaremos lower y buscaremos en lower
+    epc_lower_set = {e.lower() for e in epc_list if e}
+
+    # Busqueda lowercase: EtiquetaRFIDDetalle.epc es único, convertimos ambos lados a lower
+    detalle_qs = (
+        EtiquetaRFIDDetalle.objects.filter(epc__in=list(epc_lower_set) + list({e.upper() for e in epc_lower_set}))
+        .select_related(
+            "impresion",
+            "impresion__producto",
+            "impresion__producto_variante",
+            "impresion__producto_variante__color",
+            "impresion__producto_variante__talla",
+        )
+        .only(
+            "epc",
+            "barcode_value",
+            "serial",
+            "estado",
+            "impresion__id",
+            "impresion__producto_id",
+            "impresion__producto__nombre",
+            "impresion__producto__cod_proscai",
+            "impresion__producto__codigo",
+            "impresion__producto_variante_id",
+            "impresion__producto_variante__nombre",
+            "impresion__producto_variante__sku",
+            "impresion__producto_variante__color_id",
+            "impresion__producto_variante__color__nombre",
+            "impresion__producto_variante__talla_id",
+            "impresion__producto_variante__talla__nombre",
+        )
+    )
+    detalle_by_epc_lower = {}
+    for d in detalle_qs:
+        detalle_by_epc_lower[(d.epc or "").lower()] = d
+
+    data = []
+    for scan in scans:
+        epc = scan.epc or ""
+        epc_lower = epc.lower()
+        detalle = detalle_by_epc_lower.get(epc_lower)
+
+        item = {
             "id": scan.pk,
-            "epc": scan.epc,
+            "epc": epc,
             "timestamp": scan.created_at.isoformat(),
             "antenna": scan.antenna,
             "rssi": scan.rssi,
             "reader_ip": scan.reader_ip,
         }
-        for scan in scans
-    ]
+
+        if detalle is not None:
+            impresion = detalle.impresion
+            variante = impresion.producto_variante if impresion else None
+            producto = impresion.producto if impresion else None
+
+            nombre_producto = None
+            sku = None
+            color_nombre = None
+            talla_nombre = None
+            if variante:
+                sku = variante.sku
+                if variante.color:
+                    color_nombre = variante.color.nombre
+                if variante.talla:
+                    talla_nombre = variante.talla.nombre
+                # Variante tiene nombre completo producto-color-talla, preferimos ese
+                if variante.nombre:
+                    nombre_producto = variante.nombre
+                elif variante.producto:
+                    nombre_producto = variante.producto.nombre
+            elif producto:
+                nombre_producto = producto.nombre
+
+            item.update(
+                {
+                    "match_impresion": True,
+                    "impresion_folio": impresion.folio if impresion else None,
+                    "impresion_id": impresion.id if impresion else None,
+                    "producto_nombre": nombre_producto,
+                    "sku": sku,
+                    "color": color_nombre,
+                    "talla": talla_nombre,
+                    "barcode_value": detalle.barcode_value,
+                    "serial": detalle.serial,
+                    "estado": detalle.estado,  # IMPRESO / LEIDO / PENDIENTE / CANCELADO
+                    "detalle_id": detalle.id,
+                }
+            )
+        else:
+            item["match_impresion"] = False
+        data.append(item)
     return JsonResponse({"scans": data})
 
 
