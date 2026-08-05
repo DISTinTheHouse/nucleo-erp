@@ -177,10 +177,61 @@ class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+    ubicaciones = serializers.SerializerMethodField()
+    foto = serializers.SerializerMethodField()
+    notas = serializers.SerializerMethodField()
+    bordado_config = serializers.SerializerMethodField()
 
     class Meta:
         model = OrdenBordadoDetalle
         fields = '__all__'
+
+    def _get_pedido_detalle_talla(self, obj):
+        if obj.pedido_detalle_id is None or obj.talla_id is None:
+            return None
+        if not hasattr(self, '_pdt_cache'):
+            self._pdt_cache = {}
+        key = (obj.pedido_detalle_id, obj.talla_id)
+        if key not in self._pdt_cache:
+            from ventas.models import PedidoDetalleTalla
+            self._pdt_cache[key] = (
+                PedidoDetalleTalla.objects
+                .filter(pedido_detalle_id=obj.pedido_detalle_id, talla_id=obj.talla_id)
+                .only('bordado_config')
+                .first()
+            )
+        return self._pdt_cache[key]
+
+    def _get_cfg(self, obj):
+        pdt = self._get_pedido_detalle_talla(obj)
+        return getattr(pdt, 'bordado_config', None) or {}
+
+    def get_bordado_config(self, obj):
+        cfg = self._get_cfg(obj)
+        return cfg or None
+
+    def get_ubicaciones(self, obj):
+        cfg = self._get_cfg(obj)
+        ubicaciones = cfg.get('ubicaciones')
+        return ubicaciones if isinstance(ubicaciones, list) else []
+
+    def get_foto(self, obj):
+        cfg = self._get_cfg(obj)
+        for key in ('foto', 'imagen', 'imagen_url', 'foto_url'):
+            value = cfg.get(key)
+            if value:
+                if isinstance(value, dict):
+                    return value
+                return {'url': value}
+        return None
+
+    def get_notas(self, obj):
+        cfg = self._get_cfg(obj)
+        for key in ('notas', 'observaciones', 'comentarios'):
+            value = cfg.get(key)
+            if value:
+                return value
+        return None
 
 class OrdenBordadoSerializer(serializers.ModelSerializer):
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)

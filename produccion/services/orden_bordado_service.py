@@ -138,16 +138,32 @@ class OrdenBordadoService:
             OrdenBordadoService._payload_duplicada,
         )
 
-        bulk_data = [
-            OrdenBordadoDetalle(
+        bulk_data = []
+        for detalle_talla in detalle_tallas:
+            cfg = detalle_talla.bordado_config or {}
+            ubicaciones = cfg.get("ubicaciones") or []
+            primera_ubicacion = (
+                ubicaciones[0] if isinstance(ubicaciones, list) and ubicaciones else {}
+            )
+            posicion = (
+                cfg.get("posicion")
+                or primera_ubicacion.get("codigo")
+                or primera_ubicacion.get("nombre")
+                or None
+            )
+            bulk_data.append(OrdenBordadoDetalle(
                 ob=orden_bordado,
                 pedido_detalle=detalle_talla.pedido_detalle,
                 producto_id=detalle_talla.pedido_detalle.producto_id,
                 cantidad=detalle_talla.cantidad,
                 talla=detalle_talla.talla,
-            )
-            for detalle_talla in detalle_tallas
-        ]
+                color=getattr(detalle_talla.pedido_detalle, "color", None),
+                posicion_bordado=posicion,
+                colores_hilo=(
+                    int(primera_ubicacion.get("colores_hilo") or cfg.get("colores_hilo") or 0)
+                ),
+                puntadas=int(cfg.get("puntadas") or primera_ubicacion.get("puntadas") or 0),
+            ))
 
         OrdenBordadoDetalle.objects.bulk_create(bulk_data)
 

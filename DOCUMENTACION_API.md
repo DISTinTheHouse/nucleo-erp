@@ -1878,6 +1878,15 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 - Internamente: carga automáticamente **todas** las `PedidoDetalleTalla` del pedido con `lleva_bordado=True`, genera folio OB único y `bulk_create` de `OrdenBordadoDetalle` con la cantidad 100% de cada línea.
 - No depende de WMS ni de un picking existente; se genera completamente desde Producción.
 
+**SSoT de la configuración del bordado — SIN duplicación**
+
+> Toda la configuración de bordado/ubicaciones/foto vive únicamente en `PedidoDetalleTalla.bordado_config` (modelo `ventas.PedidoDetalleTalla`, campos `lleva_bordado` + `bordado_config`). `OrdenBordadoDetalle` **no duplica** ese JSON; lo consulta en tiempo real por FK cruzada (`pedido_detalle_id` + `talla_id`), con caché por serializer para evitar N+1 en respuestas de `list`/`retrieve`.
+>
+> Lo que SÍ se guarda en `OrdenBordadoDetalle` (campos escalares de snapshot, legacy / compatibilidad):
+> - `posicion_bordado` → derivado con fallback: `bordado_config.posicion` → `bordado_config.ubicaciones[0].codigo` → `bordado_config.ubicaciones[0].nombre`
+> - `colores_hilo`, `puntadas` → si vienen en `bordado_config` o en la primera ubicación
+> - `color` → tomado directamente de `PedidoDetalle.color` (FK del renglón de pedido)
+
 **Respuesta 201 OK**
 
 ```json
@@ -1890,11 +1899,41 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
       "id": 39,
       "producto_nombre": "Gorra Legionario",
       "talla_nombre": "CH",
-      "cantidad": 10.0
+      "color_nombre": "Azul Marino",
+      "cantidad": 10.0,
+      "posicion_bordado": "F",
+      "colores_hilo": 2,
+      "puntadas": 1500,
+      "bordado_config": {
+        "ubicaciones": [
+          { "codigo": "F", "ancho_cm": 10, "alto_cm": 5, "color_hilo": "ROJO" }
+        ],
+        "foto": { "url": "https://cdn.empresa.com/ref/bordado_gorra.jpg" },
+        "notas": "Centrado en pecho"
+      },
+      "ubicaciones": [
+        { "codigo": "F", "ancho_cm": 10, "alto_cm": 5, "color_hilo": "ROJO" }
+      ],
+      "foto": { "url": "https://cdn.empresa.com/ref/bordado_gorra.jpg" },
+      "notas": "Centrado en pecho"
     }
   ]
 }
 ```
+
+Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDetalleTalla.bordado_config`):
+
+| Campo            | Fuente / Regla                                                                                                                                  |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bordado_config` | JSON íntegro desde `PedidoDetalleTalla.bordado_config` (misma llave que usó Cotizaciones → Pedido). Retorna `null` si la talla no trae config. |
+| `ubicaciones[]`  | `bordado_config.ubicaciones` cuando es arreglo, de lo contrario `[]`.                                                                           |
+| `foto`           | Busca la primera llave no vacía entre `foto / imagen / imagen_url / foto_url`. Si es string retorna `{ "url": string }`; si es dict lo deja así. |
+| `notas`          | Busca la primera llave no vacía entre `notas / observaciones / comentarios`; `null` si ninguna.                                                 |
+
+**Django Admin** — Producción
+
+- `OrdenesBordado` (`OrdenesBordadoAdmin`): `list_display` id/folio/empresa/sucursal/pedido/estatus/usuario_asignado/prioridad, filtros y búsqueda por folio OB, folio de pedido, empresa, sucursal y operador. Incluye inline `OrdenBordadoDetalleInline` (renglones de la orden).
+- `OrdenBordadoDetalle` (`OrdenBordadoDetalleAdmin`): listado standalone con filtros cruzados por `ob__empresa`, `ob__sucursal`, `estatus_bordado`, talla, color y `posicion_bordado`; búsqueda por folio OB, pedido, producto y posición.
 
 **Control anti-duplicado (HTTP 409 Conflict)**
 

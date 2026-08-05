@@ -9,6 +9,7 @@ from produccion.models import (
     ConsumoProduccionDetalle,
     ProductoTerminadoEntradas, 
     OrdenesBordado,
+    OrdenBordadoDetalle,
     BordadoAvances,
     BordadoIncidencias,
     OrdenesReflejante,
@@ -18,7 +19,6 @@ from produccion.models import (
     OrdenCorteMangaDetalle
 )
 
-admin.site.register(OrdenesBordado)
 admin.site.register(BordadoAvances)
 admin.site.register(BordadoIncidencias)
 admin.site.register(OrdenesReflejante)
@@ -138,3 +138,65 @@ class ProductoTerminadoEntradasAdmin(admin.ModelAdmin):
     ordering = ("-pt_entrada_id",)
     autocomplete_fields = ("op", "almacen", "ubicacion")
     list_select_related = ("op", "almacen", "ubicacion")
+
+class OrdenBordadoDetalleInline(admin.TabularInline):
+    model = OrdenBordadoDetalle
+    extra = 0
+    autocomplete_fields = ("producto", "talla", "color", "pedido_detalle")
+    list_select_related = ("producto", "talla", "color")
+    fields = (
+        "pedido_detalle",
+        "producto",
+        "talla",
+        "color",
+        "cantidad",
+        "posicion_bordado",
+        "colores_hilo",
+        "puntadas",
+    )
+
+@admin.register(OrdenesBordado)
+class OrdenesBordadoAdmin(admin.ModelAdmin):
+    list_display = ("id", "folio_bordado", "empresa", "sucursal", "pedido", "estatus_bordado", "usuario_asignado", "prioridad")
+    list_filter = ("empresa", "sucursal", "estatus_bordado", "prioridad")
+    search_fields = (
+        "folio_bordado",
+        "pedido__folio",
+        "pedido__id",
+        "empresa__codigo",
+        "empresa__razon_social",
+        "sucursal__codigo",
+        "sucursal__nombre",
+        "usuario_asignado__email",
+        "usuario_asignado__first_name",
+        "usuario_asignado__last_name",
+    )
+    ordering = ("-id",)
+    autocomplete_fields = ("empresa", "sucursal", "pedido", "usuario_asignado")
+    list_select_related = ("empresa", "sucursal", "pedido", "usuario_asignado")
+    inlines = (OrdenBordadoDetalleInline,)
+
+@admin.register(OrdenBordadoDetalle)
+class OrdenBordadoDetalleAdmin(admin.ModelAdmin):
+    list_display = ("id", "ob", "producto", "talla", "color", "cantidad", "posicion_bordado", "colores_hilo", "puntadas")
+    list_filter = (
+        "ob__empresa",
+        "ob__sucursal",
+        "ob__estatus_bordado",
+        "talla",
+        "color",
+        "posicion_bordado",
+    )
+    search_fields = (
+        "id",
+        "ob__folio_bordado",
+        "ob__pedido__folio",
+        "producto__nombre",
+        "producto__id",
+        "talla__nombre",
+        "color__nombre",
+        "posicion_bordado",
+    )
+    ordering = ("-id",)
+    autocomplete_fields = ("ob", "pedido_detalle", "producto", "talla", "color")
+    list_select_related = ("ob", "producto", "talla", "color")
