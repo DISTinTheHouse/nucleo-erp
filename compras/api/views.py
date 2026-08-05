@@ -156,11 +156,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         limit_raw = request.query_params.get("limit")
-        try:
-            limit = int(limit_raw) if limit_raw not in (None, "", "all", "0", "-1") else 50
-        except Exception:
-            limit = 50
-        limit = max(1, min(limit, 200))
+        limit = None
+        if limit_raw not in (None, "", "all", "ALL", "0", "-1"):
+            try:
+                limit = int(limit_raw)
+            except Exception:
+                limit = 20
+            limit = max(1, min(limit, 1000))
 
         proveedor_q = (request.query_params.get("proveedor_q") or "").strip()
         producto_q = (request.query_params.get("producto_q") or "").strip()
@@ -183,12 +185,15 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 Q(nombre__icontains=producto_q) | Q(descripcion__icontains=producto_q)
             )
 
-        proveedores = list(
-            proveedores_qs.order_by("nombre").values("id", "codigo", "nombre", "razon_social", "rfc")[:limit]
-        )
-        productos = list(
-            productos_qs.order_by("nombre").values("id", "nombre", "descripcion", "precio_base")[:limit]
-        )
+        proveedores_qs = proveedores_qs.order_by("nombre").values("id", "codigo", "nombre", "razon_social", "rfc")
+        productos_qs = productos_qs.order_by("nombre").values("id", "codigo", "cod_proscai", "nombre", "descripcion", "precio_base")
+
+        if limit is not None:
+            proveedores_qs = proveedores_qs[:limit]
+            productos_qs = productos_qs[:limit]
+
+        proveedores = list(proveedores_qs)
+        productos = list(productos_qs)
         sucursales = []
         if empresa:
             sucursales = list(
