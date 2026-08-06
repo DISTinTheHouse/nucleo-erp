@@ -3,7 +3,7 @@ import logging
 from decimal import Decimal, ROUND_HALF_UP
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
-from django.db.models import OuterRef, Prefetch, Q, Subquery, Sum
+from django.db.models import F, OuterRef, Prefetch, Q, Subquery, Sum
 from django.db.models.functions import Coalesce
 from datetime import timedelta
 from django.utils import timezone
@@ -206,22 +206,15 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 q_filter = q_filter | Q(id=int(q))
             qs = qs.filter(q_filter)
 
-        ordering = (self.request.query_params.get("ordering") or "-created_at").strip()
-        allowed = {"id", "created_at", "updated_at", "gran_total", "estatus"}
-        ordering_fields = []
-        for part in ordering.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            desc = part.startswith("-")
-            field = part[1:] if desc else part
-            if field in allowed:
-                ordering_fields.append(part)
-        if not ordering_fields:
-            ordering_fields = ["-created_at"]
-        if not any(f.lstrip("-") == "id" for f in ordering_fields):
-            ordering_fields.append("-id")
-        qs = qs.order_by(*ordering_fields)
+        # Orden fijo: más reciente primero, con ``-id`` como desempate estable.
+        # Ya no se admite ``?ordering=`` del cliente: el requisito de producto es
+        # que el listado siempre salga en ese orden, y el parámetro permitía
+        # romperlo (p. ej. ``?ordering=created_at`` devolvía lo más viejo arriba).
+        # Si llega el parámetro se ignora en silencio.
+        # ``nulls_last``: ``Cotizacion.created_at`` es NULL-able y las filas
+        # anteriores a la migración que lo agregó siguen en NULL; en PostgreSQL
+        # un DESC las pondría al principio del listado.
+        qs = qs.order_by(F("created_at").desc(nulls_last=True), "-id")
 
         return qs
 
@@ -2170,7 +2163,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
         q = self.request.query_params.get("q") or self.request.query_params.get("folio")
         if q:
             qs = qs.filter(folio__icontains=q)
-        return qs
+        # Listado más reciente primero; ``-id`` como desempate estable.
+        # ``nulls_last``: ``Pedido.created_at`` se agregó como NULL-able
+        # (migración 0007) y los pedidos previos siguen en NULL; en PostgreSQL
+        # un DESC los pondría al principio del listado.
+        return qs.order_by(F("created_at").desc(nulls_last=True), "-id")
 
     def perform_create(self, serializer):
         empresa = self.request.user.empresa
@@ -2220,21 +2217,14 @@ class MesaControlViewSet(CotizacionViewSet):
         if empresa:
             qs = qs.filter(empresa=empresa)
 
-        return qs.select_related(
-            "cliente", "sucursal", "moneda", "vendedor"
-        ).prefetch_related(
-            Prefetch(
-                "cotizaciondetalle",
-                queryset=CotizacionDetalle.objects.select_related(
-                    "producto"
-                ).prefetch_related(
-                    Prefetch(
-                        "tallas",
-                        queryset=CotizacionDetalleTalla.objects.select_related("talla", "variante"),
-                    )
-                ),
-            )
-        )
+        # Se delega en ``_apply_filters`` (heredado de ``CotizacionViewSet``) el
+        # ordenamiento y los filtros de query params, en vez de duplicar aquí una
+        # variante que divergía del listado de cotizaciones. ``_apply_filters``
+        # también aporta el ``Prefetch`` de ``cotizaciondetalle`` en ``retrieve``
+        # y las anotaciones (``pedido_id``/``pedido_folio``/``piezas``) en
+        # ``list``, así que no se declara aquí un prefetch propio: duplicar el
+        # mismo lookup con otro queryset hace que Django reviente al ejecutar.
+        return self._apply_filters(qs.select_related("cliente", "sucursal", "moneda", "vendedor"))
 
     @action(detail=True, methods=["get"], url_path="stock-detalle")
     def stock_detalle(self, request, pk=None):

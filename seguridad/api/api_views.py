@@ -34,11 +34,13 @@ class RolViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        # Listado más reciente primero; ``-id`` como desempate estable.
+        base_qs = self.queryset.order_by('-created_at', '-id')
         if user.is_superuser:
-            return self.queryset
+            return base_qs
         if hasattr(user, 'empresa') and user.empresa:
-            return self.queryset.filter(empresa=user.empresa)
-        return self.queryset.none()
+            return base_qs.filter(empresa=user.empresa)
+        return base_qs.none()
 
     @action(detail=True, methods=['get', 'put'], serializer_class=RolPermisosSerializer)
     def permisos(self, request, pk=None):

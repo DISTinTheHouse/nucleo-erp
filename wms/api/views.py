@@ -327,7 +327,10 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
                     ).order_by("id"),
                 )
             )
-            .order_by("-id")
+            # ``Despacho`` no tiene fecha propia: el más reciente primero se
+            # resuelve por la fecha de alta del ``Packing`` del que cuelga (ya
+            # viene en el ``select_related``, así que no añade consultas).
+            .order_by("-packing__created_at", "-id")
         )
 
         if getattr(user, "is_superuser", False):

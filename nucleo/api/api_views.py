@@ -62,16 +62,19 @@ class SucursalViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        # Listado más reciente primero (requisito de producto para las vistas de
+        # lista del frontend); el ``-id`` es solo desempate estable.
+        base_qs = self.queryset.order_by('-created_at', '-id_sucursal')
         if user.is_superuser:
-            return self.queryset
+            return base_qs
         if hasattr(user, 'empresa') and user.empresa:
             # Filtrar por empresa del usuario
-            qs = self.queryset.filter(empresa=user.empresa)
+            qs = base_qs.filter(empresa=user.empresa)
             # Y filtrar por sucursales asignadas al usuario (si no es admin empresa)
             if not getattr(user, 'is_admin_empresa', False):
                  qs = qs.filter(id_sucursal__in=user.sucursales.values_list('id_sucursal', flat=True))
             return qs
-        return self.queryset.none()
+        return base_qs.none()
     
     def perform_destroy(self, instance): 
         instance.soft_delete()
@@ -147,14 +150,16 @@ class SerieFolioViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        # Listado más reciente primero; ``-id`` como desempate estable.
+        base_qs = self.queryset.order_by('-created_at', '-id_serie_folio')
         if user.is_superuser:
-            return self.queryset
-        
+            return base_qs
+
         if user.empresa:
             # Solo mostrar series de la empresa del usuario
-            return self.queryset.filter(empresa=user.empresa)
-            
-        return self.queryset.none()
+            return base_qs.filter(empresa=user.empresa)
+
+        return base_qs.none()
 
     def perform_create(self, serializer):
         user = self.request.user
