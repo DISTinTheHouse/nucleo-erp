@@ -72,7 +72,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 'ordencompradetalle_set',
                 Prefetch("recepcion_set", queryset=recepciones_qs),
             )
-        return qs
+        # Listado más reciente primero; ``-id`` como desempate estable. Es el
+        # orden de las órdenes de compra en sí: el ``order_by`` de arriba es del
+        # Prefetch de recepciones anidadas y solo aplica en ``retrieve``.
+        return qs.order_by("-fecha_oc", "-id")
 
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -157,6 +160,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
         limit_raw = request.query_params.get("limit")
         limit = None
+
         if limit_raw not in (None, "", "all", "ALL", "0", "-1"):
             try:
                 limit = int(limit_raw)
@@ -185,8 +189,12 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 Q(nombre__icontains=producto_q) | Q(descripcion__icontains=producto_q)
             )
 
-        proveedores_qs = proveedores_qs.order_by("nombre").values("id", "codigo", "nombre", "razon_social", "rfc")
-        productos_qs = productos_qs.order_by("nombre").values("id", "codigo", "cod_proscai", "nombre", "descripcion", "precio_base")
+        proveedores_qs = proveedores_qs.order_by("nombre").values(
+            "id", "codigo", "nombre", "razon_social", "rfc"
+        )
+        productos_qs = productos_qs.order_by("nombre").values(
+            "id", "codigo", "cod_proscai", "nombre", "descripcion", "precio_base"
+        )
 
         if limit is not None:
             proveedores_qs = proveedores_qs[:limit]

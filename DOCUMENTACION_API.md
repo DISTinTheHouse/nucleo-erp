@@ -1015,7 +1015,7 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 - **Query Params (opcionales)**:
   - `q`: busca por `oc`, `cliente.nombre`, `cliente.razon_social`, `cliente.rfc` o `id` (si es numérico)
   - `estatus`: uno o varios separados por coma (ej: `2` o `2,5`)
-  - `ordering`: lista separada por coma. Permitidos: `id`, `created_at`, `updated_at`, `gran_total`, `estatus` (ej: `-created_at`)
+- **Orden**: fijo, más reciente primero (`created_at` descendente, desempate por `id` descendente). No es configurable: el parámetro `ordering` ya no se admite y se ignora si se envía.
 - **Campos útiles para tabla**:
   - `estatus_label`, `cliente_nombre`, `cliente_razon_social`, `pedido_id`, `pedido_folio`
   - `piezas`: sumatoria de `cantidad` en tallas (detalle de la cotización)

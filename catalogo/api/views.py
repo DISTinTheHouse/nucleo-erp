@@ -13,7 +13,7 @@ class CategoriaProductoViewSet(viewsets.ModelViewSet):
     serializer_class = CategoriaProductoSerializer
 
     def get_queryset(self):
-        return CategoriaProducto.objects.filter(activo=True)
+        return CategoriaProducto.objects.filter(activo=True).order_by("-created_at", "-id")
 
 class ColorViewSet(viewsets.ModelViewSet):
     serializer_class = ColorSerializer
@@ -40,7 +40,7 @@ class ProductoViewSet(viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 raise ValidationError({"tipo_id": "Must be an integer."})
             qs = qs.filter(tipo_id=tipo_id)
-        return qs
+        return qs.order_by("-created_at", "-id")
 
     def perform_create(self, serializer):
         user = self.request.user
