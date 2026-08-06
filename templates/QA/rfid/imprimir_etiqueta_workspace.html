@@ -17,6 +17,7 @@
                 <h1 class="mt-3 text-3xl font-semibold">Imprimir etiqueta QA</h1>
                 <p class="mt-2 max-w-3xl text-sm text-slate-600">
                     Selecciona un SKU o un producto base, genera una etiqueta Zebra de prueba y vuelve al encuadre RFID para escanearla.
+                    El registro de la impresión se guarda en la base de datos antes de enviarse a la impresora.
                 </p>
             </div>
             {% if encuadre_id %}
@@ -63,7 +64,7 @@
                     <h3 class="text-sm font-semibold uppercase tracking-wide text-slate-500">Resultados</h3>
                     <div class="mt-3 space-y-3">
                         {% for variante in variantes %}
-                        <a href="?variante={{ variante.pk }}{% if q %}&q={{ q|urlencode }}{% endif %}{% if encuadre_id %}&encuadre={{ encuadre_id }}{% endif %}"
+                        <a href="?variante={{ variante.pk }}{% if q %}&q={{ q|urlencode }}{% endif %}{% if encuadre_id %}&encuadre={{ encuadre_id }}{% endif %}{% if cantidad_default and cantidad_default != 1 %}&cantidad={{ cantidad_default }}{% endif %}"
                             class="block rounded-xl border px-4 py-3 text-sm hover:bg-slate-50 {% if variante_seleccionada and variante.pk == variante_seleccionada.pk %}border-indigo-300 bg-indigo-50{% else %}border-slate-200 hover:border-slate-300{% endif %}">
                             <div class="font-medium">{{ variante.sku }}</div>
                             <div class="mt-1 text-slate-500">{{ variante.producto.nombre }} · {{ variante.color.nombre }} · {{ variante.talla.nombre }}</div>
@@ -71,7 +72,7 @@
                         {% endfor %}
 
                         {% for producto in productos %}
-                        <a href="?producto={{ producto.pk }}{% if q %}&q={{ q|urlencode }}{% endif %}{% if encuadre_id %}&encuadre={{ encuadre_id }}{% endif %}"
+                        <a href="?producto={{ producto.pk }}{% if q %}&q={{ q|urlencode }}{% endif %}{% if encuadre_id %}&encuadre={{ encuadre_id }}{% endif %}{% if cantidad_default and cantidad_default != 1 %}&cantidad={{ cantidad_default }}{% endif %}"
                             class="block rounded-xl border px-4 py-3 text-sm hover:bg-slate-50 {% if producto_seleccionado and producto.pk == producto_seleccionado.pk %}border-emerald-300 bg-emerald-50{% else %}border-slate-200 hover:border-slate-300{% endif %}">
                             <div class="font-medium">{{ producto.codigo|default:producto.cod_proscai|default:"Producto" }}</div>
                             <div class="mt-1 text-slate-500">{{ producto.nombre }}</div>
@@ -112,8 +113,28 @@
                             </div>
                         </div>
 
+                        <div class="mt-6 grid gap-4 sm:grid-cols-[220px,1fr] sm:items-end">
+                            <div>
+                                <label class="mb-1 block text-sm font-medium">Cantidad de etiquetas</label>
+                                <input type="number" id="cantidad-input" min="1" max="1000" step="1" value="{{ cantidad_default|default:1 }}"
+                                    class="w-full rounded-xl border border-slate-300 px-3 py-2.5 text-right text-sm tabular-nums">
+                                <p class="mt-1 text-xs text-slate-500">Serie desde 0001 hasta 000N. EPC único por etiqueta.</p>
+                            </div>
+                            <div class="text-sm text-slate-600">
+                                {% if variante_seleccionada %}
+                                SKU seleccionado: <span class="font-medium text-slate-900">{{ variante_seleccionada.sku }}</span> ({{ variante_seleccionada.producto.nombre }} · {{ variante_seleccionada.color.nombre }} / {{ variante_seleccionada.talla.nombre }})
+                                {% elif producto_seleccionado %}
+                                Producto base: <span class="font-medium text-slate-900">{{ producto_seleccionado.nombre }}</span>
+                                ({{ producto_seleccionado.codigo|default:producto_seleccionado.cod_proscai }})
+                                {% endif %}
+                            </div>
+                        </div>
+
                         <div class="mt-6">
-                            <label class="mb-1 block text-sm font-medium">ZPL generado</label>
+                            <div class="mb-2 flex items-center justify-between">
+                                <label class="block text-sm font-medium">ZPL generado (usará EPCs desde la DB al imprimir)</label>
+                                <span id="guardado-folio" class="hidden rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700 border border-indigo-200"></span>
+                            </div>
                             <textarea id="zpl-output" readonly rows="13"
                                 class="w-full rounded-xl border border-slate-300 bg-slate-50 px-4 py-3 font-mono text-xs text-slate-700">{{ zpl_preview }}</textarea>
                         </div>
@@ -123,7 +144,7 @@
                         <div class="rounded-2xl border border-indigo-200 bg-indigo-50 p-5">
                             <h3 class="text-sm font-semibold uppercase tracking-wide text-indigo-700">Impresión Zebra</h3>
                             <p class="mt-2 text-sm text-indigo-700">
-                                Esta pantalla intenta usar Zebra Browser Print local. Si el puente no está disponible, aún tendrás el ZPL para validación.
+                                Esta pantalla usa Zebra Browser Print local. Antes de imprimir se registra la impresión en DB y se devuelve el ZPL por cada EPC.
                             </p>
 
                             <div class="mt-4 space-y-3">
@@ -141,8 +162,8 @@
                                 </div>
 
                                 <button type="button" id="print-button"
-                                    class="w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-medium text-white hover:bg-indigo-700">
-                                    Imprimir etiqueta
+                                    class="w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed">
+                                    Guardar e imprimir etiqueta(s) RFID
                                 </button>
 
                                 <button type="button" id="copy-zpl-button"
@@ -187,6 +208,15 @@
             const printButton = document.getElementById("print-button");
             const copyButton = document.getElementById("copy-zpl-button");
             const zplOutput = document.getElementById("zpl-output");
+            const cantidadInput = document.getElementById("cantidad-input");
+            const folioEl = document.getElementById("guardado-folio");
+            const csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).content || (
+                ((document.cookie || "").match(/csrftoken=([^;]+)/) || [])[1] || ""
+            );
+
+            const SKU_URL = "{% url 'qa_guardar_impresion_sku' %}";
+            const VARIANTE_ID = {% if variante_seleccionada %}{{ variante_seleccionada.pk }}{% else %}null{% endif %};
+            const PRODUCTO_ID = {% if producto_seleccionado %}{{ producto_seleccionado.pk }}{% else %}null{% endif %};
 
             if (!statusEl || !deviceSelect || !printButton || !copyButton || !zplOutput) {
                 return;
@@ -223,34 +253,23 @@
             }
 
             function addDevice(device) {
-                if (!device) {
-                    return;
-                }
+                if (!device) return;
                 const exists = devices.some(item => (item.uid || item.name) === (device.uid || device.name));
-                if (!exists) {
-                    devices.push(device);
-                }
+                if (!exists) devices.push(device);
             }
 
             function browserPrintError(error) {
                 let detail = "";
-                if (typeof error === "string") {
-                    detail = error;
-                } else if (error && typeof error === "object") {
-                    try {
-                        detail = JSON.stringify(error);
-                    } catch (e) {
-                        detail = String(error);
-                    }
+                if (typeof error === "string") detail = error;
+                else if (error && typeof error === "object") {
+                    try { detail = JSON.stringify(error); } catch (e) { detail = String(error); }
                 }
                 const origin = window.location.origin;
                 const message = detail
                     ? "Browser Print no respondió correctamente. Detalle: " + detail + ". Origen actual: " + origin
                     : "Browser Print no está disponible en este equipo o navegador. Origen actual: " + origin;
                 setStatus(message, "error");
-                if (window.console) {
-                    console.error(error);
-                }
+                if (window.console) console.error(error);
             }
 
             function initBrowserPrint() {
@@ -280,6 +299,46 @@
                 }, browserPrintError);
             }
 
+            function cantidad() {
+                const q = parseInt((cantidadInput && cantidadInput.value) || "1", 10);
+                return isNaN(q) ? 1 : Math.max(1, q);
+            }
+
+            async function guardarImpresion() {
+                const printer = selectedDevice || null;
+                const body = {
+                    variante_id: VARIANTE_ID,
+                    producto_id: PRODUCTO_ID,
+                    cantidad: cantidad(),
+                    printer_name: printer ? (printer.name || printer.uid || null) : null,
+                    printer_address: printer ? (printer.connection || printer.address || printer.uid || null) : null,
+                };
+                const resp = await fetch(SKU_URL, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRFToken": csrfToken || "",
+                    },
+                    body: JSON.stringify(body),
+                    credentials: "same-origin",
+                });
+                let data = {};
+                try { data = await resp.json(); } catch (e) {}
+                if (!resp.ok || !data.ok) {
+                    const err = (data && data.error) || ("Error HTTP " + resp.status);
+                    const pretty = typeof err === "string" ? err : JSON.stringify(err);
+                    throw new Error("No se pudo registrar la impresión. " + pretty);
+                }
+                return data.impresion;
+            }
+
+            function updateFolio(impresion) {
+                if (!folioEl || !impresion) return;
+                const folio = impresion.folio || ("LAB-" + (impresion.id || ""));
+                folioEl.textContent = "Registro: " + folio + " · " + (impresion.cantidad || 0) + " etiqueta(s) · " + (impresion.estado ? impresion.estado : impresion.status || "");
+                folioEl.classList.remove("hidden");
+            }
+
             deviceSelect.addEventListener("change", function () {
                 selectedDevice = devices.find(device => (device.uid || device.name) === this.value) || devices[0] || null;
                 if (selectedDevice) {
@@ -287,49 +346,82 @@
                 }
             });
 
-            printButton.addEventListener("click", function () {
-                if (!selectedDevice) {
-                    setStatus("Primero necesitas una impresora detectada por Browser Print.", "error");
+            printButton.addEventListener("click", async function () {
+                if (!VARIANTE_ID && !PRODUCTO_ID) {
+                    setStatus("Primero selecciona un SKU o producto base desde el buscador.", "error");
                     return;
                 }
-                selectedDevice.send(zplOutput.value, function () {
-                    setStatus("Etiqueta enviada a la impresora correctamente.", "ok");
-                }, function (error) {
-                    setStatus("No se pudo imprimir. Revisa Browser Print y la impresora Zebra.", "error");
-                    if (window.console) {
-                        console.error(error);
+                printButton.disabled = true;
+                setStatus("Registrando impresión en base de datos...", "info");
+                try {
+                    const impresion = await guardarImpresion();
+                    updateFolio(impresion);
+                    const zplCompleto = (impresion && impresion.zpl_completo) || "";
+                    if (zplOutput) {
+                        zplOutput.value = zplCompleto;
                     }
-                });
+
+                    if (!selectedDevice) {
+                        setStatus("Impresión registrada. Sin impresora Browser Print, solo se guardó el registro.", "ok");
+                        return;
+                    }
+                    setStatus("Enviando a la impresora " + (selectedDevice.name || selectedDevice.uid) + "...", "info");
+                    selectedDevice.send(zplCompleto || "", function () {
+                        setStatus("OK. Registro guardado y enviado a impresora: " + (impresion.folio || ("LAB-" + (impresion.id || ""))), "ok");
+                    }, function (error) {
+                        setStatus("Registro guardado, pero no se pudo imprimir en la impresora. Revisa Browser Print.", "error");
+                        if (window.console) console.error(error);
+                    });
+                } catch (e) {
+                    setStatus(String(e.message || e), "error");
+                } finally {
+                    printButton.disabled = false;
+                }
             });
 
             copyButton.addEventListener("click", function () {
-                if (navigator.clipboard && window.isSecureContext) {
-                    navigator.clipboard.writeText(zplOutput.value).then(function () {
-                        setStatus("ZPL copiado al portapapeles.", "ok");
-                    }).catch(function () {
-                        setStatus("No se pudo copiar el ZPL en este navegador.", "error");
-                    });
+                const zpl = (zplOutput && zplOutput.value) || "";
+                if (!zpl) {
+                    setStatus("Aún no hay ZPL guardado. Usa 'Guardar e imprimir' para generarlo.", "error");
                     return;
                 }
-
-                zplOutput.removeAttribute("readonly");
-                zplOutput.select();
-                zplOutput.setSelectionRange(0, zplOutput.value.length);
+                const okHandler = function () { setStatus("ZPL copiado al portapapeles.", "ok"); };
+                const errHandler = function () { setStatus("No se pudo copiar el ZPL en este navegador.", "error"); };
+                if (navigator.clipboard && window.isSecureContext) {
+                    navigator.clipboard.writeText(zpl).then(okHandler).catch(errHandler);
+                    return;
+                }
+                const ta = document.createElement("textarea");
+                ta.value = zpl;
+                ta.style.position = "fixed";
+                ta.style.left = "-9999px";
+                document.body.appendChild(ta);
+                ta.select();
                 try {
                     document.execCommand("copy");
-                    setStatus("ZPL copiado al portapapeles.", "ok");
-                } catch (error) {
-                    setStatus("No se pudo copiar el ZPL en este navegador.", "error");
-                    if (window.console) {
-                        console.error(error);
-                    }
+                    okHandler();
+                } catch (e) {
+                    errHandler();
                 } finally {
-                    zplOutput.setAttribute("readonly", "readonly");
+                    document.body.removeChild(ta);
                 }
             });
 
             initBrowserPrint();
         })();
     </script>
+    {% if request and request.COOKIES and not request.META.HTTP_X_CSRFTOKEN %}
+    <script>
+        (function () {
+            var meta = document.createElement("meta");
+            meta.name = "csrf-token";
+            var match = (document.cookie || "").match(/csrftoken=([^;]+)/);
+            if (match && match[1]) {
+                meta.content = decodeURIComponent(match[1]);
+                document.head.appendChild(meta);
+            }
+        })();
+    </script>
+    {% endif %}
 </body>
 </html>

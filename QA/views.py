@@ -25,7 +25,13 @@ from produccion.models import (
     OrdenProduccion,
     OrdenProduccionDetalle,
 )
-from wms.models import EtiquetaRFIDDetalle, RfidScan
+from rest_framework.exceptions import ValidationError as DRFValidationError
+from wms.api.serializers import (
+    EtiquetaRFIDCreateSerializer,
+    EtiquetaRFIDSerializer,
+)
+from wms.models import EtiquetaRFIDDetalle, EtiquetaRFIDImpresion, RfidScan
+from wms.services.rfid_label_service import RFIDLabelService
 
 rfid_scanner_logger = logging.getLogger(__name__)
 
@@ -525,6 +531,168 @@ def qa_browserprint_asset(request, filename):
     return FileResponse(asset_path.open("rb"), content_type="application/javascript; charset=utf-8")
 
 
+def _qa_rfid_success_payload(impresion):
+    data = EtiquetaRFIDSerializer(impresion).data
+    zpl_individual = []
+    detalles = list(
+        EtiquetaRFIDDetalle.objects.filter(impresion=impresion).order_by("id")
+    )
+    if impresion.rfid_mode and detalles:
+        for d in detalles:
+            zpl_individual.append(
+                RFIDLabelService._build_zpl_rfid(
+                    d.epc,
+                    variante=impresion.producto_variante,
+                    producto=impresion.producto,
+                    barcode_value=d.barcode_value,
+                )
+            )
+    else:
+        preview = RFIDLabelService._build_label_preview(
+            variante=impresion.producto_variante, producto=impresion.producto
+        )
+        zpl_normal = RFIDLabelService._build_zpl_normal(
+            variante=impresion.producto_variante,
+            producto=impresion.producto,
+            barcode_value=preview["barcode_value"] if preview else "",
+        )
+        zpl_individual = [zpl_normal] * max(1, impresion.cantidad)
+
+    data["zpl_individual"] = zpl_individual
+    data["zpl_completo"] = "\n".join(zpl_individual)
+    etiquetas = []
+    for d in detalles:
+        etiquetas.append(
+            {
+                "id": d.id,
+                "epc": d.epc,
+                "barcode_value": d.barcode_value,
+                "serial": d.serial,
+                "estado": d.estado,
+            }
+        )
+    if not etiquetas and impresion.cantidad:
+        for i in range(1, impresion.cantidad + 1):
+            etiquetas.append(
+                {
+                    "id": None,
+                    "epc": None,
+                    "barcode_value": (
+                        RFIDLabelService._build_label_preview(
+                            variante=impresion.producto_variante,
+                            producto=impresion.producto,
+                        ) or {}
+                    ).get("barcode_value"),
+                    "serial": f"{i:04d}",
+                    "estado": EtiquetaRFIDDetalle.Estado.PENDIENTE,
+                }
+            )
+    data["etiquetas"] = etiquetas
+    return data
+
+
+def _qa_rfid_guardar_impresion(request, variante_id, producto_id, cantidad, printer_name, printer_address):
+    """Guarda una impresión y devuelve (response_json, status_code)."""
+    if request.method != "POST":
+        return {"ok": False, "error": "Método no permitido."}, 405
+
+    cantidad = max(1, int(cantidad or 1))
+    payload = {
+        "producto_variante": int(variante_id) if variante_id else None,
+        "producto": int(producto_id) if producto_id else None,
+        "cantidad": cantidad,
+        "rfid_mode": True,
+        "printer_name": printer_name or None,
+        "printer_address": printer_address or None,
+        "status": EtiquetaRFIDImpresion.Estatus.EXITO,
+    }
+    try:
+        serializer = EtiquetaRFIDCreateSerializer(data=payload)
+        serializer.is_valid(raise_exception=True)
+        impresion = RFIDLabelService.store_impresion(serializer.validated_data, request.user)
+    except DRFValidationError as exc:
+        return {"ok": False, "error": exc.detail if hasattr(exc, "detail") else str(exc)}, 400
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}, 400
+
+    return {
+        "ok": True,
+        "impresion": _qa_rfid_success_payload(impresion),
+    }, 201
+
+
+@login_required
+def qa_guardar_impresion_sku(request):
+    """POST {variante_id, producto_id, cantidad, printer_name, printer_address}"""
+    if request.content_type and "application/json" in request.content_type:
+        try:
+            body = json.loads(request.body.decode("utf-8") or "{}")
+        except Exception:
+            body = {}
+    else:
+        body = request.POST
+    variante_id = body.get("variante_id") or body.get("producto_variante")
+    producto_id = body.get("producto_id") or body.get("producto")
+    cantidad = body.get("cantidad", 1)
+    printer_name = body.get("printer_name")
+    printer_address = body.get("printer_address")
+    data, status = _qa_rfid_guardar_impresion(
+        request, variante_id, producto_id, cantidad, printer_name, printer_address
+    )
+    return JsonResponse(data, status=status)
+
+
+@login_required
+def qa_guardar_impresion_oc(request, detalle_id):
+    """POST {cantidad, printer_name, printer_address}"""
+    empresa = _empresa_qa(request)
+    if empresa is None:
+        return JsonResponse({"ok": False, "error": "Sin empresa."}, status=400)
+
+    detalle = get_object_or_404(
+        OrdenCompraDetalle.objects.select_related("producto", "orden_compra"),
+        pk=int(detalle_id),
+        orden_compra__empresa=empresa,
+        orden_compra__activo=True,
+    )
+    producto = detalle.producto
+    if request.content_type and "application/json" in request.content_type:
+        try:
+            body = json.loads(request.body.decode("utf-8") or "{}")
+        except Exception:
+            body = {}
+    else:
+        body = request.POST
+    cantidad_raw = body.get("cantidad")
+    if cantidad_raw is None or cantidad_raw == "":
+        cantidad_default = int(detalle.cantidad or detalle.piezas or 0)
+        cantidad_default = max(1, cantidad_default) if cantidad_default else 1
+    else:
+        cantidad_default = max(1, int(cantidad_raw or 1))
+    printer_name = body.get("printer_name")
+    printer_address = body.get("printer_address")
+
+    if not producto:
+        return JsonResponse(
+            {"ok": False, "error": "Este detalle de OC no tiene producto ligado."},
+            status=400,
+        )
+    variante = None
+    producto_id = producto.pk
+    data, status = _qa_rfid_guardar_impresion(
+        request,
+        variante.pk if variante else None,
+        producto_id,
+        cantidad_default,
+        printer_name,
+        printer_address,
+    )
+    if data.get("ok"):
+        data["detalle_id"] = detalle.pk
+        data["orden_compra_id"] = detalle.orden_compra_id
+    return JsonResponse(data, status=status)
+
+
 @login_required
 def imprimir_etiqueta_workspace(request):
     empresa = _empresa_qa(request)
@@ -536,6 +704,11 @@ def imprimir_etiqueta_workspace(request):
     encuadre_id = (request.GET.get("encuadre") or request.POST.get("encuadre") or "").strip()
     variante_id = request.GET.get("variante") or request.POST.get("variante_id")
     producto_id = request.GET.get("producto") or request.POST.get("producto_id")
+    cantidad_raw = request.GET.get("cantidad") or request.POST.get("cantidad") or "1"
+    try:
+        cantidad_default = max(1, int(cantidad_raw))
+    except Exception:
+        cantidad_default = 1
 
     variantes_qs = (
         ProductoVariante.objects.select_related("producto", "color", "talla")
@@ -602,6 +775,7 @@ def imprimir_etiqueta_workspace(request):
         "variante_seleccionada": variante_seleccionada,
         "producto_seleccionado": producto_seleccionado,
         "preview_data": preview_data,
+        "cantidad_default": cantidad_default,
         "zpl_preview": (
             _build_producto_label_zpl(variante_seleccionada)
             if variante_seleccionada

@@ -64,11 +64,14 @@
                             <div class="flex items-start justify-between gap-2">
                                 <div>
                                     <div class="text-sm font-semibold text-rose-900">
-                                        {% if selected_oc.folio %}{{ selected_oc.folio }}{% else %}OC-{{ selected_oc.id }}{% endif %}
-                                        <span class="ml-1 text-xs font-normal text-rose-700">#{{ selected_oc.id }}</span>
+                                        {% if selected_oc.folio %}{{ selected_oc.folio }}{% else %}OC-{{ selected_oc.id
+                                        }}{% endif %}
+                                        <span class="ml-1 text-xs font-normal text-rose-700">#{{ selected_oc.id
+                                            }}</span>
                                     </div>
                                     <div class="mt-0.5 text-xs text-rose-800">
-                                        {% if selected_oc.proveedor %}{{ selected_oc.proveedor.nombre }}{% else %}Sin proveedor{% endif %}
+                                        {% if selected_oc.proveedor %}{{ selected_oc.proveedor.nombre }}{% else %}Sin
+                                        proveedor{% endif %}
                                     </div>
                                 </div>
                                 <span
@@ -146,11 +149,13 @@
                                 <tbody class="divide-y divide-slate-100">
                                     {% if renglones %}
                                     {% for r in renglones %}
-                                    <tr data-zpl-row>
+                                    <tr data-zpl-row data-detalle-id="{{ r.detalle_id }}">
                                         <td class="px-3 py-3 align-top">
                                             <div class="font-medium text-slate-800">{{ r.nombre }}</div>
                                             <div class="mt-0.5 text-xs text-slate-500">Detalle #{{ r.detalle_id }} ·
                                                 Producto #{{ r.producto_id }}</div>
+                                            <div class="mt-1 text-[11px] font-medium uppercase tracking-wide text-indigo-600 hidden"
+                                                data-row-guardado></div>
                                         </td>
                                         <td class="px-3 py-3 align-top text-xs text-slate-600">
                                             {% if r.codigo %}<div>Cód: {{ r.codigo }}</div>{% endif %}
@@ -190,8 +195,9 @@
                             <h3 class="text-sm font-semibold uppercase tracking-wide text-indigo-700">Impresión Zebra
                             </h3>
                             <p class="mt-2 text-sm text-indigo-700">
-                                Requiere Zebra Browser Print corriendo localmente en este equipo. Las etiquetas se
-                                envían directo a la impresora seleccionada.
+                                Requiere Zebra Browser Print corriendo localmente en este equipo. Antes de
+                                imprimir, cada renglón se registra en la base de datos (un registro de impresión
+                                por producto) con sus EPCs únicos y luego se envía el ZPL generado.
                             </p>
 
                             <div class="mt-4 space-y-3">
@@ -217,13 +223,14 @@
                                     </div>
                                     <div>
                                         <div class="text-xs text-indigo-800 font-medium mb-1">Renglones</div>
-                                        <div class="text-xl font-semibold text-indigo-900 tabular-nums">{{ renglones|length }}</div>
+                                        <div class="text-xl font-semibold text-indigo-900 tabular-nums">{{
+                                            renglones|length }}</div>
                                     </div>
                                 </div>
 
                                 <button type="button" id="print-button"
-                                    class="w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-medium text-white hover:bg-indigo-700">
-                                    Imprimir etiquetas RFID
+                                    class="w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed">
+                                    Guardar y imprimir etiquetas RFID
                                 </button>
 
                                 <button type="button" id="copy-zpl-button"
@@ -261,12 +268,18 @@
             const copyButton = document.getElementById("copy-zpl-button");
             const totalEl = document.getElementById("total-etiquetas");
 
+            const csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).content || (
+                ((document.cookie || "").match(/csrftoken=([^;]+)/) || [])[1] || ""
+            );
+            const DETALLE_GUARDAR_TEMPLATE = "{% url 'qa_guardar_impresion_oc' detalle_id=0 %}".replace("/0/", "/{{detalle_id}}/");
+
             if (!statusEl || !deviceSelect || !printButton || !copyButton || !totalEl) {
                 return;
             }
 
             let selectedDevice = null;
             const devices = [];
+            let ultimoZplCompleto = "";
 
             function setStatus(message, tone) {
                 const tones = {
@@ -348,13 +361,14 @@
                 const items = [];
                 let total = 0;
                 rows.forEach(function (row) {
+                    const detalleId = row.getAttribute("data-detalle-id");
                     const cantidadInput = row.querySelector("[data-cantidad]");
                     const zplTextarea = row.querySelector("[data-zpl]");
                     const qty = parseInt((cantidadInput && cantidadInput.value) || "0", 10);
                     const zpl = (zplTextarea && zplTextarea.value) || "";
                     const cantidad = isNaN(qty) ? 0 : Math.max(0, qty);
-                    if (cantidad > 0 && zpl) {
-                        items.push({ zpl: zpl, cantidad: cantidad });
+                    if (cantidad > 0) {
+                        items.push({ detalleId: detalleId, zpl: zpl, cantidad: cantidad, row: row });
                         total += cantidad;
                     }
                 });
@@ -370,6 +384,67 @@
                     }
                 });
                 return { total: bundle.total, zpl: parts.join("\n") };
+            }
+
+            async function guardarRenglon(item) {
+                const printer = selectedDevice || null;
+                const url = DETALLE_GUARDAR_TEMPLATE.replace("{{detalle_id}}", String(item.detalleId));
+                const body = {
+                    cantidad: item.cantidad,
+                    printer_name: printer ? (printer.name || printer.uid || null) : null,
+                    printer_address: printer ? (printer.connection || printer.address || printer.uid || null) : null,
+                };
+                const resp = await fetch(url, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRFToken": csrfToken || "",
+                    },
+                    credentials: "same-origin",
+                    body: JSON.stringify(body),
+                });
+                let data = {};
+                try { data = await resp.json(); } catch (e) {}
+                if (!resp.ok || !data.ok) {
+                    const err = (data && data.error) || ("Error HTTP " + resp.status);
+                    const pretty = typeof err === "string" ? err : JSON.stringify(err);
+                    throw new Error("Detalle OC #" + item.detalleId + ": " + pretty);
+                }
+                return data.impresion;
+            }
+
+            function marcarRowGuardado(row, impresion) {
+                if (!row || !impresion) return;
+                const badge = row.querySelector("[data-row-guardado]");
+                if (!badge) return;
+                const folio = impresion.folio || ("LAB-" + (impresion.id || ""));
+                badge.textContent = "Registro: " + folio + " · " + (impresion.cantidad || 0) + " etiqueta(s)";
+                badge.classList.remove("hidden");
+            }
+
+            async function guardarTodosLosRenglones(bundle) {
+                const zplPieces = [];
+                const folios = [];
+                const items = bundle.items;
+                let totalEtiquetas = 0;
+                let savedCount = 0;
+                for (const item of items) {
+                    savedCount += 1;
+                    setStatus("Guardando (" + savedCount + "/" + items.length + ") renglón #" + item.detalleId + " ...", "info");
+                    const impresion = await guardarRenglon(item);
+                    marcarRowGuardado(item.row, impresion);
+                    folios.push(impresion.folio || ("LAB-" + (impresion.id || "")));
+                    totalEtiquetas += impresion.cantidad || item.cantidad;
+                    const zplRenglon = (impresion.zpl_completo || "");
+                    if (zplRenglon) {
+                        zplPieces.push(zplRenglon);
+                        const ta = item.row.querySelector("[data-zpl]");
+                        if (ta) ta.value = zplRenglon;
+                    } else {
+                        for (let i = 0; i < item.cantidad; i++) zplPieces.push(item.zpl || "");
+                    }
+                }
+                return { zpl: zplPieces.join("\n"), total: totalEtiquetas, folios: folios };
             }
 
             function recalcularTotal() {
@@ -388,42 +463,61 @@
                 if (e.target && e.target.hasAttribute("data-cantidad")) recalcularTotal();
             });
 
-            printButton.addEventListener("click", function () {
+            printButton.addEventListener("click", async function () {
                 if (!selectedDevice) {
-                    setStatus("Primero necesitas una impresora detectada por Browser Print.", "error");
-                    return;
+                    setStatus("Primero necesitas una impresora detectada por Browser Print. Si no la tienes, la impresión se guarda en DB sin enviarse a impresora.", "error");
                 }
-                const bundle = buildZplBundle();
+                const bundle = getRenglones();
                 if (bundle.total <= 0) {
                     setStatus("No hay etiquetas que imprimir. Revisa las cantidades.", "error");
                     return;
                 }
-                selectedDevice.send(bundle.zpl, function () {
-                    setStatus("Se enviaron " + bundle.total + " etiqueta(s) RFID a la impresora correctamente.", "ok");
-                }, function (error) {
-                    setStatus("No se pudo imprimir. Revisa Browser Print y la impresora Zebra.", "error");
-                    if (window.console) console.error(error);
-                });
+                printButton.disabled = true;
+                try {
+                    setStatus("Registrando " + bundle.items.length + " renglón(es) en la base de datos...", "info");
+                    const guardado = await guardarTodosLosRenglones(bundle);
+                    ultimoZplCompleto = guardado.zpl || "";
+                    if (!selectedDevice) {
+                        setStatus("OK. Registrados " + guardado.folios.length + " impresión(es) en DB. Sin impresora Browser Print no se envía a la impresora. Folios: " + guardado.folios.join(", "), "ok");
+                        return;
+                    }
+                    setStatus("Enviando " + guardado.total + " etiqueta(s) a " + (selectedDevice.name || selectedDevice.uid) + "...", "info");
+                    const folioTexto = guardado.folios.length <= 3
+                        ? guardado.folios.join(", ")
+                        : guardado.folios.slice(0, 3).join(", ") + " + " + (guardado.folios.length - 3) + " más";
+                    selectedDevice.send(guardado.zpl || "", function () {
+                        setStatus("OK. Registrados en DB y enviados a impresora " + guardado.total + " etiqueta(s). Folios: " + folioTexto, "ok");
+                    }, function (error) {
+                        setStatus("OK. Registro guardado en DB, pero no se pudo imprimir en la impresora. Revisa Browser Print.", "error");
+                        if (window.console) console.error(error);
+                    });
+                } catch (e) {
+                    setStatus(String(e.message || e), "error");
+                } finally {
+                    printButton.disabled = false;
+                }
             });
 
             copyButton.addEventListener("click", function () {
                 const bundle = buildZplBundle();
-                if (!bundle.zpl) {
-                    setStatus("No hay ZPL para copiar. Revisa las cantidades.", "error");
+                const zpl = ultimoZplCompleto || bundle.zpl || "";
+                if (!zpl) {
+                    setStatus("No hay ZPL para copiar. Guarda primero o revisa las cantidades.", "error");
                     return;
                 }
+                const etiquetas = ultimoZplCompleto ? bundle.total : bundle.total;
                 const okHandler = function () {
-                    setStatus("ZPL combinado copiado al portapapeles (" + bundle.total + " etiquetas).", "ok");
+                    setStatus("ZPL combinado copiado al portapapeles (" + etiquetas + " etiquetas).", "ok");
                 };
                 const errHandler = function () {
                     setStatus("No se pudo copiar el ZPL en este navegador.", "error");
                 };
                 if (navigator.clipboard && window.isSecureContext) {
-                    navigator.clipboard.writeText(bundle.zpl).then(okHandler).catch(errHandler);
+                    navigator.clipboard.writeText(zpl).then(okHandler).catch(errHandler);
                     return;
                 }
                 const ta = document.createElement("textarea");
-                ta.value = bundle.zpl;
+                ta.value = zpl;
                 ta.style.position = "fixed";
                 ta.style.left = "-9999px";
                 document.body.appendChild(ta);
@@ -442,6 +536,19 @@
             initBrowserPrint();
         })();
     </script>
+    {% if request and request.COOKIES %}
+    <script>
+        (function () {
+            var meta = document.createElement("meta");
+            meta.name = "csrf-token";
+            var match = (document.cookie || "").match(/csrftoken=([^;]+)/);
+            if (match && match[1]) {
+                meta.content = decodeURIComponent(match[1]);
+                document.head.appendChild(meta);
+            }
+        })();
+    </script>
+    {% endif %}
 </body>
 
 </html>
