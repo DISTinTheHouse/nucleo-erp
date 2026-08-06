@@ -1,7 +1,7 @@
 asgiref==3.11.1
 attrs==25.4.0
 cffi==2.0.0
-cryptography==49.0.0
+cryptography==50.0.0
 dj-database-url==2.1.0
 Django==6.0.6
 django-allauth==65.16.0
