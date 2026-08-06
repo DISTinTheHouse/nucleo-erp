@@ -62,7 +62,8 @@ class AlmacenViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = self.queryset
+        # Listado más reciente primero; el desempate usa la PK real (``id_almacen``).
+        qs = self.queryset.order_by(models.F('created_at').desc(nulls_last=True), '-id_almacen')
         if user.is_superuser:
             return qs
         # Filtrar por empresas y sucursales permitidas
@@ -74,7 +75,7 @@ class AlmacenViewSet(viewsets.ModelViewSet):
         return qs.filter(
             models.Q(empresa_id__in=empresa_ids) &
             models.Q(sucursal_id__in=sucursal_ids)
-        ).distinct()
+        ).distinct().order_by(models.F('created_at').desc(nulls_last=True), '-id_almacen')
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -95,7 +96,8 @@ class UbicacionViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = self.queryset
+        # Listado más reciente primero; el desempate usa la PK real (``id_ubicacion``).
+        qs = self.queryset.order_by(models.F('created_at').desc(nulls_last=True), '-id_ubicacion')
         if user.is_superuser:
             return qs
         empresa_ids = []
@@ -106,7 +108,7 @@ class UbicacionViewSet(viewsets.ModelViewSet):
         return qs.filter(
             models.Q(almacen__empresa_id__in=empresa_ids) &
             models.Q(almacen__sucursal_id__in=sucursal_ids)
-        ).distinct()
+        ).distinct().order_by(models.F('created_at').desc(nulls_last=True), '-id_ubicacion')
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -192,7 +194,13 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
             except Exception:
                 limit = 200
 
-        qs = qs.order_by("-id")
+        # Listado más reciente primero por la fecha real de la existencia;
+        # ``-id`` como desempate estable. El recorte por ``limit`` va después,
+        # así que se queda con las existencias movidas más recientemente.
+        # ``nulls_last``: ``fecha_actualizacion`` se agregó como NULL-able
+        # (migración 0011) y las filas previas siguen en NULL; en PostgreSQL un
+        # DESC pone los NULL primero y se llevarían el ``limit`` entero.
+        qs = qs.order_by(models.F("fecha_actualizacion").desc(nulls_last=True), "-id")
         if limit is None:
             return qs
         limit = max(1, min(limit, 2000))

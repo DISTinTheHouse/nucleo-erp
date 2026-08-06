@@ -112,6 +112,8 @@ class FacturaViewSet(viewsets.ModelViewSet):
         queryset = (
             Factura.objects.filter(empresa=empresa)
             .select_related('pedido', 'cliente', 'moneda')
+            # Listado más reciente primero; ``-id`` como desempate estable.
+            .order_by('-fecha_emision', '-id')
         )
         return queryset
 

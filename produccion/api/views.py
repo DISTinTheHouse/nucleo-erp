@@ -172,7 +172,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         user = self.request.user
         empresa = getattr(user, 'empresa', None)
         if empresa is None: return OrdenProduccion.objects.none()
-        queryset = OrdenProduccion.objects.filter(empresa=empresa)
+        # Listado más reciente primero; el desempate usa la PK real del modelo
+        # (``op_id``, no ``id``).
+        queryset = OrdenProduccion.objects.filter(empresa=empresa).order_by("-fecha_inicio", "-op_id")
         return queryset
     
     def save_op(self, request):
@@ -311,6 +313,8 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                     ),
                 )
             )
+            # Listado más reciente primero; ``-id`` como desempate estable.
+            .order_by("-fecha_inicio", "-id")
         )
 
         if getattr(user, "is_superuser", False):
@@ -492,6 +496,8 @@ class OrdenReflejanteViewSet(
                     ),
                 )
             )
+            # Listado más reciente primero; ``-id`` como desempate estable.
+            .order_by("-fecha_inicio", "-id")
         )
 
         if getattr(user, "is_superuser", False):
@@ -645,6 +651,8 @@ class OrdenesCorteMangaViewSet(
                     ),
                 )
             )
+            # Listado más reciente primero; ``-id`` como desempate estable.
+            .order_by("-fecha_inicio", "-id")
         )
 
         if getattr(user, "is_superuser", False):

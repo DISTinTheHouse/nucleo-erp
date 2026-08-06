@@ -72,7 +72,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 'ordencompradetalle_set',
                 Prefetch("recepcion_set", queryset=recepciones_qs),
             )
-        return qs
+        # Listado más reciente primero; ``-id`` como desempate estable. Es el
+        # orden de las órdenes de compra en sí: el ``order_by`` de arriba es del
+        # Prefetch de recepciones anidadas y solo aplica en ``retrieve``.
+        return qs.order_by("-fecha_oc", "-id")
 
     def get_serializer_class(self):
         if self.action == 'retrieve':

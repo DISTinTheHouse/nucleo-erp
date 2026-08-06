@@ -93,7 +93,9 @@ class ProveedorViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset()
+        # Listado más reciente primero por fecha de alta del proveedor;
+        # ``-id`` como desempate estable.
+        qs = super().get_queryset().order_by("-fecha_alta", "-id")
         if getattr(user, "is_superuser", False):
             return qs
         empresa = getattr(user, "empresa", None)
