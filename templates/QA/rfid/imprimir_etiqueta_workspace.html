@@ -1,6 +1,7 @@
 {% load static %}
 <!DOCTYPE html>
 <html lang="es">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,6 +10,7 @@
     <script src="{% url 'qa_browserprint_asset' 'BrowserPrint-3.1.250.min.js' %}"></script>
     <script src="{% url 'qa_browserprint_asset' 'BrowserPrint-Zebra-1.1.250.min.js' %}"></script>
 </head>
+
 <body class="bg-slate-50 text-slate-900">
     <div class="mx-auto max-w-7xl px-6 py-10">
         <div class="mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -16,7 +18,8 @@
                 <a href="{% url 'index_QA' %}" class="text-sm text-slate-500 hover:text-slate-800">← Volver a QA</a>
                 <h1 class="mt-3 text-3xl font-semibold">Imprimir etiqueta QA</h1>
                 <p class="mt-2 max-w-3xl text-sm text-slate-600">
-                    Selecciona un SKU o un producto base, genera una etiqueta Zebra de prueba y vuelve al encuadre RFID para escanearla.
+                    Selecciona un SKU o un producto base, genera una etiqueta Zebra de prueba y vuelve al encuadre RFID
+                    para escanearla.
                     El registro de la impresión se guarda en la base de datos antes de enviarse a la impresora.
                 </p>
             </div>
@@ -31,7 +34,8 @@
         {% if messages %}
         <div class="mb-6 space-y-3">
             {% for message in messages %}
-            <div class="rounded-xl border px-4 py-3 text-sm {% if message.tags == 'error' %}border-red-200 bg-red-50 text-red-700{% elif message.tags == 'warning' %}border-amber-200 bg-amber-50 text-amber-700{% else %}border-emerald-200 bg-emerald-50 text-emerald-700{% endif %}">
+            <div
+                class="rounded-xl border px-4 py-3 text-sm {% if message.tags == 'error' %}border-red-200 bg-red-50 text-red-700{% elif message.tags == 'warning' %}border-amber-200 bg-amber-50 text-amber-700{% else %}border-emerald-200 bg-emerald-50 text-emerald-700{% endif %}">
                 {{ message }}
             </div>
             {% endfor %}
@@ -67,16 +71,19 @@
                         <a href="?variante={{ variante.pk }}{% if q %}&q={{ q|urlencode }}{% endif %}{% if encuadre_id %}&encuadre={{ encuadre_id }}{% endif %}{% if cantidad_default and cantidad_default != 1 %}&cantidad={{ cantidad_default }}{% endif %}"
                             class="block rounded-xl border px-4 py-3 text-sm hover:bg-slate-50 {% if variante_seleccionada and variante.pk == variante_seleccionada.pk %}border-indigo-300 bg-indigo-50{% else %}border-slate-200 hover:border-slate-300{% endif %}">
                             <div class="font-medium">{{ variante.sku }}</div>
-                            <div class="mt-1 text-slate-500">{{ variante.producto.nombre }} · {{ variante.color.nombre }} · {{ variante.talla.nombre }}</div>
+                            <div class="mt-1 text-slate-500">{{ variante.producto.nombre }} · {{ variante.color.nombre
+                                }} · {{ variante.talla.nombre }}</div>
                         </a>
                         {% endfor %}
 
                         {% for producto in productos %}
                         <a href="?producto={{ producto.pk }}{% if q %}&q={{ q|urlencode }}{% endif %}{% if encuadre_id %}&encuadre={{ encuadre_id }}{% endif %}{% if cantidad_default and cantidad_default != 1 %}&cantidad={{ cantidad_default }}{% endif %}"
                             class="block rounded-xl border px-4 py-3 text-sm hover:bg-slate-50 {% if producto_seleccionado and producto.pk == producto_seleccionado.pk %}border-emerald-300 bg-emerald-50{% else %}border-slate-200 hover:border-slate-300{% endif %}">
-                            <div class="font-medium">{{ producto.codigo|default:producto.cod_proscai|default:"Producto" }}</div>
+                            <div class="font-medium">{{ producto.codigo|default:producto.cod_proscai|default:"Producto"
+                                }}</div>
                             <div class="mt-1 text-slate-500">{{ producto.nombre }}</div>
-                            <div class="mt-2 text-xs font-medium uppercase tracking-wide text-emerald-700">Producto sin variantes</div>
+                            <div class="mt-2 text-xs font-medium uppercase tracking-wide text-emerald-700">Producto sin
+                                variantes</div>
                         </a>
                         {% endfor %}
 
@@ -97,8 +104,10 @@
                         <p class="mt-1 text-sm text-slate-500">{{ preview_data.header }}</p>
 
                         <div class="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-6">
-                            <div class="max-w-[420px] rounded-xl border-2 border-slate-900 bg-white p-5 text-slate-900 shadow-sm">
-                                <div class="text-xs font-semibold uppercase tracking-[0.25em] text-slate-500">QA RFID - Etiqueta prueba</div>
+                            <div
+                                class="max-w-[420px] rounded-xl border-2 border-slate-900 bg-white p-5 text-slate-900 shadow-sm">
+                                <div class="text-xs font-semibold uppercase tracking-[0.25em] text-slate-500">QA RFID -
+                                    Etiqueta prueba</div>
                                 <div class="mt-4 text-2xl font-semibold">{{ preview_data.title }}</div>
                                 <div class="mt-3 text-lg font-medium">{{ preview_data.primary_line }}</div>
                                 {% if preview_data.secondary_line %}
@@ -107,7 +116,8 @@
                                 {% if preview_data.meta_line %}
                                 <div class="mt-2 text-sm text-slate-500">{{ preview_data.meta_line }}</div>
                                 {% endif %}
-                                <div class="mt-6 rounded-lg border border-slate-300 px-3 py-4 text-center font-mono text-sm tracking-[0.18em]">
+                                <div
+                                    class="mt-6 rounded-lg border border-slate-300 px-3 py-4 text-center font-mono text-sm tracking-[0.18em]">
                                     ||| {{ preview_data.barcode_value }} |||
                                 </div>
                             </div>
@@ -116,15 +126,20 @@
                         <div class="mt-6 grid gap-4 sm:grid-cols-[220px,1fr] sm:items-end">
                             <div>
                                 <label class="mb-1 block text-sm font-medium">Cantidad de etiquetas</label>
-                                <input type="number" id="cantidad-input" min="1" max="1000" step="1" value="{{ cantidad_default|default:1 }}"
+                                <input type="number" id="cantidad-input" min="1" max="1000" step="1"
+                                    value="{{ cantidad_default|default:1 }}"
                                     class="w-full rounded-xl border border-slate-300 px-3 py-2.5 text-right text-sm tabular-nums">
-                                <p class="mt-1 text-xs text-slate-500">Serie desde 0001 hasta 000N. EPC único por etiqueta.</p>
+                                <p class="mt-1 text-xs text-slate-500">Serie desde 0001 hasta 000N. EPC único por
+                                    etiqueta.</p>
                             </div>
                             <div class="text-sm text-slate-600">
                                 {% if variante_seleccionada %}
-                                SKU seleccionado: <span class="font-medium text-slate-900">{{ variante_seleccionada.sku }}</span> ({{ variante_seleccionada.producto.nombre }} · {{ variante_seleccionada.color.nombre }} / {{ variante_seleccionada.talla.nombre }})
+                                SKU seleccionado: <span class="font-medium text-slate-900">{{ variante_seleccionada.sku
+                                    }}</span> ({{ variante_seleccionada.producto.nombre }} · {{
+                                variante_seleccionada.color.nombre }} / {{ variante_seleccionada.talla.nombre }})
                                 {% elif producto_seleccionado %}
-                                Producto base: <span class="font-medium text-slate-900">{{ producto_seleccionado.nombre }}</span>
+                                Producto base: <span class="font-medium text-slate-900">{{ producto_seleccionado.nombre
+                                    }}</span>
                                 ({{ producto_seleccionado.codigo|default:producto_seleccionado.cod_proscai }})
                                 {% endif %}
                             </div>
@@ -132,8 +147,10 @@
 
                         <div class="mt-6">
                             <div class="mb-2 flex items-center justify-between">
-                                <label class="block text-sm font-medium">ZPL generado (usará EPCs desde la DB al imprimir)</label>
-                                <span id="guardado-folio" class="hidden rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700 border border-indigo-200"></span>
+                                <label class="block text-sm font-medium">ZPL generado (usará EPCs desde la DB al
+                                    imprimir)</label>
+                                <span id="guardado-folio"
+                                    class="hidden rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700 border border-indigo-200"></span>
                             </div>
                             <textarea id="zpl-output" readonly rows="13"
                                 class="w-full rounded-xl border border-slate-300 bg-slate-50 px-4 py-3 font-mono text-xs text-slate-700">{{ zpl_preview }}</textarea>
@@ -142,14 +159,17 @@
 
                     <div class="space-y-6">
                         <div class="rounded-2xl border border-indigo-200 bg-indigo-50 p-5">
-                            <h3 class="text-sm font-semibold uppercase tracking-wide text-indigo-700">Impresión Zebra</h3>
+                            <h3 class="text-sm font-semibold uppercase tracking-wide text-indigo-700">Impresión Zebra
+                            </h3>
                             <p class="mt-2 text-sm text-indigo-700">
-                                Esta pantalla usa Zebra Browser Print local. Antes de imprimir se registra la impresión en DB y se devuelve el ZPL por cada EPC.
+                                Esta pantalla usa Zebra Browser Print local. Antes de imprimir se registra la impresión
+                                en DB y se devuelve el ZPL por cada EPC.
                             </p>
 
                             <div class="mt-4 space-y-3">
                                 <div>
-                                    <label class="mb-1 block text-sm font-medium text-indigo-800">Impresora detectada</label>
+                                    <label class="mb-1 block text-sm font-medium text-indigo-800">Impresora
+                                        detectada</label>
                                     <select id="selected-device"
                                         class="w-full rounded-xl border border-indigo-300 bg-white px-3 py-2.5 text-sm">
                                         <option value="">Buscando impresoras...</option>
@@ -175,7 +195,8 @@
 
                         {% if encuadre_id %}
                         <div class="rounded-2xl border border-emerald-200 bg-emerald-50 p-5">
-                            <h3 class="text-sm font-semibold uppercase tracking-wide text-emerald-700">Siguiente paso</h3>
+                            <h3 class="text-sm font-semibold uppercase tracking-wide text-emerald-700">Siguiente paso
+                            </h3>
                             <p class="mt-2 text-sm text-emerald-700">
                                 Después de imprimir la etiqueta, regresa al encuadre y escanéala desde el Zebra.
                             </p>
@@ -188,11 +209,13 @@
                     </div>
                 </div>
                 {% else %}
-                <div class="flex h-full min-h-[420px] items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50">
+                <div
+                    class="flex h-full min-h-[420px] items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50">
                     <div class="max-w-md text-center">
                         <h2 class="text-xl font-semibold">Selecciona un SKU o producto</h2>
                         <p class="mt-3 text-sm leading-6 text-slate-500">
-                            Busca una variante activa o un producto base, genera la etiqueta Zebra de prueba y luego vuelve al flujo RFID para escanearla.
+                            Busca una variante activa o un producto base, genera la etiqueta Zebra de prueba y luego
+                            vuelve al flujo RFID para escanearla.
                         </p>
                     </div>
                 </div>
@@ -215,200 +238,227 @@
             );
 
             const SKU_URL = "{% url 'qa_guardar_impresion_sku' %}";
-            const VARIANTE_ID = {% if variante_seleccionada %}{{ variante_seleccionada.pk }}{% else %}null{% endif %};
-            const PRODUCTO_ID = {% if producto_seleccionado %}{{ producto_seleccionado.pk }}{% else %}null{% endif %};
+            const VARIANTE_ID = {% if variante_seleccionada %}{ { variante_seleccionada.pk } } {% else %} null{% endif %};
+        const PRODUCTO_ID = {% if producto_seleccionado %}{ { producto_seleccionado.pk } } {% else %} null{% endif %};
 
-            if (!statusEl || !deviceSelect || !printButton || !copyButton || !zplOutput) {
+        if (!statusEl || !deviceSelect || !printButton || !copyButton || !zplOutput) {
+            return;
+        }
+
+        let selectedDevice = null;
+        const devices = [];
+
+        function setStatus(message, tone) {
+            const tones = {
+                error: "border-red-200 bg-red-50 text-red-700",
+                ok: "border-emerald-200 bg-emerald-50 text-emerald-700",
+                info: "border-slate-200 bg-white text-slate-600",
+            };
+            statusEl.className = "rounded-xl border px-4 py-3 text-sm " + (tones[tone] || tones.info);
+            statusEl.textContent = message;
+        }
+
+        function syncDeviceSelect() {
+            deviceSelect.innerHTML = "";
+            if (!devices.length) {
+                deviceSelect.innerHTML = '<option value="">Sin impresoras detectadas</option>';
+                return;
+            }
+            devices.forEach((device, index) => {
+                const option = document.createElement("option");
+                option.value = device.uid || ("idx-" + index);
+                option.textContent = device.name || device.uid || "Impresora Zebra";
+                deviceSelect.appendChild(option);
+            });
+            if (selectedDevice) {
+                deviceSelect.value = selectedDevice.uid || "idx-0";
+            }
+        }
+
+        function addDevice(device) {
+            if (!device) return;
+            const exists = devices.some(item => (item.uid || item.name) === (device.uid || device.name));
+            if (!exists) devices.push(device);
+        }
+
+        function browserPrintError(error) {
+            let detail = "";
+            if (typeof error === "string") detail = error;
+            else if (error && typeof error === "object") {
+                try { detail = JSON.stringify(error); } catch (e) { detail = String(error); }
+            }
+            const origin = window.location.origin;
+            const message = detail
+                ? "Browser Print no respondió correctamente. Detalle: " + detail + ". Origen actual: " + origin
+                : "Browser Print no está disponible en este equipo o navegador. Origen actual: " + origin;
+            setStatus(message, "error");
+            if (window.console) console.error(error);
+        }
+
+        function initBrowserPrint() {
+            if (typeof window.BrowserPrint === "undefined") {
+                browserPrintError("BrowserPrint no cargó.");
                 return;
             }
 
-            let selectedDevice = null;
-            const devices = [];
+            window.BrowserPrint.getDefaultDevice("printer", function (device) {
+                selectedDevice = device || null;
+                addDevice(device);
+                syncDeviceSelect();
+                setStatus(device ? "Impresora predeterminada detectada." : "No hay impresora predeterminada, buscando locales...", device ? "ok" : "info");
 
-            function setStatus(message, tone) {
-                const tones = {
-                    error: "border-red-200 bg-red-50 text-red-700",
-                    ok: "border-emerald-200 bg-emerald-50 text-emerald-700",
-                    info: "border-slate-200 bg-white text-slate-600",
-                };
-                statusEl.className = "rounded-xl border px-4 py-3 text-sm " + (tones[tone] || tones.info);
-                statusEl.textContent = message;
-            }
-
-            function syncDeviceSelect() {
-                deviceSelect.innerHTML = "";
-                if (!devices.length) {
-                    deviceSelect.innerHTML = '<option value="">Sin impresoras detectadas</option>';
-                    return;
-                }
-                devices.forEach((device, index) => {
-                    const option = document.createElement("option");
-                    option.value = device.uid || ("idx-" + index);
-                    option.textContent = device.name || device.uid || "Impresora Zebra";
-                    deviceSelect.appendChild(option);
-                });
-                if (selectedDevice) {
-                    deviceSelect.value = selectedDevice.uid || "idx-0";
-                }
-            }
-
-            function addDevice(device) {
-                if (!device) return;
-                const exists = devices.some(item => (item.uid || item.name) === (device.uid || device.name));
-                if (!exists) devices.push(device);
-            }
-
-            function browserPrintError(error) {
-                let detail = "";
-                if (typeof error === "string") detail = error;
-                else if (error && typeof error === "object") {
-                    try { detail = JSON.stringify(error); } catch (e) { detail = String(error); }
-                }
-                const origin = window.location.origin;
-                const message = detail
-                    ? "Browser Print no respondió correctamente. Detalle: " + detail + ". Origen actual: " + origin
-                    : "Browser Print no está disponible en este equipo o navegador. Origen actual: " + origin;
-                setStatus(message, "error");
-                if (window.console) console.error(error);
-            }
-
-            function initBrowserPrint() {
-                if (typeof window.BrowserPrint === "undefined") {
-                    browserPrintError("BrowserPrint no cargó.");
-                    return;
-                }
-
-                window.BrowserPrint.getDefaultDevice("printer", function (device) {
-                    selectedDevice = device || null;
-                    addDevice(device);
+                window.BrowserPrint.getLocalDevices(function (deviceList) {
+                    (deviceList || []).forEach(addDevice);
+                    if (!selectedDevice && devices.length) {
+                        selectedDevice = devices[0];
+                    }
                     syncDeviceSelect();
-                    setStatus(device ? "Impresora predeterminada detectada." : "No hay impresora predeterminada, buscando locales...", device ? "ok" : "info");
+                    if (selectedDevice) {
+                        setStatus("Browser Print listo para imprimir.", "ok");
+                    } else {
+                        setStatus("No se detectaron impresoras Zebra locales.", "error");
+                    }
+                }, browserPrintError, "printer");
+            }, browserPrintError);
+        }
 
-                    window.BrowserPrint.getLocalDevices(function (deviceList) {
-                        (deviceList || []).forEach(addDevice);
-                        if (!selectedDevice && devices.length) {
-                            selectedDevice = devices[0];
-                        }
-                        syncDeviceSelect();
-                        if (selectedDevice) {
-                            setStatus("Browser Print listo para imprimir.", "ok");
-                        } else {
-                            setStatus("No se detectaron impresoras Zebra locales.", "error");
-                        }
-                    }, browserPrintError, "printer");
-                }, browserPrintError);
-            }
+        function cantidad() {
+            const q = parseInt((cantidadInput && cantidadInput.value) || "1", 10);
+            return isNaN(q) ? 1 : Math.max(1, q);
+        }
 
-            function cantidad() {
-                const q = parseInt((cantidadInput && cantidadInput.value) || "1", 10);
-                return isNaN(q) ? 1 : Math.max(1, q);
-            }
-
-            async function guardarImpresion() {
-                const printer = selectedDevice || null;
-                const body = {
-                    variante_id: VARIANTE_ID,
-                    producto_id: PRODUCTO_ID,
-                    cantidad: cantidad(),
-                    printer_name: printer ? (printer.name || printer.uid || null) : null,
-                    printer_address: printer ? (printer.connection || printer.address || printer.uid || null) : null,
-                };
-                const resp = await fetch(SKU_URL, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "X-CSRFToken": csrfToken || "",
-                    },
-                    body: JSON.stringify(body),
-                    credentials: "same-origin",
-                });
-                let data = {};
-                try { data = await resp.json(); } catch (e) {}
-                if (!resp.ok || !data.ok) {
-                    const err = (data && data.error) || ("Error HTTP " + resp.status);
-                    const pretty = typeof err === "string" ? err : JSON.stringify(err);
-                    throw new Error("No se pudo registrar la impresión. " + pretty);
-                }
-                return data.impresion;
-            }
-
-            function updateFolio(impresion) {
-                if (!folioEl || !impresion) return;
-                const folio = impresion.folio || ("LAB-" + (impresion.id || ""));
-                folioEl.textContent = "Registro: " + folio + " · " + (impresion.cantidad || 0) + " etiqueta(s) · " + (impresion.estado ? impresion.estado : impresion.status || "");
-                folioEl.classList.remove("hidden");
-            }
-
-            deviceSelect.addEventListener("change", function () {
-                selectedDevice = devices.find(device => (device.uid || device.name) === this.value) || devices[0] || null;
-                if (selectedDevice) {
-                    setStatus("Impresora seleccionada: " + (selectedDevice.name || selectedDevice.uid), "ok");
-                }
+        async function guardarImpresion() {
+            const printer = selectedDevice || null;
+            const body = {
+                variante_id: VARIANTE_ID,
+                producto_id: PRODUCTO_ID,
+                cantidad: cantidad(),
+                printer_name: printer ? (printer.name || printer.uid || null) : null,
+                printer_address: printer ? (printer.connection || printer.address || printer.uid || null) : null,
+            };
+            if (window.console) console.log("[RFID-IMPRIMIR] POST %s body=", SKU_URL, JSON.parse(JSON.stringify(body)));
+            const resp = await fetch(SKU_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": csrfToken || "",
+                },
+                body: JSON.stringify(body),
+                credentials: "same-origin",
             });
-
-            printButton.addEventListener("click", async function () {
-                if (!VARIANTE_ID && !PRODUCTO_ID) {
-                    setStatus("Primero selecciona un SKU o producto base desde el buscador.", "error");
-                    return;
-                }
-                printButton.disabled = true;
-                setStatus("Registrando impresión en base de datos...", "info");
-                try {
-                    const impresion = await guardarImpresion();
-                    updateFolio(impresion);
-                    const zplCompleto = (impresion && impresion.zpl_completo) || "";
-                    if (zplOutput) {
-                        zplOutput.value = zplCompleto;
-                    }
-
-                    if (!selectedDevice) {
-                        setStatus("Impresión registrada. Sin impresora Browser Print, solo se guardó el registro.", "ok");
-                        return;
-                    }
-                    setStatus("Enviando a la impresora " + (selectedDevice.name || selectedDevice.uid) + "...", "info");
-                    selectedDevice.send(zplCompleto || "", function () {
-                        setStatus("OK. Registro guardado y enviado a impresora: " + (impresion.folio || ("LAB-" + (impresion.id || ""))), "ok");
-                    }, function (error) {
-                        setStatus("Registro guardado, pero no se pudo imprimir en la impresora. Revisa Browser Print.", "error");
-                        if (window.console) console.error(error);
+            let data = {};
+            try { data = await resp.json(); } catch (e) { }
+            if (window.console) console.log("[RFID-IMPRIMIR] HTTP %s response=", resp.status, data);
+            if (!resp.ok || !data.ok) {
+                const err = (data && data.error) || ("Error HTTP " + resp.status);
+                const pretty = typeof err === "string" ? err : JSON.stringify(err);
+                throw new Error("No se pudo registrar la impresión. " + pretty);
+            }
+            if (window.console && data && data.impresion) {
+                const imp = data.impresion;
+                console.log("[RFID-IMPRIMIR] DB OK: id=%s folio=%s estado=%s cantidad=%s zpl_len=%s etiquetas=%s",
+                    imp.id, imp.folio || ("LAB-" + imp.id),
+                    imp.estado || imp.status || "(null)",
+                    imp.cantidad,
+                    (imp.zpl_completo || "").length,
+                    ((imp.etiquetas || []).length ? JSON.stringify(imp.etiquetas.map(e => ({ id: e.id, epc: e.epc, serial: e.serial, estado: e.estado }))) : "(sin etiquetas)")
+                );
+                if (imp.zpl_individual && imp.zpl_individual.length) {
+                    imp.zpl_individual.forEach(function (one, idx) {
+                        var lines = (one || "").split(/\r?\n/);
+                        var rfidLines = lines.filter(l => /\^RS|\^RB|\^RFW|\^HV|^\^FD/.test(l));
+                        console.log("[RFID-IMPRIMIR] ZPL individual[%d/%d] comandos RFID=%s",
+                            idx + 1, imp.zpl_individual.length,
+                            rfidLines.join(" | "));
                     });
-                } catch (e) {
-                    setStatus(String(e.message || e), "error");
-                } finally {
-                    printButton.disabled = false;
                 }
-            });
+            }
+            return data.impresion;
+        }
 
-            copyButton.addEventListener("click", function () {
-                const zpl = (zplOutput && zplOutput.value) || "";
-                if (!zpl) {
-                    setStatus("Aún no hay ZPL guardado. Usa 'Guardar e imprimir' para generarlo.", "error");
+        function updateFolio(impresion) {
+            if (!folioEl || !impresion) return;
+            const folio = impresion.folio || ("LAB-" + (impresion.id || ""));
+            folioEl.textContent = "Registro: " + folio + " · " + (impresion.cantidad || 0) + " etiqueta(s) · " + (impresion.estado ? impresion.estado : impresion.status || "");
+            folioEl.classList.remove("hidden");
+        }
+
+        deviceSelect.addEventListener("change", function () {
+            selectedDevice = devices.find(device => (device.uid || device.name) === this.value) || devices[0] || null;
+            if (selectedDevice) {
+                setStatus("Impresora seleccionada: " + (selectedDevice.name || selectedDevice.uid), "ok");
+            }
+        });
+
+        printButton.addEventListener("click", async function () {
+            if (!VARIANTE_ID && !PRODUCTO_ID) {
+                setStatus("Primero selecciona un SKU o producto base desde el buscador.", "error");
+                return;
+            }
+            printButton.disabled = true;
+            setStatus("Registrando impresión en base de datos...", "info");
+            try {
+                const impresion = await guardarImpresion();
+                updateFolio(impresion);
+                const zplCompleto = (impresion && impresion.zpl_completo) || "";
+                if (zplOutput) {
+                    zplOutput.value = zplCompleto;
+                }
+
+                if (!selectedDevice) {
+                    setStatus("Impresión registrada. Sin impresora Browser Print, solo se guardó el registro.", "ok");
                     return;
                 }
-                const okHandler = function () { setStatus("ZPL copiado al portapapeles.", "ok"); };
-                const errHandler = function () { setStatus("No se pudo copiar el ZPL en este navegador.", "error"); };
-                if (navigator.clipboard && window.isSecureContext) {
-                    navigator.clipboard.writeText(zpl).then(okHandler).catch(errHandler);
-                    return;
+                setStatus("Enviando a la impresora " + (selectedDevice.name || selectedDevice.uid) + "...", "info");
+                if (window.console) {
+                    var preview = (zplCompleto || "").slice(0, 200);
+                    console.log("[RFID-IMPRIMIR] Browser Print send(): %d chars total. Preview=%s",
+                        (zplCompleto || "").length, JSON.stringify(preview) + ((zplCompleto || "").length > 200 ? "..." : ""));
                 }
-                const ta = document.createElement("textarea");
-                ta.value = zpl;
-                ta.style.position = "fixed";
-                ta.style.left = "-9999px";
-                document.body.appendChild(ta);
-                ta.select();
-                try {
-                    document.execCommand("copy");
-                    okHandler();
-                } catch (e) {
-                    errHandler();
-                } finally {
-                    document.body.removeChild(ta);
-                }
-            });
+                selectedDevice.send(zplCompleto || "", function () {
+                    setStatus("OK. Registro guardado y enviado a impresora: " + (impresion.folio || ("LAB-" + (impresion.id || ""))), "ok");
+                    if (window.console) console.log("[RFID-IMPRIMIR] Browser Print send() -> SUCCESS callback.");
+                }, function (error) {
+                    setStatus("Registro guardado, pero no se pudo imprimir en la impresora. Revisa Browser Print.", "error");
+                    if (window.console) console.error("[RFID-IMPRIMIR] Browser Print send() -> ERROR callback:", error);
+                });
+            } catch (e) {
+                setStatus(String(e.message || e), "error");
+            } finally {
+                printButton.disabled = false;
+            }
+        });
 
-            initBrowserPrint();
-        })();
+        copyButton.addEventListener("click", function () {
+            const zpl = (zplOutput && zplOutput.value) || "";
+            if (!zpl) {
+                setStatus("Aún no hay ZPL guardado. Usa 'Guardar e imprimir' para generarlo.", "error");
+                return;
+            }
+            const okHandler = function () { setStatus("ZPL copiado al portapapeles.", "ok"); };
+            const errHandler = function () { setStatus("No se pudo copiar el ZPL en este navegador.", "error"); };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(zpl).then(okHandler).catch(errHandler);
+                return;
+            }
+            const ta = document.createElement("textarea");
+            ta.value = zpl;
+            ta.style.position = "fixed";
+            ta.style.left = "-9999px";
+            document.body.appendChild(ta);
+            ta.select();
+            try {
+                document.execCommand("copy");
+                okHandler();
+            } catch (e) {
+                errHandler();
+            } finally {
+                document.body.removeChild(ta);
+            }
+        });
+
+        initBrowserPrint();
+        }) ();
     </script>
     {% if request and request.COOKIES and not request.META.HTTP_X_CSRFTOKEN %}
     <script>
@@ -424,4 +474,5 @@
     </script>
     {% endif %}
 </body>
+
 </html>

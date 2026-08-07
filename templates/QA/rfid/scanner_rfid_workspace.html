@@ -293,20 +293,42 @@
           tags.add(epc);
           tagCountEl.textContent = tags.size;
           const match = !!scan.match_impresion;
-          console.log(
-            "[RFID new tag] id=%s epc=%s match=%s lab=%s estado=%s sku=%s talla=%s antenna=%s rssi=%s ts=%s uniqueCount=%d",
-            scan.id ?? '?',
-            epc,
-            match ? 'SI' : 'NO',
-            scan.impresion_folio ?? '—',
-            scan.estado ?? '—',
-            scan.sku ?? '—',
-            scan.talla ?? '—',
-            scan.antenna ?? '?',
-            scan.rssi ?? '?',
-            scan.timestamp ?? new Date().toISOString(),
-            tags.size
-          );
+          if (window.console && console.log) {
+            // Log completo de match debug (backend regresa debug_match si lo envia)
+            const debug = scan.match_debug || null;
+            const matchInfo = match
+              ? ("MATCH=SI lab=" + (scan.impresion_folio ?? '?') + " detalle_id=" + (scan.detalle_id ?? '?') +
+                 " sku=" + (scan.sku ?? '?') + " talla=" + (scan.talla ?? '?') + " variante_id=" + (scan.producto_variante ?? scan.variante_id ?? '?'))
+              : "MATCH=NO";
+            const antennaRaw = (typeof scan.antenna === "undefined" || scan.antenna === null)
+              ? "null"
+              : JSON.stringify(scan.antenna);
+            const rssiRaw = (typeof scan.rssi === "undefined" || scan.rssi === null)
+              ? "null"
+              : JSON.stringify(scan.rssi);
+            console.log(
+              "[RFID new tag] id=%s epc_raw=%s epc_len=%s %s antenna_raw=%s rssi_raw=%s ts=%s uniqueCount=%d",
+              scan.id ?? '?',
+              epc,
+              epc.length,
+              matchInfo,
+              antennaRaw,
+              rssiRaw,
+              scan.timestamp ?? new Date().toISOString(),
+              tags.size
+            );
+            if (debug) {
+              console.groupCollapsed("[RFID new tag] match_debug (id=%s epc=%s)", scan.id ?? '?', epc);
+              try { console.log(JSON.stringify(debug, null, 2)); } catch (e) { console.log(debug); }
+              console.groupEnd();
+            }
+            if (!match) {
+              console.warn(
+                "[RFID new tag] MATCH=NO sugerencias: (1) la etiqueta no se imprimio con ^RS8,E/^RB ^RFW (re-imprime), (2) el FX manda EPC de long=%s distinta (ver match_debug), (3) EPC registrado != chip (comparar admin detalle vs rfidscan).",
+                epc.length
+              );
+            }
+          }
           const emptyEl = document.getElementById('empty-state');
           if (emptyEl) emptyEl.remove();
           const li = document.createElement('li');

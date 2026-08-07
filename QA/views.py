@@ -623,29 +623,74 @@ def _qa_rfid_guardar_impresion(request, variante_id, producto_id, cantidad, prin
         serializer.is_valid(raise_exception=True)
         impresion = RFIDLabelService.store_impresion(serializer.validated_data, request.user)
     except DRFValidationError as exc:
+        rfid_scanner_logger.warning(
+            "RFID guardar impresion: serializer invalid user=%s payload=%s errors=%s",
+            getattr(request.user, "pk", None),
+            json.dumps(payload, ensure_ascii=False, default=str)[:800],
+            exc.detail if hasattr(exc, "detail") else str(exc),
+        )
         return {"ok": False, "error": exc.detail if hasattr(exc, "detail") else str(exc)}, 400
     except Exception as exc:
+        rfid_scanner_logger.exception(
+            "RFID guardar impresion: store_impresion exception user=%s payload=%s",
+            getattr(request.user, "pk", None),
+            json.dumps(payload, ensure_ascii=False, default=str)[:800],
+        )
         return {"ok": False, "error": str(exc)}, 400
 
     response_payload = _qa_rfid_success_payload(impresion)
-    zpl_real = (
-        response_payload.get("zpl_completo")
-        or ""
+    zpl_real = response_payload.get("zpl_completo") or ""
+    etiquetas = response_payload.get("etiquetas") or []
+    rfid_scanner_logger.info(
+        "RFID guardar impresion: id=%s folio=%s user=%s empresa=%s sucursal=%s variante=%s producto=%s cantidad=%s etiquetas=%d zpl_len=%d printer=%s",
+        impresion.pk,
+        impresion.folio,
+        getattr(request.user, "pk", None),
+        impresion.empresa_id,
+        impresion.sucursal_id,
+        impresion.producto_variante_id,
+        impresion.producto_id,
+        impresion.cantidad,
+        len(etiquetas),
+        len(zpl_real),
+        impresion.printer_name,
     )
+    if etiquetas:
+        rfid_scanner_logger.debug(
+            "RFID guardar impresion EPCs id=%s folio=%s epcs=%s",
+            impresion.pk,
+            impresion.folio,
+            json.dumps(
+                [{"id": e.get("id"), "epc": e.get("epc"), "serial": e.get("serial"), "estado": e.get("estado")} for e in (etiquetas or [])],
+                ensure_ascii=False,
+            )[:1500],
+        )
+    if not zpl_real:
+        rfid_scanner_logger.warning(
+            "RFID guardar impresion: zpl_completo vacio id=%s folio=%s",
+            impresion.pk,
+            impresion.folio,
+        )
 
     # Guardar el ZPL REAL generado DESPUÉS de crear los EPCs en EtiquetaRFIDDetalle.
     # Esto es lo que Browser Print envía a la impresora.
     try:
-        EtiquetaRFIDImpresion.objects.filter(pk=impresion.pk).update(
+        upd = EtiquetaRFIDImpresion.objects.filter(pk=impresion.pk).update(
             zpl_enviado=zpl_real if zpl_real else None
+        )
+        rfid_scanner_logger.info(
+            "RFID guardar impresion: zpl_enviado actualizado id=%s rows_updated=%s zpl_len=%d (antes len=%d)",
+            impresion.pk,
+            upd,
+            len(zpl_real),
+            len(impresion.zpl_enviado or ""),
         )
     except Exception as exc:
         # No fallamos la respuesta por esto (ya se crearon impresion+detalles);
         # solo loggeamos.
-        logger.warning(
-            "No se pudo guardar zpl_enviado en impresion %s: %s",
+        rfid_scanner_logger.exception(
+            "RFID guardar impresion: fallo update zpl_enviado impresion %s",
             impresion.pk,
-            str(exc),
         )
 
     return {
@@ -1253,7 +1298,7 @@ def scanner_rfid_receive(request):
 
         tags_to_create = []
         seen_epcs_in_this_batch = set()
-        for item in items:
+        for idx, item in enumerate(items):
             if isinstance(item, dict) and item.get("isHeartBeat") is True:
                 continue
             epc_raw = _extract_epc_raw(item)
@@ -1276,6 +1321,43 @@ def scanner_rfid_receive(request):
             antenna, rssi = _extract_antenna_rssi(
                 item, fallback_antenna=fallback_antenna, fallback_rssi=fallback_rssi
             )
+            # Debug: log de cada tag para identificar estructura del payload
+            # (desde Vercel Dashboard Function Logs se ve.)
+            if isinstance(item, dict):
+                # Solo keys de 1er nivel (solo anidados tag/data/meta para no volcar todo)
+                top_keys = sorted(item.keys())
+                excerpt = {
+                    "i": idx,
+                    "keys": top_keys,
+                    "epc_raw_len": len(epc_raw) if epc_raw else 0,
+                    "epc_raw_head": epc_raw[:24] if epc_raw else "",
+                    "ant_raw_item": {k: item.get(k) for k in _ANTENNA_INT_KEYS if k in item and item.get(k) is not None},
+                    "rssi_raw_item": {k: item.get(k) for k in _RSSI_FLOAT_KEYS if k in item and item.get(k) is not None},
+                    "tag_dict_keys": sorted(item["tag"].keys()) if isinstance(item.get("tag"), dict) else None,
+                    "data_dict_keys": sorted(item["data"].keys()) if isinstance(item.get("data"), dict) else None,
+                    "meta_dict_keys": sorted(item["meta"].keys()) if isinstance(item.get("meta"), dict) else None,
+                }
+            else:
+                excerpt = {
+                    "i": idx,
+                    "item_type": type(item).__name__,
+                    "epc_raw_len": len(epc_raw) if epc_raw else 0,
+                    "epc_raw_head": epc_raw[:24] if epc_raw else "",
+                }
+            excerpt["antenna_final"] = antenna
+            excerpt["rssi_final"] = rssi
+            excerpt["fallback_antenna"] = fallback_antenna
+            excerpt["fallback_rssi"] = fallback_rssi
+            excerpt["epc_norm"] = epc_norm
+            rfid_scanner_logger.debug(
+                "RFID receive tag[%s] epc=%s len=%s antenna=%s rssi=%s excerpt=%s",
+                idx,
+                epc_norm,
+                len(epc_norm),
+                antenna,
+                rssi,
+                json.dumps(excerpt, ensure_ascii=False)[:700],
+            )
             tags_to_create.append(
                 RfidScan(
                     epc=epc_norm,
@@ -1286,7 +1368,27 @@ def scanner_rfid_receive(request):
             )
 
         if tags_to_create:
+            # Log resumen del request (por si en logs solo vemos el último)
+            summary = {
+                "count": len(tags_to_create),
+                "unique_epcs_sample": sorted([s.epc for s in tags_to_create[:5]]),
+                "antenna_values": sorted({s.antenna for s in tags_to_create if s.antenna is not None}),
+                "rssi_values_sample": sorted([float(s.rssi) for s in tags_to_create if s.rssi is not None])[:10],
+            }
+            rfid_scanner_logger.info(
+                "RFID receive request: created=%s summary=%s body_sample=%s",
+                len(tags_to_create),
+                json.dumps(summary, ensure_ascii=False),
+                (body[:200] if isinstance(body, str) else "(binary)"),
+            )
             RfidScan.objects.bulk_create(tags_to_create, batch_size=200)
+        else:
+            rfid_scanner_logger.warning(
+                "RFID receive request: 0 tags creadas. Tipo items=%s len_items=%s body_sample=%s",
+                type(items).__name__,
+                len(items) if hasattr(items, "__len__") else "(n/a)",
+                (body[:500] if isinstance(body, str) else "(binary)"),
+            )
         return JsonResponse({"status": "success", "count": len(tags_to_create)})
     except json.JSONDecodeError as e:
         return JsonResponse({"status": "error", "message": f"JSON invalido: {str(e)}"}, status=400)
@@ -1370,9 +1472,12 @@ def scanner_rfid_get(request):
         epc = scan.epc or ""
         epc_lower = epc.lower()
         detalle = None
-        for variant in _epc_variants(epc_lower):
+        variant_used = None
+        variants_tried = list(_epc_variants(epc_lower))
+        for variant in variants_tried:
             detalle = detalle_by_epc_variant.get(variant)
             if detalle is not None:
+                variant_used = variant
                 break
 
         item = {
@@ -1420,10 +1525,47 @@ def scanner_rfid_get(request):
                     "serial": detalle.serial,
                     "estado": detalle.estado,  # IMPRESO / LEIDO / PENDIENTE / CANCELADO
                     "detalle_id": detalle.id,
+                    "match_debug": {
+                        "scan_epc": epc_lower,
+                        "scan_epc_len": len(epc_lower),
+                        "variants_tried": variants_tried,
+                        "variant_used": variant_used,
+                        "detalle_epc_raw": detalle.epc,
+                        "detalle_epc_len": len(detalle.epc or ""),
+                        "detalle_epc_variants": sorted(_epc_variants(detalle.epc)),
+                    },
                 }
             )
         else:
             item["match_impresion"] = False
+            item["match_debug"] = {
+                "scan_epc": epc_lower,
+                "scan_epc_len": len(epc_lower),
+                "variants_tried": variants_tried,
+                "variant_used": None,
+                "detalle_lookup_count": len(detalle_by_epc_variant),
+            }
+        # Log por scan en Vercel para depurar match=NO frecuentes
+        if not detalle:
+            rfid_scanner_logger.debug(
+                "RFID get MATCH=NO scan_id=%s epc=%s len=%s tried=%s lookup_size=%s",
+                scan.pk,
+                epc_lower,
+                len(epc_lower),
+                json.dumps(variants_tried),
+                len(detalle_by_epc_variant),
+            )
+        else:
+            rfid_scanner_logger.info(
+                "RFID get MATCH=SI scan_id=%s epc=%s variant=%s detalle=%s lab=%s sku=%s talla=%s",
+                scan.pk,
+                epc_lower,
+                variant_used,
+                detalle.id,
+                (impresion.folio if impresion else None),
+                sku,
+                talla_nombre,
+            )
         data.append(item)
     return JsonResponse({"scans": data})
 
