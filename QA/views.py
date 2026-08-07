@@ -1765,3 +1765,73 @@ def scanner_rfid_clear(request):
     RfidScan.objects.all().delete()
     return JsonResponse({"status": "success"})
 
+
+def scanner_rfid_stats(request):
+    """Endpoint rápido 1-clic para ver: ¿FX está mandando POSTs a receive?
+    NO REQUIERE Vercel Dashboard ni FX web UI.
+    Devuelve: total scans, último scan timestamp, últimas 5 filas (id/epc/antenna/rssi/ip/ts),
+    y buscador query ?epc=XXXX igual que get pero lite.
+    """
+    total = RfidScan.objects.count()
+    last_5 = list(
+        RfidScan.objects.order_by("-created_at", "-id")[:5].values(
+            "id", "epc", "antenna", "rssi", "reader_ip", "created_at"
+        )
+    )
+    last_5_serializable = []
+    for s in last_5:
+        last_5_serializable.append({
+            "id": s["id"],
+            "epc": s["epc"],
+            "epc_len": len(s["epc"] or ""),
+            "antenna": s["antenna"],
+            "rssi": s["rssi"],
+            "reader_ip": s["reader_ip"],
+            "ts": s["created_at"].isoformat() if s["created_at"] else None,
+        })
+    last_scan_ts = last_5_serializable[0]["ts"] if last_5_serializable else None
+    last_scan_how_old_secs = None
+    if last_scan_ts:
+        try:
+            from django.utils import timezone as dj_tz
+            dt = dj_tz.datetime.fromisoformat(last_scan_ts.replace("Z", "+00:00"))
+            last_scan_how_old_secs = int((dj_tz.now() - dt).total_seconds())
+        except Exception:
+            pass
+
+    # Mini buscador ?epc=XXXX (igual que el get pero más rápido)
+    q_epc = (request.GET.get("epc") or "").strip().lower()
+    q_found_samples = []
+    if q_epc:
+        base_vars = {q_epc, q_epc.lstrip("0"), q_epc.rstrip("0"), q_epc.strip("0")}
+        if len(q_epc) > 24:
+            base_vars |= {q_epc[:24], q_epc[-24:]}
+        if len(q_epc) < 24:
+            base_vars |= {q_epc.rjust(24, "0"), q_epc.ljust(24, "0")}
+        q_lookup = list(base_vars) + [v.upper() for v in base_vars]
+        qs_found = RfidScan.objects.filter(epc__in=q_lookup).order_by("-created_at")[:10]
+        for f in qs_found:
+            q_found_samples.append({
+                "id": f.id, "epc": f.epc, "epc_len": len(f.epc or ""),
+                "antenna": f.antenna, "rssi": f.rssi,
+                "ts": f.created_at.isoformat() if f.created_at else None,
+            })
+
+    payload = {
+        "status": "ok",
+        "total_rfidscan_rows": total,
+        "last_scan_ts": last_scan_ts,
+        "last_scan_seconds_ago": last_scan_how_old_secs,
+        "last_5_scans": last_5_serializable,
+        "query_epc": q_epc or None,
+        "query_epc_found_count": len(q_found_samples),
+        "query_epc_found_samples": q_found_samples,
+        "receive_endpoint_info": {
+            "method_required": "POST (no responde a GET — 'Method not allowed' es NORMAL)",
+            "example_POST_test_1_tag": (
+                "POST /QA/scanner_rfid/receive/ JSON: [{\"epcId\":\"000012e32827000147c0c5f5\",\"antennaPort\":1,\"peakRssiValue\":-45}]"
+            ),
+        },
+    }
+    return JsonResponse(payload)
+

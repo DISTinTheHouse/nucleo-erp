@@ -18,4 +18,5 @@ urlpatterns = [
     path('scanner_rfid/receive/', views.scanner_rfid_receive, name='qa_scanner_rfid_receive'),
     path('scanner_rfid/get/', views.scanner_rfid_get, name='qa_scanner_rfid_get'),
     path('scanner_rfid/clear/', views.scanner_rfid_clear, name='qa_scanner_rfid_clear'),
+    path('scanner_rfid/stats/', views.scanner_rfid_stats, name='qa_scanner_rfid_stats'),
 ]
