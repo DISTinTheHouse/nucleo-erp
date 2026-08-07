@@ -1243,15 +1243,85 @@ def scanner_rfid_receive(request):
     # Declarado FUERA del try para que los logger.info/warning de abajo
     # (fuera del bloque try) no causen NameError si algo falló en medio.
     body = ""
+    debug_payload = {
+        "content_type": request.content_type or "",
+        "method": request.method,
+        "remote_addr": request.META.get("REMOTE_ADDR"),
+    }
     try:
         remote_addr = request.META.get("REMOTE_ADDR")
         raw_body = request.body.decode("utf-8", errors="replace")
         body = raw_body
+        debug_payload["body_len"] = len(raw_body)
+        debug_payload["body_prefix"] = raw_body[:512]
         rfid_scanner_logger.info(
-            "RFID receive from %s body[:4096]=%s", remote_addr, raw_body[:4096]
+            "RFID receive from %s ct=%s body[:4096]=%s",
+            remote_addr,
+            request.content_type,
+            raw_body[:4096],
         )
 
-        data = json.loads(raw_body) if raw_body else None
+        # --- PARSEO MULTI CONTENT-TYPE (porque FX puede mandar text/plain, form, urlencoded, JSON)
+        data = None
+        parse_attempts = []
+
+        # 1) JSON directo (mejor caso)
+        try:
+            if raw_body and raw_body.strip():
+                data = json.loads(raw_body)
+                parse_attempts.append("json_loads:OK")
+        except (json.JSONDecodeError, ValueError, Exception) as e:
+            parse_attempts.append(f"json_loads:FAIL:{type(e).__name__}")
+            data = None
+
+        # 2) request.POST (x-www-form-urlencoded) — FXs viejos a veces usan esto
+        if data is None and request.POST:
+            try:
+                qd = request.POST.dict()
+                # Si contiene una key llamada "data"/"payload" con JSON adentro: intentar parsearla
+                for wrapper in ["data", "payload", "body", "json", "tags_json"]:
+                    if wrapper in qd and isinstance(qd[wrapper], str):
+                        try:
+                            parsed_inner = json.loads(qd[wrapper])
+                            qd[wrapper] = parsed_inner
+                            break
+                        except Exception:
+                            pass
+                data = qd
+                parse_attempts.append("request.POST.dict:OK")
+            except Exception as e:
+                parse_attempts.append(f"request.POST.dict:FAIL:{type(e).__name__}")
+
+        # 3) text/plain pero con EPCs separados por newlines (lista de strings sin corchetes)
+        if data is None and raw_body and raw_body.strip():
+            stripped = raw_body.strip()
+            if "\n" in stripped or "," in stripped:
+                # Lista separada por comas o saltos de línea (posiblemente con espacios)
+                parts = [p.strip() for p in stripped.replace(",", "\n").splitlines() if p.strip()]
+                # Si todo parece hex (chars [0-9a-fA-F: - ])
+                def _looks_hex(s):
+                    if not s or len(s) < 8:
+                        return False
+                    cl = s.replace(" ", "").replace(":", "").replace("-", "")
+                    return all(c in "0123456789abcdefABCDEF" for c in cl)
+                if parts and all(_looks_hex(p) for p in parts):
+                    data = [{"epc": p} for p in parts]
+                    parse_attempts.append("split_newlines_epc:OK")
+
+        # 4) Si sigue None: cuerpo dict vacío {} o [] con intento final limpiar espacios
+        if data is None and raw_body and raw_body.strip():
+            try:
+                cleaned = raw_body.strip()
+                # caso texto plano con objeto JSON (sin header correcto)
+                data = json.loads(cleaned)
+                parse_attempts.append("json_loads_cleaned:OK")
+            except Exception as e:
+                parse_attempts.append(f"json_loads_cleaned:FAIL:{type(e).__name__}")
+                data = None
+
+        debug_payload["parse_attempts"] = parse_attempts
+
+        # --- Extracción items + fallback (igual que antes)
         items = []
         fallback_antenna = None
         fallback_rssi = None
@@ -1297,16 +1367,48 @@ def scanner_rfid_receive(request):
                 or _find_by_key_substr(data, ["rssi", "signal"])
             )
 
+            debug_payload["body_dict_keys"] = sorted(data.keys())
+        else:
+            debug_payload["body_dict_keys"] = None
+            debug_payload["fallback_antenna_raw_type"] = type(data).__name__
+
         if not isinstance(items, list):
-            return JsonResponse({"status": "error", "message": "Invalid data format"}, status=400)
+            items = []
+        debug_payload["fallback_antenna_final"] = (
+            str(fallback_antenna)[:200] if fallback_antenna is not None else None
+        )
+        debug_payload["fallback_rssi_final"] = (
+            str(fallback_rssi)[:200] if fallback_rssi is not None else None
+        )
+        debug_payload["items_raw_len"] = len(items)
+
+        if not isinstance(items, list):
+            debug_payload["error"] = "Invalid data format"
+            return JsonResponse(
+                {"status": "error", "message": "Invalid data format", "debug": debug_payload},
+                status=400,
+            )
 
         tags_to_create = []
+        debug_items = []
         seen_epcs_in_this_batch = set()
         for idx, item in enumerate(items):
             if isinstance(item, dict) and item.get("isHeartBeat") is True:
                 continue
             epc_raw = _extract_epc_raw(item)
             if not epc_raw:
+                # Debug: tag item sin EPC, igual guardamos info para saber por qué
+                debug_items.append(
+                    {
+                        "i": idx,
+                        "item_type": type(item).__name__,
+                        "keys_list": sorted(item.keys())[:20] if isinstance(item, dict) else None,
+                        "epc_raw": None,
+                        "antenna_final": None,
+                        "rssi_final": None,
+                        "item_str": (str(item)[:200] if not isinstance(item, (dict, list)) else None),
+                    }
+                )
                 continue
             # limpia / normaliza hex (minusculas, sin separadores)
             epc_norm = (
@@ -1317,62 +1419,57 @@ def scanner_rfid_receive(request):
                 .lower()
             )
             if not epc_norm or len(epc_norm) < 8:
+                debug_items.append(
+                    {
+                        "i": idx,
+                        "epc_raw": epc_raw[:40] if isinstance(epc_raw, str) else epc_raw,
+                        "skip_reason": f"len<8 epc={epc_norm}",
+                    }
+                )
                 continue
             # Si ya estaba dentro del mismo request (duplicado fx reader), omitimos 2da insert
             if epc_norm in seen_epcs_in_this_batch:
+                debug_items.append(
+                    {"i": idx, "epc_norm": epc_norm, "skip_reason": "dup_in_batch"}
+                )
                 continue
             seen_epcs_in_this_batch.add(epc_norm)
             antenna, rssi = _extract_antenna_rssi(
                 item, fallback_antenna=fallback_antenna, fallback_rssi=fallback_rssi
             )
             # --- DEEP debug del item (se sube a INFO para que aparezca en Vercel)
-            # No más adivinar keys: imprimimos TODO el payload (truncado).
+            debug_item_entry = {
+                "i": idx,
+                "item_type": type(item).__name__,
+                "epc_raw_len": (len(epc_raw) if isinstance(epc_raw, (str, bytes)) else None),
+                "epc_raw_head": epc_raw[:32] if isinstance(epc_raw, str) else None,
+                "epc_norm": epc_norm,
+                "antenna_final": antenna,
+                "rssi_final": rssi,
+                "fallback_antenna_used": (
+                    str(fallback_antenna)[:80] if fallback_antenna is not None else None
+                ),
+                "fallback_rssi_used": (
+                    str(fallback_rssi)[:80] if fallback_rssi is not None else None
+                ),
+            }
             if isinstance(item, dict):
-                def _safe_val(v, max_len=80):
-                    if v is None:
-                        return None
-                    if isinstance(v, (dict, list, tuple)):
-                        try:
-                            s = json.dumps(v, ensure_ascii=False, default=str)
-                        except Exception:
-                            s = f"<{type(v).__name__}>"
-                    else:
-                        s = str(v)
-                    return s if len(s) <= max_len else s[: max_len - 3] + "..."
-
-                # 1) TODO el item como json truncado 900 chars (no nos perdimos nada).
+                debug_item_entry["keys_top20"] = sorted(item.keys())[:20]
                 try:
-                    item_json = json.dumps(item, ensure_ascii=False, default=str)
+                    dump = json.dumps(item, ensure_ascii=False, default=str)
                 except Exception:
-                    item_json = f"<unserializable {type(item).__name__}>"
-                excerpt = {
-                    "i": idx,
-                    "item_len": len(item_json),
-                    "item": item_json[:900],
-                }
+                    dump = "<unserializable>"
+                debug_item_entry["item_json_prefix"] = dump[:300]
+                debug_item_entry["item_json_len"] = len(dump)
             else:
-                excerpt = {
-                    "i": idx,
-                    "item_type": type(item).__name__,
-                    "item_str": (str(item)[:200]),
-                }
-            excerpt["epc_raw"] = (epc_raw[:64] if isinstance(epc_raw, str) else epc_raw)
-            excerpt["epc_raw_len"] = (len(epc_raw) if isinstance(epc_raw, (str, bytes)) else None)
-            excerpt["epc_norm"] = epc_norm
-            excerpt["antenna_final"] = antenna
-            excerpt["rssi_final"] = rssi
-            excerpt["fallback_antenna_raw"] = (
-                str(fallback_antenna)[:160] if fallback_antenna is not None else None
-            )
-            excerpt["fallback_rssi_raw"] = (
-                str(fallback_rssi)[:160] if fallback_rssi is not None else None
-            )
+                debug_item_entry["item_str_prefix"] = str(item)[:200]
+
+            # Dump a Vercel logs
+            excerpt = dict(debug_item_entry)
             try:
                 excerpt_json = json.dumps(excerpt, ensure_ascii=False, default=str)
             except Exception:
                 excerpt_json = f"<excerpt_unserializable keys={list(excerpt.keys())}>"
-            # NIVEL INFO para que aparezca en Vercel Function Logs sin tener
-            # que habilitar DEBUG_LEVEL (default Vercel = INFO/WARN/ERROR).
             rfid_scanner_logger.info(
                 "RFID receive tag[%s] epc=%s len=%s antenna=%s rssi=%s excerpt=%s",
                 idx,
@@ -1382,6 +1479,8 @@ def scanner_rfid_receive(request):
                 rssi,
                 excerpt_json[:1400],
             )
+            debug_items.append(debug_item_entry)
+
             tags_to_create.append(
                 RfidScan(
                     epc=epc_norm,
@@ -1391,22 +1490,13 @@ def scanner_rfid_receive(request):
                 )
             )
 
+        debug_payload["items"] = debug_items
+
         if tags_to_create:
             # Log resumen DEL REQUEST ENTERO (nivel INFO).
-            try:
-                body_dict_keys = sorted(data.keys()) if isinstance(data, dict) else None
-            except Exception:
-                body_dict_keys = None
             summary = {
                 "count": len(tags_to_create),
                 "items_raw_len": len(items),
-                "body_dict_keys": body_dict_keys,
-                "fallback_antenna_raw": (
-                    str(fallback_antenna)[:160] if fallback_antenna is not None else None
-                ),
-                "fallback_rssi_raw": (
-                    str(fallback_rssi)[:160] if fallback_rssi is not None else None
-                ),
                 "unique_epcs_sample": sorted([s.epc for s in tags_to_create[:5]]),
                 "antenna_values": sorted({s.antenna for s in tags_to_create if s.antenna is not None}),
                 "rssi_values_sample": sorted([float(s.rssi) for s in tags_to_create if s.rssi is not None])[:10],
@@ -1418,6 +1508,9 @@ def scanner_rfid_receive(request):
                 (body[:200] if isinstance(body, str) else "(binary)"),
             )
             RfidScan.objects.bulk_create(tags_to_create, batch_size=200)
+            debug_payload["created_epcs_sample"] = summary["unique_epcs_sample"]
+            debug_payload["antenna_values"] = summary["antenna_values"]
+            debug_payload["rssi_values_sample"] = summary["rssi_values_sample"]
         else:
             rfid_scanner_logger.warning(
                 "RFID receive request: 0 tags creadas. Tipo items=%s len_items=%s body_sample=%s",
@@ -1425,12 +1518,28 @@ def scanner_rfid_receive(request):
                 len(items) if hasattr(items, "__len__") else "(n/a)",
                 (body[:500] if isinstance(body, str) else "(binary)"),
             )
-        return JsonResponse({"status": "success", "count": len(tags_to_create)})
+            debug_payload["warn"] = (
+                "0 tags creadas. Tipo items=%s len=%s"
+                % (type(items).__name__, len(items) if hasattr(items, "__len__") else "n/a")
+            )
+
+        return JsonResponse(
+            {"status": "success", "count": len(tags_to_create), "debug": debug_payload}
+        )
     except json.JSONDecodeError as e:
-        return JsonResponse({"status": "error", "message": f"JSON invalido: {str(e)}"}, status=400)
+        debug_payload["error"] = f"JSON invalido: {str(e)}"
+        return JsonResponse(
+            {"status": "error", "message": f"JSON invalido: {str(e)}", "debug": debug_payload},
+            status=400,
+        )
     except Exception as e:
         rfid_scanner_logger.exception("RFID receive error")
-        return JsonResponse({"status": "error", "message": str(e)}, status=500)
+        debug_payload["error"] = str(e)
+        debug_payload["error_type"] = type(e).__name__
+        return JsonResponse(
+            {"status": "error", "message": str(e), "debug": debug_payload},
+            status=500,
+        )
 
 
 def scanner_rfid_get(request):

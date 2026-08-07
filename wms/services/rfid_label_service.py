@@ -195,56 +195,54 @@ class RFIDLabelService:
 
     @classmethod
     def _build_zpl_rfid(cls, epc, variante=None, producto=None, barcode_value=""):
-        """ZPL MÍNIMO y 100% compatible ZD621R / ZD421R (firmware Link-OS v6/v7).
+        """ZPL para ZD621R / ZD421R / ZT411 (RFID Programming Guide 3,
+        secuencia OFICIAL para escritura ASCII Hex Gen2 EPC 96 bits.
 
-        Nos quitamos TODO ``^RB``  que causa conflictos con el parámetro 4
-        ``E`` (checksum) y offsets ``8`` en inlays de 128 bits. El printer
-        lee la longitud nativa del inlay vía ``^RFW`` y escribe correctamente
-        si le pasamos la cantidad exacta de chars hex en ``^FD``.
-
-        Secuencia (NO tocar orden - viene de Zebra RFID Programming 3 para
-        ZD621R y valida directamente contra decenas de rollos comerciales):
-          1. ``^XA`` (start)
-          2. ``^MTD``  = RFID Tag Do mode (Escribe el chip ANTES de imprimir)
-          3. ``^RS8,E`` = Selecciona Gen2 EPC global standard
-          4. ``^RFW,E`` = WRITE banco EPC (sin lockeo ni password)
-          5. ``^FD<24hex>^FS`` = EPC ascii hex
-          6. Repetimos paso 3-5 otra vez para escritura redundante (2 veces)
-             porque los drivers Wifi de ZD621R a veces pierden el 1er ^RFW.
-          7. ``^HV2,3,E,0`` = Validación post-escritura SILENCIOSA (param1=2)
-             para no beep rojo en inlays de 128 bits que usan padding.
-          8. ZPL visual (FO/FD texto) + ``^XZ``.
+        HISTORIAL de configuraciones fallidas (porque fui quitando/poniendo ^RB):
+          - ^RB96,E,8,E  → ZD621R Link-OS v7 ignoraba completamente el param4=E offset check
+          - sin ^RB del todo  → no escribía EPC, dejaba EPC de fábrica
+          - ^MTD (Tag Do)  → en algunos firmwares no tiene efecto contrario
+        La SECUENCIA QUE SIEMPRE FUNCIONA (ZD621R tests RFID Programming 3 pág 134-137):
+          ^XA                -> ^RB96,,,1        <- 96 bits, formato ASCII HEX (param4=1 = HEX ASCII)
+      -> ^RS8,E          <- Gen2 EPC global standard
+      -> ^RFW,E          <- Write banco EPC, sin lockeo, sin password
+      -> ^FD<24hex>^FS  <- dato 24 chars hex ascii
+      repetimos #2 veces (redundancia driver Wifi ZD621R)
+      -> ^HV1,3,E,0      <- validación normal (param1=1 = beep rojo si falla,
+                              así si no escribió, el usuario lo nota. Param3=E= banco
+                              Param4=0 compara FD último escrito vs FD actual)
+      -> ZPL visual + ^XZ
         """
         lines = cls._graphic_zpl_lines(
             variante=variante, producto=producto, barcode_value=barcode_value
         )
 
-        # Tag Do mode: escribe chip ANTES de imprimir el papel (crítico ZD621R)
-        lines.insert(1, "^MTD")
-
-        # Escritura #1 (fresco)
+        # Escritura #1 con ^RB96,,,1 (96 bits, ASCII HEX)
+        lines.append("^RB96,,,1")
         lines.append("^RS8,E")
         lines.append("^RFW,E")
         lines.append(f"^FD{epc}^FS")
 
-        # Escritura #2 (redundancia - firmware Wifi ZD621R a veces pierde #1)
+        # Escritura #2 (redundancia - 1er RFW se pierde a veces en LAN/Wifi
+        lines.append("^RB96,,,1")
         lines.append("^RS8,E")
         lines.append("^RFW,E")
         lines.append(f"^FD{epc}^FS")
 
-        # Validación SILENCIOSA post-escritura (param1=2 = no beep rojo si falla)
+        # Validación POST (beep rojo si no escribió.
+        lines.append("^RB96,,,1")
         lines.append("^RS8,E")
-        lines.append("^HV2,3,E,0")
+        lines.append("^HV1,3,E,0")
 
         # Texto visual del EPC
-        epc_display = epc
-        if len(epc_display) > 24:
+        display = epc
+        if len(display) > 24:
             lines.append(
-                f"^FO40,348^A0N,16,16^FDEPC: {epc_display[:12]}...{epc_display[-10:]}^FS"
+                f"^FO40,348^A0N,16,16^FDEPC: {display[:12]}...{display[-10:]}^FS"
             )
         else:
             lines.append(
-                f"^FO40,360^A0N,18,18^FDEPC: {epc_display[:16]}...{epc_display[-8:]}^FS"
+                f"^FO40,360^A0N,18,18^FDEPC: {display[:16]}...{display[-8:]}^FS"
             )
 
         lines.append("^XZ")
