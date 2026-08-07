@@ -940,6 +940,18 @@ def _extract_float(value):
         return None
 
 
+def _find_by_key_substr(d, substrings):
+    if not isinstance(d, dict):
+        return None
+    for key, value in d.items():
+        k = str(key).lower().replace("_", "").replace("-", "")
+        for s in substrings:
+            s_norm = s.lower().replace("_", "").replace("-", "")
+            if s_norm in k:
+                return value
+    return None
+
+
 def _extract_antenna_rssi(item, fallback_antenna=None, fallback_rssi=None):
     antenna = None
     rssi = None
@@ -950,12 +962,26 @@ def _extract_antenna_rssi(item, fallback_antenna=None, fallback_rssi=None):
             or item.get("antennaPort")
             or item.get("antennaPortName")
             or item.get("port")
+            or item.get("ant")
+            or item.get("source")
+            or item.get("antenna_number")
+            or item.get("antennaNumber")
+            or item.get("port_no")
+            or item.get("portNo")
+            or _find_by_key_substr(item, ["ant", "port"])
         )
         rssi = _extract_float(
             item.get("peakRssi")
             or item.get("rssi")
             or item.get("rssiDbm")
             or item.get("peakRssiDbm")
+            or item.get("rssi_value")
+            or item.get("rssiValue")
+            or item.get("peak_rssi")
+            or item.get("peakRssiValue")
+            or item.get("signal_strength")
+            or item.get("signalStrength")
+            or _find_by_key_substr(item, ["rssi", "signal"])
         )
     if antenna is None:
         antenna = _extract_int(fallback_antenna)
@@ -984,7 +1010,9 @@ def scanner_rfid_receive(request):
     try:
         remote_addr = request.META.get("REMOTE_ADDR")
         raw_body = request.body.decode("utf-8", errors="replace")
-        rfid_scanner_logger.info("RFID receive from %s body[:160]=%s", remote_addr, raw_body[:160])
+        rfid_scanner_logger.info(
+            "RFID receive from %s body[:4096]=%s", remote_addr, raw_body[:4096]
+        )
 
         data = json.loads(raw_body) if raw_body else None
         items = []
@@ -993,13 +1021,16 @@ def scanner_rfid_receive(request):
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict):
-            # Zebra FX puede mandar {tagData:[...]}, {tags:[...]}, {data:[...]}, {events:[...]}
             items = (
                 data.get("tagData")
                 or data.get("tags")
                 or data.get("events")
                 or data.get("eventList")
                 or data.get("data")
+                or data.get("items")
+                or data.get("reads")
+                or data.get("readEvents")
+                or data.get("tagReadEvents")
                 or [data]
             )
             fallback_antenna = (
@@ -1007,12 +1038,26 @@ def scanner_rfid_receive(request):
                 or data.get("antennaID")
                 or data.get("antennaPort")
                 or data.get("port")
+                or data.get("ant")
+                or data.get("source")
+                or data.get("antenna_number")
+                or data.get("antennaNumber")
+                or data.get("port_no")
+                or data.get("portNo")
+                or _find_by_key_substr(data, ["ant", "port"])
             )
             fallback_rssi = (
                 data.get("peakRssi")
                 or data.get("rssi")
                 or data.get("rssiDbm")
                 or data.get("peakRssiDbm")
+                or data.get("rssi_value")
+                or data.get("rssiValue")
+                or data.get("peak_rssi")
+                or data.get("peakRssiValue")
+                or data.get("signal_strength")
+                or data.get("signalStrength")
+                or _find_by_key_substr(data, ["rssi", "signal"])
             )
 
         if not isinstance(items, list):
@@ -1070,12 +1115,35 @@ def scanner_rfid_get(request):
 
     # JOIN por epc contra EtiquetaRFIDDetalle (incluyendo impresion, producto, variante)
     epc_list = [s.epc for s in scans if s.epc]
-    # Normalizamos para match tanto mayus como minus: guardaremos lower y buscaremos en lower
     epc_lower_set = {e.lower() for e in epc_list if e}
+
+    # Variantes de normalizacion robusta:
+    # - algunos lectores envian EPC con padding (ceros al inicio/fin), hex con longitud 28 o 32
+    # - Etiquetas impresas con EPC 24 hex (96 bits)
+    def _epc_variants(epc):
+        base = (epc or "").strip().lower()
+        if not base:
+            return set()
+        vars = {base}
+        vars.add(base.lstrip("0"))
+        vars.add(base.rstrip("0"))
+        vars.add(base.strip("0"))
+        if len(base) > 24:
+            vars.add(base[:24])
+            vars.add(base[-24:])
+            vars.add(base[:24].lstrip("0"))
+            vars.add(base[-24:].lstrip("0"))
+        return {v for v in vars if len(v) >= 8}
+
+    epc_search_set = set()
+    for e in list(epc_lower_set):
+        epc_search_set |= _epc_variants(e)
 
     # Busqueda lowercase: EtiquetaRFIDDetalle.epc es único, convertimos ambos lados a lower
     detalle_qs = (
-        EtiquetaRFIDDetalle.objects.filter(epc__in=list(epc_lower_set) + list({e.upper() for e in epc_lower_set}))
+        EtiquetaRFIDDetalle.objects.filter(
+            epc__in=list(epc_search_set) + list({e.upper() for e in epc_search_set})
+        )
         .select_related(
             "impresion",
             "impresion__producto",
@@ -1102,15 +1170,22 @@ def scanner_rfid_get(request):
             "impresion__producto_variante__talla__nombre",
         )
     )
-    detalle_by_epc_lower = {}
+    # Indexamos el detalle con LAS MISMAS variantes de normalizacion que los scans,
+    # para que si detalle viene con 24 upper y scan con 28 lower + padding coincida.
+    detalle_by_epc_variant = {}
     for d in detalle_qs:
-        detalle_by_epc_lower[(d.epc or "").lower()] = d
+        for v in _epc_variants(d.epc):
+            detalle_by_epc_variant.setdefault(v, d)
 
     data = []
     for scan in scans:
         epc = scan.epc or ""
         epc_lower = epc.lower()
-        detalle = detalle_by_epc_lower.get(epc_lower)
+        detalle = None
+        for variant in _epc_variants(epc_lower):
+            detalle = detalle_by_epc_variant.get(variant)
+            if detalle is not None:
+                break
 
         item = {
             "id": scan.pk,

@@ -198,6 +198,8 @@ class RFIDLabelService:
         lines = cls._graphic_zpl_lines(
             variante=variante, producto=producto, barcode_value=barcode_value
         )
+        lines.append("^RS8,E")
+        lines.append("^RB96,,,1")
         lines.append("^RFW,E,,N")
         lines.append(f"^FD{epc}^FS")
         lines.append(
