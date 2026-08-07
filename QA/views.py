@@ -1240,9 +1240,13 @@ def scanner_rfid_workspace(request):
 def scanner_rfid_receive(request):
     if request.method != "POST":
         return JsonResponse({"status": "error", "message": "Method not allowed"}, status=405)
+    # Declarado FUERA del try para que los logger.info/warning de abajo
+    # (fuera del bloque try) no causen NameError si algo falló en medio.
+    body = ""
     try:
         remote_addr = request.META.get("REMOTE_ADDR")
         raw_body = request.body.decode("utf-8", errors="replace")
+        body = raw_body
         rfid_scanner_logger.info(
             "RFID receive from %s body[:4096]=%s", remote_addr, raw_body[:4096]
         )
