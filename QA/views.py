@@ -597,6 +597,18 @@ def _qa_rfid_guardar_impresion(request, variante_id, producto_id, cantidad, prin
         return {"ok": False, "error": "Método no permitido."}, 405
 
     cantidad = max(1, int(cantidad or 1))
+
+    # NOTA: NO mandamos ``zpl_enviado`` ni ``etiquetas`` al serializer (por lo
+    # tanto ``store_impresion`` recibe ``None`` para ambos) porque queremos que
+    # el service:
+    #   1) genere EPCs únicos por backend (intento reintento colisión),
+    #   2) cree EtiquetaRFIDDetalle en DB,
+    #   3) y después NOSOTROS armamos el ZPL final real (el que Browser Print
+    #      va a enviar a la impresora) y lo guardamos con update_fields().
+    #
+    # Este paso es OBLIGATORIO: antes store_impresion guardaba ``zpl_enviado``
+    # antes de haber generado los EPCs reales (vacío = NULL), por lo que el
+    # admin mostraba "ZPL enviado: vacío".
     payload = {
         "producto_variante": int(variante_id) if variante_id else None,
         "producto": int(producto_id) if producto_id else None,
@@ -615,9 +627,30 @@ def _qa_rfid_guardar_impresion(request, variante_id, producto_id, cantidad, prin
     except Exception as exc:
         return {"ok": False, "error": str(exc)}, 400
 
+    response_payload = _qa_rfid_success_payload(impresion)
+    zpl_real = (
+        response_payload.get("zpl_completo")
+        or ""
+    )
+
+    # Guardar el ZPL REAL generado DESPUÉS de crear los EPCs en EtiquetaRFIDDetalle.
+    # Esto es lo que Browser Print envía a la impresora.
+    try:
+        EtiquetaRFIDImpresion.objects.filter(pk=impresion.pk).update(
+            zpl_enviado=zpl_real if zpl_real else None
+        )
+    except Exception as exc:
+        # No fallamos la respuesta por esto (ya se crearon impresion+detalles);
+        # solo loggeamos.
+        logger.warning(
+            "No se pudo guardar zpl_enviado en impresion %s: %s",
+            impresion.pk,
+            str(exc),
+        )
+
     return {
         "ok": True,
-        "impresion": _qa_rfid_success_payload(impresion),
+        "impresion": response_payload,
     }, 201
 
 
@@ -882,33 +915,77 @@ def _es_hexadecimal_epc(value):
 
 def _extract_epc_raw(item):
     """Devuelve el EPC hex raw de un item de scan dict o string.
+
     Soporta:
       - str: hex directo
-      - dict: {'idHex':'..'} / {'data':'..'} / {'epc':'..'} / {'tagID':'..'}
-              tambien {'epc':{'idHex':'..'}} (anidado como en logs FX)
-    Devuelve None si no hay EPC valido.
-    Ademas retorna antenna/rssi extraidos del mismo item, separados.
+      - dict top-level keys comunes FX/ZDS
+      - anidado {tag:{epcHex:..}, meta:{..}} (Zebra Data Services SDK)
+      - anidado {data:{hex:.., source:..}} (FX EventReport)
+      - fuzzy find por substring (hex / epc / tag) con profundidad hasta 6.
     """
     if item is None:
         return None
+    if isinstance(item, bytes):
+        try:
+            item = item.decode("utf-8", errors="replace")
+        except Exception:
+            item = None
     if isinstance(item, str):
-        return item.strip()
+        s = item.strip()
+        return s if s else None
 
     if not isinstance(item, dict):
         return None
 
+    top_level_keys = (
+        "idHex", "data", "epc", "EPC", "tagID", "tidHex", "epcHex", "hex",
+        "epcId", "epcID", "tagEpc", "tag_epc", "tid", "value", "code",
+        "raw", "rawValue", "tag_id",
+    )
     candidates = []
-    for key in ("idHex", "data", "epc", "tagID", "tidHex", "epcHex", "hex"):
+    for key in top_level_keys:
         v = item.get(key)
         if v is None:
             continue
         if isinstance(v, dict):
-            for sub in ("idHex", "data", "epc", "tagID", "tidHex", "epcHex", "hex"):
+            for sub in top_level_keys:
                 sv = v.get(sub)
-                if sv:
+                if isinstance(sv, (str, bytes)) and sv:
                     candidates.append(sv)
         elif isinstance(v, (str, bytes)):
             candidates.append(v)
+
+    tag = item.get("tag")
+    if isinstance(tag, dict):
+        for sub in top_level_keys:
+            sv = tag.get(sub)
+            if isinstance(sv, (str, bytes)) and sv:
+                candidates.append(sv)
+        fuzzy_tag = _find_by_key_substr(tag, ["hex", "epc", "tag"])
+        if isinstance(fuzzy_tag, (str, bytes)) and fuzzy_tag:
+            candidates.append(fuzzy_tag)
+
+    data = item.get("data")
+    if isinstance(data, dict):
+        for sub in top_level_keys:
+            sv = data.get(sub)
+            if isinstance(sv, (str, bytes)) and sv:
+                candidates.append(sv)
+        fuzzy_data = _find_by_key_substr(data, ["hex", "epc", "tag"])
+        if isinstance(fuzzy_data, (str, bytes)) and fuzzy_data:
+            candidates.append(fuzzy_data)
+
+    reads = item.get("reads")
+    if isinstance(reads, list):
+        for r in reads:
+            if isinstance(r, (str, bytes)) and r:
+                candidates.append(r)
+                break
+
+    fuzzy_top = _find_by_key_substr(item, ["hex", "epc", "tag"])
+    if isinstance(fuzzy_top, (str, bytes)) and fuzzy_top:
+        candidates.append(fuzzy_top)
+
     for c in candidates:
         if isinstance(c, bytes):
             try:
@@ -926,8 +1003,23 @@ def _extract_int(value):
     try:
         if value is None:
             return None
+        if isinstance(value, bool):
+            return 1 if value else 0
+        if isinstance(value, float):
+            return int(value) if value.is_integer() else None
         return int(value)
     except (TypeError, ValueError):
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                if "." in stripped or "e" in stripped.lower():
+                    as_float = float(stripped)
+                    return int(as_float) if as_float.is_integer() else None
+                return int(stripped)
+            except (TypeError, ValueError):
+                return None
         return None
 
 
@@ -935,20 +1027,87 @@ def _extract_float(value):
     try:
         if value is None:
             return None
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
         return float(value)
     except (TypeError, ValueError):
+        if isinstance(value, str) and value.strip():
+            try:
+                return float(value.strip())
+            except (TypeError, ValueError):
+                return None
         return None
 
 
 def _find_by_key_substr(d, substrings):
-    if not isinstance(d, dict):
+    """Búsqueda recursiva de keys por substring a profundidad 6.
+
+    Retorna el primer valor (no list/tuple/dict) cuya key haga match;
+    si no, retorna None.
+    """
+    if not isinstance(d, dict) and not isinstance(d, (list, tuple)):
         return None
-    for key, value in d.items():
-        k = str(key).lower().replace("_", "").replace("-", "")
-        for s in substrings:
-            s_norm = s.lower().replace("_", "").replace("-", "")
-            if s_norm in k:
-                return value
+
+    def _recurse(obj, depth):
+        if depth > 6:
+            return None
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                k = str(key).lower().replace("_", "").replace("-", "")
+                matched = False
+                for s in substrings:
+                    s_norm = s.lower().replace("_", "").replace("-", "")
+                    if s_norm in k:
+                        matched = True
+                        break
+                if matched:
+                    if value is not None and not isinstance(value, (list, tuple, dict)):
+                        return value
+                found = _recurse(value, depth + 1)
+                if found is not None:
+                    return found
+            return None
+        if isinstance(obj, (list, tuple)):
+            for x in obj:
+                found = _recurse(x, depth + 1)
+                if found is not None:
+                    return found
+            return None
+        return None
+
+    return _recurse(d, 0)
+
+
+_ANTENNA_INT_KEYS = (
+    "antenna", "antennaID", "antennaId", "antennaPort", "antennaPortName",
+    "port", "ant", "source", "antenna_number", "antennaNumber",
+    "port_no", "portNo", "antPort", "ant_port", "readerPort",
+    "reader_port", "inputPort", "channel", "channelIndex",
+)
+_RSSI_FLOAT_KEYS = (
+    "peakRssi", "rssi", "rssiDbm", "peakRssiDbm", "rssi_value",
+    "rssiValue", "peak_rssi", "peakRssiValue", "signal_strength",
+    "signalStrength", "rssi_db", "rssiDb", "signalDb", "signalLevel",
+    "signal_level", "rssiPeak", "rxRssi", "rx_rssi", "tagRSSI",
+)
+
+
+def _antenna_from_value(raw):
+    """Convierte enteros, floats enteros, y strings estilo 'ANT-1' / 'Port#3'."""
+    as_int = _extract_int(raw)
+    if as_int is not None:
+        return as_int
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        import re as _re
+        m = _re.search(r"\d+", stripped)
+        if m:
+            try:
+                return int(m.group(0))
+            except Exception:
+                return None
     return None
 
 
@@ -956,35 +1115,64 @@ def _extract_antenna_rssi(item, fallback_antenna=None, fallback_rssi=None):
     antenna = None
     rssi = None
     if isinstance(item, dict):
-        antenna = _extract_int(
-            item.get("antenna")
-            or item.get("antennaID")
-            or item.get("antennaPort")
-            or item.get("antennaPortName")
-            or item.get("port")
-            or item.get("ant")
-            or item.get("source")
-            or item.get("antenna_number")
-            or item.get("antennaNumber")
-            or item.get("port_no")
-            or item.get("portNo")
-            or _find_by_key_substr(item, ["ant", "port"])
-        )
-        rssi = _extract_float(
-            item.get("peakRssi")
-            or item.get("rssi")
-            or item.get("rssiDbm")
-            or item.get("peakRssiDbm")
-            or item.get("rssi_value")
-            or item.get("rssiValue")
-            or item.get("peak_rssi")
-            or item.get("peakRssiValue")
-            or item.get("signal_strength")
-            or item.get("signalStrength")
-            or _find_by_key_substr(item, ["rssi", "signal"])
-        )
+        for key in _ANTENNA_INT_KEYS:
+            if key in item:
+                v = _antenna_from_value(item.get(key))
+                if v is not None:
+                    antenna = v
+                    break
+        if antenna is None:
+            meta = item.get("meta")
+            if isinstance(meta, dict):
+                for key in _ANTENNA_INT_KEYS:
+                    if key in meta:
+                        v = _antenna_from_value(meta.get(key))
+                        if v is not None:
+                            antenna = v
+                            break
+        if antenna is None:
+            data = item.get("data")
+            if isinstance(data, dict):
+                for key in _ANTENNA_INT_KEYS:
+                    if key in data:
+                        v = _antenna_from_value(data.get(key))
+                        if v is not None:
+                            antenna = v
+                            break
+        if antenna is None:
+            fuzzy_raw = _find_by_key_substr(item, ["ant", "port", "channel", "source"])
+            antenna = _antenna_from_value(fuzzy_raw)
+
+        for key in _RSSI_FLOAT_KEYS:
+            if key in item:
+                v = _extract_float(item.get(key))
+                if v is not None:
+                    rssi = v
+                    break
+        if rssi is None:
+            meta = item.get("meta")
+            if isinstance(meta, dict):
+                for key in _RSSI_FLOAT_KEYS:
+                    if key in meta:
+                        v = _extract_float(meta.get(key))
+                        if v is not None:
+                            rssi = v
+                            break
+        if rssi is None:
+            data = item.get("data")
+            if isinstance(data, dict):
+                for key in _RSSI_FLOAT_KEYS:
+                    if key in data:
+                        v = _extract_float(data.get(key))
+                        if v is not None:
+                            rssi = v
+                            break
+        if rssi is None:
+            fuzzy_rssi = _find_by_key_substr(item, ["rssi", "signal", "dbm", "db"])
+            rssi = _extract_float(fuzzy_rssi)
+
     if antenna is None:
-        antenna = _extract_int(fallback_antenna)
+        antenna = _antenna_from_value(fallback_antenna)
     if rssi is None:
         rssi = _extract_float(fallback_rssi)
     return antenna, rssi

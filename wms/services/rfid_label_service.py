@@ -195,16 +195,70 @@ class RFIDLabelService:
 
     @classmethod
     def _build_zpl_rfid(cls, epc, variante=None, producto=None, barcode_value=""):
+        """Construye el ZPL para una etiqueta RFID individual.
+
+        Este ZPL tiene 3 FORMATOS de escritura de EPC y una validación de
+        post-escritura con ``^HV``. Razón: entre versiones de firmware de
+        Zebra ZD500R/ZD421R/ZT411 + Browser Print local + tipo de inlay
+        Gen2 (96 bits / 128 bits) hay diferencias en cómo se interpreta
+        ``^RS`` / ``^RB`` / ``^RFW`` y un solo formato falla en algunos
+        casos (sintoma típico: ZPL imprime bien el texto pero el chip
+        conserva el EPC de fábrica ``3035...``).
+
+        El chip solo permite UNA escritura correcta por etiqueta (el
+        primer ^RFW que coincida con la longitud del inlay escribe; los
+        siguientes no hacen nada porque la región EPC ya no está blank).
+        """
         lines = cls._graphic_zpl_lines(
             variante=variante, producto=producto, barcode_value=barcode_value
         )
+
+        # --- Escritura #1: Gen2 EPC explícito con ASCII Hex (estándar nuevo)
+        # ``^RS8,E``   = Gen2 EPC global standard
+        # ``^RB96,,,1`` = 96 bits (24 hex), formato ASCII hex (param4=1)
+        # ``^RFW,E,,N`` = escribe banco EPC, sin password, no lockeo permanente
         lines.append("^RS8,E")
         lines.append("^RB96,,,1")
         lines.append("^RFW,E,,N")
         lines.append(f"^FD{epc}^FS")
-        lines.append(
-            f"^FO40,360^A0N,18,18^FDEPC: {epc[:16]}...{epc[-8:]}^FS"
-        )
+
+        # --- Escritura #2: Sin ^RS/^RB explícitos (fallback firmware viejo)
+        # Algunas versiones de ZebraLink/Connect for Printers cuando reciben
+        # ^RS fallan (por tamaño del inlay != 96 bits exactos). Por eso
+        # emitimos una segunda copia de ^RFW sin configuración previa:
+        # el firmware asume la longitud nativa del chip (96 o 128 bits).
+        lines.append("^RFW,E,,N")
+        lines.append(f"^FD{epc}^FS")
+
+        # --- Escritura #3: ^RB128 bits (28/32 hex) para inlays SGTIN-198
+        # Algunos inlays de mercado tienen 128 bits del banco EPC. Si
+        # escribimos 96 bits en una zona 128 bits, el FX reader lee
+        # EPC len=32 (128 bits) con padding de ceros; ^RB con 128 y
+        # format=1 ASCII Hex hace que el printer paddee automáticamente.
+        lines.append("^RS8,E")
+        lines.append("^RB128,,,1")
+        lines.append("^RFW,E,,N")
+        lines.append(f"^FD{epc}^FS")
+
+        # --- Validación post-escritura: ``^HV`` verifica EPC escrito con
+        # checksum. Si el chip NO aceptó la escritura, el printer marca
+        # error de impresora (beep + flashing RED) y el ZPL se cancela;
+        # así el usuario tiene retroalimentación inmediata.
+        lines.append("^RS8,E")
+        lines.append("^RB96,,,1")
+        lines.append("^HV1,3,E,0")
+
+        # Texto visual del EPC (información humana)
+        epc_display = epc
+        if len(epc_display) > 24:
+            lines.append(
+                f"^FO40,348^A0N,16,16^FDEPC: {epc_display[:12]}...{epc_display[-10:]}^FS"
+            )
+        else:
+            lines.append(
+                f"^FO40,360^A0N,18,18^FDEPC: {epc_display[:16]}...{epc_display[-8:]}^FS"
+            )
+
         lines.append("^XZ")
         return "\n".join(lines)
 
