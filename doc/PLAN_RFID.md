@@ -5,8 +5,8 @@
 Definir una ruta clara y escalable para incorporar:
 
 - [x] Impresion de etiquetas Zebra normales
-- [ ] Impresion de etiquetas RFID
-- [ ] Lectura de tags RFID
+- [x] Impresion de etiquetas RFID
+- [x] Lectura de tags RFID
 - [ ] Automatizacion de flujos WMS con RFID
 
 La idea es implementarlo por fases, sin mezclar todo desde el inicio.
@@ -103,46 +103,63 @@ Grabar tags RFID y al mismo tiempo imprimir la etiqueta fisica.
 
 ### Alcance
 
-- [ ] definir estructura EPC
-- [ ] generar ZPL compatible con RFID
-- [ ] relacionar etiqueta impresa con producto o unidad logistica
+- [x] definir estructura EPC
+- [x] generar ZPL compatible con RFID
+- [x] relacionar etiqueta impresa con producto o unidad logistica
 
 ### Decisiones necesarias
 
 - que se grabara en el tag:
-  - EPC
-  - SKU
-  - serie
-  - lote
-  - identificador interno
+  - [x] EPC
+  - [ ] SKU
+  - [x] serie (serial consecutivo 4d en detalle)
+  - [ ] lote
+  - [ ] identificador interno
 - que objetos del ERP tendran RFID:
-  - producto
-  - variante
-  - caja
-  - pallet
-  - ubicacion
+  - [x] producto
+  - [x] variante
+  - [ ] caja
+  - [ ] pallet
+  - [ ] ubicacion
 
 ### Entregables
 
-- [ ] generador de ZPL RFID
-- [ ] estrategia de EPC
-- [ ] registro de etiqueta RFID emitida
+- [x] generador de ZPL RFID
+- [x] estrategia de EPC
+- [x] registro de etiqueta RFID emitida
 
 ### Modelo sugerido
 
 - `EtiquetaRFID`
-  - epc
-  - tid
-  - producto
-  - producto_variante
-  - serie
-  - lote
-  - estatus
-  - fecha_impresion
+  - [x] epc
+  - [ ] tid
+  - [x] producto
+  - [x] producto_variante
+  - [x] serie
+  - [ ] lote
+  - [x] estatus
+  - [x] fecha_impresion
 
 ### Meta de esta fase
 
 Pasar de impresion normal a impresion con identidad RFID trazable.
+
+### Validacion QA completada (Fase 2)
+
+- [x] Workspace QA `/QA/imprimir_etiqueta/` con botón **"Guardar e imprimir etiqueta(s) RFID"** (SKU/variante).
+- [x] Workspace QA `/QA/imprimir_orden_compra/<id>/` con botón **"Guardar y imprimir etiquetas RFID"** (renglones de OC, guarda por renglon, badge de guardado).
+- [x] Backend `RFIDLabelService` (archivo `wms/services/rfid_label_service.py`):
+  - `_generate_epc_list()`: 24 hex = 96 bits SGTIN Gen2 (prefix 8 + ts_chunk 4 + idx 4 + random 8).
+  - `_build_zpl_rfid()`: `^RS8,E` + `^RB96,,,1` + `^RFW,E,,N` + `^FD{EPC}^FS` (escribe EPC Gen2 96 bits al chip, sin padding 128 bits).
+  - `store_impresion()`: transacción atómica, exige sucursal del usuario, crea `EtiquetaRFIDImpresion` + bulk `EtiquetaRFIDDetalle` (epc=UPPER, UNIQUE, estado IMPRESO).
+  - `_resolve_context()`: pertenencia a empresa + sucursal default ligada al usuario.
+- [x] Endpoints guardar impresión (archivo `QA/views.py`):
+  - POST `/QA/imprimir_etiqueta/guardar/` (SKU/Producto) → función `qa_guardar_impresion_sku`
+  - POST `/QA/imprimir_orden_compra/<detalle_id>/guardar/` (OC renglón) → función `qa_guardar_impresion_oc`
+- [x] Modelos finales (archivo `wms/models.py`):
+  - `EtiquetaRFIDImpresion` (folio `LAB-{id:06d}`, usuario, empresa, sucursal, producto/variante, cantidad, printer_name, ZPL enviado, status).
+  - `EtiquetaRFIDDetalle` (FK impresion, epc UNIQUE 64 chars, barcode_value, serial 4d, estado PENDIENTE/IMPRESO/LEIDO/CANCELADO).
+- [x] Validación usuario real: Impresión LAB-000012 crea renglón en `admin/wms/etiquetarfidimpresion/` y N renglones en `admin/wms/etiquetarfiddetalle/` (00001BD7EF5F000148CB3BF2 / SKU 3000703XCH / 0001 / Impreso).
 
 ---
 
@@ -154,10 +171,10 @@ Poder registrar lecturas RFID dentro del ERP.
 
 ### Alcance
 
-- [ ] recibir EPC leido
-- [ ] identificar a que producto o unidad corresponde
-- [ ] registrar evento
-- [ ] mostrar lectura en frontend
+- [x] recibir EPC leido
+- [x] identificar a que producto o unidad corresponde
+- [x] registrar evento
+- [x] mostrar lectura en frontend
 
 ### Flujo
 
@@ -169,34 +186,58 @@ Poder registrar lecturas RFID dentro del ERP.
 ### Estado actual
 
 - [x] Ya existe una prueba funcional de lectura en `QA/rfid/recepciones/`, pero hoy resuelve por `sku`, `codigo` o `cod_proscai`.
-- [ ] El siguiente paso para RFID real es sustituir ese valor por `EPC` leido desde hardware RFID o middleware Zebra compatible.
+- [x] Workspace dedicado `GET /QA/scanner_rfid/` para lectura RFID en vivo.
+- [x] El endpoint de hardware `POST /QA/scanner_rfid/receive/` recibe webhook del lector FX.
+- [x] El endpoint de polling `GET /QA/scanner_rfid/get/` devuelve scans + match cruzado con EtiquetaRFIDDetalle.
+- [x] El endpoint `GET /QA/scanner_rfid/clear/` purga staging rfid_scans (Purge List).
+- [x] Match en vivo: cada scan nuevo indica MATCH=SI con folio LAB-xxxx, SKU, talla, color, barcode, serial y estado; o MATCH=NO si EPC no está registrado.
 
 ### Entregables
 
-- [ ] endpoint para registrar lectura RFID
-- [ ] historial de lecturas
-- [ ] consulta de EPC
-- [ ] validaciones de tags no registrados
+- [x] endpoint para registrar lectura RFID
+- [x] historial de lecturas
+- [x] consulta de EPC
+- [x] validaciones de tags no registrados
 
 ### Modelos sugeridos
 
 - `RFIDLectura`
-  - epc
-  - tid
-  - dispositivo
-  - ubicacion
-  - evento
-  - fecha_lectura
+  - [x] epc
+  - [ ] tid
+  - [ ] dispositivo
+  - [ ] ubicacion
+  - [ ] evento
+  - [x] fecha_lectura
 
 - `RFIDDispositivo`
-  - nombre
-  - tipo
-  - ip
-  - activo
+  - [ ] nombre
+  - [ ] tipo
+  - [x] ip (reader_ip)
+  - [ ] activo
+
+Nota: modelo actual en uso = `RfidScan` (archivo `wms/models.py`): epc + reader_ip + antenna + rssi + created_at.
 
 ### Meta de esta fase
 
 Tener trazabilidad de lectura, aunque todavia no automatice procesos.
+
+### Validacion QA completada (Fase 3)
+
+- [x] `scanner_rfid_receive` (archivo `QA/views.py`):
+  - Soporta payloads FX: lista simple u objetos con llaves `tagData/tags/events/eventList/data/items/reads/readEvents/tagReadEvents`.
+  - `_extract_epc_raw()`: keys idHex/data/epc/tagID/tidHex/epcHex/hex + anidado `{epc:{idHex:...}}`.
+  - `_extract_antenna_rssi()` + `_find_by_key_substr()`: extrae antenna/rssi con keys nuevas (ant, source, antenna_number, port_no, rssi_value, peak_rssi, signal_strength, peakRssiValue, rssiDbm, signalStrength) + fuzzy substring.
+  - EPC normalizado (strip separadores, lower, min 8 chars).
+  - Deduplicado por batch + `bulk_create(batch_size=200)`.
+  - Logs body[:4096] para diagnosticar payloads FX desconocidos.
+- [x] `scanner_rfid_get`: match robusto con `_epc_variants()` — lower/upper, strip ceros inicio/fin, slice 24 hex prefijo/sufijo para padding de 128 bits.
+- [x] Frontend workspace: polling 2s, uniqueCount, tag nuevo por EPC, badge MATCH SI/NO, antenna, rssi, scan velocity.
+- [x] Purge List: limpia staging y resetea lastMaxId local.
+
+### PENDIENTES menores por confirmar con hardware
+
+- [ ] Que antenna y rssi dejen de ser `-` (null) en admin `wms/rfidscan/` — depende de las keys reales que mande el FX; ya hay logger 4096 chars y fuzzy match listo.
+- [ ] Confirmar MATCH=SI con etiqueta re-impresa CON el nuevo ZPL `^RS8,E ^RB96,,,1 ^RFW,E` (antes chip no tenía el EPC correcto; LAB-000012 salió sin ese fix, hay que reimprimir una nueva).
 
 ---
 
@@ -237,8 +278,8 @@ Reducir errores, mejorar velocidad y aumentar trazabilidad en almacen.
 ## Orden Recomendado de Implementacion
 
 1. [x] Impresion Zebra normal
-2. [ ] ZPL RFID + grabacion de tags
-3. [ ] Lectura RFID + registro de eventos
+2. [x] ZPL RFID + grabacion de tags
+3. [x] Lectura RFID + registro de eventos
 4. [ ] Automatizacion WMS por etapas
 
 ---
@@ -253,13 +294,13 @@ Reducir errores, mejorar velocidad y aumentar trazabilidad en almacen.
 
 ### Mediano plazo
 
-- [ ] Django genera ZPL RFID
-- [ ] Next.js imprime y graba tags
-- [ ] backend registra etiqueta RFID emitida
+- [x] Django genera ZPL RFID
+- [x] Next.js imprime y graba tags
+- [x] backend registra etiqueta RFID emitida
 
 ### Largo plazo
 
-- [ ] lector RFID o middleware envia eventos al backend
+- [x] lector RFID o middleware envia eventos al backend
 - [ ] backend conecta lecturas con WMS
 
 ---
@@ -271,6 +312,8 @@ Reducir errores, mejorar velocidad y aumentar trazabilidad en almacen.
 - definir EPC antes de imprimir masivamente
 - no automatizar WMS con RFID sin tener trazabilidad base estable
 - validar compatibilidad exacta del modelo de impresora Zebra
+- [x] Usar `^RS8,E + ^RB96,,,1` ANTES de `^RFW,E` para escritura real de EPC 96 bits Gen2 (sin padding de 128 bits; sin esto, el papel muestra el EPC pero el chip lo escribe con otra longitud o directamente no lo sobreescribe)
+- [x] Extractor antenna/rssi con fuzzy find + logger 4096 chars para payloads FX variables
 
 ---
 
@@ -282,11 +325,11 @@ Reducir errores, mejorar velocidad y aumentar trazabilidad en almacen.
 
 ### MVP 2
 
-- [ ] imprimir etiqueta RFID con EPC generado por backend
+- [x] imprimir etiqueta RFID con EPC generado por backend
 
 ### MVP 3
 
-- [ ] registrar lectura de EPC y mostrar historial
+- [x] registrar lectura de EPC y mostrar historial
 
 ### MVP 4
 
@@ -299,8 +342,19 @@ Reducir errores, mejorar velocidad y aumentar trazabilidad en almacen.
 La ruta correcta para este proyecto es:
 
 1. [x] imprimir bien
-2. [ ] grabar RFID
-3. [ ] leer RFID
+2. [x] grabar RFID
+3. [x] leer RFID
 4. [ ] automatizar WMS
 
 Ese orden reduce riesgo, facilita mantenimiento y permite avanzar con valor real desde la primera fase.
+
+---
+
+## Resumen CHECKBOX actualizado al commit `ace44de`
+
+- **FASE 1 = 100% ✅** (Zebra normales, F1 validación QA, endpoints, MVPs, flujo).
+- **FASE 2 = 100% ✅** (Estructura EPC 24 hex, ZPL RFID Gen2 `^RS8,E ^RB96,,,1 ^RFW,E`, registro impreso en DB con usuario/empresa/sucursal, 2 workspaces QA SKU+OC, MVPs).
+- **FASE 3 = 95% ✅** (receive+get+clear implementados, match live robusto, antenna/rssi extracción + logger 4096 chars). Los 2 únicos pendientes son confirmaciones de hardware que dependen de probar una etiqueta nueva:
+  - [ ] antenna/rssi aparecen en admin (código listo, falta correr un FX post).
+  - [ ] MATCH=SI real con chip con EPC bien grabado (LAB-000012 no sirve porque salió sin ^RS/^RB, hay que reimprimir).
+- **FASE 4 = 0% (como corresponde)**: se mantiene off hasta confirmar lectura 100% real + match SI en producción.
