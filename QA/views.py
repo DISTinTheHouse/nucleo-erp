@@ -1564,10 +1564,23 @@ def scanner_rfid_get(request):
         vars.add(base.rstrip("0"))
         vars.add(base.strip("0"))
         if len(base) > 24:
+            # FX7500/FX9600 manda 28 chars (96b + 4 CRC/PC) o 32 chars (128b)
             vars.add(base[:24])
             vars.add(base[-24:])
             vars.add(base[:24].lstrip("0"))
             vars.add(base[-24:].lstrip("0"))
+            for target_len in (28, 32):
+                if len(base) >= target_len:
+                    vars.add(base[:target_len])
+                    vars.add(base[-target_len:])
+        elif len(base) < 24:
+            # Caso raro: FX manda EPC con ceros truncados a izq/der (len < 24)
+            pad_left = base.rjust(24, "0")
+            pad_right = base.ljust(24, "0")
+            vars.add(pad_left)
+            vars.add(pad_right)
+            vars.add(pad_left.lstrip("0"))
+            vars.add(pad_right.rstrip("0"))
         return {v for v in vars if len(v) >= 8}
 
     epc_search_set = set()
@@ -1712,7 +1725,40 @@ def scanner_rfid_get(request):
                 talla_nombre,
             )
         data.append(item)
-    return JsonResponse({"scans": data})
+
+    # --- INFO DEBUG TOP-LEVEL en /get/ response (sin entrar a Vercel / receive)
+    # Útil para saber: ¿mi EPC LAB-000022 (000012e3...) se leyó en FX?
+    epc_all_scans_lower = [s.epc.lower() for s in scans if s.epc]
+    epc_all_scans_set = set(epc_all_scans_lower)
+
+    # Busqueda manual especifica del ultimo EPC de impresion (si usuario lo pasa por query)
+    q_epc = (request.GET.get("epc") or "").strip().lower()
+    q_search_debug = None
+    if q_epc:
+        q_vars = sorted(_epc_variants(q_epc))
+        hit = None
+        for v in q_vars:
+            if v in epc_all_scans_set:
+                hit = v
+                break
+        q_search_debug = {
+            "query_epc": q_epc,
+            "query_epc_len": len(q_epc),
+            "variants_count": len(q_vars),
+            "variants_head5": q_vars[:5],
+            "found_in_scans": bool(hit),
+            "hit_variant": hit,
+        }
+
+    debug_get = {
+        "scans_returned": len(data),
+        "scans_total_max_50": len(scans),
+        "lookup_detalle_count": len(detalle_by_epc_variant),
+        "unique_epc_in_50_scans_count": len(epc_all_scans_set),
+        "unique_epc_prefixes_head30": sorted({e[:4] for e in epc_all_scans_lower})[:30],
+        "query_epc_search": q_search_debug,
+    }
+    return JsonResponse({"scans": data, "debug_get": debug_get})
 
 
 def scanner_rfid_clear(request):
