@@ -318,6 +318,17 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         "detalles_override": f"`cantidad` debe ser mayor a 0 para `pedido_detalle_talla_id={pdt_id}`."
                     })
+                # ``PedidoDetalleTalla.cantidad`` es ``PositiveIntegerField``:
+                # las prendas se bordan enteras. Aceptar fraccionarios metía
+                # residuos de coma flotante en las sumas de cupo y dejaba
+                # pendientes de 1e-15 que ninguna OB podía consumir.
+                if cantidad_num != int(cantidad_num):
+                    raise serializers.ValidationError({
+                        "detalles_override": (
+                            f"`cantidad` debe ser un número entero de piezas para "
+                            f"`pedido_detalle_talla_id={pdt_id}` (llegó {cantidad_num})."
+                        )
+                    })
 
                 if pedido is not None:
                     try:

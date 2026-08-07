@@ -1863,6 +1863,8 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
           "color_id": 9,
           "color_nombre": "Azul Marino",
           "cantidad_pedido": 25.0,
+          "cantidad_asignada": 10.0,
+          "cantidad_pendiente": 15.0,
           "posicion_sugerida": "F",
           "ubicaciones": [
             {
@@ -1889,8 +1891,9 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 | Campo                                  | Regla                                                                                                                                                                                                     |
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_bordado=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                                                                 |
-| `pedidos[].detalles[]`                 | Líneas del pedido que llevan servicio de bordado (una por cada combinación `producto + talla + color`). Incluye `cantidad_pedido` y el preview de ubicaciones/foto/notas extraído desde `bordado_config`. |
+| `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_bordado=True` **y con saldo pendiente**: si todas sus líneas están cubiertas al 100% por OBs activas, el pedido **no aparece** (no hay nada que bordar). Scope por `empresa` + `sucursales_permitidas()` del usuario. |
+| `pedidos[].detalles[]`                 | Líneas del pedido que llevan servicio de bordado (una por cada combinación `producto + talla + color`) y con `cantidad > 0` —mismo criterio que aplica el POST, para no ofrecer renglones que luego rechaza—. Incluye `cantidad_pedido` y el preview de ubicaciones/foto/notas extraído desde `bordado_config`. Un pedido que sí aparece viaja con **todas** sus líneas, incluidas las ya agotadas (`cantidad_pendiente = 0`), para que el frontend pueda marcarlas. |
+| `cantidad_asignada` / `cantidad_pendiente` | Por línea. `cantidad_asignada` es la suma de `OrdenBordadoDetalle.cantidad` de **todas las OBs activas** de ese pedido para esa línea; `cantidad_pendiente = max(0, cantidad_pedido - cantidad_asignada)`. Es el valor con el que el frontend debe pre-llenar el selector de cantidades: usar `cantidad_pedido` ofrece piezas ya programadas y el POST las rechaza con 400. Los renglones de OB cuya `talla` quedó en `NULL` (los genera el pipeline de picking cuando la talla no trae `variante`) no se pueden atribuir a una talla concreta y se descuentan del pendiente de las líneas del mismo `pedido_detalle`, así que el **total por renglón** es exacto aunque el reparto por talla sea aproximado. |
 | `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                                                              |
 | `preview.folio_ob_sugerido`            | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`).                                        |
 | Sin empresa / sin sucursales asignadas | Devuelve listas vacías `[]` sin error.                                                                                                                                                                    |
@@ -1923,12 +1926,12 @@ Ejemplo body con selección parcial:
 | Error                                                                                                                                        | HTTP Status                                                                                        |
 | -------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | IDs `pedido_detalle_talla_id` repetidos, inválidos, o que no pertenecen al mismo `pedido` que el body                                        | 400                                                                                                |
-| `cantidad` no numérica, `<= 0`, o mayor a `PedidoDetalleTalla.cantidad` del renglón del pedido                                               | 400                                                                                                |
+| `cantidad` no numérica, `<= 0`, fraccionaria (debe ser entero de piezas), o mayor a `PedidoDetalleTalla.cantidad` del renglón del pedido      | 400                                                                                                |
 | Alguna línea enviada tiene `lleva_bordado=False`                                                                                             | 400                                                                                                |
 | `detalles_override[]` vacío (no se seleccionó nada)                                                                                          | 400                                                                                                |
 | Se intenta **crear sin override** una OB para un pedido que ya tiene una activa con el 100% de sus líneas                                    | 409 Conflict (mantiene la regla legacy SSoT, ver abajo)                                            |
 | **`ya_asignado + nuevo > disponible`** por alguna línea combinando todas las OBs activas (regla nueva de fraccionamiento seguro)             | 400                                                                                                |
-| Se envía `detalles_override[]` seleccionando **solamente una parte** de las líneas y/o cantidades parciales **sin exceder el cupo restante** | Se permite. **No dispara 409**; se pueden crear múltiples OBs parciales hasta completar el pedido. |
+| Se envía `detalles_override[]` seleccionando **solamente una parte** de las líneas y/o cantidades parciales **sin exceder el cupo restante** | Se permite (`201`). **No dispara 409**; se pueden crear múltiples OBs parciales activas hasta completar el pedido —la constraint que lo impedía se removió en la migración `0026`—. |
 
 > **Regla de fraccionamiento SSoT** (`OrdenBordadoService._cantidades_asignadas_por_linea`): la suma de todos los `OrdenBordadoDetalle` activos para el mismo `(pedido_detalle_id, talla_id)` **no puede superar** `PedidoDetalleTalla.cantidad`. El error 400 del caso de exceso retorna además `detalles_exceso[]` con la línea exacta, lo pedido, lo ya asignado, lo nuevo solicitado y el cupo restante:```json
 > {
@@ -2024,7 +2027,14 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
   - Validación **cross-tenant**: `pedido.empresa_id == user.empresa_id` y acceso por `sucursales_permitidas()`; si no, retorna 403/409 según caso y no gasta folio.
   - `buscar_existente_full_match()`: detecta OB activa para el mismo pedido con cobertura 100%.
 
-**Estados y cancelación**: El candado "una OB activa por pedido" (constraint `uq_orden_bordado_activa_por_pedido`) se libera **sólo** al dar de baja la OB (soft delete, `activo=false`). Cambiar el estatus a `CANCELADO` **no** libera el pedido por sí solo: la OB sigue `activo=true`, así que un segundo `POST` responderá `409` hasta que la OB previa se dé de baja.
+**Estados y cancelación**: La constraint `uq_orden_bordado_activa_por_pedido` ("una OB activa por pedido") **ya no existe**: se removió en la migración `0026`, gemela de la `0025` que hizo lo propio con Reflejante y OCM, porque impedía la segunda OB parcial sobre el mismo pedido. Hoy un pedido puede tener **varias OBs activas** mientras la suma por línea no exceda `PedidoDetalleTalla.cantidad`.
+
+Lo que controla el cupo ahora:
+
+- **Por línea y por renglón**: `ya_asignado + nuevo <= cantidad_pedido`, contando sólo OBs con `activo=true`. Se valida en dos cortes —por `(pedido_detalle, talla)` y por total del `pedido_detalle`, este último para absorber los renglones con `talla = NULL` que genera el picking—. Excederlo es `400` con `detalles_exceso[]`.
+- **409 de pedido completo**: sólo en el POST **sin** `detalles_override` y sólo si el pedido ya está cubierto al 100% **en piezas**. Una OB parcial que toca todas las líneas con cantidades reducidas ya no dispara este 409 (antes sí: la detección contaba renglones, no piezas).
+- **Concurrencia**: `OrdenBordadoService.save()` toma un `select_for_update` sobre el renglón de `Pedido` antes de leer lo asignado, de modo que dos POST simultáneos sobre el mismo pedido se serializan en vez de pasar ambos el chequeo de cupo.
+- **Cancelación**: cambiar el estatus a `CANCELADO` **no** libera cupo; sólo el soft delete (`activo=false`) lo devuelve, porque el cupo se calcula sobre OBs `activo=true`.
 
 ### 8) Orden de Reflejante Onboarding (patrón sencillo / manual)
 
@@ -2032,6 +2042,8 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
   - `GET /api/v1/produccion/orden-reflejante/onboarding/`
   - `POST /api/v1/produccion/orden-reflejante/onboarding/`
 - **Objetivo**: patrón onboarding idéntico a ÓrdenesBordado y WMS: catálogos precargados para que Next.js muestre selector de pedido + operadores + preview folio.
+
+> **Pendiente por línea**: cada objeto de `detalles[]` incluye `cantidad_asignada` y `cantidad_pendiente` (= `max(0, cantidad_pedido - cantidad_asignada)`) sobre las órdenes activas del pedido, y un pedido sin ninguna línea con saldo **no aparece** en `pedidos`. Misma semántica que el onboarding de Bordado; ver esa sección para el detalle de los renglones con `talla = NULL`.
 
 **GET onboarding — shape**
 
@@ -2200,6 +2212,8 @@ Cuando la solicitud de OR parcial sí excede el cupo restante (validación de su
   - `GET /api/v1/produccion/orden-corte-manga/onboarding/`
   - `POST /api/v1/produccion/orden-corte-manga/onboarding/`
 - **Objetivo**: patrón onboarding idéntico a ÓrdenesBordado/ÓrdenesReflejante y WMS: catálogos precargados para que Next.js muestre selector de pedido + operadores + preview folio.
+
+> **Pendiente por línea**: cada objeto de `detalles[]` incluye `cantidad_asignada` y `cantidad_pendiente` (= `max(0, cantidad_pedido - cantidad_asignada)`) sobre las órdenes activas del pedido, y un pedido sin ninguna línea con saldo **no aparece** en `pedidos`. Misma semántica que el onboarding de Bordado; ver esa sección para el detalle de los renglones con `talla = NULL`.
 
 **GET onboarding — shape**
 
