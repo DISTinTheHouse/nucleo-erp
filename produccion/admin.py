@@ -213,7 +213,10 @@ class OrdenReflejanteDetalleInline(admin.TabularInline):
         "cantidad",
         "tipo_reflejante",
         "posicion",
-        "metros_reflejante",
+        # El campo del modelo es ``metros``; ``metros_reflejante`` no existe y
+        # rompía este inline al renderizarlo (los checks de admin no lo
+        # detectan). Mismo error que había en el service.
+        "metros",
     )
 
 @admin.register(OrdenesReflejante)

@@ -361,6 +361,43 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
                         })
         return attrs
 
+class OrdenBordadoDetalleListSerializer(serializers.ModelSerializer):
+    """Renglón de orden de bordado para el listado."""
+
+    # NOTA (comentario, no docstring: drf-spectacular publica el docstring como
+    # `description` del componente en /api/schema/ y /api/docs/, y esto es
+    # detalle interno de implementación).
+    #
+    # ``OrdenBordadoDetalleSerializer`` re-lee ``PedidoDetalleTalla`` para
+    # resolver ``ubicaciones``/``foto``/``notas``/``bordado_config``, y su caché
+    # va por ``(pedido_detalle_id, talla_id)`` —clave que en datos reales es
+    # distinta en cada renglón, así que nunca acierta—. Resultado: una query por
+    # renglón.
+    #
+    # Ninguna vista de listado consume esos cuatro campos —los pinta el diálogo
+    # de detalle, que sigue usando el serializer completo—, así que aquí
+    # simplemente no se declaran: sin ``SerializerMethodField`` no hay lookup, y
+    # el listado deja de crecer con el número de renglones.
+
+    producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
+    color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+
+    class Meta:
+        model = OrdenBordadoDetalle
+        fields = '__all__'
+
+
+class OrdenBordadoListSerializer(OrdenBordadoSerializer):
+    """Orden de bordado para el listado."""
+
+    # Hereda de ``OrdenBordadoSerializer`` para que el encabezado no pueda
+    # divergir: mismos campos, mismo ``Meta``, mismo ``usuario_nombre``. Lo
+    # único que cambia es que ``detalles`` usa el renglón ligero.
+
+    detalles = OrdenBordadoDetalleListSerializer(many=True, read_only=True)
+
+
 class _OrdenPadreWriteOnceMixin:
     """Endurece la superficie escribible de los serializers satélite
     (Avances/Incidencias de Bordado y Reflejante), que declaran
@@ -521,20 +558,51 @@ class OrdenReflejanteDetalleSerializer(serializers.ModelSerializer):
         return self._pdt_reflejante_cache[key]
 
     def _get_cfg(self, obj):
+        """El ``reflejante_config`` CRUDO, tal cual lo guardó ventas.
+
+        Aquí no se normaliza nada: es lo que viaja en el campo
+        ``reflejante_config`` de la respuesta, y en datos reales es SIEMPRE un
+        arreglo (ver ``_get_cfg_dict``).
+        """
         pdt = self._get_pedido_detalle_talla(obj)
         return getattr(pdt, 'reflejante_config', None) or {}
+
+    def _get_cfg_dict(self, obj):
+        """El config sólo si es un dict; ``{}`` en cualquier otro caso.
+
+        ``reflejante_config`` NO tiene la forma de ``bordado_config``: en los
+        37 registros que lo traen es un ARREGLO de un elemento
+        ``[{"tipo": …, "opcion": …, "posicion": …}]`` —nunca un dict—, así que
+        ``cfg.get('ubicaciones')`` reventaba con ``AttributeError: 'list'
+        object has no attribute 'get'`` y el ``retrieve`` respondía 500.
+
+        Este helper existe para que las tres extracciones de abajo —copiadas
+        de Bordado, donde el config SÍ es un dict— no exploten. No traduce el
+        arreglo a ``ubicaciones``: no es lo mismo. Los elementos de bordado
+        describen el estampado (``codigo``, ``imagen``, medidas, técnicas) y
+        los de reflejante describen el material y dónde va (``tipo``,
+        ``opcion``, ``posicion``); mapear unos a otros devolvería datos
+        plausibles pero equivocados. ``ubicaciones``/``foto``/``notas`` quedan
+        vacíos porque para reflejante NO existe ese dato: ninguna fila
+        menciona ``ubicaciones``, ``foto``, ``imagen`` ni ``notas``.
+
+        El arreglo no se pierde: viaja íntegro en ``reflejante_config``, que
+        sigue leyendo el valor crudo con ``_get_cfg``.
+        """
+        cfg = self._get_cfg(obj)
+        return cfg if isinstance(cfg, dict) else {}
 
     def get_reflejante_config(self, obj):
         cfg = self._get_cfg(obj)
         return cfg or None
 
     def get_ubicaciones(self, obj):
-        cfg = self._get_cfg(obj)
+        cfg = self._get_cfg_dict(obj)
         ubicaciones = cfg.get('ubicaciones')
         return ubicaciones if isinstance(ubicaciones, list) else []
 
     def get_foto(self, obj):
-        cfg = self._get_cfg(obj)
+        cfg = self._get_cfg_dict(obj)
         for key in ('foto', 'imagen', 'imagen_url', 'foto_url'):
             value = cfg.get(key)
             if value:
@@ -544,7 +612,7 @@ class OrdenReflejanteDetalleSerializer(serializers.ModelSerializer):
         return None
 
     def get_notas(self, obj):
-        cfg = self._get_cfg(obj)
+        cfg = self._get_cfg_dict(obj)
         for key in ('notas', 'observaciones', 'comentarios'):
             value = cfg.get(key)
             if value:
@@ -649,6 +717,35 @@ class OrdenReflejanteSerializer(serializers.ModelSerializer):
                         })
         return attrs
         
+class OrdenReflejanteDetalleListSerializer(serializers.ModelSerializer):
+    """Renglón de orden de reflejante para el listado."""
+
+    # NOTA (comentario, no docstring: drf-spectacular lo publicaría como
+    # `description` del componente en /api/schema/ y /api/docs/).
+    #
+    # Mismo motivo que en Bordado (ver ``OrdenBordadoDetalleListSerializer``):
+    # el serializer completo dispara una query a ``PedidoDetalleTalla`` por
+    # renglón. Al no declarar los campos derivados de ``reflejante_config``,
+    # el listado tampoco ejecuta la extracción que los resuelve.
+
+    producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
+    color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+
+    class Meta:
+        model = OrdenReflejanteDetalle
+        fields = '__all__'
+
+
+class OrdenReflejanteListSerializer(OrdenReflejanteSerializer):
+    """Orden de reflejante para el listado."""
+
+    # Sólo cambia el anidado de ``detalles``; ver
+    # ``OrdenBordadoListSerializer``.
+
+    detalles = OrdenReflejanteDetalleListSerializer(many=True, read_only=True)
+
+
 class ReflejanteAvancesSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSerializer):
     orden_padre_field = 'orden_r'
 
@@ -829,3 +926,37 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
                             )
                         })
         return attrs
+
+
+class OrdenCorteMangaDetalleListSerializer(serializers.ModelSerializer):
+    """Renglón de orden de corte de manga para el listado."""
+
+    # NOTA (comentario, no docstring: drf-spectacular lo publicaría como
+    # `description` del componente en /api/schema/ y /api/docs/).
+    #
+    # Mismo motivo que en Bordado (ver ``OrdenBordadoDetalleListSerializer``):
+    # una query a ``PedidoDetalleTalla`` por renglón.
+    #
+    # Ojo con la diferencia de este módulo: ``corte_manga_config`` no sale sólo
+    # del pedido, es la mezcla de ``PedidoDetalleTalla.corte_manga_config`` con
+    # el campo propio ``OrdenCorteMangaDetalle.configuracion``. Lo que se
+    # descarta aquí es únicamente la parte que exige ir al pedido; el campo
+    # ``configuracion`` es una columna del propio renglón y sigue viajando en el
+    # listado (llega con ``fields = '__all__'``, sin query extra).
+
+    producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
+    color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+
+    class Meta:
+        model = OrdenCorteMangaDetalle
+        fields = '__all__'
+
+
+class OrdenesCorteMangaListSerializer(OrdenesCorteMangaSerializer):
+    """Orden de corte de manga para el listado."""
+
+    # Sólo cambia el anidado de ``detalles``; ver
+    # ``OrdenBordadoListSerializer``.
+
+    detalles = OrdenCorteMangaDetalleListSerializer(many=True, read_only=True)

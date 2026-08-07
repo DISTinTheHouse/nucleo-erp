@@ -1,8 +1,8 @@
 from django.db import transaction
-from django.db.models import Count, Sum
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesCorteManga, OrdenCorteMangaDetalle
 from produccion.services.common import (
+    EPS_CANTIDAD,
     cantidades_asignadas,
     crear_orden_con_guardia_duplicado,
     payload_duplicada,
@@ -60,31 +60,47 @@ class OrdenCorteMangaService:
 
     @staticmethod
     def buscar_existente_full_match(pedido):
-        """Devuelve OrdenesCorteManga activa si ya cubre 100% de las tallas con lleva_corte_manga.
+        """Devuelve una OCM activa si el pedido ya está cubierto al 100%.
 
-        Regla SAFE minimalista: misma cantidad de detalle_tallas que el pedido.
-        Si negocio decide habilitar fraccionamiento (OCM parcial), esta función
-        regresa None y se permite una segunda OCM.
+        "Cubierto" se mide en **piezas**, no en número de renglones: hay que
+        comparar lo asignado por las OCMs activas contra
+        ``PedidoDetalleTalla.cantidad`` línea por línea. Contar renglones (lo
+        que hacía antes) trataba una OCM parcial que toca todas las líneas con
+        cantidades reducidas como cobertura total, y devolvía un 409 diciendo
+        "ya existe ... con el 100% de las prendas" sobre un pedido cubierto a
+        medias.
+
+        Sólo se consulta en el POST **sin** ``detalles_override``. Si queda
+        cualquier saldo, devuelve ``None`` y el chequeo de cupo de ``save()``
+        produce el 400 con las cantidades exactas que faltan.
+
+        Misma regla que ``OrdenBordadoService.buscar_existente_full_match``.
         """
-        tallas_esperadas_qty = OrdenCorteMangaService._tallas_corte_manga_qs(
-            pedido.id
-        ).count()
-        if tallas_esperadas_qty == 0:
+        tallas = list(OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id))
+        if not tallas:
             return None
 
-        ocm_match = (
+        por_linea, sin_talla = OrdenCorteMangaService._cantidades_asignadas_por_linea(pedido)
+        for dt in tallas:
+            asignado = por_linea.get((dt.pedido_detalle_id, dt.talla_id), 0.0)
+            if asignado + EPS_CANTIDAD < float(dt.cantidad or 0):
+                return None
+        if any(v > EPS_CANTIDAD for v in sin_talla.values()):
+            # Hay piezas programadas sin talla identificable (ver
+            # ``cantidades_asignadas_por_pedidos``): no se puede afirmar
+            # cobertura exacta, así que no se emite el 409 de duplicado.
+            return None
+
+        return (
             OrdenesCorteManga.objects.filter(
                 empresa=pedido.empresa,
                 sucursal=pedido.sucursal,
                 pedido=pedido,
                 activo=True,
             )
-            .annotate(detalle_count=Count("detalles"))
-            .filter(detalle_count=tallas_esperadas_qty)
             .order_by("-id")
             .first()
         )
-        return ocm_match
 
     @staticmethod
     def cantidades_asignadas_por_pedidos(pedido_ids):
@@ -146,6 +162,20 @@ class OrdenCorteMangaService:
                 "err": "No se seleccionaron líneas para generar la orden de corte de manga."
             })
 
+        # El 409 de pedido completo va **antes** del cupo por línea: un POST sin
+        # override sobre un pedido ya cubierto al 100% es el duplicado clásico y
+        # debe contestar 409, no el 400 de exceso —que es lo que pasaba al
+        # evaluar el cupo primero, porque ese caso también agota el cupo—.
+        # Sin override se pide el pedido completo tal cual salió de
+        # ``_tallas_corte_manga_qs``, así que la condición es exactamente esa.
+        # Mismo orden que ``OrdenBordadoService.save``.
+        if not detalles_override:
+            existente = OrdenCorteMangaService.buscar_existente_full_match(pedido)
+            if existente is not None:
+                raise OrdenCorteMangaDuplicada409(
+                    OrdenCorteMangaService._payload_duplicada(existente)
+                )
+
         asignado_por_linea, _asignado_sin_talla = (
             OrdenCorteMangaService._cantidades_asignadas_por_linea(pedido)
         )
@@ -176,24 +206,8 @@ class OrdenCorteMangaService:
                 "detalles_exceso": errores_lineas,
             })
 
-        es_full_match = (
-            not detalles_override
-            and {dt.id for dt in detalle_tallas_raw} == {dt.id for dt in detalle_tallas}
-            and all(
-                float(dt.cantidad or 0) == float(raw.cantidad or 0)
-                for dt, raw in zip(
-                    sorted(detalle_tallas, key=lambda x: x.id),
-                    sorted(detalle_tallas_raw, key=lambda x: x.id),
-                )
-            )
-        )
-        if es_full_match:
-            existente = OrdenCorteMangaService.buscar_existente_full_match(pedido)
-            if existente is not None:
-                raise OrdenCorteMangaDuplicada409(
-                    OrdenCorteMangaService._payload_duplicada(existente)
-                )
-
+        # El folio se consume DESPUÉS de todas las validaciones, para que un
+        # rechazo no gaste consecutivo de la serie.
         folio_ocm = generate_ocm_folio(pedido.empresa_id, pedido.sucursal_id)
 
         orden_corte_manga = crear_orden_con_guardia_duplicado(
