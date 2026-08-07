@@ -1,8 +1,7 @@
 from django.db import transaction
-from django.db.models import Count, Sum
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesReflejante, OrdenReflejanteDetalle
-from produccion.services.common import cantidades_asignadas, crear_orden_con_guardia_duplicado, payload_duplicada, revisar_empresa, tallas_orden_trabajo_qs
+from produccion.services.common import EPS_CANTIDAD, cantidades_asignadas, crear_orden_con_guardia_duplicado, payload_duplicada, revisar_empresa, tallas_orden_trabajo_qs
 from produccion.utils.folios import generate_or_folio
 
 
@@ -60,29 +59,47 @@ class OrdenReflejanteService:
 
     @staticmethod
     def buscar_existente_full_match(pedido):
-        """Devuelve OrdenesReflejante activa si ya cubre 100% de las tallas con lleva_reflejante.
+        """Devuelve una OR activa si el pedido ya está cubierto al 100%.
 
-        Regla SAFE minimalista: misma cantidad de detalle_tallas que el pedido.
-        Si negocio decide habilitar fraccionamiento (OR parcial), esta función
-        regresa None y se permite una segunda OR.
+        "Cubierto" se mide en **piezas**, no en número de renglones: hay que
+        comparar lo asignado por las ORs activas contra
+        ``PedidoDetalleTalla.cantidad`` línea por línea. Contar renglones (lo
+        que hacía antes) trataba una OR parcial que toca todas las líneas con
+        cantidades reducidas como cobertura total, y devolvía un 409 diciendo
+        "ya existe ... con el 100% de las prendas" sobre un pedido cubierto a
+        medias.
+
+        Sólo se consulta en el POST **sin** ``detalles_override``. Si queda
+        cualquier saldo, devuelve ``None`` y el chequeo de cupo de ``save()``
+        produce el 400 con las cantidades exactas que faltan.
+
+        Misma regla que ``OrdenBordadoService.buscar_existente_full_match``.
         """
-        tallas_esperadas_qty = OrdenReflejanteService._tallas_reflejante_qs(pedido.id).count()
-        if tallas_esperadas_qty == 0:
+        tallas = list(OrdenReflejanteService._tallas_reflejante_qs(pedido.id))
+        if not tallas:
             return None
 
-        or_match = (
+        por_linea, sin_talla = OrdenReflejanteService._cantidades_asignadas_por_linea(pedido)
+        for dt in tallas:
+            asignado = por_linea.get((dt.pedido_detalle_id, dt.talla_id), 0.0)
+            if asignado + EPS_CANTIDAD < float(dt.cantidad or 0):
+                return None
+        if any(v > EPS_CANTIDAD for v in sin_talla.values()):
+            # Hay piezas programadas sin talla identificable (ver
+            # ``cantidades_asignadas_por_pedidos``): no se puede afirmar
+            # cobertura exacta, así que no se emite el 409 de duplicado.
+            return None
+
+        return (
             OrdenesReflejante.objects.filter(
                 empresa=pedido.empresa,
                 sucursal=pedido.sucursal,
                 pedido=pedido,
                 activo=True,
             )
-            .annotate(detalle_count=Count("detalles"))
-            .filter(detalle_count=tallas_esperadas_qty)
             .order_by("-id")
             .first()
         )
-        return or_match
 
     @staticmethod
     def cantidades_asignadas_por_pedidos(pedido_ids):
@@ -151,6 +168,20 @@ class OrdenReflejanteService:
                 "err": "No se seleccionaron líneas para generar la orden de reflejante."
             })
 
+        # El 409 de pedido completo va **antes** del cupo por línea: un POST sin
+        # override sobre un pedido ya cubierto al 100% es el duplicado clásico y
+        # debe contestar 409, no el 400 de exceso —que es lo que pasaba al
+        # evaluar el cupo primero, porque ese caso también agota el cupo—.
+        # Sin override se pide el pedido completo tal cual salió de
+        # ``_tallas_reflejante_qs``, así que la condición es exactamente esa.
+        # Mismo orden que ``OrdenBordadoService.save``.
+        if not detalles_override:
+            existente = OrdenReflejanteService.buscar_existente_full_match(pedido)
+            if existente is not None:
+                raise OrdenReflejanteDuplicada409(
+                    OrdenReflejanteService._payload_duplicada(existente)
+                )
+
         asignado_por_linea, _asignado_sin_talla = (
             OrdenReflejanteService._cantidades_asignadas_por_linea(pedido)
         )
@@ -183,24 +214,8 @@ class OrdenReflejanteService:
                 "detalles_exceso": errores_lineas,
             })
 
-        es_full_match = (
-            not detalles_override
-            and {dt.id for dt in detalle_tallas_raw} == {dt.id for dt in detalle_tallas}
-            and all(
-                float(dt.cantidad or 0) == float(raw.cantidad or 0)
-                for dt, raw in zip(
-                    sorted(detalle_tallas, key=lambda x: x.id),
-                    sorted(detalle_tallas_raw, key=lambda x: x.id),
-                )
-            )
-        )
-        if es_full_match:
-            existente = OrdenReflejanteService.buscar_existente_full_match(pedido)
-            if existente is not None:
-                raise OrdenReflejanteDuplicada409(
-                    OrdenReflejanteService._payload_duplicada(existente)
-                )
-
+        # El folio se consume DESPUÉS de todas las validaciones, para que un
+        # rechazo no gaste consecutivo de la serie.
         folio_reflejante = generate_or_folio(pedido.empresa_id, pedido.sucursal_id)
 
         orden_reflejante = crear_orden_con_guardia_duplicado(
@@ -221,7 +236,28 @@ class OrdenReflejanteService:
 
         bulk_data = []
         for dt in detalle_tallas:
-            cfg = getattr(dt, "reflejante_config", None) or {}
+            # ``reflejante_config`` NO siempre es un dict: en el 100% de los
+            # registros reales es un ARREGLO de un elemento
+            # ``[{"tipo": …, "opcion": …, "posicion": …}]``. Sin normalizarlo,
+            # el ``cfg.get(...)`` de abajo reventaba con ``AttributeError:
+            # 'list' object has no attribute 'get'`` y el POST respondía 500
+            # antes de construir un solo renglón —de ahí que el ``metros=`` de
+            # más abajo nunca llegara a ejecutarse—.
+            #
+            # Se toma el primer elemento del arreglo, no ``{}``: sus claves
+            # ``tipo`` y ``posicion`` son las que alimentan ``tipo_reflejante``
+            # y ``posicion`` del renglón (mismo nombre, mismo significado), así
+            # que descartarlas guardaría la orden entera sin especificación de
+            # reflejante. No se inventa ningún ``ubicaciones``/``foto``/
+            # ``notas``: para reflejante ese dato no existe (ver
+            # ``OrdenReflejanteDetalleSerializer._get_cfg_dict``).
+            cfg_raw = getattr(dt, "reflejante_config", None)
+            if isinstance(cfg_raw, dict):
+                cfg = cfg_raw
+            elif isinstance(cfg_raw, list) and cfg_raw and isinstance(cfg_raw[0], dict):
+                cfg = cfg_raw[0]
+            else:
+                cfg = {}
             ubicaciones = cfg.get("ubicaciones") or []
             if isinstance(ubicaciones, list) and ubicaciones:
                 primera_ubic = ubicaciones[0] or {}
@@ -241,7 +277,11 @@ class OrdenReflejanteService:
                 color=getattr(dt.pedido_detalle, "color", None),
                 tipo_reflejante=cfg.get("tipo_reflejante") or cfg.get("tipo"),
                 posicion=posicion_sugerida,
-                metros_reflejante=(
+                # El campo del modelo se llama ``metros``; ``metros_reflejante``
+                # no existe en ``OrdenReflejanteDetalle`` y reventaba el alta
+                # entera con ``TypeError``. La expresión ya leía ``metros`` del
+                # config, así que la intención siempre fue este campo.
+                metros=(
                     cfg.get("metros") or cfg.get("metros_reflejante") or 0
                 ),
             ))

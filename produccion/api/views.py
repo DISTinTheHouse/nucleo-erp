@@ -37,12 +37,15 @@ from produccion.api.serializers import (
     ConsumoProduccionSerializer,
     ProductoTerminadoEntradasSerializer,
     OrdenBordadoSerializer,
+    OrdenBordadoListSerializer,
     BordadoAvancesSerializer,
     BordadoIncidenciasSerializer,
     OrdenReflejanteSerializer,
+    OrdenReflejanteListSerializer,
     ReflejanteAvancesSerializer,
     ReflejanteIncidenciasSerializer,
-    OrdenesCorteMangaSerializer
+    OrdenesCorteMangaSerializer,
+    OrdenesCorteMangaListSerializer
 )
 
 from produccion.services.orden_bordado_service import OrdenBordadoService
@@ -412,9 +415,14 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
             .prefetch_related(
                 Prefetch(
                     "detalles",
+                    # ``order_by`` local al Prefetch, no ``Meta.ordering``: el
+                    # modelo no declara orden y el de la BD no es estable, así
+                    # que ``detalles`` salía en distinto orden en list y en
+                    # retrieve. Ponerlo en el ``Meta`` afectaría toda consulta
+                    # al modelo (admin incluido); aquí sólo afecta a esta vista.
                     queryset=OrdenBordadoDetalle.objects.select_related(
                         "producto", "talla", "color"
-                    ),
+                    ).order_by("id"),
                 )
             )
             # Listado más reciente primero; ``-id`` como desempate estable.
@@ -430,6 +438,16 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         if getattr(user, "is_admin_empresa", False):
             return qs
         return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+
+    def get_serializer_class(self):
+        # list → renglón ligero, sin los campos que obligan a re-leer
+        # ``PedidoDetalleTalla`` una vez por renglón (ver
+        # ``OrdenBordadoDetalleListSerializer``). retrieve y create conservan
+        # el serializer completo: el detalle sigue devolviendo exactamente los
+        # mismos campos que hoy. Mismo patrón que ``TransferenciaViewSet``.
+        if self.action == "list":
+            return OrdenBordadoListSerializer
+        return OrdenBordadoSerializer
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
@@ -602,9 +620,11 @@ class OrdenReflejanteViewSet(
             .prefetch_related(
                 Prefetch(
                     "detalles",
+                    # Orden estable local al Prefetch; ver el equivalente en
+                    # ``OrdenBordadoViewSet``.
                     queryset=OrdenReflejanteDetalle.objects.select_related(
                         "producto", "talla", "color"
-                    ),
+                    ).order_by("id"),
                 )
             )
             # Listado más reciente primero; ``-id`` como desempate estable.
@@ -620,6 +640,12 @@ class OrdenReflejanteViewSet(
         if getattr(user, "is_admin_empresa", False):
             return qs
         return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+
+    def get_serializer_class(self):
+        # Ver ``OrdenBordadoViewSet.get_serializer_class``.
+        if self.action == "list":
+            return OrdenReflejanteListSerializer
+        return OrdenReflejanteSerializer
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
@@ -764,9 +790,11 @@ class OrdenesCorteMangaViewSet(
             .prefetch_related(
                 Prefetch(
                     "detalles",
+                    # Orden estable local al Prefetch; ver el equivalente en
+                    # ``OrdenBordadoViewSet``.
                     queryset=OrdenCorteMangaDetalle.objects.select_related(
                         "producto", "talla", "color"
-                    ),
+                    ).order_by("id"),
                 )
             )
             # Listado más reciente primero; ``-id`` como desempate estable.
@@ -782,6 +810,12 @@ class OrdenesCorteMangaViewSet(
         if getattr(user, "is_admin_empresa", False):
             return qs
         return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+
+    def get_serializer_class(self):
+        # Ver ``OrdenBordadoViewSet.get_serializer_class``.
+        if self.action == "list":
+            return OrdenesCorteMangaListSerializer
+        return OrdenesCorteMangaSerializer
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
