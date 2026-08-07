@@ -3,6 +3,7 @@ from django.db.models import Count, Sum
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesCorteManga, OrdenCorteMangaDetalle
 from produccion.services.common import (
+    cantidades_asignadas,
     crear_orden_con_guardia_duplicado,
     payload_duplicada,
     revisar_empresa,
@@ -86,22 +87,18 @@ class OrdenCorteMangaService:
         return ocm_match
 
     @staticmethod
+    def cantidades_asignadas_por_pedidos(pedido_ids):
+        """``common.cantidades_asignadas`` para OCMs; ver allí el contrato."""
+        return cantidades_asignadas(OrdenCorteMangaDetalle, "ocm", pedido_ids)
+
+    @staticmethod
     def _cantidades_asignadas_por_linea(pedido):
         """Suma lo ya programado en OCMs activas por cada línea (pedido_detalle, talla).
 
-        Retorna dict ``{(pedido_detalle_id, talla_id): cantidad_asignada}``.
-        Solo considera ``OrdenesCorteManga.activo=True``.
+        Retorna ``(por_linea, sin_talla)``; solo considera
+        ``OrdenesCorteManga.activo=True``.
         """
-        filas = (
-            OrdenCorteMangaDetalle.objects
-            .filter(ocm__pedido=pedido, ocm__activo=True)
-            .values("pedido_detalle_id", "talla_id")
-            .annotate(asignado=Sum("cantidad"))
-        )
-        return {
-            (f["pedido_detalle_id"], f["talla_id"]): float(f["asignado"] or 0)
-            for f in filas
-        }
+        return OrdenCorteMangaService.cantidades_asignadas_por_pedidos([pedido.pk])
 
     @staticmethod
     @transaction.atomic
@@ -149,7 +146,9 @@ class OrdenCorteMangaService:
                 "err": "No se seleccionaron líneas para generar la orden de corte de manga."
             })
 
-        asignado_por_linea = OrdenCorteMangaService._cantidades_asignadas_por_linea(pedido)
+        asignado_por_linea, _asignado_sin_talla = (
+            OrdenCorteMangaService._cantidades_asignadas_por_linea(pedido)
+        )
         errores_lineas = []
         for dt in detalle_tallas:
             key = (dt.pedido_detalle_id, getattr(dt.talla, "id", None))

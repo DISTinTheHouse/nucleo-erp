@@ -1,7 +1,8 @@
 from django.db import transaction
-from django.db.models import Count, Sum
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesBordado, OrdenBordadoDetalle
+from ventas.models import Pedido
+from produccion.services.common import EPS_CANTIDAD, cantidades_asignadas
 from produccion.services.common import (
     crear_orden_con_guardia_duplicado,
     payload_duplicada,
@@ -67,48 +68,55 @@ class OrdenBordadoService:
 
     @staticmethod
     def buscar_existente_full_match(pedido):
-        """Devuelve OrdenesBordado activa si ya cubre 100% de las tallas con lleva_bordado.
+        """Devuelve una OB activa si el pedido ya está cubierto al 100%.
 
-        Regla SAFE minimalista: misma cantidad de detalle_tallas que el pedido.
-        Si negocio decide habilitar fraccionamiento (OB parcial), esta función
-        regresa None y se permite una segunda OB.
+        "Cubierto" se mide en **piezas**, no en número de renglones: hay que
+        comparar lo asignado por las OBs activas contra
+        ``PedidoDetalleTalla.cantidad`` línea por línea. Contar renglones (lo
+        que hacía antes) trataba una OB parcial que toca todas las líneas con
+        cantidades reducidas como cobertura total, y devolvía un 409 diciendo
+        "ya existe ... con el 100% de las prendas" sobre un pedido cubierto a
+        medias.
+
+        Sólo se consulta en el POST **sin** ``detalles_override``. Si queda
+        cualquier saldo, devuelve ``None`` y el chequeo de cupo de ``save()``
+        produce el 400 con las cantidades exactas que faltan.
         """
-        tallas_esperadas_qty = OrdenBordadoService._tallas_bordado_qs(pedido.id).count()
-        if tallas_esperadas_qty == 0:
+        tallas = list(OrdenBordadoService._tallas_bordado_qs(pedido.id))
+        if not tallas:
             return None
 
-        ob_match = (
+        por_linea, sin_talla = OrdenBordadoService._cantidades_asignadas_por_linea(pedido)
+        for dt in tallas:
+            asignado = por_linea.get((dt.pedido_detalle_id, dt.talla_id), 0.0)
+            if asignado + EPS_CANTIDAD < float(dt.cantidad or 0):
+                return None
+        if any(v > EPS_CANTIDAD for v in sin_talla.values()):
+            # Hay piezas programadas sin talla identificable (ver
+            # ``cantidades_asignadas_por_pedidos``): no se puede afirmar
+            # cobertura exacta, así que no se emite el 409 de duplicado.
+            return None
+
+        return (
             OrdenesBordado.objects.filter(
                 empresa=pedido.empresa,
                 sucursal=pedido.sucursal,
                 pedido=pedido,
                 activo=True,
             )
-            .annotate(detalle_count=Count("detalles"))
-            .filter(detalle_count=tallas_esperadas_qty)
             .order_by("-id")
             .first()
         )
-        return ob_match
+
+    @staticmethod
+    def cantidades_asignadas_por_pedidos(pedido_ids):
+        """``common.cantidades_asignadas`` para OBs; ver allí el contrato."""
+        return cantidades_asignadas(OrdenBordadoDetalle, "ob", pedido_ids)
 
     @staticmethod
     def _cantidades_asignadas_por_linea(pedido):
-        """Suma lo ya programado en OBs activas por cada línea (pedido_detalle, talla).
-
-        Retorna dict ``{(pedido_detalle_id, talla_id): cantidad_asignada}``.
-        Solo considera ``OrdenesBordado.activo=True`` — las OBs canceladas/soft-deleted
-        no consumen cupo del pedido.
-        """
-        filas = (
-            OrdenBordadoDetalle.objects
-            .filter(ob__pedido=pedido, ob__activo=True)
-            .values("pedido_detalle_id", "talla_id")
-            .annotate(asignado=Sum("cantidad"))
-        )
-        return {
-            (f["pedido_detalle_id"], f["talla_id"]): float(f["asignado"] or 0)
-            for f in filas
-        }
+        """``cantidades_asignadas_por_pedidos`` para un solo pedido."""
+        return OrdenBordadoService.cantidades_asignadas_por_pedidos([pedido.pk])
 
     @staticmethod
     @transaction.atomic
@@ -122,6 +130,17 @@ class OrdenBordadoService:
         if sucursal is None:
             raise ValidationError({"err": "El usuario no tiene una sucursal asignada."})
 
+        # Candado de concurrencia. La constraint ``uq_orden_bordado_activa_por
+        # _pedido`` era, además del antiduplicado, lo que impedía que dos POST
+        # simultáneos se pisaran; al quitarla (migración ``0026``) el cupo por
+        # línea quedó como único guardián y se lee sin bloqueo: bajo READ
+        # COMMITTED ambas transacciones veían ``ya=0`` y ambas insertaban,
+        # programando el doble de piezas. Se serializa por pedido tomando el
+        # renglón de ``Pedido`` antes de leer lo asignado.
+        # En SQLite ``select_for_update`` es no-op (``has_select_for_update``
+        # False) y la suite corre igual; en Postgres es el bloqueo real.
+        Pedido.objects.select_for_update().filter(pk=pedido.pk).first()
+
         detalle_tallas_raw = list(
             OrdenBordadoService._tallas_bordado_qs(pedido.id).select_related(
                 "pedido_detalle", "talla"
@@ -132,6 +151,18 @@ class OrdenBordadoService:
             raise ValidationError({
                  "err": "El pedido no tiene detalles con bordado para generar la orden."
             })
+
+        # Foto de la cantidad contratada por línea **antes** de que la rama de
+        # ``detalles_override`` pise ``dt.cantidad`` con lo solicitado. El
+        # chequeo de cupo de abajo necesita el valor original del pedido (SSoT
+        # de ``PedidoDetalleTalla.cantidad``); leerlo de ``dt`` después de la
+        # mutación comparaba lo pedido contra sí mismo y anulaba el chequeo.
+        # Se captura aquí en vez de re-consultar por línea como hace
+        # ``OrdenReflejanteService`` para no meter un N+1: son los mismos
+        # registros que ya trajo ``_tallas_bordado_qs``.
+        cantidad_pedido_por_id = {
+            dt.id: float(dt.cantidad or 0) for dt in detalle_tallas_raw
+        }
 
         detalles_override = data.get("detalles_override") or []
         if detalles_override:
@@ -164,20 +195,69 @@ class OrdenBordadoService:
                 "err": "No se seleccionaron líneas para generar la orden de bordado."
             })
 
-        asignado_por_linea = OrdenBordadoService._cantidades_asignadas_por_linea(pedido)
+        # El 409 de pedido completo va **antes** del cupo por línea: un POST sin
+        # override sobre un pedido ya cubierto al 100% es el duplicado clásico y
+        # debe seguir contestando 409, no el 400 de exceso —que es lo que pasaba
+        # al evaluar el cupo primero, porque ese caso también agota el cupo—.
+        # Sin override se pide el pedido completo tal cual salió de
+        # ``_tallas_bordado_qs``, así que la condición es exactamente esa.
+        if not detalles_override:
+            existente = OrdenBordadoService.buscar_existente_full_match(pedido)
+            if existente is not None:
+                raise OrdenBordadoDuplicada409(
+                    OrdenBordadoService._payload_duplicada(existente)
+                )
+
+        asignado_por_linea, asignado_sin_talla = (
+            OrdenBordadoService._cantidades_asignadas_por_linea(pedido)
+        )
         errores_lineas = []
         for dt in detalle_tallas:
             key = (dt.pedido_detalle_id, getattr(dt.talla, "id", None))
-            disponible = float((getattr(dt, "cantidad", None) or 0))
+            disponible = cantidad_pedido_por_id.get(dt.id, 0.0)
             nuevo = float(dt.cantidad or 0)
             ya = asignado_por_linea.get(key, 0.0)
             faltante = max(0.0, disponible - ya)
-            if nuevo > faltante:
+            if nuevo > faltante + EPS_CANTIDAD:
                 errores_lineas.append(
                     f"  - talla_id={key[1]} pedido_detalle_id={key[0]}: "
                     f"pedido={disponible}, ya_asignado={ya}, solicitado={nuevo}, "
                     f"disponible_restante={faltante}"
                 )
+
+        # Segundo corte, por ``pedido_detalle``. Absorbe las piezas ya
+        # programadas sin talla identificable (``asignado_sin_talla``), que el
+        # corte por línea no puede ver: sin esto, una OB generada desde picking
+        # sobre una talla sin variante no consumía cupo y se podía volver a
+        # programar el pedido completo.
+        capacidad_por_detalle = {}
+        for dt in detalle_tallas_raw:
+            capacidad_por_detalle[dt.pedido_detalle_id] = (
+                capacidad_por_detalle.get(dt.pedido_detalle_id, 0.0)
+                + cantidad_pedido_por_id.get(dt.id, 0.0)
+            )
+        solicitado_por_detalle = {}
+        for dt in detalle_tallas:
+            solicitado_por_detalle[dt.pedido_detalle_id] = (
+                solicitado_por_detalle.get(dt.pedido_detalle_id, 0.0)
+                + float(dt.cantidad or 0)
+            )
+        asignado_por_detalle = dict(asignado_sin_talla)
+        for (pedido_detalle_id, _talla_id), cantidad in asignado_por_linea.items():
+            asignado_por_detalle[pedido_detalle_id] = (
+                asignado_por_detalle.get(pedido_detalle_id, 0.0) + cantidad
+            )
+        for pedido_detalle_id, solicitado in solicitado_por_detalle.items():
+            capacidad = capacidad_por_detalle.get(pedido_detalle_id, 0.0)
+            ya = asignado_por_detalle.get(pedido_detalle_id, 0.0)
+            faltante = max(0.0, capacidad - ya)
+            if solicitado > faltante + EPS_CANTIDAD:
+                errores_lineas.append(
+                    f"  - pedido_detalle_id={pedido_detalle_id} (total del renglón): "
+                    f"pedido={capacidad}, ya_asignado={ya}, solicitado={solicitado}, "
+                    f"disponible_restante={faltante}"
+                )
+
         if errores_lineas:
             raise ValidationError({
                 "err": (
@@ -187,24 +267,6 @@ class OrdenBordadoService:
                 ),
                 "detalles_exceso": errores_lineas,
             })
-
-        es_full_match = (
-            not detalles_override
-            and {dt.id for dt in detalle_tallas_raw} == {dt.id for dt in detalle_tallas}
-            and all(
-                float(dt.cantidad or 0) == float(raw.cantidad or 0)
-                for dt, raw in zip(
-                    sorted(detalle_tallas, key=lambda x: x.id),
-                    sorted(detalle_tallas_raw, key=lambda x: x.id),
-                )
-            )
-        )
-        if es_full_match:
-            existente = OrdenBordadoService.buscar_existente_full_match(pedido)
-            if existente is not None:
-                raise OrdenBordadoDuplicada409(
-                    OrdenBordadoService._payload_duplicada(existente)
-                )
 
         folio_bordado = generate_ob_folio(pedido.empresa_id, pedido.sucursal_id)
 

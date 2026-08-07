@@ -184,24 +184,6 @@ class OrdenesBordado(StatusLifecycleModel):
         db_table = 'orden_bordado'
         verbose_name = 'Orden Bordado'
         verbose_name_plural = 'Ordenes Bordado'
-        constraints = [
-            # Una sola OB activa por pedido. Gemela de
-            # ``uq_orden_reflejante_activa_por_pedido``: el 409 de
-            # ``OrdenBordadoService`` es la puerta amable y esto es la red de
-            # seguridad, para dos POST concurrentes o para cualquier ruta que
-            # no pase por el service (admin, shell, script).
-            #
-            # La condición es el mismo criterio de vigencia que ya usa
-            # ``buscar_existente_full_match``: ``activo=True``. Sólo el soft
-            # delete libera el pedido; el estatus CANCELADO **no** lo libera
-            # hoy, ni aquí ni en el chequeo de Python. Cambiarlo requiere
-            # mover ambos lados a la vez.
-            models.UniqueConstraint(
-                fields=["pedido"],
-                condition=models.Q(activo=True),
-                name="uq_orden_bordado_activa_por_pedido",
-            ),
-        ]
 
     def __str__(self):
         return self.folio_bordado
