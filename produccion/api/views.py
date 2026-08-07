@@ -6,8 +6,10 @@ from rest_framework.viewsets import GenericViewSet
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 
-from ventas.models import Pedido
+from ventas.models import Pedido, PedidoDetalleTalla
 from usuarios.models import Usuario
+
+from produccion.services.common import pendientes_por_linea
 
 from produccion.models import (
     ListaMaterialBom,
@@ -47,6 +49,108 @@ from produccion.services.orden_bordado_service import OrdenBordadoService
 from produccion.services.orden_reflejante_service import OrdenReflejanteService
 from produccion.services.orden_produccion_service import OrdenProduccionService
 from produccion.services.orden_corte_manga_service import OrdenCorteMangaService
+
+
+def _tallas_ot_prefetch(flag):
+    """``Prefetch`` de las tallas elegibles para una orden de trabajo.
+
+    Filtra en la BD por el flag y por ``cantidad > 0`` —el mismo criterio que
+    ``services.common.tallas_orden_trabajo_qs`` aplica al crear la orden—, así
+    que el GET deja de ofrecer renglones que el POST rechaza.
+
+    Sustituye a filtrar con ``det.tallas.filter(...)`` dentro del loop: eso
+    ignora la caché del prefetch y dispara una query por ``PedidoDetalle``,
+    dejando además inservible el ``prefetch_related`` del queryset.
+    """
+    return Prefetch(
+        "detalles__tallas",
+        queryset=(
+            PedidoDetalleTalla.objects
+            .filter(**{flag: True}, cantidad__gt=0)
+            .select_related("talla")
+            .order_by("id")
+        ),
+    )
+
+
+def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn):
+    """Arma la lista ``pedidos`` del GET de onboarding de órdenes de trabajo.
+
+    Compartido por Bordado / Reflejante / Corte de Manga: los tres emitían el
+    mismo bloque verbatim y sólo divergen en el flag de la talla (ya resuelto
+    por el ``Prefetch``) y en el campo de configuración (``config_attr``).
+
+    Por línea agrega ``cantidad_asignada``/``cantidad_pendiente`` sobre lo ya
+    programado en órdenes activas, y descarta el pedido que no tenga ninguna
+    línea con saldo. El descarte se decide **antes** de construir los dicts:
+    parsear ``*_config``, ubicaciones, foto y notas de un pedido ya cubierto
+    era trabajo que se tiraba a la basura.
+    """
+    pedidos_lista = list(pedidos_qs)
+    por_linea, sin_talla = cantidades_asignadas_fn([p.id for p in pedidos_lista])
+
+    pedidos_payload = []
+    for p in pedidos_lista:
+        pares = [(det, dt) for det in p.detalles.all() for dt in det.tallas.all()]
+        pendientes = pendientes_por_linea(
+            [(det.id, dt.talla_id, float(dt.cantidad or 0)) for det, dt in pares],
+            por_linea,
+            sin_talla,
+        )
+        if not any(pendiente > 0 for _asignada, pendiente in pendientes):
+            continue
+
+        lineas = []
+        for (det, dt), (cantidad_asignada, cantidad_pendiente) in zip(pares, pendientes):
+            cfg = getattr(dt, config_attr, None) or {}
+            ubicaciones = cfg.get("ubicaciones") or []
+            if isinstance(ubicaciones, list) and ubicaciones:
+                primera_ubic = ubicaciones[0] or {}
+            else:
+                primera_ubic = {}
+            foto = None
+            for k in ("foto", "imagen", "imagen_url", "foto_url"):
+                v = cfg.get(k)
+                if v:
+                    foto = {"url": v} if isinstance(v, str) else v
+                    break
+            notas = next(
+                (cfg[k] for k in ("notas", "observaciones", "comentarios") if cfg.get(k)),
+                None,
+            )
+            lineas.append({
+                "pedido_detalle_talla_id": dt.id,
+                "pedido_detalle_id": det.id,
+                "producto_id": det.producto_id,
+                "producto_nombre": getattr(det.producto, "nombre", None),
+                "talla_id": getattr(dt.talla, "id", None),
+                "talla_nombre": getattr(dt.talla, "nombre", None),
+                "color_id": getattr(det, "color_id", None),
+                "color_nombre": getattr(getattr(det, "color", None), "nombre", None),
+                "cantidad_pedido": float(dt.cantidad or 0),
+                "cantidad_asignada": cantidad_asignada,
+                "cantidad_pendiente": cantidad_pendiente,
+                "posicion_sugerida": (
+                    cfg.get("posicion")
+                    or primera_ubic.get("codigo")
+                    or primera_ubic.get("nombre")
+                    or None
+                ),
+                "ubicaciones": ubicaciones if isinstance(ubicaciones, list) else [],
+                "foto": foto,
+                "notas": notas,
+            })
+
+        pedidos_payload.append({
+            "id": p.id,
+            "folio": p.folio,
+            "cliente": p.cliente_id,
+            "cliente_nombre": getattr(p.cliente, "nombre", None),
+            "sucursal": p.sucursal_id,
+            "sucursal_nombre": getattr(p.sucursal, "nombre", None),
+            "detalles": lineas,
+        })
+    return pedidos_payload
 
 
 def _con_detalles_prefetcheados(orden, detalle_model):
@@ -374,8 +478,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 .select_related("cliente", "sucursal")
                 .prefetch_related(
                     "detalles",
-                    "detalles__tallas",
-                    "detalles__tallas__talla",
+                    _tallas_ot_prefetch("lleva_bordado"),
                     "detalles__producto",
                     "detalles__color",
                 )
@@ -397,56 +500,11 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 except Exception:
                     preview_folio = None
 
-            pedidos_payload = []
-            for p in pedidos_qs:
-                lineas = []
-                for det in p.detalles.all():
-                    for dt in det.tallas.filter(lleva_bordado=True).select_related("talla"):
-                        cfg = dt.bordado_config or {}
-                        ubicaciones = cfg.get("ubicaciones") or []
-                        if isinstance(ubicaciones, list) and ubicaciones:
-                            primera_ubic = ubicaciones[0] or {}
-                        else:
-                            primera_ubic = {}
-                        foto = None
-                        for k in ("foto", "imagen", "imagen_url", "foto_url"):
-                            v = cfg.get(k)
-                            if v:
-                                foto = {"url": v} if isinstance(v, str) else v
-                                break
-                        notas = next(
-                            (cfg[k] for k in ("notas", "observaciones", "comentarios") if cfg.get(k)),
-                            None,
-                        )
-                        lineas.append({
-                            "pedido_detalle_talla_id": dt.id,
-                            "pedido_detalle_id": det.id,
-                            "producto_id": det.producto_id,
-                            "producto_nombre": getattr(det.producto, "nombre", None),
-                            "talla_id": getattr(dt.talla, "id", None),
-                            "talla_nombre": getattr(dt.talla, "nombre", None),
-                            "color_id": getattr(det, "color_id", None),
-                            "color_nombre": getattr(getattr(det, "color", None), "nombre", None),
-                            "cantidad_pedido": float(dt.cantidad or 0),
-                            "posicion_sugerida": (
-                                cfg.get("posicion")
-                                or primera_ubic.get("codigo")
-                                or primera_ubic.get("nombre")
-                                or None
-                            ),
-                            "ubicaciones": ubicaciones if isinstance(ubicaciones, list) else [],
-                            "foto": foto,
-                            "notas": notas,
-                        })
-                pedidos_payload.append({
-                    "id": p.id,
-                    "folio": p.folio,
-                    "cliente": p.cliente_id,
-                    "cliente_nombre": getattr(p.cliente, "nombre", None),
-                    "sucursal": p.sucursal_id,
-                    "sucursal_nombre": getattr(p.sucursal, "nombre", None),
-                    "detalles": lineas,
-                })
+            pedidos_payload = _payload_pedidos_onboarding(
+                pedidos_qs,
+                "bordado_config",
+                OrdenBordadoService.cantidades_asignadas_por_pedidos,
+            )
 
             return Response({
                 "pedidos": pedidos_payload,
@@ -613,8 +671,7 @@ class OrdenReflejanteViewSet(
                 .select_related("cliente", "sucursal")
                 .prefetch_related(
                     "detalles",
-                    "detalles__tallas",
-                    "detalles__tallas__talla",
+                    _tallas_ot_prefetch("lleva_reflejante"),
                     "detalles__producto",
                     "detalles__color",
                 )
@@ -636,56 +693,11 @@ class OrdenReflejanteViewSet(
                 except Exception:
                     preview_folio = None
 
-            pedidos_payload = []
-            for p in pedidos_qs:
-                lineas = []
-                for det in p.detalles.all():
-                    for dt in det.tallas.filter(lleva_reflejante=True).select_related("talla"):
-                        cfg = dt.reflejante_config or {}
-                        ubicaciones = cfg.get("ubicaciones") or []
-                        if isinstance(ubicaciones, list) and ubicaciones:
-                            primera_ubic = ubicaciones[0] or {}
-                        else:
-                            primera_ubic = {}
-                        foto = None
-                        for k in ("foto", "imagen", "imagen_url", "foto_url"):
-                            v = cfg.get(k)
-                            if v:
-                                foto = {"url": v} if isinstance(v, str) else v
-                                break
-                        notas = next(
-                            (cfg[k] for k in ("notas", "observaciones", "comentarios") if cfg.get(k)),
-                            None,
-                        )
-                        lineas.append({
-                            "pedido_detalle_talla_id": dt.id,
-                            "pedido_detalle_id": det.id,
-                            "producto_id": det.producto_id,
-                            "producto_nombre": getattr(det.producto, "nombre", None),
-                            "talla_id": getattr(dt.talla, "id", None),
-                            "talla_nombre": getattr(dt.talla, "nombre", None),
-                            "color_id": getattr(det, "color_id", None),
-                            "color_nombre": getattr(getattr(det, "color", None), "nombre", None),
-                            "cantidad_pedido": float(dt.cantidad or 0),
-                            "posicion_sugerida": (
-                                cfg.get("posicion")
-                                or primera_ubic.get("codigo")
-                                or primera_ubic.get("nombre")
-                                or None
-                            ),
-                            "ubicaciones": ubicaciones if isinstance(ubicaciones, list) else [],
-                            "foto": foto,
-                            "notas": notas,
-                        })
-                pedidos_payload.append({
-                    "id": p.id,
-                    "folio": p.folio,
-                    "cliente": p.cliente_id,
-                    "cliente_nombre": getattr(p.cliente, "nombre", None),
-                    "sucursal": p.sucursal_id,
-                    "sucursal_nombre": getattr(p.sucursal, "nombre", None),
-                    "detalles": lineas,
-                })
+            pedidos_payload = _payload_pedidos_onboarding(
+                pedidos_qs,
+                "reflejante_config",
+                OrdenReflejanteService.cantidades_asignadas_por_pedidos,
+            )
 
             return Response({
                 "pedidos": pedidos_payload,
@@ -821,8 +833,7 @@ class OrdenesCorteMangaViewSet(
                 .select_related("cliente", "sucursal")
                 .prefetch_related(
                     "detalles",
-                    "detalles__tallas",
-                    "detalles__tallas__talla",
+                    _tallas_ot_prefetch("lleva_corte_manga"),
                     "detalles__producto",
                     "detalles__color",
                 )
@@ -844,56 +855,11 @@ class OrdenesCorteMangaViewSet(
                 except Exception:
                     preview_folio = None
 
-            pedidos_payload = []
-            for p in pedidos_qs:
-                lineas = []
-                for det in p.detalles.all():
-                    for dt in det.tallas.filter(lleva_corte_manga=True).select_related("talla"):
-                        cfg = dt.corte_manga_config or {}
-                        ubicaciones = cfg.get("ubicaciones") or []
-                        if isinstance(ubicaciones, list) and ubicaciones:
-                            primera_ubic = ubicaciones[0] or {}
-                        else:
-                            primera_ubic = {}
-                        foto = None
-                        for k in ("foto", "imagen", "imagen_url", "foto_url"):
-                            v = cfg.get(k)
-                            if v:
-                                foto = {"url": v} if isinstance(v, str) else v
-                                break
-                        notas = next(
-                            (cfg[k] for k in ("notas", "observaciones", "comentarios") if cfg.get(k)),
-                            None,
-                        )
-                        lineas.append({
-                            "pedido_detalle_talla_id": dt.id,
-                            "pedido_detalle_id": det.id,
-                            "producto_id": det.producto_id,
-                            "producto_nombre": getattr(det.producto, "nombre", None),
-                            "talla_id": getattr(dt.talla, "id", None),
-                            "talla_nombre": getattr(dt.talla, "nombre", None),
-                            "color_id": getattr(det, "color_id", None),
-                            "color_nombre": getattr(getattr(det, "color", None), "nombre", None),
-                            "cantidad_pedido": float(dt.cantidad or 0),
-                            "posicion_sugerida": (
-                                cfg.get("posicion")
-                                or primera_ubic.get("codigo")
-                                or primera_ubic.get("nombre")
-                                or None
-                            ),
-                            "ubicaciones": ubicaciones if isinstance(ubicaciones, list) else [],
-                            "foto": foto,
-                            "notas": notas,
-                        })
-                pedidos_payload.append({
-                    "id": p.id,
-                    "folio": p.folio,
-                    "cliente": p.cliente_id,
-                    "cliente_nombre": getattr(p.cliente, "nombre", None),
-                    "sucursal": p.sucursal_id,
-                    "sucursal_nombre": getattr(p.sucursal, "nombre", None),
-                    "detalles": lineas,
-                })
+            pedidos_payload = _payload_pedidos_onboarding(
+                pedidos_qs,
+                "corte_manga_config",
+                OrdenCorteMangaService.cantidades_asignadas_por_pedidos,
+            )
 
             return Response({
                 "pedidos": pedidos_payload,

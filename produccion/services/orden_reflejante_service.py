@@ -2,7 +2,7 @@ from django.db import transaction
 from django.db.models import Count, Sum
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesReflejante, OrdenReflejanteDetalle
-from produccion.services.common import crear_orden_con_guardia_duplicado, payload_duplicada, revisar_empresa, tallas_orden_trabajo_qs
+from produccion.services.common import cantidades_asignadas, crear_orden_con_guardia_duplicado, payload_duplicada, revisar_empresa, tallas_orden_trabajo_qs
 from produccion.utils.folios import generate_or_folio
 
 
@@ -85,22 +85,24 @@ class OrdenReflejanteService:
         return or_match
 
     @staticmethod
+    def cantidades_asignadas_por_pedidos(pedido_ids):
+        """``common.cantidades_asignadas`` para ORs; ver allí el contrato.
+
+        La FK a la orden padre es ``orden_r`` (``OrdenReflejanteDetalle``); el
+        filtro decía ``or_r__...``, que no existe y reventaba con
+        ``FieldError: Cannot resolve keyword 'or_r'`` en cuanto se consultaba
+        el cupo.
+        """
+        return cantidades_asignadas(OrdenReflejanteDetalle, "orden_r", pedido_ids)
+
+    @staticmethod
     def _cantidades_asignadas_por_linea(pedido):
         """Suma lo ya programado en ORs activas por cada línea (pedido_detalle, talla).
 
-        Retorna dict ``{(pedido_detalle_id, talla_id): cantidad_asignada}``.
-        Solo considera ``OrdenesReflejante.activo=True``.
+        Retorna ``(por_linea, sin_talla)``; solo considera
+        ``OrdenesReflejante.activo=True``.
         """
-        filas = (
-            OrdenReflejanteDetalle.objects
-            .filter(or_r__pedido=pedido, or_r__activo=True)
-            .values("pedido_detalle_id", "talla_id")
-            .annotate(asignado=Sum("cantidad"))
-        )
-        return {
-            (f["pedido_detalle_id"], f["talla_id"]): float(f["asignado"] or 0)
-            for f in filas
-        }
+        return OrdenReflejanteService.cantidades_asignadas_por_pedidos([pedido.pk])
 
     @staticmethod
     @transaction.atomic
@@ -149,7 +151,9 @@ class OrdenReflejanteService:
                 "err": "No se seleccionaron líneas para generar la orden de reflejante."
             })
 
-        asignado_por_linea = OrdenReflejanteService._cantidades_asignadas_por_linea(pedido)
+        asignado_por_linea, _asignado_sin_talla = (
+            OrdenReflejanteService._cantidades_asignadas_por_linea(pedido)
+        )
         errores_lineas = []
         for dt in detalle_tallas:
             key = (dt.pedido_detalle_id, getattr(dt.talla, "id", None))

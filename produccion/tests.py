@@ -13,8 +13,9 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test produccion --settings=sqlite_settings
 """
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
@@ -71,6 +72,15 @@ class BaseOrdenTrabajoTests:
     SERVICE = None
     MODEL = None
     DUPLICADA = None
+
+    #: ¿El modelo conserva la constraint parcial "una orden activa por pedido"?
+    #: Los tres tipos la tuvieron; se fueron quitando al habilitar parcialidades
+    #: por renglón (``detalles_override[]``), porque impedía la segunda orden
+    #: parcial sobre el mismo pedido: Reflejante y OCM en la migración ``0025``,
+    #: Bordado en la ``0026``. Las subclases que ya no la tienen lo declaran y
+    #: los dos tests de más abajo se saltan; el resto de la batería (incluido el
+    #: 409 de pedido completo, que es puro Python) sigue aplicando a todas.
+    CONSTRAINT_ACTIVA = True
 
     @classmethod
     def setUpTestData(cls):
@@ -195,6 +205,8 @@ class BaseOrdenTrabajoTests:
 
     def test_constraint_bloquea_segunda_orden_activa_saltandose_el_service(self):
         """La red de seguridad: INSERT directo por ORM, sin pasar por el 409."""
+        if not self.CONSTRAINT_ACTIVA:
+            self.skipTest("El modelo ya no tiene la constraint (parcialidades habilitadas).")
         pedido, detalle = self._crear_pedido()
         self._talla(detalle, self.talla_ch, 10)
         self._save(pedido)
@@ -221,6 +233,8 @@ class BaseOrdenTrabajoTests:
         nombre de la constraint en ``str(IntegrityError)`` (que SQLite omite),
         por lo que esta rama es verificable en la suite.
         """
+        if not self.CONSTRAINT_ACTIVA:
+            self.skipTest("El modelo ya no tiene la constraint (parcialidades habilitadas).")
         pedido, detalle = self._crear_pedido()
         self._talla(detalle, self.talla_ch, 10)
         self._talla(detalle, self.talla_m, 5)
@@ -259,6 +273,30 @@ class BaseOrdenTrabajoTests:
 
         self.assertEqual(self.MODEL.objects.filter(pedido=pedido).count(), 1)
 
+    def test_sin_constraint_dos_ordenes_activas_por_pedido_conviven(self):
+        """Inverso del test de arriba: fija el estado que dejan ``0025``/``0026``.
+
+        Sin esta aserción, quitar la constraint sólo se notaba de rebote (un 409
+        inesperado en los tests de parcialidades); si la migración se revirtiera
+        o nunca se aplicara en un entorno, nada apuntaría a la causa.
+        """
+        if self.CONSTRAINT_ACTIVA:
+            self.skipTest("El modelo aún declara la constraint.")
+        pedido, detalle = self._crear_pedido()
+        self._talla(detalle, self.talla_ch, 10)
+
+        for i in range(2):
+            self.MODEL.objects.create(
+                empresa=self.empresa,
+                sucursal=self.sucursal,
+                pedido=pedido,
+                **{self.FOLIO_FIELD: f"FOLIO-PARCIAL-{i}"},
+            )
+
+        self.assertEqual(
+            self.MODEL.objects.filter(pedido=pedido, activo=True).count(), 2
+        )
+
     def test_orden_con_soft_delete_libera_el_pedido_para_una_nueva(self):
         pedido, detalle = self._crear_pedido()
         self._talla(detalle, self.talla_ch, 10)
@@ -280,6 +318,7 @@ class OrdenReflejanteAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
     FOLIO_FIELD = "folio_reflejante"
     ESTATUS_FIELD = "estatus_reflejante"
     CANCELADO = OrdenesReflejante.EstatusReflejante.CANCELADO
+    CONSTRAINT_ACTIVA = False  # removida en 0025
 
 
 class OrdenBordadoAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
@@ -290,6 +329,7 @@ class OrdenBordadoAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
     FOLIO_FIELD = "folio_bordado"
     ESTATUS_FIELD = "estatus_bordado"
     CANCELADO = OrdenesBordado.EstatusBordado.CANCELADO
+    CONSTRAINT_ACTIVA = False  # removida en 0026
 
 
 class OrdenCorteMangaAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
@@ -300,6 +340,7 @@ class OrdenCorteMangaAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
     FOLIO_FIELD = "folio_ocm"
     ESTATUS_FIELD = "estatus_corte"
     CANCELADO = OrdenesCorteManga.EstatusCorte.CANCELADO
+    CONSTRAINT_ACTIVA = False  # removida en 0025
 
 
 class OrdenBordadoScopeTenantTests(BaseOrdenTrabajoTests, TestCase):
@@ -317,6 +358,7 @@ class OrdenBordadoScopeTenantTests(BaseOrdenTrabajoTests, TestCase):
     FOLIO_FIELD = "folio_bordado"
     ESTATUS_FIELD = "estatus_bordado"
     CANCELADO = OrdenesBordado.EstatusBordado.CANCELADO
+    CONSTRAINT_ACTIVA = False  # removida en 0026
 
     @classmethod
     def setUpTestData(cls):
@@ -1420,3 +1462,469 @@ class OrdenesCorteMangaListQueriesTests(TestCase):
         overhead = queries_con_3 - self.QUERIES_LIST
         self.assertGreaterEqual(overhead, 0)
         self.assertEqual(queries_con_12 - overhead, self.QUERIES_LIST)
+
+
+class OrdenBordadoParcialidadesTests(TestCase):
+    """OBs parciales sobre un mismo pedido vía ``detalles_override[]``.
+
+    Cubre lo que la constraint ``uq_orden_bordado_activa_por_pedido`` impedía
+    (segunda OB parcial sobre el mismo pedido, removida en ``0026``) y el cupo
+    por línea que la respalda: ``ya_asignado + nuevo <=
+    PedidoDetalleTalla.cantidad``. Ese chequeo existía pero era inocuo con
+    override, porque leía ``dt.cantidad`` *después* de que la rama de override
+    lo pisa con lo solicitado, y terminaba comparando lo pedido contra sí mismo.
+
+    Fixture de referencia (mismos números en todos los tests de abajo):
+
+        pedido -> pedido_detalle -> talla CH: cantidad 10
+                                 -> talla M : cantidad 6
+    """
+
+    CANTIDAD_CH = 10
+    CANTIDAD_M = 6
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Monterrey"
+        )
+        SerieFolio.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            tipo_documento="ORDEN_BORDADO",
+            serie="OB",
+        )
+        cls.usuario = Usuario.objects.create(
+            username="operador",
+            email="operador@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla_ch = Talla.objects.create(nombre="CH")
+        cls.talla_m = Talla.objects.create(nombre="M")
+        cls.talla_g = Talla.objects.create(nombre="G")
+
+    def setUp(self):
+        self.pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        self.detalle = PedidoDetalle.objects.create(
+            pedido=self.pedido, producto=self.producto
+        )
+        self.pdt_ch = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_ch,
+            cantidad=self.CANTIDAD_CH, lleva_bordado=True,
+        )
+        self.pdt_m = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_m,
+            cantidad=self.CANTIDAD_M, lleva_bordado=True,
+        )
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client
+
+    def _post(self, overrides):
+        """POST de onboarding con ``detalles_override``; ``overrides`` es
+        ``[(PedidoDetalleTalla, cantidad), ...]``."""
+        return self._client().post(
+            "/api/v1/produccion/orden-bordado/onboarding/",
+            {
+                "pedido": self.pedido.pk,
+                "detalles_override": [
+                    {"pedido_detalle_talla_id": pdt.pk, "cantidad": cantidad}
+                    for pdt, cantidad in overrides
+                ],
+            },
+            format="json",
+        )
+
+    def _lineas_del_get(self):
+        """``{talla_id: linea}`` del pedido de este test en el GET de onboarding,
+        o ``None`` si el pedido ya no aparece en el catálogo."""
+        data = self._client().get(
+            "/api/v1/produccion/orden-bordado/onboarding/"
+        ).json()
+        pedido = next(
+            (p for p in data["pedidos"] if p["id"] == self.pedido.pk), None
+        )
+        if pedido is None:
+            return None
+        return {linea["talla_id"]: linea for linea in pedido["detalles"]}
+
+    # --- creación de parcialidades -------------------------------------------
+
+    def test_dos_obs_parciales_secuenciales_sobre_lineas_distintas(self):
+        """El caso que la constraint bloqueaba: dos OBs activas para un pedido.
+
+        CH (10) va en la primera OB y M (6) en la segunda; no se solapan, así
+        que ninguna consume cupo de la otra.
+        """
+        primera = self._post([(self.pdt_ch, self.CANTIDAD_CH)])
+        self.assertEqual(primera.status_code, 201, primera.data)
+
+        segunda = self._post([(self.pdt_m, self.CANTIDAD_M)])
+        self.assertEqual(segunda.status_code, 201, segunda.data)
+
+        self.assertNotEqual(primera.data["id"], segunda.data["id"])
+        self.assertEqual(
+            OrdenesBordado.objects.filter(pedido=self.pedido, activo=True).count(), 2
+        )
+        # Cada OB llevó sólo su línea, con la cantidad solicitada.
+        self.assertEqual(
+            [(d["talla"], d["cantidad"]) for d in primera.data["detalles"]],
+            [(self.talla_ch.pk, float(self.CANTIDAD_CH))],
+        )
+        self.assertEqual(
+            [(d["talla"], d["cantidad"]) for d in segunda.data["detalles"]],
+            [(self.talla_m.pk, float(self.CANTIDAD_M))],
+        )
+
+    def test_dos_obs_parciales_sobre_la_misma_linea_hasta_agotar_el_cupo(self):
+        """Fraccionar una misma línea: 4 + 6 = 10, exactamente la cantidad
+        contratada de CH. El segundo POST debe pasar (cupo restante 6)."""
+        primera = self._post([(self.pdt_ch, 4)])
+        self.assertEqual(primera.status_code, 201, primera.data)
+
+        segunda = self._post([(self.pdt_ch, 6)])
+        self.assertEqual(segunda.status_code, 201, segunda.data)
+
+        total = sum(
+            d.cantidad
+            for d in OrdenBordadoDetalle.objects.filter(
+                ob__pedido=self.pedido, ob__activo=True, talla=self.talla_ch
+            )
+        )
+        self.assertEqual(total, float(self.CANTIDAD_CH))
+
+    def test_segunda_ob_que_excede_el_pendiente_de_la_linea_se_rechaza(self):
+        """El bug del cupo: con CH ya cubierto en 4, pedir 7 más excede el
+        pendiente (6) y debe dar 400 con el detalle del exceso —no 201 ni 500—.
+
+        Ojo: 7 <= 10 (la cantidad del pedido), así que el chequeo del serializer
+        lo deja pasar; quien tiene que atajarlo es el cupo del service.
+        """
+        self.assertEqual(self._post([(self.pdt_ch, 4)]).status_code, 201)
+
+        resp = self._post([(self.pdt_ch, 7)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("detalles_exceso", resp.data)
+        exceso = " ".join(str(x) for x in resp.data["detalles_exceso"])
+        self.assertIn("ya_asignado=4.0", exceso)
+        self.assertIn("solicitado=7.0", exceso)
+        self.assertIn("disponible_restante=6.0", exceso)
+        # No se creó una segunda OB.
+        self.assertEqual(
+            OrdenesBordado.objects.filter(pedido=self.pedido, activo=True).count(), 1
+        )
+
+    def test_ob_parcial_que_excede_sin_ob_previa_se_rechaza(self):
+        """Sin OB previa el cupo es la cantidad del pedido; pedir 11 de CH (10)
+        lo corta el serializer antes de llegar al service."""
+        resp = self._post([(self.pdt_ch, 11)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(
+            OrdenesBordado.objects.filter(pedido=self.pedido).count(), 0
+        )
+
+    # --- GET de onboarding: pendiente y exclusión ----------------------------
+
+    def test_get_expone_asignada_y_pendiente_por_linea(self):
+        """Tras una OB parcial de 4 sobre CH: CH queda 10/4/6 y M intacta 6/0/6."""
+        self.assertEqual(self._post([(self.pdt_ch, 4)]).status_code, 201)
+
+        lineas = self._lineas_del_get()
+
+        self.assertIsNotNone(lineas)
+        self.assertEqual(lineas[self.talla_ch.pk]["cantidad_pedido"], 10.0)
+        self.assertEqual(lineas[self.talla_ch.pk]["cantidad_asignada"], 4.0)
+        self.assertEqual(lineas[self.talla_ch.pk]["cantidad_pendiente"], 6.0)
+        self.assertEqual(lineas[self.talla_m.pk]["cantidad_pedido"], 6.0)
+        self.assertEqual(lineas[self.talla_m.pk]["cantidad_asignada"], 0.0)
+        self.assertEqual(lineas[self.talla_m.pk]["cantidad_pendiente"], 6.0)
+
+    def test_get_sin_ob_previa_reporta_pendiente_igual_a_lo_pedido(self):
+        lineas = self._lineas_del_get()
+
+        self.assertIsNotNone(lineas)
+        for pdt, talla in ((self.pdt_ch, self.talla_ch), (self.pdt_m, self.talla_m)):
+            linea = lineas[talla.pk]
+            self.assertEqual(linea["cantidad_asignada"], 0.0)
+            self.assertEqual(linea["cantidad_pendiente"], float(pdt.cantidad))
+
+    def test_pedido_totalmente_cubierto_desaparece_del_get(self):
+        """CH (10) y M (6) cubiertas al 100%: no queda nada que bordar."""
+        resp = self._post(
+            [(self.pdt_ch, self.CANTIDAD_CH), (self.pdt_m, self.CANTIDAD_M)]
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        self.assertIsNone(self._lineas_del_get())
+
+    def test_pedido_parcialmente_cubierto_sigue_en_el_get_con_lineas_agotadas(self):
+        """CH agotada (10/10) pero M pendiente: el pedido sigue apareciendo y
+        viaja con **las dos** líneas, para que el frontend marque la agotada."""
+        self.assertEqual(
+            self._post([(self.pdt_ch, self.CANTIDAD_CH)]).status_code, 201
+        )
+
+        lineas = self._lineas_del_get()
+
+        self.assertIsNotNone(lineas)
+        self.assertEqual(len(lineas), 2)
+        self.assertEqual(lineas[self.talla_ch.pk]["cantidad_asignada"], 10.0)
+        self.assertEqual(lineas[self.talla_ch.pk]["cantidad_pendiente"], 0.0)
+        self.assertEqual(lineas[self.talla_m.pk]["cantidad_pendiente"], 6.0)
+
+    def test_ob_dada_de_baja_devuelve_el_cupo_y_el_pedido_al_get(self):
+        """El soft delete libera cupo: ``_cantidades_asignadas_por_linea`` sólo
+        cuenta OBs ``activo=True``."""
+        resp = self._post(
+            [(self.pdt_ch, self.CANTIDAD_CH), (self.pdt_m, self.CANTIDAD_M)]
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertIsNone(self._lineas_del_get())
+
+        OrdenesBordado.objects.get(pk=resp.data["id"]).soft_delete()
+
+        lineas = self._lineas_del_get()
+        self.assertIsNotNone(lineas)
+        self.assertEqual(lineas[self.talla_ch.pk]["cantidad_pendiente"], 10.0)
+        self.assertEqual(lineas[self.talla_m.pk]["cantidad_pendiente"], 6.0)
+
+
+class OrdenBordadoRevisionParcialidadesTests(OrdenBordadoParcialidadesTests):
+    """Defectos encontrados en la revisión de las parcialidades de OB.
+
+    Hereda el fixture de ``OrdenBordadoParcialidadesTests``
+    (CH cantidad=10, M cantidad=6, ambas ``lleva_bordado=True``).
+    """
+
+    def test_ob_parcial_en_todas_las_lineas_no_dispara_409_falso(self):
+        """``buscar_existente_full_match`` contaba renglones, no piezas.
+
+        Una OB parcial que toca las dos líneas con cantidades reducidas tiene el
+        mismo número de renglones que una completa, así que el POST siguiente
+        sin override recibía un 409 diciendo "ya existe ... con el 100% de las
+        prendas" sobre un pedido cubierto a medias. Debe ser un 400 de exceso,
+        que sí dice cuántas piezas quedan.
+        """
+        self.assertEqual(self._post([(self.pdt_ch, 5), (self.pdt_m, 3)]).status_code, 201)
+
+        resp = self._client().post(
+            "/api/v1/produccion/orden-bordado/onboarding/",
+            {"pedido": self.pedido.pk},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("detalles_exceso", resp.data)
+        exceso = " ".join(str(x) for x in resp.data["detalles_exceso"])
+        self.assertIn("disponible_restante=5.0", exceso)
+        self.assertIn("disponible_restante=3.0", exceso)
+
+    def test_pedido_cubierto_al_100_por_ciento_sigue_dando_409(self):
+        """El 409 legítimo no se pierde: cobertura real del 100% en piezas."""
+        self.assertEqual(
+            self._post(
+                [(self.pdt_ch, self.CANTIDAD_CH), (self.pdt_m, self.CANTIDAD_M)]
+            ).status_code,
+            201,
+        )
+
+        resp = self._client().post(
+            "/api/v1/produccion/orden-bordado/onboarding/",
+            {"pedido": self.pedido.pk},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 409, resp.data)
+
+    def test_renglones_sin_talla_consumen_cupo(self):
+        """``OrdenBordadoDetalle.talla`` es ``SET_NULL`` y el picking escribe
+        NULL cuando la talla no trae variante; esas piezas existen.
+
+        Antes caían en la clave ``(pd_id, None)`` que ningún lookup buscaba, así
+        que contaban como cero y se podía reprogramar el pedido completo.
+        El renglón tiene 16 piezas en total (CH 10 + M 6); con 10 ya
+        programadas sin talla, sólo quedan 6.
+        """
+        ob = OrdenesBordado.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            folio_bordado="OB-PICKING-SIN-TALLA",
+        )
+        OrdenBordadoDetalle.objects.create(
+            ob=ob, pedido_detalle=self.detalle, producto=self.producto,
+            cantidad=10, talla=None,
+        )
+
+        resp = self._post([(self.pdt_ch, self.CANTIDAD_CH)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        exceso = " ".join(str(x) for x in resp.data["detalles_exceso"])
+        self.assertIn("total del renglón", exceso)
+        self.assertIn("ya_asignado=10.0", exceso)
+        self.assertIn("disponible_restante=6.0", exceso)
+
+    def test_renglones_sin_talla_se_reflejan_en_el_pendiente_del_get(self):
+        """El total pendiente del renglón baja aunque no se sepa la talla."""
+        ob = OrdenesBordado.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            folio_bordado="OB-PICKING-SIN-TALLA",
+        )
+        OrdenBordadoDetalle.objects.create(
+            ob=ob, pedido_detalle=self.detalle, producto=self.producto,
+            cantidad=10, talla=None,
+        )
+
+        lineas = self._lineas_del_get()
+
+        self.assertIsNotNone(lineas)
+        total_pendiente = sum(l["cantidad_pendiente"] for l in lineas.values())
+        self.assertEqual(total_pendiente, 6.0)
+
+    def test_cantidad_fraccionaria_se_rechaza(self):
+        """``PedidoDetalleTalla.cantidad`` es entero: no se bordan medias prendas."""
+        resp = self._post([(self.pdt_ch, 2.5)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("entero", str(resp.data["detalles_override"]))
+        self.assertEqual(OrdenesBordado.objects.filter(pedido=self.pedido).count(), 0)
+
+    def test_get_no_ofrece_lineas_en_cantidad_cero(self):
+        """El GET filtraba sólo por ``lleva_bordado``; el service exige además
+        ``cantidad > 0``, así que ofrecía renglones que el POST rechazaba con un
+        'no pertenece a este pedido' falso."""
+        pdt_g = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_g,
+            cantidad=0, lleva_bordado=True,
+        )
+
+        lineas = self._lineas_del_get()
+
+        self.assertIsNotNone(lineas)
+        self.assertNotIn(self.talla_g.pk, lineas)
+        self.assertNotIn(
+            pdt_g.pk, [l["pedido_detalle_talla_id"] for l in lineas.values()]
+        )
+
+    def test_get_no_dispara_una_query_por_pedido_detalle(self):
+        """El ``Prefetch`` filtrado sustituye al ``det.tallas.filter(...)`` que
+        ignoraba la caché y consultaba una vez por ``PedidoDetalle``.
+
+        Se afirma que el número de queries **no crece** con los renglones (mismo
+        criterio que ``test_list_sin_n_mas_1_constante``), no un número mágico.
+        """
+        def _agregar_detalles(n):
+            for _ in range(n):
+                det = PedidoDetalle.objects.create(
+                    pedido=self.pedido, producto=self.producto
+                )
+                PedidoDetalleTalla.objects.create(
+                    pedido_detalle=det, talla=self.talla_ch,
+                    cantidad=5, lleva_bordado=True,
+                )
+
+        def _queries():
+            client = self._client()
+            with CaptureQueriesContext(connection) as ctx:
+                client.get("/api/v1/produccion/orden-bordado/onboarding/")
+            return len(ctx)
+
+        _agregar_detalles(1)
+        con_2 = _queries()
+        _agregar_detalles(8)
+        con_10 = _queries()
+
+        self.assertEqual(con_2, con_10)
+
+
+class OrdenReflejanteOnboardingGetTests(TestCase):
+    """El GET de OR debe exponer el mismo pendiente que el de OB.
+
+    Los tres onboardings se mantienen simétricos a propósito; sólo OB tenía
+    ``cantidad_asignada``/``cantidad_pendiente``, así que OR y OCM seguían
+    ofreciendo el total contratado aunque ya estuviera programado.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Monterrey"
+        )
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal,
+            tipo_documento="ORDEN_REFLEJANTE", serie="OR",
+        )
+        cls.usuario = Usuario.objects.create(
+            username="operador", email="operador@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla_ch = Talla.objects.create(nombre="CH")
+
+    def _lineas(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        data = client.get("/api/v1/produccion/orden-reflejante/onboarding/").json()
+        pedido = next((p for p in data["pedidos"] if p["id"] == self.pedido.pk), None)
+        return None if pedido is None else pedido["detalles"]
+
+    def setUp(self):
+        self.pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        self.detalle = PedidoDetalle.objects.create(
+            pedido=self.pedido, producto=self.producto
+        )
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_ch,
+            cantidad=10, lleva_reflejante=True,
+        )
+
+    def test_get_expone_asignada_y_pendiente(self):
+        orden = OrdenesReflejante.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            folio_reflejante="OR-PARCIAL-1",
+        )
+        OrdenReflejanteDetalle.objects.create(
+            orden_r=orden, pedido_detalle=self.detalle, producto=self.producto,
+            cantidad=4, talla=self.talla_ch,
+        )
+
+        lineas = self._lineas()
+
+        self.assertIsNotNone(lineas)
+        self.assertEqual(lineas[0]["cantidad_pedido"], 10.0)
+        self.assertEqual(lineas[0]["cantidad_asignada"], 4.0)
+        self.assertEqual(lineas[0]["cantidad_pendiente"], 6.0)
+
+    def test_pedido_cubierto_desaparece_del_get(self):
+        orden = OrdenesReflejante.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            folio_reflejante="OR-COMPLETA",
+        )
+        OrdenReflejanteDetalle.objects.create(
+            orden_r=orden, pedido_detalle=self.detalle, producto=self.producto,
+            cantidad=10, talla=self.talla_ch,
+        )
+
+        self.assertIsNone(self._lineas())

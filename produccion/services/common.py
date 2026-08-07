@@ -14,8 +14,84 @@ Centraliza lo que antes estaba triplicado verbatim en cada service:
 """
 
 from django.db import IntegrityError, transaction
+from django.db.models import Sum
 
 from ventas.models import PedidoDetalleTalla
+
+#: Tolerancia al comparar cantidades. Los ``cantidad`` del detalle de las
+#: órdenes son ``FloatField``, así que sumar varias parcialidades puede dejar
+#: residuos del orden de 1e-15 que no representan piezas reales.
+EPS_CANTIDAD = 1e-9
+
+
+def cantidades_asignadas(detalle_model, fk_orden, pedido_ids):
+    """Lo ya programado en órdenes activas, para varios pedidos en una query.
+
+    ``fk_orden`` es el nombre de la FK a la orden padre en el modelo de detalle
+    (``ob`` / ``orden_r`` / ``ocm``). Devuelve la tupla
+    ``(por_linea, sin_talla)``:
+
+    - ``por_linea``: ``{(pedido_detalle_id, talla_id): cantidad}`` para los
+      renglones con talla identificada.
+    - ``sin_talla``: ``{pedido_detalle_id: cantidad}`` con los renglones cuyo
+      ``talla_id`` es ``NULL``. La FK ``talla`` del detalle es ``SET_NULL`` y
+      el pipeline de picking escribe ``NULL`` cuando la ``PedidoDetalleTalla``
+      no trae ``variante`` (``wms/services/picking_pipeline/work_orders.py``),
+      así que esas piezas existen y consumen cupo. Antes caían en una clave
+      ``(pd_id, None)`` que ningún lookup buscaba y contaban como cero.
+
+    La clave ``(pedido_detalle_id, talla_id)`` no colisiona entre pedidos —un
+    ``PedidoDetalle`` pertenece a un único pedido— así que el dict combinado es
+    seguro. Sólo cuenta órdenes ``activo=True``: las canceladas o dadas de baja
+    no consumen cupo.
+    """
+    filas = (
+        detalle_model.objects
+        .filter(**{
+            f"{fk_orden}__pedido_id__in": list(pedido_ids),
+            f"{fk_orden}__activo": True,
+        })
+        .values("pedido_detalle_id", "talla_id")
+        .annotate(asignado=Sum("cantidad"))
+    )
+    por_linea = {}
+    sin_talla = {}
+    for f in filas:
+        cantidad = float(f["asignado"] or 0)
+        if f["talla_id"] is None:
+            sin_talla[f["pedido_detalle_id"]] = (
+                sin_talla.get(f["pedido_detalle_id"], 0.0) + cantidad
+            )
+        else:
+            por_linea[(f["pedido_detalle_id"], f["talla_id"])] = cantidad
+    return por_linea, sin_talla
+
+
+def pendientes_por_linea(lineas, por_linea, sin_talla):
+    """Calcula ``(asignada, pendiente)`` por línea aplicando el pool sin talla.
+
+    ``lineas`` es ``[(pedido_detalle_id, talla_id, cantidad_pedido), ...]``.
+    Las piezas de ``sin_talla`` no se pueden atribuir a una talla concreta, así
+    que se drenan en orden contra las líneas del mismo ``pedido_detalle``: el
+    pendiente por línea puede quedar repartido de forma distinta a la real,
+    pero el **total** por ``pedido_detalle`` sí queda correcto, que es lo que
+    evita ofrecer cantidad que ya está programada.
+    """
+    pool = dict(sin_talla)
+    resultado = []
+    for pedido_detalle_id, talla_id, cantidad_pedido in lineas:
+        asignada = por_linea.get((pedido_detalle_id, talla_id), 0.0)
+        pendiente = max(0.0, cantidad_pedido - asignada)
+        disponible_pool = pool.get(pedido_detalle_id, 0.0)
+        if disponible_pool > 0 and pendiente > 0:
+            consumido = min(disponible_pool, pendiente)
+            asignada += consumido
+            pendiente -= consumido
+            pool[pedido_detalle_id] = disponible_pool - consumido
+        if pendiente <= EPS_CANTIDAD:
+            pendiente = 0.0
+        resultado.append((asignada, pendiente))
+    return resultado
 
 
 def revisar_empresa(user, obj):
@@ -72,6 +148,18 @@ def payload_duplicada(existente, *, folio_field, estatus_display, estatus_field,
     }
 
 
+def _tiene_candado_activa_por_pedido(modelo):
+    """¿El modelo declara la constraint parcial "una orden activa por pedido"?
+
+    Se lee del ``Meta`` en vez de hardcodear la respuesta para que vuelva a ser
+    verdad sola si negocio re-instaura el candado en alguno de los tres tipos.
+    """
+    return any(
+        "activa_por_pedido" in getattr(constraint, "name", "")
+        for constraint in modelo._meta.constraints
+    )
+
+
 def crear_orden_con_guardia_duplicado(modelo, pedido, crear_kwargs,
                                       duplicada_exc, payload_builder):
     """Crea la orden en un savepoint propio y traduce la violación de la
@@ -89,6 +177,15 @@ def crear_orden_con_guardia_duplicado(modelo, pedido, crear_kwargs,
         with transaction.atomic():
             return modelo.objects.create(**crear_kwargs)
     except IntegrityError:
+        # Sólo se traduce si el modelo **todavía** declara el candado de "una
+        # orden activa por pedido". Al quitarlo (migraciones ``0025`` para
+        # Reflejante/OCM y ``0026`` para Bordado) el único índice único que
+        # queda es el del folio, y como ahora es normal que un pedido tenga
+        # órdenes activas, la re-consulta encontraba una y reportaba un 409 de
+        # duplicado sobre lo que en realidad era una colisión de folio
+        # —enmascarando la causa real—.
+        if not _tiene_candado_activa_por_pedido(modelo):
+            raise
         existente = (
             modelo.objects.filter(pedido=pedido, activo=True).order_by("-id").first()
         )
