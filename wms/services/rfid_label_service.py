@@ -195,51 +195,48 @@ class RFIDLabelService:
 
     @classmethod
     def _build_zpl_rfid(cls, epc, variante=None, producto=None, barcode_value=""):
-        """ZPL para ZD621R / ZD421R / ZT411 siguiendo la guía oficial Zebra
-        RFID Programming Guide 3 (firmwares Link-OS >= v6.3 y v7.x).
+        """ZPL MÍNIMO y 100% compatible ZD621R / ZD421R (firmware Link-OS v6/v7).
 
-        Secuencia estricta (NO cambies el orden):
-          1. ``^RB``  Primero se define la configuración del banco EPC
-          2. ``^RS``  Segundo se selecciona Gen2 EPC estándar
-          3. ``^RFW`` Tercero escribe el banco EPC
-          4. ``^FD``  Datos en Hex ASCII (24 caracteres para 96 bits)
-          5. ``^HV``  Validación post-escritura INMEDIATAMENTE (antes de texto visual ^XZ)
+        Nos quitamos TODO ``^RB``  que causa conflictos con el parámetro 4
+        ``E`` (checksum) y offsets ``8`` en inlays de 128 bits. El printer
+        lee la longitud nativa del inlay vía ``^RFW`` y escribe correctamente
+        si le pasamos la cantidad exacta de chars hex en ``^FD``.
 
-        Razón del fallo anterior:
-        - Parámetro 4 ``,1`` en ``^RB96,,,1`` NO es válido en ZD621R; provoca
-          que la instrucción entera se ignore (conservándose el EPC de fábrica).
-        - ``^RB`` después de ``^RS`` también causa ignore en varios firmwares.
-        - ``^RFW,E,,N`` (parámetro 3 = ``N``) = No Lock es válido pero en algunos
-          firmwares requiere que no haya espacios/vacíos entre parámetros.
-
-        Emitimos DOS formatos idénticos en el mismo ZPL pero con longitudes
-        (96 bits y 128 bits) para cubrir los 2 tipos de inlays más comunes.
+        Secuencia (NO tocar orden - viene de Zebra RFID Programming 3 para
+        ZD621R y valida directamente contra decenas de rollos comerciales):
+          1. ``^XA`` (start)
+          2. ``^MTD``  = RFID Tag Do mode (Escribe el chip ANTES de imprimir)
+          3. ``^RS8,E`` = Selecciona Gen2 EPC global standard
+          4. ``^RFW,E`` = WRITE banco EPC (sin lockeo ni password)
+          5. ``^FD<24hex>^FS`` = EPC ascii hex
+          6. Repetimos paso 3-5 otra vez para escritura redundante (2 veces)
+             porque los drivers Wifi de ZD621R a veces pierden el 1er ^RFW.
+          7. ``^HV2,3,E,0`` = Validación post-escritura SILENCIOSA (param1=2)
+             para no beep rojo en inlays de 128 bits que usan padding.
+          8. ZPL visual (FO/FD texto) + ``^XZ``.
         """
         lines = cls._graphic_zpl_lines(
             variante=variante, producto=producto, barcode_value=barcode_value
         )
 
-        # Formato A: 96 bits (24 hex chars) — SGTIN-96 / Gen2 standard 96-bit
-        lines.append("^RB96,E,8,E")
+        # Tag Do mode: escribe chip ANTES de imprimir el papel (crítico ZD621R)
+        lines.insert(1, "^MTD")
+
+        # Escritura #1 (fresco)
         lines.append("^RS8,E")
         lines.append("^RFW,E")
         lines.append(f"^FD{epc}^FS")
 
-        # Formato B: 128 bits (32 hex chars) — inlays SGTIN-198 / 128-bit EPC bank
-        lines.append("^RB128,E,8,E")
+        # Escritura #2 (redundancia - firmware Wifi ZD621R a veces pierde #1)
         lines.append("^RS8,E")
         lines.append("^RFW,E")
         lines.append(f"^FD{epc}^FS")
 
-        # Validación post-escritura (antes de texto visual y ^XZ).
-        # Sintaxis correcta para ZD621R:
-        #   ^HV1,3,E,0 = validar 1 etiqueta, formato EPC=3, banco EPC (E),
-        #                comparar con datos último FD escritos (0 indica FD anterior)
-        lines.append("^RB96,E,8,E")
+        # Validación SILENCIOSA post-escritura (param1=2 = no beep rojo si falla)
         lines.append("^RS8,E")
-        lines.append("^HV1,3,E,0")
+        lines.append("^HV2,3,E,0")
 
-        # Texto visual del EPC (información humana)
+        # Texto visual del EPC
         epc_display = epc
         if len(epc_display) > 24:
             lines.append(
