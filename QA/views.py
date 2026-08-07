@@ -1325,42 +1325,62 @@ def scanner_rfid_receive(request):
             antenna, rssi = _extract_antenna_rssi(
                 item, fallback_antenna=fallback_antenna, fallback_rssi=fallback_rssi
             )
-            # Debug: log de cada tag para identificar estructura del payload
-            # (desde Vercel Dashboard Function Logs se ve.)
+            # --- DEEP debug del item (se sube a INFO para que aparezca en Vercel)
+            # No más adivinar keys: imprimimos TODO el payload (truncado).
             if isinstance(item, dict):
-                # Solo keys de 1er nivel (solo anidados tag/data/meta para no volcar todo)
-                top_keys = sorted(item.keys())
+                def _safe_val(v, max_len=80):
+                    if v is None:
+                        return None
+                    if isinstance(v, (dict, list, tuple)):
+                        try:
+                            s = json.dumps(v, ensure_ascii=False, default=str)
+                        except Exception:
+                            s = f"<{type(v).__name__}>"
+                    else:
+                        s = str(v)
+                    return s if len(s) <= max_len else s[: max_len - 3] + "..."
+
+                # 1) TODO el item como json truncado 900 chars (no nos perdimos nada).
+                try:
+                    item_json = json.dumps(item, ensure_ascii=False, default=str)
+                except Exception:
+                    item_json = f"<unserializable {type(item).__name__}>"
                 excerpt = {
                     "i": idx,
-                    "keys": top_keys,
-                    "epc_raw_len": len(epc_raw) if epc_raw else 0,
-                    "epc_raw_head": epc_raw[:24] if epc_raw else "",
-                    "ant_raw_item": {k: item.get(k) for k in _ANTENNA_INT_KEYS if k in item and item.get(k) is not None},
-                    "rssi_raw_item": {k: item.get(k) for k in _RSSI_FLOAT_KEYS if k in item and item.get(k) is not None},
-                    "tag_dict_keys": sorted(item["tag"].keys()) if isinstance(item.get("tag"), dict) else None,
-                    "data_dict_keys": sorted(item["data"].keys()) if isinstance(item.get("data"), dict) else None,
-                    "meta_dict_keys": sorted(item["meta"].keys()) if isinstance(item.get("meta"), dict) else None,
+                    "item_len": len(item_json),
+                    "item": item_json[:900],
                 }
             else:
                 excerpt = {
                     "i": idx,
                     "item_type": type(item).__name__,
-                    "epc_raw_len": len(epc_raw) if epc_raw else 0,
-                    "epc_raw_head": epc_raw[:24] if epc_raw else "",
+                    "item_str": (str(item)[:200]),
                 }
+            excerpt["epc_raw"] = (epc_raw[:64] if isinstance(epc_raw, str) else epc_raw)
+            excerpt["epc_raw_len"] = (len(epc_raw) if isinstance(epc_raw, (str, bytes)) else None)
+            excerpt["epc_norm"] = epc_norm
             excerpt["antenna_final"] = antenna
             excerpt["rssi_final"] = rssi
-            excerpt["fallback_antenna"] = fallback_antenna
-            excerpt["fallback_rssi"] = fallback_rssi
-            excerpt["epc_norm"] = epc_norm
-            rfid_scanner_logger.debug(
+            excerpt["fallback_antenna_raw"] = (
+                str(fallback_antenna)[:160] if fallback_antenna is not None else None
+            )
+            excerpt["fallback_rssi_raw"] = (
+                str(fallback_rssi)[:160] if fallback_rssi is not None else None
+            )
+            try:
+                excerpt_json = json.dumps(excerpt, ensure_ascii=False, default=str)
+            except Exception:
+                excerpt_json = f"<excerpt_unserializable keys={list(excerpt.keys())}>"
+            # NIVEL INFO para que aparezca en Vercel Function Logs sin tener
+            # que habilitar DEBUG_LEVEL (default Vercel = INFO/WARN/ERROR).
+            rfid_scanner_logger.info(
                 "RFID receive tag[%s] epc=%s len=%s antenna=%s rssi=%s excerpt=%s",
                 idx,
                 epc_norm,
                 len(epc_norm),
                 antenna,
                 rssi,
-                json.dumps(excerpt, ensure_ascii=False)[:700],
+                excerpt_json[:1400],
             )
             tags_to_create.append(
                 RfidScan(
@@ -1372,9 +1392,21 @@ def scanner_rfid_receive(request):
             )
 
         if tags_to_create:
-            # Log resumen del request (por si en logs solo vemos el último)
+            # Log resumen DEL REQUEST ENTERO (nivel INFO).
+            try:
+                body_dict_keys = sorted(data.keys()) if isinstance(data, dict) else None
+            except Exception:
+                body_dict_keys = None
             summary = {
                 "count": len(tags_to_create),
+                "items_raw_len": len(items),
+                "body_dict_keys": body_dict_keys,
+                "fallback_antenna_raw": (
+                    str(fallback_antenna)[:160] if fallback_antenna is not None else None
+                ),
+                "fallback_rssi_raw": (
+                    str(fallback_rssi)[:160] if fallback_rssi is not None else None
+                ),
                 "unique_epcs_sample": sorted([s.epc for s in tags_to_create[:5]]),
                 "antenna_values": sorted({s.antenna for s in tags_to_create if s.antenna is not None}),
                 "rssi_values_sample": sorted([float(s.rssi) for s in tags_to_create if s.rssi is not None])[:10],
@@ -1382,7 +1414,7 @@ def scanner_rfid_receive(request):
             rfid_scanner_logger.info(
                 "RFID receive request: created=%s summary=%s body_sample=%s",
                 len(tags_to_create),
-                json.dumps(summary, ensure_ascii=False),
+                json.dumps(summary, ensure_ascii=False, default=str),
                 (body[:200] if isinstance(body, str) else "(binary)"),
             )
             RfidScan.objects.bulk_create(tags_to_create, batch_size=200)
