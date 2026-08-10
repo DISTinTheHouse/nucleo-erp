@@ -454,15 +454,13 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
             return OrdenBordadoRetrieveSerializer
         return OrdenBordadoSerializer
 
-    def list(self, request, *args, **kwargs):
-        """Listado con la cobertura de cada orden sobre su pedido.
+    def _serializar_pagina(self, ordenes):
+        """Serializa un conjunto de órdenes con la cobertura ya resuelta.
 
-        Se sobreescribe ``list`` sólo para resolver la cobertura de la página
-        ENTERA antes de serializar: 2 queries agrupadas, constantes, en vez de
-        dos por fila. El resultado viaja por el contexto del serializer.
+        La cobertura se calcula para el conjunto ENTERO antes de serializar: 2
+        queries agrupadas, constantes, en vez de dos por fila.
         """
-        ordenes = list(self.filter_queryset(self.get_queryset()))
-        serializer = self.get_serializer(
+        return self.get_serializer(
             ordenes,
             many=True,
             context={
@@ -470,23 +468,46 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 "cobertura": OrdenBordadoService.cobertura_por_orden(ordenes),
             },
         )
-        return Response(serializer.data)
+
+    def list(self, request, *args, **kwargs):
+        """Listado con la cobertura de cada orden sobre su pedido.
+
+        Réplica de ``ListModelMixin.list`` —incluida la paginación, que la
+        versión anterior de este override omitía: sin ``paginate_queryset`` este
+        endpoint habría ignorado en silencio cualquier
+        ``DEFAULT_PAGINATION_CLASS`` que se configurara después, devolviendo el
+        arreglo completo mientras el resto de los listados sí paginaba—. Lo
+        único que añade es el contexto de cobertura.
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            return self.get_paginated_response(self._serializar_pagina(page).data)
+
+        return Response(self._serializar_pagina(list(queryset)).data)
 
     def retrieve(self, request, *args, **kwargs):
         """Detalle con el contexto de parcialidad del pedido.
 
         Resuelve una sola vez —para todos los renglones— lo contratado, lo ya
-        asignado por las OBs activas y las órdenes hermanas.
+        asignado por las OBs activas y las órdenes hermanas. La cobertura
+        (``cantidad_cubierta``/``cantidad_contratada``/``cobertura_completa``)
+        también viaja aquí: el serializer del detalle hereda del de listado, así
+        que el diálogo puede enunciar "cubre 7 de 40" sin leer además la fila
+        del listado.
         """
         orden = self.get_object()
-        por_linea, hermanas, aproximado = (
+        por_linea, por_detalle, hermanas, aproximado = (
             OrdenBordadoService.partialidad_de_orden(orden)
         )
         serializer = self.get_serializer(
             orden,
             context={
                 **self.get_serializer_context(),
+                "cobertura": OrdenBordadoService.cobertura_por_orden([orden]),
                 "partialidad_por_linea": por_linea,
+                "partialidad_por_detalle": por_detalle,
                 "hermanas": hermanas,
                 "reparto_aproximado": aproximado,
             },

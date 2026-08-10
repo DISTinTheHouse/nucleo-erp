@@ -1,3 +1,5 @@
+import math
+
 from django.db import transaction
 from django.db.models import Sum
 from rest_framework.exceptions import ValidationError, APIException
@@ -182,13 +184,39 @@ class OrdenBordadoService:
         for orden in ordenes:
             cubierto = cubierto_por_ob.get(orden.pk, 0.0)
             total = contratado.get(orden.pedido_id, 0.0)
+            # PISO, no redondeo. Con redondeo, un cubierto=9.6 sobre
+            # contratado=10.0 publicaba ``cubierta=10``/``contratada=10``
+            # —sobre-reporta cobertura que no existe—. Con piso publica
+            # ``cubierta=9``, que sub-reporta (hay 9.6, no 9) pero nunca finge
+            # una pieza que no se ha cubierto. Sub-reportar es el trade-off
+            # aceptado; sobre-reportar —declarar completa una orden que no lo
+            # está— no lo es.
+            #
+            # ``+ EPS_CANTIDAD`` antes del piso compensa el ruido de punto
+            # flotante de ``Sum()`` sobre ``FloatField`` (una suma que
+            # matemáticamente da 10.0 puede llegar como 9.999999999999998), no
+            # cantidades fraccionarias reales: la tolerancia es 1e-9, muy por
+            # debajo de cualquier pieza genuina, así que un 9.6 real sigue
+            # dando piso 9. Sin este ajuste, un pedido genuinamente cubierto al
+            # 100% podía reportarse como 9/10 por el redondeo binario de la
+            # suma, que sí sería un sub-reporte espurio, no el aceptado.
+            #
+            # La bandera se deriva de estos MISMOS enteros ya calculados con
+            # piso, no de los floats crudos: cubierto_int/contratado_int son la
+            # única fuente de verdad que ve el cliente, así que la bandera no
+            # puede disentir de ellos. Fraccionarios sí son alcanzables:
+            # ``OrdenBordadoDetalle.cantidad`` es ``FloatField`` y el pipeline
+            # de picking escribe ``float(item["cantidad"])`` sin validar
+            # enteros.
+            cubierto_int = math.floor(cubierto + EPS_CANTIDAD)
+            contratado_int = math.floor(total + EPS_CANTIDAD)
             resultado[orden.pk] = {
-                "cubierto": int(round(cubierto)),
-                "contratado": int(round(total)),
+                "cubierto": cubierto_int,
+                "contratado": contratado_int,
                 # Un pedido sin piezas contratadas de bordado no se declara
                 # "cubierto al 100%": no hay nada que cubrir y afirmarlo
                 # confundiría más que el ``false``.
-                "completa": total > EPS_CANTIDAD and cubierto + EPS_CANTIDAD >= total,
+                "completa": contratado_int > 0 and cubierto_int >= contratado_int,
             }
         return resultado
 
@@ -196,11 +224,17 @@ class OrdenBordadoService:
     def partialidad_de_orden(orden):
         """Contexto de parcialidad para el DETALLE de una OB.
 
-        Devuelve ``(por_linea, hermanas, reparto_aproximado)``:
+        Devuelve ``(por_linea, por_detalle, hermanas, reparto_aproximado)``:
 
         - ``por_linea``: ``{(pedido_detalle_id, talla_id): (pedido, asignada,
           pendiente)}`` con lo contratado, lo ya programado por **todas** las
           OBs activas del pedido y el saldo.
+        - ``por_detalle``: lo mismo agregado por ``pedido_detalle_id``. Es el
+          respaldo para los renglones de la OB cuya ``talla`` es NULL —los
+          genera el pipeline de picking—, que no tienen entrada por talla
+          porque el mapa se arma desde ``PedidoDetalleTalla``. Sin él esos
+          renglones salían con los tres campos en ``null``, justo el caso que
+          ``reparto_aproximado`` dice estar describiendo.
         - ``hermanas``: las otras OBs activas del mismo pedido.
         - ``reparto_aproximado``: ``True`` si el pedido tiene piezas
           programadas sin talla identificable. Esas piezas no se pueden
@@ -214,6 +248,14 @@ class OrdenBordadoService:
         """
         tallas = list(
             OrdenBordadoService._tallas_bordado_qs(orden.pedido_id)
+            # Orden explícito: ``tallas_orden_trabajo_qs`` no lo declara y
+            # ``PedidoDetalleTalla`` no tiene ``Meta.ordering``, así que el
+            # orden lo decidía la BD. ``pendientes_por_linea`` drena el pool sin
+            # talla contra las primeras líneas que encuentra, de modo que dos
+            # GET idénticos podían repartir ``asignada``/``pendiente`` distinto
+            # entre renglones (los totales por renglón sí coincidían). Mismo
+            # criterio que el ``order_by("id")`` del Prefetch de ``detalles``.
+            .order_by("id")
             .values("pedido_detalle_id", "talla_id", "cantidad")
         )
         por_linea_asignado, sin_talla = (
@@ -225,12 +267,19 @@ class OrdenBordadoService:
             por_linea_asignado,
             sin_talla,
         )
-        por_linea = {
-            (t["pedido_detalle_id"], t["talla_id"]): (
-                float(t["cantidad"] or 0), asignada, pendiente
+        por_linea = {}
+        por_detalle = {}
+        for t, (asignada, pendiente) in zip(tallas, calculado):
+            contratado = float(t["cantidad"] or 0)
+            por_linea[(t["pedido_detalle_id"], t["talla_id"])] = (
+                contratado, asignada, pendiente
             )
-            for t, (asignada, pendiente) in zip(tallas, calculado)
-        }
+            acumulado = por_detalle.get(t["pedido_detalle_id"], (0.0, 0.0, 0.0))
+            por_detalle[t["pedido_detalle_id"]] = (
+                acumulado[0] + contratado,
+                acumulado[1] + asignada,
+                acumulado[2] + pendiente,
+            )
 
         hermanas = list(
             OrdenesBordado.objects
@@ -241,7 +290,7 @@ class OrdenBordadoService:
         )
 
         reparto_aproximado = any(v > EPS_CANTIDAD for v in sin_talla.values())
-        return por_linea, hermanas, reparto_aproximado
+        return por_linea, por_detalle, hermanas, reparto_aproximado
 
     @staticmethod
     def _cantidades_asignadas_por_linea(pedido):
