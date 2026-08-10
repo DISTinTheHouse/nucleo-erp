@@ -198,6 +198,16 @@ class OrdenBordadoDetalle(models.Model):
     puntadas = models.IntegerField(default=0)
     talla = models.ForeignKey(Talla, on_delete=models.SET_NULL, null=True, blank=True)
     color = models.ForeignKey(Color, on_delete=models.SET_NULL, null=True, blank=True)
+    #: ``bordado_config`` ÍNTEGRO de la ``PedidoDetalleTalla`` de origen.
+    #:
+    #: Los tres escalares de arriba se derivan de ``ubicaciones[0]``, así que
+    #: una línea con varias ubicaciones perdía todas menos la primera —y hay
+    #: filas reales con 2—. Aquí se guarda el objeto completo, con todo
+    #: ``ubicaciones[]``, para que el renglón deje de ser el único registro y
+    #: pase a ser el atajo. Mismo patrón que ``OrdenCorteMangaDetalle
+    #: .configuracion``. Nulo en las órdenes anteriores a este campo: no se
+    #: hizo backfill.
+    configuracion = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = 'orden_bordado_detalle'
@@ -279,6 +289,17 @@ class OrdenReflejanteDetalle(models.Model):
     metros = models.FloatField(default=0)
     talla = models.ForeignKey(Talla, on_delete=models.SET_NULL, null=True, blank=True)
     color = models.ForeignKey(Color, on_delete=models.SET_NULL, null=True, blank=True)
+    #: ``reflejante_config`` ÍNTEGRO de la ``PedidoDetalleTalla`` de origen.
+    #:
+    #: A diferencia de bordado y corte de manga, el config de reflejante ES el
+    #: arreglo (``[{"tipo", "opcion", "posicion"}, ...]``), no un objeto que lo
+    #: envuelve. Los escalares de arriba se derivan del elemento ``[0]``, así
+    #: que una línea con varios elementos perdía el resto —y en datos reales no
+    #: sólo se pierde una posición: P-00027 mezcla ``ignifuga-plata-1`` con
+    #: ``costurable-plata-1``, o sea un MATERIAL distinto—. Aquí se guarda el
+    #: arreglo completo. Mismo patrón que ``OrdenCorteMangaDetalle
+    #: .configuracion``. Nulo en las órdenes anteriores: no se hizo backfill.
+    configuracion = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = 'orden_reflejante_detalle'

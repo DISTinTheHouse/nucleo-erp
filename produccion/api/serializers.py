@@ -23,7 +23,7 @@ from produccion.models import (
 
 from catalogo.api.serializers import ProductoVarianteSerializer
 from catalogo.models import ProductoVariante
-from produccion.services.common import revisar_empresa
+from produccion.services.common import config_como_dict, revisar_empresa
 
 
 class BomDetalleSerializer(serializers.ModelSerializer):
@@ -385,7 +385,13 @@ class OrdenBordadoDetalleListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OrdenBordadoDetalle
-        fields = '__all__'
+        # ``exclude`` en vez de ``fields = '__all__'`` sólo por
+        # ``configuracion``: es una columna del modelo, así que ``__all__`` la
+        # metería sola en el listado. No cuesta queries (viaja en el mismo
+        # SELECT), pero sí peso: es el ``bordado_config`` entero, con todas sus
+        # ubicaciones y sus URLs de imagen, por renglón. El listado se mantiene
+        # ligero y el detalle —que sí la declara— es quien la publica.
+        exclude = ('configuracion',)
 
 
 class OrdenBordadoListSerializer(OrdenBordadoSerializer):
@@ -760,9 +766,13 @@ class OrdenReflejanteDetalleSerializer(serializers.ModelSerializer):
 
         El arreglo no se pierde: viaja íntegro en ``reflejante_config``, que
         sigue leyendo el valor crudo con ``_get_cfg``.
+
+        La normalización vive en ``services.common.config_como_dict``: este
+        mismo criterio lo necesita también el GET de onboarding
+        (``_payload_pedidos_onboarding``), y tenerlo duplicado fue justo lo que
+        dejó ese endpoint sin guardia.
         """
-        cfg = self._get_cfg(obj)
-        return cfg if isinstance(cfg, dict) else {}
+        return config_como_dict(self._get_cfg(obj))
 
     def get_reflejante_config(self, obj):
         cfg = self._get_cfg(obj)
@@ -918,7 +928,10 @@ class OrdenReflejanteDetalleListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OrdenReflejanteDetalle
-        fields = '__all__'
+        # Mismo motivo que en ``OrdenBordadoDetalleListSerializer``: sin este
+        # ``exclude``, ``__all__`` publicaría el ``reflejante_config`` entero
+        # en cada renglón del listado.
+        exclude = ('configuracion',)
 
 
 class OrdenReflejanteListSerializer(OrdenReflejanteSerializer):

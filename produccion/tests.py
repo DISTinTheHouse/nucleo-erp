@@ -33,6 +33,7 @@ from produccion.models import (
     ReflejanteAvances,
     ReflejanteIncidencias,
 )
+from produccion.services.common import config_como_dict
 from produccion.services.orden_bordado_service import (
     OrdenBordadoDuplicada409,
     OrdenBordadoService,
@@ -2461,3 +2462,447 @@ class OrdenReflejanteCoberturaParcialidadTests(OrdenReflejanteParcialidadesTests
         delta = _queries(dos_lineas.data["id"]) - _queries(una_linea.data["id"])
 
         self.assertEqual(delta, 1)
+
+
+#: Formas REALES de los tres ``*_config`` de ``PedidoDetalleTalla``, tomadas de
+#: la base de producción (no inventadas). El resto de los fixtures de este
+#: archivo crea las tallas SIN config, así que ``cfg`` siempre quedaba en ``{}``
+#: y ninguna prueba tocaba nunca el camino del arreglo: por eso el 500 del GET
+#: de onboarding de reflejante sobrevivió a toda la suite.
+#:
+#: - ``bordado_config``     -> objeto (92/92 filas reales).
+#: - ``corte_manga_config`` -> objeto (36/36 filas reales).
+#: - ``reflejante_config``  -> ARREGLO (55/55 filas reales), y no siempre de un
+#:   solo elemento: 6 filas traen 2 posiciones distintas.
+BORDADO_CONFIG_REAL = {
+    "notas": "",
+    "ubicaciones": [{
+        "dtf": False,
+        "codigo": "A",
+        "imagen": "https://example.invalid/cat.jpeg",
+        "alto_cm": 0,
+        "ancho_cm": 0,
+        "pantones": None,
+        "revelado": False,
+        "sublimado": False,
+        "color_hilo": "",
+        "serigrafia": False,
+        "nuevo_ponchado": False,
+        "descripcion_posicion": None,
+    }],
+}
+REFLEJANTE_CONFIG_REAL = [
+    {"tipo": "costurable-plata-1", "opcion": "catalogo", "posicion": "ESPALDA"},
+]
+REFLEJANTE_CONFIG_REAL_MULTI = [
+    {"tipo": "costurable-plata-1", "opcion": "catalogo", "posicion": "HOMBROS"},
+    {"tipo": "costurable-plata-1", "opcion": "catalogo", "posicion": "FRENTE"},
+]
+CORTE_MANGA_CONFIG_REAL = {"tipo": "1"}
+
+#: Configs MULTI copiados verbatim de P-00027-2026 (pedido real creado para
+#: ejercitar justo este caso): la misma línea lleva 2 ubicaciones de bordado y
+#: 3 elementos de reflejante que abarcan DOS materiales distintos
+#: (``ignifuga-plata-1`` y ``costurable-plata-1``). Nótese que el primer
+#: elemento de cada uno es el que alimenta los escalares del renglón, así que
+#: todo lo demás es exactamente lo que se perdía.
+def _ubicacion(codigo, imagen):
+    return {
+        "dtf": False,
+        "codigo": codigo,
+        "imagen": imagen,
+        "alto_cm": 10,
+        "ancho_cm": 10,
+        "pantones": "",
+        "revelado": False,
+        "sublimado": False,
+        "color_hilo": "",
+        "serigrafia": False,
+        "nuevo_ponchado": False,
+        "descripcion_posicion": None,
+    }
+
+
+BORDADO_CONFIG_REAL_MULTI = {
+    "notas": "",
+    "ubicaciones": [
+        _ubicacion("B", "https://example.invalid/cat-jpeg.jpeg"),
+        _ubicacion("A", "https://example.invalid/Bordado-de-Cachorro-Infantil.jpg"),
+    ],
+}
+REFLEJANTE_CONFIG_REAL_MULTI_3 = [
+    {"tipo": "ignifuga-plata-1", "opcion": "catalogo", "posicion": "HOMBROS"},
+    {"tipo": "ignifuga-plata-1", "opcion": "catalogo", "posicion": "BRAZOS"},
+    {"tipo": "costurable-plata-1", "opcion": "catalogo", "posicion": "TIRANTES"},
+]
+
+
+class ConfiguracionCompletaEnDetalleTests(TestCase):
+    """El renglón de la orden guarda el ``*_config`` ÍNTEGRO.
+
+    Los escalares (``posicion_bordado``/``colores_hilo``/``puntadas`` y
+    ``tipo_reflejante``/``posicion``/``metros``) se derivan del elemento ``[0]``
+    y NO cambian: siguen siendo el atajo. Lo que cambia es que dejan de ser el
+    único registro, porque una línea con varias ubicaciones/elementos perdía
+    todo menos el primero (en reflejante, incluso un material distinto).
+
+    La cardinalidad NO cambia: sigue habiendo UN renglón por
+    (``pedido_detalle``, ``talla``) por más configs que traiga la línea.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Monterrey"
+        )
+        for tipo_documento, serie in SERIES:
+            SerieFolio.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal,
+                tipo_documento=tipo_documento, serie=serie,
+            )
+        cls.usuario = Usuario.objects.create(
+            username="operador", email="operador@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Chamarra")
+        cls.talla_ch = Talla.objects.create(nombre="CH")
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client
+
+    def _pedido(self, flag, campo_config, valor):
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=self.talla_ch, cantidad=5,
+            **{flag: True, campo_config: valor},
+        )
+        return pedido
+
+    def _crear(self, url, pedido):
+        resp = self._client().post(url, {"pedido": pedido.pk}, format="json")
+        self.assertIn(resp.status_code, (200, 201), resp.data)
+        return resp.data["id"]
+
+    # --- BORDADO -------------------------------------------------------------
+
+    def test_ob_multi_ubicacion_guarda_todas_las_ubicaciones(self):
+        pedido = self._pedido(
+            "lleva_bordado", "bordado_config", BORDADO_CONFIG_REAL_MULTI
+        )
+
+        ob_id = self._crear(
+            "/api/v1/produccion/orden-bordado/onboarding/", pedido
+        )
+
+        renglones = list(OrdenBordadoDetalle.objects.filter(ob_id=ob_id))
+        # La cardinalidad no cambia: 2 ubicaciones siguen siendo UN renglón.
+        self.assertEqual(len(renglones), 1)
+        renglon = renglones[0]
+        # El config completo, con LAS DOS ubicaciones.
+        self.assertEqual(renglon.configuracion, BORDADO_CONFIG_REAL_MULTI)
+        self.assertEqual(
+            [u["codigo"] for u in renglon.configuracion["ubicaciones"]], ["B", "A"]
+        )
+        # Y los escalares siguen derivándose de ``ubicaciones[0]``.
+        self.assertEqual(renglon.posicion_bordado, "B")
+
+    def test_ob_una_ubicacion_no_cambia_de_comportamiento(self):
+        """Guardia de regresión: la línea de siempre se comporta igual."""
+        pedido = self._pedido(
+            "lleva_bordado", "bordado_config", BORDADO_CONFIG_REAL
+        )
+
+        ob_id = self._crear(
+            "/api/v1/produccion/orden-bordado/onboarding/", pedido
+        )
+
+        renglon = OrdenBordadoDetalle.objects.get(ob_id=ob_id)
+        self.assertEqual(renglon.posicion_bordado, "A")
+        self.assertEqual(renglon.configuracion, BORDADO_CONFIG_REAL)
+
+    def test_ob_sin_config_deja_configuracion_nula(self):
+        pedido = self._pedido("lleva_bordado", "bordado_config", None)
+
+        ob_id = self._crear(
+            "/api/v1/produccion/orden-bordado/onboarding/", pedido
+        )
+
+        renglon = OrdenBordadoDetalle.objects.get(ob_id=ob_id)
+        self.assertIsNone(renglon.configuracion)
+        self.assertIsNone(renglon.posicion_bordado)
+
+    # --- REFLEJANTE ----------------------------------------------------------
+
+    def test_or_multi_elemento_guarda_el_arreglo_completo(self):
+        pedido = self._pedido(
+            "lleva_reflejante", "reflejante_config", REFLEJANTE_CONFIG_REAL_MULTI_3
+        )
+
+        or_id = self._crear(
+            "/api/v1/produccion/orden-reflejante/onboarding/", pedido
+        )
+
+        renglones = list(OrdenReflejanteDetalle.objects.filter(orden_r_id=or_id))
+        self.assertEqual(len(renglones), 1)
+        renglon = renglones[0]
+        # Los TRES elementos, incluido el material distinto del tercero.
+        self.assertEqual(renglon.configuracion, REFLEJANTE_CONFIG_REAL_MULTI_3)
+        self.assertEqual(
+            [(e["tipo"], e["posicion"]) for e in renglon.configuracion],
+            [("ignifuga-plata-1", "HOMBROS"),
+             ("ignifuga-plata-1", "BRAZOS"),
+             ("costurable-plata-1", "TIRANTES")],
+        )
+        # Y los escalares siguen saliendo del elemento [0].
+        self.assertEqual(renglon.tipo_reflejante, "ignifuga-plata-1")
+        self.assertEqual(renglon.posicion, "HOMBROS")
+
+    def test_or_un_elemento_no_cambia_de_comportamiento(self):
+        pedido = self._pedido(
+            "lleva_reflejante", "reflejante_config", REFLEJANTE_CONFIG_REAL
+        )
+
+        or_id = self._crear(
+            "/api/v1/produccion/orden-reflejante/onboarding/", pedido
+        )
+
+        renglon = OrdenReflejanteDetalle.objects.get(orden_r_id=or_id)
+        self.assertEqual(renglon.tipo_reflejante, "costurable-plata-1")
+        self.assertEqual(renglon.posicion, "ESPALDA")
+        self.assertEqual(renglon.configuracion, REFLEJANTE_CONFIG_REAL)
+
+    def test_or_sin_config_deja_configuracion_nula(self):
+        pedido = self._pedido("lleva_reflejante", "reflejante_config", None)
+
+        or_id = self._crear(
+            "/api/v1/produccion/orden-reflejante/onboarding/", pedido
+        )
+
+        renglon = OrdenReflejanteDetalle.objects.get(orden_r_id=or_id)
+        self.assertIsNone(renglon.configuracion)
+        self.assertIsNone(renglon.tipo_reflejante)
+
+    # --- superficie API: detalle sí, listado no ------------------------------
+
+    def test_retrieve_publica_configuracion_y_el_listado_no(self):
+        pedido_ob = self._pedido(
+            "lleva_bordado", "bordado_config", BORDADO_CONFIG_REAL_MULTI
+        )
+        ob_id = self._crear(
+            "/api/v1/produccion/orden-bordado/onboarding/", pedido_ob
+        )
+        pedido_or = self._pedido(
+            "lleva_reflejante", "reflejante_config", REFLEJANTE_CONFIG_REAL_MULTI_3
+        )
+        or_id = self._crear(
+            "/api/v1/produccion/orden-reflejante/onboarding/", pedido_or
+        )
+
+        for url, oid, esperado in (
+            ("/api/v1/produccion/orden-bordado/", ob_id, BORDADO_CONFIG_REAL_MULTI),
+            ("/api/v1/produccion/orden-reflejante/", or_id,
+             REFLEJANTE_CONFIG_REAL_MULTI_3),
+        ):
+            detalle = self._client().get(f"{url}{oid}/").json()
+            renglon = detalle["detalles"][0]
+            self.assertIn("configuracion", renglon, url)
+            self.assertEqual(renglon["configuracion"], esperado, url)
+
+            fila = next(
+                f for f in self._client().get(url).json() if f["id"] == oid
+            )
+            self.assertNotIn("configuracion", fila["detalles"][0], url)
+
+
+class ConfigComoDictTests(TestCase):
+    """``config_como_dict``: el punto único de normalización de ``*_config``."""
+
+    def test_dict_pasa_intacto(self):
+        self.assertEqual(
+            config_como_dict(BORDADO_CONFIG_REAL), BORDADO_CONFIG_REAL
+        )
+
+    def test_arreglo_de_reflejante_no_revienta(self):
+        """El caso que rompía: un arreglo no tiene ``.get``."""
+        self.assertEqual(config_como_dict(REFLEJANTE_CONFIG_REAL), {})
+        self.assertEqual(config_como_dict(REFLEJANTE_CONFIG_REAL_MULTI), {})
+
+    def test_none_y_escalares(self):
+        for valor in (None, "", 0, "texto", 5, []):
+            self.assertEqual(config_como_dict(valor), {})
+
+
+class OnboardingGetConfigFormaRealTests(TestCase):
+    """El GET de onboarding contra ``*_config`` POBLADO con su forma real.
+
+    Los demás fixtures del archivo dejan el config en ``None``, así que el
+    ``cfg.get(...)`` del payload nunca veía un arreglo. Estas pruebas fijan el
+    contrato con datos de la misma forma que producción: sin el guardia de
+    ``config_como_dict``, la de reflejante responde 500 (``AttributeError``:
+    un arreglo no tiene ``.get``).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Monterrey"
+        )
+        for tipo_documento, serie in SERIES:
+            SerieFolio.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal,
+                tipo_documento=tipo_documento, serie=serie,
+            )
+        cls.usuario = Usuario.objects.create(
+            username="operador", email="operador@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla_ch = Talla.objects.create(nombre="CH")
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client
+
+    def _pedido_con_config(self, flag, campo_config, valor):
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=self.talla_ch, cantidad=10,
+            **{flag: True, campo_config: valor},
+        )
+        return pedido
+
+    def _lineas(self, url, pedido):
+        resp = self._client().get(url)
+        self.assertEqual(resp.status_code, 200, getattr(resp, "data", resp))
+        entrada = next(
+            (p for p in resp.json()["pedidos"] if p["id"] == pedido.pk), None
+        )
+        self.assertIsNotNone(entrada)
+        return entrada["detalles"]
+
+    # --- reflejante: la forma de ARREGLO, que es la que rompía ---------------
+
+    def test_onboarding_reflejante_con_config_arreglo_responde_200(self):
+        pedido = self._pedido_con_config(
+            "lleva_reflejante", "reflejante_config", REFLEJANTE_CONFIG_REAL
+        )
+
+        lineas = self._lineas(
+            "/api/v1/produccion/orden-reflejante/onboarding/", pedido
+        )
+
+        self.assertEqual(len(lineas), 1)
+        # El arreglo no se traduce a la forma de bordado: para reflejante no
+        # existen ubicaciones, foto ni notas (ver ``config_como_dict``).
+        self.assertEqual(lineas[0]["ubicaciones"], [])
+        self.assertIsNone(lineas[0]["foto"])
+        self.assertIsNone(lineas[0]["notas"])
+        self.assertIsNone(lineas[0]["posicion_sugerida"])
+        # Y lo que sí importa del renglón sigue saliendo bien.
+        self.assertEqual(lineas[0]["cantidad_pedido"], 10.0)
+        self.assertEqual(lineas[0]["cantidad_pendiente"], 10.0)
+
+    def test_onboarding_reflejante_con_arreglo_de_varias_posiciones(self):
+        """Hay filas reales con 2 posiciones; tampoco deben reventar."""
+        pedido = self._pedido_con_config(
+            "lleva_reflejante", "reflejante_config", REFLEJANTE_CONFIG_REAL_MULTI
+        )
+
+        lineas = self._lineas(
+            "/api/v1/produccion/orden-reflejante/onboarding/", pedido
+        )
+
+        self.assertEqual(len(lineas), 1)
+        self.assertEqual(lineas[0]["cantidad_pendiente"], 10.0)
+
+    def test_retrieve_reflejante_con_config_arreglo_responde_200(self):
+        """El retrieve ya estaba guardado; queda fijado con config poblado."""
+        pedido = self._pedido_con_config(
+            "lleva_reflejante", "reflejante_config", REFLEJANTE_CONFIG_REAL
+        )
+        detalle = PedidoDetalle.objects.get(pedido=pedido)
+        orden = OrdenesReflejante.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=pedido,
+            folio_reflejante="OR-CFG-ARREGLO",
+        )
+        OrdenReflejanteDetalle.objects.create(
+            orden_r=orden, pedido_detalle=detalle, producto=self.producto,
+            cantidad=4, talla=self.talla_ch,
+        )
+
+        resp = self._client().get(
+            f"/api/v1/produccion/orden-reflejante/{orden.pk}/"
+        )
+
+        self.assertEqual(resp.status_code, 200, getattr(resp, "data", resp))
+        renglon = resp.json()["detalles"][0]
+        # El arreglo CRUDO sí viaja íntegro, sin recortar elementos.
+        self.assertEqual(renglon["reflejante_config"], REFLEJANTE_CONFIG_REAL)
+        self.assertEqual(renglon["ubicaciones"], [])
+
+    # --- bordado / corte de manga: la forma de OBJETO ------------------------
+
+    def test_onboarding_bordado_con_config_objeto_responde_200(self):
+        pedido = self._pedido_con_config(
+            "lleva_bordado", "bordado_config", BORDADO_CONFIG_REAL
+        )
+
+        lineas = self._lineas(
+            "/api/v1/produccion/orden-bordado/onboarding/", pedido
+        )
+
+        self.assertEqual(len(lineas), 1)
+        # A diferencia de reflejante, aquí el objeto SÍ se lee: es la forma
+        # contra la que se escribió el payload.
+        self.assertEqual(len(lineas[0]["ubicaciones"]), 1)
+        self.assertEqual(lineas[0]["ubicaciones"][0]["codigo"], "A")
+        self.assertEqual(lineas[0]["posicion_sugerida"], "A")
+        # ``foto`` queda en ``None`` aunque la ubicación traiga ``imagen``: el
+        # payload busca ``foto``/``imagen``/``imagen_url``/``foto_url`` sólo en
+        # el NIVEL SUPERIOR del config, y en los datos reales de bordado la
+        # imagen vive dentro de ``ubicaciones[0]``. Se fija el comportamiento
+        # observado, no el deseado — la imagen no se pierde (viaja entera en
+        # ``ubicaciones``), pero el atajo ``foto`` nunca se llena. Gap
+        # preexistente, reportado aparte; NO se corrige aquí para no mezclarlo
+        # con el arreglo del 500.
+        self.assertIsNone(lineas[0]["foto"])
+        self.assertEqual(
+            lineas[0]["ubicaciones"][0]["imagen"],
+            BORDADO_CONFIG_REAL["ubicaciones"][0]["imagen"],
+        )
+
+    def test_onboarding_corte_manga_con_config_objeto_responde_200(self):
+        pedido = self._pedido_con_config(
+            "lleva_corte_manga", "corte_manga_config", CORTE_MANGA_CONFIG_REAL
+        )
+
+        lineas = self._lineas(
+            "/api/v1/produccion/orden-corte-manga/onboarding/", pedido
+        )
+
+        self.assertEqual(len(lineas), 1)
+        self.assertEqual(lineas[0]["ubicaciones"], [])
+        self.assertEqual(lineas[0]["cantidad_pendiente"], 10.0)

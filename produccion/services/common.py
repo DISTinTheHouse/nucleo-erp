@@ -94,6 +94,35 @@ def pendientes_por_linea(lineas, por_linea, sin_talla):
     return resultado
 
 
+def config_como_dict(valor):
+    """Normaliza un ``*_config`` de ``PedidoDetalleTalla`` a dict.
+
+    Los tres campos de configuración (``bordado_config`` /
+    ``reflejante_config`` / ``corte_manga_config``) son ``JSONField`` libres, y
+    **no comparten forma** en datos reales:
+
+    - ``bordado_config``: objeto ``{"ubicaciones": [...], "notas": ...}``.
+    - ``corte_manga_config``: objeto ``{"tipo": ...}``.
+    - ``reflejante_config``: **ARREGLO** ``[{"tipo", "opcion", "posicion"}, ...]``.
+
+    Todo el código que lee estos campos fue escrito contra la forma de bordado
+    (``cfg.get(...)``), así que un ``reflejante_config`` revienta con
+    ``AttributeError: 'list' object has no attribute 'get'``. Ese mismo fallo ya
+    causó tres 500 distintos en este proyecto (lectura del retrieve, escritura
+    de ``save()`` y el GET de onboarding), porque cada arreglo se hizo local en
+    vez de compartido. Este helper es el punto único de normalización.
+
+    Devuelve ``{}`` para cualquier cosa que no sea dict —incluido el arreglo de
+    reflejante—. **No** traduce el arreglo a la forma de bordado: sus elementos
+    describen material y colocación (``tipo``/``opcion``/``posicion``), no
+    estampados con imagen y medidas; mapear unos a otros devolvería datos
+    plausibles pero equivocados. Tampoco toma ``valor[0]``: hay filas reales con
+    2 y 3 elementos de ``posicion`` distinta, así que quedarse con el primero
+    perdería posiciones en silencio.
+    """
+    return valor if isinstance(valor, dict) else {}
+
+
 def revisar_empresa(user, obj):
     """Compara la empresa de ``obj`` contra la del ``user``.
 

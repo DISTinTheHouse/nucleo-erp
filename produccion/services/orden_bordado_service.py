@@ -490,6 +490,16 @@ class OrdenBordadoService:
                     int(primera_ubicacion.get("colores_hilo") or cfg.get("colores_hilo") or 0)
                 ),
                 puntadas=int(cfg.get("puntadas") or primera_ubicacion.get("puntadas") or 0),
+                # El ``bordado_config`` COMPLETO, con todo ``ubicaciones[]``.
+                # Los tres escalares de arriba siguen saliendo de
+                # ``ubicaciones[0]`` y no cambian de significado; lo que cambia
+                # es que ya no son el único registro: una línea con 2
+                # ubicaciones perdía la segunda —y su ``colores_hilo`` y sus
+                # ``puntadas``— sin dejar rastro. Mismo guardia que
+                # ``OrdenCorteMangaService.save`` (``dict`` no vacío o ``None``,
+                # nunca ``{}``), que aquí aplica tal cual porque
+                # ``bordado_config`` es un objeto en el 100% de las filas.
+                configuracion=cfg if isinstance(cfg, dict) and cfg else None,
             ))
 
         OrdenBordadoDetalle.objects.bulk_create(bulk_data)

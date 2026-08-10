@@ -556,6 +556,21 @@ class OrdenReflejanteService:
                 metros=(
                     cfg.get("metros") or cfg.get("metros_reflejante") or 0
                 ),
+                # El ``reflejante_config`` COMPLETO —``cfg_raw``, no ``cfg``—:
+                # ``cfg`` es sólo el elemento ``[0]``, que es justo lo que se
+                # quiere dejar de perder. Los tres escalares de arriba siguen
+                # derivándose de ``[0]`` y no cambian.
+                #
+                # El guardia de ``OrdenCorteMangaService.save`` es
+                # ``isinstance(cfg, dict)``: aquí NO se puede copiar literal
+                # porque el config de reflejante es una LISTA, y ese guardia lo
+                # convertiría en ``None`` en el 100% de los casos —el mismo
+                # desajuste de forma lista/objeto que ya causó tres bugs—. Se
+                # conserva su INTENCIÓN (guardar entero, ``None`` si viene
+                # vacío) admitiendo ambas formas.
+                configuracion=(
+                    cfg_raw if isinstance(cfg_raw, (dict, list)) and cfg_raw else None
+                ),
             ))
 
         OrdenReflejanteDetalle.objects.bulk_create(bulk_data)
