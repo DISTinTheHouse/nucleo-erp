@@ -409,7 +409,20 @@ class OrdenBordadoListSerializer(OrdenBordadoSerializer):
     cobertura_completa = serializers.SerializerMethodField()
 
     def _cobertura(self, obj):
-        return (self.context.get("cobertura") or {}).get(obj.pk) or {}
+        # Se exige la clave, no se asume: sin ella los tres getters devolvían
+        # 0/0/False —una respuesta bien formada afirmando que la orden no cubre
+        # nada de nada—, indistinguible de un dato real. Cualquier uso de este
+        # serializer fuera de ``OrdenBordadoViewSet.list``/``retrieve`` (una
+        # anidación, una acción nueva, un comando) publicaría ceros como hechos.
+        # Se prefiere fallar de forma visible. ``.get(obj.pk)`` sí puede faltar
+        # legítimamente —una orden ajena a la página— y ahí el default es
+        # correcto.
+        if "cobertura" not in self.context:
+            raise KeyError(
+                f"{type(self).__name__} requiere 'cobertura' en el contexto; "
+                "lo inyecta OrdenBordadoViewSet (ver cobertura_por_orden)."
+            )
+        return (self.context["cobertura"] or {}).get(obj.pk) or {}
 
     def get_cantidad_cubierta(self, obj):
         """Piezas que programa ESTA orden."""
@@ -441,11 +454,40 @@ class OrdenBordadoDetalleRetrieveSerializer(OrdenBordadoDetalleSerializer):
     cantidad_pendiente = serializers.SerializerMethodField()
 
     def _linea(self, obj):
-        mapa = self.context.get("partialidad_por_linea") or {}
-        return mapa.get((obj.pedido_detalle_id, obj.talla_id))
+        """``(pedido, asignada, pendiente)`` de este renglón.
+
+        Se exige la clave del contexto por el mismo motivo que
+        ``OrdenBordadoListSerializer._cobertura``: sin ella los tres getters
+        devolvían ``null`` en silencio.
+
+        Un renglón con ``talla`` NULL —los genera el pipeline de picking— no
+        tiene entrada por talla, porque el mapa se construye desde
+        ``PedidoDetalleTalla``, que siempre la trae. Antes eso daba tres
+        ``null`` justo en el caso que ``reparto_por_talla_aproximado`` dice
+        estar describiendo: la bandera anunciaba "reparto aproximado" y el
+        renglón no mostraba número alguno. Ahora se cae al total del
+        ``pedido_detalle``, que sí es exacto (es lo que garantiza
+        ``pendientes_por_linea``), de modo que la bandera y los números hablan
+        de lo mismo.
+        """
+        if "partialidad_por_linea" not in self.context:
+            raise KeyError(
+                f"{type(self).__name__} requiere 'partialidad_por_linea' en el "
+                "contexto; lo inyecta OrdenBordadoViewSet.retrieve "
+                "(ver partialidad_de_orden)."
+            )
+        mapa = self.context["partialidad_por_linea"] or {}
+        linea = mapa.get((obj.pedido_detalle_id, obj.talla_id))
+        if linea is not None:
+            return linea
+        por_detalle = self.context.get("partialidad_por_detalle") or {}
+        return por_detalle.get(obj.pedido_detalle_id)
 
     def get_cantidad_pedido(self, obj):
-        """Piezas contratadas por el pedido en esta línea."""
+        """Piezas contratadas por el pedido en esta línea.
+
+        Para un renglón sin talla identificable, el total del ``pedido_detalle``.
+        """
         linea = self._linea(obj)
         return linea[0] if linea else None
 
@@ -460,13 +502,43 @@ class OrdenBordadoDetalleRetrieveSerializer(OrdenBordadoDetalleSerializer):
         return linea[2] if linea else None
 
 
-class OrdenBordadoRetrieveSerializer(OrdenBordadoSerializer):
-    """Orden de bordado para el detalle, con contexto de parcialidad.
+class OrdenBordadoHermanaSerializer(serializers.Serializer):
+    """Referencia mínima a otra OB activa del mismo pedido.
 
-    Sólo la usa ``retrieve``: ``create`` conserva ``OrdenBordadoSerializer``
-    para no alterar lo que devuelve el alta.
+    Existe para que ``fecha_inicio`` pase por un ``DateTimeField`` de DRF. El
+    servicio la trae con ``.values(...)``, así que llegaba como ``datetime``
+    crudo y el renderer JSON la emitía en un formato distinto (UTC, sufijo
+    ``Z``) al de la ``fecha_inicio`` de la propia orden, que sí es campo de
+    modelo y respeta ``DATETIME_FORMAT`` y la zona activa. Dos formas distintas
+    del mismo instante, bajo el mismo nombre, en una sola respuesta.
     """
 
+    id = serializers.IntegerField(read_only=True)
+    folio_bordado = serializers.CharField(read_only=True)
+    fecha_inicio = serializers.DateTimeField(read_only=True)
+
+
+class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
+    """Orden de bordado para el detalle, con contexto de parcialidad.
+
+    Hereda de ``OrdenBordadoListSerializer`` —no de ``OrdenBordadoSerializer``—
+    para conservar los tres campos de cobertura
+    (``cantidad_cubierta``/``cantidad_contratada``/``cobertura_completa``). Sin
+    ellos el detalle no podía enunciar "cubre 7 de 40": los campos por línea no
+    sustituyen al total, porque el detalle sólo itemiza las líneas que ESTA
+    orden toca —la OB 61 muestra 2 de las 6 del pedido, y sus
+    ``cantidad_pedido`` suman 20, no 40—. Un diálogo montado sobre el GET por id
+    tendría que leer además la fila del listado, que es justo lo que el fetch
+    por id venía a evitar.
+
+    ``create`` conserva ``OrdenBordadoSerializer`` tal cual, así que el alta no
+    cambia lo que devuelve.
+    """
+
+    # Vuelve a apuntar al renglón completo: ``OrdenBordadoListSerializer`` lo
+    # deja en el ligero (sin ``ubicaciones``/``foto``/``notas``/
+    # ``bordado_config``), que es correcto para el listado pero no para el
+    # detalle.
     detalles = OrdenBordadoDetalleRetrieveSerializer(many=True, read_only=True)
 
     otras_ordenes_del_pedido = serializers.SerializerMethodField()
@@ -474,7 +546,17 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoSerializer):
 
     def get_otras_ordenes_del_pedido(self, obj):
         """Las demás OBs activas del mismo pedido, sin incluir ésta."""
-        return self.context.get("hermanas") or []
+        # Se exige la clave: un ``[]`` por contexto ausente es indistinguible de
+        # una orden que de verdad no tiene hermanas. Ver ``_cobertura``.
+        if "hermanas" not in self.context:
+            raise KeyError(
+                f"{type(self).__name__} requiere 'hermanas' en el contexto; "
+                "lo inyecta OrdenBordadoViewSet.retrieve "
+                "(ver partialidad_de_orden)."
+            )
+        return OrdenBordadoHermanaSerializer(
+            self.context["hermanas"] or [], many=True
+        ).data
 
     def get_reparto_por_talla_aproximado(self, obj):
         """¿El reparto por talla es aproximado?
