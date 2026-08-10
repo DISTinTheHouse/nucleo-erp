@@ -69,12 +69,13 @@ INSTALLED_APPS = [
     'wms',
     'logistica',
     'finanzas',
+    'personal',
     'allauth',
     'allauth.account',
     'auth_kit',
     'auth_kit.mfa',
     'drf_spectacular',
-    'simple_history'
+    'simple_history',
 ]
 
 AUTH_KIT = {
