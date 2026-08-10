@@ -9,7 +9,7 @@ from rest_framework.exceptions import ValidationError
 from ventas.models import Pedido, PedidoDetalleTalla
 from usuarios.models import Usuario
 
-from produccion.services.common import pendientes_por_linea
+from produccion.services.common import config_como_dict, pendientes_por_linea
 
 from produccion.models import (
     ListaMaterialBom,
@@ -107,7 +107,14 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
 
         lineas = []
         for (det, dt), (cantidad_asignada, cantidad_pendiente) in zip(pares, pendientes):
-            cfg = getattr(dt, config_attr, None) or {}
+            # ``config_como_dict``, no ``or {}``: ``reflejante_config`` es un
+            # ARREGLO en el 100% de las filas reales, así que las cinco lecturas
+            # de ``cfg`` de aquí abajo (``ubicaciones``, ``foto``, ``notas``,
+            # ``posicion``) reventaban con ``AttributeError: 'list' object has
+            # no attribute 'get'`` y el GET de onboarding de OR respondía 500.
+            # El helper es el mismo que ya usa el retrieve (ver
+            # ``services.common.config_como_dict``).
+            cfg = config_como_dict(getattr(dt, config_attr, None))
             ubicaciones = cfg.get("ubicaciones") or []
             if isinstance(ubicaciones, list) and ubicaciones:
                 primera_ubic = ubicaciones[0] or {}
