@@ -1,11 +1,13 @@
 from django.db import transaction
+from django.db.models import Sum
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesBordado, OrdenBordadoDetalle
-from ventas.models import Pedido
+from ventas.models import Pedido, PedidoDetalleTalla
 from produccion.services.common import EPS_CANTIDAD, cantidades_asignadas
 from produccion.services.common import (
     crear_orden_con_guardia_duplicado,
     payload_duplicada,
+    pendientes_por_linea,
     revisar_empresa,
     tallas_orden_trabajo_qs,
 )
@@ -112,6 +114,134 @@ class OrdenBordadoService:
     def cantidades_asignadas_por_pedidos(pedido_ids):
         """``common.cantidades_asignadas`` para OBs; ver allí el contrato."""
         return cantidades_asignadas(OrdenBordadoDetalle, "ob", pedido_ids)
+
+    @staticmethod
+    def contratado_por_pedido(pedido_ids):
+        """Piezas contratadas de bordado por pedido, en UNA query.
+
+        Denominador de la cobertura: sólo las tallas con ``lleva_bordado=True``
+        y ``cantidad > 0`` —el mismo criterio que ``tallas_orden_trabajo_qs``
+        aplica al crear la orden—. Contar todas las líneas del pedido
+        subestimaría la cobertura, porque incluiría piezas que ninguna OB puede
+        cubrir (en el pedido 120: 42 piezas en total contra 40 con bordado).
+        """
+        filas = (
+            PedidoDetalleTalla.objects
+            .filter(
+                pedido_detalle__pedido_id__in=list(pedido_ids),
+                lleva_bordado=True,
+                cantidad__gt=0,
+            )
+            .values("pedido_detalle__pedido_id")
+            .annotate(total=Sum("cantidad"))
+        )
+        return {
+            f["pedido_detalle__pedido_id"]: float(f["total"] or 0) for f in filas
+        }
+
+    @staticmethod
+    def cobertura_por_orden(ordenes):
+        """Cobertura de cada OB sobre lo contratado por su pedido.
+
+        Devuelve ``{ob_id: {"cubierto": int, "contratado": int, "completa": bool}}``.
+
+        Mide la definición (a): cuánto cubre **esta** orden del total contratado
+        del pedido —no si al pedido le queda saldo entre todas sus OBs, que es
+        otra pregunta y rendiría el mismo valor para dos parciales distintas del
+        mismo pedido—.
+
+        Cuesta **2 queries constantes** para toda la página, sin trabajo por
+        fila: una suma agrupada por ``ob_id`` (numerador) y otra agrupada por
+        pedido (denominador). No se reutiliza
+        ``cantidades_asignadas_por_pedidos`` aquí a propósito: devuelve una
+        fila por línea, mucho más de lo que hace falta para un total.
+
+        Los renglones con ``talla`` NULL no distorsionan nada: el numerador
+        suma **todos** los renglones de la OB sin mirar la talla, así que el
+        total es exacto aunque el reparto por talla no se pueda atribuir.
+        """
+        ordenes = list(ordenes)
+        if not ordenes:
+            return {}
+
+        ob_ids = [o.pk for o in ordenes]
+        pedido_ids = {o.pedido_id for o in ordenes}
+
+        cubierto_por_ob = {
+            f["ob_id"]: float(f["total"] or 0)
+            for f in (
+                OrdenBordadoDetalle.objects
+                .filter(ob_id__in=ob_ids)
+                .values("ob_id")
+                .annotate(total=Sum("cantidad"))
+            )
+        }
+        contratado = OrdenBordadoService.contratado_por_pedido(pedido_ids)
+
+        resultado = {}
+        for orden in ordenes:
+            cubierto = cubierto_por_ob.get(orden.pk, 0.0)
+            total = contratado.get(orden.pedido_id, 0.0)
+            resultado[orden.pk] = {
+                "cubierto": int(round(cubierto)),
+                "contratado": int(round(total)),
+                # Un pedido sin piezas contratadas de bordado no se declara
+                # "cubierto al 100%": no hay nada que cubrir y afirmarlo
+                # confundiría más que el ``false``.
+                "completa": total > EPS_CANTIDAD and cubierto + EPS_CANTIDAD >= total,
+            }
+        return resultado
+
+    @staticmethod
+    def partialidad_de_orden(orden):
+        """Contexto de parcialidad para el DETALLE de una OB.
+
+        Devuelve ``(por_linea, hermanas, reparto_aproximado)``:
+
+        - ``por_linea``: ``{(pedido_detalle_id, talla_id): (pedido, asignada,
+          pendiente)}`` con lo contratado, lo ya programado por **todas** las
+          OBs activas del pedido y el saldo.
+        - ``hermanas``: las otras OBs activas del mismo pedido.
+        - ``reparto_aproximado``: ``True`` si el pedido tiene piezas
+          programadas sin talla identificable. Esas piezas no se pueden
+          atribuir a una talla concreta, así que ``pendientes_por_linea`` las
+          drena en orden contra las líneas del mismo ``pedido_detalle``: el
+          total por renglón queda exacto, pero el reparto entre tallas es
+          aproximado. Se expone la bandera en vez de silenciarlo.
+
+        Cuesta 3 queries constantes (tallas del pedido, asignado por línea,
+        hermanas), independientemente del número de renglones.
+        """
+        tallas = list(
+            OrdenBordadoService._tallas_bordado_qs(orden.pedido_id)
+            .values("pedido_detalle_id", "talla_id", "cantidad")
+        )
+        por_linea_asignado, sin_talla = (
+            OrdenBordadoService.cantidades_asignadas_por_pedidos([orden.pedido_id])
+        )
+        calculado = pendientes_por_linea(
+            [(t["pedido_detalle_id"], t["talla_id"], float(t["cantidad"] or 0))
+             for t in tallas],
+            por_linea_asignado,
+            sin_talla,
+        )
+        por_linea = {
+            (t["pedido_detalle_id"], t["talla_id"]): (
+                float(t["cantidad"] or 0), asignada, pendiente
+            )
+            for t, (asignada, pendiente) in zip(tallas, calculado)
+        }
+
+        hermanas = list(
+            OrdenesBordado.objects
+            .filter(pedido_id=orden.pedido_id, activo=True)
+            .exclude(pk=orden.pk)
+            .order_by("id")
+            .values("id", "folio_bordado", "fecha_inicio")
+        )
+
+        reparto_aproximado = any(v > EPS_CANTIDAD for v in sin_talla.values())
+        return por_linea, hermanas, reparto_aproximado
 
     @staticmethod
     def _cantidades_asignadas_por_linea(pedido):
