@@ -38,6 +38,7 @@ from produccion.api.serializers import (
     ProductoTerminadoEntradasSerializer,
     OrdenBordadoSerializer,
     OrdenBordadoListSerializer,
+    OrdenBordadoRetrieveSerializer,
     BordadoAvancesSerializer,
     BordadoIncidenciasSerializer,
     OrdenReflejanteSerializer,
@@ -442,12 +443,55 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
     def get_serializer_class(self):
         # list → renglón ligero, sin los campos que obligan a re-leer
         # ``PedidoDetalleTalla`` una vez por renglón (ver
-        # ``OrdenBordadoDetalleListSerializer``). retrieve y create conservan
-        # el serializer completo: el detalle sigue devolviendo exactamente los
-        # mismos campos que hoy. Mismo patrón que ``TransferenciaViewSet``.
+        # ``OrdenBordadoDetalleListSerializer``), más los tres campos de
+        # cobertura. retrieve → el serializer completo más el contexto de
+        # parcialidad por línea. ``create`` conserva ``OrdenBordadoSerializer``
+        # tal cual, para no alterar lo que devuelve el alta.
+        # Mismo patrón que ``TransferenciaViewSet``.
         if self.action == "list":
             return OrdenBordadoListSerializer
+        if self.action == "retrieve":
+            return OrdenBordadoRetrieveSerializer
         return OrdenBordadoSerializer
+
+    def list(self, request, *args, **kwargs):
+        """Listado con la cobertura de cada orden sobre su pedido.
+
+        Se sobreescribe ``list`` sólo para resolver la cobertura de la página
+        ENTERA antes de serializar: 2 queries agrupadas, constantes, en vez de
+        dos por fila. El resultado viaja por el contexto del serializer.
+        """
+        ordenes = list(self.filter_queryset(self.get_queryset()))
+        serializer = self.get_serializer(
+            ordenes,
+            many=True,
+            context={
+                **self.get_serializer_context(),
+                "cobertura": OrdenBordadoService.cobertura_por_orden(ordenes),
+            },
+        )
+        return Response(serializer.data)
+
+    def retrieve(self, request, *args, **kwargs):
+        """Detalle con el contexto de parcialidad del pedido.
+
+        Resuelve una sola vez —para todos los renglones— lo contratado, lo ya
+        asignado por las OBs activas y las órdenes hermanas.
+        """
+        orden = self.get_object()
+        por_linea, hermanas, aproximado = (
+            OrdenBordadoService.partialidad_de_orden(orden)
+        )
+        serializer = self.get_serializer(
+            orden,
+            context={
+                **self.get_serializer_context(),
+                "partialidad_por_linea": por_linea,
+                "hermanas": hermanas,
+                "reparto_aproximado": aproximado,
+            },
+        )
+        return Response(serializer.data)
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)

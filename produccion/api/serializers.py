@@ -393,9 +393,99 @@ class OrdenBordadoListSerializer(OrdenBordadoSerializer):
 
     # Hereda de ``OrdenBordadoSerializer`` para que el encabezado no pueda
     # divergir: mismos campos, mismo ``Meta``, mismo ``usuario_nombre``. Lo
-    # único que cambia es que ``detalles`` usa el renglón ligero.
+    # único que cambia es que ``detalles`` usa el renglón ligero y que se
+    # añaden los tres campos de cobertura.
+    #
+    # La cobertura NO se calcula aquí por fila: el ``ViewSet`` la resuelve para
+    # toda la página en 2 queries agrupadas y la deja en el contexto bajo
+    # ``cobertura`` (ver ``OrdenBordadoService.cobertura_por_orden``). Si cada
+    # fila la calculara sola volveríamos al N+1 que este listado acaba de
+    # quitarse de encima.
 
     detalles = OrdenBordadoDetalleListSerializer(many=True, read_only=True)
+
+    cantidad_cubierta = serializers.SerializerMethodField()
+    cantidad_contratada = serializers.SerializerMethodField()
+    cobertura_completa = serializers.SerializerMethodField()
+
+    def _cobertura(self, obj):
+        return (self.context.get("cobertura") or {}).get(obj.pk) or {}
+
+    def get_cantidad_cubierta(self, obj):
+        """Piezas que programa ESTA orden."""
+        return self._cobertura(obj).get("cubierto", 0)
+
+    def get_cantidad_contratada(self, obj):
+        """Piezas de bordado que contrató el pedido (todas sus líneas)."""
+        return self._cobertura(obj).get("contratado", 0)
+
+    def get_cobertura_completa(self, obj):
+        """¿Esta orden sola cubre el 100% de lo contratado por el pedido?"""
+        return self._cobertura(obj).get("completa", False)
+
+
+class OrdenBordadoDetalleRetrieveSerializer(OrdenBordadoDetalleSerializer):
+    """Renglón del DETALLE, con el contexto de parcialidad de su línea."""
+
+    # Mismos nombres que ya usa el GET de onboarding para estos tres conceptos
+    # (``cantidad_pedido``/``cantidad_asignada``/``cantidad_pendiente``), para
+    # no inventar un vocabulario paralelo. Aquí ``cantidad`` sigue siendo lo que
+    # programa ESTA orden; los tres nuevos hablan del pedido y de TODAS sus OBs
+    # activas.
+    #
+    # El ``ViewSet`` deja el mapa por línea en el contexto: una sola resolución
+    # para todos los renglones, sin query por fila.
+
+    cantidad_pedido = serializers.SerializerMethodField()
+    cantidad_asignada = serializers.SerializerMethodField()
+    cantidad_pendiente = serializers.SerializerMethodField()
+
+    def _linea(self, obj):
+        mapa = self.context.get("partialidad_por_linea") or {}
+        return mapa.get((obj.pedido_detalle_id, obj.talla_id))
+
+    def get_cantidad_pedido(self, obj):
+        """Piezas contratadas por el pedido en esta línea."""
+        linea = self._linea(obj)
+        return linea[0] if linea else None
+
+    def get_cantidad_asignada(self, obj):
+        """Piezas ya programadas en esta línea por TODAS las OBs activas."""
+        linea = self._linea(obj)
+        return linea[1] if linea else None
+
+    def get_cantidad_pendiente(self, obj):
+        """Saldo de la línea: ``cantidad_pedido - cantidad_asignada``."""
+        linea = self._linea(obj)
+        return linea[2] if linea else None
+
+
+class OrdenBordadoRetrieveSerializer(OrdenBordadoSerializer):
+    """Orden de bordado para el detalle, con contexto de parcialidad.
+
+    Sólo la usa ``retrieve``: ``create`` conserva ``OrdenBordadoSerializer``
+    para no alterar lo que devuelve el alta.
+    """
+
+    detalles = OrdenBordadoDetalleRetrieveSerializer(many=True, read_only=True)
+
+    otras_ordenes_del_pedido = serializers.SerializerMethodField()
+    reparto_por_talla_aproximado = serializers.SerializerMethodField()
+
+    def get_otras_ordenes_del_pedido(self, obj):
+        """Las demás OBs activas del mismo pedido, sin incluir ésta."""
+        return self.context.get("hermanas") or []
+
+    def get_reparto_por_talla_aproximado(self, obj):
+        """¿El reparto por talla es aproximado?
+
+        ``True`` cuando el pedido tiene piezas programadas sin talla
+        identificable (renglones con ``talla`` NULL, que genera el pipeline de
+        picking). El total por ``pedido_detalle`` sigue siendo exacto; lo que
+        no se puede afirmar es a qué talla concreta pertenecen. Hoy no hay
+        ningún renglón así en la base.
+        """
+        return bool(self.context.get("reparto_aproximado", False))
 
 
 class _OrdenPadreWriteOnceMixin:
