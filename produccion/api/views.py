@@ -43,6 +43,7 @@ from produccion.api.serializers import (
     BordadoIncidenciasSerializer,
     OrdenReflejanteSerializer,
     OrdenReflejanteListSerializer,
+    OrdenReflejanteRetrieveSerializer,
     ReflejanteAvancesSerializer,
     ReflejanteIncidenciasSerializer,
     OrdenesCorteMangaSerializer,
@@ -710,7 +711,69 @@ class OrdenReflejanteViewSet(
         # Ver ``OrdenBordadoViewSet.get_serializer_class``.
         if self.action == "list":
             return OrdenReflejanteListSerializer
+        if self.action == "retrieve":
+            return OrdenReflejanteRetrieveSerializer
         return OrdenReflejanteSerializer
+
+    def _serializar_pagina(self, ordenes):
+        """Serializa un conjunto de órdenes con la cobertura ya resuelta.
+
+        La cobertura se calcula para el conjunto ENTERO antes de serializar: 2
+        queries agrupadas, constantes, en vez de dos por fila.
+        """
+        return self.get_serializer(
+            ordenes,
+            many=True,
+            context={
+                **self.get_serializer_context(),
+                "cobertura": OrdenReflejanteService.cobertura_por_orden(ordenes),
+            },
+        )
+
+    def list(self, request, *args, **kwargs):
+        """Listado con la cobertura de cada orden sobre su pedido.
+
+        Réplica de ``ListModelMixin.list`` —incluida la paginación, que sin
+        ``paginate_queryset`` este endpoint ignoraría en silencio si algún día
+        se configurara un ``DEFAULT_PAGINATION_CLASS``, devolviendo el arreglo
+        completo mientras el resto de los listados sí pagina—. Lo único que
+        añade es el contexto de cobertura. Mismo patrón que
+        ``OrdenBordadoViewSet.list``.
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            return self.get_paginated_response(self._serializar_pagina(page).data)
+
+        return Response(self._serializar_pagina(list(queryset)).data)
+
+    def retrieve(self, request, *args, **kwargs):
+        """Detalle con el contexto de parcialidad del pedido.
+
+        Resuelve una sola vez —para todos los renglones— lo contratado, lo ya
+        asignado por las ORs activas y las órdenes hermanas. La cobertura
+        (``cantidad_cubierta``/``cantidad_contratada``/``cobertura_completa``)
+        también viaja aquí: el serializer del detalle hereda del de listado, así
+        que el diálogo puede enunciar "cubre 7 de 40" sin leer además la fila
+        del listado.
+        """
+        orden = self.get_object()
+        por_linea, por_detalle, hermanas, aproximado = (
+            OrdenReflejanteService.partialidad_de_orden(orden)
+        )
+        serializer = self.get_serializer(
+            orden,
+            context={
+                **self.get_serializer_context(),
+                "cobertura": OrdenReflejanteService.cobertura_por_orden([orden]),
+                "partialidad_por_linea": por_linea,
+                "partialidad_por_detalle": por_detalle,
+                "hermanas": hermanas,
+                "reparto_aproximado": aproximado,
+            },
+        )
+        return Response(serializer.data)
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)

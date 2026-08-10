@@ -1184,10 +1184,16 @@ class OrdenReflejanteListShapeTests(TestCase):
             self.assertEqual(fila["sucursal_nombre"], "Monterrey")
 
     #: 1 query de órdenes (con los ``select_related`` en el JOIN) + 1 del
-    #: ``Prefetch`` de ``detalles``. No incluye las 2-3 queries de auth/sesión
-    #: del request, que se aíslan usando ``CaptureQueriesContext`` sólo sobre
-    #: el GET ya autenticado.
-    QUERIES_LIST = 2
+    #: ``Prefetch`` de ``detalles`` + las 2 agrupadas de la cobertura
+    #: (``cobertura_por_orden``: suma por ``orden_r_id`` y contratado por
+    #: pedido). No incluye las 2-3 queries de auth/sesión del request, que se
+    #: aíslan usando ``CaptureQueriesContext`` sólo sobre el GET ya autenticado.
+    #:
+    #: Era 2 antes de exponer la cobertura en el listado. Las 2 nuevas son
+    #: CONSTANTES —no crecen con el nº de órdenes ni de renglones, que es lo que
+    #: sigue aseverando ``test_list_sin_n_mas_1_constante`` comparando 3 contra
+    #: 12 órdenes— y son el mismo costo que ya paga el listado de Bordado.
+    QUERIES_LIST = 4
 
     def test_list_sin_n_mas_1_constante(self):
         """El N+1 del serializer queda cortado: el nº de queries no crece con
@@ -1928,3 +1934,530 @@ class OrdenReflejanteOnboardingGetTests(TestCase):
         )
 
         self.assertIsNone(self._lineas())
+
+
+class OrdenReflejanteParcialidadesTests(TestCase):
+    """ORs parciales sobre un mismo pedido vía ``detalles_override[]``.
+
+    Análogo de ``OrdenBordadoParcialidadesTests`` para reflejante: OR tenía la
+    mecánica de override y el cupo por línea, pero ni un solo test que la
+    ejercitara.
+
+    Fixture de referencia (mismos números en todos los tests de abajo):
+
+        pedido -> pedido_detalle -> talla CH: cantidad 10
+                                 -> talla M : cantidad 6
+    """
+
+    CANTIDAD_CH = 10
+    CANTIDAD_M = 6
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Monterrey"
+        )
+        SerieFolio.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            tipo_documento="ORDEN_REFLEJANTE",
+            serie="OR",
+        )
+        cls.usuario = Usuario.objects.create(
+            username="operador",
+            email="operador@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla_ch = Talla.objects.create(nombre="CH")
+        cls.talla_m = Talla.objects.create(nombre="M")
+        cls.talla_g = Talla.objects.create(nombre="G")
+
+    def setUp(self):
+        self.pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        self.detalle = PedidoDetalle.objects.create(
+            pedido=self.pedido, producto=self.producto
+        )
+        self.pdt_ch = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_ch,
+            cantidad=self.CANTIDAD_CH, lleva_reflejante=True,
+        )
+        self.pdt_m = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_m,
+            cantidad=self.CANTIDAD_M, lleva_reflejante=True,
+        )
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client
+
+    def _post(self, overrides):
+        """POST de onboarding con ``detalles_override``; ``overrides`` es
+        ``[(PedidoDetalleTalla, cantidad), ...]``."""
+        return self._client().post(
+            "/api/v1/produccion/orden-reflejante/onboarding/",
+            {
+                "pedido": self.pedido.pk,
+                "detalles_override": [
+                    {"pedido_detalle_talla_id": pdt.pk, "cantidad": cantidad}
+                    for pdt, cantidad in overrides
+                ],
+            },
+            format="json",
+        )
+
+    def _lineas_del_get(self):
+        """``{talla_id: linea}`` del pedido de este test en el GET de onboarding,
+        o ``None`` si el pedido ya no aparece en el catálogo."""
+        data = self._client().get(
+            "/api/v1/produccion/orden-reflejante/onboarding/"
+        ).json()
+        pedido = next(
+            (p for p in data["pedidos"] if p["id"] == self.pedido.pk), None
+        )
+        if pedido is None:
+            return None
+        return {linea["talla_id"]: linea for linea in pedido["detalles"]}
+
+    # --- creación de parcialidades -------------------------------------------
+
+    def test_dos_ors_parciales_secuenciales_sobre_lineas_distintas(self):
+        """Dos ORs activas para un pedido: CH (10) en la primera y M (6) en la
+        segunda; no se solapan, así que ninguna consume cupo de la otra."""
+        primera = self._post([(self.pdt_ch, self.CANTIDAD_CH)])
+        self.assertEqual(primera.status_code, 201, primera.data)
+
+        segunda = self._post([(self.pdt_m, self.CANTIDAD_M)])
+        self.assertEqual(segunda.status_code, 201, segunda.data)
+
+        self.assertNotEqual(primera.data["id"], segunda.data["id"])
+        self.assertEqual(
+            OrdenesReflejante.objects.filter(pedido=self.pedido, activo=True).count(), 2
+        )
+        self.assertEqual(
+            [(d["talla"], d["cantidad"]) for d in primera.data["detalles"]],
+            [(self.talla_ch.pk, float(self.CANTIDAD_CH))],
+        )
+        self.assertEqual(
+            [(d["talla"], d["cantidad"]) for d in segunda.data["detalles"]],
+            [(self.talla_m.pk, float(self.CANTIDAD_M))],
+        )
+
+    def test_dos_ors_parciales_sobre_la_misma_linea_hasta_agotar_el_cupo(self):
+        """Fraccionar una misma línea: 4 + 6 = 10, exactamente la cantidad
+        contratada de CH. El segundo POST debe pasar (cupo restante 6).
+
+        Es también el test de la tolerancia ``EPS_CANTIDAD``: sin ella, el
+        residuo de coma flotante de la suma podía dejar el segundo POST un
+        epsilon por encima del pendiente y devolver un 400 falso.
+        """
+        primera = self._post([(self.pdt_ch, 4)])
+        self.assertEqual(primera.status_code, 201, primera.data)
+
+        segunda = self._post([(self.pdt_ch, 6)])
+        self.assertEqual(segunda.status_code, 201, segunda.data)
+
+        total = sum(
+            d.cantidad
+            for d in OrdenReflejanteDetalle.objects.filter(
+                orden_r__pedido=self.pedido, orden_r__activo=True, talla=self.talla_ch
+            )
+        )
+        self.assertEqual(total, float(self.CANTIDAD_CH))
+
+    def test_segunda_or_que_excede_el_pendiente_de_la_linea_se_rechaza(self):
+        """Con CH ya cubierto en 4, pedir 7 más excede el pendiente (6) y debe
+        dar 400 con el detalle del exceso —no 201 ni 500—.
+
+        Ojo: 7 <= 10 (la cantidad del pedido), así que el chequeo del serializer
+        lo deja pasar; quien tiene que atajarlo es el cupo del service.
+        """
+        self.assertEqual(self._post([(self.pdt_ch, 4)]).status_code, 201)
+
+        resp = self._post([(self.pdt_ch, 7)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("detalles_exceso", resp.data)
+        exceso = " ".join(str(x) for x in resp.data["detalles_exceso"])
+        self.assertIn("ya_asignado=4.0", exceso)
+        self.assertIn("solicitado=7.0", exceso)
+        self.assertIn("disponible_restante=6.0", exceso)
+        self.assertEqual(
+            OrdenesReflejante.objects.filter(pedido=self.pedido, activo=True).count(), 1
+        )
+
+    def test_or_parcial_que_excede_sin_or_previa_se_rechaza(self):
+        """Sin OR previa el cupo es la cantidad del pedido; pedir 11 de CH (10)
+        lo corta el serializer antes de llegar al service."""
+        resp = self._post([(self.pdt_ch, 11)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(
+            OrdenesReflejante.objects.filter(pedido=self.pedido).count(), 0
+        )
+
+    # --- GET de onboarding: pendiente y exclusión ----------------------------
+
+    def test_get_expone_asignada_y_pendiente_por_linea(self):
+        """Tras una OR parcial de 4 sobre CH: CH queda 10/4/6 y M intacta 6/0/6."""
+        self.assertEqual(self._post([(self.pdt_ch, 4)]).status_code, 201)
+
+        lineas = self._lineas_del_get()
+
+        self.assertIsNotNone(lineas)
+        self.assertEqual(lineas[self.talla_ch.pk]["cantidad_pedido"], 10.0)
+        self.assertEqual(lineas[self.talla_ch.pk]["cantidad_asignada"], 4.0)
+        self.assertEqual(lineas[self.talla_ch.pk]["cantidad_pendiente"], 6.0)
+        self.assertEqual(lineas[self.talla_m.pk]["cantidad_pedido"], 6.0)
+        self.assertEqual(lineas[self.talla_m.pk]["cantidad_asignada"], 0.0)
+        self.assertEqual(lineas[self.talla_m.pk]["cantidad_pendiente"], 6.0)
+
+    def test_pedido_totalmente_cubierto_desaparece_del_get(self):
+        """CH (10) y M (6) cubiertas al 100%: no queda nada que reflejar."""
+        resp = self._post(
+            [(self.pdt_ch, self.CANTIDAD_CH), (self.pdt_m, self.CANTIDAD_M)]
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        self.assertIsNone(self._lineas_del_get())
+
+    def test_or_dada_de_baja_devuelve_el_cupo_y_el_pedido_al_get(self):
+        """El soft delete libera cupo: ``_cantidades_asignadas_por_linea`` sólo
+        cuenta ORs ``activo=True``."""
+        resp = self._post(
+            [(self.pdt_ch, self.CANTIDAD_CH), (self.pdt_m, self.CANTIDAD_M)]
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertIsNone(self._lineas_del_get())
+
+        OrdenesReflejante.objects.get(pk=resp.data["id"]).soft_delete()
+
+        lineas = self._lineas_del_get()
+        self.assertIsNotNone(lineas)
+        self.assertEqual(lineas[self.talla_ch.pk]["cantidad_pendiente"], 10.0)
+        self.assertEqual(lineas[self.talla_m.pk]["cantidad_pendiente"], 6.0)
+
+    # --- endurecimiento portado de OB ----------------------------------------
+
+    def test_or_parcial_en_todas_las_lineas_no_dispara_409_falso(self):
+        """Una OR parcial que toca las dos líneas con cantidades reducidas tiene
+        el mismo número de renglones que una completa; el POST siguiente sin
+        override debe dar el 400 de exceso —que sí dice cuántas piezas quedan—,
+        no un 409 de "ya existe con el 100% de las prendas"."""
+        self.assertEqual(self._post([(self.pdt_ch, 5), (self.pdt_m, 3)]).status_code, 201)
+
+        resp = self._client().post(
+            "/api/v1/produccion/orden-reflejante/onboarding/",
+            {"pedido": self.pedido.pk},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("detalles_exceso", resp.data)
+        exceso = " ".join(str(x) for x in resp.data["detalles_exceso"])
+        self.assertIn("disponible_restante=5.0", exceso)
+        self.assertIn("disponible_restante=3.0", exceso)
+
+    def test_pedido_cubierto_al_100_por_ciento_sigue_dando_409(self):
+        """El 409 legítimo no se pierde: cobertura real del 100% en piezas."""
+        self.assertEqual(
+            self._post(
+                [(self.pdt_ch, self.CANTIDAD_CH), (self.pdt_m, self.CANTIDAD_M)]
+            ).status_code,
+            201,
+        )
+
+        resp = self._client().post(
+            "/api/v1/produccion/orden-reflejante/onboarding/",
+            {"pedido": self.pedido.pk},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 409, resp.data)
+
+    def test_renglones_sin_talla_consumen_cupo(self):
+        """Fix (c): ``_asignado_sin_talla`` se calculaba y se descartaba.
+
+        ``OrdenReflejanteDetalle.talla`` es ``SET_NULL`` y el picking escribe
+        NULL cuando la talla no trae variante; esas piezas existen. Sin el
+        segundo corte por ``pedido_detalle`` caían en una clave que ningún
+        lookup buscaba y contaban como cero, así que se podía reprogramar el
+        pedido completo. El renglón tiene 16 piezas (CH 10 + M 6); con 10 ya
+        programadas sin talla, sólo quedan 6.
+        """
+        orden = OrdenesReflejante.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            folio_reflejante="OR-PICKING-SIN-TALLA",
+        )
+        OrdenReflejanteDetalle.objects.create(
+            orden_r=orden, pedido_detalle=self.detalle, producto=self.producto,
+            cantidad=10, talla=None,
+        )
+
+        resp = self._post([(self.pdt_ch, self.CANTIDAD_CH)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        exceso = " ".join(str(x) for x in resp.data["detalles_exceso"])
+        self.assertIn("total del renglón", exceso)
+        self.assertIn("ya_asignado=10.0", exceso)
+        self.assertIn("disponible_restante=6.0", exceso)
+
+    def test_cantidad_fraccionaria_se_rechaza(self):
+        """Fix (b): ``PedidoDetalleTalla.cantidad`` es entero, no se reflejan
+        medias prendas. Antes de este arreglo el POST devolvía 201."""
+        resp = self._post([(self.pdt_ch, 2.5)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("entero", str(resp.data["detalles_override"]))
+        self.assertEqual(
+            OrdenesReflejante.objects.filter(pedido=self.pedido).count(), 0
+        )
+
+    def test_pedido_detalle_talla_desconocido_se_rechaza(self):
+        """Fix (e): el id que no está entre las tallas elegibles se RECHAZA.
+
+        Antes se descartaba en silencio y el POST devolvía 201 con menos
+        renglones de los pedidos. Una talla marcada pero en cantidad 0 es
+        justamente ese caso: ``tallas_orden_trabajo_qs`` la excluye, así que
+        pasa el serializer (existe, pertenece al pedido, ``lleva_reflejante``)
+        y sólo el service puede atajarla.
+        """
+        pdt_g = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_g,
+            cantidad=0, lleva_reflejante=True,
+        )
+
+        resp = self._post([(self.pdt_ch, 5), (pdt_g, 3)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn(str(pdt_g.pk), str(resp.data))
+        self.assertEqual(
+            OrdenesReflejante.objects.filter(pedido=self.pedido).count(), 0
+        )
+
+    def test_cupo_no_dispara_una_query_por_linea(self):
+        """Fix (e), segunda mitad: el loop de cupo re-consultaba
+        ``PedidoDetalleTalla`` una vez por renglón. Ahora usa la foto tomada
+        antes del loop, así que el nº de queries del SERVICE no crece con el nº
+        de líneas.
+
+        Se mide el service directamente, no el POST HTTP: el ``validate`` del
+        serializer hace su propio ``.get()`` por renglón de ``detalles_override``
+        —comportamiento preexistente, idéntico en ``OrdenBordadoSerializer``—
+        que enmascararía la medición. Lo que este test fija es el service.
+        """
+        def _queries_para(overrides):
+            with CaptureQueriesContext(connection) as ctx:
+                OrdenReflejanteService.save(
+                    {
+                        "pedido": self.pedido,
+                        "detalles_override": [
+                            {"pedido_detalle_talla_id": pdt.pk, "cantidad": cantidad}
+                            for pdt, cantidad in overrides
+                        ],
+                    },
+                    self.usuario,
+                )
+            return len(ctx)
+
+        con_1 = _queries_para([(self.pdt_ch, 1)])
+        con_2 = _queries_para([(self.pdt_ch, 1), (self.pdt_m, 1)])
+
+        self.assertEqual(con_1, con_2)
+
+
+class OrdenReflejanteCoberturaParcialidadTests(OrdenReflejanteParcialidadesTests):
+    """Cobertura en el listado y parcialidad en el detalle de la OR.
+
+    Hereda el fixture de ``OrdenReflejanteParcialidadesTests``
+    (CH cantidad=10, M cantidad=6, ambas ``lleva_reflejante=True``; total
+    contratado = 16 piezas).
+    """
+
+    def _fila_del_list(self, orden_id):
+        filas = self._client().get("/api/v1/produccion/orden-reflejante/").json()
+        return next((f for f in filas if f["id"] == orden_id), None)
+
+    def _detalle(self, orden_id):
+        return self._client().get(
+            f"/api/v1/produccion/orden-reflejante/{orden_id}/"
+        ).json()
+
+    # --- listado -------------------------------------------------------------
+
+    def test_list_expone_cobertura_parcial(self):
+        """Una OR de 4 piezas sobre un pedido que contrató 16."""
+        resp = self._post([(self.pdt_ch, 4)])
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        fila = self._fila_del_list(resp.data["id"])
+
+        self.assertIsNotNone(fila)
+        self.assertEqual(fila["cantidad_cubierta"], 4)
+        self.assertEqual(fila["cantidad_contratada"], 16)
+        self.assertFalse(fila["cobertura_completa"])
+
+    def test_list_expone_cobertura_completa(self):
+        resp = self._post(
+            [(self.pdt_ch, self.CANTIDAD_CH), (self.pdt_m, self.CANTIDAD_M)]
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        fila = self._fila_del_list(resp.data["id"])
+
+        self.assertEqual(fila["cantidad_cubierta"], 16)
+        self.assertEqual(fila["cantidad_contratada"], 16)
+        self.assertTrue(fila["cobertura_completa"])
+
+    def test_cobertura_no_suma_las_ordenes_hermanas(self):
+        """Cada OR reporta LO QUE ELLA cubre, no el saldo del pedido: dos
+        parciales distintas del mismo pedido no pueden dar el mismo número."""
+        primera = self._post([(self.pdt_ch, 4)])
+        segunda = self._post([(self.pdt_m, 6)])
+
+        self.assertEqual(self._fila_del_list(primera.data["id"])["cantidad_cubierta"], 4)
+        self.assertEqual(self._fila_del_list(segunda.data["id"])["cantidad_cubierta"], 6)
+
+    def test_cobertura_usa_piso_y_no_sobre_reporta(self):
+        """Piso, no redondeo: 9.6 sobre 16 publica 9, nunca 10.
+
+        Se escribe el renglón directo porque el serializer ya no acepta
+        fraccionarios (fix b); el pipeline de picking sí puede generarlos.
+        """
+        orden = OrdenesReflejante.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            folio_reflejante="OR-FRACCION",
+        )
+        OrdenReflejanteDetalle.objects.create(
+            orden_r=orden, pedido_detalle=self.detalle, producto=self.producto,
+            cantidad=9.6, talla=self.talla_ch,
+        )
+
+        fila = self._fila_del_list(orden.pk)
+
+        self.assertEqual(fila["cantidad_cubierta"], 9)
+        self.assertFalse(fila["cobertura_completa"])
+
+    def test_pedido_sin_piezas_contratadas_no_se_declara_completo(self):
+        """Sin nada que cubrir, ``cobertura_completa`` es False (no True vacío)."""
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        orden = OrdenesReflejante.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=pedido,
+            folio_reflejante="OR-VACIA",
+        )
+
+        fila = self._fila_del_list(orden.pk)
+
+        self.assertEqual(fila["cantidad_contratada"], 0)
+        self.assertEqual(fila["cantidad_cubierta"], 0)
+        self.assertFalse(fila["cobertura_completa"])
+
+    # --- detalle -------------------------------------------------------------
+
+    def test_retrieve_expone_parcialidad_por_linea(self):
+        """La OR programa 4 de CH; la línea contrató 10, así que quedan 6."""
+        resp = self._post([(self.pdt_ch, 4)])
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        detalle = self._detalle(resp.data["id"])
+
+        self.assertEqual(len(detalle["detalles"]), 1)
+        linea = detalle["detalles"][0]
+        self.assertEqual(linea["cantidad"], 4.0)
+        self.assertEqual(linea["cantidad_pedido"], 10.0)
+        self.assertEqual(linea["cantidad_asignada"], 4.0)
+        self.assertEqual(linea["cantidad_pendiente"], 6.0)
+
+    def test_retrieve_tambien_trae_la_cobertura(self):
+        """El detalle hereda del serializer de listado: puede enunciar
+        "cubre 4 de 16" sin leer además la fila del listado."""
+        resp = self._post([(self.pdt_ch, 4)])
+
+        detalle = self._detalle(resp.data["id"])
+
+        self.assertEqual(detalle["cantidad_cubierta"], 4)
+        self.assertEqual(detalle["cantidad_contratada"], 16)
+        self.assertFalse(detalle["cobertura_completa"])
+
+    def test_retrieve_expone_las_ordenes_hermanas(self):
+        primera = self._post([(self.pdt_ch, self.CANTIDAD_CH)])
+        segunda = self._post([(self.pdt_m, self.CANTIDAD_M)])
+
+        detalle = self._detalle(primera.data["id"])
+
+        hermanas = detalle["otras_ordenes_del_pedido"]
+        self.assertEqual([h["id"] for h in hermanas], [segunda.data["id"]])
+        self.assertIn("folio_reflejante", hermanas[0])
+        self.assertIn("fecha_inicio", hermanas[0])
+        # No se incluye a sí misma.
+        self.assertNotIn(primera.data["id"], [h["id"] for h in hermanas])
+
+    def test_retrieve_sin_hermanas_devuelve_lista_vacia(self):
+        resp = self._post([(self.pdt_ch, 4)])
+
+        detalle = self._detalle(resp.data["id"])
+
+        self.assertEqual(detalle["otras_ordenes_del_pedido"], [])
+        self.assertFalse(detalle["reparto_por_talla_aproximado"])
+
+    def test_retrieve_marca_reparto_aproximado_con_renglones_sin_talla(self):
+        """Y el renglón sin talla NO sale con los tres campos en ``null``: cae
+        al total del ``pedido_detalle`` (respaldo ``partialidad_por_detalle``)."""
+        orden = OrdenesReflejante.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            folio_reflejante="OR-SIN-TALLA",
+        )
+        OrdenReflejanteDetalle.objects.create(
+            orden_r=orden, pedido_detalle=self.detalle, producto=self.producto,
+            cantidad=4, talla=None,
+        )
+
+        detalle = self._detalle(orden.pk)
+
+        self.assertTrue(detalle["reparto_por_talla_aproximado"])
+        linea = detalle["detalles"][0]
+        self.assertIsNotNone(linea["cantidad_pedido"])
+        self.assertEqual(linea["cantidad_pedido"], 16.0)
+        self.assertEqual(linea["cantidad_asignada"], 4.0)
+        self.assertEqual(linea["cantidad_pendiente"], 12.0)
+
+    def test_retrieve_resuelve_la_parcialidad_una_sola_vez(self):
+        """El contexto de parcialidad se resuelve UNA vez para todos los
+        renglones (3 queries constantes), no una por renglón.
+
+        El detalle sí crece 1 query por renglón, pero por un motivo
+        preexistente y ajeno a este cambio: ``OrdenReflejanteDetalleSerializer``
+        re-lee ``PedidoDetalleTalla`` para resolver ``reflejante_config``. Es
+        exactamente el mismo perfil que el detalle de Bordado ("7 base + 1 por
+        renglón"). Lo que este test fija es que la parcialidad no añada nada a
+        ese crecimiento: el delta entre un detalle de 1 renglón y uno de 2 es
+        exactamente 1.
+        """
+        def _queries(orden_id):
+            client = self._client()
+            with CaptureQueriesContext(connection) as ctx:
+                client.get(f"/api/v1/produccion/orden-reflejante/{orden_id}/")
+            return len(ctx)
+
+        una_linea = self._post([(self.pdt_ch, 4)])
+        dos_lineas = self._post([(self.pdt_ch, 6), (self.pdt_m, 6)])
+
+        delta = _queries(dos_lineas.data["id"]) - _queries(una_linea.data["id"])
+
+        self.assertEqual(delta, 1)
