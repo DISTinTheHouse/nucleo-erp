@@ -858,6 +858,18 @@ class OrdenReflejanteSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         "detalles_override": f"`cantidad` debe ser mayor a 0 para `pedido_detalle_talla_id={pdt_id}`."
                     })
+                # ``PedidoDetalleTalla.cantidad`` es ``PositiveIntegerField``:
+                # las prendas se reflejan enteras. Aceptar fraccionarios metía
+                # residuos de coma flotante en las sumas de cupo y dejaba
+                # pendientes de 1e-15 que ninguna OR podía consumir. Mismo
+                # criterio y mismo mensaje que ``OrdenBordadoSerializer``.
+                if cantidad_num != int(cantidad_num):
+                    raise serializers.ValidationError({
+                        "detalles_override": (
+                            f"`cantidad` debe ser un número entero de piezas para "
+                            f"`pedido_detalle_talla_id={pdt_id}` (llegó {cantidad_num})."
+                        )
+                    })
                 if pedido is not None:
                     try:
                         pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(pk=pdt_id)
@@ -912,10 +924,181 @@ class OrdenReflejanteDetalleListSerializer(serializers.ModelSerializer):
 class OrdenReflejanteListSerializer(OrdenReflejanteSerializer):
     """Orden de reflejante para el listado."""
 
-    # Sólo cambia el anidado de ``detalles``; ver
-    # ``OrdenBordadoListSerializer``.
+    # Hereda de ``OrdenReflejanteSerializer`` para que el encabezado no pueda
+    # divergir: mismos campos, mismo ``Meta``, mismo ``usuario_nombre``. Lo
+    # único que cambia es que ``detalles`` usa el renglón ligero y que se
+    # añaden los tres campos de cobertura.
+    #
+    # La cobertura NO se calcula aquí por fila: el ``ViewSet`` la resuelve para
+    # todo el conjunto en 2 queries agrupadas y la deja en el contexto bajo
+    # ``cobertura`` (ver ``OrdenReflejanteService.cobertura_por_orden``). Si
+    # cada fila la calculara sola volveríamos al N+1 que este listado ya se
+    # quitó de encima. Mismo patrón que ``OrdenBordadoListSerializer``.
 
     detalles = OrdenReflejanteDetalleListSerializer(many=True, read_only=True)
+
+    cantidad_cubierta = serializers.SerializerMethodField()
+    cantidad_contratada = serializers.SerializerMethodField()
+    cobertura_completa = serializers.SerializerMethodField()
+
+    def _cobertura(self, obj):
+        # Se exige la clave, no se asume: sin ella los tres getters devolverían
+        # 0/0/False —una respuesta bien formada afirmando que la orden no cubre
+        # nada de nada—, indistinguible de un dato real. Cualquier uso de este
+        # serializer fuera de ``OrdenReflejanteViewSet.list``/``retrieve`` (una
+        # anidación, una acción nueva, un comando) publicaría ceros como hechos.
+        # Se prefiere fallar de forma visible. ``.get(obj.pk)`` sí puede faltar
+        # legítimamente —una orden ajena al conjunto— y ahí el default es
+        # correcto.
+        if "cobertura" not in self.context:
+            raise KeyError(
+                f"{type(self).__name__} requiere 'cobertura' en el contexto; "
+                "lo inyecta OrdenReflejanteViewSet (ver cobertura_por_orden)."
+            )
+        return (self.context["cobertura"] or {}).get(obj.pk) or {}
+
+    def get_cantidad_cubierta(self, obj):
+        """Piezas que programa ESTA orden."""
+        return self._cobertura(obj).get("cubierto", 0)
+
+    def get_cantidad_contratada(self, obj):
+        """Piezas de reflejante que contrató el pedido (todas sus líneas)."""
+        return self._cobertura(obj).get("contratado", 0)
+
+    def get_cobertura_completa(self, obj):
+        """¿Esta orden sola cubre el 100% de lo contratado por el pedido?"""
+        return self._cobertura(obj).get("completa", False)
+
+
+class OrdenReflejanteDetalleRetrieveSerializer(OrdenReflejanteDetalleSerializer):
+    """Renglón del DETALLE, con el contexto de parcialidad de su línea."""
+
+    # Mismos nombres que ya usa el GET de onboarding para estos tres conceptos
+    # (``cantidad_pedido``/``cantidad_asignada``/``cantidad_pendiente``), para
+    # no inventar un vocabulario paralelo. Aquí ``cantidad`` sigue siendo lo que
+    # programa ESTA orden; los tres nuevos hablan del pedido y de TODAS sus ORs
+    # activas.
+    #
+    # El ``ViewSet`` deja el mapa por línea en el contexto: una sola resolución
+    # para todos los renglones, sin query por fila.
+
+    cantidad_pedido = serializers.SerializerMethodField()
+    cantidad_asignada = serializers.SerializerMethodField()
+    cantidad_pendiente = serializers.SerializerMethodField()
+
+    def _linea(self, obj):
+        """``(pedido, asignada, pendiente)`` de este renglón.
+
+        Se exige la clave del contexto por el mismo motivo que
+        ``OrdenReflejanteListSerializer._cobertura``: sin ella los tres getters
+        devolverían ``null`` en silencio.
+
+        Un renglón con ``talla`` NULL —los genera el pipeline de picking, y en
+        reflejante además los renglones históricos anteriores al arreglo del
+        ``reflejante_config``— no tiene entrada por talla, porque el mapa se
+        construye desde ``PedidoDetalleTalla``, que siempre la trae. Eso daría
+        tres ``null`` justo en el caso que ``reparto_por_talla_aproximado`` dice
+        estar describiendo: la bandera anunciaría "reparto aproximado" y el
+        renglón no mostraría número alguno. Se cae al total del
+        ``pedido_detalle``, que sí es exacto (es lo que garantiza
+        ``pendientes_por_linea``), de modo que la bandera y los números hablan
+        de lo mismo.
+        """
+        if "partialidad_por_linea" not in self.context:
+            raise KeyError(
+                f"{type(self).__name__} requiere 'partialidad_por_linea' en el "
+                "contexto; lo inyecta OrdenReflejanteViewSet.retrieve "
+                "(ver partialidad_de_orden)."
+            )
+        mapa = self.context["partialidad_por_linea"] or {}
+        linea = mapa.get((obj.pedido_detalle_id, obj.talla_id))
+        if linea is not None:
+            return linea
+        por_detalle = self.context.get("partialidad_por_detalle") or {}
+        return por_detalle.get(obj.pedido_detalle_id)
+
+    def get_cantidad_pedido(self, obj):
+        """Piezas contratadas por el pedido en esta línea.
+
+        Para un renglón sin talla identificable, el total del ``pedido_detalle``.
+        """
+        linea = self._linea(obj)
+        return linea[0] if linea else None
+
+    def get_cantidad_asignada(self, obj):
+        """Piezas ya programadas en esta línea por TODAS las ORs activas."""
+        linea = self._linea(obj)
+        return linea[1] if linea else None
+
+    def get_cantidad_pendiente(self, obj):
+        """Saldo de la línea: ``cantidad_pedido - cantidad_asignada``."""
+        linea = self._linea(obj)
+        return linea[2] if linea else None
+
+
+class OrdenReflejanteHermanaSerializer(serializers.Serializer):
+    """Referencia mínima a otra OR activa del mismo pedido.
+
+    Existe para que ``fecha_inicio`` pase por un ``DateTimeField`` de DRF. El
+    servicio la trae con ``.values(...)``, así que llegaría como ``datetime``
+    crudo y el renderer JSON la emitiría en un formato distinto (UTC, sufijo
+    ``Z``) al de la ``fecha_inicio`` de la propia orden, que sí es campo de
+    modelo y respeta ``DATETIME_FORMAT`` y la zona activa. Dos formas distintas
+    del mismo instante, bajo el mismo nombre, en una sola respuesta.
+    """
+
+    id = serializers.IntegerField(read_only=True)
+    folio_reflejante = serializers.CharField(read_only=True)
+    fecha_inicio = serializers.DateTimeField(read_only=True)
+
+
+class OrdenReflejanteRetrieveSerializer(OrdenReflejanteListSerializer):
+    """Orden de reflejante para el detalle, con contexto de parcialidad.
+
+    Hereda de ``OrdenReflejanteListSerializer`` —no de
+    ``OrdenReflejanteSerializer``— para conservar los tres campos de cobertura
+    (``cantidad_cubierta``/``cantidad_contratada``/``cobertura_completa``). Sin
+    ellos el detalle no podría enunciar "cubre 7 de 40": los campos por línea no
+    sustituyen al total, porque el detalle sólo itemiza las líneas que ESTA
+    orden toca. Un diálogo montado sobre el GET por id tendría que leer además
+    la fila del listado, que es justo lo que el fetch por id viene a evitar.
+
+    ``create`` conserva ``OrdenReflejanteSerializer`` tal cual, así que el alta
+    no cambia lo que devuelve.
+    """
+
+    # Vuelve a apuntar al renglón completo: ``OrdenReflejanteListSerializer`` lo
+    # deja en el ligero (sin ``ubicaciones``/``foto``/``notas``/
+    # ``reflejante_config``), que es correcto para el listado pero no para el
+    # detalle.
+    detalles = OrdenReflejanteDetalleRetrieveSerializer(many=True, read_only=True)
+
+    otras_ordenes_del_pedido = serializers.SerializerMethodField()
+    reparto_por_talla_aproximado = serializers.SerializerMethodField()
+
+    def get_otras_ordenes_del_pedido(self, obj):
+        """Las demás ORs activas del mismo pedido, sin incluir ésta."""
+        # Se exige la clave: un ``[]`` por contexto ausente es indistinguible de
+        # una orden que de verdad no tiene hermanas. Ver ``_cobertura``.
+        if "hermanas" not in self.context:
+            raise KeyError(
+                f"{type(self).__name__} requiere 'hermanas' en el contexto; "
+                "lo inyecta OrdenReflejanteViewSet.retrieve "
+                "(ver partialidad_de_orden)."
+            )
+        return OrdenReflejanteHermanaSerializer(
+            self.context["hermanas"] or [], many=True
+        ).data
+
+    def get_reparto_por_talla_aproximado(self, obj):
+        """¿El reparto por talla es aproximado?
+
+        ``True`` cuando el pedido tiene piezas programadas sin talla
+        identificable (renglones con ``talla`` NULL, que genera el pipeline de
+        picking). El total por ``pedido_detalle`` sigue siendo exacto; lo que no
+        se puede afirmar es a qué talla concreta pertenecen.
+        """
+        return bool(self.context.get("reparto_aproximado", False))
 
 
 class ReflejanteAvancesSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSerializer):
