@@ -277,12 +277,50 @@ class PedidoServicioExtraSerializer(serializers.ModelSerializer):
 
 class PedidoDetalleSerializer(serializers.ModelSerializer):
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
+
+    def validate_pedido(self, pedido):
+        # Aislamiento multi-tenant en ESCRITURA (POST/PATCH). ``get_queryset`` del
+        # ViewSet sólo acota LECTURAS; con ``fields='__all__'`` el campo ``pedido``
+        # acepta cualquier ``Pedido`` (``queryset=Pedido.objects.all()``), así que
+        # sin esto un usuario podría crear un renglón —o mover el suyo— hacia el
+        # pedido de otra empresa. Misma convención empresa-only que
+        # ``PedidoDetalleViewSet.get_queryset()`` y ``SerieFolioSerializer.validate``
+        # (nucleo): superuser puede todo; sin empresa no se permite; el resto sólo
+        # su empresa.
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if getattr(user, "is_superuser", False):
+            return pedido
+        empresa = getattr(user, "empresa", None)
+        if empresa is None or pedido.empresa_id != empresa.pk:
+            raise serializers.ValidationError(
+                "El pedido no pertenece a la empresa del usuario."
+            )
+        return pedido
+
     class Meta:
         model = PedidoDetalle
         fields = '__all__'
 
 class PedidoDetalleTallaSerializer(serializers.ModelSerializer):
     pedido_folio = serializers.CharField(source='pedido_detalle.pedido.folio', read_only=True)
+
+    def validate_pedido_detalle(self, pedido_detalle):
+        # Aislamiento multi-tenant en ESCRITURA vía la cadena ``pedido_detalle`` ->
+        # ``pedido`` -> ``Pedido.empresa`` (misma cadena que
+        # ``PedidoDetalleTallaViewSet.get_queryset()``). Ver la nota en
+        # ``PedidoDetalleSerializer.validate_pedido``.
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if getattr(user, "is_superuser", False):
+            return pedido_detalle
+        empresa = getattr(user, "empresa", None)
+        if empresa is None or pedido_detalle.pedido.empresa_id != empresa.pk:
+            raise serializers.ValidationError(
+                "El renglón de pedido no pertenece a la empresa del usuario."
+            )
+        return pedido_detalle
+
     class Meta:
         model = PedidoDetalleTalla
         fields = '__all__'
