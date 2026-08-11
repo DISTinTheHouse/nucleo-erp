@@ -7,6 +7,7 @@ from produccion.models import OrdenesBordado, OrdenBordadoDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
 from produccion.services.common import EPS_CANTIDAD, cantidades_asignadas
 from produccion.services.common import (
+    config_como_dict,
     crear_orden_con_guardia_duplicado,
     payload_duplicada,
     pendientes_por_linea,
@@ -467,7 +468,23 @@ class OrdenBordadoService:
 
         bulk_data = []
         for detalle_talla in detalle_tallas:
-            cfg = detalle_talla.bordado_config or {}
+            # ``cfg_raw`` (lo que guardó ventas, sin tocar) y ``cfg`` (el mismo
+            # valor normalizado a dict) se separan igual que en
+            # ``OrdenReflejanteService.save``: los escalares de abajo necesitan
+            # un dict para poder llamar ``.get()``, pero la foto de
+            # ``configuracion`` debe conservar el valor ÍNTEGRO, sea cual sea su
+            # forma —descartarlo sería volver a perder datos, que es justo lo
+            # que este campo vino a evitar—.
+            #
+            # Antes era ``bordado_config or {}``, que sobre un config con forma
+            # de arreglo reventaba en el ``.get()`` de la línea siguiente con
+            # ``AttributeError: 'list' object has no attribute 'get'``. Hoy
+            # ``bordado_config`` es un objeto en el 100% de las filas (96/96),
+            # así que esto es un no-op sobre los datos actuales; el guardia
+            # existe porque ese mismo desajuste lista/objeto ya provocó tres
+            # 500 en reflejante.
+            cfg_raw = detalle_talla.bordado_config
+            cfg = config_como_dict(cfg_raw)
             ubicaciones = cfg.get("ubicaciones") or []
             primera_ubicacion = (
                 ubicaciones[0] if isinstance(ubicaciones, list) and ubicaciones else {}
@@ -495,11 +512,17 @@ class OrdenBordadoService:
                 # ``ubicaciones[0]`` y no cambian de significado; lo que cambia
                 # es que ya no son el único registro: una línea con 2
                 # ubicaciones perdía la segunda —y su ``colores_hilo`` y sus
-                # ``puntadas``— sin dejar rastro. Mismo guardia que
-                # ``OrdenCorteMangaService.save`` (``dict`` no vacío o ``None``,
-                # nunca ``{}``), que aquí aplica tal cual porque
-                # ``bordado_config`` es un objeto en el 100% de las filas.
-                configuracion=cfg if isinstance(cfg, dict) and cfg else None,
+                # ``puntadas``— sin dejar rastro.
+                #
+                # Se guarda ``cfg_raw``, no ``cfg``: si algún día llega un
+                # config con otra forma, la foto lo conserva entero en vez de
+                # tirarlo (mismo criterio y mismo guardia que
+                # ``OrdenReflejanteService.save``). Sobre un dict —el 100% de
+                # las filas de hoy— ambos son el MISMO objeto, así que el valor
+                # persistido no cambia.
+                configuracion=(
+                    cfg_raw if isinstance(cfg_raw, (dict, list)) and cfg_raw else None
+                ),
             ))
 
         OrdenBordadoDetalle.objects.bulk_create(bulk_data)

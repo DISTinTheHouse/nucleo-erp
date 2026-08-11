@@ -78,7 +78,8 @@ def _tallas_ot_prefetch(flag):
     )
 
 
-def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn):
+def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn,
+                                incluir_config_crudo=False):
     """Arma la lista ``pedidos`` del GET de onboarding de órdenes de trabajo.
 
     Compartido por Bordado / Reflejante / Corte de Manga: los tres emitían el
@@ -90,6 +91,19 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
     línea con saldo. El descarte se decide **antes** de construir los dicts:
     parsear ``*_config``, ubicaciones, foto y notas de un pedido ya cubierto
     era trabajo que se tiraba a la basura.
+
+    ``incluir_config_crudo`` añade a cada línea el ``*_config`` SIN NORMALIZAR,
+    bajo una clave con el nombre del propio campo (``config_attr``). Es opt-in
+    porque los cuatro campos derivados de arriba —``posicion_sugerida``,
+    ``ubicaciones``, ``foto``, ``notas``— sólo saben leer un config con forma de
+    OBJETO, que es la de bordado y corte de manga; el de reflejante es un
+    ARREGLO, así que ``config_como_dict`` lo convierte en ``{}`` y esos cuatro
+    salen vacíos: el endpoint devolvía 200 pero SIN un solo dato de reflejante,
+    y el Paso 2 del alta de OR no tenía nada que pintar.
+
+    No se emite para los tres por igual —que sería lo genérico— porque eso
+    cambiaría el shape de las respuestas de Bordado y Corte de Manga, que hoy
+    ya son correctas. Se activa sólo donde falta el dato.
     """
     pedidos_lista = list(pedidos_qs)
     por_linea, sin_talla = cantidades_asignadas_fn([p.id for p in pedidos_lista])
@@ -114,7 +128,8 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
             # no attribute 'get'`` y el GET de onboarding de OR respondía 500.
             # El helper es el mismo que ya usa el retrieve (ver
             # ``services.common.config_como_dict``).
-            cfg = config_como_dict(getattr(dt, config_attr, None))
+            cfg_crudo = getattr(dt, config_attr, None)
+            cfg = config_como_dict(cfg_crudo)
             ubicaciones = cfg.get("ubicaciones") or []
             if isinstance(ubicaciones, list) and ubicaciones:
                 primera_ubic = ubicaciones[0] or {}
@@ -130,7 +145,7 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
                 (cfg[k] for k in ("notas", "observaciones", "comentarios") if cfg.get(k)),
                 None,
             )
-            lineas.append({
+            linea = {
                 "pedido_detalle_talla_id": dt.id,
                 "pedido_detalle_id": det.id,
                 "producto_id": det.producto_id,
@@ -151,7 +166,15 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
                 "ubicaciones": ubicaciones if isinstance(ubicaciones, list) else [],
                 "foto": foto,
                 "notas": notas,
-            })
+            }
+            if incluir_config_crudo:
+                # El config ÍNTEGRO, con todos sus elementos y sus claves
+                # verbatim. Misma clave, misma forma y mismo ``or None`` que
+                # publica el retrieve (``OrdenReflejanteDetalleSerializer
+                # .get_reflejante_config``), para que el mismo nombre signifique
+                # lo mismo en los dos endpoints.
+                linea[config_attr] = cfg_crudo or None
+            lineas.append(linea)
 
         pedidos_payload.append({
             "id": p.id,
@@ -858,6 +881,13 @@ class OrdenReflejanteViewSet(
                 pedidos_qs,
                 "reflejante_config",
                 OrdenReflejanteService.cantidades_asignadas_por_pedidos,
+                # Sólo reflejante: su config es un ARREGLO, así que los cuatro
+                # campos derivados (``posicion_sugerida``/``ubicaciones``/
+                # ``foto``/``notas``) salen vacíos y sin esto la línea no
+                # llevaría NINGÚN dato de reflejante. Bordado y corte de manga
+                # tienen config con forma de objeto y ya lo publican por esa
+                # vía, así que no se activa ahí y su respuesta no cambia.
+                incluir_config_crudo=True,
             )
 
             return Response({
