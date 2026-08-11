@@ -44,17 +44,8 @@ def _tokens_roles_usuario(user) -> set:
         rol = getattr(ur, "rol", None)
         if not rol:
             continue
-        estatus = getattr(rol, "estatus", None)
-        if isinstance(estatus, str):
-            if estatus != "activo":
-                continue
-        else:
-            estatus_val = getattr(estatus, "value", estatus) if estatus else None
-            if estatus_val != "activo":
-                continue
         for attr in ("codigo", "nombre", "clave_departamento"):
-            raw = getattr(rol, attr, None)
-            tok = _normalizar_token(raw)
+            tok = _normalizar_token(getattr(rol, attr, None))
             if tok:
                 tokens.add(tok)
     return tokens
@@ -67,14 +58,7 @@ def puede_ver_contabilidad(user) -> bool:
         return True
 
     tokens = _tokens_roles_usuario(user)
-
-    if tokens & TOKENS_ROL_VER_TODO:
-        return True
-
-    if not tokens:
-        return False
-
-    return False
+    return bool(tokens & TOKENS_ROL_VER_TODO) if tokens else False
 
 
 def _drop_keys(d: dict, keys: list) -> None:
