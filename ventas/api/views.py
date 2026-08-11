@@ -57,6 +57,7 @@ from produccion.models import (
 )
 
 from ventas.utils.helpers import _save_cotizacion_detalle, _save_servicios_extras
+from ventas.services.pedido_field_filter_service import filtrar_campos_contabilidad_pedido
 
 logger = logging.getLogger(__name__)
 QTY_PRECISION = Decimal("0.0001")
@@ -2063,6 +2064,12 @@ class CotizacionDetalleViewSet(viewsets.ModelViewSet):
 class PedidoViewSet(viewsets.ModelViewSet):
     queryset = Pedido.objects.filter(activo=True)
     serializer_class = PedidoSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        data = filtrar_campos_contabilidad_pedido(serializer.data, request.user)
+        return Response(data)
 
     def _snapshot_facturacion(self, pedido):
         try:
