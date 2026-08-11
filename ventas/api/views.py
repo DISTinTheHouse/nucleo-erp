@@ -2185,6 +2185,21 @@ class PedidoDetalleViewSet(viewsets.ModelViewSet):
     serializer_class = PedidoDetalleSerializer
     http_method_names = ["get", "post", "patch"]
 
+    def get_queryset(self):
+        # Aislamiento multi-tenant vía la FK ``pedido`` -> ``Pedido.empresa``.
+        # Sin este override el ViewSet servía ``PedidoDetalle`` de todas las
+        # empresas (list/retrieve/patch). Misma convención que
+        # ``PedidoViewSet.get_queryset()``: superuser ve todo; sin empresa no se
+        # ve nada; el resto sólo su empresa.
+        user = self.request.user
+        qs = super().get_queryset()
+        if not getattr(user, "is_superuser", False):
+            empresa = getattr(user, "empresa", None)
+            if not empresa:
+                return qs.none()
+            qs = qs.filter(pedido__empresa=empresa)
+        return qs
+
     @action(detail=True, methods=["post"])
     def anular(self, request, pk=None):
         return Response({"msg": "PedidoDetalleViewSet.anular"})
@@ -2194,6 +2209,20 @@ class PedidoDetalleTallaViewSet(viewsets.ModelViewSet):
     queryset = PedidoDetalleTalla.objects.all()
     serializer_class = PedidoDetalleTallaSerializer
     http_method_names = ["get", "post", "patch"]
+
+    def get_queryset(self):
+        # Aislamiento multi-tenant vía ``pedido_detalle`` -> ``pedido`` ->
+        # ``Pedido.empresa``. Sin este override el ViewSet servía
+        # ``PedidoDetalleTalla`` de todas las empresas (list/retrieve/patch).
+        # Misma convención que ``PedidoViewSet.get_queryset()``.
+        user = self.request.user
+        qs = super().get_queryset()
+        if not getattr(user, "is_superuser", False):
+            empresa = getattr(user, "empresa", None)
+            if not empresa:
+                return qs.none()
+            qs = qs.filter(pedido_detalle__pedido__empresa=empresa)
+        return qs
 
 
 class MesaControlViewSet(CotizacionViewSet):
