@@ -1226,10 +1226,9 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
     - ❌ Se **eliminan del JSON** (no vienen en el response) para roles `WMS`, `Compras` o cualquier otro.
   - Consumo en Next.js:
     ```ts
-    const fetchPedido = async (id: string, token: string) => {
-      const res = await fetch(`/api/v1/ventas/pedidos/${id}/`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+    // El usuario ya tiene sesión activa (cookie de Django).
+    const fetchPedido = async (id: string) => {
+      const res = await fetch(`/api/v1/ventas/pedidos/${id}/`);
       if (!res.ok) throw new Error("Error cargando pedido");
       return res.json();
     };
@@ -1237,7 +1236,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
     const granTotal = pedido?.gran_total;          // string | undefined
     const servicioMonto = pedido?.servicios_extras?.[0]?.monto; // number | undefined
     ```
-    - No asumas que existen los keys $$$; usa `pedido?.campo ?? fallback` para no romper en WMS/Compras.
+    - No asumas que existen los keys $$; usa `pedido?.campo ?? fallback` para no romper en WMS/Compras.
     - Para abrir en pestaña nueva desde "Ver detalles": `window.open(\`/pedidos/\${id}\`, "_blank")` (o `next/navigation` + `<Link target="_blank">`).
 
 ---
