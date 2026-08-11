@@ -203,20 +203,36 @@ class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
         return self._pdt_cache[key]
 
     def _get_cfg(self, obj):
+        """El ``bordado_config`` CRUDO, tal cual lo guardó ventas."""
         pdt = self._get_pedido_detalle_talla(obj)
         return getattr(pdt, 'bordado_config', None) or {}
+
+    def _get_cfg_dict(self, obj):
+        """El config sólo si es un dict; ``{}`` en cualquier otro caso.
+
+        Mismo par crudo/normalizado que ``OrdenReflejanteDetalleSerializer``:
+        ``get_bordado_config`` publica el valor ÍNTEGRO (no puede normalizarse
+        sin perder dato), mientras que las tres extracciones de abajo necesitan
+        un dict para llamar ``.get()``.
+
+        Hoy ``bordado_config`` es un objeto en el 100% de las filas (96/96), así
+        que esto es un no-op; el guardia existe porque este mismo desajuste
+        lista/objeto ya causó tres 500 en reflejante y esta era la copia del
+        mismo código que quedó sin proteger.
+        """
+        return config_como_dict(self._get_cfg(obj))
 
     def get_bordado_config(self, obj):
         cfg = self._get_cfg(obj)
         return cfg or None
 
     def get_ubicaciones(self, obj):
-        cfg = self._get_cfg(obj)
+        cfg = self._get_cfg_dict(obj)
         ubicaciones = cfg.get('ubicaciones')
         return ubicaciones if isinstance(ubicaciones, list) else []
 
     def get_foto(self, obj):
-        cfg = self._get_cfg(obj)
+        cfg = self._get_cfg_dict(obj)
         for key in ('foto', 'imagen', 'imagen_url', 'foto_url'):
             value = cfg.get(key)
             if value:
@@ -226,7 +242,7 @@ class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
         return None
 
     def get_notas(self, obj):
-        cfg = self._get_cfg(obj)
+        cfg = self._get_cfg_dict(obj)
         for key in ('notas', 'observaciones', 'comentarios'):
             value = cfg.get(key)
             if value:
@@ -738,12 +754,17 @@ class OrdenReflejanteDetalleSerializer(serializers.ModelSerializer):
     def _get_cfg(self, obj):
         """El ``reflejante_config`` CRUDO, tal cual lo guardó ventas.
 
-        Aquí no se normaliza nada: es lo que viaja en el campo
-        ``reflejante_config`` de la respuesta, y en datos reales es SIEMPRE un
-        arreglo (ver ``_get_cfg_dict``).
+        Aquí no se normaliza nada —ni siquiera el ``or {}`` que tenía antes—:
+        es lo que viaja en el campo ``reflejante_config`` de la respuesta, y en
+        datos reales es SIEMPRE un arreglo (ver ``_get_cfg_dict``).
+
+        Los dos consumidores absorben el ``None`` por su cuenta, así que aquel
+        ``or {}`` era pura redundancia: ``get_reflejante_config`` hace
+        ``cfg or None`` (``{}`` y ``None`` dan lo mismo) y ``_get_cfg_dict``
+        pasa por ``config_como_dict``, que ya mapea cualquier no-dict a ``{}``.
         """
         pdt = self._get_pedido_detalle_talla(obj)
-        return getattr(pdt, 'reflejante_config', None) or {}
+        return getattr(pdt, 'reflejante_config', None)
 
     def _get_cfg_dict(self, obj):
         """El config sólo si es un dict; ``{}`` en cualquier otro caso.
@@ -1165,21 +1186,32 @@ class OrdenCorteMangaDetalleSerializer(serializers.ModelSerializer):
         return getattr(pdt, 'corte_manga_config', None) or {}
 
     def get_corte_manga_config(self, obj):
+        # ``config_como_dict`` en la base de la mezcla: ``dict(cfg_pedido)``
+        # sobre un config con forma de arreglo NO falla como los ``.get()`` del
+        # resto del módulo —lanza ``ValueError: dictionary update sequence
+        # element #0 has length 1; 2 is required``, no ``AttributeError``—, así
+        # que es la misma clase de defecto con otra cara. Sobre un dict,
+        # ``dict(config_como_dict(d))`` es idéntico a ``dict(d)``: no-op para el
+        # 100% de las filas de hoy (36/36 objetos).
+        #
+        # El camino sin ``obj.configuracion`` sigue devolviendo el valor CRUDO:
+        # publicar el config íntegro es lo correcto aunque no sea un dict; de
+        # normalizarlo se encargan los tres getters de abajo.
         cfg_pedido = self._get_cfg(obj)
         if obj.configuracion:
-            merged = dict(cfg_pedido) if cfg_pedido else {}
+            merged = dict(config_como_dict(cfg_pedido))
             if isinstance(obj.configuracion, dict):
                 merged.update(obj.configuracion)
             return merged or None
         return cfg_pedido or None
 
     def get_ubicaciones(self, obj):
-        cfg = self.get_corte_manga_config(obj) or {}
+        cfg = config_como_dict(self.get_corte_manga_config(obj))
         ubicaciones = cfg.get('ubicaciones')
         return ubicaciones if isinstance(ubicaciones, list) else []
 
     def get_foto(self, obj):
-        cfg = self.get_corte_manga_config(obj) or {}
+        cfg = config_como_dict(self.get_corte_manga_config(obj))
         for key in ('foto', 'imagen', 'imagen_url', 'foto_url'):
             value = cfg.get(key)
             if value:
@@ -1189,7 +1221,7 @@ class OrdenCorteMangaDetalleSerializer(serializers.ModelSerializer):
         return None
 
     def get_notas(self, obj):
-        cfg = self.get_corte_manga_config(obj) or {}
+        cfg = config_como_dict(self.get_corte_manga_config(obj))
         for key in ('notas', 'observaciones', 'comentarios'):
             value = cfg.get(key)
             if value:
