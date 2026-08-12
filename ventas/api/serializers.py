@@ -251,6 +251,7 @@ class PedidoSerializer(serializers.ModelSerializer):
     folio = serializers.CharField(read_only=True)
     folio_consecutivo = serializers.IntegerField(read_only=True)
     servicios_extras = serializers.SerializerMethodField()
+    documentos = serializers.SerializerMethodField()
     # Solo lectura: no cambia el contrato de escritura de ningún endpoint de
     # Pedido (POST/PATCH ignoran ``detalles``).
     detalles = PedidoDetalleReadSerializer(many=True, read_only=True)
@@ -261,6 +262,13 @@ class PedidoSerializer(serializers.ModelSerializer):
         except Exception:
             return []
         return PedidoServicioExtraSerializer(qs, many=True).data
+
+    def get_documentos(self, obj):
+        from ventas.services.pedido_documentos_service import listar_documentos_pedido
+        try:
+            return listar_documentos_pedido(obj)
+        except Exception:
+            return []
 
     class Meta:
         model = Pedido

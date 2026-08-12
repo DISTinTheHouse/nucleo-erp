@@ -2066,7 +2066,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
     serializer_class = PedidoSerializer
 
     def retrieve(self, request, *args, **kwargs):
-        instance = self.get_object()
+        from ventas.services.pedido_documentos_service import documentos_related_prefetch_args
+        qs = self.get_queryset()
+        instance = qs.prefetch_related(*documentos_related_prefetch_args()).get(pk=kwargs.get("pk"))
         serializer = self.get_serializer(instance)
         data = filtrar_campos_contabilidad_pedido(serializer.data, request.user)
         return Response(data)
