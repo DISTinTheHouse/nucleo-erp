@@ -262,13 +262,18 @@ class PedidoListSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "folio",
+            "folio_consecutivo",
             "oc",
             "cliente_razon_social",
             "cliente_nombre",
             "gran_total",
+            "subtotal",
             "created_at",
             "fecha_confirmacion",
             "estatus",
+            "activo",
+            "cliente",
+            "moneda",
         ]
 
 class PedidoSerializer(serializers.ModelSerializer):
