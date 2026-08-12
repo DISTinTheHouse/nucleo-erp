@@ -18,10 +18,8 @@ def generate_folio(empresa_id, sucursal_id, tipo_documento: str):
             [tipo_documento],
             descripcion_documento=tipo_documento,
         )
-    except DjangoValidationError as e:
-        msgs = getattr(e, "messages", [str(e)])
-        msg = msgs[0] if msgs else str(e)
-        raise ValidationError(msg)
+    except DjangoValidationError:
+        raise ValidationError("No fue posible generar el folio con los datos proporcionados.")
 
 
 @transaction.atomic
@@ -45,7 +43,5 @@ def generate_folio_multi_tipo(
             tipos_documento,
             descripcion_documento=descripcion_documento,
         )
-    except DjangoValidationError as e:
-        msgs = getattr(e, "messages", [str(e)])
-        msg = msgs[0] if msgs else str(e)
-        raise ValidationError(msg)
+    except DjangoValidationError:
+        raise ValidationError("No fue posible generar el folio con los datos proporcionados.")
