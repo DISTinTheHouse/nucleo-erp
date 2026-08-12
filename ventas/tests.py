@@ -13,7 +13,7 @@ from catalogo.models import Producto, Talla
 from nucleo.models import Empresa, Moneda, Sucursal
 from terceros.models import Cliente
 from usuarios.models import Usuario
-from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+from ventas.models import Cotizacion, Pedido, PedidoDetalle, PedidoDetalleTalla
 
 PEDIDOS_URL = "/api/v1/ventas/pedidos/"
 PEDIDO_DETALLE_URL = "/api/v1/ventas/pedido-detalle/"
@@ -118,6 +118,135 @@ class PedidoViewSetScopeTenantTests(TestCase):
         )
         self.assertEqual(
             self._ids(self.b["usuario"], f"{PEDIDOS_URL}?q={folio}"), []
+        )
+
+
+class PedidoMisPedidosFilterTests(TestCase):
+    """``?mis_pedidos=true``: pedidos cuya cotización de origen creó el usuario.
+
+    La cadena es ``pedido.cotizacion.vendedor``; ambos eslabones son NULL-ables,
+    así que los pedidos sin cotización (o con cotización sin vendedor) quedan
+    fuera por la semántica INNER JOIN del filtro — es el comportamiento buscado.
+
+    Los dos vendedores viven a propósito en la **misma** empresa: así el filtro
+    de empresa que ya existía no puede dar un falso verde.
+    """
+
+    @classmethod
+    def _pedido(cls, folio, cotizacion=None):
+        return Pedido.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            cliente=cls.cliente,
+            moneda=cls.moneda,
+            cotizacion=cotizacion,
+            folio=folio,
+            persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test",
+            telefono_pagos="8100000000",
+            forma_pago="03",
+            metodo_pago="PUE",
+            uso_cfdi="G03",
+        )
+
+    @classmethod
+    def _cotizacion(cls, vendedor):
+        return Cotizacion.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            cliente=cls.cliente,
+            moneda=cls.moneda,
+            vendedor=vendedor,
+        )
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="MTY"
+        )
+        cls.cliente = Cliente.objects.create(
+            empresa=cls.empresa, nombre="Cliente ACME"
+        )
+
+        cls.vendedor_a = Usuario.objects.create(
+            username="vendedor_a", email="vendedor.a@acme.test", empresa=cls.empresa
+        )
+        cls.vendedor_b = Usuario.objects.create(
+            username="vendedor_b", email="vendedor.b@acme.test", empresa=cls.empresa
+        )
+
+        cls.pedido_a = cls._pedido("PED-A", cotizacion=cls._cotizacion(cls.vendedor_a))
+        cls.pedido_b = cls._pedido("PED-B", cotizacion=cls._cotizacion(cls.vendedor_b))
+        # Tercer pedido creado directo, sin cotización de origen.
+        cls.pedido_sin_cotizacion = cls._pedido("PED-SIN", cotizacion=None)
+
+    def _ids(self, user, url=PEDIDOS_URL):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        return [row["id"] for row in resp.json()]
+
+    # --- el filtro nuevo ------------------------------------------------------
+
+    def test_mis_pedidos_true_solo_devuelve_los_del_usuario_autenticado(self):
+        self.assertEqual(
+            self._ids(self.vendedor_a, f"{PEDIDOS_URL}?mis_pedidos=true"),
+            [self.pedido_a.pk],
+        )
+        self.assertEqual(
+            self._ids(self.vendedor_b, f"{PEDIDOS_URL}?mis_pedidos=true"),
+            [self.pedido_b.pk],
+        )
+
+    def test_mis_pedidos_true_excluye_el_pedido_sin_cotizacion(self):
+        """``cotizacion`` es NULL-able: ese pedido no es de nadie."""
+        self.assertNotIn(
+            self.pedido_sin_cotizacion.pk,
+            self._ids(self.vendedor_a, f"{PEDIDOS_URL}?mis_pedidos=true"),
+        )
+
+    def test_mis_pedidos_acepta_1_y_mayusculas(self):
+        for valor in ("1", "True", "TRUE"):
+            with self.subTest(valor=valor):
+                self.assertEqual(
+                    self._ids(self.vendedor_a, f"{PEDIDOS_URL}?mis_pedidos={valor}"),
+                    [self.pedido_a.pk],
+                )
+
+    # --- no regresión del comportamiento previo -------------------------------
+
+    def test_sin_el_parametro_se_devuelven_todos_los_de_la_empresa(self):
+        self.assertCountEqual(
+            self._ids(self.vendedor_a),
+            [self.pedido_a.pk, self.pedido_b.pk, self.pedido_sin_cotizacion.pk],
+        )
+
+    def test_valores_que_no_activan_el_filtro_se_ignoran(self):
+        todos = [self.pedido_a.pk, self.pedido_b.pk, self.pedido_sin_cotizacion.pk]
+        for valor in ("false", "foo", "0", ""):
+            with self.subTest(valor=valor):
+                self.assertCountEqual(
+                    self._ids(self.vendedor_a, f"{PEDIDOS_URL}?mis_pedidos={valor}"),
+                    todos,
+                )
+
+    def test_mis_pedidos_se_combina_con_el_filtro_q(self):
+        """Ambos filtros viven en el mismo ``get_queryset``; deben componerse."""
+        self.assertEqual(
+            self._ids(
+                self.vendedor_a, f"{PEDIDOS_URL}?mis_pedidos=true&q={self.pedido_a.folio}"
+            ),
+            [self.pedido_a.pk],
+        )
+        # El folio de B existe, pero no es del vendedor A.
+        self.assertEqual(
+            self._ids(
+                self.vendedor_a, f"{PEDIDOS_URL}?mis_pedidos=true&q={self.pedido_b.folio}"
+            ),
+            [],
         )
 
 

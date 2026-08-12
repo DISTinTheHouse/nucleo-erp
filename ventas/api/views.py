@@ -2167,6 +2167,15 @@ class PedidoViewSet(viewsets.ModelViewSet):
             if not empresa:
                 return qs.none()
             qs = qs.filter(empresa=empresa)
+        # ``?mis_pedidos=true``: sólo los pedidos que nacieron de una cotización
+        # creada por el usuario autenticado. El vendedor no vive en ``Pedido``,
+        # se resuelve por la cadena ``pedido.cotizacion.vendedor``. Ambos
+        # eslabones son NULL-ables, así que el INNER JOIN deja fuera por sí solo
+        # los pedidos sin cotización de origen — que es lo buscado: no son de
+        # nadie. El usuario sale del token, nunca del query string.
+        mis_pedidos = self.request.query_params.get("mis_pedidos", "")
+        if mis_pedidos.lower() in ("true", "1"):
+            qs = qs.filter(cotizacion__vendedor=user)
         q = self.request.query_params.get("q") or self.request.query_params.get("folio")
         if q:
             qs = qs.filter(folio__icontains=q)
