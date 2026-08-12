@@ -65,12 +65,12 @@ DOCUMENTOS_CONFIG = [
     {
         "tipo": "orden_corte_manga",
         "label": "Orden de Corte de Manga",
-        "related_name": "ordenesscortemanga_set",
+        "related_name": "ordenescortemanga_set",
         "is_single": False,
-        "folio_field": "folio_corte_manga",
+        "folio_field": "folio_ocm",
         "fecha_field": "fecha_inicio",
-        "estatus_field": "estatus",
-        "estatus_label_field": "get_estatus_display",
+        "estatus_field": "estatus_corte",
+        "estatus_label_field": "get_estatus_corte_display",
     },
     {
         "tipo": "picking",

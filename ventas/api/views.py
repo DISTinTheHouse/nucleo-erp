@@ -10,6 +10,7 @@ from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
+from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
 from django.conf import settings
 
@@ -39,6 +40,7 @@ from ventas.api.serializers import (
     CotizacionDetalleWithTallasSerializer,
     CotizacionFullSerializer,
     PedidoSerializer,
+    PedidoListSerializer,
     PedidoDetalleSerializer,
     PedidoDetalleTallaSerializer,
     PedidoDetalleWithTallasSerializer,
@@ -2065,10 +2067,24 @@ class PedidoViewSet(viewsets.ModelViewSet):
     queryset = Pedido.objects.filter(activo=True)
     serializer_class = PedidoSerializer
 
+    def get_serializer_class(self):
+        # Listado: serializer minimalista (9 campos escalares). Resto de acciones
+        # (retrieve/create/update/...): ``PedidoSerializer`` completo con
+        # ``detalles``/``servicios_extras``/``documentos``.
+        if getattr(self, "action", None) == "list":
+            return PedidoListSerializer
+        return PedidoSerializer
+
     def retrieve(self, request, *args, **kwargs):
+        # ``get_queryset`` ya prefetchea ``detalles``+``tallas`` para las acciones
+        # de detalle; aquí sólo se añaden los ``documentos`` del ciclo de vida del
+        # pedido (todos en un único set de prefetch para evitar el N+1).
+        # ``get_object_or_404`` sobre el queryset ya aislado por empresa devuelve
+        # 404 (no 500) para un pedido de otra empresa o inexistente — misma
+        # convención multi-tenant del resto de la API.
         from ventas.services.pedido_documentos_service import documentos_related_prefetch_args
-        qs = self.get_queryset()
-        instance = qs.prefetch_related(*documentos_related_prefetch_args()).get(pk=kwargs.get("pk"))
+        qs = self.get_queryset().prefetch_related(*documentos_related_prefetch_args())
+        instance = get_object_or_404(qs, pk=kwargs.get("pk"))
         serializer = self.get_serializer(instance)
         data = filtrar_campos_contabilidad_pedido(serializer.data, request.user)
         return Response(data)
@@ -2156,11 +2172,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        # ``PedidoSerializer`` es compartido (list/retrieve) y anida ``detalles``
-        # con nombres resueltos: los renglones y sus tallas viajan en un único
-        # prefetch para evitar el N+1 del shape anidado — misma convención que
-        # ``PickingViewSet.get_queryset()`` en WMS.
-        qs = super().get_queryset().prefetch_related(_pedido_detalles_prefetch())
+        # Queryset base + aislamiento multi-tenant, común a todas las acciones.
+        qs = super().get_queryset()
         if not getattr(user, "is_superuser", False):
             # Un usuario sin empresa asignada no cae en ninguna rama y se
             # llevaba los pedidos de **todas** las empresas. Sin empresa no se
@@ -2181,6 +2194,13 @@ class PedidoViewSet(viewsets.ModelViewSet):
         q = self.request.query_params.get("q") or self.request.query_params.get("folio")
         if q:
             qs = qs.filter(folio__icontains=q)
+        # El shape de detalle (retrieve/create/update) serializa ``detalles`` +
+        # ``tallas`` vía ``PedidoSerializer``: se prefetchean para evitar el N+1.
+        # El listado usa ``PedidoListSerializer`` (9 campos escalares) y NO los
+        # toca, así que ahí se omite el prefetch — es lo que baja el tiempo del
+        # listado de ~15s a <1s. ``documentos`` sólo lo añade ``retrieve()``.
+        if getattr(self, "action", None) != "list":
+            qs = qs.prefetch_related(_pedido_detalles_prefetch())
         # Listado más reciente primero; ``-id`` como desempate estable.
         # ``nulls_last``: ``Pedido.created_at`` se agregó como NULL-able
         # (migración 0007) y los pedidos previos siguen en NULL; en PostgreSQL
