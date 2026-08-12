@@ -3,13 +3,13 @@ from . import views
 
 urlpatterns = [
     path('creator/', views.creator, name='ia_creator'),
-    path('drive/', views.drive, name='drive'),
-    path('drive/google/connect/', views.drive_google_connect, name='drive_google_connect'),
-    path('drive/google/callback/', views.drive_google_callback, name='drive_google_callback'),
-    path('drive/disconnect/<str:provider>/', views.drive_disconnect, name='drive_disconnect'),
-    path('correo/', views.correo, name='correo'),
-    path('correo/send/', views.correo_send, name='correo_send'),
-    path('correo/<str:msg_id>/', views.correo_detail, name='correo_detail'),
-    path('calendario/', views.calendario, name='calendario'),
-    path('calendario/create/', views.calendario_create, name='calendario_create'),
+    # path('drive/', views.drive, name='drive'),
+    # path('drive/google/connect/', views.drive_google_connect, name='drive_google_connect'),
+    # path('drive/google/callback/', views.drive_google_callback, name='drive_google_callback'),
+    # path('drive/disconnect/<str:provider>/', views.drive_disconnect, name='drive_disconnect'),
+    # path('correo/', views.correo, name='correo'),
+    # path('correo/send/', views.correo_send, name='correo_send'),
+    # path('correo/<str:msg_id>/', views.correo_detail, name='correo_detail'),
+    # path('calendario/', views.calendario, name='calendario'),
+    # path('calendario/create/', views.calendario_create, name='calendario_create'),
 ]
