@@ -1224,17 +1224,91 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
   - Campos de contabilidad (dinero / forma_pago / metodos_pago / uso_cfdi / subtotal / iva / gran_total / precios_unitarios_$_en_detalles_tallas_servicios):
     - ✅ Se envían **completos** si el usuario tiene rol `Mesa-de-Control` o `Ventas` (o es `is_superuser` / `is_admin_empresa`).
     - ❌ Se **eliminan del JSON** (no vienen en el response) para roles `WMS`, `Compras` o cualquier otro.
+  - **Nuevo**: `documentos[]` — lista de todos los documentos ligados al pedido (1 solo query por relación, prefetch optimizado).
+    - **Shape de cada entrada**:
+      ```ts
+      type PedidoDocumento = {
+        id: number;
+        tipo:
+          | "cotizacion"
+          | "orden_compra"
+          | "factura"
+          | "orden_produccion"
+          | "orden_bordado"
+          | "orden_reflejante"
+          | "orden_corte_manga"
+          | "picking"
+          | "packing"
+          | "envio"
+          | "entrega"
+          | "devolucion"
+          | "movimiento_inventario";
+        label: string;           // nombre legible del tipo ("Cotización", "Picking (WMS)", ...)
+        folio: string;           // folio natural del documento; si no tiene, cae a `id`
+        fecha: string | null;    // ISO string (date o datetime) del campo fecha/creación; null si no hay
+        estatus: string | number | null; // label legible si hay choices (ex. "Autorizada"), null si el modelo no tiene estatus
+      };
+      ```
+    - **Tipos registrados hasta ahora** (editar en `ventas/services/pedido_documentos_service.py → DOCUMENTOS_CONFIG` si hace falta agregar/quitar alguno):
+      - `cotizacion` → Cotización origen (0 o 1)
+      - `orden_compra` → Ordenes de compra vinculadas (0..N)
+      - `factura` → Facturas (0..N)
+      - `orden_produccion` → OP (0..N)
+      - `orden_bordado`, `orden_reflejante`, `orden_corte_manga` → OTs (0..N cada una)
+      - `picking`, `packing` → WMS (0..N cada una)
+      - `envio`, `entrega`, `devolucion` → Logística (0..N cada una)
+      - `movimiento_inventario` → MovInv ligados (0..N)
+    - **Ejemplo de response**:
+      ```json
+      "documentos": [
+        { "id": 52,  "tipo": "cotizacion", "label": "Cotización",         "folio": "COT-2025-0042", "fecha": "2025-06-18T09:12:00",  "estatus": "Confirmada" },
+        { "id": 301, "tipo": "orden_compra", "label": "Orden de Compra",   "folio": "OC-0871",       "fecha": "2025-06-19",           "estatus": "Autorizada" },
+        { "id": 990, "tipo": "orden_produccion", "label": "Orden de Producción", "folio": "OP-771",   "fecha": "2025-06-21T10:00:00",  "estatus": "En produccion" },
+        { "id": 556, "tipo": "picking", "label": "Picking (WMS)",          "folio": "PK-2025-0112",  "fecha": "2025-07-05T09:00:00",  "estatus": "Surtida" }
+      ]
+      ```
   - Consumo en Next.js:
     ```ts
     // El usuario ya tiene sesión activa (cookie de Django).
-    const fetchPedido = async (id: string) => {
+    type PedidoDocumento = {
+      id: number;
+      tipo: "cotizacion" | "orden_compra" | "factura" | "orden_produccion" |
+            "orden_bordado" | "orden_reflejante" | "orden_corte_manga" |
+            "picking" | "packing" | "envio" | "entrega" | "devolucion" |
+            "movimiento_inventario";
+      label: string;
+      folio: string;
+      fecha: string | null;
+      estatus: string | number | null;
+    };
+
+    type Pedido = {
+      id: number;
+      folio?: string;
+      gran_total?: string | number;
+      documentos: PedidoDocumento[];
+      // ... resto de campos ya conocidos
+      detalles?: any[];
+      servicios_extras?: any[];
+    };
+
+    // Fetch
+    async function fetchPedido(id: number | string): Promise<Pedido> {
       const res = await fetch(`/api/v1/ventas/pedidos/${id}/`);
       if (!res.ok) throw new Error("Error cargando pedido");
       return res.json();
-    };
+    }
+
     // En la UI, leer siempre con optional chaining:
-    const granTotal = pedido?.gran_total;          // string | undefined
-    const servicioMonto = pedido?.servicios_extras?.[0]?.monto; // number | undefined
+    const granTotal = pedido?.gran_total ?? 0;            // no romper en WMS/Compras
+    const servicioMonto = pedido?.servicios_extras?.[0]?.monto ?? 0;
+
+    // Renderizar lista de documentos con botón "Ver" que abra modal (endpoint de detalle por tipo se agrega después)
+    // pedido.documentos.map(d => <li key={`${d.tipo}-${d.id}`}>{d.label} · {d.folio}</li>)
+
+    // Para abrir "Ver detalles" del pedido en pestaña nueva:
+    //   window.open(`/pedidos/${pedido.id}`, "_blank");
+    //   o <Link href={`/pedidos/${pedido.id}`} target="_blank">Ver detalles</Link>
     ```
     - No asumas que existen los keys $$; usa `pedido?.campo ?? fallback` para no romper en WMS/Compras.
     - Para abrir en pestaña nueva desde "Ver detalles": `window.open(\`/pedidos/\${id}\`, "_blank")` (o `next/navigation` + `<Link target="_blank">`).
