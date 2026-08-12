@@ -394,3 +394,78 @@ class RecepcionRFIDLectura(models.Model):
 
     def __str__(self):
         return self.codigo_tag
+
+class CalidadInspeccion(models.Model):
+    ESTADO_CHOICES = [
+        ('pendiente', 'Pendiente'),
+        ('aprobada', 'Aprobada'),
+        ('rechazada', 'Rechazada'),
+        ('aprobada_condicion', 'Aprobada con condiciones'),
+    ]
+
+    recepcion = models.ForeignKey(Recepcion, on_delete=models.CASCADE, related_name='calidad_inspecciones')
+    inspector = models.ForeignKey('hr.Empleado', on_delete=models.PROTECT, related_name='calidad_inspecciones')
+    fecha = models.DateField()
+    estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='pendiente')
+    observaciones = models.TextField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'calidad_inspecciones'
+        verbose_name = 'Calidad Inspección'
+        verbose_name_plural = 'Calidad Inspecciones'
+
+    def __str__(self):
+        return str(self.id)
+
+class CalidadInspeccionDetalle(models.Model):
+    RESULTADO_CHOICES = [
+        ('cuarentena', 'Cuarentena'),
+        ('liberado', 'Liberado'),
+        ('concesion_cc', 'Concesión Control de Calidad'),
+        ('concesion lazzar', 'Concesión lazzar'),
+        ('rechazo', 'Rechazo'),
+    ]
+
+    calidad_inspeccion = models.ForeignKey(CalidadInspeccion, on_delete=models.CASCADE, related_name='detalles')
+    recepcion_detalle = models.ForeignKey(RecepcionDetalle, on_delete=models.CASCADE, related_name='calidad_inspecciones')
+    cantidad_inspeccionada = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    cantidad_aprobada = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    cantidad_rechazada = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    resultado = models.TextField(max_length=20, choices=RESULTADO_CHOICES, default='aprobado')
+    motivo_rechazo = models.TextField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'calidad_inspeccion_detalle'
+        verbose_name = 'Calidad Inspección Detalle'
+        verbose_name_plural = 'Calidad Inspecciones Detalle'
+
+    def __str__(self):
+        return str(self.id)
+
+class EnvioProveedor(models.Model):
+    ESTADO_CHOICES = [
+        ('preparando', 'Preparando'),
+        ('en_transito', 'En tránsito'),
+        ('entregado', 'Entregado'),
+        ('retrasado', 'Retrasado'),
+        ('cancelado', 'Cancelado'),
+    ]
+
+    proveedor = models.ForeignKey(Proveedor, on_delete=models.CASCADE, related_name='envios_proveedor')
+    transportista = models.ForeignKey(Transportista, on_delete=models.CASCADE, related_name='envios_proveedor')
+    oc = models.ForeignKey(OrdenCompra, on_delete=models.CASCADE, related_name='envios_proveedor')
+    numero_guia = models.CharField(max_length=100, blank=True)
+    fecha_envio = models.DateField(blank=True, null=True)
+    fecha_entrega_estimada = models.DateField(blank=True, null=True)
+    fecha_entrega_real = models.DateField(blank=True, null=True)
+    estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='preparando')
+    costo_envio = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    observaciones = models.TextField(blank=True)
+
+    class Meta:
+        db_table = 'envios_proveedor'
+        verbose_name = 'Envio Proveedor'
+        verbose_name_plural = 'Envios Proveedor'
+
+    def __str__(self):
+        return str(self.id)
