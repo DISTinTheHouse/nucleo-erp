@@ -247,6 +247,30 @@ class PedidoDetalleReadSerializer(serializers.ModelSerializer):
     def get_cantidad_total(self, obj):
         return sum(int(t.cantidad or 0) for t in obj.tallas.all())
 
+class PedidoListSerializer(serializers.ModelSerializer):
+    """Serializer minimalista para el LISTADO de pedidos.
+
+    Devuelve sólo los campos escalares que consume la tabla del frontend, sin
+    ``detalles``/``tallas``/``servicios_extras``/``documentos``. Estos anidados
+    (y sus prefetch) sólo se necesitan en el detalle (``retrieve``), no en la
+    lista — evitar serializarlos en cada renglón del listado es lo que baja el
+    tiempo de respuesta de ~15s a <1s. Campos explícitos, no ``__all__``.
+    """
+
+    class Meta:
+        model = Pedido
+        fields = [
+            "id",
+            "folio",
+            "oc",
+            "cliente_razon_social",
+            "cliente_nombre",
+            "gran_total",
+            "created_at",
+            "fecha_confirmacion",
+            "estatus",
+        ]
+
 class PedidoSerializer(serializers.ModelSerializer):
     folio = serializers.CharField(read_only=True)
     folio_consecutivo = serializers.IntegerField(read_only=True)
