@@ -8,47 +8,63 @@
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="shortcut icon" href="/favicon.ico" />
 
-    <!-- Tailwind CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <!-- Resource hints: conexiones tempranas -->
+    <link rel="dns-prefetch" href="https://cdn.tailwindcss.com">
+    <link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
+    <link rel="dns-prefetch" href="https://fonts.googleapis.com">
+    <link rel="dns-prefetch" href="https://fonts.gstatic.com">
+    <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 
-    <!-- Theme auto -->
+    <!-- Font Awesome CSS (asíncrono con preload + fallback onload) -->
+    <link rel="preload" as="style" onload="this.onload=null;this.rel='stylesheet'"
+        href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <noscript>
+        <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    </noscript>
+
+    <!-- Google Fonts: Inter + Poppins (display=swap para FOIT corto -> FOUT) -->
+    <link rel="preload" as="style" onload="this.onload=null;this.rel='stylesheet'"
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Poppins:wght@300;400;500;600;700&display=swap">
+    <noscript>
+        <link
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Poppins:wght@300;400;500;600;700&display=swap"
+            rel="stylesheet">
+    </noscript>
+
+    <!-- Tailwind CDN (bloqueante, necesario para paint) con fetchpriority high -->
+    <script src="https://cdn.tailwindcss.com" fetchpriority="high"></script>
+
+    <!-- Theme auto (crítico para no FOUC de dark/light) -->
     <script>
         (function () {
-            const root = document.documentElement;
-
-            function applySystemTheme() {
-                const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-                if (isDark) {
-                    root.classList.add('dark');
-                    root.setAttribute('data-bs-theme', 'dark');
-                } else {
-                    root.classList.remove('dark');
-                    root.setAttribute('data-bs-theme', 'light');
-                }
-            }
-
-            applySystemTheme();
-            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applySystemTheme);
+            const r = document.documentElement,
+                d = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            d ? (r.classList.add('dark'), r.setAttribute('data-bs-theme', 'dark'))
+                : (r.classList.remove('dark'), r.setAttribute('data-bs-theme', 'light'));
+            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function (e) {
+                const isDark = e.matches;
+                isDark ? (r.classList.add('dark'), r.setAttribute('data-bs-theme', 'dark'))
+                    : (r.classList.remove('dark'), r.setAttribute('data-bs-theme', 'light'));
+            });
         })();
     </script>
 
-    <!-- Fonts -->
+    <!-- CSS inline mínimo para primer paint (body font + custom scrollbar) -->
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Poppins:wght@300;400;500;600;700&display=swap');
-
         body {
-            font-family: 'Inter', sans-serif;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
         }
 
         h1,
         h2,
         h3,
         .brand-font {
-            font-family: 'Poppins', sans-serif;
+            font-family: 'Poppins', system-ui, sans-serif;
         }
 
-        /* Custom Scrollbar */
         .no-scrollbar::-webkit-scrollbar {
             display: none;
         }
@@ -58,7 +74,6 @@
             scrollbar-width: none;
         }
 
-        /* Custom scrollbar for content if needed */
         ::-webkit-scrollbar {
             width: 8px;
             height: 8px;
@@ -87,22 +102,11 @@
             darkMode: 'class',
             theme: {
                 extend: {
-                    transitionProperty: {
-                        'width': 'width'
-                    },
+                    transitionProperty: { 'width': 'width' },
                     colors: {
                         brand: {
-                            50: '#eff6ff',
-                            100: '#dbeafe',
-                            200: '#bfdbfe',
-                            300: '#93c5fd',
-                            400: '#60a5fa',
-                            500: '#3b82f6',
-                            600: '#2563eb',
-                            700: '#1d4ed8',
-                            800: '#1e40af',
-                            900: '#1e3a8a',
-                            950: '#172554',
+                            50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd', 400: '#60a5fa',
+                            500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8', 800: '#1e40af', 900: '#1e3a8a', 950: '#172554',
                         }
                     }
                 }
@@ -691,7 +695,8 @@
         <!-- Header -->
         <header class="hidden md:flex h-20 items-center justify-between px-8 bg-transparent shrink-0 z-30">
             <div class="flex items-center gap-4 text-slate-400">
-                <h2 class="text-2xl font-semibold text-slate-800 dark:text-white tracking-tight">{% block header_title %}Panel de Control{% endblock %}</h2>
+                <h2 class="text-2xl font-semibold text-slate-800 dark:text-white tracking-tight">{% block header_title
+                    %}Panel de Control{% endblock %}</h2>
                 <span class="text-sm font-medium">{% block header_subtitle %}{% endblock %}</span>
             </div>
             <div class="flex items-center gap-6">
@@ -706,8 +711,10 @@
                     Ir al Frontend
                 </a>
                 <div class="flex flex-col items-end mr-2">
-                    <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ request.user.username }}</span>
-                    <span class="text-xs text-slate-500">{% if request.user.is_superuser %}Super Admin{% else %}Usuario{% endif %}</span>
+                    <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ request.user.username
+                        }}</span>
+                    <span class="text-xs text-slate-500">{% if request.user.is_superuser %}Super Admin{% else
+                        %}Usuario{% endif %}</span>
                 </div>
                 <div
                     class="h-10 w-10 rounded-full bg-gradient-to-br from-sky-500 to-sky-700 flex items-center justify-center text-white font-bold shadow-lg shadow-sky-500/20 ring-2 ring-white dark:ring-slate-800">
@@ -751,36 +758,7 @@
     </form>
 
     <!-- Mobile Drawer Logic -->
-    <script>
-        const mobileMenuBtn = document.getElementById('mobileMenuBtn');
-        const closeDrawerBtn = document.getElementById('closeDrawerBtn');
-        const mobileDrawer = document.getElementById('mobileDrawer');
-        const drawerOverlay = document.getElementById('drawerOverlay');
-
-        function openDrawer() {
-            mobileDrawer.classList.remove('translate-x-full');
-            setTimeout(() => {
-                drawerOverlay.classList.remove('opacity-0');
-            }, 10);
-        }
-
-        function closeDrawer() {
-            drawerOverlay.classList.add('opacity-0');
-            setTimeout(() => {
-                mobileDrawer.classList.add('translate-x-full');
-            }, 300);
-        }
-
-        if (mobileMenuBtn) {
-            mobileMenuBtn.addEventListener('click', openDrawer);
-        }
-        if (closeDrawerBtn) {
-            closeDrawerBtn.addEventListener('click', closeDrawer);
-        }
-        if (drawerOverlay) {
-            drawerOverlay.addEventListener('click', closeDrawer);
-        }
-    </script>
+    <script>document.addEventListener('DOMContentLoaded', function () { var a = document.getElementById('mobileMenuBtn'), b = document.getElementById('closeDrawerBtn'), c = document.getElementById('mobileDrawer'), d = document.getElementById('drawerOverlay'); if (!(a && b && c && d)) return; a.addEventListener('click', function () { c.classList.remove('translate-x-full'); setTimeout(function () { d.classList.remove('opacity-0'); }, 10); }); b.addEventListener('click', close); d.addEventListener('click', close); function close() { d.classList.add('opacity-0'); setTimeout(function () { c.classList.add('translate-x-full'); }, 300); } });</script>
 
     <!-- Collapsible Chat Widget -->
     <div id="chat-widget"
@@ -842,102 +820,50 @@
         <i class="fas fa-comments text-2xl"></i>
     </button>
 
-    <script>
-        const chatWidget = document.getElementById('chat-widget');
-        const openChatBtn = document.getElementById('open-chat');
-        const closeChatBtn = document.getElementById('close-chat');
-        const clearChatBtn = document.getElementById('clear-chat');
-        const sendChatBtn = document.getElementById('send-chat');
-        const chatInput = document.getElementById('chat-input');
-        const chatMessages = document.getElementById('chat-messages');
-        const suggestions = document.getElementById('chat-suggestions');
-
-        let conversationHistory = [];
-        const STORAGE_KEY = 'erp_ai_chat_history';
-        function saveHistory() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(conversationHistory.slice(-40))); } catch (_) { } }
-        function appendMessage(role, text) {
-            const row = document.createElement('div');
-            const bubble = document.createElement('span');
-
-            if (role === 'user') {
-                row.className = 'text-right';
-                bubble.className = 'inline-block bg-sky-600 text-white p-3 rounded-2xl rounded-tr-sm shadow-sm text-sm';
-            } else {
-                row.className = 'text-left';
-                bubble.className = 'inline-block bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm whitespace-pre-wrap';
+    <script>document.addEventListener('DOMContentLoaded', function () {
+            var w = document.getElementById('chat-widget'), o = document.getElementById('open-chat'), x = document.getElementById('close-chat'),
+                q = document.getElementById('clear-chat'), s = document.getElementById('send-chat'), t = document.getElementById('chat-input'),
+                m = document.getElementById('chat-messages'), p = document.getElementById('chat-suggestions'), h = [], K = 'erp_ai_chat_history',
+                Q = "¡Hola! Soy tu asistente. ¿En qué te puedo ayudar hoy?",
+                B = '<div class="text-left"><span class="inline-block bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm">' + Q + '</span></div>';
+            if (!(w && o && m && s && t)) return;
+            function SH() { try { localStorage.setItem(K, JSON.stringify(h.slice(-40))); } catch (_) { } }
+            function AM(r, x) {
+                var d = document.createElement('div'), b = document.createElement('span');
+                if (r === 'user') { d.className = 'text-right'; b.className = 'inline-block bg-sky-600 text-white p-3 rounded-2xl rounded-tr-sm shadow-sm text-sm'; }
+                else { d.className = 'text-left'; b.className = 'inline-block bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm whitespace-pre-wrap'; }
+                b.textContent = x; d.appendChild(b); m.appendChild(d); m.scrollTop = m.scrollHeight;
             }
-
-            bubble.textContent = text;
-            row.appendChild(bubble);
-            chatMessages.appendChild(row);
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-        }
-        function loadHistory() {
-            try {
-                const raw = localStorage.getItem(STORAGE_KEY);
-                if (!raw) return;
-                const arr = JSON.parse(raw);
-                if (Array.isArray(arr)) {
-                    conversationHistory = arr;
-                    chatMessages.innerHTML = '';
-                    for (const m of arr) { if (m && m.role && m.content) { appendMessage(m.role, m.content); } }
-                }
-            } catch (_) { }
-        }
-        function autoResize(el) {
-            const min = 40;
-            const max = 128;
-            el.style.height = 'auto';
-            const target = Math.max(min, Math.min(el.scrollHeight, max));
-            el.style.height = target + 'px';
-        }
-        chatInput.addEventListener('input', () => autoResize(chatInput));
-
-        openChatBtn.addEventListener('click', () => { chatWidget.classList.remove('hidden'); chatWidget.classList.remove('scale-0', 'opacity-0'); chatWidget.classList.add('scale-100', 'opacity-100'); openChatBtn.classList.add('hidden'); chatInput.focus(); });
-        closeChatBtn.addEventListener('click', () => { chatWidget.classList.remove('scale-100', 'opacity-100'); chatWidget.classList.add('scale-0', 'opacity-0'); setTimeout(() => { chatWidget.classList.add('hidden'); openChatBtn.classList.remove('hidden'); }, 300); });
-
-        if (clearChatBtn) { clearChatBtn.addEventListener('click', () => { conversationHistory = []; chatMessages.innerHTML = `<div class="text-left"><span class="inline-block bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-200 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm">¡Hola! Soy tu asistente. ¿En qué te puedo ayudar hoy?</span></div>`; try { localStorage.removeItem(STORAGE_KEY); } catch (_) { } }); }
-        if (suggestions) { suggestions.addEventListener('click', (e) => { const t = e.target.closest('button[data-suggest]'); if (!t) return; const prompt = t.getAttribute('data-suggest') || ''; chatInput.value = prompt; autoResize(chatInput); sendMessage(); }); }
-
-        async function sendMessage() {
-            const message = chatInput.value.trim();
-            if (!message) return;
-            chatInput.value = ''; autoResize(chatInput);
-
-            appendMessage('user', message);
-
-            const loadingId = 'loading-' + Date.now();
-            chatMessages.innerHTML += `<div class="text-left" id="${loadingId}"><span class="inline-block bg-white dark:bg-slate-700 text-slate-500 dark:text-slate-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm"><i class="fas fa-circle-notch fa-spin"></i> Pensando...</span></div>`;
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-
-            const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value;
-
-            try {
-                const response = await fetch('{% url "ai_chat" %}', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrftoken }, body: JSON.stringify({ message: message, conversation: conversationHistory }) });
-                const data = await response.json();
-                document.getElementById(loadingId).remove();
-
-                if (response.ok && data.reply) {
-                    appendMessage('assistant', data.reply);
-                    conversationHistory.push({ role: 'user', content: message });
-                    conversationHistory.push({ role: 'assistant', content: data.reply });
-                    saveHistory();
-                } else {
-                    const errorMsg = data.error || 'Error al procesar la respuesta';
-                    chatMessages.innerHTML += `<div class="text-left"><span class="inline-block bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-red-200 dark:border-red-800/50 text-sm"><i class="fas fa-exclamation-triangle mr-1"></i> ${errorMsg}</span></div>`;
-                }
-            } catch (error) {
-                document.getElementById(loadingId).remove();
-                chatMessages.innerHTML += `<div class="text-left"><span class="inline-block bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-red-200 dark:border-red-800/50 text-sm"><i class="fas fa-wifi mr-1"></i> Error de conexión con el servidor</span></div>`;
+            function LH() {
+                try {
+                    var r = localStorage.getItem(K); if (!r) return; var a = JSON.parse(r); if (!Array.isArray(a)) return; h = a; m.innerHTML = '';
+                    for (var i = 0; i < a.length; i++) { var e = a[i]; if (e && e.role && e.content) AM(e.role, e.content); }
+                } catch (_) { }
             }
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-        }
-
-        sendChatBtn.addEventListener('click', sendMessage);
-
-        chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
-        loadHistory();
-    </script>
+            function AR(e) { var n = 40, x = 128; e.style.height = 'auto'; e.style.height = Math.max(n, Math.min(e.scrollHeight, x)) + 'px'; }
+            t.addEventListener('input', function () { AR(t); });
+            o.addEventListener('click', function () { w.classList.remove('hidden', 'scale-0', 'opacity-0'); w.classList.add('scale-100', 'opacity-100'); o.classList.add('hidden'); t.focus(); });
+            x && x.addEventListener('click', function () {
+                w.classList.remove('scale-100', 'opacity-100'); w.classList.add('scale-0', 'opacity-0');
+                setTimeout(function () { w.classList.add('hidden'); o.classList.remove('hidden'); }, 300);
+            });
+            q && q.addEventListener('click', function () { h = []; m.innerHTML = B; try { localStorage.removeItem(K); } catch (_) { } });
+            p && p.addEventListener('click', function (e) { var b = e.target.closest('button[data-suggest]'); if (!b) return; t.value = b.getAttribute('data-suggest') || ''; AR(t); SM(); });
+            async function SM() {
+                var v = (t.value || '').trim(); if (!v) return; t.value = ''; AR(t); AM('user', v);
+                var L = 'loading-' + Date.now(); m.innerHTML += '<div class="text-left" id="' + L + '"><span class="inline-block bg-white dark:bg-slate-700 text-slate-500 dark:text-slate-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-slate-100 dark:border-slate-600 text-sm"><i class="fas fa-circle-notch fa-spin"></i> Pensando...</span></div>'; m.scrollTop = m.scrollHeight;
+                var C = (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value || '';
+                try {
+                    var R = await fetch("{% url 'ai_chat' %}", { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': C }, body: JSON.stringify({ message: v, conversation: h }) }),
+                    D = await R.json(); document.getElementById(L) && document.getElementById(L).remove();
+                    if (R.ok && D.reply) { AM('assistant', D.reply); h.push({ role: 'user', content: v }); h.push({ role: 'assistant', content: D.reply }); SH(); }
+                    else { m.innerHTML += '<div class="text-left"><span class="inline-block bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-red-200 dark:border-red-800/50 text-sm"><i class="fas fa-exclamation-triangle mr-1"></i> ' + (D.error || 'Error al procesar la respuesta') + '</span></div>'; }
+                }
+                catch (_) { document.getElementById(L) && document.getElementById(L).remove(); m.innerHTML += '<div class="text-left"><span class="inline-block bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 p-3 rounded-2xl rounded-tl-sm shadow-sm border border-red-200 dark:border-red-800/50 text-sm"><i class="fas fa-wifi mr-1"></i> Error de conexión con el servidor</span></div>'; }
+                m.scrollTop = m.scrollHeight;
+            }
+            s.addEventListener('click', SM); t.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); SM(); } }); LH();
+        });</script>
 
     {% with host=request.get_host %}
     {% if ".vercel.app" in host %}
