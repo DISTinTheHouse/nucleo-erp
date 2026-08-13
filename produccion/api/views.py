@@ -363,6 +363,20 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         op_id = request.query_params.get('op_id', None)
         if op_id is None:
             return Response({'msg': 'No se proporcionó orden de producción'}, status=status.HTTP_400_BAD_REQUEST)
+        # Aislamiento multi-tenant: esta acción es ``detail=False`` y NO pasa por
+        # ``get_queryset()``, así que sin esta verificación cualquier usuario
+        # autenticado podría leer la OP de otra empresa adivinando el ``op_id``
+        # (IDOR). El servicio hace ``filter(pk=op_id)`` sin filtro de empresa. Se
+        # valida la pertenencia aquí, en la capa de vista, antes de delegar. Se
+        # responde 404 (no 403) para no revelar la existencia del documento a
+        # otra empresa —mismo criterio que ``retrieve`` en OB/OR/OCM—.
+        empresa = getattr(request.user, 'empresa', None)
+        es_propia = (
+            empresa is not None
+            and OrdenProduccion.objects.filter(pk=op_id, empresa=empresa).exists()
+        )
+        if not es_propia:
+            return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
         res_data = OrdenProduccionService.get_formatted_op_detalle(op_id)
         if res_data is None:
             return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
