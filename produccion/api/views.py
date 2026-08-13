@@ -330,7 +330,14 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # consumen retrieve/create/update; el listado usa un serializer ligero
         # que no lo toca, así que evitamos el prefetch pesado en ``list``.
         if getattr(self, "action", None) != "list":
-            queryset = queryset.prefetch_related(
+            # Los cuatro FKs de encabezado alimentan las etiquetas legibles del
+            # serializer (``empresa_nombre``/``sucursal_nombre``/``pedido_folio``/
+            # ``usuario_nombre``). Sin este ``select_related`` cada una dispararía
+            # una query lazy en retrieve; el listado usa el serializer ligero y no
+            # las toca, por eso solo se aplica fuera de ``list``.
+            queryset = queryset.select_related(
+                "empresa", "sucursal", "pedido", "usuario_asignado"
+            ).prefetch_related(
                 Prefetch(
                     "orden_produccion_detalle",
                     queryset=OrdenProduccionDetalle.objects.select_related(
