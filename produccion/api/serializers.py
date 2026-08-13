@@ -296,6 +296,7 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
     empresa_nombre = serializers.CharField(source='empresa.razon_social', read_only=True)
     sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
+    estatus_bordado_display = serializers.CharField(source="get_estatus_bordado_display", read_only=True)
 
     detalles_override = serializers.ListField(
         child=serializers.JSONField(),
@@ -874,6 +875,7 @@ class OrdenReflejanteSerializer(serializers.ModelSerializer):
     empresa_nombre = serializers.CharField(source='empresa.razon_social', read_only=True)
     sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
+    estatus_reflejante_display = serializers.CharField(source="get_estatus_reflejante_display", read_only=True)
 
     detalles_override = serializers.ListField(
         child=serializers.JSONField(),
@@ -1285,6 +1287,7 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
     sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
     detalles = OrdenCorteMangaDetalleSerializer(many=True, read_only=True)
+    estatus_corte_display = serializers.CharField(source="get_estatus_corte_display", read_only=True)
 
     detalles_override = serializers.ListField(
         child=serializers.JSONField(),
