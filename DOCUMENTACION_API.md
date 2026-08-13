@@ -1927,10 +1927,16 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 ### 7) Orden de Bordado Onboarding (patrón sencillo / manual)
 
-- **Endpoints**:
+- **Endpoints CRUD**:
+  - `GET /api/v1/produccion/orden-bordado/` — listado (ligero, con cobertura)
+  - `POST /api/v1/produccion/orden-bordado/` — alta
+  - `GET /api/v1/produccion/orden-bordado/{id}/` — detalle
+    - Entrega: encabezado OB + `detalles[]` completo (ubicaciones/configuración bordado), `cantidad_cubierta/contratada`, parcialidad por línea (`cantidad_pedido/asignada/pendiente`), `otras_ordenes_del_pedido[]`, `reparto_por_talla_aproximado`.
+    - **Nuevo** `pedido_vinculado: {id, folio}` — siempre presente. **No incluye** la lista de documentos ligados al pedido (cotización/OC/factura/...): la OB se ve como documento de taller (operador), no de escritorio. Si los necesitas los sacas de `GET /api/v1/ventas/pedidos/{id}/`.
+    - Filtro de campos $$ por rol: `is_superuser` / `is_admin_empresa` / rol `Mesa-de-Control` o `Ventas` → intacto. Resto de roles → se eliminan keys $$ (por ahora vacío; cuando la OB tenga $ los agrega `produccion/services/orden_bordado_field_filter_service.py`).
+- **Onboarding**:
   - `GET /api/v1/produccion/orden-bordado/onboarding/`
   - `POST /api/v1/produccion/orden-bordado/onboarding/`
-- **Objetivo**: patrón onboarding idéntico a WMS (picking / packing / despacho): catálogos precargados para que Next.js muestre selector de pedido + operadores + preview folio.
 
 **GET onboarding — shape**
 

@@ -565,6 +565,11 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
 
     otras_ordenes_del_pedido = serializers.SerializerMethodField()
     reparto_por_talla_aproximado = serializers.SerializerMethodField()
+    pedido_vinculado = serializers.SerializerMethodField()
+
+    def get_pedido_vinculado(self, obj):
+        from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
+        return armar_pedido_vinculado(obj)
 
     def get_otras_ordenes_del_pedido(self, obj):
         """Las demás OBs activas del mismo pedido, sin incluir ésta."""

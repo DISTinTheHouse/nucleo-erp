@@ -527,7 +527,16 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         también viaja aquí: el serializer del detalle hereda del de listado, así
         que el diálogo puede enunciar "cubre 7 de 40" sin leer además la fila
         del listado.
+
+        Filtra campos $$ por rol (mismo patrón que detalle de pedido):
+        ``is_superuser`` / ``is_admin_empresa`` / Mesa-de-Control / Ventas
+        mantienen todo intacto; el resto ve los keys que están en las listas
+        de ``orden_bordado_field_filter_service`` eliminados.
         """
+        from produccion.services.orden_bordado_field_filter_service import (
+            filtrar_campos_contabilidad_orden_bordado,
+        )
+
         orden = self.get_object()
         por_linea, por_detalle, hermanas, aproximado = (
             OrdenBordadoService.partialidad_de_orden(orden)
@@ -543,7 +552,8 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 "reparto_aproximado": aproximado,
             },
         )
-        return Response(serializer.data)
+        data = filtrar_campos_contabilidad_orden_bordado(serializer.data, request.user)
+        return Response(data)
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
