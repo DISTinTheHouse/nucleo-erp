@@ -15,6 +15,7 @@ from produccion.models import (
     ListaMaterialBom,
     BomDetalle,
     OrdenProduccion,
+    OrdenProduccionDetalle,
     ConsumoProduccion,
     ProductoTerminadoEntradas,
     OrdenesBordado,
@@ -34,6 +35,7 @@ from produccion.api.serializers import (
     BomDetalleSerializer,
     BomBulkItemSerializer,
     OrdenProduccionSerializer,
+    OrdenProduccionListSerializer,
     ConsumoProduccionSerializer,
     ProductoTerminadoEntradasSerializer,
     OrdenBordadoSerializer,
@@ -307,13 +309,43 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
     queryset = OrdenProduccion.objects.all()
     serializer_class = OrdenProduccionSerializer
 
+    def get_serializer_class(self):
+        if getattr(self, "action", None) == "list":
+            return OrdenProduccionListSerializer
+        return OrdenProduccionSerializer
+
     def get_queryset(self):
         user = self.request.user
         empresa = getattr(user, 'empresa', None)
         if empresa is None: return OrdenProduccion.objects.none()
         # Listado más reciente primero; el desempate usa la PK real del modelo
         # (``op_id``, no ``id``).
-        queryset = OrdenProduccion.objects.filter(empresa=empresa).order_by("-fecha_inicio", "-op_id")
+        queryset = (
+            OrdenProduccion.objects
+            .filter(empresa=empresa)
+            .order_by("-fecha_inicio", "-op_id")
+        )
+        # El nested ``orden_produccion_detalle`` (con su cadena de FKs) solo lo
+        # consumen retrieve/create/update; el listado usa un serializer ligero
+        # que no lo toca, así que evitamos el prefetch pesado en ``list``.
+        if getattr(self, "action", None) != "list":
+            queryset = queryset.prefetch_related(
+                Prefetch(
+                    "orden_produccion_detalle",
+                    queryset=OrdenProduccionDetalle.objects.select_related(
+                        "producto_variante",
+                        "producto_variante__producto",
+                        "producto_variante__color",
+                        "producto_variante__talla",
+                        "bom",
+                    ).prefetch_related(
+                        Prefetch(
+                            "bom__materia_prima_detalle",
+                            queryset=BomDetalle.objects.select_related("componente", "unidad"),
+                        ),
+                    ),
+                ),
+            )
         return queryset
     
     def save_op(self, request):
