@@ -1221,7 +1221,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
 - **Listar**: `GET /api/v1/ventas/pedidos/`
 - **Detalle**: `GET /api/v1/ventas/pedidos/{id}/`
-  - Campos de contabilidad (dinero / forma_pago / metodos_pago / uso_cfdi / subtotal / iva / gran_total / precios_unitarios_$_en_detalles_tallas_servicios):
+  - Campos de contabilidad (dinero / forma*pago / metodos_pago / uso_cfdi / subtotal / iva / gran_total / precios_unitarios*$\_en_detalles_tallas_servicios):
     - ✅ Se envían **completos** si el usuario tiene rol `Mesa-de-Control` o `Ventas` (o es `is_superuser` / `is_admin_empresa`).
     - ❌ Se **eliminan del JSON** (no vienen en el response) para roles `WMS`, `Compras` o cualquier otro.
   - **Nuevo**: `documentos[]` — lista de todos los documentos ligados al pedido (1 solo query por relación, prefetch optimizado).
@@ -1243,9 +1243,9 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
           | "entrega"
           | "devolucion"
           | "movimiento_inventario";
-        label: string;           // nombre legible del tipo ("Cotización", "Picking (WMS)", ...)
-        folio: string;           // folio natural del documento; si no tiene, cae a `id`
-        fecha: string | null;    // ISO string (date o datetime) del campo fecha/creación; null si no hay
+        label: string; // nombre legible del tipo ("Cotización", "Picking (WMS)", ...)
+        folio: string; // folio natural del documento; si no tiene, cae a `id`
+        fecha: string | null; // ISO string (date o datetime) del campo fecha/creación; null si no hay
         estatus: string | number | null; // label legible si hay choices (ex. "Autorizada"), null si el modelo no tiene estatus
       };
       ```
@@ -1268,14 +1268,25 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
       ]
       ```
   - Consumo en Next.js:
+
     ```ts
     // El usuario ya tiene sesión activa (cookie de Django).
     type PedidoDocumento = {
       id: number;
-      tipo: "cotizacion" | "orden_compra" | "factura" | "orden_produccion" |
-            "orden_bordado" | "orden_reflejante" | "orden_corte_manga" |
-            "picking" | "packing" | "envio" | "entrega" | "devolucion" |
-            "movimiento_inventario";
+      tipo:
+        | "cotizacion"
+        | "orden_compra"
+        | "factura"
+        | "orden_produccion"
+        | "orden_bordado"
+        | "orden_reflejante"
+        | "orden_corte_manga"
+        | "picking"
+        | "packing"
+        | "envio"
+        | "entrega"
+        | "devolucion"
+        | "movimiento_inventario";
       label: string;
       folio: string;
       fecha: string | null;
@@ -1300,7 +1311,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
     }
 
     // En la UI, leer siempre con optional chaining:
-    const granTotal = pedido?.gran_total ?? 0;            // no romper en WMS/Compras
+    const granTotal = pedido?.gran_total ?? 0; // no romper en WMS/Compras
     const servicioMonto = pedido?.servicios_extras?.[0]?.monto ?? 0;
 
     // Renderizar lista de documentos con botón "Ver" que abra modal (endpoint de detalle por tipo se agrega después)
@@ -1310,8 +1321,9 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
     //   window.open(`/pedidos/${pedido.id}`, "_blank");
     //   o <Link href={`/pedidos/${pedido.id}`} target="_blank">Ver detalles</Link>
     ```
+
     - No asumas que existen los keys $$; usa `pedido?.campo ?? fallback` para no romper en WMS/Compras.
-    - Para abrir en pestaña nueva desde "Ver detalles": `window.open(\`/pedidos/\${id}\`, "_blank")` (o `next/navigation` + `<Link target="_blank">`).
+    - Para abrir en pestaña nueva desde "Ver detalles": `window.open(\`/pedidos/\${id}\`, "\_blank")`(o`next/navigation`+`<Link target="_blank">`).
 
 ---
 
@@ -1932,8 +1944,8 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
   - `POST /api/v1/produccion/orden-bordado/` — alta
   - `GET /api/v1/produccion/orden-bordado/{id}/` — detalle
     - Entrega: encabezado OB + `detalles[]` completo (ubicaciones/configuración bordado), `cantidad_cubierta/contratada`, parcialidad por línea (`cantidad_pedido/asignada/pendiente`), `otras_ordenes_del_pedido[]`, `reparto_por_talla_aproximado`.
-    - **Nuevo** `pedido_vinculado: {id, folio}` — siempre presente. **No incluye** la lista de documentos ligados al pedido (cotización/OC/factura/...): la OB se ve como documento de taller (operador), no de escritorio. Si los necesitas los sacas de `GET /api/v1/ventas/pedidos/{id}/`.
-    - Filtro de campos $$ por rol: `is_superuser` / `is_admin_empresa` / rol `Mesa-de-Control` o `Ventas` → intacto. Resto de roles → se eliminan keys $$ (por ahora vacío; cuando la OB tenga $ los agrega `produccion/services/orden_bordado_field_filter_service.py`).
+    - **Nuevo**: `pedido_vinculado: {id, folio}`.
+    - **No incluye** lista de documentos ligados al pedido (cotización/OC/factura/...): la OB es documento de taller. Si los necesitas, usa `GET /api/v1/ventas/pedidos/{id}/`.
 - **Onboarding**:
   - `GET /api/v1/produccion/orden-bordado/onboarding/`
   - `POST /api/v1/produccion/orden-bordado/onboarding/`
