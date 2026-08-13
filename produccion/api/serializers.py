@@ -157,7 +157,15 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
 
 class OrdenProduccionSerializer(serializers.ModelSerializer):
     orden_produccion_detalle = OrdenProduccionDetalleSerializer(many=True)
+<<<<<<< Updated upstream
     estatus_op_display = serializers.CharField(source="get_estatus_op_display", read_only=True)
+=======
+    pedido_vinculado = serializers.SerializerMethodField()
+
+    def get_pedido_vinculado(self, obj):
+        from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
+        return armar_pedido_vinculado(obj)
+>>>>>>> Stashed changes
 
     class Meta:
         model = OrdenProduccion
@@ -1131,6 +1139,11 @@ class OrdenReflejanteRetrieveSerializer(OrdenReflejanteListSerializer):
 
     otras_ordenes_del_pedido = serializers.SerializerMethodField()
     reparto_por_talla_aproximado = serializers.SerializerMethodField()
+    pedido_vinculado = serializers.SerializerMethodField()
+
+    def get_pedido_vinculado(self, obj):
+        from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
+        return armar_pedido_vinculado(obj)
 
     def get_otras_ordenes_del_pedido(self, obj):
         """Las demás ORs activas del mismo pedido, sin incluir ésta."""
@@ -1260,6 +1273,11 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
     sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
     detalles = OrdenCorteMangaDetalleSerializer(many=True, read_only=True)
+    pedido_vinculado = serializers.SerializerMethodField()
+
+    def get_pedido_vinculado(self, obj):
+        from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
+        return armar_pedido_vinculado(obj)
 
     detalles_override = serializers.ListField(
         child=serializers.JSONField(),

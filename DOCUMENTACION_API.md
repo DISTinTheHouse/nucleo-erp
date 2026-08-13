@@ -1876,7 +1876,13 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 ### 5) Orden de Producción (Onboarding)
 
-- **Endpoint**: `GET|POST /api/v1/produccion/orden-produccion/onboarding/`
+- **Endpoints CRUD**:
+  - `GET /api/v1/produccion/orden-produccion/` — listado
+  - `POST /api/v1/produccion/orden-produccion/` — alta
+  - `GET /api/v1/produccion/orden-produccion/{id}/` — detalle
+    - **Nuevo**: `pedido_vinculado: {id, folio}`. Nota: `OrdenProduccion.pedido` es `nullable`; si la OP no tiene pedido, `pedido_vinculado = null`.
+- **Endpoints onboarding**:
+  - `GET|POST /api/v1/produccion/orden-produccion/onboarding/`
 - **Regla**:
   - El frontend no necesita enviar `bom` dentro de cada detalle.
   - El backend resuelve automáticamente el BOM activo a partir de `producto_variante`.
@@ -2148,7 +2154,12 @@ Lo que controla el cupo ahora:
 
 ### 8) Orden de Reflejante Onboarding (patrón sencillo / manual)
 
-- **Endpoints**:
+- **Endpoints CRUD**:
+  - `GET /api/v1/produccion/orden-reflejante/` — listado (ligero, con cobertura)
+  - `POST /api/v1/produccion/orden-reflejante/` — alta
+  - `GET /api/v1/produccion/orden-reflejante/{id}/` — detalle
+    - **Nuevo**: `pedido_vinculado: {id, folio}`.
+- **Endpoints onboarding**:
   - `GET /api/v1/produccion/orden-reflejante/onboarding/`
   - `POST /api/v1/produccion/orden-reflejante/onboarding/`
 - **Objetivo**: patrón onboarding idéntico a ÓrdenesBordado y WMS: catálogos precargados para que Next.js muestre selector de pedido + operadores + preview folio.
@@ -2318,7 +2329,12 @@ Cuando la solicitud de OR parcial sí excede el cupo restante (validación de su
 
 ### 9) Orden de Corte de Manga Onboarding (patrón sencillo / manual)
 
-- **Endpoints**:
+- **Endpoints CRUD**:
+  - `GET /api/v1/produccion/orden-corte-manga/` — listado (ligero)
+  - `POST /api/v1/produccion/orden-corte-manga/` — alta
+  - `GET /api/v1/produccion/orden-corte-manga/{id}/` — detalle
+    - **Nuevo**: `pedido_vinculado: {id, folio}`.
+- **Endpoints onboarding**:
   - `GET /api/v1/produccion/orden-corte-manga/onboarding/`
   - `POST /api/v1/produccion/orden-corte-manga/onboarding/`
 - **Objetivo**: patrón onboarding idéntico a ÓrdenesBordado/ÓrdenesReflejante y WMS: catálogos precargados para que Next.js muestre selector de pedido + operadores + preview folio.
