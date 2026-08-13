@@ -6,6 +6,7 @@ class Puesto(StatusLifecycleModel):
     nombre = models.CharField(max_length=100)
     descripcion = models.TextField(blank=True, null=True)
     salario_base = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    area = models.ForeignKey('hr.Area', on_delete=models.PROTECT, related_name='puestos', blank=True, null=True)
 
     class Meta:
         db_table = "puestos"
@@ -40,6 +41,21 @@ class Empleado(StatusLifecycleModel):
 
     def __str__(self):
         return f"{self.nombre} {self.apellido_paterno}"
+
+class Area(StatusLifecycleModel):
+    departamento = models.ForeignKey('nucleo.Departamento', on_delete=models.PROTECT, related_name='areas')
+    nombre = models.CharField(max_length=150)
+    codigo = models.CharField(max_length=20, blank=True, null=True, help_text='Clave corta del area')
+    responsable = models.ForeignKey(Empleado, on_delete=models.PROTECT, related_name='areas', blank=True, null=True)
+    descripcion = models.TextField(blank=True, null=True)
+
+    class Meta:
+        db_table = "areas"
+        verbose_name = "Area"
+        verbose_name_plural = "Areas"
+
+    def __str__(self):
+        return self.nombre
 
 class Contrato(models.Model):
     TIPO_CHOICES = [
