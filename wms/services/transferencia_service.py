@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.db import transaction
 from rest_framework.exceptions import ValidationError
+from auditoria.models import AuditoriaEvento
 from wms.models import Transferencia, TransferenciaDetalle
 from inventarios.models import Existencia
 from wms.utils.folios import generate_folio
@@ -15,7 +16,7 @@ class TransferenciaService:
 
     @staticmethod
     @transaction.atomic
-    def handle_store(data, user):
+    def handle_store(data, user, request=None):
         almacen_origen = data["almacen_origen"]
         almacen_destino = data["almacen_destino"]
         empresa = user.empresa
@@ -179,6 +180,56 @@ class TransferenciaService:
             sucursal=sucursal,
             transferencia=transferencia,
             transferencia_detalle_rows=transferencia_detalle_rows,
+        )
+
+        # 5. Registrar evento de auditoría
+        items_audit = []
+        for row in transferencia_detalle_rows:
+            producto = row.get("producto")
+            producto_variante = row.get("producto_variante")
+            items_audit.append(
+                {
+                    "producto_id": producto.pk if producto else None,
+                    "producto_variante_id": producto_variante.pk if producto_variante else None,
+                    "cantidad": str(TransferenciaService._normalize(row["cantidad"])),
+                    "ubicacion_origen_id": getattr(row.get("ubicacion_origen"), "pk", None),
+                    "ubicacion_destino_id": getattr(row.get("ubicacion_destino"), "pk", None),
+                    "lote_id": getattr(row.get("lote"), "pk", None),
+                    "serie_id": getattr(row.get("serie"), "pk", None),
+                }
+            )
+
+        payload_base = {
+            "almacen_origen_id": almacen_origen.pk,
+            "almacen_destino_id": almacen_destino.pk,
+            "sucursal_id": getattr(sucursal, "pk", None),
+            "empresa_id": getattr(empresa, "pk", None),
+            "folio": transferencia.folio,
+            "items": items_audit,
+        }
+
+        ip = None
+        user_agent = None
+        if request is not None:
+            meta = getattr(request, "META", None) or {}
+            ip = (
+                meta.get("HTTP_X_FORWARDED_FOR")
+                or meta.get("REMOTE_ADDR")
+                or None
+            )
+            user_agent = meta.get("HTTP_USER_AGENT") or None
+
+        AuditoriaEvento.objects.create(
+            empresa=empresa,
+            usuario=user if getattr(user, "pk", None) else None,
+            modulo="inventarios",
+            accion="TRANSFERENCIA",
+            tabla="existencias",
+            id_registro=str(transferencia.pk),
+            antes_json=payload_base,
+            despues_json={**payload_base, "transferencia_id": transferencia.pk},
+            ip=ip,
+            user_agent=user_agent,
         )
 
         return transferencia

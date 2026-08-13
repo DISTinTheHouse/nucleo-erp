@@ -1106,11 +1106,11 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["get"], url_path="reporte-movimientos-periodo")
     def reporte_movimientos_periodo(self, request):
         tipo_movimiento = (request.query_params.get("tipo_movimiento") or "").strip().upper()
-        if tipo_movimiento not in {"ENTRADA", "SALIDA", "AJUSTE"}:
+        if tipo_movimiento not in {"ENTRADA", "SALIDA", "AJUSTE", "TRANSFERENCIA"}:
             raise ValidationError(
                 {
                     "tipo_movimiento": (
-                        "tipo_movimiento es requerido y debe ser ENTRADA, SALIDA o AJUSTE."
+                        "tipo_movimiento es requerido y debe ser ENTRADA, SALIDA, AJUSTE o TRANSFERENCIA."
                     )
                 }
             )
@@ -1148,6 +1148,7 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
                 "movimiento_inventario__recepcion",
                 "movimiento_inventario__ajuste_inventario",
                 "movimiento_inventario__op",
+                "movimiento_inventario__transferencia",
                 "producto",
                 "producto_variante",
                 "producto_variante__producto",
@@ -1184,6 +1185,11 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
                     movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids
                 )
             )
+        elif tipo_movimiento == "TRANSFERENCIA":
+            detalles_qs = detalles_qs.filter(
+                models.Q(ubicacion_origen__almacen_id__in=allowed_almacen_ids)
+                | models.Q(ubicacion_destino__almacen_id__in=allowed_almacen_ids)
+            )
         else:
             detalles_qs = detalles_qs.filter(
                 movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids
@@ -1213,12 +1219,27 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
                     and movimiento.ajuste_inventario.almacen
                 )
                 ubicacion = detalle.ubicacion_origen
+            elif tipo_movimiento == "TRANSFERENCIA":
+                origen_almacen = getattr(detalle.ubicacion_origen, "almacen", None)
+                destino_almacen = getattr(detalle.ubicacion_destino, "almacen", None)
+                origen_ok = getattr(origen_almacen, "pk", None) in allowed_almacen_ids
+                destino_ok = getattr(destino_almacen, "pk", None) in allowed_almacen_ids
+                if origen_ok:
+                    almacen = origen_almacen
+                    ubicacion = detalle.ubicacion_origen
+                elif destino_ok:
+                    almacen = destino_almacen
+                    ubicacion = detalle.ubicacion_destino
+                else:
+                    almacen = origen_almacen or destino_almacen
+                    ubicacion = detalle.ubicacion_origen or detalle.ubicacion_destino
             else:
                 almacen = getattr(movimiento, "ajuste_inventario", None) and movimiento.ajuste_inventario.almacen
                 ubicacion = detalle.ubicacion_destino or detalle.ubicacion_origen
 
             usuario = getattr(movimiento, "usuario", None)
             pedido = getattr(movimiento, "pedido", None)
+            transferencia = getattr(movimiento, "transferencia", None)
             cantidad = self._report_to_decimal(detalle.cantidad)
             costo_unitario = self._report_to_decimal(detalle.costo_unitario)
             total_cantidad += cantidad
@@ -1254,6 +1275,8 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
                     "costo_total": str((cantidad * costo_unitario).quantize(Decimal("0.01"))),
                     "pedido_id": getattr(pedido, "pk", None),
                     "pedido_folio": getattr(pedido, "folio", None),
+                    "transferencia_id": getattr(transferencia, "pk", None),
+                    "transferencia_folio": getattr(transferencia, "folio", None),
                     "recepcion_id": getattr(movimiento, "recepcion_id", None),
                     "ajuste_inventario_id": getattr(movimiento, "ajuste_inventario_id", None),
                     "op_id": getattr(movimiento, "op_id", None),

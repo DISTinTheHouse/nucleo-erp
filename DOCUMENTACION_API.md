@@ -727,13 +727,18 @@ Historial operativo de entradas, salidas y ajustes.
   - Clic en buscar
   - Con la misma respuesta generar PDF
 - **Query params**:
-  - `tipo_movimiento`: requerido, `ENTRADA`, `SALIDA` o `AJUSTE`
+  - `tipo_movimiento`: requerido, `ENTRADA`, `SALIDA`, `AJUSTE` o `TRANSFERENCIA`
   - `fecha_inicio`: requerido, formato `YYYY-MM-DD`
   - `fecha_final`: requerido, formato `YYYY-MM-DD`
   - `almacen_id`: opcional; si no se envía, el reporte incluye todos los almacenes visibles para el usuario
 - **Ejemplo**:
   - `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/?tipo_movimiento=SALIDA&fecha_inicio=2026-07-01&fecha_final=2026-07-31&almacen_id=1`
   - `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/?tipo_movimiento=SALIDA&fecha_inicio=2026-07-01&fecha_final=2026-07-31`
+  - `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/?tipo_movimiento=TRANSFERENCIA&fecha_inicio=2026-07-01&fecha_final=2026-07-31`
+- **Nota TRANSFERENCIA**:
+  - Cada renglón incluye `transferencia_id` y `transferencia_folio`.
+  - El reporte incluye la transferencia si el usuario tiene acceso al almacén de origen o al de destino.
+  - Al crear una transferencia (WMS) se registra automáticamente `AuditoriaEvento` (`modulo=inventarios`, `accion=TRANSFERENCIA`, `tabla=existencias`), por lo que también aparece en el listado general de movimientos (`GET /api/v1/inventarios/movimientos/`).
 - **Respuesta**:
   ```json
   {

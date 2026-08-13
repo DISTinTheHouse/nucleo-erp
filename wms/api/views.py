@@ -108,7 +108,7 @@ class TransferenciaViewSet(
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        res = TransferenciaService.handle_store(serializer.validated_data, request.user)
+        res = TransferenciaService.handle_store(serializer.validated_data, request.user, request=request)
         return Response(TransferenciaSerializer(res).data, status=status.HTTP_201_CREATED)
 
 class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericViewSet):
