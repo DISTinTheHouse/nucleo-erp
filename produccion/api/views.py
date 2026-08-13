@@ -49,7 +49,8 @@ from produccion.api.serializers import (
     ReflejanteAvancesSerializer,
     ReflejanteIncidenciasSerializer,
     OrdenesCorteMangaSerializer,
-    OrdenesCorteMangaListSerializer
+    OrdenesCorteMangaListSerializer,
+    OrdenesCorteMangaRetrieveSerializer
 )
 
 from produccion.services.orden_bordado_service import OrdenBordadoService
@@ -1012,6 +1013,8 @@ class OrdenesCorteMangaViewSet(
         # Ver ``OrdenBordadoViewSet.get_serializer_class``.
         if self.action == "list":
             return OrdenesCorteMangaListSerializer
+        if self.action == "retrieve":
+            return OrdenesCorteMangaRetrieveSerializer
         return OrdenesCorteMangaSerializer
 
     def create(self, request):
