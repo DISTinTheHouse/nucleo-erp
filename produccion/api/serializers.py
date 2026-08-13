@@ -159,10 +159,25 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
     orden_produccion_detalle = OrdenProduccionDetalleSerializer(many=True)
     estatus_op_display = serializers.CharField(source="get_estatus_op_display", read_only=True)
     pedido_vinculado = serializers.SerializerMethodField()
+    # Etiquetas legibles junto a las FKs (mismo patrón ``source=`` que
+    # ``OrdenBordadoSerializer``/``OrdenReflejanteSerializer``). ``Empresa`` no
+    # tiene ``nombre``: su nombre humano es ``razon_social``. ``pedido`` es
+    # nullable en OP (a diferencia de OB/OR/OCM), así que ``pedido_folio`` lleva
+    # ``allow_null=True`` para devolver ``null`` en vez de 500 cuando no hay
+    # pedido.
+    empresa_nombre = serializers.CharField(source="empresa.razon_social", read_only=True)
+    sucursal_nombre = serializers.CharField(source="sucursal.nombre", read_only=True)
+    pedido_folio = serializers.CharField(source="pedido.folio", read_only=True, allow_null=True)
+    usuario_nombre = serializers.SerializerMethodField()
 
     def get_pedido_vinculado(self, obj):
         from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
         return armar_pedido_vinculado(obj)
+
+    def get_usuario_nombre(self, obj):
+        usuario = obj.usuario_asignado
+        if not usuario: return None
+        return usuario.get_full_name().strip() or usuario.email
 
     class Meta:
         model = OrdenProduccion
