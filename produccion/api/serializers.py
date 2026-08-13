@@ -1270,11 +1270,6 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
     sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
     detalles = OrdenCorteMangaDetalleSerializer(many=True, read_only=True)
-    pedido_vinculado = serializers.SerializerMethodField()
-
-    def get_pedido_vinculado(self, obj):
-        from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
-        return armar_pedido_vinculado(obj)
 
     detalles_override = serializers.ListField(
         child=serializers.JSONField(),
@@ -1397,3 +1392,20 @@ class OrdenesCorteMangaListSerializer(OrdenesCorteMangaSerializer):
     # ``OrdenBordadoListSerializer``.
 
     detalles = OrdenCorteMangaDetalleListSerializer(many=True, read_only=True)
+
+
+class OrdenesCorteMangaRetrieveSerializer(OrdenesCorteMangaSerializer):
+    """Orden de corte de manga para el detalle.
+
+    Hereda del serializer base —no del de listado— para conservar el renglón
+    completo (``OrdenCorteMangaDetalleSerializer`` con
+    ``corte_manga_config``/``ubicaciones``/``foto``/``notas``). Añade
+    ``pedido_vinculado`` sólo en el detalle, igual que
+    ``OrdenReflejanteRetrieveSerializer``/``OrdenBordadoRetrieveSerializer``.
+    """
+
+    pedido_vinculado = serializers.SerializerMethodField()
+
+    def get_pedido_vinculado(self, obj):
+        from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
+        return armar_pedido_vinculado(obj)
