@@ -157,15 +157,12 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
 
 class OrdenProduccionSerializer(serializers.ModelSerializer):
     orden_produccion_detalle = OrdenProduccionDetalleSerializer(many=True)
-<<<<<<< Updated upstream
     estatus_op_display = serializers.CharField(source="get_estatus_op_display", read_only=True)
-=======
     pedido_vinculado = serializers.SerializerMethodField()
 
     def get_pedido_vinculado(self, obj):
         from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
         return armar_pedido_vinculado(obj)
->>>>>>> Stashed changes
 
     class Meta:
         model = OrdenProduccion
