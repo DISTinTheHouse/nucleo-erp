@@ -139,8 +139,25 @@ class OrdenProduccionDetalleSerializer(serializers.ModelSerializer):
         # servidor a partir del BOM activo de cada producto_variante.
         read_only_fields = ['activo', 'op', 'bom']
 
+class OrdenProduccionListSerializer(serializers.ModelSerializer):
+    """Serializer minimalista para el LISTADO de OP.
+
+    Solo campos escalares que consume la tabla; sin ``orden_produccion_detalle``
+    (el nested pesado) para evitar el N+1. Campos explícitos, no ``__all__``.
+    """
+    estatus_op_display = serializers.CharField(source="get_estatus_op_display", read_only=True)
+
+    class Meta:
+        model = OrdenProduccion
+        fields = [
+            "op_id", "folio_op", "estatus_op", "estatus_op_display",
+            "prioridad", "fecha_inicio", "fecha_fin", "activo",
+            "pedido", "sucursal",
+        ]
+
 class OrdenProduccionSerializer(serializers.ModelSerializer):
     orden_produccion_detalle = OrdenProduccionDetalleSerializer(many=True)
+    estatus_op_display = serializers.CharField(source="get_estatus_op_display", read_only=True)
 
     class Meta:
         model = OrdenProduccion
