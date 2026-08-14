@@ -592,11 +592,11 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                     cantidad=cantidad,
                     rfid_mode=rfid_mode,
                 )
-            except ValidationError as exc:
+            except ValidationError:
                 return Response(
                     {
                         **empty,
-                        "error": exc.detail if hasattr(exc, "detail") else str(exc),
+                        "error": "Solicitud inválida. Verifica los datos enviados.",
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
