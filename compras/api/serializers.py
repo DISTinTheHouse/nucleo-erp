@@ -3,29 +3,63 @@ from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, Recepcion
 
 
 class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
+    # ``id`` permite casar cada renglón de la OC con el ``orden_compra_detalle``
+    # que referencian los renglones anidados en ``recepciones[].detalles[]``.
+    # ``producto`` es NOT NULL en el modelo, así que ``source=`` basta (mismo
+    # patrón que ``RecepcionDetalleResumenSerializer.producto_nombre``).
+    producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+
     class Meta:
         model = OrdenCompraDetalle
-        fields = ['producto_id', 'descripcion', 'cantidad', 'descuento', 'importe', 'piezas', 'precio']
+        fields = [
+            'id',
+            'producto_id',
+            'producto_nombre',
+            'descripcion',
+            'cantidad',
+            'descuento',
+            'importe',
+            'piezas',
+            'precio',
+        ]
 
 
 class OrdenCompraSerializer(serializers.ModelSerializer):
     estatus_label = serializers.SerializerMethodField()
     proveedor_nombre = serializers.SerializerMethodField()
     proveedor_correo = serializers.SerializerMethodField()
+    # Etiquetas legibles junto a las FKs, mismo patrón ``source=`` que
+    # ``RecepcionRelacionadaSerializer`` y que los serializers de producción.
+    # ``Empresa`` no tiene ``nombre``: su nombre humano es ``razon_social``.
+    # ``Moneda.simbolo`` y ``Pedido.folio`` son nullable, y ``pedido`` es además
+    # una FK opcional (``SET_NULL``): sin ``allow_null=True`` DRF omitiría el
+    # campo (``SkipField``) en vez de devolver ``null``.
+    empresa_nombre = serializers.CharField(source='empresa.razon_social', read_only=True)
+    sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
+    usuario_nombre = serializers.SerializerMethodField()
+    moneda_codigo = serializers.CharField(source='moneda.codigo_iso', read_only=True)
+    moneda_simbolo = serializers.CharField(source='moneda.simbolo', read_only=True, allow_null=True)
+    pedido_folio = serializers.CharField(source='pedido.folio', read_only=True, allow_null=True)
 
     class Meta:
         model = OrdenCompra
         fields = [
             'id',
             'empresa',
+            'empresa_nombre',
             'sucursal',
+            'sucursal_nombre',
             'proveedor',
             'proveedor_nombre',
             'proveedor_correo',
             'solicitud_compra',
             'moneda',
+            'moneda_codigo',
+            'moneda_simbolo',
             'usuario',
+            'usuario_nombre',
             'pedido',
+            'pedido_folio',
             'folio',
             'referencia',
             'fecha_oc',
@@ -66,6 +100,14 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
 
     def get_proveedor_correo(self, obj):
         return obj.proveedor.email if obj.proveedor_id else None
+
+    def get_usuario_nombre(self, obj):
+        # ``Usuario`` extiende ``AbstractUser`` y su ``__str__`` devuelve
+        # ``username``, que no es el identificador de login (se entra por email).
+        # Mismo fallback que en producción/wms/inventarios.
+        if obj.usuario:
+            return obj.usuario.get_full_name().strip() or obj.usuario.email
+        return None
 
     def to_internal_value(self, data):
         # Convert "0" or 0 to None for FK fields if they are optional

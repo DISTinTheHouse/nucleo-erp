@@ -1407,7 +1407,7 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
       label: string, folio: string, fecha: string | null, estatus: string | number | null }
     ```
 
-    - `movimiento_inventario` se arma via `recepcion_set.movimiento_inventario_set` (sin duplicados).
+    - `movimiento_inventario` se arma via `recepcion_set.movimientoinventario_set` (sin duplicados).
 - **Visibilidad de campos $$ (estatus/subtotal/impuestos/gran_total y $ en detalles)**:
   - Se envía todo intacto si `is_superuser` / `is_admin_empresa` o alguno de estos roles: `Mesa-de-Control`, `Ventas`, `Compras`, `Contabilidad`, `ContaVentas`, `ContaCompras`, `MesaControlYVentas`.
   - Cualquier otro rol (incl. WMS sin compras): se eliminan los keys $$ del response.

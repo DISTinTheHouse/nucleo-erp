@@ -42,7 +42,19 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset().select_related('proveedor', 'pedido', 'solicitud_compra')
+        # ``select_related`` cubre todas las FKs cuyo nombre legible resuelve
+        # ``OrdenCompraSerializer`` (empresa_nombre, sucursal_nombre,
+        # moneda_codigo/simbolo, usuario_nombre, pedido_folio). Aplica también al
+        # list porque esos campos viven en el serializer padre.
+        qs = super().get_queryset().select_related(
+            'proveedor',
+            'pedido',
+            'solicitud_compra',
+            'empresa',
+            'sucursal',
+            'moneda',
+            'usuario',
+        )
         empresa = getattr(user, "empresa", None)
         if empresa:
             qs = qs.filter(empresa=empresa)
@@ -66,27 +78,35 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                         ).order_by("id"),
                     ),
                     Prefetch(
-                        "movimiento_inventario_set",
+                        # ``MovimientoInventario.recepcion`` no declara
+                        # ``related_name``: el accessor inverso real es
+                        # ``movimientoinventario_set`` (sin guiones bajos).
+                        "movimientoinventario_set",
+                        # ``recepcion`` es obligatorio en el ``only``: es la
+                        # columna con la que el prefetch agrupa las filas por
+                        # recepción. Diferirla cuesta un SELECT por movimiento.
                         queryset=MovimientoInventario.objects.filter(activo=True).only(
-                            "pk", "fecha_movimiento"
+                            "pk", "fecha_movimiento", "recepcion"
                         ),
                     ),
                 )
                 .order_by("-fecha_recepcion", "-id")
             )
-            from compras.services.orden_compra_view_service import documentos_related_prefetch_args
-
             prefetch_list = [
-                'ordencompradetalle_set',
+                # ``select_related("producto")`` evita el N+1 que provocaría
+                # ``producto_nombre`` en cada renglón de ``detalles``.
+                # ``order_by("id")`` (igual que el Prefetch de
+                # ``recepciondetalle_set``) da un orden estable: el modelo no
+                # define ``Meta.ordering`` y ``update``/``onboarding`` borran y
+                # recrean los renglones, así que sin esto dos GET idénticos
+                # pueden devolverlos en distinto orden.
+                Prefetch(
+                    'ordencompradetalle_set',
+                    queryset=OrdenCompraDetalle.objects.select_related('producto').order_by('id'),
+                ),
                 Prefetch("recepcion_set", queryset=recepciones_qs),
                 "facturas_proveedores",
             ]
-            for path in documentos_related_prefetch_args():
-                if path in {"recepcion_set", "facturas_proveedores"}:
-                    continue
-                if path == "recepcion_set__movimiento_inventario_set":
-                    continue
-                prefetch_list.append(path)
             qs = qs.prefetch_related(*prefetch_list)
         # Listado más reciente primero; ``-id`` como desempate estable. Es el
         # orden de las órdenes de compra en sí: el ``order_by`` de arriba es del
