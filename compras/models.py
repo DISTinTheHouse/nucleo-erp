@@ -128,8 +128,6 @@ class OrdenCompra(StatusLifecycleModel):
     
     estatus = models.IntegerField(choices=EstatusOrdenCompra.choices, default=EstatusOrdenCompra.BORRADOR)
 
-    subtotal = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
-    descuento = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
     impuestos = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
     total = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
 

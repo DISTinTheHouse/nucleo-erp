@@ -199,10 +199,13 @@ def _iterar_candidatos(orden_compra, cfg):
 
     if attr == "_recepciones_a_movinv":
         seen_ids = set()
-        for recepcion in getattr(orden_compra, "recepcion_set", None) or []:
+        # ``recepcion_set`` es un RelatedManager: no es iterable sin ``.all()``
+        # (iterarlo directo lanza TypeError y tumba el retrieve completo).
+        recepcion_manager = getattr(orden_compra, "recepcion_set", None)
+        for recepcion in (recepcion_manager.all() if recepcion_manager is not None else []):
             if not getattr(recepcion, "activo", True):
                 continue
-            qs = getattr(recepcion, "movimiento_inventario_set", None)
+            qs = getattr(recepcion, "movimientoinventario_set", None)
             if qs is None:
                 continue
             try:
@@ -283,7 +286,7 @@ def documentos_related_prefetch_args():
     return [
         "facturas_proveedores",
         "recepcion_set",
-        "recepcion_set__movimiento_inventario_set",
+        "recepcion_set__movimientoinventario_set",
     ]
 
 
