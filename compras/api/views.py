@@ -42,7 +42,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset().select_related('proveedor')
+        qs = super().get_queryset().select_related('proveedor', 'pedido', 'solicitud_compra')
         empresa = getattr(user, "empresa", None)
         if empresa:
             qs = qs.filter(empresa=empresa)
@@ -64,14 +64,30 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                             "ubicacion",
                             "ubicacion__almacen",
                         ).order_by("id"),
-                    )
+                    ),
+                    Prefetch(
+                        "movimiento_inventario_set",
+                        queryset=MovimientoInventario.objects.filter(activo=True).only(
+                            "pk", "fecha_movimiento"
+                        ),
+                    ),
                 )
                 .order_by("-fecha_recepcion", "-id")
             )
-            qs = qs.prefetch_related(
+            from compras.services.orden_compra_view_service import documentos_related_prefetch_args
+
+            prefetch_list = [
                 'ordencompradetalle_set',
                 Prefetch("recepcion_set", queryset=recepciones_qs),
-            )
+                "facturas_proveedores",
+            ]
+            for path in documentos_related_prefetch_args():
+                if path in {"recepcion_set", "facturas_proveedores"}:
+                    continue
+                if path == "recepcion_set__movimiento_inventario_set":
+                    continue
+                prefetch_list.append(path)
+            qs = qs.prefetch_related(*prefetch_list)
         # Listado más reciente primero; ``-id`` como desempate estable. Es el
         # orden de las órdenes de compra en sí: el ``order_by`` de arriba es del
         # Prefetch de recepciones anidadas y solo aplica en ``retrieve``.
@@ -81,6 +97,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         if self.action == 'retrieve':
             return OrdenCompraRetrieveSerializer
         return OrdenCompraSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        from compras.services.orden_compra_view_service import filtrar_campos_contabilidad_orden_compra
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        data = filtrar_campos_contabilidad_orden_compra(serializer.data, request.user)
+        return Response(data)
 
     def _asignar_folio_oc(self, instance, empresa):
         serie_folio = SerieFolio.objects.filter(

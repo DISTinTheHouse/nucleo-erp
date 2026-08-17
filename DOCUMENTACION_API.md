@@ -1399,11 +1399,21 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 
 - **Endpoint**: `GET /api/v1/compras/ordenes/{id}/`
 - **Respuesta**:
-  - conserva el bloque `detalles` de la orden de compra
-  - agrega el bloque `recepciones` con todas las recepciones activas ligadas a esa `orden_compra`
-  - cada recepción incluye su información general y su `detalles`
+  - `detalles` (renglones de la OC) y `recepciones[]` anidadas completas (con su `detalles[]`) se conservan tal cual.
+  - **Nuevo** `pedido_vinculado: {id, folio} | null` — el FK `pedido` del modelo permite null.
+  - **Nuevo** `documentos[]` — lista plana de documentos ligados a la OC (para FE abrir modal por `tipo + id`). Shape:
+    ```ts
+    { id: number, tipo: "pedido" | "solicitud_compra" | "recepcion" | "factura_proveedor" | "movimiento_inventario",
+      label: string, folio: string, fecha: string | null, estatus: string | number | null }
+    ```
 
-**Respuesta (resumen)**
+    - `movimiento_inventario` se arma via `recepcion_set.movimiento_inventario_set` (sin duplicados).
+- **Visibilidad de campos $$ (estatus/subtotal/impuestos/gran_total y $ en detalles)**:
+  - Se envía todo intacto si `is_superuser` / `is_admin_empresa` o alguno de estos roles: `Mesa-de-Control`, `Ventas`, `Compras`, `Contabilidad`, `ContaVentas`, `ContaCompras`, `MesaControlYVentas`.
+  - Cualquier otro rol (incl. WMS sin compras): se eliminan los keys $$ del response.
+- Consumo FE: usa optional chaining `oc?.gran_total ?? 0` y `oc?.detalles?.[0]?.precio ?? 0` para no romper.
+
+**Respuesta (resumen de los campos nuevos)**
 
 ```json
 {
@@ -1411,50 +1421,51 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
   "folio": "OC-000112",
   "estatus": 4,
   "estatus_label": "Parcialmente recibida",
-  "detalles": [
+  "pedido_vinculado": { "id": 219, "folio": "PD-000219" },
+  "documentos": [
     {
-      "producto_id": 1,
-      "descripcion": "Tela gabardina",
-      "cantidad": 10,
-      "precio": "150.00",
-      "importe": "1500.00"
-    }
-  ],
-  "recepciones": [
+      "id": 219,
+      "tipo": "pedido",
+      "label": "Pedido",
+      "folio": "PD-000219",
+      "fecha": "2026-06-12T09:00:00+00:00",
+      "estatus": "En produccion"
+    },
+    {
+      "id": 44,
+      "tipo": "solicitud_compra",
+      "label": "Solicitud de Compra",
+      "folio": "44",
+      "fecha": null,
+      "estatus": null
+    },
     {
       "id": 35,
-      "tipo_origen": "OC",
+      "tipo": "recepcion",
+      "label": "Recepción",
       "folio": "RC-000035",
-      "remision": "REM-102",
-      "factura_referencia": "FAC-9001",
-      "fecha_recepcion": "2026-07-07T12:00:00Z",
-      "estatus": 2,
-      "estatus_label": "Recibida",
-      "sucursal": 1,
-      "sucursal_nombre": "Matriz",
-      "proveedor": 8,
-      "proveedor_nombre": "Proveedor Demo",
-      "almacen": 3,
-      "almacen_nombre": "Almacen General",
-      "transportista": null,
-      "transportista_nombre": null,
-      "observaciones": "Recepcion parcial",
-      "detalles": [
-        {
-          "id": 77,
-          "orden_compra_detalle": 25,
-          "producto": 1,
-          "producto_nombre": "Tela gabardina",
-          "producto_variante": null,
-          "ubicacion": 12,
-          "ubicacion_nombre": "Rack A1",
-          "lote": null,
-          "serie": null,
-          "cantidad_recibida": "4.0000"
-        }
-      ]
+      "fecha": "2026-07-07T12:00:00Z",
+      "estatus": "Recibida"
+    },
+    {
+      "id": 7,
+      "tipo": "factura_proveedor",
+      "label": "Factura Proveedor",
+      "folio": "F-PROV-9021",
+      "fecha": "2026-07-08",
+      "estatus": "Registrada"
+    },
+    {
+      "id": 5512,
+      "tipo": "movimiento_inventario",
+      "label": "Movimiento Inventario",
+      "folio": "5512",
+      "fecha": "2026-07-07T13:10:00Z",
+      "estatus": null
     }
-  ]
+  ],
+  "detalles": [],
+  "recepciones": []
 }
 ```
 

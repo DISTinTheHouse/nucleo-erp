@@ -153,9 +153,19 @@ class OrdenCompraRetrieveSerializer(OrdenCompraSerializer):
         read_only=True,
         source="recepcion_set",
     )
+    pedido_vinculado = serializers.SerializerMethodField()
+    documentos = serializers.SerializerMethodField()
+
+    def get_pedido_vinculado(self, obj):
+        from compras.services.orden_compra_view_service import armar_pedido_vinculado
+        return armar_pedido_vinculado(obj)
+
+    def get_documentos(self, obj):
+        from compras.services.orden_compra_view_service import listar_documentos_orden_compra
+        return listar_documentos_orden_compra(obj)
 
     class Meta(OrdenCompraSerializer.Meta):
-        fields = OrdenCompraSerializer.Meta.fields + ['detalles', 'recepciones']
+        fields = OrdenCompraSerializer.Meta.fields + ['detalles', 'recepciones', 'pedido_vinculado', 'documentos']
 
 
 class OrdenCompraOnboardingHeaderSerializer(serializers.Serializer):
