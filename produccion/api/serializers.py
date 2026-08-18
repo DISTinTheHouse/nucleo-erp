@@ -980,10 +980,12 @@ class BordadoAvancesSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSeria
     class Meta:
         model = BordadoAvances
         fields = '__all__'
-        # ``usuario`` queda escribible (client-supplied, flujo de supervisor
-        # en nombre de otro operador) pero validado contra la empresa de la
-        # orden padre en ``_OrdenPadreWriteOnceMixin.validate()``.
-        read_only_fields = ['activo']
+        # ``usuario`` es read_only: la autoría la inyecta siempre
+        # ``perform_create`` con ``request.user`` (ver ViewSet), así que exigirlo
+        # en el body sólo producía un 400 espurio. El chequeo usuario↔empresa del
+        # ``_OrdenPadreWriteOnceMixin`` queda inerte aquí (usuario nunca llega en
+        # ``attrs``) y es correcto: request.user siempre es de su propia empresa.
+        read_only_fields = ['activo', 'usuario']
 
     def get_orden_bordado_detalle_display(self, obj):
         det = getattr(obj, "orden_bordado_detalle", None)

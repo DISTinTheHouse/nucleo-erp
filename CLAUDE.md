@@ -35,7 +35,7 @@ docker compose up --build
 
 Note: `docker-compose.yml` defines **only** the `web` container — there is no bundled Postgres. It builds from the `Dockerfile`, reads config from a `.env` file, and expects a reachable DB (host Postgres or remote Supabase) per the env vars below.
 
-Test coverage is uneven — `produccion/tests.py` (58 tests), `ventas/tests.py` (7 tests), and `wms/tests.py` (25 tests) contain real tests; no other app has a `tests.py` file. (Grepping for `def test_func` elsewhere in the codebase will hit `UserPassesTestMixin` permission checks, not tests.) None of this runs in CI — the CI gate is still `manage.py check` + migration-drift check.
+Test coverage is uneven — only `produccion/tests.py`, `ventas/tests.py`, and `wms/tests.py` contain real tests; no other app has a `tests.py` file. (Grepping for `def test_func` elsewhere in the codebase will hit `UserPassesTestMixin` permission checks, not tests. In `produccion` the method count also understates the suite, since subclassed test cases re-run inherited tests — trust `manage.py test`, not the grep.) None of this runs in CI — the CI gate is still `manage.py check` + migration-drift check.
 
 ## Database & environments
 
