@@ -600,7 +600,15 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         avances = list(
             BordadoAvances.objects
             .filter(ob=orden, activo=True)
-            .select_related("usuario")
+            .select_related(
+                "usuario",
+                "orden_bordado_detalle",
+                "orden_bordado_detalle__producto",
+                "orden_bordado_detalle__talla",
+                "orden_bordado_detalle__color",
+                "pedido_detalle_talla",
+                "pedido_detalle_talla__talla",
+            )
             .order_by("-fecha", "-id")
         )
         serializer = self.get_serializer(
@@ -747,7 +755,23 @@ class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet)
     orden_padre_field = "ob"
 
     def perform_create(self, serializer):
-        serializer.save(usuario=self.request.user)
+        validated = dict(serializer.validated_data)
+        extra = {}
+        detalle = validated.get("orden_bordado_detalle")
+        if detalle is not None and validated.get("pedido_detalle_talla") is None:
+            pedido_detalle_id = getattr(detalle, "pedido_detalle_id", None)
+            talla_id = getattr(detalle, "talla_id", None)
+            if pedido_detalle_id is not None and talla_id is not None:
+                from ventas.models import PedidoDetalleTalla
+                pdt = (
+                    PedidoDetalleTalla.objects
+                    .filter(pedido_detalle_id=pedido_detalle_id, talla_id=talla_id)
+                    .only("id")
+                    .first()
+                )
+                if pdt is not None:
+                    extra["pedido_detalle_talla"] = pdt
+        serializer.save(usuario=self.request.user, **extra)
 
     def perform_destroy(self, instance):
         instance.soft_delete()

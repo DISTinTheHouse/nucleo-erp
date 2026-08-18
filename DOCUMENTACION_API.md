@@ -2161,7 +2161,10 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
   "cantidad_contratada": 100,
   "cobertura_completa": false,
 
-  "detalles": [],
+  "detalles": [
+    {"id": 101, "pedido_detalle_id": 3301, "producto_nombre": "Playera", "talla_nombre": "M", "color_nombre": "Negro", "cantidad": 40, "puntadas": 8000, "posicion_bordado": "F"},
+    {"id": 102, "pedido_detalle_id": 3301, "producto_nombre": "Playera", "talla_nombre": "L", "color_nombre": "Negro", "cantidad": 20, "puntadas": 8000, "posicion_bordado": "F"}
+  ],
 
   "avances": [
     {
@@ -2169,18 +2172,81 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
       "fecha": "2026-08-18T09:15:00Z",
       "usuario": 4,
       "usuario_nombre": "María Gómez",
-      "cantidad_bordada": 30,
-      "puntadas_realizadas": 160000,
+      "orden_bordado_detalle": 101,
+      "orden_bordado_detalle_display": {"id": 101, "producto_nombre": "Playera", "talla_nombre": "M", "color_nombre": "Negro", "cantidad_programada": 40, "posicion_bordado": "F"},
+      "pedido_detalle_talla": 8821,
+      "pedido_detalle_talla_display": {"id": 8821, "pedido_detalle_id": 3301, "talla_nombre": "M", "cantidad_pedido": 100},
+      "cantidad_bordada": 25,
+      "puntadas_realizadas": 200000,
       "comentario": "Turno matutino"
+    },
+    {
+      "id": 2,
+      "fecha": "2026-08-18T14:35:00Z",
+      "usuario": 7,
+      "usuario_nombre": "Luis Rodríguez",
+      "orden_bordado_detalle": 101,
+      "orden_bordado_detalle_display": {"id": 101, "producto_nombre": "Playera", "talla_nombre": "M", "color_nombre": "Negro", "cantidad_programada": 40, "posicion_bordado": "F"},
+      "pedido_detalle_talla": 8821,
+      "pedido_detalle_talla_display": {"id": 8821, "pedido_detalle_id": 3301, "talla_nombre": "M", "cantidad_pedido": 100},
+      "cantidad_bordada": 15,
+      "puntadas_realizadas": 120000,
+      "comentario": "Terminé la talla M — vengo de la Playera talla CH"
+    },
+    {
+      "id": 3,
+      "fecha": "2026-08-18T15:10:00Z",
+      "usuario": 4,
+      "usuario_nombre": "María Gómez",
+      "orden_bordado_detalle": 102,
+      "orden_bordado_detalle_display": {"id": 102, "producto_nombre": "Playera", "talla_nombre": "L", "color_nombre": "Negro", "cantidad_programada": 20, "posicion_bordado": "F"},
+      "pedido_detalle_talla": 8822,
+      "pedido_detalle_talla_display": {"id": 8822, "pedido_detalle_id": 3301, "talla_nombre": "L", "cantidad_pedido": 50},
+      "cantidad_bordada": 8,
+      "puntadas_realizadas": 64000,
+      "comentario": "Empiezo talla L"
     }
   ],
 
   "resumen_avance": {
     "cantidad_programada": 60,
-    "cantidad_bordada_total": 30,
-    "puntadas_presupuesto": 360000,
-    "puntadas_realizadas": 160000,
-    "porcentaje_avance": 50.0
+    "cantidad_bordada_total": 48,
+    "puntadas_presupuesto": 480000,
+    "puntadas_realizadas": 384000,
+    "porcentaje_avance": 80.0,
+    "por_detalle": [
+      {
+        "orden_bordado_detalle_id": 101,
+        "producto_nombre": "Playera",
+        "talla_nombre": "M",
+        "color_nombre": "Negro",
+        "posicion_bordado": "F",
+        "cantidad_programada": 40,
+        "puntadas_presupuesto": 320000,
+        "cantidad_bordada": 40,
+        "puntadas_realizadas": 320000,
+        "porcentaje_avance": 100.0,
+        "operadores": [
+          {"usuario_id": 4, "usuario_nombre": "María Gómez", "cantidad_bordada": 25, "puntadas_realizadas": 200000},
+          {"usuario_id": 7, "usuario_nombre": "Luis Rodríguez", "cantidad_bordada": 15, "puntadas_realizadas": 120000}
+        ]
+      },
+      {
+        "orden_bordado_detalle_id": 102,
+        "producto_nombre": "Playera",
+        "talla_nombre": "L",
+        "color_nombre": "Negro",
+        "posicion_bordado": "F",
+        "cantidad_programada": 20,
+        "puntadas_presupuesto": 160000,
+        "cantidad_bordada": 8,
+        "puntadas_realizadas": 64000,
+        "porcentaje_avance": 40.0,
+        "operadores": [
+          {"usuario_id": 4, "usuario_nombre": "María Gómez", "cantidad_bordada": 8, "puntadas_realizadas": 64000}
+        ]
+      }
+    ]
   },
 
   "otras_ordenes_del_pedido": [],
@@ -2189,13 +2255,17 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
 }
 ```
 
-| Campo                           | Tipo     | Fuente / Regla                                                                                                         |
-| ------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `maquina_asignada`              | str/null | Campo editable. **Texto libre**: el operador escribe "M1", "Máquina 2", "Barudan 1", etc. (sin catálogo hoy).          |
-| `avances[]`                     | array    | Historial de producción por OB. Lo llena `POST /produccion/bordado-avances/`. Orden: `fecha` DESC.                     |
-| `avances[].usuario`             | int      | FK al operador. **NO editable desde frontend**: backend siempre usa el `request.user` que envió el POST.               |
-| `avances[].puntadas_realizadas` | int      | Puntadas REALES de esta tanda. Distinto de `detalles[].puntadas` = presupuesto estimado por línea.                     |
-| `resumen_avance.*`              | object   | Sumatorias precomputadas por el serializer: no tienes que calcularlas en el frontend. Si no hay avances retorna ceros. |
+| Campo                                              | Tipo      | Fuente / Regla                                                                                                                                                                                                                                                            |
+| -------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maquina_asignada`                                 | str/null  | Campo editable. **Texto libre**: el operador escribe "M1", "Máquina 2", "Barudan 1", etc. (sin catálogo hoy).                                                                                                                                                             |
+| `avances[]`                                        | array     | Historial de producción por OB. Lo llena `POST /produccion/bordado-avances/`. Orden: `fecha` DESC.                                                                                                                                                                        |
+| `avances[].usuario`                                | int       | FK al operador. **NO editable desde frontend**: backend siempre usa el `request.user` que envió el POST.                                                                                                                                                                  |
+| `avances[].orden_bordado_detalle`                  | int/null  | FK al renglón concreto de la OB (la talla/SKU de esta tanda de producción). **Recomendado siempre mandarlo** desde el selector del frontend.                                                                                                                               |
+| `avances[].orden_bordado_detalle_display`          | object    | Label listo para pintar en chip: producto, talla, color, cantidad programada, posición. NULL si el registro es viejo (antes del ajuste por talla).                                                                                                                         |
+| `avances[].pedido_detalle_talla`                   | int/null  | FK al `PedidoDetalleTalla`. **Backend lo autocompleta** si mandaste `orden_bordado_detalle_id` (no tienes que buscarlo tú en Ventas).                                                                                                                                     |
+| `avances[].puntadas_realizadas`                    | int       | Puntadas REALES de esta tanda. Distinto de `detalles[].puntadas` = presupuesto estimado por línea.                                                                                                                                                                         |
+| `resumen_avance.por_detalle[]`                     | array     | ⭐ **NUEVO**. Agrupación por cada renglón de la OB: cuánto va, cuánto presupuesto original, % y **quién trabajó ese SKU** (lista de operadores con su aporte). Sirve para pintar el grid "Avance por talla" sin más endpoints.                                              |
+| `resumen_avance.por_detalle[].operadores[]`        | array     | Suma de `cantidad_bordada` + `puntadas_realizadas` agrupado por `usuario_id` para ESE renglón concreto. Ejemplo útil: "María 25pz + Luis 15pz = 40pz talla M = 100%".                                                                                                   |
 
 **Editar encabezado de OB — `PATCH /api/v1/produccion/orden-bordado/{id}/`**
 
@@ -2215,21 +2285,41 @@ Body mínimo (solo los campos que quieras cambiar; los omitidos se dejan igual):
 - `usuario_asignado`: FK a usuario (jefe reasigna a alguien). Nulo permitido.
 - Campos que SIGUEN read-only y se ignoran si los mandas: `folio_bordado`, `empresa`, `sucursal`, `activo`.
 
-**Registrar producción — `POST /api/v1/produccion/bordado-avances/`**
+**Registrar producción — `POST /api/v1/produccion/bordado-avances/` (AHORA POR TALLA/SKU)**
 
+**Opción recomendada (frontend manda el renglón exacto de la OB):**
 ```json
 {
   "ob": 42,
+  "orden_bordado_detalle": 101,
   "cantidad_bordada": 20,
   "puntadas_realizadas": 165000,
-  "comentario": "Turno vespertino — sigo con la talla L"
+  "comentario": "Turno vespertino — sigo con la talla M"
 }
 ```
+> Con sólo mandar `orden_bordado_detalle` el backend:
+> - ✅ Valida que ese renglón pertenece a la `ob` (si no, 400 `orden_bordado_detalle` no pertenece).
+> - ✅ Autocompleta `pedido_detalle_talla` cruzando `pedido_detalle_id + talla_id` del renglón (no tienes que buscarlo tú).
+> - ✅ Asigna `usuario = request.user` (ignora el valor aunque lo mandaras).
 
-- **NUNCA mandar `usuario` en el body**: el backend siempre sobreescribe con `request.user`. Si lo mandas se ignora.
-- El endpoint **no valida** que `cantidad_bordada <= cantidad programada` (acepta sobreproducción por correcciones).
-- `puntadas_realizadas = 0` es permitido si todavía no la máquina no reportó el contador.
-- Para cancelar un registro mal hecho: `DELETE /produccion/bordado-avances/{id}/` (soft delete, no sale más en `avances[]`).
+**Opción legacy (compatibilidad, registros sin detalle):**
+```json
+{
+  "ob": 42,
+  "cantidad_bordada": 12,
+  "puntadas_realizadas": 99000,
+  "comentario": "Producción sin detalle específico"
+}
+```
+- Si `orden_bordado_detalle = null`, en el resumen se agrupa en el renglón "Sin talla/SKU asignado (registro antiguo)" — la suma no se pierde pero no puede atribuirse a una talla.
+
+**Reglas del avance por detalle-talla:**
+- **Varios operadores = misma talla/SKU OK**. María POST 25pz talla M, luego Luis POST 15pz talla M: ambos usan el mismo `orden_bordado_detalle=101`; en `resumen_avance.por_detalle[].operadores` aparecen ambos agrupados y el renglón suma 100% cuando completan.
+- `cantidad_bordada` no se valida contra la programada (acepta sobreproducción por errores/correcciones/rework).
+- `puntadas_realizadas = 0` es permitido si aún no se lee el contador de la máquina.
+- **Para corregir un registro mal capturado**: `DELETE /produccion/bordado-avances/{id}/` (soft delete — desaparece de `avances[]` y de sumatorias).
+- **Campos write-once inmutables en update**: `orden_bordado_detalle` y `pedido_detalle_talla`. Si haces PATCH a un avance intentando reasignarlo a otra talla, el backend los descarta (no se puede mover producción de un SKU a otro retroactivamente).
+
 
 **Control anti-duplicado (HTTP 409 Conflict)**
 

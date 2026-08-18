@@ -578,6 +578,8 @@ class OrdenBordadoHermanaSerializer(serializers.Serializer):
 
 class _OrdenBordadoAvanceReadSerializer(serializers.ModelSerializer):
     usuario_nombre = serializers.SerializerMethodField()
+    orden_bordado_detalle_display = serializers.SerializerMethodField()
+    pedido_detalle_talla_display = serializers.SerializerMethodField()
 
     class Meta:
         model = BordadoAvances
@@ -586,6 +588,10 @@ class _OrdenBordadoAvanceReadSerializer(serializers.ModelSerializer):
             "fecha",
             "usuario",
             "usuario_nombre",
+            "orden_bordado_detalle",
+            "orden_bordado_detalle_display",
+            "pedido_detalle_talla",
+            "pedido_detalle_talla_display",
             "cantidad_bordada",
             "puntadas_realizadas",
             "comentario",
@@ -597,6 +603,38 @@ class _OrdenBordadoAvanceReadSerializer(serializers.ModelSerializer):
         if not usuario:
             return None
         return usuario.get_full_name().strip() or getattr(usuario, "email", None)
+
+    def get_orden_bordado_detalle_display(self, obj):
+        det = getattr(obj, "orden_bordado_detalle", None)
+        if not det:
+            return None
+        producto = getattr(det, "producto", None)
+        talla = getattr(det, "talla", None)
+        color = getattr(det, "color", None)
+        return {
+            "id": det.pk,
+            "producto_id": getattr(det, "producto_id", None),
+            "producto_nombre": getattr(producto, "nombre", None),
+            "talla_id": getattr(det, "talla_id", None),
+            "talla_nombre": getattr(talla, "nombre", None) if talla else None,
+            "color_id": getattr(det, "color_id", None),
+            "color_nombre": getattr(color, "nombre", None) if color else None,
+            "cantidad_programada": getattr(det, "cantidad", None),
+            "posicion_bordado": getattr(det, "posicion_bordado", None),
+        }
+
+    def get_pedido_detalle_talla_display(self, obj):
+        pdt = getattr(obj, "pedido_detalle_talla", None)
+        if not pdt:
+            return None
+        talla = getattr(pdt, "talla", None)
+        return {
+            "id": pdt.pk,
+            "pedido_detalle_id": getattr(pdt, "pedido_detalle_id", None),
+            "talla_id": getattr(pdt, "talla_id", None),
+            "talla_nombre": getattr(talla, "nombre", None) if talla else None,
+            "cantidad_pedido": getattr(pdt, "cantidad", None),
+        }
 
 
 class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
@@ -663,14 +701,60 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
 
     def get_resumen_avance(self, obj):
         avances = self.context.get("avances") or []
+
+        detalles = getattr(obj, "detalles", None)
+        if detalles is None:
+            detalles_qs = (
+                OrdenBordadoDetalle.objects
+                .filter(ob_id=obj.pk)
+                .only("id", "cantidad", "puntadas", "producto_id", "talla_id", "color_id",
+                      "pedido_detalle_id", "posicion_bordado")
+                .select_related("producto", "talla", "color")
+            )
+        else:
+            try:
+                detalles_qs = list(detalles.all())
+            except Exception:
+                detalles_qs = list(detalles)
+
+        cantidad_programada = sum(
+            float(getattr(d, "cantidad", 0) or 0) for d in detalles_qs
+        )
+        puntadas_presupuesto = sum(
+            int(getattr(d, "puntadas", 0) or 0) for d in detalles_qs
+        )
+
         if not avances:
+            por_detalle = []
+            for d in detalles_qs:
+                producto = getattr(d, "producto", None)
+                talla = getattr(d, "talla", None)
+                color = getattr(d, "color", None)
+                por_detalle.append({
+                    "orden_bordado_detalle_id": d.pk,
+                    "producto_id": getattr(d, "producto_id", None),
+                    "producto_nombre": getattr(producto, "nombre", None),
+                    "talla_id": getattr(d, "talla_id", None),
+                    "talla_nombre": getattr(talla, "nombre", None) if talla else None,
+                    "color_id": getattr(d, "color_id", None),
+                    "color_nombre": getattr(color, "nombre", None) if color else None,
+                    "posicion_bordado": getattr(d, "posicion_bordado", None),
+                    "cantidad_programada": float(getattr(d, "cantidad", 0) or 0),
+                    "puntadas_presupuesto": int(getattr(d, "puntadas", 0) or 0),
+                    "cantidad_bordada": 0.0,
+                    "puntadas_realizadas": 0,
+                    "porcentaje_avance": 0.0,
+                    "operadores": [],
+                })
             return {
-                "cantidad_programada": float(self.context.get("_programada", 0) or 0),
+                "cantidad_programada": cantidad_programada,
                 "cantidad_bordada_total": 0.0,
-                "puntadas_presupuesto": 0,
+                "puntadas_presupuesto": puntadas_presupuesto,
                 "puntadas_realizadas": 0,
                 "porcentaje_avance": 0.0,
+                "por_detalle": por_detalle,
             }
+
         cantidad_bordada = sum(
             float(getattr(a, "cantidad_bordada", 0) or 0) for a in avances
         )
@@ -678,35 +762,101 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
             int(getattr(a, "puntadas_realizadas", 0) or 0) for a in avances
         )
 
-        detalles = getattr(obj, "detalles", None)
-        if detalles is None:
-            detalles = (
-                OrdenBordadoDetalle.objects
-                .filter(ob_id=obj.pk)
-                .only("cantidad", "puntadas")
-            )
-        else:
-            try:
-                detalles = list(detalles.all())
-            except Exception:
-                pass
-
-        cantidad_programada = sum(
-            float(getattr(d, "cantidad", 0) or 0) for d in detalles
-        )
-        puntadas_presupuesto = sum(
-            int(getattr(d, "puntadas", 0) or 0) for d in detalles
-        )
-
         pct = 0.0
         if cantidad_programada > 0:
             pct = round((cantidad_bordada / cantidad_programada) * 100.0, 2)
+
+        agrupado = {}
+        for a in avances:
+            key = getattr(a, "orden_bordado_detalle_id", None)
+            bucket = agrupado.setdefault(key, {
+                "cantidad_bordada": 0.0,
+                "puntadas_realizadas": 0,
+                "operadores": {},
+            })
+            qty = float(getattr(a, "cantidad_bordada", 0) or 0)
+            pts = int(getattr(a, "puntadas_realizadas", 0) or 0)
+            bucket["cantidad_bordada"] += qty
+            bucket["puntadas_realizadas"] += pts
+            usr = getattr(a, "usuario", None)
+            uid = getattr(usr, "pk", None) if usr else None
+            if uid is not None:
+                if uid not in bucket["operadores"]:
+                    nombre = (
+                        getattr(usr, "get_full_name", lambda: "")().strip()
+                        or getattr(usr, "email", "")
+                    )
+                    bucket["operadores"][uid] = {
+                        "usuario_id": uid,
+                        "usuario_nombre": nombre,
+                        "cantidad_bordada": 0.0,
+                        "puntadas_realizadas": 0,
+                    }
+                bucket["operadores"][uid]["cantidad_bordada"] += qty
+                bucket["operadores"][uid]["puntadas_realizadas"] += pts
+
+        por_detalle = []
+        for d in detalles_qs:
+            key = d.pk
+            bucket = agrupado.get(key, {
+                "cantidad_bordada": 0.0,
+                "puntadas_realizadas": 0,
+                "operadores": {},
+            })
+            programa = float(getattr(d, "cantidad", 0) or 0)
+            porc = 0.0
+            if programa > 0:
+                porc = round((bucket["cantidad_bordada"] / programa) * 100.0, 2)
+            producto = getattr(d, "producto", None)
+            talla = getattr(d, "talla", None)
+            color = getattr(d, "color", None)
+            por_detalle.append({
+                "orden_bordado_detalle_id": d.pk,
+                "producto_id": getattr(d, "producto_id", None),
+                "producto_nombre": getattr(producto, "nombre", None),
+                "talla_id": getattr(d, "talla_id", None),
+                "talla_nombre": getattr(talla, "nombre", None) if talla else None,
+                "color_id": getattr(d, "color_id", None),
+                "color_nombre": getattr(color, "nombre", None) if color else None,
+                "posicion_bordado": getattr(d, "posicion_bordado", None),
+                "cantidad_programada": programa,
+                "puntadas_presupuesto": int(getattr(d, "puntadas", 0) or 0),
+                "cantidad_bordada": bucket["cantidad_bordada"],
+                "puntadas_realizadas": bucket["puntadas_realizadas"],
+                "porcentaje_avance": porc,
+                "operadores": list(bucket["operadores"].values()),
+            })
+
+        avance_sin_detalle = agrupado.get(None, None)
+        if avance_sin_detalle and (
+            avance_sin_detalle["cantidad_bordada"] or avance_sin_detalle["puntadas_realizadas"]
+        ):
+            programa = 0.0
+            porc = 0.0
+            por_detalle.append({
+                "orden_bordado_detalle_id": None,
+                "producto_id": None,
+                "producto_nombre": "Sin talla/SKU asignado (registro antiguo)",
+                "talla_id": None,
+                "talla_nombre": None,
+                "color_id": None,
+                "color_nombre": None,
+                "posicion_bordado": None,
+                "cantidad_programada": programa,
+                "puntadas_presupuesto": 0,
+                "cantidad_bordada": avance_sin_detalle["cantidad_bordada"],
+                "puntadas_realizadas": avance_sin_detalle["puntadas_realizadas"],
+                "porcentaje_avance": porc,
+                "operadores": list(avance_sin_detalle["operadores"].values()),
+            })
+
         return {
             "cantidad_programada": cantidad_programada,
             "cantidad_bordada_total": cantidad_bordada,
             "puntadas_presupuesto": puntadas_presupuesto,
             "puntadas_realizadas": puntadas_realizadas,
             "porcentaje_avance": pct,
+            "por_detalle": por_detalle,
         }
 
 
@@ -824,6 +974,9 @@ class _OrdenPadreWriteOnceMixin:
 class BordadoAvancesSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSerializer):
     orden_padre_field = 'ob'
 
+    orden_bordado_detalle_display = serializers.SerializerMethodField()
+    pedido_detalle_talla_display = serializers.SerializerMethodField()
+
     class Meta:
         model = BordadoAvances
         fields = '__all__'
@@ -831,6 +984,90 @@ class BordadoAvancesSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSeria
         # en nombre de otro operador) pero validado contra la empresa de la
         # orden padre en ``_OrdenPadreWriteOnceMixin.validate()``.
         read_only_fields = ['activo']
+
+    def get_orden_bordado_detalle_display(self, obj):
+        det = getattr(obj, "orden_bordado_detalle", None)
+        if not det:
+            return None
+        producto = getattr(det, "producto", None)
+        talla = getattr(det, "talla", None)
+        color = getattr(det, "color", None)
+        return {
+            "id": det.pk,
+            "producto_id": getattr(det, "producto_id", None),
+            "producto_nombre": getattr(producto, "nombre", None),
+            "talla_id": getattr(det, "talla_id", None),
+            "talla_nombre": getattr(talla, "nombre", None) if talla else None,
+            "color_id": getattr(det, "color_id", None),
+            "color_nombre": getattr(color, "nombre", None) if color else None,
+            "cantidad_programada": getattr(det, "cantidad", None),
+            "posicion_bordado": getattr(det, "posicion_bordado", None),
+        }
+
+    def get_pedido_detalle_talla_display(self, obj):
+        pdt = getattr(obj, "pedido_detalle_talla", None)
+        if not pdt:
+            return None
+        talla = getattr(pdt, "talla", None)
+        return {
+            "id": pdt.pk,
+            "pedido_detalle_id": getattr(pdt, "pedido_detalle_id", None),
+            "talla_id": getattr(pdt, "talla_id", None),
+            "talla_nombre": getattr(talla, "nombre", None) if talla else None,
+            "cantidad_pedido": getattr(pdt, "cantidad", None),
+        }
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+
+        ob_id = None
+        if self.instance is None:
+            ob = attrs.get(self.orden_padre_field)
+            if ob is not None:
+                ob_id = ob.pk
+        else:
+            ob_instancia = getattr(self.instance, self.orden_padre_field, None)
+            if ob_instancia is not None:
+                ob_id = ob_instancia.pk
+
+        detalle = attrs.get("orden_bordado_detalle")
+        if detalle is not None and ob_id is not None:
+            if int(detalle.ob_id) != int(ob_id):
+                raise serializers.ValidationError({
+                    "orden_bordado_detalle": (
+                        "Este detalle-talla no pertenece a la orden de bordado seleccionada."
+                    )
+                })
+
+        pdt = attrs.get("pedido_detalle_talla")
+        if pdt is not None and detalle is not None:
+            if (
+                getattr(pdt, "pedido_detalle_id", None) is not None
+                and getattr(detalle, "pedido_detalle_id", None) is not None
+                and int(pdt.pedido_detalle_id) != int(detalle.pedido_detalle_id)
+            ):
+                raise serializers.ValidationError({
+                    "pedido_detalle_talla": (
+                        "El PedidoDetalleTalla no coincide con el pedido_detalle del renglón de la OB."
+                    )
+                })
+            if (
+                getattr(pdt, "talla_id", None) is not None
+                and getattr(detalle, "talla_id", None) is not None
+                and int(pdt.talla_id) != int(detalle.talla_id)
+            ):
+                raise serializers.ValidationError({
+                    "pedido_detalle_talla": (
+                        "La talla del PedidoDetalleTalla no coincide con la talla del renglón de la OB."
+                    )
+                })
+
+        return attrs
+
+    def update(self, instance, validated_data):
+        validated_data.pop("orden_bordado_detalle", None)
+        validated_data.pop("pedido_detalle_talla", None)
+        return super().update(instance, validated_data)
 
 class BordadoIncidenciasSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSerializer):
     orden_padre_field = 'ob'

@@ -220,6 +220,18 @@ class OrdenBordadoDetalle(models.Model):
     
 class BordadoAvances(StatusLifecycleModel):
     ob = models.ForeignKey(OrdenesBordado, on_delete=models.CASCADE)
+    orden_bordado_detalle = models.ForeignKey(
+        OrdenBordadoDetalle,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    pedido_detalle_talla = models.ForeignKey(
+        "ventas.PedidoDetalleTalla",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
     fecha = models.DateTimeField(auto_now_add=True)
     cantidad_bordada = models.FloatField()
     usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE)
