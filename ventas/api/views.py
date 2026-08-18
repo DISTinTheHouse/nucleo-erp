@@ -980,11 +980,16 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             "sat_uso_cfdi__descripcion",
         )
 
-        productos_qs = productos_qs.order_by("id").values(
-            "id",
-            "nombre",
-            "descripcion",
-            "precio_base",
+        productos_qs = (
+            productos_qs.filter(variantes__activo=True)
+            .distinct()
+            .order_by("id")
+            .values(
+                "id",
+                "nombre",
+                "descripcion",
+                "precio_base",
+            )
         )
 
         if limit is not None:
