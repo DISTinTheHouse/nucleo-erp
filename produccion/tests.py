@@ -462,6 +462,11 @@ SATELITES = (
         "fk": "ob",
         "extra": {"cantidad_bordada": 5},
         "patch": {"comentario": "tocado"},
+        # A diferencia del resto de satélites, ``BordadoAvancesViewSet``
+        # fuerza ``usuario=request.user`` en ``perform_create`` y el serializer
+        # lo declara read_only: la autoría NO es client-supplied. El flujo
+        # "supervisor en nombre de otro operador" no aplica a este endpoint.
+        "usuario_read_only": True,
     },
     {
         "nombre": "bordado-incidencias",
@@ -897,12 +902,25 @@ class SatelitesUsuarioTenantTests(TestCase):
                     **cfg["extra"],
                 }
                 resp = client.post(cfg["url"], body, format="json")
+                if cfg.get("usuario_read_only"):
+                    # ``usuario`` read_only: el valor del cliente se ignora en
+                    # vez de rechazarse. El registro se crea a nombre del
+                    # solicitante (request.user), nunca del operador ajeno, así
+                    # que el cross-tenant queda cerrado por construcción.
+                    self.assertEqual(resp.status_code, 201, resp.content)
+                    creado = cfg["modelo"].objects.get(pk=resp.json()["id"])
+                    self.assertEqual(creado.usuario_id, self.solicitante.pk)
+                    creado.delete()
+                    continue
                 self.assertEqual(resp.status_code, 400, resp.content)
                 self.assertIn("usuario", resp.json())
                 self.assertEqual(cfg["modelo"].objects.count(), 0)
 
     def test_create_acepta_usuario_de_la_misma_empresa_distinto_al_solicitante(self):
-        """No regresión: supervisor-en-nombre-de-otro-operador sigue funcionando."""
+        """No regresión: supervisor-en-nombre-de-otro-operador sigue funcionando
+        para los satélites con autoría client-supplied. En bordado-avances la
+        autoría la fuerza el ViewSet (usuario read_only), así que el operador
+        indicado se ignora y queda el solicitante."""
         client = self._client()
         for cfg in SATELITES:
             with self.subTest(cfg["nombre"]):
@@ -914,7 +932,12 @@ class SatelitesUsuarioTenantTests(TestCase):
                 resp = client.post(cfg["url"], body, format="json")
                 self.assertEqual(resp.status_code, 201, resp.content)
                 creado = cfg["modelo"].objects.get(pk=resp.json()["id"])
-                self.assertEqual(creado.usuario_id, self.operador_mismo_tenant.pk)
+                esperado = (
+                    self.solicitante.pk
+                    if cfg.get("usuario_read_only")
+                    else self.operador_mismo_tenant.pk
+                )
+                self.assertEqual(creado.usuario_id, esperado)
                 creado.delete()
 
     def test_patch_rechaza_reasignar_a_usuario_de_otra_empresa(self):
@@ -929,8 +952,13 @@ class SatelitesUsuarioTenantTests(TestCase):
                     {"usuario": self.operador_otro_tenant.pk},
                     format="json",
                 )
-                self.assertEqual(resp.status_code, 400, resp.content)
-                self.assertIn("usuario", resp.json())
+                if cfg.get("usuario_read_only"):
+                    # read_only: el PATCH ignora ``usuario`` en vez de
+                    # rechazarlo; no hay 400 y la autoría no cambia.
+                    self.assertEqual(resp.status_code, 200, resp.content)
+                else:
+                    self.assertEqual(resp.status_code, 400, resp.content)
+                    self.assertIn("usuario", resp.json())
                 reg.refresh_from_db()
                 self.assertNotEqual(reg.usuario_id, self.operador_otro_tenant.pk)
 
@@ -946,7 +974,12 @@ class SatelitesUsuarioTenantTests(TestCase):
                 )
                 self.assertEqual(resp.status_code, 200, resp.content)
                 reg.refresh_from_db()
-                self.assertEqual(reg.usuario_id, self.operador_mismo_tenant.pk)
+                if cfg.get("usuario_read_only"):
+                    # read_only: la reasignación se ignora; la autoría queda en
+                    # el solicitante con que ``_crear`` levantó el registro.
+                    self.assertEqual(reg.usuario_id, self.solicitante.pk)
+                else:
+                    self.assertEqual(reg.usuario_id, self.operador_mismo_tenant.pk)
 
 
 class SatelitesOrdenPadreTenantTests(TestCase):
