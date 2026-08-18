@@ -179,6 +179,7 @@ class OrdenesBordado(StatusLifecycleModel):
     usuario_asignado = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE, null=True, blank=True)
     observaciones = models.TextField(blank=True, null=True)
     activo = models.BooleanField(default=True)
+    maquina_asignada = models.CharField(max_length=100, null=True, blank=True)
 
     class Meta:
         db_table = 'orden_bordado'
@@ -223,6 +224,7 @@ class BordadoAvances(StatusLifecycleModel):
     cantidad_bordada = models.FloatField()
     usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE)
     comentario = models.TextField(blank=True, null=True)
+    puntadas_realizadas = models.IntegerField(default=0)
     activo = models.BooleanField(default=True)
 
     class Meta:

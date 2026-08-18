@@ -473,9 +473,20 @@ class ProductoTerminadoEntradasViewSet(viewsets.ModelViewSet):
     def anular(self, request, pk=None):
         return Response({'msg': 'ProductoTerminadoEntradasViewSet.anular'}, status=status.HTTP_200_OK)
 
-class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, GenericViewSet):
+class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, mixins.DestroyModelMixin, GenericViewSet):
     queryset = OrdenesBordado.objects.filter()
     serializer_class = OrdenBordadoSerializer
+
+    def get_serializer_class(self):
+        action = getattr(self, "action", None)
+        if action == "list":
+            return OrdenBordadoListSerializer
+        if action == "retrieve":
+            return OrdenBordadoRetrieveSerializer
+        return OrdenBordadoSerializer
+
+    def perform_destroy(self, instance):
+        instance.soft_delete()
 
     def get_queryset(self):
         """Aislamiento multi-tenant: empresa + sucursal.
@@ -586,6 +597,12 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         por_linea, por_detalle, hermanas, aproximado = (
             OrdenBordadoService.partialidad_de_orden(orden)
         )
+        avances = list(
+            BordadoAvances.objects
+            .filter(ob=orden, activo=True)
+            .select_related("usuario")
+            .order_by("-fecha", "-id")
+        )
         serializer = self.get_serializer(
             orden,
             context={
@@ -595,6 +612,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 "partialidad_por_detalle": por_detalle,
                 "hermanas": hermanas,
                 "reparto_aproximado": aproximado,
+                "avances": avances,
             },
         )
         return Response(serializer.data)
@@ -727,6 +745,9 @@ class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet)
     queryset = BordadoAvances.objects.filter(activo=True)
     serializer_class = BordadoAvancesSerializer
     orden_padre_field = "ob"
+
+    def perform_create(self, serializer):
+        serializer.save(usuario=self.request.user)
 
     def perform_destroy(self, instance):
         instance.soft_delete()

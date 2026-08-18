@@ -1402,12 +1402,14 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
   - `detalles` (renglones de la OC) y `recepciones[]` anidadas completas (con su `detalles[]`) se conservan tal cual.
   - **Nuevo** `pedido_vinculado: {id, folio} | null` — el FK `pedido` del modelo permite null.
   - **Nuevo** `documentos[]` — lista plana de documentos ligados a la OC (para FE abrir modal por `tipo + id`). Shape:
+
     ```ts
     { id: number, tipo: "pedido" | "solicitud_compra" | "recepcion" | "factura_proveedor" | "movimiento_inventario",
       label: string, folio: string, fecha: string | null, estatus: string | number | null }
     ```
 
     - `movimiento_inventario` se arma via `recepcion_set.movimientoinventario_set` (sin duplicados).
+
 - **Visibilidad de campos $$ (estatus/subtotal/impuestos/gran_total y $ en detalles)**:
   - Se envía todo intacto si `is_superuser` / `is_admin_empresa` o alguno de estos roles: `Mesa-de-Control`, `Ventas`, `Compras`, `Contabilidad`, `ContaVentas`, `ContaCompras`, `MesaControlYVentas`.
   - Cualquier otro rol (incl. WMS sin compras): se eliminan los keys $$ del response.
@@ -1966,8 +1968,14 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
   - `POST /api/v1/produccion/orden-bordado/` — alta
   - `GET /api/v1/produccion/orden-bordado/{id}/` — detalle
     - Entrega: encabezado OB + `detalles[]` completo (ubicaciones/configuración bordado), `cantidad_cubierta/contratada`, parcialidad por línea (`cantidad_pedido/asignada/pendiente`), `otras_ordenes_del_pedido[]`, `reparto_por_talla_aproximado`.
-    - **Nuevo**: `pedido_vinculado: {id, folio}`.
+    - **Nuevo (último cambio)**: `pedido_vinculado: {id, folio}`, `avances[]` (historial de producción por operador), `resumen_avance` (totales + % avance), `maquina_asignada`.
     - **No incluye** lista de documentos ligados al pedido (cotización/OC/factura/...): la OB es documento de taller. Si los necesitas, usa `GET /api/v1/ventas/pedidos/{id}/`.
+  - `PATCH /api/v1/produccion/orden-bordado/{id}/` — editar encabezado (estatus, máquina, prioridad, observaciones, reasignar operador).
+  - `DELETE /api/v1/produccion/orden-bordado/{id}/` — soft delete (`activo=False`). Libera cupo del pedido para nuevas OBs.
+- **Avances de producción (registrar bordado del día)**:
+  - `GET /api/v1/produccion/bordado-avances/?ob=42` — listado filtrado por OB.
+  - `POST /api/v1/produccion/bordado-avances/` — registrar producción. **En el body NO mandar `usuario`**: el backend usa SIEMPRE `request.user` (operador conectado). Body: `{ "ob": 42, "cantidad_bordada": 20, "puntadas_realizadas": 165000, "comentario": "Turno matutino" }`.
+  - `DELETE /api/v1/produccion/bordado-avances/{id}/` — soft delete.
 - **Onboarding**:
   - `GET /api/v1/produccion/orden-bordado/onboarding/`
   - `POST /api/v1/produccion/orden-bordado/onboarding/`
@@ -2133,6 +2141,95 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
 
 - `OrdenesBordado` (`OrdenesBordadoAdmin`): `list_display` id/folio/empresa/sucursal/pedido/estatus/usuario_asignado/prioridad, filtros y búsqueda por folio OB, folio de pedido, empresa, sucursal y operador. Incluye inline `OrdenBordadoDetalleInline` (renglones de la orden).
 - `OrdenBordadoDetalle` (`OrdenBordadoDetalleAdmin`): listado standalone con filtros cruzados por `ob__empresa`, `ob__sucursal`, `estatus_bordado`, talla, color y `posicion_bordado`; búsqueda por folio OB, pedido, producto y posición.
+
+**Ficha OB — Campos NUEVOS en `GET /api/v1/produccion/orden-bordado/{id}/`**
+
+> Útiles para la ficha "hoja física de taller" de Next.js.
+
+```json
+{
+  "id": 42,
+  "folio_bordado": "OB-20260818-0042",
+  "estatus_bordado": 3,
+  "estatus_bordado_display": "Bordando",
+  "prioridad": 1,
+  "maquina_asignada": "Barudan 1",
+  "observaciones": "Cliente pide logo nítido",
+  "usuario_asignado": 5,
+  "usuario_nombre": "Juan Pérez (supervisor)",
+  "cantidad_cubierta": 60,
+  "cantidad_contratada": 100,
+  "cobertura_completa": false,
+
+  "detalles": [],
+
+  "avances": [
+    {
+      "id": 1,
+      "fecha": "2026-08-18T09:15:00Z",
+      "usuario": 4,
+      "usuario_nombre": "María Gómez",
+      "cantidad_bordada": 30,
+      "puntadas_realizadas": 160000,
+      "comentario": "Turno matutino"
+    }
+  ],
+
+  "resumen_avance": {
+    "cantidad_programada": 60,
+    "cantidad_bordada_total": 30,
+    "puntadas_presupuesto": 360000,
+    "puntadas_realizadas": 160000,
+    "porcentaje_avance": 50.0
+  },
+
+  "otras_ordenes_del_pedido": [],
+  "pedido_vinculado": { "id": 125, "folio": "PD-000125" },
+  "reparto_por_talla_aproximado": false
+}
+```
+
+| Campo                           | Tipo     | Fuente / Regla                                                                                                         |
+| ------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `maquina_asignada`              | str/null | Campo editable. **Texto libre**: el operador escribe "M1", "Máquina 2", "Barudan 1", etc. (sin catálogo hoy).          |
+| `avances[]`                     | array    | Historial de producción por OB. Lo llena `POST /produccion/bordado-avances/`. Orden: `fecha` DESC.                     |
+| `avances[].usuario`             | int      | FK al operador. **NO editable desde frontend**: backend siempre usa el `request.user` que envió el POST.               |
+| `avances[].puntadas_realizadas` | int      | Puntadas REALES de esta tanda. Distinto de `detalles[].puntadas` = presupuesto estimado por línea.                     |
+| `resumen_avance.*`              | object   | Sumatorias precomputadas por el serializer: no tienes que calcularlas en el frontend. Si no hay avances retorna ceros. |
+
+**Editar encabezado de OB — `PATCH /api/v1/produccion/orden-bordado/{id}/`**
+
+Body mínimo (solo los campos que quieras cambiar; los omitidos se dejan igual):
+
+```json
+{
+  "estatus_bordado": 3,
+  "maquina_asignada": "Barudan 1",
+  "prioridad": 2,
+  "observaciones": "Urgente — cliente pide hoy",
+  "usuario_asignado": 5
+}
+```
+
+- `estatus_bordado`: 1 Pendiente, 2 Preparación, 3 Bordando, 4 Revisión, 5 Completado, 6 Detenido, 7 Cancelado.
+- `usuario_asignado`: FK a usuario (jefe reasigna a alguien). Nulo permitido.
+- Campos que SIGUEN read-only y se ignoran si los mandas: `folio_bordado`, `empresa`, `sucursal`, `activo`.
+
+**Registrar producción — `POST /api/v1/produccion/bordado-avances/`**
+
+```json
+{
+  "ob": 42,
+  "cantidad_bordada": 20,
+  "puntadas_realizadas": 165000,
+  "comentario": "Turno vespertino — sigo con la talla L"
+}
+```
+
+- **NUNCA mandar `usuario` en el body**: el backend siempre sobreescribe con `request.user`. Si lo mandas se ignora.
+- El endpoint **no valida** que `cantidad_bordada <= cantidad programada` (acepta sobreproducción por correcciones).
+- `puntadas_realizadas = 0` es permitido si todavía no la máquina no reportó el contador.
+- Para cancelar un registro mal hecho: `DELETE /produccion/bordado-avances/{id}/` (soft delete, no sale más en `avances[]`).
 
 **Control anti-duplicado (HTTP 409 Conflict)**
 

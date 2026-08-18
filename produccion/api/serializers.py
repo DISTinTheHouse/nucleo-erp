@@ -310,11 +310,9 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = [
             'activo',
-            'usuario_asignado',
-            'estatus_bordado',
             'folio_bordado',
             'empresa',
-            'sucursal'
+            'sucursal',
         ]
 
     def get_usuario_nombre(self, obj):
@@ -578,6 +576,29 @@ class OrdenBordadoHermanaSerializer(serializers.Serializer):
     fecha_inicio = serializers.DateTimeField(read_only=True)
 
 
+class _OrdenBordadoAvanceReadSerializer(serializers.ModelSerializer):
+    usuario_nombre = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BordadoAvances
+        fields = [
+            "id",
+            "fecha",
+            "usuario",
+            "usuario_nombre",
+            "cantidad_bordada",
+            "puntadas_realizadas",
+            "comentario",
+        ]
+        read_only_fields = fields
+
+    def get_usuario_nombre(self, obj):
+        usuario = getattr(obj, "usuario", None)
+        if not usuario:
+            return None
+        return usuario.get_full_name().strip() or getattr(usuario, "email", None)
+
+
 class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
     """Orden de bordado para el detalle, con contexto de parcialidad.
 
@@ -604,6 +625,8 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
     otras_ordenes_del_pedido = serializers.SerializerMethodField()
     reparto_por_talla_aproximado = serializers.SerializerMethodField()
     pedido_vinculado = serializers.SerializerMethodField()
+    avances = serializers.SerializerMethodField()
+    resumen_avance = serializers.SerializerMethodField()
 
     def get_pedido_vinculado(self, obj):
         from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
@@ -633,6 +656,58 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
         ningún renglón así en la base.
         """
         return bool(self.context.get("reparto_aproximado", False))
+
+    def get_avances(self, obj):
+        avances = self.context.get("avances") or []
+        return _OrdenBordadoAvanceReadSerializer(avances, many=True).data
+
+    def get_resumen_avance(self, obj):
+        avances = self.context.get("avances") or []
+        if not avances:
+            return {
+                "cantidad_programada": float(self.context.get("_programada", 0) or 0),
+                "cantidad_bordada_total": 0.0,
+                "puntadas_presupuesto": 0,
+                "puntadas_realizadas": 0,
+                "porcentaje_avance": 0.0,
+            }
+        cantidad_bordada = sum(
+            float(getattr(a, "cantidad_bordada", 0) or 0) for a in avances
+        )
+        puntadas_realizadas = sum(
+            int(getattr(a, "puntadas_realizadas", 0) or 0) for a in avances
+        )
+
+        detalles = getattr(obj, "detalles", None)
+        if detalles is None:
+            detalles = (
+                OrdenBordadoDetalle.objects
+                .filter(ob_id=obj.pk)
+                .only("cantidad", "puntadas")
+            )
+        else:
+            try:
+                detalles = list(detalles.all())
+            except Exception:
+                pass
+
+        cantidad_programada = sum(
+            float(getattr(d, "cantidad", 0) or 0) for d in detalles
+        )
+        puntadas_presupuesto = sum(
+            int(getattr(d, "puntadas", 0) or 0) for d in detalles
+        )
+
+        pct = 0.0
+        if cantidad_programada > 0:
+            pct = round((cantidad_bordada / cantidad_programada) * 100.0, 2)
+        return {
+            "cantidad_programada": cantidad_programada,
+            "cantidad_bordada_total": cantidad_bordada,
+            "puntadas_presupuesto": puntadas_presupuesto,
+            "puntadas_realizadas": puntadas_realizadas,
+            "porcentaje_avance": pct,
+        }
 
 
 class _OrdenPadreWriteOnceMixin:
