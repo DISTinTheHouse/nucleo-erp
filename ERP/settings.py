@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 import os
+from datetime import timedelta
 from pathlib import Path
 from decouple import config
 import dj_database_url
@@ -83,6 +84,23 @@ AUTH_KIT = {
     'USER_SERIALIZER': 'usuarios.api.serializers.UsuarioSerializer',
     'AUTH_COOKIE_SECURE': config('AUTH_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool),
     'AUTH_COOKIE_SAMESITE': config('AUTH_COOKIE_SAMESITE', default='None'),
+}
+
+# =========================
+# JWT (djangorestframework-simplejwt, usado por auth_kit)
+# =========================
+# Sesión deslizante: con ROTATE_REFRESH_TOKENS el endpoint de refresh emite un
+# refresh token nuevo con ventana completa, de modo que un usuario activo no es
+# forzado a re-loguearse. Sin rotación el refresh conserva su `exp` original y
+# la sesión caduca de forma absoluta desde el login.
+# BLACKLIST_AFTER_ROTATION queda en False a propósito: la revocación real
+# requiere la app `token_blacklist` (+ migraciones) y se abordará aparte.
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': False,
+    'UPDATE_LAST_LOGIN': True,
 }
 
 AUTH_USER_MODEL = "usuarios.Usuario"
