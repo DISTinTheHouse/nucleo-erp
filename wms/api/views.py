@@ -1,7 +1,7 @@
 from django.db.models import Prefetch
 from rest_framework import mixins, status
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 from wms.api.serializers import (
@@ -975,6 +975,13 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
     def scans_clear(self, request):
         """Purge list: borra todos los renglones de RfidScan (lecturas).
         Respuesta: {"status": "success", "deleted": N}
+
+        Solo superusuario o administrador de empresa: el borrado es global
+        (``RfidScan`` no tiene FK a empresa todavía).
         """
+        user = request.user
+        if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
+            raise PermissionDenied("No tiene permisos para realizar esta acción.")
+
         deleted, _ = RfidScan.objects.all().delete()
         return Response({"status": "success", "deleted": deleted})
