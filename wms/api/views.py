@@ -751,7 +751,7 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             )
             .only(
                 "epc", "barcode_value", "serial", "estado",
-                "impresion__id", "impresion__folio",
+                "impresion__id",
                 "impresion__producto_id", "impresion__producto__nombre",
                 "impresion__producto_variante_id", "impresion__producto_variante__nombre",
                 "impresion__producto_variante__sku",
