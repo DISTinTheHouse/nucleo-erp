@@ -3787,6 +3787,333 @@ La impresión ya quedó registrada y se verá en `GET /api/v1/wms/etiquetas-rfid
 
 ---
 
+## 🛰️ WMS - Scanner / Lector RFID (Next.js)
+
+Lector oficial para consumir lecturas desde el hardware Zebra FX (FX7500 / FX9600) y **hacer MATCH automático** contra las etiquetas impresas (EtiquetaRFIDDetalle).
+El frontend (Next.js) NO habla directamente con el lector FX. El flujo es:
+
+```
+  LECTOR FX ZEBRA  ──POST JSON/EPCs──▶  /QA/scanner_rfid/receive/  ──▶ DB: RfidScan
+                                                                          │
+  NEXT.JS  ──poll GET cada 2s──▶  /api/v1/wms/etiquetas-rfid/scans/  ◀──┘
+                                  (match auto con detalle)
+```
+
+**Importante arquitectura**:
+- El `POST /QA/scanner_rfid/receive/` es SOLO para el FX (no requiere token / `@csrf_exempt`). **Next.js NUNCA llama a receive**.
+- Next.js solo consume 3 endpoints del V1 (mismo Bearer token que el resto del ERP):
+  1. `GET /api/v1/wms/etiquetas-rfid/scans/` → polling (lista lecturas + MATCH)
+  2. `GET /api/v1/wms/etiquetas-rfid/scanner-stats/` → debug 1-clic (estado FX + busqueda ?epc=)
+  3. `POST /api/v1/wms/etiquetas-rfid/scans/clear/` → purge list (vaciar tabla)
+
+---
+
+### 0) Onboarding SCANNER (1 modal simple)
+
+No hay endpoint especial tipo onboarding. El modal consta de 3 partes:
+
+| UI Element | Código a ejecutar |
+|---|---|
+| Botón **🔄 Iniciar Monitoreo** cada 2s | `setInterval()` llamando `GET /api/v1/wms/etiquetas-rfid/scans/` |
+| Botón **🗑️ Purge List** (antes de empezar) | `POST /api/v1/wms/etiquetas-rfid/scans/clear/` |
+| Botón **🛠️ Ver Status FX** (debug 1-clic) | `GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=<EPC_RECIEN_IMPRESO>` |
+
+---
+
+### 1) Polling de Lecturas (principal / polling cada 2s)
+
+- **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/scans/`
+- **Descripción**: devuelve **últimas 50 filas de `RfidScan`** en orden DESC (reciente → antiguo). **Cada scan tiene ya calculado el `match_impresion`** (true/false) contra `EtiquetaRFIDDetalle`, con scope empresa/sucursales.
+- **Autenticación**: Bearer token.
+- **Query params (opcionales para debug)**:
+  - `epc=XXXX` (hex): busca directo este EPC en el payload de 50 scans y devuelve `debug_get.query_epc_search.found_in_scans` (booleano rápido sin iterar).
+
+**Ejemplo URL de debug (recién impresa una etiqueta)**:
+```
+GET /api/v1/wms/etiquetas-rfid/scans/?epc=000012E32827000147C0C5F5
+```
+
+**Respuesta shape (mínimo a renderizar)**:
+
+```json
+{
+  "scans": [
+    {
+      "id": 3856,
+      "epc": "000012e32827000147c0c5f5",
+      "timestamp": "2026-08-07T19:51:45.490950+00:00",
+      "antenna": 1,
+      "rssi": -45.0,
+      "reader_ip": "187.188.149.179",
+
+      "match_impresion": true,
+
+      "impresion_folio": "LAB-000022",
+      "impresion_id": 22,
+      "producto_nombre": "CAMISA MANGA LARGA RAYAS THAI PREMIUM VINO",
+      "sku": "1000503G",
+      "color": "VINO",
+      "talla": "G",
+      "barcode_value": "1000503G",
+      "serial": "0001",
+      "estado": "IMPRESO",
+      "detalle_id": 62,
+      "match_debug": {
+        "scan_epc": "000012e32827000147c0c5f5",
+        "scan_epc_len": 24,
+        "variants_tried": ["12e32827000147c0c5f5", "000012e32827000147c0c5f5"],
+        "variant_used": "12e32827000147c0c5f5",
+        "detalle_epc_raw": "000012E32827000147C0C5F5",
+        "detalle_epc_len": 24,
+        "detalle_epc_variants": ["000012e32827000147c0c5f5", "12e32827000147c0c5f5"]
+      }
+    },
+
+    {
+      "id": 3827,
+      "epc": "3035c9d34c5767c0004ccc4c",
+      "timestamp": "...",
+      "antenna": null,
+      "rssi": null,
+      "reader_ip": "187.188.149.179",
+      "match_impresion": false,
+      "match_debug": {
+        "scan_epc": "3035c9d34c5767c0004ccc4c",
+        "scan_epc_len": 24,
+        "variants_tried": ["3035c9d34c5767c0004ccc4c", ...],
+        "variant_used": null,
+        "detalle_lookup_count": 2
+      }
+    }
+  ],
+
+  "debug_get": {
+    "scans_returned": 2,
+    "scans_total_max_50": 2,
+    "lookup_detalle_count": 2,
+    "unique_epc_in_50_scans_count": 2,
+    "unique_epc_prefixes_head30": ["0000", "3035"],
+    "query_epc_search": {
+      "query_epc": "000012e32827000147c0c5f5",
+      "query_epc_len": 24,
+      "variants_count": 2,
+      "variants_head5": ["000012e32827000147c0c5f5", "12e32827000147c0c5f5"],
+      "found_in_scans": true,
+      "hit_variant": "000012e32827000147c0c5f5"
+    }
+  }
+}
+```
+
+**Reglas de render UI**:
+- Si `match_impresion === true` → fila en VERDE, muestra sku, color, talla, folio LAB-000XX.
+- Si `match_impresion === false` → fila en ROJO / GRIS, muestra EPC en hex crudo.
+- Usa `antenna` (int 1..8) y `rssi` (dBm, valor negativo: -30 bueno / -70 muy débil) como métricas de señal.
+- `timestamp`: ISO string; mostrar hora local.
+
+---
+
+### 2) Ejemplo Next.js: Componente mínimo Scanner (copy-paste funcional)
+
+```tsx
+// app/wms/rfid-scanner/page.tsx
+'use client';
+
+import { useEffect, useMemo, useRef, useState } from 'react';
+
+type RfidScan = {
+  id: number;
+  epc: string;
+  timestamp: string;
+  antenna: number | null;
+  rssi: number | null;
+  reader_ip: string | null;
+  match_impresion: boolean;
+  impresion_folio?: string | null;
+  sku?: string | null;
+  color?: string | null;
+  talla?: string | null;
+  producto_nombre?: string | null;
+  barcode_value?: string | null;
+  serial?: string | null;
+  detalle_id?: number | null;
+  match_debug?: Record<string, unknown>;
+};
+
+const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8003';
+
+function authHeaders(token: string): Record<string, string> {
+  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+}
+
+export default function RfidScannerPage() {
+  const token = 'tu-token-jwt'; // reemplaza: getToken() de tu sesión
+  const [running, setRunning] = useState(false);
+  const [scans, setScans] = useState<RfidScan[]>([]);
+  const lastSeenId = useRef(0);
+  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const uniqueByEpc = useMemo(() => {
+    const seen = new Map<string, RfidScan>();
+    for (const s of [...scans].sort((a, b) => b.id - a.id)) seen.set(s.epc, s);
+    return Array.from(seen.values());
+  }, [scans]);
+
+  async function fetchOnce() {
+    const res = await fetch(`${BASE}/api/v1/wms/etiquetas-rfid/scans/`, {
+      headers: authHeaders(token),
+    });
+    const json = await res.json();
+    const list: RfidScan[] = json.scans ?? [];
+    const nuevos = list.filter((s) => s.id > lastSeenId.current);
+    if (nuevos.length > 0) {
+      setScans((prev) => [...nuevos, ...prev].slice(0, 200));
+      lastSeenId.current = Math.max(lastSeenId.current, ...nuevos.map((s) => s.id));
+    }
+  }
+
+  async function purgeList() {
+    await fetch(`${BASE}/api/v1/wms/etiquetas-rfid/scans/clear/`, {
+      method: 'POST',
+      headers: authHeaders(token),
+    });
+    lastSeenId.current = 0;
+    setScans([]);
+  }
+
+  function toggle() {
+    setRunning((prev) => {
+      const next = !prev;
+      if (next) {
+        timer.current = setInterval(fetchOnce, 2000);
+        fetchOnce();
+      } else if (timer.current) {
+        clearInterval(timer.current);
+        timer.current = null;
+      }
+      return next;
+    });
+  }
+
+  useEffect(() => () => {
+    if (timer.current) clearInterval(timer.current);
+  }, []);
+
+  return (
+    <main className="p-6 max-w-6xl mx-auto space-y-4">
+      <div className="flex gap-3">
+        <button onClick={toggle} className="px-4 py-2 rounded bg-blue-600 text-white">
+          {running ? 'Detener Monitoreo' : 'Iniciar Monitoreo (2s)'}
+        </button>
+        <button onClick={purgeList} className="px-4 py-2 rounded bg-red-500 text-white">
+          Purge List
+        </button>
+      </div>
+
+      <div className="text-sm text-gray-600">
+        Últimas lecturas: {scans.length} rows · Únicas por EPC: {uniqueByEpc.length}
+      </div>
+
+      <table className="w-full text-sm border">
+        <thead>
+          <tr className="bg-gray-100">
+            <th className="px-3 py-2 text-left">ID</th>
+            <th className="px-3 py-2 text-left">MATCH</th>
+            <th className="px-3 py-2 text-left">EPC</th>
+            <th className="px-3 py-2 text-left">SKU · Color · Talla</th>
+            <th className="px-3 py-2 text-left">Folio</th>
+            <th className="px-3 py-2 text-left">ANT</th>
+            <th className="px-3 py-2 text-left">RSSI</th>
+            <th className="px-3 py-2 text-left">Timestamp</th>
+          </tr>
+        </thead>
+        <tbody>
+          {uniqueByEpc.map((s) => (
+            <tr key={s.id} className={s.match_impresion ? 'bg-green-50' : 'bg-red-50'}>
+              <td className="px-3 py-2">{s.id}</td>
+              <td className="px-3 py-2 font-semibold">
+                {s.match_impresion ? '✅ SI' : '❌ NO'}
+              </td>
+              <td className="px-3 py-2 font-mono text-xs">{s.epc}</td>
+              <td className="px-3 py-2">
+                {s.match_impresion ? `${s.sku} · ${s.color ?? ''} · ${s.talla ?? ''}` : '—'}
+              </td>
+              <td className="px-3 py-2">{s.impresion_folio ?? '—'}</td>
+              <td className="px-3 py-2">{s.antenna ?? '—'}</td>
+              <td className="px-3 py-2">{s.rssi ?? '—'}</td>
+              <td className="px-3 py-2">{new Date(s.timestamp).toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </main>
+  );
+}
+```
+
+---
+
+### 3) Endpoint Debug Status FX (1 clic, sin entrar Vercel)
+
+Útil para:
+- Saber **cuándo fue la última lectura del FX** (`last_scan_seconds_ago`: si es `> 300` = FX está apagado / no conectado a internet).
+- Buscar **rápido si una etiqueta recién impresa fue leída** por el FX sin abrir el admin Django.
+
+- **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/scanner-stats/`
+- **Query params**:
+  - `epc=XXXX` (opcional): EPC hex de una etiqueta recién impresa para buscarlo directo en la DB.
+
+**Ejemplo**:
+```
+GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=000012E32827000147C0C5F5
+```
+
+**Respuesta shape**:
+```json
+{
+  "status": "ok",
+  "total_rfidscan_rows": 1,
+  "last_scan_ts": "2026-08-07T19:51:45.490950+00:00",
+  "last_scan_seconds_ago": 26,
+  "last_5_scans": [
+    {"id":3856,"epc":"000012e32827000147c0c5f5","epc_len":24,"antenna":1,"rssi":-45,"reader_ip":"187.188.149.179","ts":"..."}
+  ],
+  "query_epc": "000012e32827000147c0c5f5",
+  "query_epc_found_count": 1,
+  "query_epc_found_samples": [ { "id": 3856, "epc": "...", "epc_len": 24, "antenna": 1, "rssi": -45, "ts": "..." } ],
+  "receive_endpoint_info": {
+    "fx_post_url_required": "POST https://TU-BACKEND/QA/scanner_rfid/receive/ (FX llama aquí. Next.js NO)",
+    "method_required": "POST (FX no manda token; @csrf_exempt).",
+    "note": "Next.js solo consume scans/, scans/clear y scanner-stats."
+  }
+}
+```
+
+---
+
+### 4) Purge List (vaciar lecturas antes de una prueba)
+
+- **Endpoint**: `POST /api/v1/wms/etiquetas-rfid/scans/clear/`
+- **Body**: ninguno (vacío)
+- **Respuesta**:
+  ```json
+  { "status": "success", "deleted": 42 }
+  ```
+
+---
+
+### 5) Checklist Integración Scanner Next.js
+
+| Paso | Acción                                                                                                                                                                                                                 |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | Configura en el LECTOR FX Zebra (FX7500/FX9600) su **POST URL**: `https://TU-BACKEND/QA/scanner_rfid/receive/` (content-type JSON).                                                                                    |
+| 2    | (Antes de empezar) Click **Purge List** = `POST /api/v1/wms/etiquetas-rfid/scans/clear/`.                                                                                                                              |
+| 3    | Click **Iniciar Monitoreo** = `setInterval` cada **2000 ms (2s)** llamando `GET /api/v1/wms/etiquetas-rfid/scans/`. Usa `lastSeenId` (Ref) para agregar solo scans nuevos (ids mayores).                               |
+| 4    | Render tabla: columna `MATCH=✅/❌` + `sku`, `color`, `talla`, `folio`, `antenna`, `rssi`, `timestamp`. Si `match_impresion=false` mostrar EPC hex crudo; si `true` pintar fila VERDE con los campos producto.        |
+| 5    | Debug rápido: ante duda click **Status FX** = `GET /scanner-stats/?epc=<EPC_IMPRESO>` y revisa `query_epc_found_count` (0 no leída, ≥1 leída) + `last_scan_seconds_ago` (>300s = FX offline).                          |
+
+---
+
 ## 🧪 QA RFID Workspace
 
 Flujo de pruebas locales para validar impresión Zebra y captura de lecturas desde dispositivos Zebra sin afectar inventario.

@@ -26,6 +26,7 @@ from wms.models import (
     Picking,
     PickingDetalle,
     PickingOrdenTrabajo,
+    RfidScan,
     Transferencia,
     TransferenciaDetalle,
 )
@@ -662,3 +663,317 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
 
     def create(self, request):
         return self.registrar_impresion(request)
+
+    # ── SCANNER / LECTOR RFID ───────────────────────────────────────────
+    # Next.js NO necesita usar routes /QA/* para el scanner.
+    # Consume estos 3 endpoints del V1 que ya respetan scope empresa/sucursales.
+    # (El receive/ lo usa SOLO el lector FX Zebra sin token — POST /QA/scanner_rfid/receive/)
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="scans",
+        url_name="scans",
+    )
+    def scans(self, request):
+        """Polling endpoint p/ Next.js: últimas 50 lecturas del FX + match automático.
+
+        Igual que /QA/scanner_rfid/get/ pero filtrado empresa (sucursales permitidas)
+        y enrutado vía DRF ViewSet V1.
+
+        Query params (debug opcional, sin auth):
+            epc (opcional): si enviamos un EPC (hex), se busca directamente y en
+            debug_get.query_epc_search devuelve found_in_scans true/false + variant.
+
+        Response shape:
+            {
+              scans: [
+                {id, epc, timestamp, antenna, rssi, reader_ip,
+                 match_impresion: bool,
+                 impresion_folio, impresion_id, producto_nombre, sku, color, talla,
+                 barcode_value, serial, estado, detalle_id,
+                 match_debug: {scan_epc, scan_epc_len, variants_tried, variant_used,
+                               detalle_epc_raw, detalle_epc_len, detalle_epc_variants} |
+                              {scan_epc, scan_epc_len, variants_tried, variant_used:null,
+                               detalle_lookup_count:int}
+                }, ...
+              ],
+              debug_get: {...lookup info, query_epc_search si lo mandaste...}
+            }
+        """
+        scans = list(
+            RfidScan.objects.order_by("-created_at", "-id")[:50]
+        )
+        epc_list = [s.epc for s in scans if s.epc]
+        epc_lower_set = {e.lower() for e in epc_list if e}
+
+        def _epc_variants(epc):
+            base = (epc or "").strip().lower()
+            if not base:
+                return set()
+            vars = {base}
+            vars.add(base.lstrip("0"))
+            vars.add(base.rstrip("0"))
+            vars.add(base.strip("0"))
+            if len(base) > 24:
+                vars.add(base[:24])
+                vars.add(base[-24:])
+                vars.add(base[:24].lstrip("0"))
+                vars.add(base[-24:].lstrip("0"))
+                for target_len in (28, 32):
+                    if len(base) >= target_len:
+                        vars.add(base[:target_len])
+                        vars.add(base[-target_len:])
+            elif len(base) < 24:
+                pad_left = base.rjust(24, "0")
+                pad_right = base.ljust(24, "0")
+                vars.add(pad_left)
+                vars.add(pad_right)
+                vars.add(pad_left.lstrip("0"))
+                vars.add(pad_right.rstrip("0"))
+            return {v for v in vars if len(v) >= 8}
+
+        epc_search_set = set()
+        for e in list(epc_lower_set):
+            epc_search_set |= _epc_variants(e)
+
+        user = request.user
+        detalle_qs = (
+            EtiquetaRFIDDetalle.objects.filter(
+                epc__in=list(epc_search_set) + list({v.upper() for v in epc_search_set})
+            )
+            .select_related(
+                "impresion",
+                "impresion__producto",
+                "impresion__producto_variante",
+                "impresion__producto_variante__color",
+                "impresion__producto_variante__talla",
+            )
+            .only(
+                "epc", "barcode_value", "serial", "estado",
+                "impresion__id", "impresion__folio",
+                "impresion__producto_id", "impresion__producto__nombre",
+                "impresion__producto_variante_id", "impresion__producto_variante__nombre",
+                "impresion__producto_variante__sku",
+                "impresion__producto_variante__color_id",
+                "impresion__producto_variante__color__nombre",
+                "impresion__producto_variante__talla_id",
+                "impresion__producto_variante__talla__nombre",
+            )
+        )
+        # Scope empresa (solo ver scans que hagan match con detalles de mi empresa)
+        empresa = getattr(user, "empresa", None)
+        if empresa and not getattr(user, "is_superuser", False):
+            detalle_qs = detalle_qs.filter(impresion__empresa=empresa)
+        sucursales_ok = None
+        if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
+            sucursales_ok = user.sucursales_permitidas()
+            if sucursales_ok:
+                detalle_qs = detalle_qs.filter(impresion__sucursal_id__in=sucursales_ok)
+
+        detalle_by_epc_variant = {}
+        for d in detalle_qs:
+            for v in _epc_variants(d.epc):
+                detalle_by_epc_variant.setdefault(v, d)
+
+        data = []
+        for scan in scans:
+            epc = scan.epc or ""
+            epc_lower = epc.lower()
+            detalle = None
+            variant_used = None
+            variants_tried = list(_epc_variants(epc_lower))
+            for variant in variants_tried:
+                detalle = detalle_by_epc_variant.get(variant)
+                if detalle is not None:
+                    variant_used = variant
+                    break
+            item = {
+                "id": scan.pk,
+                "epc": epc,
+                "timestamp": scan.created_at.isoformat(),
+                "antenna": scan.antenna,
+                "rssi": scan.rssi,
+                "reader_ip": scan.reader_ip,
+            }
+            if detalle is not None:
+                impresion = detalle.impresion
+                variante = impresion.producto_variante if impresion else None
+                producto = impresion.producto if impresion else None
+                nombre_producto = None
+                sku = None
+                color_nombre = None
+                talla_nombre = None
+                if variante:
+                    sku = variante.sku
+                    if variante.color:
+                        color_nombre = variante.color.nombre
+                    if variante.talla:
+                        talla_nombre = variante.talla.nombre
+                    nombre_producto = variante.nombre or (producto.nombre if producto else None)
+                elif producto:
+                    nombre_producto = producto.nombre
+                item.update({
+                    "match_impresion": True,
+                    "impresion_folio": impresion.folio if impresion else None,
+                    "impresion_id": impresion.id if impresion else None,
+                    "producto_nombre": nombre_producto,
+                    "sku": sku,
+                    "color": color_nombre,
+                    "talla": talla_nombre,
+                    "barcode_value": detalle.barcode_value,
+                    "serial": detalle.serial,
+                    "estado": detalle.estado,
+                    "detalle_id": detalle.id,
+                    "match_debug": {
+                        "scan_epc": epc_lower,
+                        "scan_epc_len": len(epc_lower),
+                        "variants_tried": variants_tried,
+                        "variant_used": variant_used,
+                        "detalle_epc_raw": detalle.epc,
+                        "detalle_epc_len": len(detalle.epc or ""),
+                        "detalle_epc_variants": sorted(_epc_variants(detalle.epc)),
+                    },
+                })
+            else:
+                item["match_impresion"] = False
+                item["match_debug"] = {
+                    "scan_epc": epc_lower,
+                    "scan_epc_len": len(epc_lower),
+                    "variants_tried": variants_tried,
+                    "variant_used": None,
+                    "detalle_lookup_count": len(detalle_by_epc_variant),
+                }
+            data.append(item)
+
+        epc_all_scans_lower = [s.epc.lower() for s in scans if s.epc]
+        epc_all_scans_set = set(epc_all_scans_lower)
+        q_epc = (request.query_params.get("epc") or "").strip().lower()
+        q_search_debug = None
+        if q_epc:
+            q_vars = sorted(_epc_variants(q_epc))
+            hit = None
+            for v in q_vars:
+                if v in epc_all_scans_set:
+                    hit = v
+                    break
+            q_search_debug = {
+                "query_epc": q_epc,
+                "query_epc_len": len(q_epc),
+                "variants_count": len(q_vars),
+                "variants_head5": q_vars[:5],
+                "found_in_scans": bool(hit),
+                "hit_variant": hit,
+            }
+        debug_get = {
+            "scans_returned": len(data),
+            "scans_total_max_50": len(scans),
+            "lookup_detalle_count": len(detalle_by_epc_variant),
+            "unique_epc_in_50_scans_count": len(epc_all_scans_set),
+            "unique_epc_prefixes_head30": sorted({e[:4] for e in epc_all_scans_lower})[:30],
+            "query_epc_search": q_search_debug,
+        }
+        return Response({"scans": data, "debug_get": debug_get})
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="scanner-stats",
+        url_name="scanner_stats",
+    )
+    def scanner_stats(self, request):
+        """Endpoint 1-clic para saber si el lector FX esta vivo SIN entrar a Vercel.
+
+        Query params:
+            epc (opcional): buscar si un EPC (ej recién impreso) existe en RfidScan.
+
+        Response shape:
+            {
+              total_rfidscan_rows, last_scan_ts, last_scan_seconds_ago,
+              last_5_scans: [{id,epc,epc_len,antenna,rssi,reader_ip,ts}, ...],
+              query_epc_found_count, query_epc_found_samples,
+              receive_endpoint_info: {fx_post_url_required, example_POST_test_1_tag}
+            }
+        """
+        total = RfidScan.objects.count()
+        last_5 = list(
+            RfidScan.objects.order_by("-created_at", "-id")[:5].values(
+                "id", "epc", "antenna", "rssi", "reader_ip", "created_at"
+            )
+        )
+        last_5_serializable = []
+        for s in last_5:
+            last_5_serializable.append({
+                "id": s["id"],
+                "epc": s["epc"],
+                "epc_len": len(s["epc"] or ""),
+                "antenna": s["antenna"],
+                "rssi": s["rssi"],
+                "reader_ip": s["reader_ip"],
+                "ts": s["created_at"].isoformat() if s["created_at"] else None,
+            })
+        last_scan_ts = last_5_serializable[0]["ts"] if last_5_serializable else None
+        last_scan_how_old_secs = None
+        if last_scan_ts:
+            try:
+                from django.utils import timezone as dj_tz
+                dt = dj_tz.datetime.fromisoformat(last_scan_ts.replace("Z", "+00:00"))
+                last_scan_how_old_secs = int((dj_tz.now() - dt).total_seconds())
+            except Exception:
+                pass
+
+        q_epc = (request.query_params.get("epc") or "").strip().lower()
+        q_found_samples = []
+        if q_epc:
+            def _v(epc):
+                base = epc
+                vars = {base, base.lstrip("0"), base.rstrip("0"), base.strip("0")}
+                if len(base) > 24:
+                    vars |= {base[:24], base[-24:]}
+                if len(base) < 24:
+                    vars |= {base.rjust(24, "0"), base.ljust(24, "0")}
+                return vars
+            base_vars = _v(q_epc)
+            q_lookup = list(base_vars) + [v.upper() for v in base_vars]
+            qs_found = RfidScan.objects.filter(epc__in=q_lookup).order_by("-created_at")[:10]
+            for f in qs_found:
+                q_found_samples.append({
+                    "id": f.id, "epc": f.epc, "epc_len": len(f.epc or ""),
+                    "antenna": f.antenna, "rssi": f.rssi,
+                    "ts": f.created_at.isoformat() if f.created_at else None,
+                })
+
+        payload = {
+            "status": "ok",
+            "total_rfidscan_rows": total,
+            "last_scan_ts": last_scan_ts,
+            "last_scan_seconds_ago": last_scan_how_old_secs,
+            "last_5_scans": last_5_serializable,
+            "query_epc": q_epc or None,
+            "query_epc_found_count": len(q_found_samples),
+            "query_epc_found_samples": q_found_samples,
+            "receive_endpoint_info": {
+                "fx_post_url_required": "POST https://TU-BACKEND/QA/scanner_rfid/receive/ (el FX llama aquí, NO Next.js)",
+                "method_required": "POST (FX no manda token; esta ruta es @csrf_exempt. Next.js NO usa receive/)",
+                "example_POST_test_1_tag": (
+                    "Invoke-RestMethod -Uri 'https://nucleo-erp.vercel.app/QA/scanner_rfid/receive/' "
+                    "-Method POST -ContentType 'application/json' -Body "
+                    "ConvertTo-Json(@(@{epcId='000012e32827000147c0c5f5';antennaPort=1;peakRssiValue=-45}))"
+                ),
+                "note": "Next.js solo consume scans/ (polling), scans/clear (purge) y scanner-stats (debug).",
+            },
+        }
+        return Response(payload)
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="scans/clear",
+        url_name="scans_clear",
+    )
+    def scans_clear(self, request):
+        """Purge list: borra todos los renglones de RfidScan (lecturas).
+        Respuesta: {"status": "success", "deleted": N}
+        """
+        deleted, _ = RfidScan.objects.all().delete()
+        return Response({"status": "success", "deleted": deleted})
