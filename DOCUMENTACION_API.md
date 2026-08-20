@@ -2705,26 +2705,30 @@ Cuando la solicitud de OCM parcial sí excede el cupo restante (validación de s
 ### 1) Onboarding de Picking
 
 - **Endpoint**: `GET /api/v1/wms/pickings/onboarding/`
-- **Objetivo**: dar al frontend todo lo necesario para preparar un surtido parcial o total mediante un flujo tipo onboarding de 4 pasos.
+- **Objetivo (rediseño v2: *Tracker de prendas por pedido*)**: dar al frontend todo lo necesario para preparar un surtido parcial o total mediante un flujo onboarding de 4 pasos. El **picking** es el documento que *rastrea la ruta física* de las prendas del pedido:
+  - `almacen_origen` → de dónde se toman las prendas.
+  - `almacen_destino` → hacia qué estación/almacén se envían (seleccionable **libremente**).
+  - Las cantidades `cantidad_asignada` / `cantidad_surtida` alimentan los dashboards de `% surtido del pedido` y `% avance de órdenes de trabajo` vinculadas al mismo pedido.
+  - Este endpoint **no crea transferencias, no mueve inventario**.
 
 **Flujo onboarding**
 
 1. Seleccionar el **pedido** (catálogo `pedidos`).
-2. Seleccionar **almacén origen** (de dónde se tomarán las prendas; catálogo `almacenes`).
-3. Seleccionar **almacén destino** (hacia dónde se moverá la mercancía; por defecto `APARTADOS`).
-4. Vista previa del encabezado (`header` con fecha sugerida y folio preview) + líneas con **existencia disponible** para picking parcial y flags de órdenes de trabajo (bordado / reflejante / corte de manga).
+2. Seleccionar **almacén origen** de la lista filtrada `almacenes_origen` (solo almacenes con `permite_salida=True`).
+3. Seleccionar **almacén destino** de la lista filtrada `almacenes_destino` (solo almacenes con `permite_entrada=True`). Si no se envía query param, se sugiere `APARTADOS` como convención, pero **ya no es obligatorio**: el operador puede cambiarlo en el selector.
+4. Vista previa del encabezado (`header` con fecha sugerida, folio preview y **`tracker` KPIs del pedido**) + líneas con **existencia disponible** para picking parcial y flags de órdenes de trabajo (bordado / reflejante / corte de manga).
 
 **Query params**
 
-| Param                                    | Requerido | Descripción                                                                    |
-| ---------------------------------------- | --------- | ------------------------------------------------------------------------------ |
-| `pedido` / `pedido_id`                   | No        | Activa la precarga del pedido y sus líneas de talla.                           |
-| `almacen_origen` / `almacen_origen_id`   | No        | Preselecciona el almacén de origen; usado para calcular existencia disponible. |
-| `almacen_destino` / `almacen_destino_id` | No        | Preselecciona el almacén destino (si no se envía se sugiere `APARTADOS`).      |
+| Param                                    | Requerido | Descripción                                                                           |
+| ---------------------------------------- | --------- | ------------------------------------------------------------------------------------- |
+| `pedido` / `pedido_id`                   | No        | Activa la precarga del pedido y sus líneas de talla.                                  |
+| `almacen_origen` / `almacen_origen_id`   | No        | Preselecciona el almacén de origen; usado para calcular existencia disponible.        |
+| `almacen_destino` / `almacen_destino_id` | No        | Preselecciona el almacén destino (si no se envía se sugiere `APARTADOS` no bloqueante).|
 
 **Ejemplo**
 
-- `GET /api/v1/wms/pickings/onboarding/?pedido_id=125&almacen_origen=3&almacen_destino=10`
+- `GET /api/v1/wms/pickings/onboarding/?pedido_id=125&almacen_origen=3&almacen_destino=28`
 
 **Respuesta resumida**
 
@@ -2746,73 +2750,79 @@ Cuando la solicitud de OCM parcial sí excede el cupo restante (validación de s
       "id": 3,
       "codigo": "PT-MTY",
       "nombre": "Almacén PT Monterrey",
-      "sucursal": 1
+      "sucursal": 1,
+      "tipo_almacen": "PT",
+      "permite_entrada": true,
+      "permite_salida": true,
+      "permite_transferencia": true
+    },
+    {
+      "id": 28,
+      "codigo": "PROC-BORD",
+      "nombre": "Estación de Bordado (PROCESO)",
+      "sucursal": 1,
+      "tipo_almacen": "PROCESO",
+      "permite_entrada": true,
+      "permite_salida": true,
+      "permite_transferencia": true
     },
     {
       "id": 10,
       "codigo": "APTOS",
       "nombre": "APARTADOS",
-      "sucursal": 1
+      "sucursal": 1,
+      "tipo_almacen": "PT",
+      "permite_entrada": true,
+      "permite_salida": false,
+      "permite_transferencia": false
     }
   ],
-  "almacen_origen": {
-    "id": 3,
-    "codigo": "PT-MTY",
-    "nombre": "Almacén PT Monterrey",
-    "sucursal": 1
-  },
-  "almacen_destino": {
-    "id": 10,
-    "codigo": "APTOS",
-    "nombre": "APARTADOS",
-    "sucursal": 1
-  },
+  "almacenes_origen": [
+    { "id": 3, "codigo": "PT-MTY", "nombre": "Almacén PT Monterrey", ... }
+  ],
+  "almacenes_destino": [
+    { "id": 28, "codigo": "PROC-BORD", "nombre": "Estación de Bordado (PROCESO)", ... },
+    { "id": 10, "codigo": "APTOS", "nombre": "APARTADOS", ... }
+  ],
+  "almacen_origen": { "id": 3, "codigo": "PT-MTY", "nombre": "Almacén PT Monterrey", "sucursal": 1 },
+  "almacen_destino": { "id": 28, "codigo": "PROC-BORD", "nombre": "Estación de Bordado (PROCESO)", "sucursal": 1 },
   "header": {
-    "fecha_picking_sugerida": "2026-07-28T15:30:00.123456Z",
-    "folio_sugerido_preview": "PICK-000021"
-  },
-  "pedido": {
-    "id": 125,
-    "folio": "PD-000125",
-    "cliente": 15,
-    "cliente_nombre": "Cliente Demo",
-    "sucursal": 1,
-    "sucursal_nombre": "Matriz"
-  },
-  "picking_detalle": [
-    {
-      "pedido_detalle": 301,
-      "pedido_detalle_talla": 990,
-      "producto": 22,
-      "producto_nombre": "Playera Dry Fit",
-      "producto_variante": 91,
-      "producto_variante_nombre": "Playera Dry Fit - Negro - M",
-      "talla": 4,
-      "talla_nombre": "M",
-      "color": 2,
-      "color_nombre": "Negro",
-      "cantidad_pedida": "50.0000",
-      "cantidad_ya_asignada": "0.0000",
-      "cantidad_ya_surtida": "0.0000",
-      "cantidad_pendiente": "50.0000",
-      "existencia_fisica": "45.0000",
-      "existencia_reservada": "15.0000",
-      "existencia_disponible": "30.0000",
-      "maximo_picking_permitido": "30.0000",
-      "requiere_bordado": true,
-      "requiere_reflejante": false,
-      "requiere_corte_manga": false,
-      "bordado_config": {
-        "posicion": "PECHO",
-        "colores_hilo": 3,
-        "puntadas": 15000
-      },
-      "reflejante_config": null,
-      "corte_manga_config": null
+    "fecha_picking_sugerida": "2026-08-20T09:15:00.123456Z",
+    "folio_sugerido_preview": "PICK-000021",
+    "tracker": {
+      "pct_asignado_pedido": "30.0000",
+      "pct_surtido_pedido":   "12.5000",
+      "total_prendas_pedido": "80",
+      "total_asignado":       "24",
+      "total_surtido":        "10"
     }
-  ]
+  },
+  "pedido": { ... },
+  "picking_detalle": [ ... ]
 }
 ```
+
+**Nuevos campos — selectores de almacén (v2)**
+
+| Campo                 | Shape (cada item)                                                                 | Cuándo usarlo en el UI                                                                 |
+| --------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `almacenes_origen`    | `{id, codigo, nombre, sucursal, tipo_almacen, permite_salida, permite_entrada}`   | Úsalo como **datasource del selector ORIGEN**. Siempre `permite_salida=True` (garantizado). |
+| `almacenes_destino`   | `{id, codigo, nombre, sucursal, tipo_almacen, permite_salida, permite_entrada}`   | Úsalo como **datasource del selector DESTINO**. Siempre `permite_entrada=True`. El usuario cambia libremente la sugerencia default de APARTADOS por cualquier otra estación. |
+| `almacenes`           | Catálogo completo (sin filtros). Backward-compat.                                 | Úsalo solo si el UI requiere vista completa del catálogo. Para los selectores de origen/destino prefiere los dos de arriba. |
+
+> **Fallback seguro**: Si el catálogo de almacenes **no tiene bien prendidos los flags** `permite_salida` / `permite_entrada` (ej: data vieja sin configurar), ambos subsets `almacenes_origen` / `almacenes_destino` **degeneran al catálogo completo** para no bloquear al operador. El admin debe prender estos flags en el catálogo `Almacen` para obtener el filtro óptimo.
+
+**`header.tracker` — KPIs del pedido (v2)**
+
+Siempre presente (shape igual cuando no hay pedido seleccionado: zeros en strings de Decimal). Los porcentajes se calculan como `100 * valor / total_prendas_pedido`.
+
+| Campo                     | Tipo     | Fuente / fórmula                                                                        | UI sugerida                                        |
+| ------------------------- | -------- | --------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `total_prendas_pedido`    | `str`    | `SUM(PedidoDetalleTalla.cantidad)` de todo el pedido.                                   | Card: "Prendas del pedido"                         |
+| `total_asignado`          | `str`    | `SUM(PickingDetalle.cantidad_asignada)` en pickings activos (no cancelados).            | Card: "Asignado a pickings"                        |
+| `total_surtido`           | `str`    | `SUM(PickingDetalle.cantidad_surtida)` en pickings activos.                             | Card: "Surtido"                                    |
+| `pct_asignado_pedido`     | `str`    | `100 * total_asignado / total_prendas_pedido`  (4 decimales fijos).                      | Progress bar: "% Asignado"                         |
+| `pct_surtido_pedido`      | `str`    | `100 * total_surtido / total_prendas_pedido`   (4 decimales fijos).                      | Progress bar: "% Surtido"                          |
 
 **Notas sobre existencia y picking parcial**
 
@@ -2845,18 +2855,25 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 ### 2) Crear Picking desde Onboarding
 
 - **Endpoint**: `POST /api/v1/wms/pickings/onboarding/` (o `POST /api/v1/wms/pickings/`)
-- **Objetivo (modelo tradicional)**: **solo crear el documento** `Picking` + `PickingDetalle` con su folio único. Este paso no mueve inventario, no crea transferencias, no crea reservas ni órdenes de producción.
+- **Objetivo (rediseño v2: *Tracker de prendas*)**: **solo crear el documento** `Picking` + `PickingDetalle` con su folio único. Este paso **no mueve inventario, no crea transferencias, no crea reservas ni órdenes de producción**. El documento registra la intención de ruta: `almacén origen → almacén destino` + cantidades asignadas.
 
 **Qué hace el POST (3 pasos)**
 
-1. Next.js envía encabezado + `picking_detalle` con las cantidades reales a surtir por línea/talla.
-2. El backend valida:
+1. Next.js envía encabezado + `picking_detalle` con las cantidades reales a surtir por línea/talla, y el `almacen_destino` seleccionado por el operador (libre, desde `almacenes_destino`).
+2. El backend valida (**errores campo-específicos `{"almacen_destino": "..."}` para poder bindear al form en Next.js**):
    - `cantidad_asignada` ≤ `cantidad_pendiente` de la talla.
    - `cantidad_asignada` ≤ `existencia_disponible` en el almacén origen (comparación contra existencia agregada por clave de stock).
    - **Validación agregada por clave**: la suma de `cantidad_asignada` de todas las líneas que comparten la misma clave `(producto_id, variante_id)` (incluyendo `variante_id = null`) debe ser ≤ la existencia disponible agregada de esa clave. Previene que múltiples tallas de un mismo producto sin variante agoten colectivamente el stock.
+   - **Validación de almacenes (nuevas en v2)**:
+     - `almacen.permite_salida = True` → 400 `{"almacen": "..."}` si no cumple.
+     - `almacen_destino.permite_entrada = True` → 400 `{"almacen_destino": "..."}` si no cumple.
+     - `almacen != almacen_destino` → 400 `{"almacen", "almacen_destino"}` (ambos campos) si son el mismo.
+     - Cross-tenant: ambos almacenes deben pertenecer a la misma `empresa` y `sucursal` permitidas del usuario.
 3. Crea el documento `Picking` + `PickingDetalle` (bulk_create), genera folio único y responde el picking.
 
 > La **operación física** (tomar prendas del almacén origen y depositarlas en el destino) queda **fuera de este endpoint**. Para el movimiento de inventario se usan los endpoints del módulo Transferencias; para órdenes de producción se usa el módulo Producción.
+>
+> Alimentación de dashboards: en cuanto el picking se crea, el `header.tracker` del GET onboarding aumenta `total_asignado` y `pct_asignado_pedido` según las cantidades asignadas en ese documento. Cuando más adelante se marcan líneas como `SURTIDA` (vía actualizaciones de `PickingDetalle`), aumenta `total_surtido` y `pct_surtido_pedido`.
 
 **Body**
 
@@ -2865,15 +2882,15 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
   "pedido": 125,
   "operador": 8,
   "almacen": 3,
-  "almacen_destino": 10,
+  "almacen_destino": 28,
   "prioridad": "MEDIA",
   "tipo": "ORDER_PICKING",
-  "observaciones": "Surtido parcial 30 pz (restante en próximo picking)",
+  "observaciones": "Surtido parcial 30 pz, envío directo a estación de bordado (alm. 28)",
   "picking_detalle": [
     {
       "pedido_detalle_talla": 990,
       "cantidad_asignada": "30.0000",
-      "observaciones": "Bordado especial — pasar a Produccion después"
+      "observaciones": "Bordado especial — ya abierto OB en Produccion"
     },
     {
       "pedido_detalle_talla": 991,
@@ -2889,30 +2906,34 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 - `operador`
 - `almacen` (almacén origen)
 - `picking_detalle` (cada línea con `pedido_detalle_talla` y `cantidad_asignada > 0`)
+- **`almacen_destino`**: en la práctica **el UI debe enviarlo** (proviene del selector `almacenes_destino`). Si no se envía, el backend intenta una sugerencia por conveniencia (ver abajo).
 
 **Campos opcionales / low-noise**
 
-- `almacen_destino`: si no se envía, se resuelve automáticamente el almacén `APARTADOS` de la misma empresa + sucursal.
+- `almacen_destino`: si se **omite** del body, el backend lo resuelve en este orden:
+  1. Busca el almacén `APARTADOS` (nombre iexact) de la misma empresa + sucursal del pedido.
+  2. Si `APARTADOS` no existe, devuelve **HTTP 400** `{"almacen_destino": "Selecciona un almacén destino. No existe un APARTADOS default configurado para Sucursal X."}` — pide al usuario que elija uno del selector.
 - `prioridad`: `BAJA`, `MEDIA`, `ALTA`
 - `tipo`: `ORDER_PICKING`, `BATCH_PICKING`, `WAVE_PICKING`, `ZONE_PICKING`
 - `oleada`, `zona_almacen`, `lote`
 - `fecha_inicio`, `fecha_fin`, `fecha_limite`
 - `observaciones`
 - Por cada línea en `picking_detalle`:
-  - `generar_orden_bordado` / `generar_orden_reflejante` / `generar_orden_corte_manga`: **aceptados pero IGNORADOS en el v1 de create**. Las órdenes de trabajo se generan desde Produccion endpoints dedicados. No se rechazan para mantener bajo ruido con Next.js.
+  - `generar_orden_bordado` / `generar_orden_reflejante` / `generar_orden_corte_manga`: **aceptados pero IGNORADOS en el v2 de create**. Las órdenes de trabajo se generan desde Produccion endpoints dedicados. No se rechazan para mantener bajo ruido con Next.js.
   - `observaciones`
 
-**Validaciones principales**
+**Validaciones principales (resumen)**
 
 - El pedido debe pertenecer a la empresa del usuario.
 - El almacén origen y destino deben pertenecer a la misma empresa y sucursal del pedido.
-- El almacén origen y destino **no** pueden ser el mismo.
+- El almacén origen **debe tener** `permite_salida=True`.
+- El almacén destino **debe tener** `permite_entrada=True`.
+- El almacén origen y destino **no** pueden ser el mismo (400 campo-específico en `almacen` + `almacen_destino`).
 - El operador debe estar activo y pertenecer a la misma empresa.
 - Cada renglón debe incluir `pedido_detalle_talla` y `cantidad_asignada > 0`.
 - Cada cantidad enviada **no** puede exceder lo pendiente del pedido para esa talla.
 - Cada cantidad enviada **no** puede exceder la `existencia_disponible` en el almacén origen.
-- Si `almacen_destino` no se envía, debe existir un almacén `APARTADOS` en la misma empresa y sucursal del pedido.
-- El avance del surtido no se guarda en `Pedido`; se calcula desde `PickingDetalle`.
+- El avance del surtido no se guarda en `Pedido`; se calcula desde `PickingDetalle` (lo expone `header.tracker` en el GET onboarding).
 
 **Respuesta**
 
@@ -2926,8 +2947,8 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
   "operador_nombre": "Juan Perez",
   "almacen": 3,
   "almacen_nombre": "Almacén PT Monterrey",
-  "almacen_destino": 10,
-  "almacen_destino_nombre": "APARTADOS",
+  "almacen_destino": 28,
+  "almacen_destino_nombre": "Estación de Bordado (PROCESO)",
   "prioridad": "MEDIA",
   "tipo": "ORDER_PICKING",
   "estado": "Pendiente",
@@ -2964,13 +2985,16 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 }
 ```
 
-**Notas para Next.js**
+**Notas para Next.js (v2 rediseño)**
 
 - Sí es necesario enviar `picking_detalle` en el onboarding `POST`.
 - El frontend decide qué tallas y cantidades se surtirán en ese picking; debe **respetar** `maximo_picking_permitido` reportado por el GET onboarding (el backend lo validará de nuevo).
-- `almacen_destino` es opcional; si no se envía el backend resuelve `APARTADOS` y lo guarda.
+- **Usa los selectores nuevos**: `almacenes_origen` para el selector de origen, `almacenes_destino` para el de destino. El usuario puede elegir **cualquier almacén válido** como destino, no solo `APARTADOS`.
+- Maneja el 400 **campo-específico**: la mayoría de errores de almacén vienen como `{"almacen_destino": "..."}` o `{"almacen": "..."}` — muestralos sobre el selector correcto.
 - Los checkbox `generar_orden_*` pueden mandarse pero se ignoran en el POST de picking; la generación de OT se hace desde endpoints Produccion (ver sección `Orden de Bordado Onboarding`).
-- El `Pedido` es solo referencia comercial; el avance real se consulta desde el historial de `PickingDetalle`.
+- El `Pedido` es solo referencia comercial; el avance real se consulta desde:
+  - `GET onboarding` **`header.tracker`** (KPI compacto para encabezado del form).
+  - Historial de `PickingDetalle` si se requiere vista granular.
 - Si frontend necesita mostrar el surtido creado, puede usar la respuesta del `POST` o consultar el `GET` de detalle.
 - `ordenes_trabajo_generadas` siempre devuelve `[]` en este endpoint. Las OT se vinculan desde sus endpoints de Producción.
 

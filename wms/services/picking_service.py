@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Sum
 
 from rest_framework.exceptions import ValidationError
 
@@ -11,40 +12,93 @@ from wms.services.picking_pipeline.catalogs import (
     armar_header_preview,
     armar_payload_vacio,
     cargar_catalogos,
-    resolver_apartados_obligatorio,
     serializar_almacen,
     sugerir_almacenes,
+    sugerir_apartados_por_defecto,
 )
 from wms.services.picking_pipeline.cantidad_validator import resolve_requested_items
 from wms.services.picking_pipeline.context import (
     parse_pk,
     validar_contexto_picking,
 )
-from wms.services.picking_pipeline.pendientes import build_snapshots
+from wms.services.picking_pipeline.pendientes import build_snapshots, historical_maps
+from wms.utils.decimales import normalizar_decimal
 from wms.utils.folios import generate_folio
 
 
 class PickingService:
     """Facade público del módulo de picking (WMS).
 
-    Modelo **tradicional** de picking:
-    - ``onboarding_payload``: catálogos + sugerencias + existencia
-      para que el usuario arma el documento.
+    Modelo **Tracker de prendas por pedido** (v2 rediseño):
+    - ``onboarding_payload``: catálogos + selector origen/destino +
+      existencia + ``header.tracker`` con los KPIs de surtido del pedido.
     - ``handle_store``: **solo crea el documento** ``Picking`` +
-      ``PickingDetalle`` + folio.
+      ``PickingDetalle`` + folio. No mueve inventario, no crea
+      transferencias, no crea reservas.
+    - El almacén destino es **seleccionable libremente** por el usuario
+      (sugerencia default a APARTADOS, sin obligatoriedad).
+    - Los campos ``cantidad_asignada / cantidad_surtida`` de
+      ``PickingDetalle`` alimentan los dashboards de ``% surtido`` y
+      ``% avance`` del pedido y de sus órdenes de trabajo vinculadas.
 
     Flujo real operativo:
       1. ``GET onboarding`` → seleccionar pedido / origen / destino / cantidades.
-      2. ``POST create`` → documento picking listo para operar.
+      2. ``POST create`` → documento picking listo para operar (tracking).
       3. **La operación física (tomar prendas del origen y moverlas al destino)
       queda fuera del create del picking**, en pasos posteriores.
 
     No crea reservas, no crea transferencias ni órdenes de producción
     dentro de este endpoint:
     - Reservas, transferencias y órdenes de trabajo quedan en sus propios
-    endpoints/services de otros módulos (Produccion, Transferencias) cuando el
-    flujo de negocio lo necesite.
+      endpoints/services de otros módulos (Produccion, Transferencias) cuando el
+      flujo de negocio lo necesite.
     """
+
+    # ------------------------------------------------------------------
+    # Helpers tracking (porcentajes y totales normalizados)
+    # ------------------------------------------------------------------
+    @classmethod
+    def _armar_tracker(cls, pedido):
+        """Construye ``header.tracker`` con KPIs del pedido (asignado / surtido).
+
+        - Totales: sumatorias de ``PedidoDetalleTalla`` y pickings activos
+          (no cancelados).
+        - Porcentajes: string Decimal(4) normalizado. Si no hay prendas
+          devuelve 0.0000 en lugar de división por cero. Si ``pedido`` es
+          ``None`` devuelve zeros (caso onboarding sin pedido seleccionado).
+        """
+        if pedido is None:
+            return {
+                "pct_asignado_pedido": "0.0000",
+                "pct_surtido_pedido": "0.0000",
+                "total_prendas_pedido": "0",
+                "total_asignado": "0",
+                "total_surtido": "0",
+            }
+        total_pedido = (
+            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido).aggregate(
+                total=Sum("cantidad")
+            )["total"]
+            or Decimal("0")
+        )
+        total_pedido = normalizar_decimal(total_pedido)
+        _asig_map, _surt_map = historical_maps(pedido)
+        total_asignado = normalizar_decimal(sum(_asig_map.values(), Decimal("0")))
+        total_surtido = normalizar_decimal(sum(_surt_map.values(), Decimal("0")))
+
+        def _pct(num, den):
+            if den <= Decimal("0"):
+                return normalizar_decimal(Decimal("0"))
+            ratio = (normalizar_decimal(num) * Decimal("100")) / normalizar_decimal(den)
+            return ratio.quantize(Decimal("0.0001"))
+
+        return {
+            "pct_asignado_pedido": str(_pct(total_asignado, total_pedido)),
+            "pct_surtido_pedido": str(_pct(total_surtido, total_pedido)),
+            "total_prendas_pedido": str(total_pedido),
+            "total_asignado": str(total_asignado),
+            "total_surtido": str(total_surtido),
+        }
 
     # ------------------------------------------------------------------
     # GET onboarding (4 pasos: pedido → origen/destino → existencias → OT)
@@ -73,6 +127,8 @@ class PickingService:
             operadores_payload,
             almacenes_qs,
             almacenes_payload,
+            almacenes_origen_payload,
+            almacenes_destino_payload,
         ) = cargar_catalogos(user, empresa, es_staff, sucursal_ids)
 
         almacen_origen_id = parse_pk(almacen_origen_id)
@@ -89,11 +145,14 @@ class PickingService:
             "pedidos": pedidos_payload,
             "operadores": operadores_payload,
             "almacenes": almacenes_payload,
+            "almacenes_origen": almacenes_origen_payload,
+            "almacenes_destino": almacenes_destino_payload,
             "almacen_origen": serializar_almacen(almacen_origen),
             "almacen_destino": serializar_almacen(almacen_destino),
             "header": {
                 "fecha_picking_sugerida": None,
                 "folio_sugerido_preview": None,
+                "tracker": cls._armar_tracker(None),
             },
             "pedido": None,
             "picking_detalle": [],
@@ -106,7 +165,9 @@ class PickingService:
         if pedido is None:
             raise ValidationError({"pedido": "Pedido no encontrado o sin acceso."})
 
-        payload["header"] = armar_header_preview(pedido)
+        header_base = armar_header_preview(pedido)
+        header_base["tracker"] = cls._armar_tracker(pedido)
+        payload["header"] = header_base
 
         if almacen_origen is None:
             origen_sugerido, destino_sugerido = sugerir_almacenes(
@@ -122,13 +183,7 @@ class PickingService:
                 almacen_destino = destino_sugerido
 
         if almacen_destino is None and payload["almacen_destino"] is None:
-            from wms.services.picking_pipeline.catalogs import (
-                resolver_apartados_safe,
-            )
-
-            almacen_apartados = resolver_apartados_safe(
-                pedido.empresa_id, pedido.sucursal_id
-            )
+            almacen_apartados = sugerir_apartados_por_defecto(pedido)
             if almacen_apartados:
                 payload["almacen_destino"] = serializar_almacen(almacen_apartados)
                 almacen_destino = almacen_apartados
@@ -206,11 +261,15 @@ class PickingService:
     def handle_store(cls, data, user):
         """Crea el documento Picking (parcial o total) con sus detalles.
 
-        Modelo tradicional: este endpoint **solo registra la intención** de
-        surtir un pedido. No mueve inventario, no crea transferencias, no
-        genera reservas, no crea órdenes de trabajo. El movimiento físico
-        de prendas del almacén origen hacia el destino queda en flujos
-        posteriores o endpoints dedicados (Transferencias, Produccion).
+        Modelo **Tracker de prendas por pedido** (v2): este endpoint
+        **solo registra la ruta y las cantidades asignadas** de un
+        picking. No mueve inventario, no crea transferencias, no
+        genera reservas, no crea órdenes de trabajo.
+
+        El almacén destino lo elige el usuario (selector libre). Si no
+        envía ninguno, se sugiere APARTADOS como convención, pero ya no
+        es obligatorio: si APARTADOS no existe, se le pide al usuario
+        seleccionar un destino manualmente.
         """
         pedido = data.pop("pedido")
         almacen = data.pop("almacen")
@@ -219,7 +278,18 @@ class PickingService:
         requested_rows = data.pop("picking_detalle")
 
         if almacen_destino is None:
-            almacen_destino = resolver_apartados_obligatorio(pedido)
+            almacen_destino = sugerir_apartados_por_defecto(pedido)
+            if almacen_destino is None:
+                sucursal_nombre = (
+                    getattr(getattr(pedido, "sucursal", None), "nombre", None)
+                    or f"sucursal #{pedido.sucursal_id}"
+                )
+                raise ValidationError({
+                    "almacen_destino": (
+                        "Selecciona un almacén destino. No existe un APARTADOS "
+                        f"default configurado para {sucursal_nombre}."
+                    ),
+                })
 
         # 1. Contexto (scope empresa / sucursal / permisos / origendestino)
         validar_contexto_picking(pedido, almacen, almacen_destino, operador, user)

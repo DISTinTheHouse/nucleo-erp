@@ -65,17 +65,24 @@ def resolver_apartados_safe(empresa_id, sucursal_id):
 
 
 def resolver_apartados_obligatorio(pedido):
-    """POST: busca el almacén ``APARTADOS`` (iexact) y lanza 400 si falta.
+    """Legacy name (deprecated). Usa ``sugerir_apartados_por_defecto``.
 
-    Mantiene el criterio ``iexact`` alineado con el GET onboarding y con
-    la data migration que siembra el catálogo de almacenes.
+    Preservado para call sites que aún no migran; su semántica de "obligatorio
+    con 400" ya no se aplica en el flujo POST onboarding (ahora el usuario
+    selecciona cualquier almacén destino válido).
     """
-    almacen_apartados = resolver_apartados_safe(pedido.empresa_id, pedido.sucursal_id)
-    if not almacen_apartados:
-        raise ValidationError(
-            "No existe el almacén APARTADOS para la empresa y sucursal del pedido."
-        )
-    return almacen_apartados
+    return sugerir_apartados_por_defecto(pedido)
+
+
+def sugerir_apartados_por_defecto(pedido):
+    """GET/POST: sugiere el almacén ``APARTADOS`` (iexact) como destino default.
+
+    A diferencia del nombre anterior NO lanza 400 si falta; devuelve el
+    ``Almacen`` o ``None`` si no está configurado. El POST onboarding
+    luego valida y — si falta tanto el body como la sugerencia — pide al
+    usuario que seleccione un destino.
+    """
+    return resolver_apartados_safe(pedido.empresa_id, pedido.sucursal_id)
 
 
 def armar_payload_vacio():
@@ -90,11 +97,20 @@ def armar_payload_vacio():
         "pedidos": [],
         "operadores": [],
         "almacenes": [],
+        "almacenes_origen": [],
+        "almacenes_destino": [],
         "almacen_origen": None,
         "almacen_destino": None,
         "header": {
             "fecha_picking_sugerida": None,
             "folio_sugerido_preview": None,
+            "tracker": {
+                "pct_asignado_pedido": "0.0000",
+                "pct_surtido_pedido": "0.0000",
+                "total_prendas_pedido": "0",
+                "total_asignado": "0",
+                "total_surtido": "0",
+            },
         },
         "pedido": None,
         "picking_detalle": [],
@@ -157,11 +173,32 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids):
             "codigo": almacen.codigo,
             "nombre": almacen.nombre,
             "sucursal": almacen.sucursal_id,
+            "tipo_almacen": almacen.tipo_almacen,
+            "permite_entrada": bool(getattr(almacen, "permite_entrada", False)),
+            "permite_salida": bool(getattr(almacen, "permite_salida", False)),
+            "permite_transferencia": bool(getattr(almacen, "permite_transferencia", False)),
         }
         for almacen in almacenes_qs[:100]
     ]
+    # Subsets para selector UI (origen / destino) con fallback seguro:
+    # si el catálogo no tiene bien prendidos los flags, caemos al catalogo
+    # completo para no bloquear al operador.
+    almacenes_origen_payload = [
+        a for a in almacenes_payload if a["permite_salida"]
+    ] or list(almacenes_payload)
+    almacenes_destino_payload = [
+        a for a in almacenes_payload if a["permite_entrada"]
+    ] or list(almacenes_payload)
 
-    return pedido_qs, pedidos_payload, operadores_payload, almacenes_qs, almacenes_payload
+    return (
+        pedido_qs,
+        pedidos_payload,
+        operadores_payload,
+        almacenes_qs,
+        almacenes_payload,
+        almacenes_origen_payload,
+        almacenes_destino_payload,
+    )
 
 
 def serializar_almacen(almacen):
