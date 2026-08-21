@@ -160,19 +160,20 @@ class ProductoTerminadoEntradas(models.Model):
     
 class OrdenesBordado(StatusLifecycleModel):
     class EstatusBordado(models.IntegerChoices):
-        PENDIENTE = 1, "Pendiente"
-        PREPARACION = 2, "Preparacion"
-        BORDANDO = 3, "Bordando"
-        REVISION = 4, "Revision"
-        COMPLETADO = 5, "Completado"
+        SIN_TRABAJAR = 1, "Sin trabajar"
+        PROGRAMADO = 2, "Programado"
+        PONCHADO = 3, "Ponchado"
+        ARREGLO = 4, "Arreglo"
+        BORDANDO = 5, "Bordando"
         DETENIDO = 6, "Detenido"
-        CANCELADO = 7, "Cancelado"
+        FINALIZADO = 7, "Finalizado"
+        CANCELADO_LEGACY = 8, "Cancelado (legacy)"
             
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE)
     folio_bordado = models.CharField(max_length=50, unique=True)
-    estatus_bordado = models.IntegerField(default=EstatusBordado.PENDIENTE.value, choices=EstatusBordado.choices)
+    estatus_bordado = models.IntegerField(default=EstatusBordado.SIN_TRABAJAR.value, choices=EstatusBordado.choices)
     prioridad = models.IntegerField(default=1)  
     fecha_inicio = models.DateTimeField(auto_now_add=True)
     fecha_fin = models.DateTimeField(null=True, blank=True)
@@ -180,6 +181,7 @@ class OrdenesBordado(StatusLifecycleModel):
     observaciones = models.TextField(blank=True, null=True)
     activo = models.BooleanField(default=True)
     maquina_asignada = models.CharField(max_length=100, null=True, blank=True)
+    proveedor_externo = models.CharField(max_length=200, null=True, blank=True)
 
     class Meta:
         db_table = 'orden_bordado'
@@ -236,7 +238,9 @@ class BordadoAvances(StatusLifecycleModel):
     cantidad_bordada = models.FloatField()
     usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE)
     comentario = models.TextField(blank=True, null=True)
+    puntadas_por_pieza = models.IntegerField(default=0)
     puntadas_realizadas = models.IntegerField(default=0)
+    puntadas_total = models.IntegerField(default=0)
     activo = models.BooleanField(default=True)
 
     class Meta:

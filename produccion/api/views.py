@@ -771,6 +771,19 @@ class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet)
                 )
                 if pdt is not None:
                     extra["pedido_detalle_talla"] = pdt
+
+        # Auto-cálculo puntadas_total = puntadas_por_pieza × cantidad_bordada
+        puntadas_por_pieza = int(validated.get("puntadas_por_pieza", 0) or 0)
+        cantidad_bordada = validated.get("cantidad_bordada", 0) or 0
+        if puntadas_por_pieza > 0 and cantidad_bordada:
+            # Si el frontend envió puntadas_total manual lo sobreescribimos
+            # (la fuente de verdad es el producto por_pieza × pz). Sólo si
+            # puntadas_por_pieza es 0 (registros legacy sin capturar)
+            # conservamos el puntadas_total que llegó (puede ser 0).
+            extra["puntadas_total"] = int(
+                round(float(puntadas_por_pieza) * float(cantidad_bordada))
+            )
+
         serializer.save(usuario=self.request.user, **extra)
 
     def perform_destroy(self, instance):

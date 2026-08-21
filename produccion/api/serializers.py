@@ -593,7 +593,9 @@ class _OrdenBordadoAvanceReadSerializer(serializers.ModelSerializer):
             "pedido_detalle_talla",
             "pedido_detalle_talla_display",
             "cantidad_bordada",
+            "puntadas_por_pieza",
             "puntadas_realizadas",
+            "puntadas_total",
             "comentario",
         ]
         read_only_fields = fields
@@ -742,7 +744,9 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
                     "cantidad_programada": float(getattr(d, "cantidad", 0) or 0),
                     "puntadas_presupuesto": int(getattr(d, "puntadas", 0) or 0),
                     "cantidad_bordada": 0.0,
+                    "puntadas_por_pieza_promedio": 0,
                     "puntadas_realizadas": 0,
+                    "puntadas_total": 0,
                     "porcentaje_avance": 0.0,
                     "operadores": [],
                 })
@@ -750,7 +754,9 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
                 "cantidad_programada": cantidad_programada,
                 "cantidad_bordada_total": 0.0,
                 "puntadas_presupuesto": puntadas_presupuesto,
+                "puntadas_por_pieza_promedio": 0,
                 "puntadas_realizadas": 0,
+                "puntadas_total": 0,
                 "porcentaje_avance": 0.0,
                 "por_detalle": por_detalle,
             }
@@ -760,6 +766,22 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
         )
         puntadas_realizadas = sum(
             int(getattr(a, "puntadas_realizadas", 0) or 0) for a in avances
+        )
+        puntadas_total = sum(
+            int(getattr(a, "puntadas_total", 0) or 0) for a in avances
+        )
+        # Promedio PONDERADO de puntadas_por_pieza para toda la OB:
+        #    sum(por_pieza * cantidad) / sum(cantidad)
+        numerador_pp = 0.0
+        denominador_pp = 0.0
+        for a in avances:
+            pp = int(getattr(a, "puntadas_por_pieza", 0) or 0)
+            qty = float(getattr(a, "cantidad_bordada", 0) or 0)
+            if pp > 0 and qty > 0:
+                numerador_pp += pp * qty
+                denominador_pp += qty
+        puntadas_por_pieza_promedio = (
+            int(round(numerador_pp / denominador_pp)) if denominador_pp > 0 else 0
         )
 
         pct = 0.0
@@ -771,13 +793,22 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
             key = getattr(a, "orden_bordado_detalle_id", None)
             bucket = agrupado.setdefault(key, {
                 "cantidad_bordada": 0.0,
+                "puntadas_por_pieza_num": 0.0,
+                "puntadas_por_pieza_den": 0.0,
                 "puntadas_realizadas": 0,
+                "puntadas_total": 0,
                 "operadores": {},
             })
             qty = float(getattr(a, "cantidad_bordada", 0) or 0)
             pts = int(getattr(a, "puntadas_realizadas", 0) or 0)
+            ptotal = int(getattr(a, "puntadas_total", 0) or 0)
+            pp = int(getattr(a, "puntadas_por_pieza", 0) or 0)
             bucket["cantidad_bordada"] += qty
             bucket["puntadas_realizadas"] += pts
+            bucket["puntadas_total"] += ptotal
+            if pp > 0 and qty > 0:
+                bucket["puntadas_por_pieza_num"] += pp * qty
+                bucket["puntadas_por_pieza_den"] += qty
             usr = getattr(a, "usuario", None)
             uid = getattr(usr, "pk", None) if usr else None
             if uid is not None:
@@ -790,17 +821,42 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
                         "usuario_id": uid,
                         "usuario_nombre": nombre,
                         "cantidad_bordada": 0.0,
+                        "puntadas_por_pieza_num": 0.0,
+                        "puntadas_por_pieza_den": 0.0,
                         "puntadas_realizadas": 0,
+                        "puntadas_total": 0,
                     }
                 bucket["operadores"][uid]["cantidad_bordada"] += qty
                 bucket["operadores"][uid]["puntadas_realizadas"] += pts
+                bucket["operadores"][uid]["puntadas_total"] += ptotal
+                if pp > 0 and qty > 0:
+                    bucket["operadores"][uid]["puntadas_por_pieza_num"] += pp * qty
+                    bucket["operadores"][uid]["puntadas_por_pieza_den"] += qty
+
+        def _prom_pp(bucket):
+            den = bucket.get("puntadas_por_pieza_den", 0.0) or 0.0
+            num = bucket.get("puntadas_por_pieza_num", 0.0) or 0.0
+            return int(round(num / den)) if den > 0 else 0
+
+        def _aplanar_operadores(ops_map):
+            lista = []
+            for op in ops_map.values():
+                op2 = dict(op)
+                op2["puntadas_por_pieza_promedio"] = _prom_pp(op2)
+                op2.pop("puntadas_por_pieza_num", None)
+                op2.pop("puntadas_por_pieza_den", None)
+                lista.append(op2)
+            return lista
 
         por_detalle = []
         for d in detalles_qs:
             key = d.pk
             bucket = agrupado.get(key, {
                 "cantidad_bordada": 0.0,
+                "puntadas_por_pieza_num": 0.0,
+                "puntadas_por_pieza_den": 0.0,
                 "puntadas_realizadas": 0,
+                "puntadas_total": 0,
                 "operadores": {},
             })
             programa = float(getattr(d, "cantidad", 0) or 0)
@@ -822,14 +878,17 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
                 "cantidad_programada": programa,
                 "puntadas_presupuesto": int(getattr(d, "puntadas", 0) or 0),
                 "cantidad_bordada": bucket["cantidad_bordada"],
+                "puntadas_por_pieza_promedio": _prom_pp(bucket),
                 "puntadas_realizadas": bucket["puntadas_realizadas"],
+                "puntadas_total": bucket["puntadas_total"],
                 "porcentaje_avance": porc,
-                "operadores": list(bucket["operadores"].values()),
+                "operadores": _aplanar_operadores(bucket["operadores"] or {}),
             })
 
         avance_sin_detalle = agrupado.get(None, None)
         if avance_sin_detalle and (
             avance_sin_detalle["cantidad_bordada"] or avance_sin_detalle["puntadas_realizadas"]
+            or avance_sin_detalle.get("puntadas_total")
         ):
             programa = 0.0
             porc = 0.0
@@ -845,16 +904,20 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
                 "cantidad_programada": programa,
                 "puntadas_presupuesto": 0,
                 "cantidad_bordada": avance_sin_detalle["cantidad_bordada"],
+                "puntadas_por_pieza_promedio": _prom_pp(avance_sin_detalle),
                 "puntadas_realizadas": avance_sin_detalle["puntadas_realizadas"],
+                "puntadas_total": avance_sin_detalle.get("puntadas_total", 0) or 0,
                 "porcentaje_avance": porc,
-                "operadores": list(avance_sin_detalle["operadores"].values()),
+                "operadores": _aplanar_operadores(avance_sin_detalle.get("operadores") or {}),
             })
 
         return {
             "cantidad_programada": cantidad_programada,
             "cantidad_bordada_total": cantidad_bordada,
             "puntadas_presupuesto": puntadas_presupuesto,
+            "puntadas_por_pieza_promedio": puntadas_por_pieza_promedio,
             "puntadas_realizadas": puntadas_realizadas,
+            "puntadas_total": puntadas_total,
             "porcentaje_avance": pct,
             "por_detalle": por_detalle,
         }
