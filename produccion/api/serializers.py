@@ -297,6 +297,10 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
     sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
     estatus_bordado_display = serializers.CharField(source="get_estatus_bordado_display", read_only=True)
+    proveedor_nombre = serializers.CharField(
+        source="proveedor.nombre", read_only=True, default=None,
+    )
+    proveedor_display = serializers.SerializerMethodField()
 
     detalles_override = serializers.ListField(
         child=serializers.JSONField(),
@@ -320,21 +324,57 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
         if not usuario: return None
         return usuario.get_full_name().strip() or usuario.email
 
+    def get_proveedor_display(self, obj):
+        """Label compacto del proveedor (para chip UI)."""
+        prov = getattr(obj, "proveedor", None)
+        if prov is None:
+            return None
+        return {
+            "id": prov.pk,
+            "codigo": getattr(prov, "codigo", None),
+            "nombre": getattr(prov, "nombre", None),
+            "razon_social": getattr(prov, "razon_social", None),
+            "tipo": getattr(prov, "tipo", None),
+            "rfc": getattr(prov, "rfc", None),
+            "email": getattr(prov, "email", None),
+            "telefono": getattr(prov, "telefono", None),
+            "contacto_principal": getattr(prov, "contacto_principal", None),
+        }
+
     def validate(self, attrs):
-        """Valida que ``detalles_override[]`` (si viene) sea un arreglo válido
-        de renglones del tipo:
+        """Valida cross-tenant de ``proveedor`` y ``detalles_override``.
 
-            { "pedido_detalle_talla_id": 123, "cantidad": 25 }
-
-        Reglas:
-        - No puede haber IDs duplicados.
-        - Cada ID debe pertenecer al mismo ``pedido`` que el body (la FK que
-          viene en attrs["pedido"]).
-        - ``cantidad`` debe ser numérico y > 0.
-        - ``cantidad`` no puede ser mayor a ``PedidoDetalleTalla.cantidad``
-          original del pedido (SSoT); se permite parcial (<= 100%), pero nunca
-          exceder el total contratado.
+        Si el body selecciona un proveedor, su ``empresa`` debe ser NULL
+        (catálogo global) o coincidir con la empresa asignada a la OB. ``Proveedor.empresa``
+        es nullable en el modelo por compatibilidad histórica, así que permitimos
+        ambos casos. Para OB NUEVA se compara con ``attrs["empresa"]``; para un
+        ``PATCH``/update se compara con ``self.instance.empresa_id`` (cuando
+        attrs no redefine ``empresa``, que es read_only).
         """
+        # --- Cross-tenant: proveedor vs empresa de la OB ---------------------
+        proveedor = attrs.get("proveedor", None)
+        if proveedor is not None:
+            if "empresa" in attrs:
+                empresa_id = getattr(attrs["empresa"], "pk", None) or attrs["empresa"]
+            elif self.instance is not None:
+                empresa_id = getattr(self.instance, "empresa_id", None)
+            else:
+                empresa_id = None
+            prov_empresa_id = getattr(proveedor, "empresa_id", None)
+            if (
+                prov_empresa_id is not None
+                and empresa_id is not None
+                and int(prov_empresa_id) != int(empresa_id)
+            ):
+                raise serializers.ValidationError({
+                    "proveedor": (
+                        f"Proveedor id={proveedor.pk} pertenece a empresa "
+                        f"{prov_empresa_id}, no coincide con empresa de la OB "
+                        f"{empresa_id}."
+                    )
+                })
+
+        # --- detalle_override (lo heredamos y lo corremos después -------------
         detalles_override = attrs.get("detalles_override") or []
         pedido = attrs.get("pedido")
         if detalles_override:

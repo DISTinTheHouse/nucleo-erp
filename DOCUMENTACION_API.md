@@ -2155,7 +2155,19 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
   "estatus_bordado_display": "Bordando",
   "prioridad": 1,
   "maquina_asignada": "Barudan 1",
-  "proveedor_externo": "Bordados Martínez S.A. (externo)",
+  "proveedor": 27,
+  "proveedor_nombre": "Bordados Martínez S.A.",
+  "proveedor_display": {
+    "id": 27,
+    "codigo": "PROV-BORD-027",
+    "nombre": "Bordados Martínez S.A.",
+    "razon_social": "Bordados Martínez S.A. de C.V.",
+    "tipo": "Produccion",
+    "rfc": "BMA890101ABC",
+    "email": "produccion@bordadosmartinez.com",
+    "telefono": "5512345678",
+    "contacto_principal": "Ing. Pedro Martínez"
+  },
   "observaciones": "Cliente pide logo nítido",
   "usuario_asignado": 5,
   "usuario_nombre": "Juan Pérez (supervisor)",
@@ -2164,8 +2176,26 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
   "cobertura_completa": false,
 
   "detalles": [
-    {"id": 101, "pedido_detalle_id": 3301, "producto_nombre": "Playera", "talla_nombre": "M", "color_nombre": "Negro", "cantidad": 40, "puntadas": 8000, "posicion_bordado": "F"},
-    {"id": 102, "pedido_detalle_id": 3301, "producto_nombre": "Playera", "talla_nombre": "L", "color_nombre": "Negro", "cantidad": 20, "puntadas": 8000, "posicion_bordado": "F"}
+    {
+      "id": 101,
+      "pedido_detalle_id": 3301,
+      "producto_nombre": "Playera",
+      "talla_nombre": "M",
+      "color_nombre": "Negro",
+      "cantidad": 40,
+      "puntadas": 8000,
+      "posicion_bordado": "F"
+    },
+    {
+      "id": 102,
+      "pedido_detalle_id": 3301,
+      "producto_nombre": "Playera",
+      "talla_nombre": "L",
+      "color_nombre": "Negro",
+      "cantidad": 20,
+      "puntadas": 8000,
+      "posicion_bordado": "F"
+    }
   ],
 
   "avances": [
@@ -2175,9 +2205,21 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
       "usuario": 4,
       "usuario_nombre": "María Gómez",
       "orden_bordado_detalle": 101,
-      "orden_bordado_detalle_display": {"id": 101, "producto_nombre": "Playera", "talla_nombre": "M", "color_nombre": "Negro", "cantidad_programada": 40, "posicion_bordado": "F"},
+      "orden_bordado_detalle_display": {
+        "id": 101,
+        "producto_nombre": "Playera",
+        "talla_nombre": "M",
+        "color_nombre": "Negro",
+        "cantidad_programada": 40,
+        "posicion_bordado": "F"
+      },
       "pedido_detalle_talla": 8821,
-      "pedido_detalle_talla_display": {"id": 8821, "pedido_detalle_id": 3301, "talla_nombre": "M", "cantidad_pedido": 100},
+      "pedido_detalle_talla_display": {
+        "id": 8821,
+        "pedido_detalle_id": 3301,
+        "talla_nombre": "M",
+        "cantidad_pedido": 100
+      },
       "cantidad_bordada": 25,
       "puntadas_por_pieza": 8000,
       "puntadas_realizadas": 200000,
@@ -2190,9 +2232,21 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
       "usuario": 7,
       "usuario_nombre": "Luis Rodríguez",
       "orden_bordado_detalle": 101,
-      "orden_bordado_detalle_display": {"id": 101, "producto_nombre": "Playera", "talla_nombre": "M", "color_nombre": "Negro", "cantidad_programada": 40, "posicion_bordado": "F"},
+      "orden_bordado_detalle_display": {
+        "id": 101,
+        "producto_nombre": "Playera",
+        "talla_nombre": "M",
+        "color_nombre": "Negro",
+        "cantidad_programada": 40,
+        "posicion_bordado": "F"
+      },
       "pedido_detalle_talla": 8821,
-      "pedido_detalle_talla_display": {"id": 8821, "pedido_detalle_id": 3301, "talla_nombre": "M", "cantidad_pedido": 100},
+      "pedido_detalle_talla_display": {
+        "id": 8821,
+        "pedido_detalle_id": 3301,
+        "talla_nombre": "M",
+        "cantidad_pedido": 100
+      },
       "cantidad_bordada": 15,
       "puntadas_por_pieza": 8000,
       "puntadas_realizadas": 120000,
@@ -2205,9 +2259,21 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
       "usuario": 4,
       "usuario_nombre": "María Gómez",
       "orden_bordado_detalle": 102,
-      "orden_bordado_detalle_display": {"id": 102, "producto_nombre": "Playera", "talla_nombre": "L", "color_nombre": "Negro", "cantidad_programada": 20, "posicion_bordado": "F"},
+      "orden_bordado_detalle_display": {
+        "id": 102,
+        "producto_nombre": "Playera",
+        "talla_nombre": "L",
+        "color_nombre": "Negro",
+        "cantidad_programada": 20,
+        "posicion_bordado": "F"
+      },
       "pedido_detalle_talla": 8822,
-      "pedido_detalle_talla_display": {"id": 8822, "pedido_detalle_id": 3301, "talla_nombre": "L", "cantidad_pedido": 50},
+      "pedido_detalle_talla_display": {
+        "id": 8822,
+        "pedido_detalle_id": 3301,
+        "talla_nombre": "L",
+        "cantidad_pedido": 50
+      },
       "cantidad_bordada": 8,
       "puntadas_por_pieza": 8000,
       "puntadas_realizadas": 64000,
@@ -2239,8 +2305,22 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
         "puntadas_total": 320000,
         "porcentaje_avance": 100.0,
         "operadores": [
-          {"usuario_id": 4, "usuario_nombre": "María Gómez", "cantidad_bordada": 25, "puntadas_por_pieza_promedio": 8000, "puntadas_realizadas": 200000, "puntadas_total": 200000},
-          {"usuario_id": 7, "usuario_nombre": "Luis Rodríguez", "cantidad_bordada": 15, "puntadas_por_pieza_promedio": 8000, "puntadas_realizadas": 120000, "puntadas_total": 120000}
+          {
+            "usuario_id": 4,
+            "usuario_nombre": "María Gómez",
+            "cantidad_bordada": 25,
+            "puntadas_por_pieza_promedio": 8000,
+            "puntadas_realizadas": 200000,
+            "puntadas_total": 200000
+          },
+          {
+            "usuario_id": 7,
+            "usuario_nombre": "Luis Rodríguez",
+            "cantidad_bordada": 15,
+            "puntadas_por_pieza_promedio": 8000,
+            "puntadas_realizadas": 120000,
+            "puntadas_total": 120000
+          }
         ]
       },
       {
@@ -2257,7 +2337,14 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
         "puntadas_total": 64000,
         "porcentaje_avance": 40.0,
         "operadores": [
-          {"usuario_id": 4, "usuario_nombre": "María Gómez", "cantidad_bordada": 8, "puntadas_por_pieza_promedio": 8000, "puntadas_realizadas": 64000, "puntadas_total": 64000}
+          {
+            "usuario_id": 4,
+            "usuario_nombre": "María Gómez",
+            "cantidad_bordada": 8,
+            "puntadas_por_pieza_promedio": 8000,
+            "puntadas_realizadas": 64000,
+            "puntadas_total": 64000
+          }
         ]
       }
     ]
@@ -2269,22 +2356,24 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
 }
 ```
 
-| Campo                                              | Tipo      | Fuente / Regla                                                                                                                                                                                                                                                            |
-| -------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `maquina_asignada`                                 | str/null  | Campo editable. **Texto libre**: el operador escribe "M1", "Máquina 2", "Barudan 1", etc. (sin catálogo hoy).                                                                                                                                                             |
-| `proveedor_externo`                                | str/null  | Campo editable. **Texto libre** para proveedor tercero (subcontratista / bordado externo). Ej: `"Bordados Martínez S.A."`. Si el bordado lo hace planta interna se deja NULL.                                                                                             |
-| `avances[]`                                        | array     | Historial de producción por OB. Lo llena `POST /produccion/bordado-avances/`. Orden: `fecha` DESC.                                                                                                                                                                        |
-| `avances[].usuario`                                | int       | FK al operador. **NO editable desde frontend**: backend siempre usa el `request.user` que envió el POST.                                                                                                                                                                  |
-| `avances[].orden_bordado_detalle`                  | int/null  | FK al renglón concreto de la OB (la talla/SKU de esta tanda de producción). **Recomendado siempre mandarlo** desde el selector del frontend.                                                                                                                               |
-| `avances[].orden_bordado_detalle_display`          | object    | Label listo para pintar en chip: producto, talla, color, cantidad programada, posición. NULL si el registro es viejo (antes del ajuste por talla).                                                                                                                         |
-| `avances[].pedido_detalle_talla`                   | int/null  | FK al `PedidoDetalleTalla`. **Backend lo autocompleta** si mandaste `orden_bordado_detalle_id` (no tienes que buscarlo tú en Ventas).                                                                                                                                     |
-| `avances[].puntadas_por_pieza`                     | int       | **NUEVO**. Contador de puntadas POR PRENDA (1 pieza). 0 si no se capturó (registros legacy).                                                                                                                                                                              |
-| `avances[].puntadas_realizadas`                    | int       | Puntadas REALES de esta tanda (puedes meter el total de la tanda directamente o dejar que `puntadas_total` lo calcule). Distinto de `detalles[].puntadas` = presupuesto estimado por línea.                                                                                |
-| `avances[].puntadas_total`                         | int       | **NUEVO y read-only calculado**. Resultado de `puntadas_por_pieza × cantidad_bordada`. Backend lo calcula automáticamente si `puntadas_por_pieza > 0`; si frontend envía valor, se sobreescribe con el cálculo (fuente de verdad).                                        |
-| `resumen_avance.por_detalle[]`                     | array     | ⭐ **NUEVO**. Agrupación por cada renglón de la OB: cuánto va, cuánto presupuesto original, % y **quién trabajó ese SKU** (lista de operadores con su aporte). Sirve para pintar el grid "Avance por talla" sin más endpoints.                                              |
-| `resumen_avance.por_detalle[].operadores[]`        | array     | Suma de `cantidad_bordada` + `puntadas_total` + `puntadas_por_pieza_promedio` agrupado por `usuario_id` para ESE renglón concreto. Ejemplo útil: "María 25pz + Luis 15pz = 40pz talla M = 100%".                                                                         |
-| `resumen_avance.puntadas_por_pieza_promedio`       | int       | **NUEVO**. Promedio PONDERADO de `puntadas_por_pieza` en toda la OB: `sum(por_pieza × cantidad) / sum(cantidad)`. 0 si ninguna tanda capturó puntadas por pieza.                                                                                                          |
-| `resumen_avance.puntadas_total`                    | int       | **NUEVO**. Suma de TODOS los `avances[].puntadas_total` de la OB. Equivale a `sum(puntadas_por_pieza × pz)` por tanda capturada.                                                                                                                                          |
+| Campo                                        | Tipo        | Fuente / Regla                                                                                                                                                                                                                     |
+| -------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maquina_asignada`                           | str/null    | Campo editable. **Texto libre**: el operador escribe "M1", "Máquina 2", "Barudan 1", etc. (sin catálogo hoy).                                                                                                                      |
+| `proveedor`                                  | int/null    | Campo editable. **FK al catálogo `terceros.Proveedor`** (usa el selector estándar de proveedores igual que Compras/Finanzas). NULL = bordado en planta interna, no subcontratado.                                                  |
+| `proveedor_nombre`                           | str/null    | Read-only. Label corto del proveedor: `obj.proveedor.nombre`. NULL si `proveedor` es null.                                                                                                                                         |
+| `proveedor_display`                          | object/null | Read-only. Label expandido para chip UI: `{id, codigo, nombre, razon_social, tipo, rfc, email, telefono, contacto_principal}`. NULL si no hay proveedor asignado.                                                                  |
+| `avances[]`                                  | array       | Historial de producción por OB. Lo llena `POST /produccion/bordado-avances/`. Orden: `fecha` DESC.                                                                                                                                 |
+| `avances[].usuario`                          | int         | FK al operador. **NO editable desde frontend**: backend siempre usa el `request.user` que envió el POST.                                                                                                                           |
+| `avances[].orden_bordado_detalle`            | int/null    | FK al renglón concreto de la OB (la talla/SKU de esta tanda de producción). **Recomendado siempre mandarlo** desde el selector del frontend.                                                                                       |
+| `avances[].orden_bordado_detalle_display`    | object      | Label listo para pintar en chip: producto, talla, color, cantidad programada, posición. NULL si el registro es viejo (antes del ajuste por talla).                                                                                 |
+| `avances[].pedido_detalle_talla`             | int/null    | FK al `PedidoDetalleTalla`. **Backend lo autocompleta** si mandaste `orden_bordado_detalle_id` (no tienes que buscarlo tú en Ventas).                                                                                              |
+| `avances[].puntadas_por_pieza`               | int         | **NUEVO**. Contador de puntadas POR PRENDA (1 pieza). 0 si no se capturó (registros legacy).                                                                                                                                       |
+| `avances[].puntadas_realizadas`              | int         | Puntadas REALES de esta tanda (puedes meter el total de la tanda directamente o dejar que `puntadas_total` lo calcule). Distinto de `detalles[].puntadas` = presupuesto estimado por línea.                                        |
+| `avances[].puntadas_total`                   | int         | **NUEVO y read-only calculado**. Resultado de `puntadas_por_pieza × cantidad_bordada`. Backend lo calcula automáticamente si `puntadas_por_pieza > 0`; si frontend envía valor, se sobreescribe con el cálculo (fuente de verdad). |
+| `resumen_avance.por_detalle[]`               | array       | ⭐ **NUEVO**. Agrupación por cada renglón de la OB: cuánto va, cuánto presupuesto original, % y **quién trabajó ese SKU** (lista de operadores con su aporte). Sirve para pintar el grid "Avance por talla" sin más endpoints.     |
+| `resumen_avance.por_detalle[].operadores[]`  | array       | Suma de `cantidad_bordada` + `puntadas_total` + `puntadas_por_pieza_promedio` agrupado por `usuario_id` para ESE renglón concreto. Ejemplo útil: "María 25pz + Luis 15pz = 40pz talla M = 100%".                                   |
+| `resumen_avance.puntadas_por_pieza_promedio` | int         | **NUEVO**. Promedio PONDERADO de `puntadas_por_pieza` en toda la OB: `sum(por_pieza × cantidad) / sum(cantidad)`. 0 si ninguna tanda capturó puntadas por pieza.                                                                   |
+| `resumen_avance.puntadas_total`              | int         | **NUEVO**. Suma de TODOS los `avances[].puntadas_total` de la OB. Equivale a `sum(puntadas_por_pieza × pz)` por tanda capturada.                                                                                                   |
 
 **Editar encabezado de OB — `PATCH /api/v1/produccion/orden-bordado/{id}/`**
 
@@ -2294,7 +2383,7 @@ Body mínimo (solo los campos que quieras cambiar; los omitidos se dejan igual):
 {
   "estatus_bordado": 3,
   "maquina_asignada": "Barudan 1",
-  "proveedor_externo": "Bordados Martínez S.A.",
+  "proveedor": 27,
   "prioridad": 2,
   "observaciones": "Urgente — cliente pide hoy",
   "usuario_asignado": 5
@@ -2304,7 +2393,7 @@ Body mínimo (solo los campos que quieras cambiar; los omitidos se dejan igual):
 - `estatus_bordado` (**7 valores, NO se automatiza — 100% manual**):
   | # | Label
   | - | -----
-  | 1 | Sin trabajar  *(default al crear)*
+  | 1 | Sin trabajar _(default al crear)_
   | 2 | Programado
   | 3 | Ponchado
   | 4 | Arreglo
@@ -2312,13 +2401,14 @@ Body mínimo (solo los campos que quieras cambiar; los omitidos se dejan igual):
   | 6 | Detenido
   | 7 | Finalizado
   (8 = Cancelado legacy — no listar en UI, se mantiene en el enum por registros históricos).
-- `proveedor_externo`: texto libre / null. **NUEVO**.
+- `proveedor`: **FK id a `/api/v1/terceros/proveedores/`**, nullable. NULL = planta interna. **Validación cross-tenant**: `proveedor.empresa_id` debe ser NULL (catálogo global) o coincidir con la empresa de la OB; si no → `400 {proveedor: ...}`.
 - `usuario_asignado`: FK a usuario (jefe reasigna a alguien). Nulo permitido.
 - Campos que SIGUEN read-only y se ignoran si los mandas: `folio_bordado`, `empresa`, `sucursal`, `activo`.
 
 **Registrar producción — `POST /api/v1/produccion/bordado-avances/` (AHORA POR TALLA/SKU + PIEZAS × PUNTADAS)**
 
 **Opción recomendada (frontend manda el renglón exacto de la OB + puntadas por pieza):**
+
 ```json
 {
   "ob": 42,
@@ -2329,14 +2419,17 @@ Body mínimo (solo los campos que quieras cambiar; los omitidos se dejan igual):
   "comentario": "Turno vespertino — sigo con la talla M"
 }
 ```
+
 > Con sólo mandar `orden_bordado_detalle` + `puntadas_por_pieza` el backend hace 4 cosas automáticas:
+>
 > - ✅ Valida que ese renglón pertenece a la `ob` (si no, 400 `orden_bordado_detalle` no pertenece).
 > - ✅ Autocompleta `pedido_detalle_talla` cruzando `pedido_detalle_id + talla_id` del renglón (no tienes que buscarlo tú).
 > - ✅ Asigna `usuario = request.user` (ignora el valor aunque lo mandaras).
 > - ✅ Calcula **`puntadas_total = puntadas_por_pieza × cantidad_bordada`** = 8250 × 20 = 165,000. Si frontend envía `puntadas_total` manual, se sobreescribe con el cálculo.
->   *Sólo cuando `puntadas_por_pieza = 0` (registros legacy sin capturar) se deja pasar el valor que mande el cliente.*
+>   _Sólo cuando `puntadas_por_pieza = 0` (registros legacy sin capturar) se deja pasar el valor que mande el cliente._
 
 **Opción legacy (compatibilidad, registros sin detalle ni por_pieza):**
+
 ```json
 {
   "ob": 42,
@@ -2345,9 +2438,11 @@ Body mínimo (solo los campos que quieras cambiar; los omitidos se dejan igual):
   "comentario": "Producción sin detalle específico"
 }
 ```
+
 - Si `orden_bordado_detalle = null`, en el resumen se agrupa en el renglón "Sin talla/SKU asignado (registro antiguo)" — la suma no se pierde pero no puede atribuirse a una talla.
 
 **Reglas del avance por detalle-talla:**
+
 - **Varios operadores = misma talla/SKU OK**. María POST 25pz talla M, luego Luis POST 15pz talla M: ambos usan el mismo `orden_bordado_detalle=101`; en `resumen_avance.por_detalle[].operadores` aparecen ambos agrupados y el renglón suma 100% cuando completan.
 - `cantidad_bordada` no se valida contra la programada (acepta sobreproducción por errores/correcciones/rework).
 - `puntadas_realizadas = 0` es permitido si aún no se lee el contador de la máquina.
@@ -2355,7 +2450,6 @@ Body mínimo (solo los campos que quieras cambiar; los omitidos se dejan igual):
 - `puntadas_total` siempre es fuente de verdad = producto × cantidad; no se modifica después del POST excepto por PATCH manual (supervisor).
 - **Para corregir un registro mal capturado**: `DELETE /produccion/bordado-avances/{id}/` (soft delete — desaparece de `avances[]` y de sumatorias).
 - **Campos write-once inmutables en update**: `orden_bordado_detalle` y `pedido_detalle_talla`. Si haces PATCH a un avance intentando reasignarlo a otra talla, el backend los descarta (no se puede mover producción de un SKU a otro retroactivamente).
-
 
 **Control anti-duplicado (HTTP 409 Conflict)**
 
@@ -2741,7 +2835,7 @@ Cuando la solicitud de OCM parcial sí excede el cupo restante (validación de s
 ### 1) Onboarding de Picking
 
 - **Endpoint**: `GET /api/v1/wms/pickings/onboarding/`
-- **Objetivo (rediseño v2: *Tracker de prendas por pedido*)**: dar al frontend todo lo necesario para preparar un surtido parcial o total mediante un flujo onboarding de 4 pasos. El **picking** es el documento que *rastrea la ruta física* de las prendas del pedido:
+- **Objetivo (rediseño v2: _Tracker de prendas por pedido_)**: dar al frontend todo lo necesario para preparar un surtido parcial o total mediante un flujo onboarding de 4 pasos. El **picking** es el documento que _rastrea la ruta física_ de las prendas del pedido:
   - `almacen_origen` → de dónde se toman las prendas.
   - `almacen_destino` → hacia qué estación/almacén se envían (seleccionable **libremente**).
   - Las cantidades `cantidad_asignada` / `cantidad_surtida` alimentan los dashboards de `% surtido del pedido` y `% avance de órdenes de trabajo` vinculadas al mismo pedido.
@@ -2756,11 +2850,11 @@ Cuando la solicitud de OCM parcial sí excede el cupo restante (validación de s
 
 **Query params**
 
-| Param                                    | Requerido | Descripción                                                                           |
-| ---------------------------------------- | --------- | ------------------------------------------------------------------------------------- |
-| `pedido` / `pedido_id`                   | No        | Activa la precarga del pedido y sus líneas de talla.                                  |
-| `almacen_origen` / `almacen_origen_id`   | No        | Preselecciona el almacén de origen; usado para calcular existencia disponible.        |
-| `almacen_destino` / `almacen_destino_id` | No        | Preselecciona el almacén destino (si no se envía se sugiere `APARTADOS` no bloqueante).|
+| Param                                    | Requerido | Descripción                                                                             |
+| ---------------------------------------- | --------- | --------------------------------------------------------------------------------------- |
+| `pedido` / `pedido_id`                   | No        | Activa la precarga del pedido y sus líneas de talla.                                    |
+| `almacen_origen` / `almacen_origen_id`   | No        | Preselecciona el almacén de origen; usado para calcular existencia disponible.          |
+| `almacen_destino` / `almacen_destino_id` | No        | Preselecciona el almacén destino (si no se envía se sugiere `APARTADOS` no bloqueante). |
 
 **Ejemplo**
 
@@ -2840,11 +2934,11 @@ Cuando la solicitud de OCM parcial sí excede el cupo restante (validación de s
 
 **Nuevos campos — selectores de almacén (v2)**
 
-| Campo                 | Shape (cada item)                                                                 | Cuándo usarlo en el UI                                                                 |
-| --------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `almacenes_origen`    | `{id, codigo, nombre, sucursal, tipo_almacen, permite_salida, permite_entrada}`   | Úsalo como **datasource del selector ORIGEN**. Siempre `permite_salida=True` (garantizado). |
-| `almacenes_destino`   | `{id, codigo, nombre, sucursal, tipo_almacen, permite_salida, permite_entrada}`   | Úsalo como **datasource del selector DESTINO**. Siempre `permite_entrada=True`. El usuario cambia libremente la sugerencia default de APARTADOS por cualquier otra estación. |
-| `almacenes`           | Catálogo completo (sin filtros). Backward-compat.                                 | Úsalo solo si el UI requiere vista completa del catálogo. Para los selectores de origen/destino prefiere los dos de arriba. |
+| Campo               | Shape (cada item)                                                               | Cuándo usarlo en el UI                                                                                                                                                       |
+| ------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `almacenes_origen`  | `{id, codigo, nombre, sucursal, tipo_almacen, permite_salida, permite_entrada}` | Úsalo como **datasource del selector ORIGEN**. Siempre `permite_salida=True` (garantizado).                                                                                  |
+| `almacenes_destino` | `{id, codigo, nombre, sucursal, tipo_almacen, permite_salida, permite_entrada}` | Úsalo como **datasource del selector DESTINO**. Siempre `permite_entrada=True`. El usuario cambia libremente la sugerencia default de APARTADOS por cualquier otra estación. |
+| `almacenes`         | Catálogo completo (sin filtros). Backward-compat.                               | Úsalo solo si el UI requiere vista completa del catálogo. Para los selectores de origen/destino prefiere los dos de arriba.                                                  |
 
 > **Fallback seguro**: Si el catálogo de almacenes **no tiene bien prendidos los flags** `permite_salida` / `permite_entrada` (ej: data vieja sin configurar), ambos subsets `almacenes_origen` / `almacenes_destino` **degeneran al catálogo completo** para no bloquear al operador. El admin debe prender estos flags en el catálogo `Almacen` para obtener el filtro óptimo.
 
@@ -2852,13 +2946,13 @@ Cuando la solicitud de OCM parcial sí excede el cupo restante (validación de s
 
 Siempre presente (shape igual cuando no hay pedido seleccionado: zeros en strings de Decimal). Los porcentajes se calculan como `100 * valor / total_prendas_pedido`.
 
-| Campo                     | Tipo     | Fuente / fórmula                                                                        | UI sugerida                                        |
-| ------------------------- | -------- | --------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `total_prendas_pedido`    | `str`    | `SUM(PedidoDetalleTalla.cantidad)` de todo el pedido.                                   | Card: "Prendas del pedido"                         |
-| `total_asignado`          | `str`    | `SUM(PickingDetalle.cantidad_asignada)` en pickings activos (no cancelados).            | Card: "Asignado a pickings"                        |
-| `total_surtido`           | `str`    | `SUM(PickingDetalle.cantidad_surtida)` en pickings activos.                             | Card: "Surtido"                                    |
-| `pct_asignado_pedido`     | `str`    | `100 * total_asignado / total_prendas_pedido`  (4 decimales fijos).                      | Progress bar: "% Asignado"                         |
-| `pct_surtido_pedido`      | `str`    | `100 * total_surtido / total_prendas_pedido`   (4 decimales fijos).                      | Progress bar: "% Surtido"                          |
+| Campo                  | Tipo  | Fuente / fórmula                                                             | UI sugerida                 |
+| ---------------------- | ----- | ---------------------------------------------------------------------------- | --------------------------- |
+| `total_prendas_pedido` | `str` | `SUM(PedidoDetalleTalla.cantidad)` de todo el pedido.                        | Card: "Prendas del pedido"  |
+| `total_asignado`       | `str` | `SUM(PickingDetalle.cantidad_asignada)` en pickings activos (no cancelados). | Card: "Asignado a pickings" |
+| `total_surtido`        | `str` | `SUM(PickingDetalle.cantidad_surtida)` en pickings activos.                  | Card: "Surtido"             |
+| `pct_asignado_pedido`  | `str` | `100 * total_asignado / total_prendas_pedido` (4 decimales fijos).           | Progress bar: "% Asignado"  |
+| `pct_surtido_pedido`   | `str` | `100 * total_surtido / total_prendas_pedido` (4 decimales fijos).            | Progress bar: "% Surtido"   |
 
 **Notas sobre existencia y picking parcial**
 
@@ -2891,7 +2985,7 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 ### 2) Crear Picking desde Onboarding
 
 - **Endpoint**: `POST /api/v1/wms/pickings/onboarding/` (o `POST /api/v1/wms/pickings/`)
-- **Objetivo (rediseño v2: *Tracker de prendas*)**: **solo crear el documento** `Picking` + `PickingDetalle` con su folio único. Este paso **no mueve inventario, no crea transferencias, no crea reservas ni órdenes de producción**. El documento registra la intención de ruta: `almacén origen → almacén destino` + cantidades asignadas.
+- **Objetivo (rediseño v2: _Tracker de prendas_)**: **solo crear el documento** `Picking` + `PickingDetalle` con su folio único. Este paso **no mueve inventario, no crea transferencias, no crea reservas ni órdenes de producción**. El documento registra la intención de ruta: `almacén origen → almacén destino` + cantidades asignadas.
 
 **Qué hace el POST (3 pasos)**
 
@@ -3860,6 +3954,7 @@ El frontend (Next.js) NO habla directamente con el lector FX. El flujo es:
 ```
 
 **Importante arquitectura**:
+
 - El `POST /QA/scanner_rfid/receive/` es SOLO para el FX (no requiere token / `@csrf_exempt`). **Next.js NUNCA llama a receive**.
 - Next.js solo consume 3 endpoints del V1 (mismo Bearer token que el resto del ERP):
   1. `GET /api/v1/wms/etiquetas-rfid/scans/` → polling (lista lecturas + MATCH)
@@ -3872,11 +3967,11 @@ El frontend (Next.js) NO habla directamente con el lector FX. El flujo es:
 
 No hay endpoint especial tipo onboarding. El modal consta de 3 partes:
 
-| UI Element | Código a ejecutar |
-|---|---|
-| Botón **🔄 Iniciar Monitoreo** cada 2s | `setInterval()` llamando `GET /api/v1/wms/etiquetas-rfid/scans/` |
-| Botón **🗑️ Purge List** (antes de empezar) | `POST /api/v1/wms/etiquetas-rfid/scans/clear/` |
-| Botón **🛠️ Ver Status FX** (debug 1-clic) | `GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=<EPC_RECIEN_IMPRESO>` |
+| UI Element                                 | Código a ejecutar                                                        |
+| ------------------------------------------ | ------------------------------------------------------------------------ |
+| Botón **🔄 Iniciar Monitoreo** cada 2s     | `setInterval()` llamando `GET /api/v1/wms/etiquetas-rfid/scans/`         |
+| Botón **🗑️ Purge List** (antes de empezar) | `POST /api/v1/wms/etiquetas-rfid/scans/clear/`                           |
+| Botón **🛠️ Ver Status FX** (debug 1-clic)  | `GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=<EPC_RECIEN_IMPRESO>` |
 
 ---
 
@@ -3889,6 +3984,7 @@ No hay endpoint especial tipo onboarding. El modal consta de 3 partes:
   - `epc=XXXX` (hex): busca directo este EPC en el payload de 50 scans y devuelve `debug_get.query_epc_search.found_in_scans` (booleano rápido sin iterar).
 
 **Ejemplo URL de debug (recién impresa una etiqueta)**:
+
 ```
 GET /api/v1/wms/etiquetas-rfid/scans/?epc=000012E32827000147C0C5F5
 ```
@@ -3966,6 +4062,7 @@ GET /api/v1/wms/etiquetas-rfid/scans/?epc=000012E32827000147C0C5F5
 ```
 
 **Reglas de render UI**:
+
 - Si `match_impresion === true` → fila en VERDE, muestra sku, color, talla, folio LAB-000XX.
 - Si `match_impresion === false` → fila en ROJO / GRIS, muestra EPC en hex crudo.
 - Usa `antenna` (int 1..8) y `rssi` (dBm, valor negativo: -30 bueno / -70 muy débil) como métricas de señal.
@@ -3977,9 +4074,9 @@ GET /api/v1/wms/etiquetas-rfid/scans/?epc=000012E32827000147C0C5F5
 
 ```tsx
 // app/wms/rfid-scanner/page.tsx
-'use client';
+"use client";
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type RfidScan = {
   id: number;
@@ -4000,14 +4097,17 @@ type RfidScan = {
   match_debug?: Record<string, unknown>;
 };
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8003';
+const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8003";
 
 function authHeaders(token: string): Record<string, string> {
-  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  return {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
 }
 
 export default function RfidScannerPage() {
-  const token = 'tu-token-jwt'; // reemplaza: getToken() de tu sesión
+  const token = "tu-token-jwt"; // reemplaza: getToken() de tu sesión
   const [running, setRunning] = useState(false);
   const [scans, setScans] = useState<RfidScan[]>([]);
   const lastSeenId = useRef(0);
@@ -4028,13 +4128,16 @@ export default function RfidScannerPage() {
     const nuevos = list.filter((s) => s.id > lastSeenId.current);
     if (nuevos.length > 0) {
       setScans((prev) => [...nuevos, ...prev].slice(0, 200));
-      lastSeenId.current = Math.max(lastSeenId.current, ...nuevos.map((s) => s.id));
+      lastSeenId.current = Math.max(
+        lastSeenId.current,
+        ...nuevos.map((s) => s.id),
+      );
     }
   }
 
   async function purgeList() {
     await fetch(`${BASE}/api/v1/wms/etiquetas-rfid/scans/clear/`, {
-      method: 'POST',
+      method: "POST",
       headers: authHeaders(token),
     });
     lastSeenId.current = 0;
@@ -4055,23 +4158,33 @@ export default function RfidScannerPage() {
     });
   }
 
-  useEffect(() => () => {
-    if (timer.current) clearInterval(timer.current);
-  }, []);
+  useEffect(
+    () => () => {
+      if (timer.current) clearInterval(timer.current);
+    },
+    [],
+  );
 
   return (
     <main className="p-6 max-w-6xl mx-auto space-y-4">
       <div className="flex gap-3">
-        <button onClick={toggle} className="px-4 py-2 rounded bg-blue-600 text-white">
-          {running ? 'Detener Monitoreo' : 'Iniciar Monitoreo (2s)'}
+        <button
+          onClick={toggle}
+          className="px-4 py-2 rounded bg-blue-600 text-white"
+        >
+          {running ? "Detener Monitoreo" : "Iniciar Monitoreo (2s)"}
         </button>
-        <button onClick={purgeList} className="px-4 py-2 rounded bg-red-500 text-white">
+        <button
+          onClick={purgeList}
+          className="px-4 py-2 rounded bg-red-500 text-white"
+        >
           Purge List
         </button>
       </div>
 
       <div className="text-sm text-gray-600">
-        Últimas lecturas: {scans.length} rows · Únicas por EPC: {uniqueByEpc.length}
+        Últimas lecturas: {scans.length} rows · Únicas por EPC:{" "}
+        {uniqueByEpc.length}
       </div>
 
       <table className="w-full text-sm border">
@@ -4089,19 +4202,26 @@ export default function RfidScannerPage() {
         </thead>
         <tbody>
           {uniqueByEpc.map((s) => (
-            <tr key={s.id} className={s.match_impresion ? 'bg-green-50' : 'bg-red-50'}>
+            <tr
+              key={s.id}
+              className={s.match_impresion ? "bg-green-50" : "bg-red-50"}
+            >
               <td className="px-3 py-2">{s.id}</td>
               <td className="px-3 py-2 font-semibold">
-                {s.match_impresion ? '✅ SI' : '❌ NO'}
+                {s.match_impresion ? "✅ SI" : "❌ NO"}
               </td>
               <td className="px-3 py-2 font-mono text-xs">{s.epc}</td>
               <td className="px-3 py-2">
-                {s.match_impresion ? `${s.sku} · ${s.color ?? ''} · ${s.talla ?? ''}` : '—'}
+                {s.match_impresion
+                  ? `${s.sku} · ${s.color ?? ""} · ${s.talla ?? ""}`
+                  : "—"}
               </td>
-              <td className="px-3 py-2">{s.impresion_folio ?? '—'}</td>
-              <td className="px-3 py-2">{s.antenna ?? '—'}</td>
-              <td className="px-3 py-2">{s.rssi ?? '—'}</td>
-              <td className="px-3 py-2">{new Date(s.timestamp).toLocaleString()}</td>
+              <td className="px-3 py-2">{s.impresion_folio ?? "—"}</td>
+              <td className="px-3 py-2">{s.antenna ?? "—"}</td>
+              <td className="px-3 py-2">{s.rssi ?? "—"}</td>
+              <td className="px-3 py-2">
+                {new Date(s.timestamp).toLocaleString()}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -4116,6 +4236,7 @@ export default function RfidScannerPage() {
 ### 3) Endpoint Debug Status FX (1 clic, sin entrar Vercel)
 
 Útil para:
+
 - Saber **cuándo fue la última lectura del FX** (`last_scan_seconds_ago`: si es `> 300` = FX está apagado / no conectado a internet).
 - Buscar **rápido si una etiqueta recién impresa fue leída** por el FX sin abrir el admin Django.
 
@@ -4124,11 +4245,13 @@ export default function RfidScannerPage() {
   - `epc=XXXX` (opcional): EPC hex de una etiqueta recién impresa para buscarlo directo en la DB.
 
 **Ejemplo**:
+
 ```
 GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=000012E32827000147C0C5F5
 ```
 
 **Respuesta shape**:
+
 ```json
 {
   "status": "ok",
@@ -4136,11 +4259,28 @@ GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=000012E32827000147C0C5F5
   "last_scan_ts": "2026-08-07T19:51:45.490950+00:00",
   "last_scan_seconds_ago": 26,
   "last_5_scans": [
-    {"id":3856,"epc":"000012e32827000147c0c5f5","epc_len":24,"antenna":1,"rssi":-45,"reader_ip":"187.188.149.179","ts":"..."}
+    {
+      "id": 3856,
+      "epc": "000012e32827000147c0c5f5",
+      "epc_len": 24,
+      "antenna": 1,
+      "rssi": -45,
+      "reader_ip": "187.188.149.179",
+      "ts": "..."
+    }
   ],
   "query_epc": "000012e32827000147c0c5f5",
   "query_epc_found_count": 1,
-  "query_epc_found_samples": [ { "id": 3856, "epc": "...", "epc_len": 24, "antenna": 1, "rssi": -45, "ts": "..." } ],
+  "query_epc_found_samples": [
+    {
+      "id": 3856,
+      "epc": "...",
+      "epc_len": 24,
+      "antenna": 1,
+      "rssi": -45,
+      "ts": "..."
+    }
+  ],
   "receive_endpoint_info": {
     "fx_post_url_required": "POST https://TU-BACKEND/QA/scanner_rfid/receive/ (FX llama aquí. Next.js NO)",
     "method_required": "POST (FX no manda token; @csrf_exempt).",
@@ -4164,13 +4304,13 @@ GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=000012E32827000147C0C5F5
 
 ### 5) Checklist Integración Scanner Next.js
 
-| Paso | Acción                                                                                                                                                                                                                 |
-| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | Configura en el LECTOR FX Zebra (FX7500/FX9600) su **POST URL**: `https://TU-BACKEND/QA/scanner_rfid/receive/` (content-type JSON).                                                                                    |
-| 2    | (Antes de empezar) Click **Purge List** = `POST /api/v1/wms/etiquetas-rfid/scans/clear/`.                                                                                                                              |
-| 3    | Click **Iniciar Monitoreo** = `setInterval` cada **2000 ms (2s)** llamando `GET /api/v1/wms/etiquetas-rfid/scans/`. Usa `lastSeenId` (Ref) para agregar solo scans nuevos (ids mayores).                               |
-| 4    | Render tabla: columna `MATCH=✅/❌` + `sku`, `color`, `talla`, `folio`, `antenna`, `rssi`, `timestamp`. Si `match_impresion=false` mostrar EPC hex crudo; si `true` pintar fila VERDE con los campos producto.        |
-| 5    | Debug rápido: ante duda click **Status FX** = `GET /scanner-stats/?epc=<EPC_IMPRESO>` y revisa `query_epc_found_count` (0 no leída, ≥1 leída) + `last_scan_seconds_ago` (>300s = FX offline).                          |
+| Paso | Acción                                                                                                                                                                                                         |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | Configura en el LECTOR FX Zebra (FX7500/FX9600) su **POST URL**: `https://TU-BACKEND/QA/scanner_rfid/receive/` (content-type JSON).                                                                            |
+| 2    | (Antes de empezar) Click **Purge List** = `POST /api/v1/wms/etiquetas-rfid/scans/clear/`.                                                                                                                      |
+| 3    | Click **Iniciar Monitoreo** = `setInterval` cada **2000 ms (2s)** llamando `GET /api/v1/wms/etiquetas-rfid/scans/`. Usa `lastSeenId` (Ref) para agregar solo scans nuevos (ids mayores).                       |
+| 4    | Render tabla: columna `MATCH=✅/❌` + `sku`, `color`, `talla`, `folio`, `antenna`, `rssi`, `timestamp`. Si `match_impresion=false` mostrar EPC hex crudo; si `true` pintar fila VERDE con los campos producto. |
+| 5    | Debug rápido: ante duda click **Status FX** = `GET /scanner-stats/?epc=<EPC_IMPRESO>` y revisa `query_epc_found_count` (0 no leída, ≥1 leída) + `last_scan_seconds_ago` (>300s = FX offline).                  |
 
 ---
 

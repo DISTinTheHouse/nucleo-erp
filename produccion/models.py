@@ -181,7 +181,13 @@ class OrdenesBordado(StatusLifecycleModel):
     observaciones = models.TextField(blank=True, null=True)
     activo = models.BooleanField(default=True)
     maquina_asignada = models.CharField(max_length=100, null=True, blank=True)
-    proveedor_externo = models.CharField(max_length=200, null=True, blank=True)
+    proveedor = models.ForeignKey(
+        "terceros.Proveedor",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="ordenes_bordado_proveedor",
+    )
 
     class Meta:
         db_table = 'orden_bordado'

@@ -501,14 +501,15 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
 
         ``select_related``/``prefetch_related`` cortan el N+1: el serializer
         resuelve ``pedido`` (``pedido_folio``), ``usuario_asignado``
-        (``usuario_nombre``) y ``empresa``/``sucursal``
-        (``empresa_nombre``/``sucursal_nombre``) por orden, y por renglón de
+        (``usuario_nombre``), ``empresa``/``sucursal``
+        (``empresa_nombre``/``sucursal_nombre``) y ``proveedor``
+        (``proveedor_nombre``/``proveedor_display``) por orden, y por renglón de
         ``detalles``, ``producto``/``talla``/``color``.
         """
         user = self.request.user
         qs = (
             OrdenesBordado.objects.filter(activo=True)
-            .select_related("pedido", "usuario_asignado", "empresa", "sucursal")
+            .select_related("pedido", "usuario_asignado", "empresa", "sucursal", "proveedor")
             .prefetch_related(
                 Prefetch(
                     "detalles",
