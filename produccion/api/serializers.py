@@ -214,6 +214,11 @@ class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+    tipo_servicio_bordado_display = serializers.CharField(
+        source="get_tipo_servicio_bordado_display",
+        read_only=True,
+    )
+    tipos_servicio_display = serializers.SerializerMethodField()
     ubicaciones = serializers.SerializerMethodField()
     foto = serializers.SerializerMethodField()
     notas = serializers.SerializerMethodField()
@@ -222,6 +227,47 @@ class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrdenBordadoDetalle
         fields = '__all__'
+
+    def get_tipos_servicio_display(self, obj):
+        """Traduce array de keys a labels humanos con acentos (multi-select)."""
+        bruto = getattr(obj, "tipos_servicio", None) or []
+        if not isinstance(bruto, list):
+            return []
+        mapa = dict(OrdenBordadoDetalle.TipoServicioBordado.choices)
+        salida = []
+        for valor in bruto:
+            if valor in mapa:
+                salida.append({"value": valor, "label": mapa[valor]})
+            else:
+                salida.append({"value": valor, "label": str(valor)})
+        return salida
+
+    def validate_tipos_servicio(self, value):
+        """Valida: debe ser lista, sin duplicados, cada key en el choices."""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError(
+                "tipos_servicio debe ser un arreglo de strings."
+            )
+        permitidos = {c[0] for c in OrdenBordadoDetalle.TipoServicioBordado.choices}
+        vistos = set()
+        for item in value:
+            if not isinstance(item, str):
+                raise serializers.ValidationError(
+                    f"tipos_servicio[{item!r}] no es una cadena."
+                )
+            if item not in permitidos:
+                raise serializers.ValidationError(
+                    f"tipos_servicio[{item!r}] no es válido. Valores permitidos: "
+                    f"{sorted(permitidos)}."
+                )
+            if item in vistos:
+                raise serializers.ValidationError(
+                    f"tipos_servicio[{item!r}] repetido; no se permiten duplicados."
+                )
+            vistos.add(item)
+        return value
 
     def _get_pedido_detalle_talla(self, obj):
         if obj.pedido_detalle_id is None or obj.talla_id is None:
@@ -772,6 +818,7 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
                 producto = getattr(d, "producto", None)
                 talla = getattr(d, "talla", None)
                 color = getattr(d, "color", None)
+                pp = int(getattr(d, "puntadas", 0) or 0)
                 por_detalle.append({
                     "orden_bordado_detalle_id": d.pk,
                     "producto_id": getattr(d, "producto_id", None),
@@ -782,12 +829,13 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
                     "color_nombre": getattr(color, "nombre", None) if color else None,
                     "posicion_bordado": getattr(d, "posicion_bordado", None),
                     "cantidad_programada": float(getattr(d, "cantidad", 0) or 0),
-                    "puntadas_presupuesto": int(getattr(d, "puntadas", 0) or 0),
+                    "puntadas_presupuesto": pp,
                     "cantidad_bordada": 0.0,
                     "puntadas_por_pieza_promedio": 0,
                     "puntadas_realizadas": 0,
                     "puntadas_total": 0,
                     "porcentaje_avance": 0.0,
+                    "puntadas_porcentaje_avance": 0.0,
                     "operadores": [],
                 })
             return {
@@ -798,6 +846,7 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
                 "puntadas_realizadas": 0,
                 "puntadas_total": 0,
                 "porcentaje_avance": 0.0,
+                "puntadas_porcentaje_avance": 0.0,
                 "por_detalle": por_detalle,
             }
 
@@ -827,6 +876,18 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
         pct = 0.0
         if cantidad_programada > 0:
             pct = round((cantidad_bordada / cantidad_programada) * 100.0, 2)
+
+        # === NUEVA MÉTRICA 2.0.1: progreso POR PUNTADAS (no por piezas) =====
+        # Regla del cliente:
+        #   puntadas_porcentaje_avance = puntadas_total / puntadas_presupuesto × 100
+        # Es una métrica más fina que porcentaje_avance porque una prenda a la
+        # mitad (4000/8000 puntadas) puede reportarse como 0 piezas terminadas.
+        puntadas_porcentaje_avance = 0.0
+        if puntadas_presupuesto > 0:
+            puntadas_porcentaje_avance = round(
+                (float(puntadas_total) / float(puntadas_presupuesto)) * 100.0,
+                2,
+            )
 
         agrupado = {}
         for a in avances:
@@ -900,9 +961,16 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
                 "operadores": {},
             })
             programa = float(getattr(d, "cantidad", 0) or 0)
+            pp = int(getattr(d, "puntadas", 0) or 0)
             porc = 0.0
             if programa > 0:
                 porc = round((bucket["cantidad_bordada"] / programa) * 100.0, 2)
+            porc_punt = 0.0
+            if pp > 0:
+                porc_punt = round(
+                    (float(bucket["puntadas_total"]) / float(pp)) * 100.0,
+                    2,
+                )
             producto = getattr(d, "producto", None)
             talla = getattr(d, "talla", None)
             color = getattr(d, "color", None)
@@ -916,12 +984,13 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
                 "color_nombre": getattr(color, "nombre", None) if color else None,
                 "posicion_bordado": getattr(d, "posicion_bordado", None),
                 "cantidad_programada": programa,
-                "puntadas_presupuesto": int(getattr(d, "puntadas", 0) or 0),
+                "puntadas_presupuesto": pp,
                 "cantidad_bordada": bucket["cantidad_bordada"],
                 "puntadas_por_pieza_promedio": _prom_pp(bucket),
                 "puntadas_realizadas": bucket["puntadas_realizadas"],
                 "puntadas_total": bucket["puntadas_total"],
                 "porcentaje_avance": porc,
+                "puntadas_porcentaje_avance": porc_punt,
                 "operadores": _aplanar_operadores(bucket["operadores"] or {}),
             })
 
@@ -932,6 +1001,7 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
         ):
             programa = 0.0
             porc = 0.0
+            porc_punt = 0.0
             por_detalle.append({
                 "orden_bordado_detalle_id": None,
                 "producto_id": None,
@@ -948,6 +1018,7 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
                 "puntadas_realizadas": avance_sin_detalle["puntadas_realizadas"],
                 "puntadas_total": avance_sin_detalle.get("puntadas_total", 0) or 0,
                 "porcentaje_avance": porc,
+                "puntadas_porcentaje_avance": porc_punt,
                 "operadores": _aplanar_operadores(avance_sin_detalle.get("operadores") or {}),
             })
 
@@ -959,6 +1030,7 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
             "puntadas_realizadas": puntadas_realizadas,
             "puntadas_total": puntadas_total,
             "porcentaje_avance": pct,
+            "puntadas_porcentaje_avance": puntadas_porcentaje_avance,
             "por_detalle": por_detalle,
         }
 

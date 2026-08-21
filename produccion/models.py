@@ -198,6 +198,39 @@ class OrdenesBordado(StatusLifecycleModel):
         return self.folio_bordado
 
 class OrdenBordadoDetalle(models.Model):
+    class TipoServicioBordadoLegacy(models.TextChoices):
+        """Opciones single-pick legacy del renglón del detalle.
+
+        Conservado para no perder data de migración 0032 aplicada en
+        ciclos anteriores de QA.
+        """
+        PLANO = "Plano", "Bordado Plano"
+        TRES_D = "3D", "Bordado 3D (Puff)"
+        CHENILLE = "Chenille", "Chenille / Toalla"
+        APLICACION = "Aplicacion", "Aplicación / Parche"
+        REFLECTANTE = "Reflectante", "Hilo Reflectante"
+        METALICO = "Metalico", "Hilo Metálico"
+        COMBINADO = "Combinado", "Combinado (2+ técnicas)"
+        OTRO = "Otro", "Otro (ver descripción)"
+
+    class TipoServicioBordado(models.TextChoices):
+        """Nuevo catálogo multi-pick (checkboxes). Valores que pide el cliente:
+
+        - Nuevo ponchado
+        - Serigrafía
+        - Sublimado
+        - DTF
+        - Revelado
+
+        Se guarda como ``JSONField`` array de strings; permite varios al mismo
+        tiempo (igual que los 5 checkboxes que ve el operador en la UI).
+        """
+        NUEVO_PONCHADO = "NUEVO_PONCHADO", "Nuevo ponchado"
+        SERIGRAFIA = "SERIGRAFIA", "Serigrafía"
+        SUBLIMADO = "SUBLIMADO", "Sublimado"
+        DTF = "DTF", "DTF"
+        REVELADO = "REVELADO", "Revelado"
+
     ob = models.ForeignKey(OrdenesBordado, on_delete=models.CASCADE, related_name='detalles')
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
@@ -207,6 +240,13 @@ class OrdenBordadoDetalle(models.Model):
     puntadas = models.IntegerField(default=0)
     talla = models.ForeignKey(Talla, on_delete=models.SET_NULL, null=True, blank=True)
     color = models.ForeignKey(Color, on_delete=models.SET_NULL, null=True, blank=True)
+    tipo_servicio_bordado = models.CharField(
+        max_length=40,
+        choices=TipoServicioBordadoLegacy.choices,
+        default=TipoServicioBordadoLegacy.PLANO,
+    )
+    descripcion_servicio = models.TextField(blank=True, null=True)
+    tipos_servicio = models.JSONField(default=list, blank=True)
     #: ``bordado_config`` ÍNTEGRO de la ``PedidoDetalleTalla`` de origen.
     #:
     #: Los tres escalares de arriba se derivan de ``ubicaciones[0]``, así que

@@ -2184,7 +2184,15 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
       "color_nombre": "Negro",
       "cantidad": 40,
       "puntadas": 8000,
-      "posicion_bordado": "F"
+      "posicion_bordado": "F",
+      "tipo_servicio_bordado": "Combinado",
+      "tipo_servicio_bordado_display": "Combinado (2+ técnicas)",
+      "tipos_servicio": ["NUEVO_PONCHADO", "SUBLIMADO"],
+      "tipos_servicio_display": [
+        { "value": "NUEVO_PONCHADO", "label": "Nuevo ponchado" },
+        { "value": "SUBLIMADO", "label": "Sublimado" }
+      ],
+      "descripcion_servicio": "Logo nítido + sublimado cuello"
     },
     {
       "id": 102,
@@ -2194,7 +2202,12 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
       "color_nombre": "Negro",
       "cantidad": 20,
       "puntadas": 8000,
-      "posicion_bordado": "F"
+      "posicion_bordado": "F",
+      "tipo_servicio_bordado": "Plano",
+      "tipo_servicio_bordado_display": "Bordado Plano",
+      "tipos_servicio": ["DTF"],
+      "tipos_servicio_display": [{ "value": "DTF", "label": "DTF" }],
+      "descripcion_servicio": null
     }
   ],
 
@@ -2290,6 +2303,7 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
     "puntadas_realizadas": 384000,
     "puntadas_total": 384000,
     "porcentaje_avance": 80.0,
+    "puntadas_porcentaje_avance": 80.0,
     "por_detalle": [
       {
         "orden_bordado_detalle_id": 101,
@@ -2304,6 +2318,7 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
         "puntadas_realizadas": 320000,
         "puntadas_total": 320000,
         "porcentaje_avance": 100.0,
+        "puntadas_porcentaje_avance": 100.0,
         "operadores": [
           {
             "usuario_id": 4,
@@ -2336,6 +2351,7 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
         "puntadas_realizadas": 64000,
         "puntadas_total": 64000,
         "porcentaje_avance": 40.0,
+        "puntadas_porcentaje_avance": 40.0,
         "operadores": [
           {
             "usuario_id": 4,
@@ -2356,24 +2372,32 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
 }
 ```
 
-| Campo                                        | Tipo        | Fuente / Regla                                                                                                                                                                                                                     |
-| -------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `maquina_asignada`                           | str/null    | Campo editable. **Texto libre**: el operador escribe "M1", "Máquina 2", "Barudan 1", etc. (sin catálogo hoy).                                                                                                                      |
-| `proveedor`                                  | int/null    | Campo editable. **FK al catálogo `terceros.Proveedor`** (usa el selector estándar de proveedores igual que Compras/Finanzas). NULL = bordado en planta interna, no subcontratado.                                                  |
-| `proveedor_nombre`                           | str/null    | Read-only. Label corto del proveedor: `obj.proveedor.nombre`. NULL si `proveedor` es null.                                                                                                                                         |
-| `proveedor_display`                          | object/null | Read-only. Label expandido para chip UI: `{id, codigo, nombre, razon_social, tipo, rfc, email, telefono, contacto_principal}`. NULL si no hay proveedor asignado.                                                                  |
-| `avances[]`                                  | array       | Historial de producción por OB. Lo llena `POST /produccion/bordado-avances/`. Orden: `fecha` DESC.                                                                                                                                 |
-| `avances[].usuario`                          | int         | FK al operador. **NO editable desde frontend**: backend siempre usa el `request.user` que envió el POST.                                                                                                                           |
-| `avances[].orden_bordado_detalle`            | int/null    | FK al renglón concreto de la OB (la talla/SKU de esta tanda de producción). **Recomendado siempre mandarlo** desde el selector del frontend.                                                                                       |
-| `avances[].orden_bordado_detalle_display`    | object      | Label listo para pintar en chip: producto, talla, color, cantidad programada, posición. NULL si el registro es viejo (antes del ajuste por talla).                                                                                 |
-| `avances[].pedido_detalle_talla`             | int/null    | FK al `PedidoDetalleTalla`. **Backend lo autocompleta** si mandaste `orden_bordado_detalle_id` (no tienes que buscarlo tú en Ventas).                                                                                              |
-| `avances[].puntadas_por_pieza`               | int         | **NUEVO**. Contador de puntadas POR PRENDA (1 pieza). 0 si no se capturó (registros legacy).                                                                                                                                       |
-| `avances[].puntadas_realizadas`              | int         | Puntadas REALES de esta tanda (puedes meter el total de la tanda directamente o dejar que `puntadas_total` lo calcule). Distinto de `detalles[].puntadas` = presupuesto estimado por línea.                                        |
-| `avances[].puntadas_total`                   | int         | **NUEVO y read-only calculado**. Resultado de `puntadas_por_pieza × cantidad_bordada`. Backend lo calcula automáticamente si `puntadas_por_pieza > 0`; si frontend envía valor, se sobreescribe con el cálculo (fuente de verdad). |
-| `resumen_avance.por_detalle[]`               | array       | ⭐ **NUEVO**. Agrupación por cada renglón de la OB: cuánto va, cuánto presupuesto original, % y **quién trabajó ese SKU** (lista de operadores con su aporte). Sirve para pintar el grid "Avance por talla" sin más endpoints.     |
-| `resumen_avance.por_detalle[].operadores[]`  | array       | Suma de `cantidad_bordada` + `puntadas_total` + `puntadas_por_pieza_promedio` agrupado por `usuario_id` para ESE renglón concreto. Ejemplo útil: "María 25pz + Luis 15pz = 40pz talla M = 100%".                                   |
-| `resumen_avance.puntadas_por_pieza_promedio` | int         | **NUEVO**. Promedio PONDERADO de `puntadas_por_pieza` en toda la OB: `sum(por_pieza × cantidad) / sum(cantidad)`. 0 si ninguna tanda capturó puntadas por pieza.                                                                   |
-| `resumen_avance.puntadas_total`              | int         | **NUEVO**. Suma de TODOS los `avances[].puntadas_total` de la OB. Equivale a `sum(puntadas_por_pieza × pz)` por tanda capturada.                                                                                                   |
+| Campo                                                     | Tipo        | Fuente / Regla                                                                                                                                                                                                                     |
+| --------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maquina_asignada`                                        | str/null    | Campo editable. **Texto libre**: el operador escribe "M1", "Máquina 2", "Barudan 1", etc. (sin catálogo hoy).                                                                                                                      |
+| `proveedor`                                               | int/null    | Campo editable. **FK al catálogo `terceros.Proveedor`** (usa el selector estándar de proveedores igual que Compras/Finanzas). NULL = bordado en planta interna, no subcontratado.                                                  |
+| `proveedor_nombre`                                        | str/null    | Read-only. Label corto del proveedor: `obj.proveedor.nombre`. NULL si `proveedor` es null.                                                                                                                                         |
+| `proveedor_display`                                       | object/null | Read-only. Label expandido para chip UI: `{id, codigo, nombre, razon_social, tipo, rfc, email, telefono, contacto_principal}`. NULL si no hay proveedor asignado.                                                                  |
+| `detalles[].tipo_servicio_bordado`                        | str         | Campo editable **single-pick LEGACY** (8 técnicas). Valores: `Plano`, `3D`, `Chenille`, `Aplicacion`, `Reflectante`, `Metalico`, `Combinado`, `Otro`. Provisto de migración 0032. Se mantiene por data QA existente.               |
+| `detalles[].tipo_servicio_bordado_display`                | str         | Read-only. Label humano del single-pick legacy (ej: `"Bordado 3D (Puff)").                                                                                                                                                         |
+| `detalles[].tipos_servicio`                               | str[]       | 🆕 Campo editable **multi-pick** (5 checkboxes de la foto). Keys: `NUEVO_PONCHADO`, `SERIGRAFIA`, `SUBLIMADO`, `DTF`, `REVELADO`. Puedes marcar varios. Sin duplicados, cada key validada.                                         |
+| `detalles[].tipos_servicio_display`                       | obj[]       | Read-only. Labels humanos traducidos para UI: `[{"value": "NUEVO_PONCHADO", "label": "Nuevo ponchado"}]`.                                                                                                                          |
+| `detalles[].descripcion_servicio`                         | str/null    | Campo editable **texto libre legacy** (migración 0032). Nota larga sobre técnica empleada. NULL permitido.                                                                                                                         |
+| `avances[]`                                               | array       | Historial de producción por OB. Lo llena `POST /produccion/bordado-avances/`. Orden: `fecha` DESC.                                                                                                                                 |
+| `avances[].usuario`                                       | int         | FK al operador. **NO editable desde frontend**: backend siempre usa el `request.user` que envió el POST.                                                                                                                           |
+| `avances[].orden_bordado_detalle`                         | int/null    | FK al renglón concreto de la OB (la talla/SKU de esta tanda de producción). **Recomendado siempre mandarlo** desde el selector del frontend.                                                                                       |
+| `avances[].orden_bordado_detalle_display`                 | object      | Label listo para pintar en chip: producto, talla, color, cantidad programada, posición. NULL si el registro es viejo (antes del ajuste por talla).                                                                                 |
+| `avances[].pedido_detalle_talla`                          | int/null    | FK al `PedidoDetalleTalla`. **Backend lo autocompleta** si mandaste `orden_bordado_detalle_id` (no tienes que buscarlo tú en Ventas).                                                                                              |
+| `avances[].puntadas_por_pieza`                            | int         | **NUEVO**. Contador de puntadas POR PRENDA (1 pieza). 0 si no se capturó (registros legacy).                                                                                                                                       |
+| `avances[].puntadas_realizadas`                           | int         | Puntadas REALES de esta tanda (puedes meter el total de la tanda directamente o dejar que `puntadas_total` lo calcule). Distinto de `detalles[].puntadas` = presupuesto estimado por línea.                                        |
+| `avances[].puntadas_total`                                | int         | **NUEVO y read-only calculado**. Resultado de `puntadas_por_pieza × cantidad_bordada`. Backend lo calcula automáticamente si `puntadas_por_pieza > 0`; si frontend envía valor, se sobreescribe con el cálculo (fuente de verdad). |
+| `resumen_avance.porcentaje_avance`                        | float       | **% por PIEZAS**: `cantidad_bordada / cantidad_programada × 100`. Métrica tradicional.                                                                                                                                             |
+| `resumen_avance.puntadas_porcentaje_avance`               | float       | 🆕 **% por PUNTADAS** (fórmula 2.0.1): `puntadas_total / puntadas_presupuesto × 100`. Más fina porque detecta prendas a media bordada (4000 de 8000 = 50% aunque cantidad=0 piezas).                                               |
+| `resumen_avance.por_detalle[]`                            | array       | ⭐ **NUEVO**. Agrupación por cada renglón de la OB: cuánto va, cuánto presupuesto original, % y **quién trabajó ese SKU** (lista de operadores con su aporte). Sirve para pintar el grid "Avance por talla" sin más endpoints.     |
+| `resumen_avance.por_detalle[].puntadas_porcentaje_avance` | float       | 🆕 % por puntadas calculado POR TALLA/SKU (misma fórmula global, por cada renglón de la OB).                                                                                                                                       |
+| `resumen_avance.por_detalle[].operadores[]`               | array       | Suma de `cantidad_bordada` + `puntadas_total` + `puntadas_por_pieza_promedio` agrupado por `usuario_id` para ESE renglón concreto. Ejemplo útil: "María 25pz + Luis 15pz = 40pz talla M = 100%".                                   |
+| `resumen_avance.puntadas_por_pieza_promedio`              | int         | **NUEVO**. Promedio PONDERADO de `puntadas_por_pieza` en toda la OB: `sum(por_pieza × cantidad) / sum(cantidad)`. 0 si ninguna tanda capturó puntadas por pieza.                                                                   |
+| `resumen_avance.puntadas_total`                           | int         | **NUEVO**. Suma de TODOS los `avances[].puntadas_total` de la OB. Equivale a `sum(puntadas_por_pieza × pz)` por tanda capturada.                                                                                                   |
 
 **Editar encabezado de OB — `PATCH /api/v1/produccion/orden-bordado/{id}/`**
 
