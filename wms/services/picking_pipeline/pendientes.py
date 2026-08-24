@@ -210,9 +210,9 @@ def armar_tracker_linea(pedido_detalle, asignado_map, surtido_map):
     total_linea = D("0")
     asig_linea = D("0")
     surt_linea = D("0")
-    # ``pedido_detalle.pedidodetalletalla_set`` viene prefetcheado por
+    # ``pedido_detalle.tallas`` viene prefetcheado por
     # ``_pedido_detalles_prefetch`` en el viewset, así que aquí hay 0 queries.
-    for talla in pedido_detalle.pedidodetalletalla_set.all():
+    for talla in pedido_detalle.tallas.all():
         t_cant = normalizar_decimal(talla.cantidad)
         total_linea += t_cant
         asig_linea += asignado_map.get(talla.id, D("0"))
