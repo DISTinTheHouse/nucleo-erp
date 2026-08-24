@@ -270,14 +270,14 @@ class PedidoDetalleReadSerializer(serializers.ModelSerializer):
         # evitar N queries y reutilizar el snapshot de una sola pasada.
         ctx_safe = dict(self.context or {})
         child = PedidoDetalleTallaReadSerializer(
-            instance=obj.pedidodetalletalla_set.all().order_by("id"),
+            instance=obj.tallas.all().order_by("id"),
             many=True,
             context=ctx_safe,
         )
         return child.data
 
     def get_cantidad_total(self, obj):
-        return sum(int(t.cantidad or 0) for t in obj.pedidodetalletalla_set.all())
+        return sum(int(t.cantidad or 0) for t in obj.tallas.all())
 
     def get_tracker_picking(self, obj):
         from wms.services.picking_pipeline.pendientes import armar_tracker_linea
@@ -385,7 +385,7 @@ class PedidoSerializer(serializers.ModelSerializer):
             except Exception:
                 ctx_safe["_picking_tracking"] = {"asignado_map": {}, "surtido_map": {}}
         child = PedidoDetalleReadSerializer(
-            instance=obj.pedidodetalle_set.all().order_by("id"),
+            instance=obj.detalles.all().order_by("id"),
             many=True,
             context=ctx_safe,
         )
