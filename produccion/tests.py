@@ -329,7 +329,7 @@ class OrdenBordadoAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
     DUPLICADA = OrdenBordadoDuplicada409
     FOLIO_FIELD = "folio_bordado"
     ESTATUS_FIELD = "estatus_bordado"
-    CANCELADO = OrdenesBordado.EstatusBordado.CANCELADO
+    CANCELADO = OrdenesBordado.EstatusBordado.CANCELADO_LEGACY
     CONSTRAINT_ACTIVA = False  # removida en 0026
 
 
@@ -358,7 +358,7 @@ class OrdenBordadoScopeTenantTests(BaseOrdenTrabajoTests, TestCase):
     DUPLICADA = OrdenBordadoDuplicada409
     FOLIO_FIELD = "folio_bordado"
     ESTATUS_FIELD = "estatus_bordado"
-    CANCELADO = OrdenesBordado.EstatusBordado.CANCELADO
+    CANCELADO = OrdenesBordado.EstatusBordado.CANCELADO_LEGACY
     CONSTRAINT_ACTIVA = False  # removida en 0026
 
     @classmethod
@@ -3275,6 +3275,8 @@ CLAVES_LINEA_ONBOARDING_BASE = {
     "ubicaciones",
     "foto",
     "notas",
+    "tipos_servicio",
+    "tipos_servicio_display",
 }
 
 

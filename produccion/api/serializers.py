@@ -796,6 +796,16 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
         puntadas_presupuesto = sum(
             int(getattr(d, "puntadas", 0) or 0) for d in detalles_qs
         )
+        # Presupuesto REAL de puntadas de toda la OB: ``OrdenBordadoDetalle
+        # .puntadas`` es POR PIEZA (va de la mano de ``cantidad``), así que el
+        # total programado es Σ(puntadas_i × cantidad_i) — no la suma pelada de
+        # ``puntadas``, que sólo presupuesta una prenda por renglón. No se
+        # expone: es únicamente el denominador de ``puntadas_porcentaje_avance``
+        # (``puntadas_presupuesto`` sigue publicándose tal cual, por pieza).
+        puntadas_presupuesto_total = sum(
+            int(getattr(d, "puntadas", 0) or 0) * float(getattr(d, "cantidad", 0) or 0)
+            for d in detalles_qs
+        )
 
         if not avances:
             por_detalle = []
@@ -864,13 +874,18 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
 
         # === NUEVA MÉTRICA 2.0.1: progreso POR PUNTADAS (no por piezas) =====
         # Regla del cliente:
-        #   puntadas_porcentaje_avance = puntadas_total / puntadas_presupuesto × 100
+        #   puntadas_porcentaje_avance = puntadas_total / Σ(puntadas × cantidad) × 100
         # Es una métrica más fina que porcentaje_avance porque una prenda a la
         # mitad (4000/8000 puntadas) puede reportarse como 0 piezas terminadas.
+        # El denominador va ESCALADO por las piezas programadas: el numerador
+        # (``BordadoAvances.puntadas_total`` = por_pieza × cantidad_bordada)
+        # acumula las puntadas de TODAS las prendas bordadas, así que dividir
+        # entre el presupuesto de una sola prenda daba porcentajes >100%
+        # (2 de 10 piezas a 5000 puntadas: 10000/5000 = 200% en vez de 20%).
         puntadas_porcentaje_avance = 0.0
-        if puntadas_presupuesto > 0:
+        if puntadas_presupuesto_total > 0:
             puntadas_porcentaje_avance = round(
-                (float(puntadas_total) / float(puntadas_presupuesto)) * 100.0,
+                (float(puntadas_total) / float(puntadas_presupuesto_total)) * 100.0,
                 2,
             )
 
@@ -950,10 +965,15 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
             porc = 0.0
             if programa > 0:
                 porc = round((bucket["cantidad_bordada"] / programa) * 100.0, 2)
+            # Mismo escalado que la métrica global: ``pp`` es el presupuesto de
+            # UNA prenda, el denominador del renglón es pp × piezas programadas.
+            # El guard cubre los dos factores: basta que ``pp`` o ``programa``
+            # sea 0 para que el producto lo sea y se devuelva 0.0.
             porc_punt = 0.0
-            if pp > 0:
+            presupuesto_linea = float(pp) * programa
+            if presupuesto_linea > 0:
                 porc_punt = round(
-                    (float(bucket["puntadas_total"]) / float(pp)) * 100.0,
+                    (float(bucket["puntadas_total"]) / presupuesto_linea) * 100.0,
                     2,
                 )
             producto = getattr(d, "producto", None)
