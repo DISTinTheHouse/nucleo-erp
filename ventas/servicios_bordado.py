@@ -32,9 +32,12 @@ def validar_tipos_servicio_array(value, campo_label="tipos_servicio"):
       - Cada elemento es string y existe en TIPO_SERVICIO_BORDADO_KEYS
       - Sin duplicados
 
-    Retorna lista validada (normalizada a keys estables) o lanza
-    serializers.ValidationError / django.core.exceptions.ValidationError
-    según el framework que la llame.
+    Retorna lista validada (normalizada a keys estables) o lanza SIEMPRE
+    ``django.core.exceptions.ValidationError`` —nunca la de DRF—, para que esta
+    función siga siendo agnóstica del framework y usable desde modelos y forms.
+    Quien la llame desde una vista DRF debe atraparla explícitamente y relanzar
+    ``rest_framework.exceptions.ValidationError``, o el error saldrá como 500 en
+    vez de 400 (ver ``ventas/utils/helpers.py``).
     """
     if value is None:
         return []
