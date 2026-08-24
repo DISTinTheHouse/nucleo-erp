@@ -4,6 +4,7 @@ from django.db import transaction
 
 from rest_framework.exceptions import ValidationError
 
+from ventas.models import PedidoDetalleTalla
 from wms.models import Picking, PickingDetalle
 from wms.services.existencia_service import ExistenciaService
 from wms.services.picking_pipeline.catalogs import (
