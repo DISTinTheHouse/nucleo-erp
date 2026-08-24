@@ -148,6 +148,14 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
                 (cfg[k] for k in ("notas", "observaciones", "comentarios") if cfg.get(k)),
                 None,
             )
+            tipos_servicio = []
+            tipos_servicio_display = []
+            if config_attr == "bordado_config":
+                ts = cfg.get("tipos_servicio") if isinstance(cfg, dict) else None
+                if isinstance(ts, list):
+                    tipos_servicio = ts
+                    from ventas.servicios_bordado import tipos_servicio_display_list
+                    tipos_servicio_display = tipos_servicio_display_list(ts)
             linea = {
                 "pedido_detalle_talla_id": dt.id,
                 "pedido_detalle_id": det.id,
@@ -169,6 +177,8 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
                 "ubicaciones": ubicaciones if isinstance(ubicaciones, list) else [],
                 "foto": foto,
                 "notas": notas,
+                "tipos_servicio": tipos_servicio,
+                "tipos_servicio_display": tipos_servicio_display,
             }
             if incluir_config_crudo:
                 # El config ÍNTEGRO, con todos sus elementos y sus claves

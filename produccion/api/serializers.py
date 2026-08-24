@@ -218,6 +218,7 @@ class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
         source="get_tipo_servicio_bordado_display",
         read_only=True,
     )
+    tipos_servicio = serializers.SerializerMethodField()
     tipos_servicio_display = serializers.SerializerMethodField()
     ubicaciones = serializers.SerializerMethodField()
     foto = serializers.SerializerMethodField()
@@ -228,46 +229,30 @@ class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
         model = OrdenBordadoDetalle
         fields = '__all__'
 
-    def get_tipos_servicio_display(self, obj):
-        """Traduce array de keys a labels humanos con acentos (multi-select)."""
-        bruto = getattr(obj, "tipos_servicio", None) or []
-        if not isinstance(bruto, list):
-            return []
-        mapa = dict(OrdenBordadoDetalle.TipoServicioBordado.choices)
-        salida = []
-        for valor in bruto:
-            if valor in mapa:
-                salida.append({"value": valor, "label": mapa[valor]})
-            else:
-                salida.append({"value": valor, "label": str(valor)})
-        return salida
+    def get_tipos_servicio(self, obj):
+        """SSoT desde Ventas: ``PedidoDetalleTalla.bordado_config.tipos_servicio``.
 
-    def validate_tipos_servicio(self, value):
-        """Valida: debe ser lista, sin duplicados, cada key en el choices."""
-        if value is None:
-            return []
-        if not isinstance(value, list):
-            raise serializers.ValidationError(
-                "tipos_servicio debe ser un arreglo de strings."
-            )
-        permitidos = {c[0] for c in OrdenBordadoDetalle.TipoServicioBordado.choices}
-        vistos = set()
-        for item in value:
-            if not isinstance(item, str):
-                raise serializers.ValidationError(
-                    f"tipos_servicio[{item!r}] no es una cadena."
-                )
-            if item not in permitidos:
-                raise serializers.ValidationError(
-                    f"tipos_servicio[{item!r}] no es válido. Valores permitidos: "
-                    f"{sorted(permitidos)}."
-                )
-            if item in vistos:
-                raise serializers.ValidationError(
-                    f"tipos_servicio[{item!r}] repetido; no se permiten duplicados."
-                )
-            vistos.add(item)
-        return value
+        Ruta completa:
+          ``OrdenBordadoDetalle.pedido_detalle_id + talla_id``
+          → ``ventas.PedidoDetalleTalla`` (único por par, con cache)
+          → ``pdt.bordado_config["tipos_servicio"]`` (array strings)
+
+        Fallback legacy: si la OB es vieja y no se pudo vincular al PDT,
+        regresamos el campo propio del detalle que ya guardamos en 0033 por
+        compatibilidad histórica.
+        """
+        pdt = self._get_pedido_detalle_talla(obj)
+        if pdt is not None and isinstance(getattr(pdt, "bordado_config", None), dict):
+            ts = pdt.bordado_config.get("tipos_servicio")
+            if isinstance(ts, list):
+                return ts
+        bruto = getattr(obj, "tipos_servicio", None) or []
+        return bruto if isinstance(bruto, list) else []
+
+    def get_tipos_servicio_display(self, obj):
+        """Labels traducidos (con acentos) a partir de la SSoT de Ventas."""
+        from ventas.servicios_bordado import tipos_servicio_display_list
+        return tipos_servicio_display_list(self.get_tipos_servicio(obj))
 
     def _get_pedido_detalle_talla(self, obj):
         if obj.pedido_detalle_id is None or obj.talla_id is None:

@@ -213,23 +213,8 @@ class OrdenBordadoDetalle(models.Model):
         COMBINADO = "Combinado", "Combinado (2+ técnicas)"
         OTRO = "Otro", "Otro (ver descripción)"
 
-    class TipoServicioBordado(models.TextChoices):
-        """Nuevo catálogo multi-pick (checkboxes). Valores que pide el cliente:
-
-        - Nuevo ponchado
-        - Serigrafía
-        - Sublimado
-        - DTF
-        - Revelado
-
-        Se guarda como ``JSONField`` array de strings; permite varios al mismo
-        tiempo (igual que los 5 checkboxes que ve el operador en la UI).
-        """
-        NUEVO_PONCHADO = "NUEVO_PONCHADO", "Nuevo ponchado"
-        SERIGRAFIA = "SERIGRAFIA", "Serigrafía"
-        SUBLIMADO = "SUBLIMADO", "Sublimado"
-        DTF = "DTF", "DTF"
-        REVELADO = "REVELADO", "Revelado"
+    from ventas.servicios_bordado import TipoServicioBordado as _TipoServicioBordadoCentral
+    TipoServicioBordado = _TipoServicioBordadoCentral
 
     ob = models.ForeignKey(OrdenesBordado, on_delete=models.CASCADE, related_name='detalles')
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE)

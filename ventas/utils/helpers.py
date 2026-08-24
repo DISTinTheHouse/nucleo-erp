@@ -131,6 +131,16 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                         "detalle": "Falta bordado_config en una talla marcada con lleva_bordado=true."
                     }
                 )
+            bruto_cfg = t.get("bordado_config") or {}
+            if isinstance(bruto_cfg, dict) and "tipos_servicio" in bruto_cfg:
+                from ventas.servicios_bordado import validar_tipos_servicio_array
+                try:
+                    bruto_cfg["tipos_servicio"] = validar_tipos_servicio_array(
+                        bruto_cfg["tipos_servicio"],
+                        campo_label="bordado_config.tipos_servicio",
+                    )
+                except ValidationError as e:
+                    raise ValidationError({"detalle": str(e.message)})
             lleva_reflejante = bool(
                 t.get("lleva_reflejante") or t.get("lleva_serigrafia")
             )
