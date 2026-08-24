@@ -6,18 +6,29 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test ventas --settings=sqlite_settings
 """
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import TestCase
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
 from catalogo.models import Producto, Talla
 from nucleo.models import Empresa, Moneda, Sucursal
 from terceros.models import Cliente
 from usuarios.models import Usuario
-from ventas.models import Cotizacion, Pedido, PedidoDetalle, PedidoDetalleTalla
+from ventas.models import (
+    Cotizacion,
+    CotizacionDetalleTalla,
+    Pedido,
+    PedidoDetalle,
+    PedidoDetalleTalla,
+)
+from ventas.servicios_bordado import TipoServicioBordado, validar_tipos_servicio_array
+from ventas.utils.helpers import _save_cotizacion_detalle
 
 PEDIDOS_URL = "/api/v1/ventas/pedidos/"
 PEDIDO_DETALLE_URL = "/api/v1/ventas/pedido-detalle/"
 PEDIDO_DETALLE_TALLA_URL = "/api/v1/ventas/pedido-detalle-talla/"
+COTIZACION_ONBOARDING_URL = "/api/v1/ventas/cotizaciones/onboarding/"
 
 
 class PedidoViewSetScopeTenantTests(TestCase):
@@ -478,3 +489,152 @@ class PedidoDetalleScopeTenantTests(TestCase):
             self._ids(self.superuser, PEDIDO_DETALLE_TALLA_URL),
             [self.a["talla_row"].pk, self.b["talla_row"].pk],
         )
+
+
+class TiposServicioBordadoValidacionTests(TestCase):
+    """``bordado_config.tipos_servicio``: validación en el alta de cotización.
+
+    El defecto que cubren estos tests: ``validar_tipos_servicio_array`` lanza la
+    ``ValidationError`` de **Django**, pero ``ventas/utils/helpers.py`` sólo
+    atrapaba la de **DRF**. Al no ser la misma clase, la excepción escapaba del
+    ``except`` y salía del view como error no manejado —HTTP 500— en lugar del
+    400 que corresponde a un valor inválido enviado por el cliente.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="MTY"
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente ACME")
+        cls.talla = Talla.objects.create(nombre="M")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.vendedor = Usuario.objects.create(
+            username="vendedor@acme.test",
+            email="vendedor@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+        )
+
+    def _payload(self, tipos_servicio):
+        """Alta mínima de cotización con una talla bordada.
+
+        ``oportunidad`` viaja explícito porque el modelo lo declara ``null=True``
+        sin ``blank=True``: DRF lo marca requerido aunque acepte ``None``.
+        """
+        bordado_config = {"ubicaciones": [], "puntadas": 1000}
+        if tipos_servicio is not None:
+            bordado_config["tipos_servicio"] = tipos_servicio
+        return {
+            "cotizacion": {
+                "cliente": self.cliente.pk,
+                "sucursal": self.sucursal.pk,
+                "moneda": self.moneda.pk,
+                "oportunidad": None,
+                "tipo_pedido": 1,
+            },
+            "detalle": [
+                {
+                    "producto": self.producto.pk,
+                    "precio_unitario": "10.00",
+                    "tallas": [
+                        {
+                            "talla": self.talla.pk,
+                            "cantidad": 2,
+                            "lleva_bordado": True,
+                            "bordado_config": bordado_config,
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def _post(self, tipos_servicio):
+        client = APIClient()
+        client.force_authenticate(user=self.vendedor)
+        return client.post(
+            COTIZACION_ONBOARDING_URL, self._payload(tipos_servicio), format="json"
+        )
+
+    # --- el validador aislado -------------------------------------------------
+
+    def test_validador_acepta_arreglo_valido(self):
+        valores = [
+            TipoServicioBordado.NUEVO_PONCHADO.value,
+            TipoServicioBordado.DTF.value,
+        ]
+        self.assertEqual(validar_tipos_servicio_array(valores), valores)
+
+    def test_validador_acepta_arreglo_vacio_y_none(self):
+        self.assertEqual(validar_tipos_servicio_array([]), [])
+        self.assertEqual(validar_tipos_servicio_array(None), [])
+
+    def test_validador_lanza_la_validation_error_de_django(self):
+        """La clase que lanza es la de Django, NO la de DRF.
+
+        Es justo lo que hacía inútil el ``except`` del caller. Si algún día se
+        cambia a la de DRF, este test avisa para revisar helpers.py.
+        """
+        with self.assertRaises(DjangoValidationError):
+            validar_tipos_servicio_array(["NO_EXISTE"])
+        self.assertNotIsInstance(DjangoValidationError("x"), DRFValidationError)
+
+    def test_validador_rechaza_duplicados_y_no_lista(self):
+        with self.assertRaises(DjangoValidationError):
+            validar_tipos_servicio_array(["DTF", "DTF"])
+        with self.assertRaises(DjangoValidationError):
+            validar_tipos_servicio_array("DTF")
+
+    # --- el caller: debe relanzar como error de DRF ---------------------------
+
+    def test_save_cotizacion_detalle_relanza_como_validation_error_de_drf(self):
+        """Regresión directa del defecto: la excepción que sale es la de DRF.
+
+        Antes salía la de Django y DRF no la convertía en 400.
+        """
+        cotizacion = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.vendedor, estatus=1
+        )
+        rows = self._payload(["NO_EXISTE"])["detalle"]
+        with self.assertRaises(DRFValidationError):
+            _save_cotizacion_detalle(cotizacion, rows, self.empresa, self.vendedor)
+
+    # --- extremo a extremo por HTTP -------------------------------------------
+
+    def test_valor_invalido_responde_400_y_no_500(self):
+        resp = self._post(["NO_EXISTE"])
+        self.assertEqual(resp.status_code, 400)
+
+    def test_el_400_nombra_el_valor_invalido_y_los_aceptados(self):
+        cuerpo = str(self._post(["NO_EXISTE"]).json())
+        self.assertIn("NO_EXISTE", cuerpo)
+        for valor in TipoServicioBordado.values:
+            self.assertIn(valor, cuerpo)
+
+    def test_duplicados_responden_400(self):
+        self.assertEqual(self._post(["DTF", "DTF"]).status_code, 400)
+
+    def test_arreglo_valido_se_acepta_y_se_persiste(self):
+        valores = [
+            TipoServicioBordado.SUBLIMADO.value,
+            TipoServicioBordado.REVELADO.value,
+        ]
+        resp = self._post(valores)
+        self.assertEqual(resp.status_code, 201)
+        fila = CotizacionDetalleTalla.objects.get()
+        self.assertEqual(fila.bordado_config["tipos_servicio"], valores)
+
+    def test_arreglo_vacio_se_acepta(self):
+        resp = self._post([])
+        self.assertEqual(resp.status_code, 201)
+        fila = CotizacionDetalleTalla.objects.get()
+        self.assertEqual(fila.bordado_config["tipos_servicio"], [])
+
+    def test_bordado_config_sin_la_clave_sigue_siendo_valido(self):
+        """La validación sólo aplica si el cliente manda ``tipos_servicio``."""
+        resp = self._post(None)
+        self.assertEqual(resp.status_code, 201)
+        fila = CotizacionDetalleTalla.objects.get()
+        self.assertNotIn("tipos_servicio", fila.bordado_config)
