@@ -2,6 +2,13 @@ from catalogo.models import Talla, Producto, ProductoVariante
 from ventas.models import CotizacionServicioExtra, CotizacionDetalle, CotizacionDetalleTalla
 from rest_framework.exceptions import ValidationError
 
+# ``validar_tipos_servicio_array`` es agnóstico del framework y siempre lanza la
+# ``ValidationError`` de Django, no la de DRF (ver ventas/servicios_bordado.py).
+# Se importa con alias porque en este módulo ``ValidationError`` es la de DRF: sin
+# distinguirlas, el ``except`` de abajo no atrapaba nada y un ``tipos_servicio``
+# inválido salía como HTTP 500 en vez de 400.
+from django.core.exceptions import ValidationError as DjangoValidationError
+
 def _is_empty_json(value):
     return value in (None, "", [], {})
 
@@ -139,8 +146,8 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                         bruto_cfg["tipos_servicio"],
                         campo_label="bordado_config.tipos_servicio",
                     )
-                except ValidationError as e:
-                    raise ValidationError({"detalle": str(e.message)})
+                except DjangoValidationError as e:
+                    raise ValidationError({"detalle": "; ".join(e.messages)})
             lleva_reflejante = bool(
                 t.get("lleva_reflejante") or t.get("lleva_serigrafia")
             )
