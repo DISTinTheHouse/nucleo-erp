@@ -2335,7 +2335,7 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
   "resumen_avance": {
     "cantidad_programada": 60,
     "cantidad_bordada_total": 48,
-    "puntadas_presupuesto": 480000,
+    "puntadas_presupuesto": 16000,
     "puntadas_por_pieza_promedio": 8000,
     "puntadas_realizadas": 384000,
     "puntadas_total": 384000,
@@ -2349,7 +2349,7 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
         "color_nombre": "Negro",
         "posicion_bordado": "F",
         "cantidad_programada": 40,
-        "puntadas_presupuesto": 320000,
+        "puntadas_presupuesto": 8000,
         "cantidad_bordada": 40,
         "puntadas_por_pieza_promedio": 8000,
         "puntadas_realizadas": 320000,
@@ -2382,7 +2382,7 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
         "color_nombre": "Negro",
         "posicion_bordado": "F",
         "cantidad_programada": 20,
-        "puntadas_presupuesto": 160000,
+        "puntadas_presupuesto": 8000,
         "cantidad_bordada": 8,
         "puntadas_por_pieza_promedio": 8000,
         "puntadas_realizadas": 64000,
@@ -2429,9 +2429,10 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
 | `avances[].puntadas_realizadas`                           | int         | Puntadas REALES de esta tanda (puedes meter el total de la tanda directamente o dejar que `puntadas_total` lo calcule). Distinto de `detalles[].puntadas` = presupuesto estimado por línea.                                                                                                                                                                                                          |
 | `avances[].puntadas_total`                                | int         | **NUEVO y read-only calculado**. Resultado de `puntadas_por_pieza × cantidad_bordada`. Backend lo calcula automáticamente si `puntadas_por_pieza > 0`; si frontend envía valor, se sobreescribe con el cálculo (fuente de verdad).                                                                                                                                                                   |
 | `resumen_avance.porcentaje_avance`                        | float       | **% por PIEZAS**: `cantidad_bordada / cantidad_programada × 100`. Métrica tradicional.                                                                                                                                                                                                                                                                                                               |
-| `resumen_avance.puntadas_porcentaje_avance`               | float       | 🆕 **% por PUNTADAS** (fórmula 2.0.1): `puntadas_total / puntadas_presupuesto × 100`. Más fina porque detecta prendas a media bordada (4000 de 8000 = 50% aunque cantidad=0 piezas).                                                                                                                                                                                                                 |
+| `resumen_avance.puntadas_presupuesto`                     | int         | Suma pelada de `detalles[].puntadas`, que es el presupuesto **POR PIEZA** de cada renglón (una prenda). **NO es el presupuesto total de la OB** — para eso hay que escalarlo por `cantidad` de cada renglón, que es justo lo que hace el denominador de `puntadas_porcentaje_avance`.                                                                                                                 |
+| `resumen_avance.puntadas_porcentaje_avance`               | float       | 🆕 **% por PUNTADAS** (fórmula 2.0.1): `puntadas_total_global / Σ(puntadas_i × cantidad_i) × 100`, redondeado a 2 decimales. El denominador se ESCALA por las piezas programadas de cada renglón porque `puntadas_total` acumula las puntadas de TODAS las prendas bordadas; dividir entre el presupuesto de una sola prenda daba porcentajes >100%. Si el denominador es 0 devuelve `0.0`. Más fina que el % por piezas porque detecta prendas a media bordada (4000 de 8000 = 50% aunque `cantidad_bordada=0`). |
 | `resumen_avance.por_detalle[]`                            | array       | ⭐ **NUEVO**. Agrupación por cada renglón de la OB: cuánto va, cuánto presupuesto original, % y **quién trabajó ese SKU** (lista de operadores con su aporte). Sirve para pintar el grid "Avance por talla" sin más endpoints.                                                                                                                                                                       |
-| `resumen_avance.por_detalle[].puntadas_porcentaje_avance` | float       | 🆕 % por puntadas calculado POR TALLA/SKU (misma fórmula global, por cada renglón de la OB).                                                                                                                                                                                                                                                                                                         |
+| `resumen_avance.por_detalle[].puntadas_porcentaje_avance` | float       | 🆕 % por puntadas calculado POR TALLA/SKU: `puntadas_total / (puntadas_presupuesto × cantidad_programada) × 100`, redondeado a 2 decimales. Misma regla que la global aplicada a un solo renglón. Si el denominador es 0 (`puntadas_presupuesto` o `cantidad_programada` en 0) devuelve `0.0`. La fila sintética "Sin talla/SKU asignado" siempre reporta `0.0`.                                       |
 | `resumen_avance.por_detalle[].operadores[]`               | array       | Suma de `cantidad_bordada` + `puntadas_total` + `puntadas_por_pieza_promedio` agrupado por `usuario_id` para ESE renglón concreto. Ejemplo útil: "María 25pz + Luis 15pz = 40pz talla M = 100%".                                                                                                                                                                                                     |
 | `resumen_avance.puntadas_por_pieza_promedio`              | int         | **NUEVO**. Promedio PONDERADO de `puntadas_por_pieza` en toda la OB: `sum(por_pieza × cantidad) / sum(cantidad)`. 0 si ninguna tanda capturó puntadas por pieza.                                                                                                                                                                                                                                     |
 | `resumen_avance.puntadas_total`                           | int         | **NUEVO**. Suma de TODOS los `avances[].puntadas_total` de la OB. Equivale a `sum(puntadas_por_pieza × pz)` por tanda capturada.                                                                                                                                                                                                                                                                     |
