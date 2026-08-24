@@ -214,6 +214,8 @@ class PedidoDetalleTallaReadSerializer(serializers.ModelSerializer):
     talla_nombre = serializers.CharField(source="talla.nombre", read_only=True)
     variante_nombre = serializers.SerializerMethodField()
     variante_sku = serializers.CharField(source="variante.sku", read_only=True, default=None)
+    cantidad_asignada_picking = serializers.SerializerMethodField()
+    cantidad_surtida_picking = serializers.SerializerMethodField()
 
     class Meta:
         model = PedidoDetalleTalla
@@ -223,6 +225,23 @@ class PedidoDetalleTallaReadSerializer(serializers.ModelSerializer):
         if not obj.variante_id:
             return None
         return obj.variante.nombre or obj.variante.sku
+
+    def _tracking_context(self):
+        return self.context.get("_picking_tracking") or {}
+
+    def get_cantidad_asignada_picking(self, obj):
+        ctx = self._tracking_context()
+        m = ctx.get("asignado_map")
+        if not m:
+            return "0"
+        return str(m.get(obj.id, 0))
+
+    def get_cantidad_surtida_picking(self, obj):
+        ctx = self._tracking_context()
+        m = ctx.get("surtido_map")
+        if not m:
+            return "0"
+        return str(m.get(obj.id, 0))
 
 class PedidoDetalleReadSerializer(serializers.ModelSerializer):
     """Renglón anidado (``detalles``) de un pedido (solo lectura).
@@ -237,15 +256,44 @@ class PedidoDetalleReadSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
     color_nombre = serializers.CharField(source="color.nombre", read_only=True, default=None)
     color_codigo_hex = serializers.CharField(source="color.codigo_hex", read_only=True, default=None)
-    tallas = PedidoDetalleTallaReadSerializer(many=True, read_only=True)
+    tallas = serializers.SerializerMethodField()
     cantidad_total = serializers.SerializerMethodField()
+    tracker_picking = serializers.SerializerMethodField()
 
     class Meta:
         model = PedidoDetalle
         fields = "__all__"
 
+    def get_tallas(self, obj):
+        # Reusamos la clase PedidoDetalleTallaReadSerializer pero le inyectamos
+        # el contexto compartido de tracking (mapas de asignado/surtido) para
+        # evitar N queries y reutilizar el snapshot de una sola pasada.
+        ctx_safe = dict(self.context or {})
+        child = PedidoDetalleTallaReadSerializer(
+            instance=obj.pedidodetalletalla_set.all().order_by("id"),
+            many=True,
+            context=ctx_safe,
+        )
+        return child.data
+
     def get_cantidad_total(self, obj):
-        return sum(int(t.cantidad or 0) for t in obj.tallas.all())
+        return sum(int(t.cantidad or 0) for t in obj.pedidodetalletalla_set.all())
+
+    def get_tracker_picking(self, obj):
+        from wms.services.picking_pipeline.pendientes import armar_tracker_linea
+        ctx = self.context.get("_picking_tracking") or {}
+        asignado_map = ctx.get("asignado_map") or {}
+        surtido_map = ctx.get("surtido_map") or {}
+        try:
+            return armar_tracker_linea(obj, asignado_map, surtido_map)
+        except Exception:
+            return {
+                "pct_asignado_linea": "0.0000",
+                "pct_surtido_linea": "0.0000",
+                "total_prendas_linea": "0",
+                "total_asignado_linea": "0",
+                "total_surtido_linea": "0",
+            }
 
 class PedidoListSerializer(serializers.ModelSerializer):
     """Serializer minimalista para el LISTADO de pedidos.
@@ -281,9 +329,11 @@ class PedidoSerializer(serializers.ModelSerializer):
     folio_consecutivo = serializers.IntegerField(read_only=True)
     servicios_extras = serializers.SerializerMethodField()
     documentos = serializers.SerializerMethodField()
+    tracker_picking = serializers.SerializerMethodField()
+    folios_picking = serializers.SerializerMethodField()
     # Solo lectura: no cambia el contrato de escritura de ningún endpoint de
     # Pedido (POST/PATCH ignoran ``detalles``).
-    detalles = PedidoDetalleReadSerializer(many=True, read_only=True)
+    detalles = serializers.SerializerMethodField()
 
     def get_servicios_extras(self, obj):
         try:
@@ -298,6 +348,48 @@ class PedidoSerializer(serializers.ModelSerializer):
             return listar_documentos_pedido(obj)
         except Exception:
             return []
+
+    def get_tracker_picking(self, obj):
+        from wms.services.picking_pipeline.pendientes import armar_tracker_pedido
+        try:
+            return armar_tracker_pedido(obj)
+        except Exception:
+            return {
+                "pct_asignado_pedido": "0.0000",
+                "pct_surtido_pedido": "0.0000",
+                "total_prendas_pedido": "0",
+                "total_asignado": "0",
+                "total_surtido": "0",
+            }
+
+    def get_folios_picking(self, obj):
+        from wms.services.picking_pipeline.pendientes import listar_folios_picking
+        try:
+            return listar_folios_picking(obj)
+        except Exception:
+            return []
+
+    def get_detalles(self, obj):
+        # ``PedidoViewSet.retrieve()`` construye ``_picking_tracking`` en el
+        # serializer.context con {asignado_map, surtido_map} una sola vez por
+        # pedido. Aquí lo propagamos a los hijos sin recalcular:
+        ctx_safe = dict(self.context or {})
+        if "_picking_tracking" not in ctx_safe:
+            from wms.services.picking_pipeline.pendientes import historical_maps
+            try:
+                asignado_map, surtido_map = historical_maps(obj)
+                ctx_safe["_picking_tracking"] = {
+                    "asignado_map": dict(asignado_map),
+                    "surtido_map": dict(surtido_map),
+                }
+            except Exception:
+                ctx_safe["_picking_tracking"] = {"asignado_map": {}, "surtido_map": {}}
+        child = PedidoDetalleReadSerializer(
+            instance=obj.pedidodetalle_set.all().order_by("id"),
+            many=True,
+            context=ctx_safe,
+        )
+        return child.data
 
     class Meta:
         model = Pedido

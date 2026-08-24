@@ -1229,7 +1229,44 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
   - Campos de contabilidad (dinero / forma*pago / metodos_pago / uso_cfdi / subtotal / iva / gran_total / precios_unitarios*$\_en_detalles_tallas_servicios):
     - ✅ Se envían **completos** si el usuario tiene rol `Mesa-de-Control` o `Ventas` (o es `is_superuser` / `is_admin_empresa`).
     - ❌ Se **eliminan del JSON** (no vienen en el response) para roles `WMS`, `Compras` o cualquier otro.
-  - **Nuevo**: `documentos[]` — lista de todos los documentos ligados al pedido (1 solo query por relación, prefetch optimizado).
+  - **Nuevo (Picking v2 Tracker)**: `tracker_picking` — 5 KPIs de surtido del pedido, derivados de TODOS los `Picking` activos (sin importar `almacen_destino`, regla de negocio v2). Shape **exactamente igual** que `header.tracker` del onboarding de WMS Picking (SSoT):
+    | Campo | Tipo | Fórmula | UI recomendada |
+    |---|---|---|---|
+    | `total_prendas_pedido` | `str` | `SUM(PedidoDetalleTalla.cantidad)` de todo el pedido | Card "Prendas del pedido" |
+    | `total_asignado` | `str` | `SUM(PickingDetalle.cantidad_asignada)` en pickings activos no cancelados **sin filtro de almacén destino** | Card "Prendas con folio picking" |
+    | `total_surtido` | `str` | `SUM(PickingDetalle.cantidad_surtida)` en pickings activos no cancelados (idem) | Card "Prendas surtidas" |
+    | `pct_asignado_pedido` | `str` (0.0000 - 100.0000) | `(total_asignado / total_prendas_pedido) * 100` (4 decimales, 0 si 0 prendas) | Progress bar grande "Asignado a folio picking" |
+    | `pct_surtido_pedido` | `str` (0.0000 - 100.0000) | `(total_surtido / total_prendas_pedido) * 100` (idem) | Progress bar grande "Surtido" |
+    > Ejemplo pedido de 500 piezas con 2 pickings de 250 → `pct_asignado_pedido: "100.0000"`, `pct_surtido_pedido: "100.0000"` **independientemente de a qué almacenes fueran destinados cada picking**. Ambos se cuentan igual para el tracker.
+    - Fórmulas y SSoT centralizado en [pendientes.py → `armar_tracker_pedido()`](file:///c:/Users/Jesús%Ibarra/Desktop/django-backend-v2/wms/services/picking_pipeline/pendientes.py#L163-L196) y [picking_service.py → `PickingService._armar_tracker`](file:///c:/Users/Jesús%Ibarra/Desktop/django-backend-v2/wms/services/picking_service.py#L61-L69). Onboarding WMS y detalle Pedido devuelven exactamente los mismos valores.
+  - **Nuevo (Picking v2 Tracker)**: `folios_picking[]` — lista compacta de **todos los folios picking activos** del pedido (sin filtro de almacén destino) para trazabilidad de ubicación:
+    ```ts
+    type FolioPickingResumen = {
+      id: number;
+      folio: string; // PK-xxxxxx / folio legible
+      estado: string | number; // estado actual del picking (Picking.Estado)
+      created_at: string; // ISO timestamp
+      almacen_origen: number | null;
+      almacen_origen_nombre: string | null; // DÓNDE SE TOMARON LAS PRENDAS
+      almacen_destino: number | null;
+      almacen_destino_nombre: string | null; // DÓNDE SE MANDARON (APARTADOS, PROCESO, MP, PT, etc.) — el valor clave para trazabilidad de ubicación
+      operador: number | null;
+      operador_nombre: string | null;
+      total_lineas: number;
+      total_lineas_completas: number;
+      cantidad_asignada_total: string; // cuántas prendas de este pedido están en este folio (string Decimal)
+      cantidad_surtida_total: string;
+    };
+    ```
+
+    - Consumo Next.js: renderiza una tabla/grid "Historial de ubicación por picking" — cada renglón representa un folio; click en el folio abre `wms/pickings/${id}` en modal/pestaña nueva para ver el detalle completo de líneas y ubicación.
+  - **Nuevo (Picking v2 Tracker)**: En cada renglón de `detalles[]` (PedidoDetalleReadSerializer) llega `detalles[].tracker_picking` (mismo shape 5 KPIs pero a nivel de la línea del pedido).
+  - **Nuevo (Picking v2 Tracker)**: En cada talla anidada `detalles[].tallas[]` (PedidoDetalleTallaReadSerializer) llegan:
+    | Campo | Tipo | Significado |
+    |---|---|---|
+    | `cantidad_asignada_picking` | `str` | Cuántas de esas prendas ya tienen folio picking (suma de todas las líneas activas, sin filtro de almacén). |
+    | `cantidad_surtida_picking` | `str` | Cuántas ya están marcadas como surtidas en sus líneas de picking correspondientes. |
+  - **Ya existente**: `documentos[]` — lista de todos los documentos ligados al pedido (1 solo query por relación, prefetch optimizado).
     - **Shape de cada entrada**:
       ```ts
       type PedidoDocumento = {

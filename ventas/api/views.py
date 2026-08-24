@@ -2088,9 +2088,31 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # 404 (no 500) para un pedido de otra empresa o inexistente — misma
         # convención multi-tenant del resto de la API.
         from ventas.services.pedido_documentos_service import documentos_related_prefetch_args
+        from wms.services.picking_pipeline.pendientes import historical_maps
+
         qs = self.get_queryset().prefetch_related(*documentos_related_prefetch_args())
         instance = get_object_or_404(qs, pk=kwargs.get("pk"))
-        serializer = self.get_serializer(instance)
+
+        # Precomputa UNA SOLA VEZ los mapas de tracking surtido/asignado por
+        # PedidoDetalleTalla y se los pasa a todos los serializers anidados
+        # via serializer.context. Los 3 serializers (Pedido, PedidoDetalleRead,
+        # PedidoDetalleTallaRead) consumen exactamente estos mismos mapas y
+        # no repiten queries. Si hay un fallo (ej: módulo WMS no disponible),
+        # se cae a mapas vacíos (tracker=0 en toda la UI), sin romper el detalle.
+        try:
+            asignado_map, surtido_map = historical_maps(instance)
+            tracking_ctx = {
+                "asignado_map": dict(asignado_map),
+                "surtido_map": dict(surtido_map),
+            }
+        except Exception:
+            tracking_ctx = {"asignado_map": {}, "surtido_map": {}}
+
+        serializer_class = self.get_serializer_class()
+        context = dict(self.get_serializer_context() or {})
+        context["_picking_tracking"] = tracking_ctx
+        serializer = serializer_class(instance, context=context)
+
         data = filtrar_campos_contabilidad_pedido(serializer.data, request.user)
         return Response(data)
 

@@ -1,11 +1,9 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum
 
 from rest_framework.exceptions import ValidationError
 
-from ventas.models import PedidoDetalleTalla
 from wms.models import Picking, PickingDetalle
 from wms.services.existencia_service import ExistenciaService
 from wms.services.picking_pipeline.catalogs import (
@@ -21,7 +19,10 @@ from wms.services.picking_pipeline.context import (
     parse_pk,
     validar_contexto_picking,
 )
-from wms.services.picking_pipeline.pendientes import build_snapshots, historical_maps
+from wms.services.picking_pipeline.pendientes import (
+    armar_tracker_pedido,
+    build_snapshots,
+)
 from wms.utils.decimales import normalizar_decimal
 from wms.utils.folios import generate_folio
 
@@ -59,46 +60,13 @@ class PickingService:
     # ------------------------------------------------------------------
     @classmethod
     def _armar_tracker(cls, pedido):
-        """Construye ``header.tracker`` con KPIs del pedido (asignado / surtido).
+        """Delega SSoT a ``armar_tracker_pedido()`` (pendientes.py).
 
-        - Totales: sumatorias de ``PedidoDetalleTalla`` y pickings activos
-          (no cancelados).
-        - Porcentajes: string Decimal(4) normalizado. Si no hay prendas
-          devuelve 0.0000 en lugar de división por cero. Si ``pedido`` es
-          ``None`` devuelve zeros (caso onboarding sin pedido seleccionado).
+        Se mantiene este wrapper aquí por backwards-compat: el servicio de
+        onboarding lo usa directamente, y el serializer de Pedido usa el
+        mismo helper para garantizar idéntica métrica entre pantallas.
         """
-        if pedido is None:
-            return {
-                "pct_asignado_pedido": "0.0000",
-                "pct_surtido_pedido": "0.0000",
-                "total_prendas_pedido": "0",
-                "total_asignado": "0",
-                "total_surtido": "0",
-            }
-        total_pedido = (
-            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido).aggregate(
-                total=Sum("cantidad")
-            )["total"]
-            or Decimal("0")
-        )
-        total_pedido = normalizar_decimal(total_pedido)
-        _asig_map, _surt_map = historical_maps(pedido)
-        total_asignado = normalizar_decimal(sum(_asig_map.values(), Decimal("0")))
-        total_surtido = normalizar_decimal(sum(_surt_map.values(), Decimal("0")))
-
-        def _pct(num, den):
-            if den <= Decimal("0"):
-                return normalizar_decimal(Decimal("0"))
-            ratio = (normalizar_decimal(num) * Decimal("100")) / normalizar_decimal(den)
-            return ratio.quantize(Decimal("0.0001"))
-
-        return {
-            "pct_asignado_pedido": str(_pct(total_asignado, total_pedido)),
-            "pct_surtido_pedido": str(_pct(total_surtido, total_pedido)),
-            "total_prendas_pedido": str(total_pedido),
-            "total_asignado": str(total_asignado),
-            "total_surtido": str(total_surtido),
-        }
+        return armar_tracker_pedido(pedido)
 
     # ------------------------------------------------------------------
     # GET onboarding (4 pasos: pedido → origen/destino → existencias → OT)
