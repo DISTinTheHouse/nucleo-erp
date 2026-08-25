@@ -208,13 +208,20 @@ def _iterar_candidatos(orden_compra, cfg):
             qs = getattr(recepcion, "movimientoinventario_set", None)
             if qs is None:
                 continue
+            # ``.all()`` a secas, NO ``.filter(activo=True)``: el ``Prefetch`` de
+            # ``movimientoinventario_set`` en ``OrdenCompraViewSet.get_queryset``
+            # ya trae sólo los activos. Encadenar ``.filter()`` clonaba el
+            # queryset, descartaba ``_result_cache`` y consultaba UNA VEZ POR
+            # RECEPCIÓN.
+            #
+            # Tampoco se filtra en Python (como sí se hace abajo con las otras
+            # relaciones): ese prefetch usa ``.only("pk", "fecha_movimiento",
+            # "recepcion")``, así que ``activo`` viene diferido y leerlo por fila
+            # reintroduciría el mismo N+1 por otra vía.
             try:
-                iterator = qs.filter(activo=True).all()
+                iterator = qs.all()
             except Exception:
-                try:
-                    iterator = qs.all()
-                except Exception:
-                    iterator = []
+                iterator = []
             for mov in iterator:
                 mov_id = getattr(mov, "pk", None) or getattr(mov, "id", None)
                 if mov_id is None or mov_id in seen_ids:
@@ -234,19 +241,37 @@ def _iterar_candidatos(orden_compra, cfg):
     if value is None:
         return
 
+    # ``.all()`` y filtrado en Python, en vez de ``.filter(activo=True)`` +
+    # ``.iterator()``. Las dos formas anteriores eludían la caché del prefetch:
+    #
+    #  - ``.filter()`` clona el queryset y descarta ``_result_cache``. Peor aún:
+    #    el clon conserva los ``prefetch_related`` ANIDADOS, así que re-ejecutar
+    #    ``recepcion_set`` arrastraba también ``recepciondetalle_set`` y
+    #    ``movimientoinventario_set`` — un ``.filter()`` costaba TRES consultas.
+    #  - ``.iterator()`` nunca lee ``_result_cache``, así que por sí solo habría
+    #    mantenido las consultas aunque se corrigiera lo anterior (mismo defecto
+    #    que ``ventas/services/pedido_documentos_service``).
+    #
+    # El filtro por ``activo`` NO se puede simplemente eliminar: el prefetch de
+    # ``recepcion_set`` sí acota a activos, pero el de ``facturas_proveedores``
+    # es un string plano sin filtro y ``FacturaProveedor.activo`` existe, así que
+    # quitarlo publicaría facturas dadas de baja. Filtrarlo en Python conserva el
+    # resultado exacto de ambas relaciones sin consultar de nuevo — mismo criterio
+    # que el ``getattr(recepcion, "activo", True)`` de la rama de arriba. Ambas
+    # relaciones vienen con todos sus campos cargados (ningún ``.only()``), así
+    # que leer ``activo`` no dispara nada.
     activo_filter = cfg.get("activo_filter", False)
     try:
-        qs = value.filter(activo=True) if activo_filter else value.all()
+        qs = value.all()
     except Exception:
         qs = value
     try:
-        iterator = qs.iterator()
+        items = list(qs)
     except Exception:
-        try:
-            iterator = iter(qs)
-        except Exception:
-            iterator = [qs]
-    for item in iterator:
+        items = [qs]
+    for item in items:
+        if activo_filter and not getattr(item, "activo", True):
+            continue
         yield item
 
 
