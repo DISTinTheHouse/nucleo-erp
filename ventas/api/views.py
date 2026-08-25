@@ -194,10 +194,32 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             pedido_qs = Pedido.objects.filter(cotizacion_id=OuterRef("pk")).order_by(
                 "-id"
             )
+            # ``piezas`` va como Subquery correlacionada, no como ``Sum`` sobre
+            # el join: un agregado obliga a Django a agrupar por TODAS las
+            # columnas seleccionadas, y con el ``select_related`` de
+            # ``get_queryset`` eso eran 143 —68 de ``cotizaciones`` + 28 de
+            # ``clientes`` + 17 de ``sucursales`` + 9 de ``monedas`` + 21 de
+            # ``usuarios``—, entre ellas ``aprobado_snapshot``, un ``jsonb`` que
+            # Postgres tiene que hashear por fila para agrupar. Y todo eso sobre
+            # el producto cartesiano detalle×talla. La subquery calcula la misma
+            # suma aparte: mismo número de queries (1), sin ``GROUP BY``, y sin
+            # los dos JOINs multivaluados en la consulta principal.
+            #
+            # Efecto colateral buscado: al no depender del join, la suma deja de
+            # ser sensible a que un filtro futuro añada otra relación
+            # multivaluada al queryset —eso habría inflado el ``Sum``—.
+            piezas_qs = (
+                CotizacionDetalleTalla.objects.filter(
+                    cotizacion_detalle__cotizacion_id=OuterRef("pk")
+                )
+                .values("cotizacion_detalle__cotizacion_id")
+                .annotate(total=Sum("cantidad"))
+                .values("total")
+            )
             qs = qs.annotate(
                 pedido_id=Subquery(pedido_qs.values("id")[:1]),
                 pedido_folio=Subquery(pedido_qs.values("folio")[:1]),
-                piezas=Coalesce(Sum("cotizaciondetalle__tallas__cantidad"), 0),
+                piezas=Coalesce(Subquery(piezas_qs[:1]), 0),
             )
 
         estatus = self.request.query_params.get("estatus")
