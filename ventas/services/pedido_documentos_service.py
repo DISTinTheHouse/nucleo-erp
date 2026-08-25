@@ -197,7 +197,11 @@ def listar_documentos_pedido(pedido):
             qs = getattr(pedido, cfg["related_name"]).all()
         except Exception:
             continue
-        for doc in qs.iterator():
+        # Iteración directa, NO ``.iterator()``: ``PedidoViewSet.retrieve()``
+        # prefetchea las 12 relaciones de ``documentos_related_prefetch_args()``,
+        # y ``.iterator()`` nunca lee ``_result_cache`` — re-ejecutaba una
+        # consulta por tipo de documento y desperdiciaba todo ese prefetch.
+        for doc in qs:
             documentos.append(
                 {
                     "id": doc.pk,

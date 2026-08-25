@@ -86,6 +86,21 @@ def _pedido_detalles_prefetch():
     )
 
 
+def _pedido_servicios_extras_prefetch():
+    """Prefetch de ``servicios_extras`` con el orden por ``id`` que antes
+    imponía ``PedidoSerializer.get_servicios_extras``.
+
+    El orden vive aquí (no en el serializer) por la misma razón que en
+    ``_pedido_detalles_prefetch()``: encadenar ``.order_by()`` sobre una
+    relación ya prefetcheada clona el queryset, descarta la caché y vuelve a
+    consultar.
+    """
+    return Prefetch(
+        "servicios_extras",
+        queryset=PedidoServicioExtra.objects.order_by("id"),
+    )
+
+
 class CotizacionViewSet(viewsets.ModelViewSet):
     queryset = Cotizacion.objects.all()
     serializer_class = CotizacionSerializer
@@ -1877,7 +1892,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
         pedido = (
             Pedido.objects.filter(pk=pedido.pk)
-            .prefetch_related(_pedido_detalles_prefetch())
+            .prefetch_related(
+                _pedido_detalles_prefetch(),
+                _pedido_servicios_extras_prefetch(),
+            )
             .first()
         )
         return Response(
@@ -2090,7 +2108,15 @@ class PedidoViewSet(viewsets.ModelViewSet):
         from ventas.services.pedido_documentos_service import documentos_related_prefetch_args
         from wms.services.picking_pipeline.pendientes import historical_maps
 
-        qs = self.get_queryset().prefetch_related(*documentos_related_prefetch_args())
+        # ``select_related("cotizacion")``: ``listar_documentos_pedido`` lee la
+        # FK ``pedido.cotizacion`` (el único documento ``is_single``), que sin
+        # esto disparaba una consulta extra durante la serialización. Sólo aquí,
+        # no en el listado — ``PedidoListSerializer`` no la toca.
+        qs = (
+            self.get_queryset()
+            .select_related("cotizacion")
+            .prefetch_related(*documentos_related_prefetch_args())
+        )
         instance = get_object_or_404(qs, pk=kwargs.get("pk"))
 
         # Precomputa UNA SOLA VEZ los mapas de tracking surtido/asignado por
@@ -2227,7 +2253,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # toca, así que ahí se omite el prefetch — es lo que baja el tiempo del
         # listado de ~15s a <1s. ``documentos`` sólo lo añade ``retrieve()``.
         if getattr(self, "action", None) != "list":
-            qs = qs.prefetch_related(_pedido_detalles_prefetch())
+            qs = qs.prefetch_related(
+                _pedido_detalles_prefetch(),
+                _pedido_servicios_extras_prefetch(),
+            )
         # Listado más reciente primero; ``-id`` como desempate estable.
         # ``nulls_last``: ``Pedido.created_at`` se agregó como NULL-able
         # (migración 0007) y los pedidos previos siguen en NULL; en PostgreSQL

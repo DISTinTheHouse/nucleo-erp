@@ -268,9 +268,15 @@ class PedidoDetalleReadSerializer(serializers.ModelSerializer):
         # Reusamos la clase PedidoDetalleTallaReadSerializer pero le inyectamos
         # el contexto compartido de tracking (mapas de asignado/surtido) para
         # evitar N queries y reutilizar el snapshot de una sola pasada.
+        #
+        # ``obj.tallas.all()`` SIN ``.order_by()``: el orden por ``id`` ya lo
+        # impone el ``Prefetch`` anidado de ``_pedido_detalles_prefetch()``.
+        # Encadenar aquí un ``.order_by("id")`` clonaba el queryset, descartaba
+        # ``_result_cache`` y re-ejecutaba la consulta UNA VEZ POR RENGLÓN
+        # (N+1), tirando a la basura el prefetch del viewset.
         ctx_safe = dict(self.context or {})
         child = PedidoDetalleTallaReadSerializer(
-            instance=obj.tallas.all().order_by("id"),
+            instance=obj.tallas.all(),
             many=True,
             context=ctx_safe,
         )
@@ -336,8 +342,13 @@ class PedidoSerializer(serializers.ModelSerializer):
     detalles = serializers.SerializerMethodField()
 
     def get_servicios_extras(self, obj):
+        # Sin ``.order_by("id")``: el orden lo impone el ``Prefetch`` del
+        # viewset (``_pedido_servicios_extras_prefetch()``); encadenarlo aquí
+        # clonaba el queryset e invalidaba esa caché. Si el pedido llega sin
+        # prefetch (p.ej. la respuesta de un POST recién creado, sin renglones)
+        # ``.all()`` consulta igual que antes.
         try:
-            qs = obj.servicios_extras.all().order_by("id")
+            qs = obj.servicios_extras.all()
         except Exception:
             return []
         return PedidoServicioExtraSerializer(qs, many=True).data
@@ -352,7 +363,13 @@ class PedidoSerializer(serializers.ModelSerializer):
     def get_tracker_picking(self, obj):
         from wms.services.picking_pipeline.pendientes import armar_tracker_pedido
         try:
-            return armar_tracker_pedido(obj)
+            # ``retrieve()`` ya calculó los mapas históricos una sola vez y los
+            # dejó en el contexto; se los pasamos para que el tracker no repita
+            # la agregación sobre ``PickingDetalle``. Si no hay contexto (POST /
+            # PATCH / mesa-control) va ``None`` y el tracker los calcula solo.
+            return armar_tracker_pedido(
+                obj, picking_maps=self.context.get("_picking_tracking")
+            )
         except Exception:
             return {
                 "pct_asignado_pedido": "0.0000",
@@ -384,8 +401,13 @@ class PedidoSerializer(serializers.ModelSerializer):
                 }
             except Exception:
                 ctx_safe["_picking_tracking"] = {"asignado_map": {}, "surtido_map": {}}
+        # ``obj.detalles.all()`` SIN ``.order_by()``: ``_pedido_detalles_prefetch()``
+        # ya ordena por ``id`` los renglones y sus tallas. El ``.order_by("id")``
+        # que había aquí clonaba el queryset, descartaba ``_result_cache`` y
+        # re-ejecutaba tanto la consulta de ``detalles`` como su prefetch anidado
+        # de ``tallas``.
         child = PedidoDetalleReadSerializer(
-            instance=obj.detalles.all().order_by("id"),
+            instance=obj.detalles.all(),
             many=True,
             context=ctx_safe,
         )

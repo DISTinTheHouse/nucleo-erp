@@ -160,7 +160,7 @@ def build_snapshots(tallas, pedido, almacen_origen=None):
 # de su ubicación física actual).
 # ---------------------------------------------------------------------------
 
-def armar_tracker_pedido(pedido):
+def armar_tracker_pedido(pedido, picking_maps=None):
     """Devuelve los 5 KPIs de surtido por Picking activo a nivel PEDIDO.
 
     Shape exacto que ``PickingService._armar_tracker`` (SSoT) para que el
@@ -169,6 +169,13 @@ def armar_tracker_pedido(pedido):
         {pct_asignado_pedido, pct_surtido_pedido,
          total_prendas_pedido, total_asignado, total_surtido}
     Todos los números son ``str`` Decimal normalizados.
+
+    ``picking_maps`` (opcional) es el dict ``{asignado_map, surtido_map}`` que
+    ``PedidoViewSet.retrieve()`` ya calculó una sola vez para todo el detalle
+    del pedido. Cuando se recibe, se reutiliza en vez de repetir
+    ``historical_maps()`` (misma agregación sobre ``PickingDetalle``). Cuando
+    llega ``None`` — el resto de llamadores, p.ej. ``PickingService`` — el
+    comportamiento es idéntico al de antes: se calcula aquí dentro.
     """
     if pedido is None:
         return {
@@ -182,7 +189,11 @@ def armar_tracker_pedido(pedido):
         pedido_detalle__pedido=pedido
     ).aggregate(total=Sum("cantidad"))
     total_pedido = normalizar_decimal(total_pedido_qs["total"] or D("0"))
-    asignado_map, surtido_map = historical_maps(pedido)
+    if picking_maps is not None:
+        asignado_map = picking_maps.get("asignado_map") or {}
+        surtido_map = picking_maps.get("surtido_map") or {}
+    else:
+        asignado_map, surtido_map = historical_maps(pedido)
     total_asignado = normalizar_decimal(sum(asignado_map.values(), D("0")))
     total_surtido = normalizar_decimal(sum(surtido_map.values(), D("0")))
     pct_asignado = _safe_pct(total_asignado, total_pedido) * D("100")
