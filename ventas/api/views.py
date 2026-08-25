@@ -222,29 +222,40 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 piezas=Coalesce(Subquery(piezas_qs[:1]), 0),
             )
 
-        estatus = self.request.query_params.get("estatus")
-        if estatus:
-            try:
-                estatus_list = [
-                    int(x) for x in str(estatus).split(",") if str(x).strip()
-                ]
-                qs = qs.filter(estatus__in=estatus_list)
-            except Exception:
-                raise ValidationError(
-                    {"estatus": "Filtro inválido. Usa números separados por coma."}
-                )
+            # Los filtros de query param viven DENTRO del guard de ``list``,
+            # igual que las anotaciones de arriba. ``_apply_filters`` se llama
+            # desde ``get_queryset()``, así que lo atraviesan TODAS las acciones
+            # —incluidas las de detalle, que resuelven por pk vía
+            # ``get_object()``—. Sin el guard, un parámetro suelto en una URL de
+            # detalle acotaba el queryset del que sale el objeto y devolvía 404
+            # sobre un registro que existe y es visible: en Mesa de Control,
+            # ``GET /mesa-control/5/stock-detalle/?estatus=3`` cruzaba el
+            # ``estatus__in=[2,5]`` del ViewSet con ``estatus=3`` y no quedaba
+            # nada. Sólo el listado devuelve una colección, y sólo él tiene
+            # sentido filtrar.
+            estatus = self.request.query_params.get("estatus")
+            if estatus:
+                try:
+                    estatus_list = [
+                        int(x) for x in str(estatus).split(",") if str(x).strip()
+                    ]
+                    qs = qs.filter(estatus__in=estatus_list)
+                except Exception:
+                    raise ValidationError(
+                        {"estatus": "Filtro inválido. Usa números separados por coma."}
+                    )
 
-        q = (self.request.query_params.get("q") or "").strip()
-        if q:
-            q_filter = (
-                Q(oc__icontains=q)
-                | Q(cliente__razon_social__icontains=q)
-                | Q(cliente__nombre__icontains=q)
-                | Q(cliente__rfc__icontains=q)
-            )
-            if q.isdigit():
-                q_filter = q_filter | Q(id=int(q))
-            qs = qs.filter(q_filter)
+            q = (self.request.query_params.get("q") or "").strip()
+            if q:
+                q_filter = (
+                    Q(oc__icontains=q)
+                    | Q(cliente__razon_social__icontains=q)
+                    | Q(cliente__nombre__icontains=q)
+                    | Q(cliente__rfc__icontains=q)
+                )
+                if q.isdigit():
+                    q_filter = q_filter | Q(id=int(q))
+                qs = qs.filter(q_filter)
 
         # Orden fijo: más reciente primero, con ``-id`` como desempate estable.
         # Ya no se admite ``?ordering=`` del cliente: el requisito de producto es
@@ -2371,6 +2382,78 @@ class MesaControlViewSet(CotizacionViewSet):
         # mismo lookup con otro queryset hace que Django reviente al ejecutar.
         return self._apply_filters(qs.select_related("cliente", "sucursal", "moneda", "vendedor"))
 
+    def _stock_disponible_en_batch(self, cotizacion, detalles):
+        """Stock disponible de todas las líneas de la cotización, en UNA query.
+
+        Devuelve ``(stock_por_variante, stock_por_producto)``, los dos mapas que
+        el bucle consulta según la línea tenga variante o no. Replica exactamente
+        el criterio de ``_get_existencias_queryset`` —que se conserva intacto
+        para el resto de llamadores—:
+
+        - **Con variante**: filtra SOLO por ``producto_variante_id``, sin mirar
+          el producto. Por eso el mapa se indexa por ``variante_id`` y no por el
+          par ``(producto_id, variante_id)``: ``Existencia.producto`` es
+          nullable, así que agrupar por el par dejaría fuera filas legítimas.
+        - **Sin variante**: filtra por ``producto_id`` entre las filas con
+          ``producto_variante`` NULL.
+
+        Los totales se ACUMULAN, no se asignan: al agrupar por las dos columnas
+        a la vez, una misma variante puede venir repartida en varias filas con
+        distinto ``producto_id`` (incluido NULL). Mismo criterio que
+        ``ExistenciaService._sum_existencia_por_clave``.
+
+        ``empresa_id``/``sucursal_id`` en vez de los objetos: evita cargar la FK
+        ``cotizacion.empresa``, que no está en el ``select_related`` del
+        queryset (compartido con ``list``, donde no se usa).
+        """
+        variante_ids = set()
+        producto_ids = set()
+        for det in detalles:
+            for ct in det.tallas.all():
+                if ct.variante_id:
+                    variante_ids.add(ct.variante_id)
+                elif det.producto_id:
+                    producto_ids.add(det.producto_id)
+
+        stock_por_variante = {}
+        stock_por_producto = {}
+        if not variante_ids and not producto_ids:
+            return stock_por_variante, stock_por_producto
+
+        condiciones = []
+        if variante_ids:
+            condiciones.append(Q(producto_variante_id__in=list(variante_ids)))
+        if producto_ids:
+            condiciones.append(
+                Q(producto_id__in=list(producto_ids), producto_variante__isnull=True)
+            )
+        q_cond = condiciones[0]
+        for condicion in condiciones[1:]:
+            q_cond = q_cond | condicion
+
+        filas = (
+            Existencia.objects.filter(
+                almacen__empresa_id=cotizacion.empresa_id,
+                almacen__sucursal_id=cotizacion.sucursal_id,
+            )
+            .filter(q_cond)
+            .values("producto_id", "producto_variante_id")
+            .annotate(total=Sum("cantidad"))
+        )
+        for fila in filas:
+            total = fila["total"] or Decimal("0.0000")
+            variante_id = fila["producto_variante_id"]
+            if variante_id is not None:
+                stock_por_variante[variante_id] = (
+                    stock_por_variante.get(variante_id, Decimal("0.0000")) + total
+                )
+            else:
+                producto_id = fila["producto_id"]
+                stock_por_producto[producto_id] = (
+                    stock_por_producto.get(producto_id, Decimal("0.0000")) + total
+                )
+        return stock_por_variante, stock_por_producto
+
     @action(detail=True, methods=["get"], url_path="stock-detalle")
     def stock_detalle(self, request, pk=None):
         """
@@ -2379,9 +2462,28 @@ class MesaControlViewSet(CotizacionViewSet):
         cotizacion = self.get_object()
 
         resultados = []
-        detalles = CotizacionDetalle.objects.filter(
-            cotizacion=cotizacion
-        ).select_related("producto", "color")
+        # ``tallas`` prefetcheado y con ``talla`` en el ``select_related``: el
+        # bucle leía ambos por fila (una consulta por renglón para las tallas y
+        # otra por talla para su nombre). ``order_by("id")`` va DENTRO del
+        # ``Prefetch``, no encadenado en el bucle: encadenarlo clonaría el
+        # queryset y descartaría la caché. ``CotizacionDetalleTalla`` no declara
+        # ``Meta.ordering``, así que sin esto el orden lo decidía la BD.
+        detalles = list(
+            CotizacionDetalle.objects.filter(cotizacion=cotizacion)
+            .select_related("producto", "color")
+            .prefetch_related(
+                Prefetch(
+                    "tallas",
+                    queryset=CotizacionDetalleTalla.objects.select_related(
+                        "talla"
+                    ).order_by("id"),
+                )
+            )
+        )
+
+        stock_por_variante, stock_por_producto = self._stock_disponible_en_batch(
+            cotizacion, detalles
+        )
 
         for det in detalles:
             item = {
@@ -2390,12 +2492,14 @@ class MesaControlViewSet(CotizacionViewSet):
                 "tallas": [],
             }
             for ct in det.tallas.all():
-                stock_total = self._get_total_disponible(
-                    empresa=cotizacion.empresa,
-                    sucursal=cotizacion.sucursal,
-                    producto_id=det.producto_id,
-                    producto_variante_id=ct.variante_id,
-                )
+                # Mismo criterio que ``_get_total_disponible``: con variante se
+                # resuelve por variante (sin mirar el producto), y sin ella por
+                # producto entre las filas que no tienen variante.
+                if ct.variante_id:
+                    stock_total = stock_por_variante.get(ct.variante_id)
+                else:
+                    stock_total = stock_por_producto.get(det.producto_id)
+                stock_total = self._to_decimal_inventory(stock_total)
                 cantidad_pedida = self._to_decimal_inventory(ct.cantidad)
                 diferencia = stock_total - cantidad_pedida
 
