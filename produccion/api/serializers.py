@@ -262,7 +262,7 @@ class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
         De ella sólo se lee ``bordado_config`` (aquí abajo y en
         ``get_tipos_servicio``), así que basta con un portador de ese atributo.
 
-        ``context["pdt_config_map"]`` —cuando existe— es
+        ``context["pdt_bordado_config_map"]`` —cuando existe— es
         ``{(pedido_detalle_id, talla_id): bordado_config}`` para TODO el pedido,
         resuelto en UNA query por ``OrdenBordadoViewSet.retrieve()``. Sin él
         este método consultaba una fila por renglón: ``_pdt_cache`` comparte
@@ -279,7 +279,7 @@ class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
             self._pdt_cache = {}
         key = (obj.pedido_detalle_id, obj.talla_id)
         if key not in self._pdt_cache:
-            mapa = self.context.get("pdt_config_map")
+            mapa = self.context.get("pdt_bordado_config_map")
             if mapa is not None:
                 # Ausente en el mapa == no existe la fila: mismo ``None`` que
                 # devolvía ``.first()``.
@@ -1301,19 +1301,47 @@ class OrdenReflejanteDetalleSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
     def _get_pedido_detalle_talla(self, obj):
+        """La ``PedidoDetalleTalla`` de origen de este renglón.
+
+        De ella sólo se lee ``reflejante_config`` (en ``_get_cfg``), así que
+        basta con un portador de ese atributo.
+
+        ``context["pdt_reflejante_config_map"]`` —cuando existe— es
+        ``{(pedido_detalle_id, talla_id): reflejante_config}`` para TODO el
+        pedido, resuelto en UNA query por ``OrdenReflejanteViewSet.retrieve()``.
+        Sin él este método consultaba una fila por renglón:
+        ``_pdt_reflejante_cache`` comparte instancia entre filas (DRF reusa el
+        serializer hijo con ``many=True``), pero la clave
+        ``(pedido_detalle_id, talla_id)`` es única por renglón por
+        construcción, así que nunca acertaba. Mismo arreglo que en
+        ``OrdenBordadoDetalleSerializer``.
+
+        La query por fila se conserva como fallback para cualquier llamador que
+        no inyecte el mapa (``create``, anidaciones, comandos).
+        """
         if obj.pedido_detalle_id is None or obj.talla_id is None:
             return None
         if not hasattr(self, '_pdt_reflejante_cache'):
             self._pdt_reflejante_cache = {}
         key = (obj.pedido_detalle_id, obj.talla_id)
         if key not in self._pdt_reflejante_cache:
-            from ventas.models import PedidoDetalleTalla
-            self._pdt_reflejante_cache[key] = (
-                PedidoDetalleTalla.objects
-                .filter(pedido_detalle_id=obj.pedido_detalle_id, talla_id=obj.talla_id)
-                .only('reflejante_config')
-                .first()
-            )
+            mapa = self.context.get("pdt_reflejante_config_map")
+            if mapa is not None:
+                # Ausente en el mapa == no existe la fila: mismo ``None`` que
+                # devolvía ``.first()``.
+                self._pdt_reflejante_cache[key] = (
+                    SimpleNamespace(reflejante_config=mapa[key])
+                    if key in mapa
+                    else None
+                )
+            else:
+                from ventas.models import PedidoDetalleTalla
+                self._pdt_reflejante_cache[key] = (
+                    PedidoDetalleTalla.objects
+                    .filter(pedido_detalle_id=obj.pedido_detalle_id, talla_id=obj.talla_id)
+                    .only('reflejante_config')
+                    .first()
+                )
         return self._pdt_reflejante_cache[key]
 
     def _get_cfg(self, obj):
@@ -1737,19 +1765,50 @@ class OrdenCorteMangaDetalleSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
     def _get_pedido_detalle_talla(self, obj):
+        """La ``PedidoDetalleTalla`` de origen de este renglón.
+
+        De ella sólo se lee ``corte_manga_config`` (en ``_get_cfg``), así que
+        basta con un portador de ese atributo. Ojo: aquí ese config es apenas
+        la BASE de la mezcla —``get_corte_manga_config`` le encima
+        ``obj.configuracion``, columna del propio renglón—, y esa lógica no se
+        toca: lo único que cambia es de dónde sale ``cfg_pedido``.
+
+        ``context["pdt_corte_manga_config_map"]`` —cuando existe— es
+        ``{(pedido_detalle_id, talla_id): corte_manga_config}`` para TODO el
+        pedido, resuelto en UNA query por ``OrdenesCorteMangaViewSet.retrieve()``.
+        Sin él este método consultaba una fila por renglón: ``_pdt_ocm_cache``
+        comparte instancia entre filas (DRF reusa el serializer hijo con
+        ``many=True``), pero la clave ``(pedido_detalle_id, talla_id)`` es única
+        por renglón por construcción, así que nunca acertaba. Mismo arreglo que
+        en ``OrdenBordadoDetalleSerializer``/``OrdenReflejanteDetalleSerializer``,
+        con clave de contexto propia para que los tres mapas no se pisen.
+
+        La query por fila se conserva como fallback para cualquier llamador que
+        no inyecte el mapa (``create``, anidaciones, comandos).
+        """
         if obj.pedido_detalle_id is None or obj.talla_id is None:
             return None
         if not hasattr(self, '_pdt_ocm_cache'):
             self._pdt_ocm_cache = {}
         key = (obj.pedido_detalle_id, obj.talla_id)
         if key not in self._pdt_ocm_cache:
-            from ventas.models import PedidoDetalleTalla
-            self._pdt_ocm_cache[key] = (
-                PedidoDetalleTalla.objects
-                .filter(pedido_detalle_id=obj.pedido_detalle_id, talla_id=obj.talla_id)
-                .only('corte_manga_config')
-                .first()
-            )
+            mapa = self.context.get("pdt_corte_manga_config_map")
+            if mapa is not None:
+                # Ausente en el mapa == no existe la fila: mismo ``None`` que
+                # devolvía ``.first()`` (y que ``_get_cfg`` colapsa a ``{}``).
+                self._pdt_ocm_cache[key] = (
+                    SimpleNamespace(corte_manga_config=mapa[key])
+                    if key in mapa
+                    else None
+                )
+            else:
+                from ventas.models import PedidoDetalleTalla
+                self._pdt_ocm_cache[key] = (
+                    PedidoDetalleTalla.objects
+                    .filter(pedido_detalle_id=obj.pedido_detalle_id, talla_id=obj.talla_id)
+                    .only('corte_manga_config')
+                    .first()
+                )
         return self._pdt_ocm_cache[key]
 
     def _get_cfg(self, obj):
