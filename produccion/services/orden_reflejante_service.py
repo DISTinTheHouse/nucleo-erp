@@ -143,7 +143,7 @@ class OrdenReflejanteService:
         }
 
     @staticmethod
-    def cobertura_por_orden(ordenes):
+    def cobertura_por_orden(ordenes, cubierto_override=None, contratado_override=None):
         """Cobertura de cada OR sobre lo contratado por su pedido.
 
         Devuelve ``{or_id: {"cubierto": int, "contratado": int, "completa": bool}}``.
@@ -163,7 +163,16 @@ class OrdenReflejanteService:
         exacto aunque el reparto por talla no se pueda atribuir.
 
         Mismo contrato que ``OrdenBordadoService.cobertura_por_orden``, incluido
-        el piso (ver el comentario de abajo).
+        el piso (ver el comentario de abajo) y los dos ``*_override``.
+
+        ``cubierto_override`` (``{or_id: piezas}``) y ``contratado_override``
+        (``{pedido_id: piezas}``) permiten saltarse una o ambas queries cuando
+        el llamador ya tiene esos totales en memoria. Es el caso del DETALLE:
+        ``retrieve()`` ya prefetcheó los renglones de la OR (numerador) y ya
+        resolvió las tallas contratadas del pedido vía ``partialidad_de_orden``
+        (denominador, mismo predicado que ``contratado_por_pedido``). El
+        LISTADO no pasa ninguno de los dos y sigue costando exactamente las 2
+        queries agrupadas de siempre.
         """
         ordenes = list(ordenes)
         if not ordenes:
@@ -172,16 +181,22 @@ class OrdenReflejanteService:
         or_ids = [o.pk for o in ordenes]
         pedido_ids = {o.pedido_id for o in ordenes}
 
-        cubierto_por_or = {
-            f["orden_r_id"]: float(f["total"] or 0)
-            for f in (
-                OrdenReflejanteDetalle.objects
-                .filter(orden_r_id__in=or_ids)
-                .values("orden_r_id")
-                .annotate(total=Sum("cantidad"))
-            )
-        }
-        contratado = OrdenReflejanteService.contratado_por_pedido(pedido_ids)
+        if cubierto_override is not None:
+            cubierto_por_or = cubierto_override
+        else:
+            cubierto_por_or = {
+                f["orden_r_id"]: float(f["total"] or 0)
+                for f in (
+                    OrdenReflejanteDetalle.objects
+                    .filter(orden_r_id__in=or_ids)
+                    .values("orden_r_id")
+                    .annotate(total=Sum("cantidad"))
+                )
+            }
+        if contratado_override is not None:
+            contratado = contratado_override
+        else:
+            contratado = OrdenReflejanteService.contratado_por_pedido(pedido_ids)
 
         resultado = {}
         for orden in ordenes:

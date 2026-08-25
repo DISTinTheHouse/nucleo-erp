@@ -2471,17 +2471,21 @@ class OrdenReflejanteCoberturaParcialidadTests(OrdenReflejanteParcialidadesTests
         self.assertEqual(linea["cantidad_asignada"], 4.0)
         self.assertEqual(linea["cantidad_pendiente"], 12.0)
 
-    def test_retrieve_resuelve_la_parcialidad_una_sola_vez(self):
-        """El contexto de parcialidad se resuelve UNA vez para todos los
-        renglones (3 queries constantes), no una por renglón.
+    def test_retrieve_no_crece_con_el_numero_de_renglones(self):
+        """El detalle cuesta lo mismo con 1 renglón que con 2: delta 0.
 
-        El detalle sí crece 1 query por renglón, pero por un motivo
-        preexistente y ajeno a este cambio: ``OrdenReflejanteDetalleSerializer``
-        re-lee ``PedidoDetalleTalla`` para resolver ``reflejante_config``. Es
-        exactamente el mismo perfil que el detalle de Bordado ("7 base + 1 por
-        renglón"). Lo que este test fija es que la parcialidad no añada nada a
-        ese crecimiento: el delta entre un detalle de 1 renglón y uno de 2 es
-        exactamente 1.
+        El contexto de parcialidad siempre se resolvió UNA vez para todos los
+        renglones (3 queries constantes), así que el delta medía únicamente el
+        crecimiento del serializer. Ese crecimiento era 1 query por renglón:
+        ``OrdenReflejanteDetalleSerializer`` re-leía ``PedidoDetalleTalla`` por
+        fila para resolver ``reflejante_config``, y su
+        ``_pdt_reflejante_cache`` nunca acertaba porque la clave
+        ``(pedido_detalle_id, talla_id)`` es única por renglón.
+
+        Ahora ``OrdenReflejanteViewSet.retrieve`` resuelve el config de todo el
+        pedido en UNA query y lo pasa por ``context["pdt_reflejante_config_map"]``, de modo
+        que el endpoint quedó PLANO. Este test fija esa propiedad —más fuerte
+        que la anterior—: ni la parcialidad ni el renglón añaden nada por fila.
         """
         def _queries(orden_id):
             client = self._client()
@@ -2494,7 +2498,7 @@ class OrdenReflejanteCoberturaParcialidadTests(OrdenReflejanteParcialidadesTests
 
         delta = _queries(dos_lineas.data["id"]) - _queries(una_linea.data["id"])
 
-        self.assertEqual(delta, 1)
+        self.assertEqual(delta, 0)
 
 
 #: Formas REALES de los tres ``*_config`` de ``PedidoDetalleTalla``, tomadas de

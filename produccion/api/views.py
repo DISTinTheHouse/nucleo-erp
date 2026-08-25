@@ -670,7 +670,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 "hermanas": hermanas,
                 "reparto_aproximado": aproximado,
                 "avances": avances,
-                "pdt_config_map": pdt_config_map,
+                "pdt_bordado_config_map": pdt_config_map,
             },
         )
         return Response(serializer.data)
@@ -954,15 +954,50 @@ class OrdenReflejanteViewSet(
         por_linea, por_detalle, hermanas, aproximado = (
             OrdenReflejanteService.partialidad_de_orden(orden)
         )
+
+        # ``reflejante_config`` de TODAS las tallas del pedido, en UNA query,
+        # con la misma clave que usa el renglón. Sin esto,
+        # ``OrdenReflejanteDetalleSerializer._get_pedido_detalle_talla``
+        # consultaba ``PedidoDetalleTalla`` una vez por renglón (su caché no
+        # puede acertar: la clave es única por renglón). Mismo arreglo que en
+        # ``OrdenBordadoViewSet.retrieve``. Sin filtro por
+        # ``lleva_reflejante``/``cantidad``: la query por fila tampoco lo tenía,
+        # y un renglón cuyo pedido cambió después seguiría resolviendo su config.
+        pdt_config_map = {}
+        for pd_id, talla_id, cfg in (
+            PedidoDetalleTalla.objects
+            .filter(pedido_detalle__pedido_id=orden.pedido_id)
+            .order_by("id")
+            .values_list("pedido_detalle_id", "talla_id", "reflejante_config")
+        ):
+            # ``setdefault``: si hubiera dos filas para el mismo par se conserva
+            # la primera, como hacía ``.first()``.
+            pdt_config_map.setdefault((pd_id, talla_id), cfg)
+
+        # Numerador y denominador de la cobertura, ya en memoria: los renglones
+        # de la OR vienen del prefetch de ``detalles`` (``.all()`` lee su caché)
+        # y lo contratado por el pedido es la suma de ``por_detalle``, que
+        # ``partialidad_de_orden`` armó con el MISMO predicado que
+        # ``contratado_por_pedido`` (``lleva_reflejante=True, cantidad__gt=0``).
+        # Pasarlos evita repetir esas dos agregaciones; el listado, que no los
+        # tiene, sigue consultándolas.
+        cubierto = sum(float(d.cantidad or 0) for d in orden.detalles.all())
+        contratado = sum(v[0] for v in por_detalle.values())
+
         serializer = self.get_serializer(
             orden,
             context={
                 **self.get_serializer_context(),
-                "cobertura": OrdenReflejanteService.cobertura_por_orden([orden]),
+                "cobertura": OrdenReflejanteService.cobertura_por_orden(
+                    [orden],
+                    cubierto_override={orden.pk: cubierto},
+                    contratado_override={orden.pedido_id: contratado},
+                ),
                 "partialidad_por_linea": por_linea,
                 "partialidad_por_detalle": por_detalle,
                 "hermanas": hermanas,
                 "reparto_aproximado": aproximado,
+                "pdt_reflejante_config_map": pdt_config_map,
             },
         )
         return Response(serializer.data)
@@ -1145,6 +1180,44 @@ class OrdenesCorteMangaViewSet(
         if self.action == "retrieve":
             return OrdenesCorteMangaRetrieveSerializer
         return OrdenesCorteMangaSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        """``RetrieveModelMixin.retrieve`` + el mapa de configs del pedido.
+
+        Réplica exacta del mixin —``get_object``, serializar, responder—; lo
+        único que añade es ``pdt_corte_manga_config_map``. A diferencia de
+        Bordado y Reflejante, este módulo NO tiene cobertura ni parcialidad
+        (``OrdenCorteMangaService`` no las declara), así que no hay nada más que
+        inyectar y este override existe sólo por el mapa.
+
+        Sin él, ``OrdenCorteMangaDetalleSerializer._get_pedido_detalle_talla``
+        consultaba ``PedidoDetalleTalla`` una vez por renglón para leer
+        ``corte_manga_config`` (su caché no puede acertar: la clave es única por
+        renglón), y como aquí no hay nada más alrededor, ese N+1 era el 91% del
+        endpoint. Se lee en vivo del pedido y SIN filtro por
+        ``lleva_corte_manga``/``cantidad``, igual que hacía la query por fila.
+        """
+        orden = self.get_object()
+
+        pdt_config_map = {}
+        for pd_id, talla_id, cfg in (
+            PedidoDetalleTalla.objects
+            .filter(pedido_detalle__pedido_id=orden.pedido_id)
+            .order_by("id")
+            .values_list("pedido_detalle_id", "talla_id", "corte_manga_config")
+        ):
+            # ``setdefault``: si hubiera dos filas para el mismo par se conserva
+            # la primera, como hacía ``.first()``.
+            pdt_config_map.setdefault((pd_id, talla_id), cfg)
+
+        serializer = self.get_serializer(
+            orden,
+            context={
+                **self.get_serializer_context(),
+                "pdt_corte_manga_config_map": pdt_config_map,
+            },
+        )
+        return Response(serializer.data)
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
