@@ -103,7 +103,7 @@ class PickingLineaSnapshot:
         )
 
 
-def build_snapshots(tallas, pedido, almacen_origen=None):
+def build_snapshots(tallas, pedido, almacen_origen=None, picking_maps=None):
     """Construye ``PickingLineaSnapshot``s para las tallas de un pedido.
 
     - Si ``almacen_origen`` está presente, consulta existencia en batch
@@ -111,10 +111,23 @@ def build_snapshots(tallas, pedido, almacen_origen=None):
     - Si falta ``almacen_origen``, las cantidades de existencia quedan en
       ``Decimal("0")`` pero el resto de campos (pendiente, histórico) sí
       se calculan (útil para el preview del onboarding sin almacén).
+
+    ``picking_maps`` (opcional) es el dict ``{asignado_map, surtido_map}`` que
+    el llamador ya calculó con ``historical_maps``; misma convención que
+    ``armar_tracker_pedido``. Lo usa el GET del onboarding, que necesita los
+    mismos mapas para el tracker del header y repetía la agregación sobre
+    ``PickingDetalle`` dos veces por petición. Sin el parámetro se calculan
+    aquí, acotados a ``tallas`` — que es lo que necesita el POST
+    (``resolve_requested_items``), donde ``tallas`` es un SUBCONJUNTO de las
+    líneas del pedido y ese filtro sí reduce la consulta.
     """
-    asignado_map, surtido_map = historical_maps(
-        pedido, talla_ids=[t.id for t in tallas]
-    )
+    if picking_maps is not None:
+        asignado_map = picking_maps.get("asignado_map") or {}
+        surtido_map = picking_maps.get("surtido_map") or {}
+    else:
+        asignado_map, surtido_map = historical_maps(
+            pedido, talla_ids=[t.id for t in tallas]
+        )
 
     existencia_by_talla = {}
     if almacen_origen:
@@ -125,8 +138,13 @@ def build_snapshots(tallas, pedido, almacen_origen=None):
     snapshots = []
     for talla in tallas:
         cantidad_pedida = normalizar_decimal(talla.cantidad)
-        cantidad_asignada = asignado_map[talla.id]
-        cantidad_surtida = surtido_map[talla.id]
+        # ``.get`` y no ``[]``: los mapas de ``historical_maps`` son
+        # ``defaultdict`` y toleraban el corchete, pero ``picking_maps`` puede
+        # llegar como dict plano desde el llamador. El valor resultante es el
+        # mismo (una talla sin picking vale 0); lo único que se pierde es la
+        # inserción de la clave ausente, que nadie lee después.
+        cantidad_asignada = asignado_map.get(talla.id, Decimal("0"))
+        cantidad_surtida = surtido_map.get(talla.id, Decimal("0"))
         cantidad_pendiente = cantidad_pedida - cantidad_asignada
         if cantidad_pendiente < Decimal("0"):
             cantidad_pendiente = Decimal("0")

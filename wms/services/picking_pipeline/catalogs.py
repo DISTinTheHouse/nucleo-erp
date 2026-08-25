@@ -130,7 +130,10 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids):
             activo=True,
             estatus__in=[3, 4],
         )
-        .select_related("cliente", "sucursal")
+        # ``empresa`` además de cliente/sucursal: ``armar_header_preview`` lee
+        # ``pedido.empresa`` para el preview del folio, y sin esto era una
+        # consulta suelta por petición.
+        .select_related("cliente", "sucursal", "empresa")
         .order_by("-id")
     )
     if not es_staff:

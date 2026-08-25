@@ -23,6 +23,7 @@ from wms.services.picking_pipeline.context import (
 from wms.services.picking_pipeline.pendientes import (
     armar_tracker_pedido,
     build_snapshots,
+    historical_maps,
 )
 from wms.utils.decimales import normalizar_decimal
 from wms.utils.folios import generate_folio
@@ -60,14 +61,17 @@ class PickingService:
     # Helpers tracking (porcentajes y totales normalizados)
     # ------------------------------------------------------------------
     @classmethod
-    def _armar_tracker(cls, pedido):
+    def _armar_tracker(cls, pedido, picking_maps=None):
         """Delega SSoT a ``armar_tracker_pedido()`` (pendientes.py).
 
         Se mantiene este wrapper aquí por backwards-compat: el servicio de
         onboarding lo usa directamente, y el serializer de Pedido usa el
         mismo helper para garantizar idéntica métrica entre pantallas.
+
+        ``picking_maps`` se pasa tal cual al helper: cuando el llamador ya
+        resolvió los mapas históricos, el tracker no repite la agregación.
         """
-        return armar_tracker_pedido(pedido)
+        return armar_tracker_pedido(pedido, picking_maps=picking_maps)
 
     # ------------------------------------------------------------------
     # GET onboarding (4 pasos: pedido → origen/destino → existencias → OT)
@@ -134,8 +138,17 @@ class PickingService:
         if pedido is None:
             raise ValidationError({"pedido": "Pedido no encontrado o sin acceso."})
 
+        # Mapas históricos del pedido, UNA sola vez por petición: los consumen
+        # el tracker del header y los snapshots por línea. Antes cada uno
+        # llamaba a ``historical_maps`` por su cuenta y la agregación sobre
+        # ``PickingDetalle`` corría dos veces. El de aquí va sin ``talla_ids``
+        # (todas las líneas del pedido), que es exactamente el conjunto que
+        # ``build_snapshots`` recibe en este flujo.
+        asignado_map, surtido_map = historical_maps(pedido)
+        picking_maps = {"asignado_map": asignado_map, "surtido_map": surtido_map}
+
         header_base = armar_header_preview(pedido)
-        header_base["tracker"] = cls._armar_tracker(pedido)
+        header_base["tracker"] = cls._armar_tracker(pedido, picking_maps=picking_maps)
         payload["header"] = header_base
 
         if almacen_origen is None:
@@ -164,10 +177,23 @@ class PickingService:
                 "variante",
                 "variante__talla",
                 "variante__color",
+                # ``str(talla.variante)`` (abajo, en ``producto_variante_nombre``)
+                # entra a ``ProductoVariante.__str__``, que compone
+                # ``producto.nombre - color.nombre - talla.nombre``. ``color`` y
+                # ``talla`` ya venían; ``producto`` NO, y disparaba una consulta
+                # por renglón. Ojo: ``pedido_detalle__producto`` cubre el mismo
+                # producto pero por OTRA ruta de FK, y ``select_related`` no las
+                # comparte.
+                "variante__producto",
             )
             .order_by("pedido_detalle_id", "id")
         )
-        snapshots = build_snapshots(tallas, pedido, almacen_origen=almacen_origen)
+        snapshots = build_snapshots(
+            tallas,
+            pedido,
+            almacen_origen=almacen_origen,
+            picking_maps=picking_maps,
+        )
 
         detalle_payload = []
         for snap in snapshots:
