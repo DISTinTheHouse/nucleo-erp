@@ -9,6 +9,12 @@ from ventas.models import (
     PedidoDetalle,
     PedidoDetalleTalla,
     PedidoServicioExtra,
+    Prospecto,
+    Oportunidad,
+    Entrega,
+    Devolucion,
+    Backorder,
+    ActividadCrm
 )
 
 class CotizacionSerializer(serializers.ModelSerializer):
@@ -429,3 +435,33 @@ class CotizacionOnboardingCreateSerializer(serializers.Serializer):
     cotizacion = CotizacionSerializer()
     detalle = CotizacionOnboardingDetalleInputSerializer(many=True)
     servicios_extras = ServicioExtraInputSerializer(many=True, required=False)
+
+class ProspectoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Prospecto
+        fields = '__all__'
+
+class OportunidadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Oportunidad
+        fields = '__all__'
+
+class EntregaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Entrega
+        fields = '__all__'
+
+class DevolucionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Devolucion
+        fields = '__all__'
+
+class BackorderSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Backorder
+        fields = '__all__'
+
+class ActividadCrmSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ActividadCrm
+        fields = '__all__'

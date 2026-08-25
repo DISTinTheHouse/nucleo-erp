@@ -30,6 +30,12 @@ from ventas.models import (
     PedidoDetalle,
     PedidoDetalleTalla,
     PedidoServicioExtra,
+    Prospecto,
+    Oportunidad,
+    Entrega,
+    Devolucion,
+    Backorder,
+    ActividadCrm,
     TIPO_PEDIDO_CHOICES,
 )
 
@@ -45,6 +51,12 @@ from ventas.api.serializers import (
     PedidoDetalleTallaSerializer,
     PedidoDetalleWithTallasSerializer,
     CotizacionOnboardingCreateSerializer,
+    ProspectoSerializer,
+    OportunidadSerializer,
+    EntregaSerializer,
+    DevolucionSerializer,
+    BackorderSerializer,
+    ActividadCrmSerializer
 )
 
 from nucleo.models import SerieFolio, Empresa
@@ -2337,3 +2349,87 @@ class MesaControlViewSet(CotizacionViewSet):
             resultados.append(item)
 
         return Response(resultados)
+
+class ProspectoViewSet(viewsets.ModelViewSet):
+    queryset = Prospecto.objects.filter(activo=True)
+    serializer_class = ProspectoSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset().select_related("empresa")
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class OportunidadViewSet(viewsets.ModelViewSet):
+    queryset = Oportunidad.objects.all()
+    serializer_class = OportunidadSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset().select_related("empresa")
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class EntregaViewSet(viewsets.ModelViewSet):
+    queryset = Entrega.objects.all()
+    serializer_class = EntregaSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset().select_related("empresa")
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class DevolucionViewSet(viewsets.ModelViewSet):
+    queryset = Devolucion.objects.all()
+    serializer_class = DevolucionSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset().select_related("empresa")
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class BackorderViewSet(viewsets.ModelViewSet):
+    queryset = Backorder.objects.all()
+    serializer_class = BackorderSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset().select_related("empresa")
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class ActividadCrmViewSet(viewsets.ModelViewSet):
+    queryset = ActividadCrm.objects.all()
+    serializer_class = ActividadCrmSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset().select_related("empresa")
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)

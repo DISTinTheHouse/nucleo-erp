@@ -11,27 +11,85 @@ TIPO_PEDIDO_CHOICES = (
     (3, "PEDIDO DE ERROR"),
 )
 
-class Prospecto(models.Model):
+class Prospecto(StatusLifecycleModel):
+    class Tipo(models.TextChoices):
+        PERSONA = "PERSONA", "Persona"
+        EMPRESA = "EMPRESA", "Empresa"
+
+    class Estatus(models.TextChoices):
+        NUEVO = "NUEVO", "Nuevo"
+        CONTACTADO = "CONTACTADO", "Contactado"
+        CALIFICADO = "CALIFICADO", "Calificado"
+        CONVERTIDO = "CONVERTIDO", "Convertido"
+        DESCARTADO = "DESCARTADO", "Descartado"
+
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="prospectos")
-    
+    sucursal = models.ForeignKey('nucleo.Sucursal', on_delete=models.PROTECT, related_name="prospectos")
+    # Contacto
+    nombre = models.CharField(max_length=150)
+    apellido = models.CharField(max_length=100, blank=True)
+    cargo = models.CharField(max_length=100, blank=True)
+    email = models.EmailField(blank=True)
+    telefono = models.CharField(max_length=20, blank=True)
+    celular = models.CharField(max_length=20, blank=True)
+    sitio_web = models.URLField(blank=True)
+    # Conversion prospecto -> cliente
+    convertido = models.BooleanField(default=False)
+    fecha_conversion = models.DateTimeField(null=True, blank=True)
+    cliente = models.ForeignKey("terceros.Cliente", on_delete=models.PROTECT, null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
     class Meta:
         db_table = "prospectos"
         verbose_name = "Prospecto"
         verbose_name_plural = "Prospectos"
-    
+
     def __str__(self):
         return str(self.id)
 
 class Oportunidad(models.Model):
+    class Etapa(models.TextChoices):
+        CALIFICACION = "CALIFICACION", "Calificación"
+        PROPUESTA = "PROPUESTA", "Propuesta"
+        NEGOCIACION = "NEGOCIACION", "Negociación"
+        CIERRE = "CIERRE", "Cierre"
+
+    class Estatus(models.TextChoices):
+        ABIERTA = "ABIERTA", "Abierta"
+        GANADA = "GANADA", "Ganada"
+        PERDIDA = "PERDIDA", "Perdida"
+        CANCELADA = "CANCELADA", "Cancelada"
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="oportunidades")
     prospecto = models.ForeignKey(Prospecto, on_delete=models.CASCADE, related_name="oportunidades")
+
+    nombre = models.CharField(max_length=150)
+
+    etapa = models.CharField(max_length=20, choices=Etapa.choices, default=Etapa.CALIFICACION)
+    estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.ABIERTA)
+    monto_estimado = models.DecimalField(max_digits=15,decimal_places=2,default=0)
+    fecha_estimada_cierre = models.DateField(null=True, blank=True)
+    notas = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "oportunidades"
         verbose_name = "Oportunidad"
         verbose_name_plural = "Oportunidades"
-    
+
     def __str__(self):
         return str(self.id)
+
+class ActividadCrm(models.Model):
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="actividades_crm")
+
+    cliente = models.ForeignKey("terceros.Cliente", on_delete=models.PROTECT, null=True, blank=True, related_name="actividades_crm")
+    prospecto = models.ForeignKey("Prospecto", on_delete=models.PROTECT, related_name="actividades_crm")
+    oportunidad = models.ForeignKey("Oportunidad", on_delete=models.PROTECT, related_name="actividades_crm")
 
 class Cotizacion(models.Model):
     class FormaPago(models.TextChoices):
@@ -388,7 +446,26 @@ class PedidoDetalleTalla(models.Model):
         return str(self.id)
 
 class Entrega(models.Model):
+    class Estatus(models.TextChoices):
+        PENDIENTE = "PENDIENTE", "Pendiente"
+        PROGRAMADA = "PROGRAMADA", "Programada"
+        EN_TRANSITO = "EN_TRANSITO", "En tránsito"
+        ENTREGADA = "ENTREGADA", "Entregada"
+        PARCIAL = "PARCIAL", "Parcial"
+        CANCELADA = "CANCELADA", "Cancelada"
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="entregas")
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="entregas")
+
+    folio = models.CharField(max_length=50,unique=True)
+    estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.PENDIENTE)
+    fecha_programada = models.DateField(null=True, blank=True)
+    fecha_entrega = models.DateTimeField(null=True, blank=True)
+    recibido_por = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE, related_name='entregas', null=True, blank=True)
+    observaciones = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "entregas"
@@ -396,11 +473,12 @@ class Entrega(models.Model):
         verbose_name_plural = "Entregas"
 
     def __str__(self):
-        return str(self.id)
+        return self.folio
 
 class EntregaDetalle(models.Model):
     entrega = models.ForeignKey(Entrega, on_delete=models.CASCADE, related_name="detalles")
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE, related_name="entregas")
+    cantidad = models.DecimalField(max_digits=12, decimal_places=2)
 
     class Meta:
         db_table = "entrega_detalle"
@@ -411,8 +489,31 @@ class EntregaDetalle(models.Model):
         return str(self.id)
 
 class Devolucion(models.Model):
+    class Motivo(models.TextChoices):
+        PRODUCTO_DANADO = "PRODUCTO_DANADO", "Producto dañado"
+        PRODUCTO_INCORRECTO = "PRODUCTO_INCORRECTO", "Producto incorrecto"
+        CANTIDAD_INCORRECTA = "CANTIDAD_INCORRECTA", "Cantidad incorrecta"
+        RECHAZO_CLIENTE = "RECHAZO_CLIENTE", "Rechazo del cliente"
+        OTRO = "OTRO", "Otro"
+
+    class Estatus(models.TextChoices):
+        PENDIENTE = "PENDIENTE", "Pendiente"
+        RECIBIDA = "RECIBIDA", "Recibida"
+        CANCELADA = "CANCELADA", "Cancelada"
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="devoluciones")
+
     entrega = models.ForeignKey(Entrega, on_delete=models.CASCADE, related_name="devoluciones")
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="devoluciones")
+
+    motivo = models.CharField(max_length=30, choices=Motivo.choices)
+    estatus = models.CharField(max_length=15, choices=Estatus.choices, default=Estatus.PENDIENTE)
+    fecha = models.DateTimeField(null=True,  blank=True)
+
+    observaciones = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "devoluciones"
@@ -426,11 +527,50 @@ class DevolucionDetalle(models.Model):
     devolucion = models.ForeignKey(Devolucion, on_delete=models.CASCADE, related_name="detalles")
     entrega_detalle = models.ForeignKey(EntregaDetalle, on_delete=models.CASCADE, related_name="devoluciones")
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE, related_name="devoluciones")
+    cantidad = models.DecimalField(max_digits=12, decimal_places=2)
 
     class Meta:
         db_table = "devolucion_detalle"
         verbose_name = "Devolución Detalle"
         verbose_name_plural = "Devoluciones Detalle"
+    
+    def __str__(self):
+        return str(self.id)
+
+class Backorder(models.Model):
+    class Estatus(models.TextChoices):
+        PENDIENTE = "PENDIENTE", "Pendiente"
+        PARCIAL = "PARCIAL", "Parcial"
+        COMPLETADO = "COMPLETADO", "Completado"
+        CANCELADO = "CANCELADO", "Cancelado"
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="backorders")
+    pedido = models.ForeignKey("Pedido", on_delete=models.PROTECT, related_name="backorders")
+    folio = models.CharField(max_length=30, unique=True)
+    estatus = models.CharField(max_length=15, choices=Estatus.choices, default=Estatus.PENDIENTE,)
+    fecha_estimada = models.DateField(null=True, blank=True)
+    observaciones = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "backorders"
+        verbose_name = "Backorder"
+        verbose_name_plural = "Backorders"
+
+    def __str__(self):
+        return str(self.id)
+
+class BackorderDetalle(models.Model):
+    backorder = models.ForeignKey("Backorder", on_delete=models.PROTECT, related_name="backorder_detalles")
+    pedido_detalle = models.ForeignKey("PedidoDetalle", on_delete=models.PROTECT, related_name="backorder_detalles")
+    cantidad = models.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+            db_table = "backorder_detalle"
+            verbose_name = "Backorder detalle"
+            verbose_name_plural = "Backorder detalles"
     
     def __str__(self):
         return str(self.id)
