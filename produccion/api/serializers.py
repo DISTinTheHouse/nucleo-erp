@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from django.db import transaction
 from rest_framework import serializers
 
@@ -255,19 +257,45 @@ class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
         return tipos_servicio_display_list(self.get_tipos_servicio(obj))
 
     def _get_pedido_detalle_talla(self, obj):
+        """La ``PedidoDetalleTalla`` de origen de este renglón.
+
+        De ella sólo se lee ``bordado_config`` (aquí abajo y en
+        ``get_tipos_servicio``), así que basta con un portador de ese atributo.
+
+        ``context["pdt_config_map"]`` —cuando existe— es
+        ``{(pedido_detalle_id, talla_id): bordado_config}`` para TODO el pedido,
+        resuelto en UNA query por ``OrdenBordadoViewSet.retrieve()``. Sin él
+        este método consultaba una fila por renglón: ``_pdt_cache`` comparte
+        instancia entre filas (DRF reusa el serializer hijo con ``many=True``),
+        pero la clave ``(pedido_detalle_id, talla_id)`` es única por renglón por
+        construcción, así que nunca acertaba.
+
+        La query por fila se conserva como fallback para cualquier llamador que
+        no inyecte el mapa (``create``, anidaciones, comandos).
+        """
         if obj.pedido_detalle_id is None or obj.talla_id is None:
             return None
         if not hasattr(self, '_pdt_cache'):
             self._pdt_cache = {}
         key = (obj.pedido_detalle_id, obj.talla_id)
         if key not in self._pdt_cache:
-            from ventas.models import PedidoDetalleTalla
-            self._pdt_cache[key] = (
-                PedidoDetalleTalla.objects
-                .filter(pedido_detalle_id=obj.pedido_detalle_id, talla_id=obj.talla_id)
-                .only('bordado_config')
-                .first()
-            )
+            mapa = self.context.get("pdt_config_map")
+            if mapa is not None:
+                # Ausente en el mapa == no existe la fila: mismo ``None`` que
+                # devolvía ``.first()``.
+                self._pdt_cache[key] = (
+                    SimpleNamespace(bordado_config=mapa[key])
+                    if key in mapa
+                    else None
+                )
+            else:
+                from ventas.models import PedidoDetalleTalla
+                self._pdt_cache[key] = (
+                    PedidoDetalleTalla.objects
+                    .filter(pedido_detalle_id=obj.pedido_detalle_id, talla_id=obj.talla_id)
+                    .only('bordado_config')
+                    .first()
+                )
         return self._pdt_cache[key]
 
     def _get_cfg(self, obj):

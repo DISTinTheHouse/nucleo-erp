@@ -608,6 +608,30 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         por_linea, por_detalle, hermanas, aproximado = (
             OrdenBordadoService.partialidad_de_orden(orden)
         )
+
+        # ``bordado_config`` de TODAS las tallas del pedido, en UNA query, con
+        # la misma clave que usa el renglón. Sin esto,
+        # ``OrdenBordadoDetalleSerializer._get_pedido_detalle_talla`` consultaba
+        # ``PedidoDetalleTalla`` una vez por renglón (su caché no puede acertar:
+        # la clave es única por renglón). Se lee en vivo del pedido —no del
+        # snapshot ``OrdenBordadoDetalle.configuracion``— porque el contrato es
+        # publicar el config ACTUAL: ver
+        # ``ToleranciaFormaConfigTests.test_retrieve_ob_con_config_arreglo_no_revienta``,
+        # que edita el pedido después de emitir la orden y espera el valor nuevo.
+        # Sin filtro por ``lleva_bordado``/``cantidad``: la query por fila
+        # tampoco lo tenía, y un renglón cuyo pedido cambió después seguiría
+        # resolviendo su config.
+        pdt_config_map = {}
+        for pd_id, talla_id, cfg in (
+            PedidoDetalleTalla.objects
+            .filter(pedido_detalle__pedido_id=orden.pedido_id)
+            .order_by("id")
+            .values_list("pedido_detalle_id", "talla_id", "bordado_config")
+        ):
+            # ``setdefault``: si hubiera dos filas para el mismo par se conserva
+            # la primera, como hacía ``.first()``.
+            pdt_config_map.setdefault((pd_id, talla_id), cfg)
+
         avances = list(
             BordadoAvances.objects
             .filter(ob=orden, activo=True)
@@ -622,16 +646,31 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
             )
             .order_by("-fecha", "-id")
         )
+        # Numerador y denominador de la cobertura, ya en memoria: los renglones
+        # de la OB vienen del prefetch de ``detalles`` (``.all()`` lee su caché)
+        # y lo contratado por el pedido es la suma de ``por_detalle``, que
+        # ``partialidad_de_orden`` armó con el MISMO predicado que
+        # ``contratado_por_pedido`` (``lleva_bordado=True, cantidad__gt=0``).
+        # Pasarlos evita repetir esas dos agregaciones; el listado, que no los
+        # tiene, sigue consultándolas.
+        cubierto = sum(float(d.cantidad or 0) for d in orden.detalles.all())
+        contratado = sum(v[0] for v in por_detalle.values())
+
         serializer = self.get_serializer(
             orden,
             context={
                 **self.get_serializer_context(),
-                "cobertura": OrdenBordadoService.cobertura_por_orden([orden]),
+                "cobertura": OrdenBordadoService.cobertura_por_orden(
+                    [orden],
+                    cubierto_override={orden.pk: cubierto},
+                    contratado_override={orden.pedido_id: contratado},
+                ),
                 "partialidad_por_linea": por_linea,
                 "partialidad_por_detalle": por_detalle,
                 "hermanas": hermanas,
                 "reparto_aproximado": aproximado,
                 "avances": avances,
+                "pdt_config_map": pdt_config_map,
             },
         )
         return Response(serializer.data)
