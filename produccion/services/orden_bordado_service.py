@@ -143,7 +143,7 @@ class OrdenBordadoService:
         }
 
     @staticmethod
-    def cobertura_por_orden(ordenes):
+    def cobertura_por_orden(ordenes, cubierto_override=None, contratado_override=None):
         """Cobertura de cada OB sobre lo contratado por su pedido.
 
         Devuelve ``{ob_id: {"cubierto": int, "contratado": int, "completa": bool}}``.
@@ -162,6 +162,15 @@ class OrdenBordadoService:
         Los renglones con ``talla`` NULL no distorsionan nada: el numerador
         suma **todos** los renglones de la OB sin mirar la talla, así que el
         total es exacto aunque el reparto por talla no se pueda atribuir.
+
+        ``cubierto_override`` (``{ob_id: piezas}``) y ``contratado_override``
+        (``{pedido_id: piezas}``) permiten saltarse una o ambas queries cuando
+        el llamador ya tiene esos totales en memoria. Es el caso del DETALLE:
+        ``retrieve()`` ya prefetcheó los renglones de la OB (numerador) y ya
+        resolvió las tallas contratadas del pedido vía ``partialidad_de_orden``
+        (denominador, mismo predicado que ``contratado_por_pedido``). El
+        LISTADO no pasa ninguno de los dos y sigue costando exactamente las 2
+        queries agrupadas de siempre.
         """
         ordenes = list(ordenes)
         if not ordenes:
@@ -170,16 +179,22 @@ class OrdenBordadoService:
         ob_ids = [o.pk for o in ordenes]
         pedido_ids = {o.pedido_id for o in ordenes}
 
-        cubierto_por_ob = {
-            f["ob_id"]: float(f["total"] or 0)
-            for f in (
-                OrdenBordadoDetalle.objects
-                .filter(ob_id__in=ob_ids)
-                .values("ob_id")
-                .annotate(total=Sum("cantidad"))
-            )
-        }
-        contratado = OrdenBordadoService.contratado_por_pedido(pedido_ids)
+        if cubierto_override is not None:
+            cubierto_por_ob = cubierto_override
+        else:
+            cubierto_por_ob = {
+                f["ob_id"]: float(f["total"] or 0)
+                for f in (
+                    OrdenBordadoDetalle.objects
+                    .filter(ob_id__in=ob_ids)
+                    .values("ob_id")
+                    .annotate(total=Sum("cantidad"))
+                )
+            }
+        if contratado_override is not None:
+            contratado = contratado_override
+        else:
+            contratado = OrdenBordadoService.contratado_por_pedido(pedido_ids)
 
         resultado = {}
         for orden in ordenes:
