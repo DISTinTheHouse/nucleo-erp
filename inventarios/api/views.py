@@ -1312,9 +1312,52 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
         }
         return response
 
+    def _empresa_ids_permitidas(self, user):
+        """Empresas visibles para el usuario: la activa más el M2M ``empresas``.
+
+        Mismo criterio que ``_movement_report_allowed_almacen_ids()`` en esta
+        misma clase y que el resto de ViewSets del módulo. ``AuditoriaEvento``
+        no tiene FK a ``sucursal``, así que aquí el scope sólo puede llegar
+        hasta la empresa (los reportes sí acotan por sucursal, porque bajan al
+        almacén).
+        """
+        empresa_ids = []
+        if getattr(user, "empresa_id", None):
+            empresa_ids.append(user.empresa_id)
+        # A diferencia de sus ViewSets hermanos, esta clase no declara el
+        # atributo ``queryset``, así que drf-spectacular resuelve el modelo
+        # llamando a ``get_queryset()`` con un request mock cuyo usuario es
+        # ``AnonymousUser`` —sin M2M ``empresas``—. Sin este guard el esquema
+        # se degrada (y cualquier llamador futuro sin usuario autenticado
+        # reventaría); un principal sin M2M no aporta empresas y cae en el
+        # ``none()`` del llamador.
+        empresas = getattr(user, "empresas", None)
+        if empresas is not None:
+            empresa_ids += list(empresas.values_list("pk", flat=True))
+        return empresa_ids
+
     def get_queryset(self):
+        user = self.request.user
         qs = self._base_queryset()
         qp = self.request.query_params
+
+        # El aislamiento multi-tenant vive AQUÍ, no en la permission class:
+        # ``IsAuthenticatedAndScoped`` sólo cierra las escrituras y deja pasar
+        # toda lectura autenticada. Es la capa que usa el resto del proyecto.
+        # El superusuario se evalúa PRIMERO —igual que ``AlmacenViewSet``,
+        # ``PedidoViewSet`` o ``EmpleadoViewSet``—: ve todo aunque tenga una
+        # empresa asignada. Sin empresa no se ve nada: se falla cerrado.
+        if not user.is_superuser:
+            empresa_ids = self._empresa_ids_permitidas(user)
+            if not empresa_ids:
+                return qs.none()
+            qs = qs.filter(empresa_id__in=empresa_ids)
+
+        # ``empresa_id`` es un filtro ADICIONAL dentro del universo ya acotado
+        # arriba, nunca la fuente del tenant: antes el scope salía sólo de este
+        # param y omitirlo devolvía los eventos —con sus ``antes_json``/
+        # ``despues_json``— de todas las empresas. Mismo shape que
+        # ``_build_report_almacenes_queryset()``.
         try:
             empresa_id = int(qp.get("empresa_id") or qp.get("empresa") or 0)
         except Exception:
