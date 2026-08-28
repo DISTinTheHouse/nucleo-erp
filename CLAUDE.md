@@ -29,11 +29,16 @@ python manage.py axes_reset                # clear brute-force lockouts (run aft
 python manage.py populate_sat_catalogs     # seed SAT fiscal catalogs (regímenes, uso CFDI, métodos/formas de pago)
 python manage.py collectstatic --noinput
 
-# Docker (single `web` service on port 8000; runs `migrate` then `runserver`)
+# Docker (single `web` service on port 8000; runs ONLY `runserver` — never auto-migrates)
 docker compose up --build
+docker compose run --rm web python manage.py migrate   # migrating is manual and deliberate — see note below
 ```
 
-Note: `docker-compose.yml` defines **only** the `web` container — there is no bundled Postgres. It builds from the `Dockerfile`, reads config from a `.env` file, and expects a reachable DB (host Postgres or remote Supabase) per the env vars below.
+**Docker/compose is a local convenience and is intentionally NOT tracked in git.** `docker-compose.yml` and its `Dockerfile` exist only to run the API on a host without Python installed — they are not part of the repo and must not be committed or added. The compose file defines **only** the `web` container: there is no bundled Postgres, and the `.env` it reads points at the **production** Supabase DB.
+
+Because of that, the `web` service runs **only** `runserver` and must **never** auto-run `migrate` on `up` — doing so applied every unapplied migration straight to production on each start. Migrating is a deliberate, manual action: `docker compose run --rm web python manage.py migrate`. Production migration policy lives in the `migrate_production` job (see below), not in compose.
+
+Same trap, different command: bare `manage.py test` would try to create its test database on that same production Supabase. Run the suite against an in-memory SQLite override settings module instead — `from ERP.settings import *`, then repoint `DATABASES` at `django.db.backends.sqlite3` / `:memory:`, and pass it with `--settings=`.
 
 Test coverage is uneven — only `produccion/tests.py`, `ventas/tests.py`, and `wms/tests.py` contain real tests; no other app has a `tests.py` file. (Grepping for `def test_func` elsewhere in the codebase will hit `UserPassesTestMixin` permission checks, not tests. In `produccion` the method count also understates the suite, since subclassed test cases re-run inherited tests — trust `manage.py test`, not the grep.) None of this runs in CI — the CI gate is still `manage.py check` + migration-drift check.
 

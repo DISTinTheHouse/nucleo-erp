@@ -287,6 +287,27 @@ class FacturaViewSet(viewsets.ModelViewSet):
             folio = generate_factura_folio(empresa, sucursal)
 
         with transaction.atomic():
+            if pedido is not None:
+                # Mismo bloqueo y guard de doble facturación que ``desde_pedido``:
+                # sin ellos esta ruta emitía una segunda factura activa para un
+                # pedido ya facturado.
+                pedido = (
+                    Pedido.objects.select_for_update()
+                    .filter(pk=pedido.pk, empresa=empresa)
+                    .first()
+                )
+                if pedido is None:
+                    raise ValidationError({'pedido': 'Pedido no encontrado o sin acceso.'})
+                ya_facturado = (
+                    Factura.objects.filter(pedido=pedido, activo=True)
+                    .exclude(estatus=Factura.FacturaStatus.CANCELADA)
+                    .exists()
+                )
+                if ya_facturado:
+                    raise ValidationError({
+                        'pedido': 'El pedido ya tiene una factura activa; no puede facturarse más de una vez.'
+                    })
+
             factura = Factura.objects.create(
                 empresa=empresa,
                 sucursal=sucursal,
@@ -341,6 +362,84 @@ class FacturaViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    def _acotar_onboarding_a_empresa(self, empresa, validated_data):
+        """
+        Aislamiento multiempresa y guard de doble facturación del POST de
+        ``onboarding``.
+
+        ``FacturaSerializer`` resuelve ``pedido`` y ``factura_detalles[].
+        pedido_detalle`` contra el manager por defecto, sin filtro de empresa:
+        las instancias que llegan del serializer no son de fiar y hay que
+        revalidarlas aquí. Espeja lo que ya hace ``desde_pedido`` (bloqueo del
+        Pedido, filtro por ``empresa`` y rechazo de la segunda factura) sin
+        tocar ese endpoint.
+
+        Debe invocarse dentro de un ``transaction.atomic`` para que el
+        ``select_for_update`` siga vigente hasta el commit de la factura.
+        """
+        pedido_recibido = validated_data.get('pedido')
+        if pedido_recibido is None:
+            raise ValidationError({'pedido': 'El pedido es obligatorio.'})
+
+        # Bloqueo del Pedido: dos requests simultáneos para el mismo pedido se
+        # serializan aquí; el segundo espera al commit del primero y luego el
+        # guard lo rechaza.
+        pedido = (
+            Pedido.objects.select_for_update()
+            .filter(pk=pedido_recibido.pk, empresa=empresa)
+            .first()
+        )
+        if pedido is None:
+            raise NotFound('El pedido no existe o no pertenece a tu empresa.')
+
+        # Guard de doble facturación.
+        ya_facturado = (
+            Factura.objects.filter(pedido=pedido, activo=True)
+            .exclude(estatus=Factura.FacturaStatus.CANCELADA)
+            .exists()
+        )
+        if ya_facturado:
+            raise ValidationError({
+                'pedido': 'El pedido ya tiene una factura activa; no puede facturarse más de una vez.'
+            })
+
+        # Una factura sin líneas dejaría el pedido bloqueado por el guard de
+        # arriba con un total de 0.00 y un folio consumido.
+        detalles = validated_data.get('factura_detalles') or []
+        if not detalles:
+            raise ValidationError({
+                'factura_detalles': 'La factura debe incluir al menos una línea.'
+            })
+
+        # Las líneas deben pertenecer al pedido que se está facturando: acotarlas
+        # solo por empresa permitiría facturar renglones (y precios) de otro
+        # pedido, que además quedaría facturable de nuevo por su cuenta.
+        ids_detalle = {fila['pedido_detalle'].pk for fila in detalles}
+        ids_propios = set(
+            PedidoDetalle.objects.filter(
+                pk__in=ids_detalle,
+                pedido=pedido,
+            ).values_list('pk', flat=True)
+        )
+        ajenos = sorted(ids_detalle - ids_propios)
+        if ajenos:
+            raise ValidationError({
+                'factura_detalles': f'Líneas que no pertenecen al pedido indicado: {ajenos}.'
+            })
+
+        # ``serie_folio`` es el tercer FK escribible del serializer y también se
+        # resuelve sin filtro de empresa.
+        serie_folio = validated_data.get('serie_folio')
+        if serie_folio is not None and serie_folio.empresa_id != empresa.pk:
+            raise ValidationError({
+                'serie_folio': 'Serie de folio no encontrada o sin acceso.'
+            })
+
+        # ``store_factura`` toma cliente y moneda del pedido: se le entrega la
+        # instancia ya acotada a la empresa del usuario.
+        validated_data['pedido'] = pedido
+        return pedido
+
     @action(detail=False, methods=['get', 'post'], url_path='onboarding', url_name='onboarding')
     def onboarding(self, request):
         if request.method == 'GET':
@@ -350,7 +449,25 @@ class FacturaViewSet(viewsets.ModelViewSet):
         elif request.method == 'POST':
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
-            factura = FacturaService.store_factura(request.user, serializer.validated_data)
+
+            empresa = getattr(request.user, 'empresa', None)
+            if empresa is None:
+                raise ValidationError({'empresa': 'El usuario no tiene empresa asignada.'})
+
+            # Misma resolución de sucursal (y mismo contrato 400) que
+            # ``desde_pedido`` y ``registrar_pendiente_cobro``: ``store_factura``
+            # usaba ``sucursal_default`` sin validar, y sin ella el folio no
+            # resolvía y el error salía como 500.
+            sucursal = self._get_default_sucursal(request.user, empresa)
+            if sucursal is None:
+                raise ValidationError({'sucursal': 'No hay una sucursal disponible para registrar la factura.'})
+
+            with transaction.atomic():
+                self._acotar_onboarding_a_empresa(empresa, serializer.validated_data)
+                factura = FacturaService.store_factura(
+                    request.user, serializer.validated_data, sucursal
+                )
+
             serializer = self.get_serializer(factura)
             return Response(serializer.data)
 
@@ -372,10 +489,18 @@ class FacturaViewSet(viewsets.ModelViewSet):
 
         user = request.user
         empresa = getattr(user, 'empresa', None)
-        sucursal = getattr(user, 'sucursal_default', None)
 
         if empresa is None:
             raise ValidationError({'empresa': 'El usuario no tiene empresa asignada.'})
+
+        # Misma resolución de sucursal (y mismo contrato 400) que
+        # ``registrar_pendiente_cobro``: ``sucursal_default`` solo si pertenece a
+        # la empresa del usuario, con respaldo a la primera sucursal activa.
+        # ``Factura.sucursal`` es NOT NULL: sin este guard un usuario sin
+        # ``sucursal_default`` provocaba IntegrityError (500) en vez de un 400.
+        sucursal = self._get_default_sucursal(user, empresa)
+        if sucursal is None:
+            raise ValidationError({'sucursal': 'No hay una sucursal disponible para registrar la factura.'})
 
         with transaction.atomic():
             # Bloqueo del Pedido: dos requests simultáneos para el mismo

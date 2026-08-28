@@ -1,4 +1,7 @@
-from rest_framework import mixins
+from django.db.models import ProtectedError
+
+from rest_framework import mixins, status
+from rest_framework.exceptions import APIException
 from rest_framework.viewsets import GenericViewSet
 
 from hr.models import (
@@ -50,9 +53,73 @@ from hr.api.serializers import (
 #
 # El lado de ESCRITURA (validar que las FK enviadas en POST/PATCH pertenezcan a
 # la empresa del usuario) vive en los serializers — ver ``hr/api/serializers.py``.
+#
+# Manejo de DELETE en HR (ver los dos mixins de abajo):
+#
+# * ``Puesto``, ``Empleado`` y ``Area`` heredan ``StatusLifecycleModel`` y se
+#   dan de baja con ``soft_delete()`` — la convención del repo para datos de
+#   catálogo/tenant. Antes ``DestroyModelMixin`` los borraba físicamente.
+# * El resto de modelos no tiene ciclo de vida, así que sí se borran; pero como
+#   todas las FK entrantes son ``on_delete=PROTECT``, un borrado con
+#   dependencias lanzaba ``ProtectedError`` —que no es ``APIException``— y
+#   salía como 500. Ahora se traduce a 409.
+
+
+class RegistroConDependenciasError(APIException):
+    """409 cuando una FK ``PROTECT`` impide borrar el registro."""
+
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = (
+        "No se puede eliminar el registro porque existen registros relacionados "
+        "que dependen de él."
+    )
+    default_code = "registro_con_dependencias"
+
+
+class ProtectedDestroyMixin:
+    """Traduce ``ProtectedError`` a 409 en vez de dejarlo escalar a 500.
+
+    Debe declararse ANTES de ``mixins.DestroyModelMixin`` para que el ``super()``
+    resuelva al ``perform_destroy`` de DRF.
+    """
+
+    def perform_destroy(self, instance):
+        try:
+            super().perform_destroy(instance)
+        except ProtectedError as exc:
+            raise RegistroConDependenciasError(
+                self._mensaje_dependencias(exc)
+            ) from exc
+
+    @staticmethod
+    def _mensaje_dependencias(exc):
+        # ``protected_objects`` ya viene materializado por el colector de
+        # Django, así que nombrar los modelos que bloquean no cuesta consultas.
+        modelos = sorted({
+            str(obj._meta.verbose_name_plural)
+            for obj in exc.protected_objects
+        })
+        if not modelos:
+            return RegistroConDependenciasError.default_detail
+        return (
+            "No se puede eliminar el registro porque tiene dependencias en: "
+            f"{', '.join(modelos)}."
+        )
+
+
+class SoftDeleteDestroyMixin:
+    """``DELETE`` sobre modelos ``StatusLifecycleModel`` = baja lógica.
+
+    Marca ``activo = False`` vía ``soft_delete()`` en lugar de borrar la fila,
+    y devuelve el 204 habitual de ``DestroyModelMixin``.
+    """
+
+    def perform_destroy(self, instance):
+        instance.soft_delete()
 
 
 class PuestoViewSet(
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -75,6 +142,7 @@ class PuestoViewSet(
         return qs.filter(empresa=empresa)
 
 class EmpleadoViewSet(
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -98,6 +166,7 @@ class EmpleadoViewSet(
         return qs.filter(empresa=empresa)
 
 class AreaViewSet(
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -122,6 +191,7 @@ class AreaViewSet(
         return qs.filter(departamento__empresa=empresa)
 
 class ContratoViewSet(
+    ProtectedDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -143,6 +213,7 @@ class ContratoViewSet(
         return qs.filter(empleado__empresa=empresa)
 
 class TurnoViewSet(
+    ProtectedDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -164,6 +235,7 @@ class TurnoViewSet(
         return qs.filter(empresa=empresa)
 
 class CalendarioViewSet(
+    ProtectedDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -186,6 +258,7 @@ class CalendarioViewSet(
         return qs.filter(turno__empresa=empresa)
 
 class AsistenciaViewSet(
+    ProtectedDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -209,6 +282,7 @@ class AsistenciaViewSet(
         return qs.filter(empleado__empresa=empresa)
 
 class ControlHorasViewSet(
+    ProtectedDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -232,6 +306,7 @@ class ControlHorasViewSet(
         return qs.filter(empleado__empresa=empresa)
 
 class VacacionesViewSet(
+    ProtectedDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -253,6 +328,7 @@ class VacacionesViewSet(
         return qs.filter(empleado__empresa=empresa)
 
 class PermisoAusenciaViewSet(
+    ProtectedDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -274,6 +350,7 @@ class PermisoAusenciaViewSet(
         return qs.filter(empleado__empresa=empresa)
 
 class IncidenciaViewSet(
+    ProtectedDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -295,6 +372,7 @@ class IncidenciaViewSet(
         return qs.filter(empleado__empresa=empresa)
 
 class EvaluacionViewSet(
+    ProtectedDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -318,6 +396,7 @@ class EvaluacionViewSet(
         return qs.filter(empleado__empresa=empresa)
 
 class CapacitacionViewSet(
+    ProtectedDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -339,6 +418,7 @@ class CapacitacionViewSet(
         return qs.filter(empleado__empresa=empresa)
 
 class NominaViewSet(
+    ProtectedDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -360,6 +440,7 @@ class NominaViewSet(
         return qs.filter(empresa=empresa)
 
 class ProductividadViewSet(
+    ProtectedDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,

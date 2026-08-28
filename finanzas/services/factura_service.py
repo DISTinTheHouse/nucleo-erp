@@ -8,9 +8,11 @@ from finanzas.utils.folios import generate_factura_folio
 class FacturaService:
     @staticmethod
     @transaction.atomic
-    def store_factura(user, validated_data):
+    def store_factura(user, validated_data, sucursal):
         empresa_id = getattr(user, 'empresa', None)
-        sucursal_id = getattr(user, 'sucursal_default', None)
+        # La sucursal la resuelve y valida quien llama (``_get_default_sucursal``):
+        # ``user.sucursal_default`` puede ser None o de otra empresa.
+        sucursal_id = sucursal
 
         pedido =  validated_data.pop('pedido')
         if not pedido: raise ValidationError({'pedido': 'El pedido no existe'})
