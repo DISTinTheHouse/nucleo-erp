@@ -143,7 +143,8 @@ class Cotizacion(models.Model):
 
 class CotizacionDetalle(models.Model):
     cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="cotizaciondetalle")
-    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="cotizaciondetalle")
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="cotizaciondetalle", null=True, blank=True)
+    producto_nombre_externo = models.CharField(max_length=350, null=True, blank=True)
     color = models.ForeignKey(Color, on_delete=models.PROTECT, related_name="cotizacion_detalles", null=True, blank=True)
     direccion_envio_cliente = models.ForeignKey(
         DireccionCliente, on_delete=models.PROTECT, related_name="cotizacion_detalles", null=True, blank=True
@@ -345,7 +346,8 @@ class PedidoServicioExtra(models.Model):
     
 class PedidoDetalle(models.Model):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="detalles")
-    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name="detalles")
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name="detalles", null=True, blank=True)
+    producto_nombre_externo = models.CharField(max_length=350, null=True, blank=True)
     color = models.ForeignKey(Color, on_delete=models.PROTECT, related_name="pedido_detalles", null=True, blank=True)
     direccion_envio_cliente = models.ForeignKey(
         DireccionCliente, on_delete=models.PROTECT, related_name="pedido_detalles", null=True, blank=True

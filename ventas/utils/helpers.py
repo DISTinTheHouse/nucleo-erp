@@ -73,13 +73,26 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
     CotizacionDetalle.objects.filter(cotizacion=cotizacion_obj).delete()
     rows = _merge_detalle(rows)
     for item in rows:
-        producto = Producto.objects.filter(pk=item["producto"], activo=True).first()
-        if not getattr(user, "is_superuser", False) and empresa:
-            producto = Producto.objects.filter(
-                pk=item["producto"], empresa=empresa, activo=True
-            ).first()
-        if not producto:
-            raise ValidationError({"detalle": f"Producto inválido: {item['producto']}"})
+        producto = None
+        producto_nombre_externo = item.get("producto_nombre_externo")
+        producto_id = item.get("producto")
+
+        if not producto_nombre_externo and producto_id not in (None, "", 0):
+            try:
+                producto_id = int(producto_id)
+            except Exception:
+                producto_id = None
+            if producto_id:
+                producto = Producto.objects.filter(pk=producto_id, activo=True).first()
+                if not getattr(user, "is_superuser", False) and empresa:
+                    producto = Producto.objects.filter(
+                        pk=producto_id, empresa=empresa, activo=True
+                    ).first()
+                if not producto:
+                    raise ValidationError({"detalle": f"Producto inválido: {producto_id}"})
+
+        if producto is None and not producto_nombre_externo:
+            raise ValidationError({"detalle": "Debe indicar un producto del catálogo o un producto_nombre_externo."})
 
         color_obj = None
         color_id = item.get("color")
@@ -116,14 +129,19 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
 
         precio_unitario = item.get("precio_unitario")
         if precio_unitario is None:
-            precio_unitario = producto.precio_base or 0
+            precio_unitario = getattr(producto, "precio_base", None) or 0
+
+        precio_lista = item.get("precio_lista")
+        if precio_lista is None:
+            precio_lista = getattr(producto, "precio_base", None) or 0
 
         cot_det = CotizacionDetalle.objects.create(
             cotizacion=cotizacion_obj,
             producto=producto,
+            producto_nombre_externo=producto_nombre_externo,
             color=color_obj,
             direccion_envio_cliente=direccion_obj,
-            precio_lista=producto.precio_base or 0,
+            precio_lista=precio_lista,
             precio_unitario=precio_unitario,
             costo_unitario=item.get("costo_unitario"),
             subtotal_linea=0,
@@ -177,21 +195,21 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                     }
                 )
 
-            # Calcular SKU snapshot
-            codigo_producto = (getattr(producto, "codigo", None) or "").strip()
+            codigo_producto = (getattr(producto, "codigo", None) or "").strip() if producto else ""
             codigo_color = (getattr(color_obj, "codigo", None) or "").strip()
             codigo_talla = (getattr(talla, "nombre", None) or "").strip()
             sku_snapshot = f"{codigo_producto}{codigo_color}{codigo_talla}".replace(
                 " ", ""
             ).upper()
 
-            # Buscar variante para vincular
-            variante_obj = ProductoVariante.objects.filter(
-                producto=producto,
-                color=color_obj,
-                talla=talla,
-                empresa=cotizacion_obj.empresa
-            ).first()
+            variante_obj = None
+            if producto:
+                variante_obj = ProductoVariante.objects.filter(
+                    producto=producto,
+                    color=color_obj,
+                    talla=talla,
+                    empresa=cotizacion_obj.empresa
+                ).first()
 
             CotizacionDetalleTalla.objects.create(
                 cotizacion_detalle=cot_det,
