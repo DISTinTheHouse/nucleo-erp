@@ -64,7 +64,8 @@ class Poliza(models.Model):
         COSTO = 'Costo', 'Costo'
     
     tipo = models.CharField(max_length=30, choices=PolizaTipo.choices, default=PolizaTipo.ACTIVO.value)
-    fecha = models.DateField(auto_now=True, null=True, blank=True)
+    # Fecha contable: se fija al crear. Con ``auto_now`` se reescribía en cada save().
+    fecha = models.DateField(auto_now_add=True, null=True, blank=True)
     concepto = models.CharField(max_length=200, null=True, blank=True)
 
     class PolizaStatus(models.TextChoices):
@@ -101,7 +102,8 @@ class Factura(StatusLifecycleModel):
     serie_folio = models.ForeignKey('nucleo.SerieFolio', on_delete=models.CASCADE, related_name="facturas", null=True, blank=True)
     moneda = models.ForeignKey('nucleo.Moneda', on_delete=models.CASCADE, related_name="facturas")
 
-    fecha_emision = models.DateField(auto_now=True)
+    # Fecha de emisión: se fija al crear. Con ``auto_now`` se reescribía en cada save().
+    fecha_emision = models.DateField(auto_now_add=True)
     fecha_vencimiento = models.DateField(null=True, blank=True)
     folio = models.CharField(max_length=30, null=True, blank=True)
 
@@ -157,7 +159,8 @@ class FacturaProveedor(models.Model):
     oc = models.ForeignKey('compras.OrdenCompra', on_delete=models.CASCADE, related_name="facturas_proveedores")
     recepcion = models.ForeignKey('compras.Recepcion', on_delete=models.CASCADE, related_name="facturas_proveedores")
     moneda = models.ForeignKey('nucleo.Moneda', on_delete=models.CASCADE, related_name="facturas_proveedores")
-    fecha_emision = models.DateField(auto_now=True)
+    # Fecha de emisión: se fija al crear. Con ``auto_now`` se reescribía en cada save().
+    fecha_emision = models.DateField(auto_now_add=True)
     fecha_vencimiento = models.DateField(null=True, blank=True)
     folio = models.CharField(max_length=30, null=True, blank=True)
     subtotal = models.DecimalField(max_digits=18, decimal_places=2, default=0)
@@ -263,7 +266,8 @@ class CuentaPorCobrar(models.Model):
 
     cliente = models.ForeignKey('terceros.Cliente', on_delete=models.CASCADE, related_name="cuentas_por_cobrar")
     factura = models.ForeignKey(Factura, on_delete=models.CASCADE, related_name="cuentas_por_cobrar")
-    fecha_emision = models.DateField(auto_now=True)
+    # Fecha de emisión: se fija al crear. Con ``auto_now`` se reescribía en cada save().
+    fecha_emision = models.DateField(auto_now_add=True)
     fecha_vencimiento = models.DateField(null=True, blank=True)
     total = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     saldo = models.DecimalField(max_digits=18, decimal_places=2, default=0)
@@ -292,7 +296,8 @@ class CuentaPorPagar(models.Model):
 
     proveedor = models.ForeignKey('terceros.Proveedor', on_delete=models.CASCADE, related_name="cuentas_por_pagar")
     factura_proveedor = models.ForeignKey(FacturaProveedor, on_delete=models.CASCADE, related_name="cuentas_por_pagar")
-    fecha_emision = models.DateField(auto_now=True)
+    # Fecha de emisión: se fija al crear. Con ``auto_now`` se reescribía en cada save().
+    fecha_emision = models.DateField(auto_now_add=True)
     fecha_vencimiento = models.DateField(null=True, blank=True)
     total = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     saldo = models.DecimalField(max_digits=18, decimal_places=2, default=0)

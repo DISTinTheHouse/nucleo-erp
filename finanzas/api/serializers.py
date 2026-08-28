@@ -78,10 +78,10 @@ class CuentaPorCobrarSerializer(serializers.ModelSerializer):
 
 
 class PolizaDetalleRelacionadoSerializer(serializers.ModelSerializer):
-    cuenta_contable_id = serializers.IntegerField(source="cuenta_contable_id", read_only=True)
+    cuenta_contable_id = serializers.IntegerField(read_only=True)
     cuenta_contable_codigo = serializers.CharField(source="cuenta_contable.codigo", read_only=True)
     cuenta_contable_nombre = serializers.CharField(source="cuenta_contable.nombre", read_only=True)
-    centro_costo_id = serializers.IntegerField(source="centro_costo_id", read_only=True)
+    centro_costo_id = serializers.IntegerField(read_only=True)
     centro_costo_nombre = serializers.CharField(source="centro_costo.nombre", read_only=True)
 
     class Meta:
