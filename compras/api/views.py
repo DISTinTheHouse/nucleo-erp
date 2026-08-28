@@ -591,11 +591,15 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 )
             qs = qs.filter(tipo_origen=tipo_origen)
 
+        # El superusuario se evalúa ANTES del filtro por empresa: con el orden
+        # inverso, un superusuario CON empresa asignada quedaba acotado a esa
+        # empresa en vez de ver todas. Mismo orden que
+        # ``PedidoViewSet``/``EmpleadoViewSet.get_queryset()``.
+        if getattr(user, "is_superuser", False):
+            return qs
         empresa = getattr(user, "empresa", None)
         if empresa:
             return qs.filter(empresa=empresa)
-        if getattr(user, "is_superuser", False):
-            return qs
         return qs.none()
 
     def get_serializer_class(self):
