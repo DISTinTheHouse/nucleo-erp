@@ -23,6 +23,11 @@ venv.bak/
 
 .vercel
 
+# Docker: conveniencia local para correr la API sin Python en el host.
+# No forma parte del repo.
+docker-compose.yml
+Dockerfile
+
 # AI / Skills
 .agents/
 .claude/
