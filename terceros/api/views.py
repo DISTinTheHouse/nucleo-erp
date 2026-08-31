@@ -2,39 +2,34 @@ from rest_framework import viewsets
 from django.conf import settings
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import ProveedorSerializer, ClienteSerializer, DireccionClienteSerializer
+from terceros.scope import clientes_base, clientes_visibles
 import json
 import base64
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 class ClienteViewSetMesaControl(viewsets.ModelViewSet):
-    queryset = Cliente.objects.filter(activo=True)
+    queryset = clientes_base()
     serializer_class = ClienteSerializer
     http_method_names = ['get']
 
     def get_queryset(self):
-        user = self.request.user
-        empresa = getattr(user, 'empresa', None)
-        if empresa is None: return Cliente.objects.none()
-        queryset = Cliente.objects.filter(empresa=empresa)
-        return queryset
+        # Mismo alcance que ``ClienteViewSet`` y que el buscador global: una sola
+        # definición en ``terceros.scope``. Antes reconstruía desde
+        # ``Cliente.objects``, con lo que perdía el ``activo=True`` de su propio
+        # ``queryset`` de clase y servía clientes borrados; tampoco aplicaba el
+        # scope por ``vendedores`` ni la política de superusuario.
+        return clientes_visibles(super().get_queryset(), self.request.user)
 
 class ClienteViewSet(viewsets.ModelViewSet):
-    queryset = Cliente.objects.filter(activo=True)
+    queryset = clientes_base()
     serializer_class = ClienteSerializer
 
     def get_queryset(self):
-        user = self.request.user
-        qs = super().get_queryset()
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if empresa:
-            qs = qs.filter(empresa=empresa)
-            if getattr(user, "is_admin_empresa", False):
-                return qs
-            return qs.filter(vendedores__id=getattr(user, "id", None))
-        return qs.none()
+        # El predicado de aislamiento vive en ``terceros.scope`` para que el
+        # buscador global (``/api/v1/search/``) reutilice EXACTAMENTE éste y no
+        # una copia que pueda separarse de él.
+        return clientes_visibles(super().get_queryset(), self.request.user)
 
     def perform_create(self, serializer):
         user = self.request.user

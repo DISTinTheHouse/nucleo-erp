@@ -58,6 +58,13 @@ from produccion.models import (
     OrdenCorteMangaDetalle,
 )
 
+from ventas.scope import (
+    alcance_cotizaciones,
+    cotizaciones_base,
+    cotizaciones_visibles,
+    pedidos_base,
+    pedidos_visibles,
+)
 from ventas.utils.helpers import _save_cotizacion_detalle, _save_servicios_extras
 from ventas.services.pedido_field_filter_service import filtrar_campos_contabilidad_pedido
 
@@ -102,7 +109,7 @@ def _pedido_servicios_extras_prefetch():
 
 
 class CotizacionViewSet(viewsets.ModelViewSet):
-    queryset = Cotizacion.objects.all()
+    queryset = cotizaciones_base()
     serializer_class = CotizacionSerializer
     http_method_names = ["get", "post", "patch"]
 
@@ -120,15 +127,15 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             .get_queryset()
             .select_related("cliente", "sucursal", "moneda", "vendedor")
         )
-        if getattr(user, "is_superuser", False):
-            return self._apply_filters(qs)
-        empresa = getattr(user, "empresa", None)
-        if empresa:
-            qs = qs.filter(empresa=empresa)
-            if not getattr(user, "is_admin_empresa", False):
-                qs = qs.filter(vendedor=user)
-            return self._apply_filters(qs)
-        return qs.none()
+        # El alcance vive en ``ventas.scope`` para que el buscador global
+        # (``/api/v1/search/``) reutilice EXACTAMENTE éste y no una copia que
+        # pueda separarse de él. ``con_alcance`` viene de la misma función que
+        # acota el queryset: quien no ve nada sale ANTES de ``_apply_filters``,
+        # que valida ``?estatus=`` y devolvería 400 donde hoy devuelve ``200 []``.
+        qs, con_alcance = alcance_cotizaciones(qs, user)
+        if not con_alcance:
+            return qs
+        return self._apply_filters(qs)
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -2120,7 +2127,7 @@ class CotizacionDetalleViewSet(viewsets.ModelViewSet):
 
 
 class PedidoViewSet(viewsets.ModelViewSet):
-    queryset = Pedido.objects.filter(activo=True)
+    queryset = pedidos_base()
     serializer_class = PedidoSerializer
 
     def get_serializer_class(self):
@@ -2259,15 +2266,12 @@ class PedidoViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         # Queryset base + aislamiento multi-tenant, común a todas las acciones.
-        qs = super().get_queryset()
-        if not getattr(user, "is_superuser", False):
-            # Un usuario sin empresa asignada no cae en ninguna rama y se
-            # llevaba los pedidos de **todas** las empresas. Sin empresa no se
-            # ve nada, misma convención que ``OrdenReflejanteViewSet``.
-            empresa = getattr(user, "empresa", None)
-            if not empresa:
-                return qs.none()
-            qs = qs.filter(empresa=empresa)
+        # El predicado vive en ``ventas.scope`` para que el buscador global
+        # (``/api/v1/search/``) reutilice EXACTAMENTE éste y no una copia que
+        # pueda separarse de él: superuser ve todo, y sin empresa no se ve nada
+        # (antes ese usuario no caía en ninguna rama y se llevaba los pedidos de
+        # todas las empresas).
+        qs = pedidos_visibles(super().get_queryset(), user)
         # ``?mis_pedidos=true``: sólo los pedidos que nacieron de una cotización
         # creada por el usuario autenticado. El vendedor no vive en ``Pedido``,
         # se resuelve por la cadena ``pedido.cotizacion.vendedor``. Ambos
@@ -2368,10 +2372,14 @@ class MesaControlViewSet(CotizacionViewSet):
         ):
             return Cotizacion.objects.none()
 
-        empresa = getattr(user, "empresa", None)
-        qs = Cotizacion.objects.filter(estatus__in=[2, 5])  # EN REVISION o CAMBIOS SOLICITADOS
-        if empresa:
-            qs = qs.filter(empresa=empresa)
+        # Mismo alcance que ``CotizacionViewSet`` y que el buscador global: una
+        # sola definición en ``ventas.scope``. El sub-scope por ``vendedor`` no
+        # llega a aplicar porque el guard de arriba ya dejó fuera a quien no es
+        # admin de empresa ni superusuario.
+        qs = cotizaciones_visibles(
+            cotizaciones_base().filter(estatus__in=[2, 5]),  # EN REVISION o CAMBIOS SOLICITADOS
+            user,
+        )
 
         # Se delega en ``_apply_filters`` (heredado de ``CotizacionViewSet``) el
         # ordenamiento y los filtros de query params, en vez de duplicar aquí una
