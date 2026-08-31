@@ -50,6 +50,11 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    # Requisito de los índices GIN trigram del buscador global: sin esta app,
+    # ``manage.py migrate`` aborta con ``postgres.E005`` (los checks de BD no
+    # corren en ``manage.py check`` a secas, así que el fallo sólo aparece al
+    # migrar).
+    'django.contrib.postgres',
     'rest_framework',
     'rest_framework.authtoken',
     'corsheaders',

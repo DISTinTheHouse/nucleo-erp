@@ -1,3 +1,4 @@
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 from django.conf import settings
 from nucleo.models import StatusLifecycleModel
@@ -42,6 +43,29 @@ class Cliente(StatusLifecycleModel):
         db_table = "clientes"
         verbose_name = "Cliente"
         verbose_name_plural = "Clientes"
+        indexes = [
+            # Trigram GIN para el buscador global (``/api/v1/search/``): acelera
+            # el ``icontains`` sobre los tres campos de texto del cliente. Estos
+            # mismos índices sirven a la búsqueda de Cotización, que no tiene
+            # folio y sólo se busca a través de ``cliente__nombre`` /
+            # ``cliente__razon_social``. La extensión ``pg_trgm`` ya está
+            # habilitada en la instancia; la migración sólo crea los índices.
+            GinIndex(
+                fields=["nombre"],
+                opclasses=["gin_trgm_ops"],
+                name="clientes_nombre_trgm",
+            ),
+            GinIndex(
+                fields=["razon_social"],
+                opclasses=["gin_trgm_ops"],
+                name="clientes_razon_social_trgm",
+            ),
+            GinIndex(
+                fields=["correo"],
+                opclasses=["gin_trgm_ops"],
+                name="clientes_correo_trgm",
+            ),
+        ]
 
     def __str__(self):
         return str(self.id)

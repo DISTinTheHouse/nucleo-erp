@@ -1,3 +1,4 @@
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 from django.conf import settings
 from nucleo.models import Empresa, Sucursal, Moneda, SerieFolio, StatusLifecycleModel, SatRegimenFiscal
@@ -323,6 +324,25 @@ class Pedido(StatusLifecycleModel):
         verbose_name_plural = "Pedidos"
         constraints = [
             models.UniqueConstraint(fields=["serie_folio", "folio"], name="uq_pedido_seriefolio_folio")
+        ]
+        indexes = [
+            # Trigram GIN para el buscador global (``/api/v1/search/``): acelera
+            # el ``icontains`` sobre las dos columnas snapshot del cliente. La
+            # extensión ``pg_trgm`` ya está habilitada en la instancia, así que
+            # la migración sólo crea los índices.
+            # ``folio`` no aparece aquí: ya tiene su btree por ``db_index=True``,
+            # y el buscador lo consulta por prefijo (``istartswith``), que ese
+            # índice sí sirve.
+            GinIndex(
+                fields=["cliente_nombre"],
+                opclasses=["gin_trgm_ops"],
+                name="pedidos_cliente_nombre_trgm",
+            ),
+            GinIndex(
+                fields=["cliente_razon_social"],
+                opclasses=["gin_trgm_ops"],
+                name="pedidos_cliente_rsocial_trgm",
+            ),
         ]
     
     def __str__(self):
