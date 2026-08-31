@@ -384,6 +384,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         plan = {}
         for row in rows:
             producto = getattr(row, producto_attr)
+            if producto is None:
+                continue
             variante = getattr(row, variante_attr)
             cantidad = self._to_decimal_inventory(getattr(row, cantidad_attr))
             key = (
@@ -417,6 +419,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         plan = {}
         for row in detalles_talla:
             producto = row.pedido_detalle.producto
+            if producto is None:
+                continue
             variante = row.variante
             cantidad = self._to_decimal_inventory(row.cantidad)
             key = (
@@ -450,6 +454,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         plan = {}
         for row in detalles_talla:
             producto = row.cotizacion_detalle.producto
+            if producto is None:
+                continue
             variante = row.variante
             cantidad = self._to_decimal_inventory(row.cantidad)
             key = (
@@ -1457,6 +1463,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             pedido_det = PedidoDetalle.objects.create(
                 pedido=pedido,
                 producto=det.producto,
+                producto_nombre_externo=getattr(det, "producto_nombre_externo", None),
                 color_id=getattr(det, "color_id", None),
                 direccion_envio_cliente_id=getattr(
                     det, "direccion_envio_cliente_id", None
@@ -1804,6 +1811,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             pedido_det = PedidoDetalle.objects.create(
                 pedido=pedido,
                 producto=det.producto,
+                producto_nombre_externo=getattr(det, "producto_nombre_externo", None),
                 color_id=getattr(det, "color_id", None),
                 direccion_envio_cliente_id=getattr(
                     det, "direccion_envio_cliente_id", None
