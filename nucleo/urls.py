@@ -7,6 +7,7 @@ from .api.api_views import (
     UserEmpresasAPIView, UserSucursalesAPIView, SatCatalogosAPIView, 
     EmpresaSatConfigUpdateView, HealthzAPIView
 )
+from .api.search import BusquedaGlobalAPIView
 from .views import (
     CoreDashboardView, get_sucursales_por_empresa,
     EmpresaListView, EmpresaCreateView, EmpresaUpdateView, EmpresaDeleteView,
@@ -43,6 +44,10 @@ urlpatterns = [
     path('api/v1/nucleo/mis-sucursales/', UserSucursalesAPIView.as_view(), name='api_mis_sucursales'),
     path('api/v1/nucleo/sat/catalogos/', SatCatalogosAPIView.as_view(), name='api_sat_catalogos'),
     path('api/v1/nucleo/empresas/<int:empresa_id>/config-sat/', EmpresaSatConfigUpdateView.as_view(), name='api_empresa_sat_config'),
+    # Buscador global del header. Se declara aquí, con el resto de APIView de
+    # nucleo, aunque su ruta NO lleve el segmento de app: es transversal (cruza
+    # ventas y terceros) y el path de primer nivel es requisito de producto.
+    path('api/v1/search/', BusquedaGlobalAPIView.as_view(), name='api_busqueda_global'),
     path('healthz/', HealthzAPIView.as_view(), name='healthz'),
 
     # WEB CORE - DASHBOARD

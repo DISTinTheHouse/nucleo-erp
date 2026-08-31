@@ -3,6 +3,25 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 
+
+def entero_acotado(valor, por_defecto, minimo, maximo):
+    """Parsea un query param a entero y lo acota a ``[minimo, maximo]``.
+
+    Un valor ausente o no numérico cae a ``por_defecto`` en vez de dar 400: son
+    parámetros de presentación (``limit``, ``page_size``), no de negocio, y no
+    deberían romper la pantalla por venir mal formados.
+
+    Vive aquí porque el patrón ya estaba repetido por varios módulos con políticas
+    distintas ante entradas inválidas (``inventarios.api.views`` tiene tres
+    variantes); lo nuevo debería converger en ésta.
+    """
+    try:
+        entero = int(valor)
+    except (TypeError, ValueError):
+        return por_defecto
+    return max(minimo, min(entero, maximo))
+
+
 def validate_rfc(rfc):
     """
     Valida un RFC (Persona Física o Moral) según el algoritmo oficial del SAT.
