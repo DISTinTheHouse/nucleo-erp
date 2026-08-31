@@ -529,7 +529,18 @@ class CotizacionOnboardingTallaInputSerializer(serializers.Serializer):
     serigrafia_config = serializers.JSONField(required=False, allow_null=True)
 
 class CotizacionOnboardingDetalleInputSerializer(serializers.Serializer):
-    producto = serializers.IntegerField()
+    # ``producto`` es opcional/nullable desde a56ae9d: un renglón de MUESTRA se
+    # captura como texto libre (``producto_nombre_externo``) porque el producto
+    # todavía no existe en catálogo — alguien lo da de alta después. Sin
+    # declarar aquí ``producto_nombre_externo``, ``Serializer.to_internal_value``
+    # sólo itera campos declarados y lo descartaba de ``validated_data``, así que
+    # nunca llegaba a ``_save_cotizacion_detalle`` (que sí lo sabe persistir).
+    # La exclusividad (todo muestra XOR todo catálogo) y los precios los
+    # garantiza el frontend; aquí no se valida.
+    producto = serializers.IntegerField(required=False, allow_null=True)
+    producto_nombre_externo = serializers.CharField(
+        max_length=350, required=False, allow_null=True, allow_blank=True
+    )
     color = serializers.IntegerField(required=False, allow_null=True)
     color_id = serializers.IntegerField(required=False, allow_null=True)
     direccion_envio_cliente = serializers.IntegerField(required=False, allow_null=True)
