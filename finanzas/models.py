@@ -5,10 +5,6 @@ from nucleo.models import StatusLifecycleModel
 from simple_history.models import HistoricalRecords
 
 class CuentaContable(models.Model):
-    empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="cuentas_contables")
-    codigo = models.CharField(max_length=30, default="", blank=True)
-    nombre = models.CharField(max_length=200, default="", blank=True)
-
     class CuentaTipo(models.TextChoices):
         ACTIVO = 'Activo', 'Activo'
         PASIVO = 'Pasivo', 'Pasivo'
@@ -16,7 +12,10 @@ class CuentaContable(models.Model):
         INGRESO = 'Ingreso', 'Ingreso'
         GASTO = 'Gasto', 'Gasto'
         COSTO = 'Costo', 'Costo'
-    
+
+    empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="cuentas_contables")
+    codigo = models.CharField(max_length=30, default="", blank=True)
+    nombre = models.CharField(max_length=200, default="", blank=True)
     tipo = models.CharField(max_length=30, choices=CuentaTipo.choices, default=CuentaTipo.ACTIVO.value)
     nivel = models.IntegerField(default=1)
     cuenta_padre = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT)
@@ -29,7 +28,7 @@ class CuentaContable(models.Model):
         verbose_name_plural = "Cuentas Contables"
 
     def __str__(self):
-        return str(self.id)
+        return f"{self.codigo} - {self.nombre}"
 
 class CentroCosto(models.Model):
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="centro_costos")
@@ -44,42 +43,31 @@ class CentroCosto(models.Model):
         verbose_name_plural = "Centros de Costo"
     
     def __str__(self):
-        return str(self.id)
+        return f"{self.codigo} - {self.nombre}"
 
 class Poliza(models.Model):
+    class PolizaTipo(models.TextChoices):
+        DIARIO = 'Diario', 'Diario'
+        INGRESO = 'Ingreso', 'Ingreso'
+        EGRESO = 'Egreso', 'Egreso'
+        AJUSTE = 'Ajuste', 'Ajuste'
+
+    class PolizaStatus(models.TextChoices):
+        BORRADOR = 'Borrador', 'Borrador'
+        CONTABILIZADA = 'Contabilizada', 'Contabilizada'
+        CANCELADA = 'Cancelada', 'Cancelada'
+
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="polizas")
     sucursal = models.ForeignKey('nucleo.Sucursal', on_delete=models.CASCADE, related_name="polizas")
     centro_costo = models.ForeignKey('finanzas.CentroCosto', on_delete=models.CASCADE, related_name="polizas", null=True, blank=True)
     folio = models.CharField(max_length=30, null=True, blank=True)
-    folio_consecutivo = models.PositiveIntegerField(null=True, blank=True)
-
-    class PolizaTipo(models.TextChoices):
-        ACTIVO = 'Activo', 'Activo'
-        PASIVO = 'Pasivo', 'Pasivo'
-        DIARIO = 'Diario', 'Diario'
-        AJUSTE = 'Ajuste', 'Ajuste'
-        CAPITAL = 'Capital', 'Capital'
-        INGRESO = 'Ingreso', 'Ingreso'
-        GASTO = 'Gasto', 'Gasto'
-        COSTO = 'Costo', 'Costo'
-    
-    tipo = models.CharField(max_length=30, choices=PolizaTipo.choices, default=PolizaTipo.ACTIVO.value)
+    tipo = models.CharField(max_length=30, choices=PolizaTipo.choices, default=PolizaTipo.DIARIO.value)
     # Fecha contable: se fija al crear. Con ``auto_now`` se reescribía en cada save().
     fecha = models.DateField(auto_now_add=True, null=True, blank=True)
     concepto = models.CharField(max_length=200, null=True, blank=True)
-
-    class PolizaStatus(models.TextChoices):
-        ACTIVO = 'Activo', 'Activo'
-        PASIVO = 'Pasivo', 'Pasivo'
-        CAPITAL = 'Capital', 'Capital'
-        INGRESO = 'Ingreso', 'Ingreso'
-        GASTO = 'Gasto', 'Gasto'
-        COSTO = 'Costo', 'Costo'
-
-    estatus = models.CharField(max_length=30, choices=PolizaStatus.choices, default=PolizaStatus.ACTIVO.value)
+    estatus = models.CharField(max_length=30, choices=PolizaStatus.choices, default=PolizaStatus.BORRADOR.value)
     usuario_creacion = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="polizas", null=True, blank=True)
     activo = models.BooleanField(default=True)
-
 
     class Meta:
         db_table = "polizas"
@@ -87,7 +75,7 @@ class Poliza(models.Model):
         verbose_name_plural = "Polizas"
     
     def __str__(self):
-        return str(self.id)
+        return self.folio
 
 class Factura(StatusLifecycleModel):
     class FacturaStatus(models.TextChoices):
@@ -221,9 +209,10 @@ class Banco(models.Model):
         verbose_name_plural = "Bancos"
     
     def __str__(self):
-        return str(self.id)
+        return self.nombre
 
 class CuentaBancaria(models.Model):
+    empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="cuentas_bancarias")
     banco = models.ForeignKey(Banco, on_delete=models.CASCADE, related_name="cuentas_bancarias")
     moneda = models.ForeignKey('nucleo.Moneda', on_delete=models.CASCADE, related_name="cuentas_bancarias")
     alias = models.CharField(max_length=100, null=True, blank=True)
@@ -233,7 +222,7 @@ class CuentaBancaria(models.Model):
     clabe = models.CharField(max_length=30, null=True, blank=True)
     numero_cliente = models.CharField(max_length=30, null=True, blank=True)
     convenio = models.CharField(max_length=50, null=True, blank=True)
-    fecha_apertura = models.DateField(auto_now=True, null=True, blank=True)
+    fecha_apertura = models.DateField(default=timezone.now, null=True, blank=True)
     saldo_actual = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     observaciones = models.TextField(null=True, blank=True)
 
@@ -294,6 +283,7 @@ class CuentaPorPagar(models.Model):
         CANCELADA = 'Cancelada', 'Cancelada'
         VENCIDA = 'Vencida', 'Vencida'
 
+    empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="cuentas_por_pagar")
     proveedor = models.ForeignKey('terceros.Proveedor', on_delete=models.CASCADE, related_name="cuentas_por_pagar")
     factura_proveedor = models.ForeignKey(FacturaProveedor, on_delete=models.CASCADE, related_name="cuentas_por_pagar")
     # Fecha de emisión: se fija al crear. Con ``auto_now`` se reescribía en cada save().
@@ -302,6 +292,7 @@ class CuentaPorPagar(models.Model):
     total = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     saldo = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     estatus = models.CharField(max_length=30, choices=EstatusCxP.choices, default=EstatusCxP.PENDIENTE)
+    fecha_ultimo_pago = models.DateField(null=True, blank=True)
     observaciones = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -331,10 +322,11 @@ class Cobro(models.Model):
         APLICADO = 'Aplicado', 'Aplicado'
         CANCELADO = 'Cancelado', 'Cancelado'
 
+    empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="cobros")
     cliente = models.ForeignKey('terceros.Cliente', on_delete=models.CASCADE, related_name="cobros")
     cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.CASCADE, related_name="cobros")
 
-    fecha_cobro = models.DateField(auto_now=True)
+    fecha_cobro = models.DateField(default=timezone.now)
     metodo_pago = models.CharField(max_length=30, choices=MetodoPago.choices, default=MetodoPago.EFECTIVO)
     referencia = models.CharField(max_length=30, choices=OpcionesReferencia.choices, default=OpcionesReferencia.SPEI)
     referencia_operacion = models.CharField(max_length=100, null=True, blank=True)
@@ -382,10 +374,12 @@ class Pago(models.Model):
         TARJETA = 'Tarjeta', 'Tarjeta'
         CHEQUE = 'Cheque', 'Cheque'
 
+    empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="pagos")
     proveedor = models.ForeignKey('terceros.Proveedor', on_delete=models.CASCADE, related_name="pagos")
     cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.CASCADE, related_name="pagos")
-    fecha_pago = models.DateField(auto_now=True, null=True, blank=True)
+    fecha_pago = models.DateField(default=timezone.now)
     metodo_pago = models.CharField(max_length=30, choices=MetodoPago.choices, default=MetodoPago.TRANSFERENCIA)
+    referencia_operacion = models.CharField(max_length=100, null=True, blank=True)
     referencia = models.CharField(max_length=100, null=True, blank=True)
     total_pagado = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     estatus = models.CharField(max_length=30, choices=Estatus.choices, default=Estatus.APLICADO)
@@ -419,36 +413,33 @@ class PagoDetalle(models.Model):
         return str(self.id)
 
 class MovimientoBancario(models.Model):
+    class OrigenOpciones(models.TextChoices):
+            MANUAL = 'Manual', 'Manual'
+            SPEI = 'SPEI', 'SPEI'
+            API = 'API', 'API'
+            CSV = 'CSV', 'CSV'
+            CONCILIACION = 'Conciliacion', 'Conciliacion'
+
+    class TipoMovimiento(models.TextChoices):
+            CARGO = 'Cargo', 'Cargo'
+            ABONO = 'Abono', 'Abono'
+
+    class Estatus(models.TextChoices):
+            PENDIENTE = 'Pendiente', 'Pendiente'
+            CONCILIADO = 'Conciliado', 'Conciliado'
+            CANCELADO = 'Cancelado', 'Cancelado'
+
     cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.CASCADE, related_name="movimientos_bancarios")
     pago = models.ForeignKey(Pago, on_delete=models.CASCADE, related_name="movimientos_bancarios", null=True, blank=True)
     cobro = models.ForeignKey(Cobro, on_delete=models.CASCADE, related_name="movimientos_bancarios", null=True, blank=True)
-    fecha = models.DateField(auto_now=True, null=True, blank=True)
+    fecha = models.DateField(default=timezone.now)
     fecha_aplicacion = models.DateField(null=True, blank=True)
     concepto = models.CharField(max_length=255, null=True, blank=True)
     referencia = models.CharField(max_length=100, null=True, blank=True)
     importe = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     saldo = models.DecimalField(max_digits=18, decimal_places=2, default=0)
-
-    class OrigenOpciones(models.TextChoices):
-        MANUAL = 'Manual', 'Manual'
-        SPEI = 'SPEI', 'SPEI'
-        API = 'API', 'API'
-        CSV = 'CSV', 'CSV'
-        CONCILIACION = 'Conciliacion', 'Conciliacion'
-
     origen = models.CharField(max_length=20, choices=OrigenOpciones.choices, default=OrigenOpciones.MANUAL)
-    
-    class TipoMovimiento(models.TextChoices):
-        CARGO = 'Cargo', 'Cargo'
-        ABONO = 'Abono', 'Abono'
-
     tipo_movimiento = models.CharField(max_length=10, choices=TipoMovimiento.choices, default=TipoMovimiento.CARGO)
-
-    class Estatus(models.TextChoices):
-        PENDIENTE = 'Pendiente', 'Pendiente'
-        CONCILIADO = 'Conciliado', 'Conciliado'
-        CANCELADO = 'Cancelado', 'Cancelado'
-    
     estatus = models.CharField(max_length=10, choices=Estatus.choices, default=Estatus.PENDIENTE)
     observaciones = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
@@ -464,15 +455,15 @@ class MovimientoBancario(models.Model):
         return str(self.id)
 
 class PolizaDetalle(models.Model):
-    poliza = models.ForeignKey(Poliza, on_delete=models.CASCADE, related_name="poliza_detalles")
-    cuenta_contable = models.ForeignKey(CuentaContable, on_delete=models.CASCADE, related_name="poliza_detalles")
-    centro_costo = models.ForeignKey(CentroCosto, on_delete=models.CASCADE, related_name="poliza_detalles")
+    poliza = models.ForeignKey(Poliza, on_delete=models.SET_NULL, related_name="poliza_detalles", null=True)
+    cuenta_contable = models.ForeignKey(CuentaContable, on_delete=models.SET_NULL, related_name="poliza_detalles", null=True)
+    centro_costo = models.ForeignKey(CentroCosto, on_delete=models.SET_NULL, related_name="poliza_detalles", null=True)
     
-    factura = models.ForeignKey(Factura, on_delete=models.CASCADE, related_name="poliza_detalles", null=True, blank=True)
-    factura_proveedor = models.ForeignKey(FacturaProveedor, on_delete=models.CASCADE, related_name="poliza_detalles", null=True, blank=True)
-    pago = models.ForeignKey(Pago, on_delete=models.CASCADE, related_name="poliza_detalles", null=True, blank=True)
-    cobro = models.ForeignKey(Cobro, on_delete=models.CASCADE, related_name="poliza_detalles", null=True, blank=True)
-    movimiento_bancario = models.ForeignKey(MovimientoBancario, on_delete=models.CASCADE, related_name="poliza_detalles", null=True, blank=True)
+    factura = models.ForeignKey(Factura, on_delete=models.SET_NULL, related_name="poliza_detalles", null=True, blank=True)
+    factura_proveedor = models.ForeignKey(FacturaProveedor, on_delete=models.SET_NULL, related_name="poliza_detalles", null=True, blank=True)
+    pago = models.ForeignKey(Pago, on_delete=models.SET_NULL, related_name="poliza_detalles", null=True, blank=True)
+    cobro = models.ForeignKey(Cobro, on_delete=models.SET_NULL, related_name="poliza_detalles", null=True, blank=True)
+    movimiento_bancario = models.ForeignKey(MovimientoBancario, on_delete=models.SET_NULL, related_name="poliza_detalles", null=True, blank=True)
     cargo = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     abono = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     referencia = models.CharField(max_length=200, null=True, blank=True)
@@ -498,7 +489,6 @@ class ConciliacionBancaria(models.Model):
     fecha_final = models.DateField(null=True, blank=True)
     saldo_estado_cuenta = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     saldo_libros = models.DecimalField(max_digits=18, decimal_places=2, default=0)
-    diferencia = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.BORRADOR)
     observaciones = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
@@ -511,6 +501,10 @@ class ConciliacionBancaria(models.Model):
     
     def __str__(self):
         return str(self.id)
+
+    @property
+    def diferencia(self):
+        return self.saldo_estado_cuenta - self.saldo_libros
 
 class ConciliacionDetalle(models.Model):
     conciliacion = models.ForeignKey(ConciliacionBancaria, on_delete=models.CASCADE, related_name="conciliacion_detalles")
@@ -569,3 +563,35 @@ class NotaCreditoDetalle(models.Model):
     
     def __str__(self):
         return str(self.id)
+
+class AlertaMora(models.Model):
+    class TipoCuenta(models.TextChoices):
+        COBRAR = 'Cobrar', 'Cobrar'
+        PAGAR = 'Pagar', 'Pagar'
+
+    class Nivel(models.TextChoices):
+        LEVE = 'Leve', 'Leve'
+        MODERADA = 'Moderada', 'Moderada'
+        GRAVE = 'Grave', 'Grave'
+        CRITICA = 'Critica', 'Critica'
+
+    empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="alertas_mora")
+    tipo_cuenta = models.CharField(max_length=10, choices=TipoCuenta.choices)
+    cuenta_por_cobrar = models.ForeignKey(CuentaPorCobrar, on_delete=models.CASCADE, related_name="alertas", null=True, blank=True)
+    cuenta_por_pagar = models.ForeignKey(CuentaPorPagar, on_delete=models.CASCADE, related_name="alertas", null=True, blank=True)
+
+    dias_mora = models.PositiveIntegerField()
+    nivel = models.CharField(max_length=20, choices=Nivel.choices)
+    fecha_generada = models.DateTimeField(default=timezone.now)
+    notificado = models.BooleanField(default=False)
+    fecha_notificado = models.DateTimeField(null=True, blank=True)
+    observaciones = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "alertas_mora"
+        verbose_name = "Alerta de Mora"
+        verbose_name_plural = "Alertas de Mora"
+
+    def __str__(self):
+        cuenta = self.cuenta_por_cobrar or self.cuenta_por_pagar
+        return f"{self.tipo_cuenta} - {self.nivel} ({self.dias_mora})d"

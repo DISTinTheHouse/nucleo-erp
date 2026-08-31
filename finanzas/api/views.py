@@ -9,22 +9,46 @@ from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 
 from finanzas.models import (
+    AlertaMora,
+    Banco,
     CentroCosto,
+    Cobro,
+    ConciliacionBancaria,
+    CuentaBancaria,
     CuentaContable,
     CuentaPorCobrar,
+    CuentaPorPagar,
     Factura,
     FacturaDetalle,
+    FacturaProveedor,
+    MovimientoBancario,
+    NotaCredito,
+    Pago,
     Poliza,
     PolizaDetalle,
 )
+
 from finanzas.api.serializers import (
+    AlertaMoraSerializer,
+    BancoSerializer,
+    CentroCostoSerializer,
+    CobroSerializer,
+    ConciliacionBancariaSerializer,
+    CuentaBancariaSerializer,
+    CuentaContableSerializer,
     CuentaPorCobrarDetalleSerializer,
     CuentaPorCobrarSerializer,
+    CuentaPorPagarSerializer,
     FacturaSerializer,
-    FacturaDetalleSerializer,
     FacturaDesdePedidoInputSerializer,
     FacturaPendienteCobroInputSerializer,
+    FacturaProveedorSerializer,
+    MovimientoBancarioSerializer,
+    NotaCreditoSerializer,
+    PagoSerializer,
+    PolizaSerializer,
 )
+
 from finanzas.services.factura_service import FacturaService
 from finanzas.utils.folios import generate_factura_folio
 from nucleo.models import Moneda, Sucursal
@@ -44,10 +68,8 @@ class ClienteViewSetContabilidad(viewsets.ModelViewSet):
         queryset = Cliente.objects.filter(empresa=empresa)
         return queryset
 
-
 # Compatibilidad temporal para imports antiguos en despliegues o rutas rezagadas.
 ClienteViewSet = ClienteViewSetContabilidad
-
 
 class CuentaPorCobrarViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CuentaPorCobrarSerializer
@@ -96,7 +118,6 @@ class CuentaPorCobrarViewSet(viewsets.ReadOnlyModelViewSet):
             ).exclude(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA)
 
         return qs
-
 
 class FacturaViewSet(viewsets.ModelViewSet):
     serializer_class = FacturaSerializer
@@ -609,3 +630,155 @@ class FacturaViewSet(viewsets.ModelViewSet):
             update_fields=['subtotal', 'descuento', 'impuestos', 'total']
         )
         return factura
+
+class CuentaContableViewSet(viewsets.ModelViewSet):
+    queryset = CuentaContable.objects.all()
+    serializer_class = CuentaContableSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class CentroCostoViewSet(viewsets.ModelViewSet):
+    queryset = CentroCosto.objects.all()
+    serializer_class = CentroCostoSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class PolizaViewSet(viewsets.ModelViewSet):
+    queryset = Poliza.objects.all()
+    serializer_class = PolizaSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class FacturaProveedorViewSet(viewsets.ModelViewSet):
+    queryset = FacturaProveedor.objects.all()
+    serializer_class = FacturaProveedorSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class BancoViewSet(viewsets.ModelViewSet):
+    queryset = Banco.objects.all()
+    serializer_class = BancoSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class CuentaBancariaViewSet(viewsets.ModelViewSet):
+    queryset = CuentaBancaria.objects.all()
+    serializer_class = CuentaBancariaSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class CuentaPorPagarViewSet(viewsets.ModelViewSet):
+    queryset = CuentaPorPagar.objects.all()
+    serializer_class = CuentaPorPagarSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class CobroViewSet(viewsets.ModelViewSet):
+    queryset = Cobro.objects.all()
+    serializer_class = CobroSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class PagoViewSet(viewsets.ModelViewSet):
+    queryset = Pago.objects.all()
+    serializer_class = PagoSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
+
+class MovimientoBancarioViewSet(viewsets.ModelViewSet):
+    queryset = MovimientoBancario.objects.all()
+    serializer_class = MovimientoBancarioSerializer
+
+class ConciliacionBancariaViewSet(viewsets.ModelViewSet):
+    queryset = ConciliacionBancaria.objects.all()
+    serializer_class = ConciliacionBancariaSerializer
+
+class NotaCreditoViewSet(viewsets.ModelViewSet):
+    queryset = NotaCredito.objects.all()
+    serializer_class = NotaCreditoSerializer
+
+class AlertaMoraViewSet(viewsets.ModelViewSet):
+    queryset = AlertaMora.objects.all()
+    serializer_class = AlertaMoraSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa)
