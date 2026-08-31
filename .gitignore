@@ -27,6 +27,7 @@ venv.bak/
 # No forma parte del repo.
 docker-compose.yml
 Dockerfile
+postgres
 
 # AI / Skills
 .agents/

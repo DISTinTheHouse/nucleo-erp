@@ -1,8 +1,25 @@
 from decimal import Decimal
 
 from rest_framework import serializers
-from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle, PolizaDetalle
-
+from finanzas.models import (
+    AlertaMora,
+    Banco,
+    CentroCosto,
+    Cobro,
+    ConciliacionBancaria,
+    CuentaBancaria,
+    CuentaContable,
+    CuentaPorCobrar,
+    CuentaPorPagar,
+    Factura,
+    FacturaDetalle,
+    FacturaProveedor,
+    MovimientoBancario,
+    NotaCredito,
+    Pago,
+    Poliza,
+    PolizaDetalle,
+)
 
 class FacturaDesdePedidoInputSerializer(serializers.Serializer):
     """
@@ -11,7 +28,6 @@ class FacturaDesdePedidoInputSerializer(serializers.Serializer):
     íntegramente en el servidor a partir del Pedido (facturación total).
     """
     pedido = serializers.IntegerField(min_value=1)
-
 
 class FacturaPendienteCobroInputSerializer(serializers.Serializer):
     cliente = serializers.IntegerField(min_value=1)
@@ -46,7 +62,6 @@ class FacturaPendienteCobroInputSerializer(serializers.Serializer):
             )
         return attrs
 
-
 class CuentaPorCobrarSerializer(serializers.ModelSerializer):
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     factura_id = serializers.IntegerField(read_only=True)
@@ -76,7 +91,6 @@ class CuentaPorCobrarSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
 
-
 class PolizaDetalleRelacionadoSerializer(serializers.ModelSerializer):
     cuenta_contable_id = serializers.IntegerField(read_only=True)
     cuenta_contable_codigo = serializers.CharField(source="cuenta_contable.codigo", read_only=True)
@@ -99,7 +113,6 @@ class PolizaDetalleRelacionadoSerializer(serializers.ModelSerializer):
             "observaciones",
             "orden",
         ]
-
 
 class FacturaDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
@@ -173,7 +186,6 @@ class FacturaSerializer(serializers.ModelSerializer):
         ]
         fields = '__all__'
 
-
 class CuentaPorCobrarDetalleSerializer(CuentaPorCobrarSerializer):
     factura = FacturaSerializer(read_only=True)
     total_pagado = serializers.SerializerMethodField()
@@ -224,3 +236,67 @@ class CuentaPorCobrarDetalleSerializer(CuentaPorCobrarSerializer):
 
         return list(polizas_map.values())
 
+class CuentaContableSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CuentaContable
+        fields = "__all__"
+
+class CentroCostoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CentroCosto
+        fields = "__all__"
+
+class PolizaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Poliza
+        fields = "__all__"
+
+class FacturaProveedorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FacturaProveedor
+        fields = "__all__"
+
+class BancoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Banco
+        fields = "__all__"
+
+class CuentaBancariaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CuentaBancaria
+        fields = "__all__"
+
+class CuentaPorPagarSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CuentaPorPagar
+        fields = "__all__"
+
+class CobroSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Cobro
+        fields = "__all__"
+
+class PagoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Pago
+        fields = "__all__"
+
+class MovimientoBancarioSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MovimientoBancario
+        fields = "__all__"
+
+class ConciliacionBancariaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ConciliacionBancaria
+        fields = "__all__"
+
+class NotaCreditoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NotaCredito
+        fields = "__all__"
+
+class AlertaMoraSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AlertaMora
+        fields = "__all__"
