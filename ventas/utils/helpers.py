@@ -15,7 +15,11 @@ def _is_empty_json(value):
 def _merge_detalle(rows):
     agrupado = {}
     for row in rows:
-        producto_id = row["producto"]
+        # ``.get()``, no ``row["producto"]``: un renglón de MUESTRA llega sin
+        # ``producto`` (o con ``None``) y el acceso por corchetes reventaba con
+        # ``KeyError`` -> HTTP 500 en vez de un 400 legible.
+        producto_id = row.get("producto")
+        producto_nombre_externo = row.get("producto_nombre_externo")
         color_id = (
             row.get("color")
             if row.get("color") not in (None, "")
@@ -31,20 +35,34 @@ def _merge_detalle(rows):
         if direccion_id in ("", 0):
             direccion_id = None
 
-        # Clave única por producto + color + dirección + configuración de tallas
+        # Clave única por producto + nombre externo + color + dirección +
+        # configuración de tallas.
         # Para que productos iguales con configuraciones distintas no se agrupen,
         # incluimos un hash de la configuración de las tallas en la key de agrupación.
+        # ``producto_nombre_externo`` entra en la key porque en los renglones de
+        # MUESTRA las otras cuatro componentes son idénticas para todos (producto,
+        # color y dirección en ``None``, y ``tallas`` siempre ``[]``): sin él,
+        # N renglones de muestra colapsaban en UNO solo, perdiendo texto en
+        # silencio. Para un renglón de catálogo vale ``None``, así que la relación
+        # de agrupación entre renglones de catálogo no cambia.
         import json
 
         tallas_raw = row.get("tallas") or []
         # Normalizamos tallas para que el orden no afecte, pero la config sí
         tallas_config_str = json.dumps(tallas_raw, sort_keys=True)
 
-        key = (producto_id, color_id, direccion_id, tallas_config_str)
+        key = (
+            producto_id,
+            producto_nombre_externo,
+            color_id,
+            direccion_id,
+            tallas_config_str,
+        )
         entry = agrupado.get(key)
         if not entry:
             entry = {
                 "producto": producto_id,
+                "producto_nombre_externo": producto_nombre_externo,
                 "color": color_id,
                 "direccion_envio_cliente": direccion_id,
                 "precio_unitario": row.get("precio_unitario"),
