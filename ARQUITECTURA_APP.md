@@ -26,15 +26,33 @@ Aunque es una base de datos compartida, el aislamiento lógico es absoluto:
 
 #### A.1 Jerarquía de bypass autorizada (por ViewSet)
 
-El sistema reconoce 3 niveles. El scoping multi-tenant SÓLO aplica al nivel 3; los niveles 1 y 2 bypassan todo filtro empresa y pueden operar sobre cualquier empresa del sistema:
-
-| Nivel | Rol               | Condición DRF                                    | Comportamiento GET                                                             | Comportamiento WRITE                                                                                                                               |
-| ----- | ----------------- | ------------------------------------------------ | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1     | Superusuario      | `is_superuser=True` (Django core)                | Ve TODO el QuerySet sin filtrar                                                | Puede (y DEBE) especificar `empresa` explícitamente en `validated_data`; si no → `ValidationError`.                                                |
-| 2     | Admin. de Empresa | `is_admin_empresa=True` (campo custom `Usuario`) | Ve TODO el QuerySet sin filtrar                                                | Mismo que superusuario: `empresa` explícita requerida.                                                                                             |
-| 3     | Usuario normal    | Los 2 de arriba son `False`                      | Filtro `empresa=request.user.empresa`. Si no tiene empresa → `.none()` (`[]`). | Empresa = `user.empresa` (**obligatorio**); si no → `PermissionDenied`. `validated_data["empresa"]` distinto a `user.empresa` → `ValidationError`. |
+El sistema reconoce **3 niveles de usuario** respecto al aislamiento multi-empresa.
+El filtro por `empresa` SÓLO aplica al nivel **Usuario normal** (nivel 3);
+los niveles 1 y 2 **bypassean** todo scoping empresa y pueden operar sobre cualquier empresa del sistema.
 
 Patrón canónico confirmado en: `catalogo/api/views.py:48`, `nucleo/permisos.py:101`, `compras/services/orden_compra_view_service.py:60-63`.
+
+##### Niveles de acceso
+
+| Nivel | Rol                   | ¿Cuándo aplica?                                     |
+| :---: | --------------------- | --------------------------------------------------- |
+| 🟢 1  | **Superusuario**      | `is_superuser=True` (campo Django core)             |
+| 🟢 2  | **Admin. de Empresa** | `is_admin_empresa=True` (campo custom en `Usuario`) |
+| 🔴 3  | **Usuario normal**    | Ambos flags anteriores = `False`                    |
+
+##### Reglas de lectura (GET / `get_queryset`)
+
+| Nivel | Comportamiento                                                                                                                                                                     |
+| :---: | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 / 2 | Devuelve **TODO** el QuerySet sin filtrar por empresa.                                                                                                                             |
+|   3   | Filtro estricto: `qs.filter(empresa=request.user.empresa)` (o lookup anidado equivalente).<br>Si el usuario no tiene empresa asignada → `qs.none()` (respuesta `200 OK` con `[]`). |
+
+##### Reglas de escritura (POST / PUT / PATCH / DELETE)
+
+| Nivel | `perform_create` (POST)                                                                                                                                                                                                                                                   | `perform_update` / `perform_destroy`                                                                                                              |
+| :---: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 / 2 | **Debe** enviar `empresa` explícitamente en el body (`validated_data`).<br>Si falta → `ValidationError`.                                                                                                                                                                  | Puede modificar/eliminar registros de **cualquier** empresa (sin restricción).                                                                    |
+|   3   | Empresa tomada de `user.empresa` (**obligatorio**, si no → `PermissionDenied`).<br>Si envía una `empresa` distinta a la suya → `ValidationError`.<br>Se valida además que **toda FK cruzada** (cliente/proveedor/banco/cuenta/centro_costo/etc.) pertenezca a su empresa. | Permitido SÓLO si `instance.empresa_id == user.empresa.pk`.<br>Si pertenece a otra empresa → `PermissionDenied` (equivalente a `404` en detalle). |
 
 #### A.2 Módulo Finanzas y Contabilidad — Blindaje multi-tenant canónico (19 ViewSets)
 
