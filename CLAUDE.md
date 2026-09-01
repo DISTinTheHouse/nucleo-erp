@@ -93,7 +93,11 @@ def get_queryset(self):
 Expected behavior: list returns `200 []` when out of scope; detail returns `404` (not 403) for another company's existing record. **When adding any tenant-scoped endpoint, replicate this — a missing `get_queryset` override is a cross-tenant data leak.**
 
 ### RBAC + overrides
-`Usuario.tiene_permiso(clave)` resolves effective permissions with strict precedence: superuser → `is_admin_empresa` → explicit **DENY** override → role grants → explicit **GRANT** override. Permission keys live in `seguridad.Permiso.clave`. The login API computes the effective `(roles + grants) - denies` list and ships it to the frontend, which only reads the final list.
+`Usuario.tiene_permiso(clave)` resolves effective permissions with strict precedence: superuser → `is_admin_empresa` → explicit **DENY** override → role grants → explicit **GRANT** override. Permission keys live in `seguridad.Permiso.clave` (the catalog lives **only in the DB** — there is no fixture or seed).
+
+Two ways to ask, one rule: `tiene_permiso(clave)` for a single key, and **`nucleo.permisos.permisos_efectivos(user)`** for the whole set at once (2 queries, 0 for superuser/admin, membership in O(1) afterwards). The batch resolver is what the login API and `UsuarioSerializer.get_permisos` use for the `(roles + grants) - denies` list they ship to the frontend, and what the search endpoint uses to filter. Do **not** write a third copy of that calculation — the precedence used to be duplicated across three call sites.
+
+**Most endpoints still don't enforce permissions server-side** — the frontend reads the login list and decides. The exception is `/api/v1/search/`, which filters *which entity groups* it returns by the user's real permissions (each `EntidadBuscable` declares its own `permisos_visibilidad`). Entity visibility is separate from row scoping, which stays in the `scope.py` predicates.
 
 ### Conventions for new code
 - **API apps follow `{{app}}/api/` layout**: `urls.py` (DRF `DefaultRouter`), `views.py` (ViewSets), `serializers.py`. Wire the router into `ERP/urls.py` under `/api/v1/{{app}}/`. ViewSets commonly override `get_serializer_class()` per action (list/retrieve/default) and restrict `http_method_names`. **Documented exception:** `/api/v1/search/` (global header search) has no app segment because it federates across apps; it's an `APIView` in `nucleo/api/search.py`, routed from `nucleo/urls.py` alongside nucleo's other `APIView`s. Add cross-app endpoints there, not as a new top-level entry in `ERP/urls.py`.

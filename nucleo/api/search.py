@@ -23,9 +23,23 @@ endpoint no inventa una.
 
 Permisos
 --------
-``IsAuthenticated`` + aislamiento, igual que el resto de ``/api/v1/``. Este backend
-no valida RBAC en ningún endpoint (``Usuario.tiene_permiso()`` no tiene llamadores),
-así que el buscador tampoco introduce una compuerta propia.
+``IsAuthenticated`` + aislamiento por tenant, como el resto de ``/api/v1/``, MÁS un
+filtro de visibilidad por entidad: éste es el primer endpoint del backend que usa
+``Usuario.tiene_permiso()``, que hasta ahora no tenía ningún llamador.
+
+Cada ``EntidadBuscable`` declara sus ``permisos_visibilidad``; basta tener UNO para
+que su grupo aparezca. La entidad que el usuario no puede ver **se omite entera de
+la respuesta**, así que ``grupos`` puede traer menos de tres elementos. El
+superusuario y el ``is_admin_empresa`` pasan solos, por el cortocircuito que hay
+dentro de ``nucleo.permisos``: aquí no hay ni un ``is_superuser``.
+
+Los permisos se resuelven en bloque UNA vez por petición
+(``permisos_efectivos()``), no clave por clave: ver ``nucleo/permisos.py`` para el
+porqué y para su equivalencia con ``Usuario.tiene_permiso()``.
+
+Ojo con la distinción: esto es visibilidad de ENTIDAD (qué tipos ve el usuario). El
+alcance de FILA (qué registros concretos) lo siguen decidiendo los ``scope.py``, y
+son cosas independientes.
 
 Estrategia de coincidencia
 --------------------------
@@ -46,6 +60,7 @@ es el siguiente paso, no éste.
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from django.core.exceptions import ImproperlyConfigured
 from django.db.models import F, Q
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -53,6 +68,7 @@ from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from nucleo.permisos import PermisosEfectivos, permisos_efectivos
 from nucleo.utils import entero_acotado
 from terceros.scope import clientes_base, clientes_visibles
 from ventas.scope import (
@@ -96,6 +112,13 @@ class EntidadBuscable:
     ``campos_only`` son las columnas que ``fila()`` necesita. Se aplican con
     ``.only()`` para no arrastrar filas completas —``Pedido`` tiene ~70 columnas,
     varias de ellas ``TextField``— en un endpoint que se dispara por pulsación.
+
+    ``permisos_visibilidad`` son las claves del catálogo que dejan ver ESTA entidad
+    en el buscador: basta UNA. Declararlas es OBLIGATORIO: una tupla vacía dejaría
+    la entidad invisible para todo el mundo —también para el superusuario, porque
+    ``alguno()`` sobre una tupla vacía es ``False`` antes de mirar el cortocircuito—
+    y eso parecería un queryset roto en vez de un olvido. Se comprueba al importar,
+    debajo del ``REGISTRO``.
     """
 
     tipo: str
@@ -105,7 +128,23 @@ class EntidadBuscable:
     campos_codigo: tuple[str, ...] = ()
     campos_nombre: tuple[str, ...] = ()
     campos_only: tuple[str, ...] = ()
+    permisos_visibilidad: tuple[str, ...] = ()
     orden: tuple[Any, ...] = ()
+
+    def visible_para(self, permisos: PermisosEfectivos) -> bool:
+        """``True`` si ``permisos`` incluye AL MENOS UNA de ``permisos_visibilidad``.
+
+        Recibe un ``PermisosEfectivos`` ya resuelto —no el usuario— porque la vista
+        lo construye UNA vez por petición y lo reutiliza para todas las entidades.
+        Preguntar aquí clave por clave con ``tiene_permiso()`` costaba hasta tres
+        consultas por clave y ``any()`` sólo corta al acertar: quien fallaba muchas
+        pagaba ~30 consultas por búsqueda, en un endpoint que se dispara por
+        pulsación.
+
+        No hay ningún ``is_superuser`` aquí a propósito: el cortocircuito de
+        superusuario y ``is_admin_empresa`` vive dentro del resolutor.
+        """
+        return permisos.alguno(self.permisos_visibilidad)
 
     def predicado(self, q: str) -> Q | None:
         """``Q`` combinado: prefijo en los CÓDIGO, subcadena en los NOMBRE.
@@ -212,6 +251,20 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         # ``pedidos`` (no FKs), así que no hay JOIN y los índices GIN son suyos.
         campos_nombre=("cliente_nombre", "cliente_razon_social"),
         campos_only=("folio", "cliente_nombre", "cliente_razon_social", "estatus"),
+        # Un pedido se ve desde muchos módulos: CRM lo vende, WMS lo surte,
+        # Compras lo abastece, Mesa de Control lo autoriza y Producción trabaja
+        # sus órdenes. Cualquiera de esas secciones basta para encontrarlo.
+        permisos_visibilidad=(
+            "R-CRM-PEDIDOS",
+            "R-WMS-PEDIDOS",
+            "R-COMPRAS-PEDIDOS",
+            "R-MESACONTROL-PEDIDOS",
+            "R-PRODUCCION-OB",
+            "R-PRODUCCION-OR",
+            "R-PRODUCCION-CM",
+            "R-COMPRAS-OC",
+            "R-WMS-PICKING",
+        ),
         orden=ORDEN_RECIENTE,
     ),
     EntidadBuscable(
@@ -221,6 +274,14 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         fila=_fila_cliente,
         campos_nombre=("nombre", "razon_social", "correo"),
         campos_only=("nombre", "razon_social", "correo"),
+        # Además de CRM, Mesa de Control ve y edita clientes, y Contabilidad los
+        # consulta para facturar. Sin esas dos, el rol Mesa-de-control se quedaba
+        # sin ver en el buscador clientes que sí puede abrir y editar.
+        permisos_visibilidad=(
+            "R-CRM-CLIENTES",
+            "R-MESACONTROL-CLIENTES",
+            "R-CONTABILIDAD-CLIENTES",
+        ),
         orden=("nombre", "id"),
     ),
     EntidadBuscable(
@@ -236,9 +297,32 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         # campos los sirven los mismos índices GIN de ``clientes``.
         campos_nombre=("cliente__nombre", "cliente__razon_social"),
         campos_only=("oc", "estatus", "cliente__nombre", "cliente__razon_social"),
+        # Mezcla códigos de SECCIÓN y de MÓDULO a propósito. En este catálogo son
+        # cadenas planas —``tiene_permiso("R-CRM")`` NO implica
+        # ``R-CRM-COTIZACIONES``—, así que incluir el de módulo amplía la regla a
+        # quien puede entrar al módulo aunque no tenga la sección. Es la política
+        # acordada, no un descuido.
+        permisos_visibilidad=(
+            "R-CRM-COTIZACIONES",
+            "R-CRM",
+            "R-MESACONTROL-COTI",
+            "R-MESACONTROL",
+        ),
         orden=ORDEN_RECIENTE,
     ),
 )
+
+# Una entidad sin ``permisos_visibilidad`` no la vería NADIE, superusuario incluido:
+# ``alguno()`` sobre una tupla vacía devuelve ``False`` sin llegar al cortocircuito.
+# Eso es un olvido al registrar la entidad, no una política, así que revienta al
+# importar en vez de convertirse en una entidad que nunca aparece y se depura
+# buscando el fallo en el queryset.
+_SIN_PERMISOS = [entidad.tipo for entidad in REGISTRO if not entidad.permisos_visibilidad]
+if _SIN_PERMISOS:
+    raise ImproperlyConfigured(
+        "Entidades del buscador sin ``permisos_visibilidad``, que las haría "
+        f"invisibles para todos: {', '.join(_SIN_PERMISOS)}"
+    )
 
 
 class BusquedaGlobalAPIView(APIView):
@@ -252,7 +336,9 @@ class BusquedaGlobalAPIView(APIView):
             "Busca en varias entidades a la vez y devuelve los resultados agrupados "
             "por tipo. Con `q` por debajo de la longitud mínima devuelve los grupos "
             "vacíos, no un error. Los campos de nombre requieren `longitud_minima_"
-            "nombre` caracteres; por debajo sólo se consultan los de código."
+            "nombre` caracteres; por debajo sólo se consultan los de código. "
+            "`grupos` sólo incluye las entidades que el usuario tiene permiso de "
+            "ver, así que puede traer menos de tres elementos."
         ),
         parameters=[
             OpenApiParameter(
@@ -280,9 +366,19 @@ class BusquedaGlobalAPIView(APIView):
             maximo=LIMITE_MAXIMO,
         )
         suficiente = len(q) >= LONGITUD_MINIMA_Q
+        # Los permisos se resuelven UNA vez por petición y se reutilizan para las
+        # tres entidades: 2 consultas en total, o 0 si es superusuario/admin.
+        permisos = permisos_efectivos(request.user)
 
         grupos = []
         for entidad in REGISTRO:
+            # Visibilidad por permisos: la entidad que el usuario no puede ver se
+            # OMITE del todo —no se consulta y no sale como grupo vacío—, para que
+            # el frontend no pinte "Pedidos: sin resultados" a quien no tiene
+            # acceso a pedidos. Se evalúa también con ``q`` corta, para que el
+            # conjunto de secciones que ve un usuario sea siempre el mismo.
+            if not entidad.visible_para(permisos):
+                continue
             if suficiente:
                 resultados, hay_mas = entidad.buscar(request.user, q, limite)
             else:
