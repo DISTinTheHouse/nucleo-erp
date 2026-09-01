@@ -5,7 +5,7 @@ from rest_framework import permissions, viewsets, status
 from rest_framework.permissions import AllowAny
 from rest_framework.exceptions import PermissionDenied
 from django.contrib.auth import authenticate
-from seguridad.models import UsuarioRol
+from nucleo.permisos import permisos_efectivos
 from ..models import Usuario
 from .serializers import UsuarioSerializer
 
@@ -60,37 +60,15 @@ class LoginAPIView(APIView):
 
             token, created = Token.objects.get_or_create(user=user)
 
-            # Construir lista de permisos efectivos
+            # Lista de permisos efectivos ``(roles activos + grants) - denies``.
+            # El cálculo vive en ``nucleo.permisos``, que es el mismo que usa el
+            # buscador global; antes estaba copiado aquí y en
+            # ``UsuarioSerializer.get_permisos``, con la misma precedencia escrita
+            # tres veces. ``.claves()`` devuelve lista vacía para superusuario y
+            # admin de empresa, que es el contrato que ya consumía el frontend.
             is_superuser = user.is_superuser
             is_admin_empresa = getattr(user, 'is_admin_empresa', False)
-
-            permisos_finales = []
-            if is_superuser or is_admin_empresa:
-                permisos_finales = []
-            else:
-                # 1. Permisos por Roles
-                qs_roles = UsuarioRol.objects.filter(
-                    usuario=user,
-                    rol__estatus="activo",
-                ).values_list("rol__permisos__clave", flat=True)
-                permisos_roles = set(filter(None, qs_roles))
-
-                # 2. Permisos por Overrides
-                permisos_grant = set()
-                permisos_deny = set()
-                
-                # Optimizacion: select_related para evitar N+1 queries
-                overrides = user.overrides_permisos.select_related('permiso').all()
-                
-                for ov in overrides:
-                    if ov.tipo == 'grant':
-                        permisos_grant.add(ov.permiso.clave)
-                    elif ov.tipo == 'deny':
-                        permisos_deny.add(ov.permiso.clave)
-                
-                # 3. Calcular resultante: (Roles + Grant) - Deny
-                permisos_efectivos = (permisos_roles | permisos_grant) - permisos_deny
-                permisos_finales = sorted(list(permisos_efectivos))
+            permisos_finales = permisos_efectivos(user).claves()
 
             return Response({
                 'token': token.key,

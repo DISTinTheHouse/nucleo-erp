@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from nucleo.permisos import permisos_efectivos
 from seguridad.models import Rol, UsuarioRol
 from ..models import Usuario
 
@@ -43,29 +44,16 @@ class UsuarioSerializer(serializers.ModelSerializer):
         return bool(getattr(obj, "is_staff", False) or getattr(obj, "is_superuser", False))
 
     def get_permisos(self, obj):
-        if getattr(obj, "is_superuser", False) or getattr(obj, "is_admin_empresa", False):
-            return []
-
-        qs_roles = UsuarioRol.objects.filter(
-            usuario=obj,
-            rol__estatus="activo",
-        ).values_list("rol__permisos__clave", flat=True)
-        permisos_roles = set(filter(None, qs_roles))
-
-        permisos_grant = set()
-        permisos_deny = set()
-        overrides = obj.overrides_permisos.select_related("permiso").all()
-        for ov in overrides:
-            clave = getattr(getattr(ov, "permiso", None), "clave", None)
-            if not clave:
-                continue
-            if ov.tipo == "grant":
-                permisos_grant.add(clave)
-            elif ov.tipo == "deny":
-                permisos_deny.add(clave)
-
-        permisos_efectivos = (permisos_roles | permisos_grant) - permisos_deny
-        return sorted(list(permisos_efectivos))
+        # El cálculo ``(roles activos + grants) - denies`` vive en
+        # ``nucleo.permisos``, que es también el que usa el buscador global. Antes
+        # estaba copiado aquí y en ``LoginAPIView``, con la misma precedencia
+        # escrita tres veces: cambiarla en un sitio y no en otro dejaba al frontend
+        # pintando secciones que el backend ya no servía.
+        #
+        # ``.claves()`` conserva el contrato publicado: lista vacía para
+        # superusuario y admin de empresa, a quienes el frontend trata como que lo
+        # tienen todo.
+        return permisos_efectivos(obj).claves()
 
     def validate(self, data):
         """
