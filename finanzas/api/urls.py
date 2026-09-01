@@ -11,6 +11,7 @@ from .views import (
     CuentaContableViewSet,
     CuentaPorCobrarViewSet,
     CuentaPorPagarViewSet,
+    DashboardFinancieroViewSet,
     FacturaProveedorViewSet,
     FacturaViewSet,
     MovimientoBancarioViewSet,
@@ -36,6 +37,7 @@ router.register(r'movimientos-bancarios', MovimientoBancarioViewSet, basename='m
 router.register(r'conciliaciones-bancarias', ConciliacionBancariaViewSet, basename='conciliacion-bancaria')
 router.register(r'notas-credito', NotaCreditoViewSet, basename='nota-credito')
 router.register(r'alertas-mora', AlertaMoraViewSet, basename='alerta-mora')
+router.register(r'dashboard', DashboardFinancieroViewSet, basename='finanzas-dashboard')
 
 urlpatterns = [
     path('', include(router.urls)),

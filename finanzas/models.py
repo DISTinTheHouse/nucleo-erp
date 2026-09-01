@@ -61,6 +61,7 @@ class Poliza(models.Model):
     sucursal = models.ForeignKey('nucleo.Sucursal', on_delete=models.CASCADE, related_name="polizas")
     centro_costo = models.ForeignKey('finanzas.CentroCosto', on_delete=models.CASCADE, related_name="polizas", null=True, blank=True)
     folio = models.CharField(max_length=30, null=True, blank=True)
+    folio_consecutivo = models.PositiveIntegerField(null=True, blank=True)
     tipo = models.CharField(max_length=30, choices=PolizaTipo.choices, default=PolizaTipo.DIARIO.value)
     # Fecha contable: se fija al crear. Con ``auto_now`` se reescribía en cada save().
     fecha = models.DateField(auto_now_add=True, null=True, blank=True)
@@ -253,6 +254,7 @@ class CuentaPorCobrar(models.Model):
         CANCELADA = 'Cancelada', 'Cancelada'
         VENCIDA = 'Vencida', 'Vencida'
 
+    empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="cuentas_por_cobrar", null=True, blank=True)
     cliente = models.ForeignKey('terceros.Cliente', on_delete=models.CASCADE, related_name="cuentas_por_cobrar")
     factura = models.ForeignKey(Factura, on_delete=models.CASCADE, related_name="cuentas_por_cobrar")
     # Fecha de emisión: se fija al crear. Con ``auto_now`` se reescribía en cada save().
