@@ -55,11 +55,12 @@ class EmpleadoAdmin(admin.ModelAdmin):
         "sucursal",
         "departamento",
         "puesto",
+        "turno",
         "fecha_ingreso",
         "activo",
     )
     list_display_links = ("numero_empleado", "nombre_completo")
-    list_filter = ("activo", "empresa", "sucursal", "departamento", "puesto")
+    list_filter = ("activo", "empresa", "sucursal", "departamento", "puesto", "turno", "sexo", "estado_civil")
     search_fields = (
         "numero_empleado",
         "nombre",
@@ -67,14 +68,40 @@ class EmpleadoAdmin(admin.ModelAdmin):
         "apellido_materno",
         "rfc",
         "curp",
+        "nss",
         "email",
         "telefono",
+        "banco",
+        "clabe",
         "empresa__codigo",
         "sucursal__nombre",
         "departamento__nombre",
         "puesto__nombre",
     )
-    list_select_related = ("empresa", "sucursal", "departamento", "puesto")
+    list_select_related = ("empresa", "sucursal", "departamento", "puesto", "turno")
+    fieldsets = (
+        (None, {
+            "fields": ("empresa", "sucursal", "departamento", "puesto", "turno", "numero_empleado", "activo")
+        }),
+        ("Información personal", {
+            "fields": ("nombre", "apellido_paterno", "apellido_materno", "fecha_nacimiento", "lugar_nacimiento", "sexo", "estado_civil", "nacionalidad", "curp", "rfc", "nss", "infonavit", "tipo_sangre", "alergias", "enfermedades_cronicas")
+        }),
+        ("Contacto", {
+            "fields": ("email", "telefono")
+        }),
+        ("Domicilio", {
+            "fields": ("calle", "numero_exterior", "numero_interior", "colonia", "codigo_postal", "ciudad", "estado")
+        }),
+        ("Datos bancarios", {
+            "fields": ("banco", "cuenta_bancaria", "clabe", "moneda_pago")
+        }),
+        ("Contacto de emergencia", {
+            "fields": ("nombre_emergencia", "parentesco_emergencia", "telefono_emergencia", "email_emergencia")
+        }),
+        ("Laboral", {
+            "fields": ("fecha_ingreso", "fecha_baja", "foto_url", "observaciones")
+        }),
+    )
 
     @admin.display(description="Nombre completo")
     def nombre_completo(self, obj):
@@ -82,16 +109,16 @@ class EmpleadoAdmin(admin.ModelAdmin):
 
 
 class ContratoAdmin(admin.ModelAdmin):
-    list_display = ("empleado", "tipo", "fecha_inicio", "fecha_fin", "salario", "estado")
-    list_filter = ("estado", "tipo", "fecha_inicio", "fecha_fin")
-    search_fields = ("empleado__numero_empleado", "empleado__nombre", "empleado__apellido_paterno", "archivo_url")
-    list_select_related = ("empleado",)
+    list_display = ("empleado", "tipo", "fecha_inicio", "fecha_fin", "salario", "estado", "activo", "creado_por")
+    list_filter = ("estado", "activo", "tipo", "fecha_inicio", "fecha_fin")
+    search_fields = ("empleado__numero_empleado", "empleado__nombre", "archivo_url", "observaciones", "prestaciones")
+    list_select_related = ("empleado", "creado_por")
 
 
 class TurnoAdmin(admin.ModelAdmin):
-    list_display = ("nombre", "empresa", "hora_entrada", "hora_salida", "dias_laborales")
-    list_filter = ("empresa", "dias_laborales")
-    search_fields = ("nombre", "empresa__codigo", "dias_laborales")
+    list_display = ("nombre", "empresa", "hora_entrada", "hora_salida", "horas_base_diarias", "tolerancia_retardo_minutos", "dias_laborales", "activo")
+    list_filter = ("activo", "empresa", "dias_laborales")
+    search_fields = ("nombre", "empresa__codigo", "dias_laborales", "descripcion")
     list_select_related = ("empresa",)
 
 
@@ -103,7 +130,7 @@ class CalendarioAdmin(admin.ModelAdmin):
 
 
 class AsistenciaAdmin(admin.ModelAdmin):
-    list_display = ("empleado", "turno", "fecha", "hora_entrada", "hora_salida", "estado")
+    list_display = ("empleado", "turno", "fecha", "hora_entrada", "hora_salida", "estado", "minutos_retardo", "horas_normales", "horas_extra")
     list_filter = ("estado", "fecha", "turno__empresa", "empleado__empresa")
     search_fields = (
         "empleado__numero_empleado",
@@ -112,70 +139,76 @@ class AsistenciaAdmin(admin.ModelAdmin):
         "turno__nombre",
         "observaciones",
     )
-    list_select_related = ("empleado", "turno")
+    list_select_related = ("empleado", "turno", "autorizado_por")
 
 
 class ControlHorasAdmin(admin.ModelAdmin):
     list_display = ("empleado", "asistencia", "fecha", "hora_inicio", "hora_fin", "horas_trabajadas", "tipo")
     list_filter = ("tipo", "fecha", "empleado__empresa")
-    search_fields = ("empleado__numero_empleado", "empleado__nombre", "asistencia__estado")
+    search_fields = ("empleado__numero_empleado", "empleado__nombre", "asistencia__estado", "descripcion")
     list_select_related = ("empleado", "asistencia", "op")
 
 
 class VacacionesAdmin(admin.ModelAdmin):
-    list_display = ("empleado", "fecha_inicio", "fecha_fin", "dias_solicitados", "estado")
-    list_filter = ("estado", "fecha_inicio", "fecha_fin")
-    search_fields = ("empleado__numero_empleado", "empleado__nombre", "motivo")
-    list_select_related = ("empleado",)
+    list_display = ("empleado", "fecha_inicio", "fecha_fin", "dias_solicitados", "estado", "fecha_solicitud", "autorizado_por", "rechazado_por")
+    list_filter = ("estado", "fecha_inicio", "fecha_fin", "fecha_solicitud")
+    search_fields = ("empleado__numero_empleado", "empleado__nombre", "motivo", "motivo_rechazo")
+    list_select_related = ("empleado", "solicitado_por", "autorizado_por", "rechazado_por")
 
 
 class PermisoAusenciaAdmin(admin.ModelAdmin):
-    list_display = ("empleado", "tipo", "fecha_inicio", "fecha_fin", "con_goce_sueldo", "estado")
-    list_filter = ("estado", "tipo", "con_goce_sueldo", "fecha_inicio")
-    search_fields = ("empleado__numero_empleado", "empleado__nombre", "motivo")
-    list_select_related = ("empleado",)
+    list_display = ("empleado", "tipo", "fecha_inicio", "fecha_fin", "con_goce_sueldo", "estado", "fecha_solicitud", "autorizado_por", "rechazado_por")
+    list_filter = ("estado", "tipo", "con_goce_sueldo", "fecha_inicio", "fecha_solicitud")
+    search_fields = ("empleado__numero_empleado", "empleado__nombre", "motivo", "motivo_rechazo")
+    list_select_related = ("empleado", "solicitado_por", "autorizado_por", "rechazado_por")
 
 
 class IncidenciaAdmin(admin.ModelAdmin):
-    list_display = ("empleado", "tipo", "fecha", "descripcion")
-    list_filter = ("tipo", "fecha")
-    search_fields = ("empleado__numero_empleado", "empleado__nombre", "descripcion")
-    list_select_related = ("empleado",)
+    list_display = ("empleado", "tipo", "gravedad", "estado", "fecha", "reportado_por", "fecha_reporte", "descripcion_corta")
+    list_filter = ("tipo", "gravedad", "estado", "activo", "fecha", "fecha_reporte")
+    search_fields = ("empleado__numero_empleado", "empleado__nombre", "descripcion", "acciones_tomadas")
+    list_select_related = ("empleado", "reportado_por")
+
+    @admin.display(description="Descripción")
+    def descripcion_corta(self, obj):
+        if not obj.descripcion:
+            return "-"
+        return (obj.descripcion[:80] + "...") if len(obj.descripcion) > 80 else obj.descripcion
 
 
 class EvaluacionAdmin(admin.ModelAdmin):
-    list_display = ("empleado", "evaluador", "fecha", "puntaje")
-    list_filter = ("fecha", "puntaje")
+    list_display = ("empleado", "evaluador", "tipo", "periodo", "estado", "fecha", "puntaje")
+    list_filter = ("tipo", "periodo", "estado", "fecha", "puntaje")
     search_fields = ("empleado__numero_empleado", "empleado__nombre", "comentarios", "evaluador__nombre")
     list_select_related = ("empleado", "evaluador")
 
 
 class CapacitacionAdmin(admin.ModelAdmin):
-    list_display = ("empleado", "nombre", "institucion", "fecha_inicio", "fecha_fin", "horas")
-    list_filter = ("fecha_inicio", "fecha_fin", "empleado__empresa")
-    search_fields = ("empleado__numero_empleado", "empleado__nombre", "nombre", "institucion")
+    list_display = ("empleado", "nombre", "institucion", "estado", "fecha_inicio", "fecha_fin", "horas", "calificacion")
+    list_filter = ("estado", "fecha_inicio", "fecha_fin", "empleado__empresa")
+    search_fields = ("empleado__numero_empleado", "empleado__nombre", "nombre", "institucion", "constancia_url")
     list_select_related = ("empleado",)
 
 
 class NominaAdmin(admin.ModelAdmin):
-    list_display = ("empresa", "sucursal", "empleado", "periodo_inicio", "periodo_fin", "fecha_pago", "estado", "neto")
+    list_display = ("empresa", "sucursal", "empleado", "periodo_inicio", "periodo_fin", "fecha_pago", "estado", "salario_base", "total_percepciones", "total_deducciones", "neto")
     list_filter = ("estado", "empresa", "sucursal", "periodo_inicio", "periodo_fin")
-    search_fields = ("empleado__numero_empleado", "empleado__nombre", "empresa__codigo", "sucursal__nombre")
-    list_select_related = ("empresa", "sucursal", "empleado")
+    search_fields = ("empleado__numero_empleado", "empleado__nombre", "empresa__codigo", "sucursal__nombre", "observaciones")
+    list_select_related = ("empresa", "sucursal", "empleado", "creado_por")
 
 
 class NominaDetalleAdmin(admin.ModelAdmin):
-    list_display = ("nomina", "concepto", "tipo", "monto")
+    list_display = ("nomina", "codigo", "concepto", "tipo", "cantidad", "unidad", "monto")
     list_filter = ("tipo", "nomina__estado", "nomina__empresa")
-    search_fields = ("concepto", "nomina__empleado__numero_empleado", "nomina__empleado__nombre")
+    search_fields = ("codigo", "concepto", "nomina__empleado__numero_empleado", "nomina__empleado__nombre")
     list_select_related = ("nomina", "nomina__empleado")
 
 
 class ProductividadAdmin(admin.ModelAdmin):
-    list_display = ("empresa", "departamento", "empleado", "fecha", "meta", "resultado")
-    list_filter = ("fecha", "empresa", "departamento", "empleado")
+    list_display = ("empresa", "departamento", "empleado", "estado", "fecha", "meta", "meta_unidad", "resultado")
+    list_filter = ("estado", "fecha", "empresa", "departamento", "empleado", "meta_unidad")
     search_fields = ("empleado__numero_empleado", "empleado__nombre", "descripcion", "empresa__codigo")
-    list_select_related = ("empresa", "departamento", "empleado", "meta_unidad")
+    list_select_related = ("empresa", "departamento", "empleado", "meta_unidad", "creado_por")
 
 
 class ProductividadDetalleAdmin(admin.ModelAdmin):
@@ -202,4 +235,3 @@ admin.site.register(Nomina, NominaAdmin)
 admin.site.register(NominaDetalle, NominaDetalleAdmin)
 admin.site.register(Productividad, ProductividadAdmin)
 admin.site.register(ProductividadDetalle, ProductividadDetalleAdmin)
-

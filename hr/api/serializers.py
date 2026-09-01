@@ -18,22 +18,14 @@ from hr.models import (
     Productividad,
     ProductividadDetalle
 )
+from django.utils import timezone
+from decimal import Decimal
 
 
 class EmpresaScopedSerializerMixin:
-    """Aislamiento multi-tenant en ESCRITURA (POST/PUT/PATCH) para HR.
-
-    ``get_queryset`` de los ViewSets sólo acota LECTURAS. Como todos estos
-    serializers usan ``fields = '__all__'``, cada FK se resuelve contra
-    ``Modelo.objects.all()``: sin esta validación un usuario podría crear —o
-    mover— un registro apuntando a la empresa, el empleado o el turno de otra
-    empresa. Misma convención empresa-only que ``PedidoDetalleSerializer``
-    (ventas) y ``SerieFolioSerializer`` (nucleo): superuser puede todo; un
-    usuario sin empresa asignada no puede escribir; el resto sólo su empresa.
-    """
+    """Aislamiento multi-tenant en ESCRITURA (POST/PUT/PATCH) para HR."""
 
     def _empresa_usuario(self):
-        """Devuelve ``(empresa, es_superuser)`` del usuario de la petición."""
         request = self.context.get("request")
         user = getattr(request, "user", None)
         if getattr(user, "is_superuser", False):
@@ -46,9 +38,6 @@ class EmpresaScopedSerializerMixin:
             return
         if empresa is None or empresa_id != empresa.pk:
             raise serializers.ValidationError(mensaje)
-
-    # Validadores reutilizados por los distintos serializers según la FK que
-    # cada modelo use para llegar a la empresa.
 
     def validate_empresa(self, empresa):
         self._validar_empresa_id(
@@ -102,6 +91,9 @@ class EmpresaScopedSerializerMixin:
         )
         return turno
 
+    def validate_meta_unidad(self, meta_unidad):
+        return meta_unidad
+
 
 class PuestoSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
@@ -109,7 +101,6 @@ class PuestoSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer
         fields = '__all__'
 
     def validate_area(self, area):
-        # ``Area`` hereda la empresa por ``departamento``.
         if area is None:
             return area
         self._validar_empresa_id(
@@ -118,10 +109,36 @@ class PuestoSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer
         )
         return area
 
+
 class EmpleadoSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = Empleado
         fields = '__all__'
+
+    def validate_nss(self, value):
+        if value and len(value) != 11:
+            raise serializers.ValidationError("El NSS debe tener 11 dígitos.")
+        if value and not value.isdigit():
+            raise serializers.ValidationError("El NSS debe contener solo dígitos.")
+        return value
+
+    def validate_clabe(self, value):
+        if value and len(value) != 18:
+            raise serializers.ValidationError("La CLABE debe tener 18 dígitos.")
+        if value and not value.isdigit():
+            raise serializers.ValidationError("La CLABE debe contener solo dígitos.")
+        return value
+
+    def validate_curp(self, value):
+        if value and len(value) != 18:
+            raise serializers.ValidationError("La CURP debe tener 18 caracteres.")
+        return value
+
+    def validate_rfc(self, value):
+        if value and len(value) not in (12, 13):
+            raise serializers.ValidationError("El RFC debe tener 12 o 13 caracteres.")
+        return value
+
 
 class AreaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
@@ -129,28 +146,75 @@ class AreaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
         fields = '__all__'
 
     def validate_responsable(self, responsable):
-        # ``responsable`` es un ``Empleado``: se valida por su empresa.
         return self.validate_empleado(responsable)
+
 
 class ContratoSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = Contrato
         fields = '__all__'
 
+    def validate(self, data):
+        empleado = data.get('empleado') or getattr(self.instance, 'empleado', None)
+        estado = data.get('estado') or getattr(self.instance, 'estado', None)
+        if empleado and estado == 'activo':
+            qs = Contrato.objects.filter(empleado=empleado, estado='activo')
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({'estado': 'Este empleado ya tiene un contrato activo.'})
+        fecha_inicio = data.get('fecha_inicio')
+        fecha_fin = data.get('fecha_fin')
+        if fecha_inicio and fecha_fin and fecha_fin < fecha_inicio:
+            raise serializers.ValidationError({'fecha_fin': 'La fecha de fin no puede ser anterior a la de inicio.'})
+        return data
+
+
 class TurnoSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = Turno
         fields = '__all__'
+
+    def validate(self, data):
+        hora_entrada = data.get('hora_entrada') or getattr(self.instance, 'hora_entrada', None)
+        hora_salida = data.get('hora_salida') or getattr(self.instance, 'hora_salida', None)
+        if hora_entrada and hora_salida:
+            hoy = timezone.now().date()
+            from datetime import datetime as _dt
+            e = _dt.combine(hoy, hora_entrada)
+            s = _dt.combine(hoy, hora_salida)
+            if s <= e:
+                raise serializers.ValidationError({'hora_salida': 'La hora de salida debe ser posterior a la de entrada.'})
+        return data
+
 
 class CalendarioSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = Calendario
         fields = '__all__'
 
+    def validate_turno(self, turno):
+        if turno is None:
+            return turno
+        self._validar_empresa_id(
+            turno.empresa_id,
+            "El turno del calendario no pertenece a la empresa del usuario.",
+        )
+        return turno
+
+
 class AsistenciaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = Asistencia
         fields = '__all__'
+
+    def validate(self, data):
+        hora_salida = data.get('hora_salida')
+        hora_entrada = data.get('hora_entrada') or (self.instance.hora_entrada if self.instance else None)
+        if hora_salida and hora_entrada and hora_salida < hora_entrada:
+            raise serializers.ValidationError({'hora_salida': 'La hora de salida no puede ser anterior a la de entrada.'})
+        return data
+
 
 class ControlHorasSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
@@ -158,7 +222,6 @@ class ControlHorasSerializer(EmpresaScopedSerializerMixin, serializers.ModelSeri
         fields = '__all__'
 
     def validate_asistencia(self, asistencia):
-        # ``Asistencia`` hereda la empresa por ``empleado``.
         if asistencia is None:
             return asistencia
         self._validar_empresa_id(
@@ -168,8 +231,6 @@ class ControlHorasSerializer(EmpresaScopedSerializerMixin, serializers.ModelSeri
         return asistencia
 
     def validate_op(self, op):
-        # ``op`` es una ``produccion.OrdenProduccion``, que tiene FK ``empresa``
-        # propia: sin esto se podían imputar horas contra la OP de otra empresa.
         if op is None:
             return op
         self._validar_empresa_id(
@@ -178,20 +239,48 @@ class ControlHorasSerializer(EmpresaScopedSerializerMixin, serializers.ModelSeri
         )
         return op
 
+    def validate(self, data):
+        hora_inicio = data.get('hora_inicio') or (self.instance.hora_inicio if self.instance else None)
+        hora_fin = data.get('hora_fin')
+        if hora_inicio and hora_fin and hora_fin < hora_inicio:
+            raise serializers.ValidationError({'hora_fin': 'La hora de fin no puede ser anterior a la de inicio.'})
+        return data
+
+
 class VacacionesSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = Vacaciones
         fields = '__all__'
+        read_only_fields = ('fecha_solicitud', 'autorizado_por', 'rechazado_por', 'fecha_aprobacion', 'fecha_rechazo', 'solicitado_por')
+
+    def validate(self, data):
+        fecha_inicio = data.get('fecha_inicio')
+        fecha_fin = data.get('fecha_fin')
+        if fecha_inicio and fecha_fin and fecha_fin < fecha_inicio:
+            raise serializers.ValidationError({'fecha_fin': 'La fecha de fin no puede ser anterior a la de inicio.'})
+        return data
+
 
 class PermisoAusenciaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = PermisoAusencia
         fields = '__all__'
+        read_only_fields = ('fecha_solicitud', 'autorizado_por', 'rechazado_por', 'fecha_aprobacion', 'fecha_rechazo', 'solicitado_por')
+
+    def validate(self, data):
+        fecha_inicio = data.get('fecha_inicio')
+        fecha_fin = data.get('fecha_fin')
+        if fecha_inicio and fecha_fin and fecha_fin < fecha_inicio:
+            raise serializers.ValidationError({'fecha_fin': 'La fecha de fin no puede ser anterior a la de inicio.'})
+        return data
+
 
 class IncidenciaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = Incidencia
         fields = '__all__'
+        read_only_fields = ('fecha_reporte', 'reportado_por')
+
 
 class EvaluacionSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
@@ -199,30 +288,92 @@ class EvaluacionSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerial
         fields = '__all__'
 
     def validate_evaluador(self, evaluador):
-        # ``evaluador`` es un ``Empleado``: se valida por su empresa.
         return self.validate_empleado(evaluador)
+
 
 class CapacitacionSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = Capacitacion
         fields = '__all__'
 
-class NominaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
-    class Meta:
-        model = Nomina
-        fields = '__all__'
 
-class NominaDetalleSerializer(serializers.ModelSerializer):
+class NominaDetalleSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = NominaDetalle
         fields = '__all__'
+
+    def validate_nomina(self, nomina):
+        if nomina is None:
+            return nomina
+        self._validar_empresa_id(
+            nomina.empresa_id,
+            "La nómina no pertenece a la empresa del usuario.",
+        )
+        return nomina
+
+    def validate(self, data):
+        monto = data.get('monto')
+        if monto is not None and monto < 0:
+            raise serializers.ValidationError({'monto': 'El monto no puede ser negativo.'})
+        return data
+
+
+class NominaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
+    detalles = NominaDetalleSerializer(many=True, required=False)
+
+    class Meta:
+        model = Nomina
+        fields = '__all__'
+        read_only_fields = ('fecha_generacion', 'total_percepciones', 'total_deducciones', 'neto', 'creado_por')
+
+    def validate(self, data):
+        periodo_inicio = data.get('periodo_inicio')
+        periodo_fin = data.get('periodo_fin')
+        if periodo_inicio and periodo_fin and periodo_fin < periodo_inicio:
+            raise serializers.ValidationError({'periodo_fin': 'El periodo fin no puede ser anterior al inicio.'})
+        return data
+
+    def create(self, validated_data):
+        detalles_data = validated_data.pop('detalles', [])
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user and not validated_data.get('creado_por'):
+            validated_data['creado_por'] = user
+        nomina = Nomina.objects.create(**validated_data)
+        for detalle_data in detalles_data:
+            NominaDetalle.objects.create(nomina=nomina, **detalle_data)
+        nomina._recalcular_totales()
+        return nomina
+
+    def update(self, instance, validated_data):
+        detalles_data = validated_data.pop('detalles', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if detalles_data is not None:
+            instance.detalles.all().delete()
+            for detalle_data in detalles_data:
+                NominaDetalle.objects.create(nomina=instance, **detalle_data)
+            instance._recalcular_totales()
+        return instance
+
 
 class ProductividadSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = Productividad
         fields = '__all__'
 
-class ProductividadDetalleSerializer(serializers.ModelSerializer):
+
+class ProductividadDetalleSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = ProductividadDetalle
         fields = '__all__'
+
+    def validate_productividad(self, productividad):
+        if productividad is None:
+            return productividad
+        self._validar_empresa_id(
+            productividad.empresa_id,
+            "La productividad no pertenece a la empresa del usuario.",
+        )
+        return productividad

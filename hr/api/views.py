@@ -1,8 +1,17 @@
-from django.db.models import ProtectedError
+from django.db.models import ProtectedError, Sum, Count, Q, F, Value, DecimalField
+from django.db.models.functions import Coalesce
+from django.utils import timezone
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 
-from rest_framework import mixins, status
-from rest_framework.exceptions import APIException
+from rest_framework import mixins, status, filters
+from rest_framework.decorators import action
+from rest_framework.exceptions import APIException, ValidationError
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.viewsets import GenericViewSet
+from django_filters.rest_framework import DjangoFilterBackend
 
 from hr.models import (
     Puesto,
@@ -19,6 +28,7 @@ from hr.models import (
     Evaluacion,
     Capacitacion,
     Nomina,
+    NominaDetalle,
     Productividad,
 )
 
@@ -40,34 +50,11 @@ from hr.api.serializers import (
     ProductividadSerializer,
 )
 
-# Aislamiento multi-tenant de LECTURA en todos los ViewSets de HR.
-#
-# Sin estos ``get_queryset`` los ViewSets servían (y dejaban modificar/borrar)
-# los registros de RH de todas las empresas. Se replica la convención ya usada
-# en ``ventas``/``produccion``/``wms``/``terceros``: superuser ve todo; un
-# usuario sin empresa asignada no ve nada (``qs.none()``); el resto sólo su
-# empresa. Los modelos que no tienen FK ``empresa`` propia la heredan por la
-# cadena de FK correspondiente (``empleado__empresa``, ``turno__empresa``,
-# ``departamento__empresa``), igual que ``BomDetalleViewSet`` (``bom__empresa``)
-# o ``PedidoDetalleTallaViewSet`` (``pedido_detalle__pedido__empresa``).
-#
-# El lado de ESCRITURA (validar que las FK enviadas en POST/PATCH pertenezcan a
-# la empresa del usuario) vive en los serializers — ver ``hr/api/serializers.py``.
-#
-# Manejo de DELETE en HR (ver los dos mixins de abajo):
-#
-# * ``Puesto``, ``Empleado`` y ``Area`` heredan ``StatusLifecycleModel`` y se
-#   dan de baja con ``soft_delete()`` — la convención del repo para datos de
-#   catálogo/tenant. Antes ``DestroyModelMixin`` los borraba físicamente.
-# * El resto de modelos no tiene ciclo de vida, así que sí se borran; pero como
-#   todas las FK entrantes son ``on_delete=PROTECT``, un borrado con
-#   dependencias lanzaba ``ProtectedError`` —que no es ``APIException``— y
-#   salía como 500. Ahora se traduce a 409.
+
+FILTER_BACKENDS = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
 
 
 class RegistroConDependenciasError(APIException):
-    """409 cuando una FK ``PROTECT`` impide borrar el registro."""
-
     status_code = status.HTTP_409_CONFLICT
     default_detail = (
         "No se puede eliminar el registro porque existen registros relacionados "
@@ -76,25 +63,29 @@ class RegistroConDependenciasError(APIException):
     default_code = "registro_con_dependencias"
 
 
-class ProtectedDestroyMixin:
-    """Traduce ``ProtectedError`` a 409 en vez de dejarlo escalar a 500.
-
-    Debe declararse ANTES de ``mixins.DestroyModelMixin`` para que el ``super()``
-    resuelva al ``perform_destroy`` de DRF.
+class SoftDeleteDestroyMixin:
+    """
+    Siempre soft-delete. Orden de prioridad:
+    1) instance.soft_delete() (StatusLifecycleModel)
+    2) instance.activo = False + save() (si tiene campo 'activo')
+    3) instance.delete() con ProtectedError → 409 (último recurso, no rompe)
     """
 
     def perform_destroy(self, instance):
+        if hasattr(instance, "soft_delete") and callable(getattr(instance, "soft_delete")):
+            instance.soft_delete()
+            return
+        if hasattr(instance, "activo"):
+            instance.activo = False
+            instance.save(update_fields=["activo", "actualizado_en"] if hasattr(instance, "actualizado_en") else ["activo"])
+            return
         try:
-            super().perform_destroy(instance)
+            instance.delete()
         except ProtectedError as exc:
-            raise RegistroConDependenciasError(
-                self._mensaje_dependencias(exc)
-            ) from exc
+            raise RegistroConDependenciasError(self._mensaje_dependencias(exc)) from exc
 
     @staticmethod
     def _mensaje_dependencias(exc):
-        # ``protected_objects`` ya viene materializado por el colector de
-        # Django, así que nombrar los modelos que bloquean no cuesta consultas.
         modelos = sorted({
             str(obj._meta.verbose_name_plural)
             for obj in exc.protected_objects
@@ -107,17 +98,6 @@ class ProtectedDestroyMixin:
         )
 
 
-class SoftDeleteDestroyMixin:
-    """``DELETE`` sobre modelos ``StatusLifecycleModel`` = baja lógica.
-
-    Marca ``activo = False`` vía ``soft_delete()`` en lugar de borrar la fila,
-    y devuelve el 204 habitual de ``DestroyModelMixin``.
-    """
-
-    def perform_destroy(self, instance):
-        instance.soft_delete()
-
-
 class PuestoViewSet(
     SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
@@ -126,10 +106,14 @@ class PuestoViewSet(
     mixins.UpdateModelMixin,
     mixins.DestroyModelMixin,
     GenericViewSet
-
 ):
     queryset = Puesto.objects.all()
     serializer_class = PuestoSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = ['area', 'activo', 'empresa']
+    search_fields = ['nombre', 'descripcion']
+    ordering_fields = ['nombre', 'salario_base', 'creado_en']
+    ordering = ['nombre']
 
     def get_queryset(self):
         user = self.request.user
@@ -140,6 +124,7 @@ class PuestoViewSet(
         if not empresa:
             return qs.none()
         return qs.filter(empresa=empresa)
+
 
 class EmpleadoViewSet(
     SoftDeleteDestroyMixin,
@@ -152,11 +137,16 @@ class EmpleadoViewSet(
 ):
     queryset = Empleado.objects.all()
     serializer_class = EmpleadoSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = ['sucursal', 'departamento', 'puesto', 'turno', 'activo', 'sexo', 'estado_civil']
+    search_fields = ['nombre', 'apellido_paterno', 'apellido_materno', 'numero_empleado', 'curp', 'rfc', 'email', 'telefono', 'nss']
+    ordering_fields = ['numero_empleado', 'nombre', 'apellido_paterno', 'fecha_ingreso', 'fecha_nacimiento']
+    ordering = ['apellido_paterno', 'nombre']
 
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset().select_related(
-            "empresa", "sucursal", "departamento", "puesto"
+            "empresa", "sucursal", "departamento", "puesto", "turno"
         )
         if getattr(user, "is_superuser", False):
             return qs
@@ -164,6 +154,7 @@ class EmpleadoViewSet(
         if not empresa:
             return qs.none()
         return qs.filter(empresa=empresa)
+
 
 class AreaViewSet(
     SoftDeleteDestroyMixin,
@@ -176,9 +167,13 @@ class AreaViewSet(
 ):
     queryset = Area.objects.all()
     serializer_class = AreaSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = ['departamento', 'activo', 'responsable']
+    search_fields = ['nombre', 'codigo', 'descripcion']
+    ordering_fields = ['nombre', 'codigo']
+    ordering = ['nombre']
 
     def get_queryset(self):
-        # ``Area`` no tiene FK ``empresa``: la hereda por ``departamento``.
         user = self.request.user
         qs = super().get_queryset().select_related(
             "departamento", "departamento__empresa", "responsable"
@@ -190,8 +185,9 @@ class AreaViewSet(
             return qs.none()
         return qs.filter(departamento__empresa=empresa)
 
+
 class ContratoViewSet(
-    ProtectedDestroyMixin,
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -201,10 +197,15 @@ class ContratoViewSet(
 ):
     queryset = Contrato.objects.all()
     serializer_class = ContratoSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = ['empleado', 'tipo', 'estado', 'activo', 'fecha_inicio__gte', 'fecha_inicio__lte', 'fecha_fin__gte', 'fecha_fin__lte']
+    search_fields = ['archivo_url', 'observaciones', 'prestaciones']
+    ordering_fields = ['fecha_inicio', 'fecha_fin', 'salario']
+    ordering = ['-fecha_inicio']
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset().select_related("empleado", "empleado__empresa")
+        qs = super().get_queryset().select_related("empleado", "empleado__empresa", "creado_por")
         if getattr(user, "is_superuser", False):
             return qs
         empresa = getattr(user, "empresa", None)
@@ -212,8 +213,12 @@ class ContratoViewSet(
             return qs.none()
         return qs.filter(empleado__empresa=empresa)
 
+    def perform_create(self, serializer):
+        serializer.save(creado_por=self.request.user)
+
+
 class TurnoViewSet(
-    ProtectedDestroyMixin,
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -223,6 +228,11 @@ class TurnoViewSet(
 ):
     queryset = Turno.objects.all()
     serializer_class = TurnoSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = ['activo', 'empresa', 'dias_laborales']
+    search_fields = ['nombre', 'descripcion']
+    ordering_fields = ['nombre', 'hora_entrada', 'hora_salida', 'horas_base_diarias']
+    ordering = ['nombre']
 
     def get_queryset(self):
         user = self.request.user
@@ -234,8 +244,9 @@ class TurnoViewSet(
             return qs.none()
         return qs.filter(empresa=empresa)
 
+
 class CalendarioViewSet(
-    ProtectedDestroyMixin,
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -245,9 +256,13 @@ class CalendarioViewSet(
 ):
     queryset = Calendario.objects.all()
     serializer_class = CalendarioSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = ['turno', 'tipo', 'fecha__gte', 'fecha__lte']
+    search_fields = ['tipo', 'turno__nombre']
+    ordering_fields = ['fecha', 'tipo']
+    ordering = ['-fecha']
 
     def get_queryset(self):
-        # ``Calendario`` hereda la empresa por ``turno``.
         user = self.request.user
         qs = super().get_queryset().select_related("turno", "turno__empresa")
         if getattr(user, "is_superuser", False):
@@ -257,8 +272,9 @@ class CalendarioViewSet(
             return qs.none()
         return qs.filter(turno__empresa=empresa)
 
+
 class AsistenciaViewSet(
-    ProtectedDestroyMixin,
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -268,11 +284,19 @@ class AsistenciaViewSet(
 ):
     queryset = Asistencia.objects.all()
     serializer_class = AsistenciaSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = [
+        'empleado', 'turno', 'estado',
+        'fecha', 'fecha__gte', 'fecha__lte',
+    ]
+    search_fields = ['observaciones', 'empleado__nombre', 'empleado__numero_empleado']
+    ordering_fields = ['fecha', 'hora_entrada', 'hora_salida', 'minutos_retardo']
+    ordering = ['-fecha']
 
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset().select_related(
-            "empleado", "empleado__empresa", "turno"
+            "empleado", "empleado__empresa", "empleado__sucursal", "empleado__departamento", "turno", "autorizado_por"
         )
         if getattr(user, "is_superuser", False):
             return qs
@@ -281,8 +305,102 @@ class AsistenciaViewSet(
             return qs.none()
         return qs.filter(empleado__empresa=empresa)
 
+    @action(detail=False, methods=['POST'])
+    def registrar_entrada(self, request):
+        empleado_id = request.data.get('empleado_id')
+        if not empleado_id:
+            return Response({'empleado_id': ['Este campo es requerido.']}, status=status.HTTP_400_BAD_REQUEST)
+        user = request.user
+        empleados_qs = Empleado.objects.all()
+        if getattr(user, "is_superuser", False):
+            pass
+        else:
+            empresa = getattr(user, "empresa", None)
+            if not empresa:
+                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+            empleados_qs = empleados_qs.filter(empresa=empresa)
+        try:
+            empleado = empleados_qs.get(pk=empleado_id)
+        except Empleado.DoesNotExist:
+            return Response({'detail': 'Empleado no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+
+        fecha_str = request.data.get('fecha')
+        if fecha_str:
+            fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+        else:
+            fecha = date.today()
+
+        hora_str = request.data.get('hora')
+        if hora_str:
+            ahora = datetime.strptime(hora_str, '%Y-%m-%d %H:%M:%S')
+        else:
+            ahora = timezone.now()
+
+        turno = empleado.turno
+        if not turno:
+            return Response({'detail': 'El empleado no tiene turno asignado.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        asistencia, created = Asistencia.objects.get_or_create(
+            empleado=empleado,
+            fecha=fecha,
+            defaults={'turno': turno, 'hora_entrada': ahora, 'estado': 'puntual'}
+        )
+        if not created:
+            asistencia.hora_entrada = ahora
+            asistencia.turno = turno
+        asistencia.save()
+        serializer = self.get_serializer(asistencia)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['POST'])
+    def registrar_salida(self, request):
+        empleado_id = request.data.get('empleado_id')
+        if not empleado_id:
+            return Response({'empleado_id': ['Este campo es requerido.']}, status=status.HTTP_400_BAD_REQUEST)
+        user = request.user
+        empleados_qs = Empleado.objects.all()
+        if getattr(user, "is_superuser", False):
+            pass
+        else:
+            empresa = getattr(user, "empresa", None)
+            if not empresa:
+                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+            empleados_qs = empleados_qs.filter(empresa=empresa)
+        try:
+            empleado = empleados_qs.get(pk=empleado_id)
+        except Empleado.DoesNotExist:
+            return Response({'detail': 'Empleado no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+
+        fecha_str = request.data.get('fecha')
+        if fecha_str:
+            fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+        else:
+            fecha = date.today()
+
+        hora_str = request.data.get('hora')
+        if hora_str:
+            ahora = datetime.strptime(hora_str, '%Y-%m-%d %H:%M:%S')
+        else:
+            ahora = timezone.now()
+
+        asistencias_qs = Asistencia.objects.filter(empleado=empleado, fecha=fecha)
+        if not getattr(user, "is_superuser", False):
+            empresa = getattr(user, "empresa", None)
+            if empresa:
+                asistencias_qs = asistencias_qs.filter(empleado__empresa=empresa)
+        try:
+            asistencia = asistencias_qs.get()
+        except Asistencia.DoesNotExist:
+            return Response({'detail': 'No se encontró registro de entrada para esta fecha.'}, status=status.HTTP_404_NOT_FOUND)
+
+        asistencia.hora_salida = ahora
+        asistencia.save()
+        serializer = self.get_serializer(asistencia)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
 class ControlHorasViewSet(
-    ProtectedDestroyMixin,
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -292,6 +410,11 @@ class ControlHorasViewSet(
 ):
     queryset = ControlHoras.objects.all()
     serializer_class = ControlHorasSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = ['empleado', 'tipo', 'op', 'fecha', 'fecha__gte', 'fecha__lte']
+    search_fields = ['descripcion', 'empleado__numero_empleado']
+    ordering_fields = ['fecha', 'hora_inicio', 'hora_fin', 'horas_trabajadas']
+    ordering = ['-fecha', '-hora_inicio']
 
     def get_queryset(self):
         user = self.request.user
@@ -305,8 +428,9 @@ class ControlHorasViewSet(
             return qs.none()
         return qs.filter(empleado__empresa=empresa)
 
+
 class VacacionesViewSet(
-    ProtectedDestroyMixin,
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -316,10 +440,17 @@ class VacacionesViewSet(
 ):
     queryset = Vacaciones.objects.all()
     serializer_class = VacacionesSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = ['empleado', 'estado', 'fecha_inicio__gte', 'fecha_fin__lte', 'fecha_solicitud__gte', 'fecha_solicitud__lte']
+    search_fields = ['motivo', 'motivo_rechazo']
+    ordering_fields = ['fecha_solicitud', 'fecha_inicio', 'fecha_fin', 'dias_solicitados']
+    ordering = ['-fecha_solicitud']
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset().select_related("empleado", "empleado__empresa")
+        qs = super().get_queryset().select_related(
+            "empleado", "empleado__empresa", "solicitado_por", "autorizado_por", "rechazado_por"
+        )
         if getattr(user, "is_superuser", False):
             return qs
         empresa = getattr(user, "empresa", None)
@@ -327,8 +458,48 @@ class VacacionesViewSet(
             return qs.none()
         return qs.filter(empleado__empresa=empresa)
 
+    def perform_create(self, serializer):
+        serializer.save(solicitado_por=self.request.user)
+
+    @action(detail=True, methods=['POST'])
+    def aprobar(self, request, pk=None):
+        obj = self.get_object()
+        user = request.user
+        if not getattr(user, "is_superuser", False):
+            empresa = getattr(user, "empresa", None)
+            if not empresa or obj.empleado.empresa_id != empresa.pk:
+                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+        if obj.estado != 'pendiente':
+            return Response({'detail': 'Solo se pueden aprobar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
+        obj.estado = 'aprobado'
+        obj.autorizado_por = request.user
+        obj.fecha_aprobacion = timezone.now()
+        obj.save()
+        serializer = self.get_serializer(obj)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['POST'])
+    def rechazar(self, request, pk=None):
+        obj = self.get_object()
+        user = request.user
+        if not getattr(user, "is_superuser", False):
+            empresa = getattr(user, "empresa", None)
+            if not empresa or obj.empleado.empresa_id != empresa.pk:
+                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+        if obj.estado != 'pendiente':
+            return Response({'detail': 'Solo se pueden rechazar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
+        motivo = request.data.get('motivo_rechazo', '')
+        obj.estado = 'rechazado'
+        obj.rechazado_por = request.user
+        obj.fecha_rechazo = timezone.now()
+        obj.motivo_rechazo = motivo
+        obj.save()
+        serializer = self.get_serializer(obj)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
 class PermisoAusenciaViewSet(
-    ProtectedDestroyMixin,
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -338,10 +509,17 @@ class PermisoAusenciaViewSet(
 ):
     queryset = PermisoAusencia.objects.all()
     serializer_class = PermisoAusenciaSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = ['empleado', 'tipo', 'estado', 'con_goce_sueldo', 'fecha_inicio__gte', 'fecha_fin__lte', 'fecha_solicitud__gte', 'fecha_solicitud__lte']
+    search_fields = ['motivo', 'motivo_rechazo']
+    ordering_fields = ['fecha_solicitud', 'fecha_inicio', 'fecha_fin']
+    ordering = ['-fecha_solicitud']
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset().select_related("empleado", "empleado__empresa")
+        qs = super().get_queryset().select_related(
+            "empleado", "empleado__empresa", "solicitado_por", "autorizado_por", "rechazado_por"
+        )
         if getattr(user, "is_superuser", False):
             return qs
         empresa = getattr(user, "empresa", None)
@@ -349,8 +527,48 @@ class PermisoAusenciaViewSet(
             return qs.none()
         return qs.filter(empleado__empresa=empresa)
 
+    def perform_create(self, serializer):
+        serializer.save(solicitado_por=self.request.user)
+
+    @action(detail=True, methods=['POST'])
+    def aprobar(self, request, pk=None):
+        obj = self.get_object()
+        user = request.user
+        if not getattr(user, "is_superuser", False):
+            empresa = getattr(user, "empresa", None)
+            if not empresa or obj.empleado.empresa_id != empresa.pk:
+                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+        if obj.estado != 'pendiente':
+            return Response({'detail': 'Solo se pueden aprobar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
+        obj.estado = 'aprobado'
+        obj.autorizado_por = request.user
+        obj.fecha_aprobacion = timezone.now()
+        obj.save()
+        serializer = self.get_serializer(obj)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['POST'])
+    def rechazar(self, request, pk=None):
+        obj = self.get_object()
+        user = request.user
+        if not getattr(user, "is_superuser", False):
+            empresa = getattr(user, "empresa", None)
+            if not empresa or obj.empleado.empresa_id != empresa.pk:
+                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+        if obj.estado != 'pendiente':
+            return Response({'detail': 'Solo se pueden rechazar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
+        motivo = request.data.get('motivo_rechazo', '')
+        obj.estado = 'rechazado'
+        obj.rechazado_por = request.user
+        obj.fecha_rechazo = timezone.now()
+        obj.motivo_rechazo = motivo
+        obj.save()
+        serializer = self.get_serializer(obj)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
 class IncidenciaViewSet(
-    ProtectedDestroyMixin,
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -360,10 +578,17 @@ class IncidenciaViewSet(
 ):
     queryset = Incidencia.objects.all()
     serializer_class = IncidenciaSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = ['empleado', 'tipo', 'gravedad', 'estado', 'activo', 'fecha', 'fecha__gte', 'fecha__lte']
+    search_fields = ['descripcion', 'acciones_tomadas']
+    ordering_fields = ['fecha', 'fecha_reporte', 'gravedad', 'estado']
+    ordering = ['-fecha', '-fecha_reporte']
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset().select_related("empleado", "empleado__empresa")
+        qs = super().get_queryset().select_related(
+            "empleado", "empleado__empresa", "reportado_por"
+        )
         if getattr(user, "is_superuser", False):
             return qs
         empresa = getattr(user, "empresa", None)
@@ -371,8 +596,12 @@ class IncidenciaViewSet(
             return qs.none()
         return qs.filter(empleado__empresa=empresa)
 
+    def perform_create(self, serializer):
+        serializer.save(reportado_por=self.request.user)
+
+
 class EvaluacionViewSet(
-    ProtectedDestroyMixin,
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -382,6 +611,11 @@ class EvaluacionViewSet(
 ):
     queryset = Evaluacion.objects.all()
     serializer_class = EvaluacionSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = ['empleado', 'evaluador', 'tipo', 'periodo', 'estado', 'fecha__gte', 'fecha__lte', 'puntaje__gte', 'puntaje__lte']
+    search_fields = ['comentarios', 'empleado__nombre', 'evaluador__nombre']
+    ordering_fields = ['fecha', 'puntaje', 'periodo']
+    ordering = ['-fecha']
 
     def get_queryset(self):
         user = self.request.user
@@ -395,8 +629,9 @@ class EvaluacionViewSet(
             return qs.none()
         return qs.filter(empleado__empresa=empresa)
 
+
 class CapacitacionViewSet(
-    ProtectedDestroyMixin,
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -406,6 +641,11 @@ class CapacitacionViewSet(
 ):
     queryset = Capacitacion.objects.all()
     serializer_class = CapacitacionSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = ['empleado', 'estado', 'institucion', 'fecha_inicio__gte', 'fecha_inicio__lte', 'fecha_fin__gte', 'fecha_fin__lte', 'calificacion__gte', 'calificacion__lte']
+    search_fields = ['nombre', 'institucion', 'constancia_url']
+    ordering_fields = ['fecha_inicio', 'fecha_fin', 'horas', 'calificacion']
+    ordering = ['-fecha_inicio']
 
     def get_queryset(self):
         user = self.request.user
@@ -417,8 +657,9 @@ class CapacitacionViewSet(
             return qs.none()
         return qs.filter(empleado__empresa=empresa)
 
+
 class NominaViewSet(
-    ProtectedDestroyMixin,
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -428,10 +669,22 @@ class NominaViewSet(
 ):
     queryset = Nomina.objects.all()
     serializer_class = NominaSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = [
+        'empleado', 'sucursal', 'estado',
+        'periodo_inicio__gte', 'periodo_inicio__lte',
+        'periodo_fin__gte', 'periodo_fin__lte',
+        'fecha_pago__gte', 'fecha_pago__lte',
+    ]
+    search_fields = ['observaciones', 'empleado__numero_empleado', 'empleado__nombre']
+    ordering_fields = ['periodo_inicio', 'fecha_pago', 'neto', 'total_percepciones', 'total_deducciones']
+    ordering = ['-periodo_inicio', '-fecha_generacion']
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset().select_related("empresa", "sucursal", "empleado")
+        qs = super().get_queryset().select_related(
+            "empresa", "sucursal", "empleado", "creado_por"
+        ).prefetch_related("detalles")
         if getattr(user, "is_superuser", False):
             return qs
         empresa = getattr(user, "empresa", None)
@@ -439,8 +692,100 @@ class NominaViewSet(
             return qs.none()
         return qs.filter(empresa=empresa)
 
+    @action(detail=True, methods=['POST'])
+    def calcular_totales(self, request, pk=None):
+        obj = self.get_object()
+        user = request.user
+        if not getattr(user, "is_superuser", False):
+            empresa = getattr(user, "empresa", None)
+            if not empresa or obj.empresa_id != empresa.pk:
+                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+        obj._recalcular_totales()
+        serializer = self.get_serializer(obj)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['POST'])
+    def generar_periodo(self, request):
+        periodo_inicio = request.data.get('periodo_inicio')
+        periodo_fin = request.data.get('periodo_fin')
+        sucursal_id = request.data.get('sucursal_id')
+        fecha_pago = request.data.get('fecha_pago')
+
+        if not periodo_inicio or not periodo_fin:
+            return Response({
+                'periodo_inicio': ['Este campo es requerido.'],
+                'periodo_fin': ['Este campo es requerido.'],
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            pi = datetime.strptime(periodo_inicio, '%Y-%m-%d').date()
+            pf = datetime.strptime(periodo_fin, '%Y-%m-%d').date()
+        except ValueError:
+            return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
+        if pf < pi:
+            return Response({'periodo_fin': ['Debe ser posterior a periodo_inicio.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        empleados_qs = Empleado.objects.filter(activo=True)
+        if getattr(user, "is_superuser", False):
+            pass
+        else:
+            empresa = getattr(user, "empresa", None)
+            if not empresa:
+                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+            empleados_qs = empleados_qs.filter(empresa=empresa)
+        if sucursal_id:
+            from nucleo.models import Sucursal
+            sucursal_qs = Sucursal.objects.filter(pk=sucursal_id)
+            if not getattr(user, "is_superuser", False):
+                sucursal_empresa = getattr(user, "empresa", None)
+                if sucursal_empresa:
+                    sucursal_qs = sucursal_qs.filter(empresa=sucursal_empresa)
+            if not sucursal_qs.exists():
+                return Response({'sucursal_id': ['La sucursal no existe o no pertenece a la empresa del usuario.']}, status=status.HTTP_400_BAD_REQUEST)
+            empleados_qs = empleados_qs.filter(sucursal_id=sucursal_id)
+
+        creadas = []
+        for empleado in empleados_qs.select_related('sucursal', 'empresa', 'puesto').all():
+            salario_base = empleado.puesto.salario_base if (empleado.puesto and empleado.puesto.salario_base) else None
+            contrato_activo = empleado.contratos.filter(estado='activo').order_by('-fecha_inicio').first()
+            if contrato_activo and contrato_activo.salario:
+                salario_base = contrato_activo.salario
+
+            nomina = Nomina.objects.create(
+                empresa=empleado.empresa,
+                sucursal=empleado.sucursal,
+                empleado=empleado,
+                periodo_inicio=pi,
+                periodo_fin=pf,
+                fecha_pago=datetime.strptime(fecha_pago, '%Y-%m-%d').date() if fecha_pago else None,
+                estado='pendiente',
+                salario_base=salario_base,
+                dias_pagados=15,
+                creado_por=request.user,
+            )
+            if salario_base:
+                percepcion_monto = (salario_base / Decimal('30.0')) * Decimal('15')
+                NominaDetalle.objects.create(
+                    nomina=nomina,
+                    codigo='PER001',
+                    concepto='Salario base',
+                    tipo='percepcion',
+                    cantidad=1,
+                    unidad='MXN',
+                    monto=Decimal(percepcion_monto).quantize(Decimal('0.01')),
+                )
+            nomina._recalcular_totales()
+            creadas.append(nomina.pk)
+
+        return Response({
+            'creadas': len(creadas),
+            'ids': creadas,
+        }, status=status.HTTP_201_CREATED)
+
+
 class ProductividadViewSet(
-    ProtectedDestroyMixin,
+    SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -450,15 +795,165 @@ class ProductividadViewSet(
 ):
     queryset = Productividad.objects.all()
     serializer_class = ProductividadSerializer
+    filter_backends = FILTER_BACKENDS
+    filterset_fields = [
+        'empleado', 'departamento', 'estado',
+        'fecha', 'fecha__gte', 'fecha__lte',
+        'meta_unidad',
+    ]
+    search_fields = ['descripcion', 'empleado__nombre']
+    ordering_fields = ['fecha', 'meta', 'resultado']
+    ordering = ['-fecha']
 
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset().select_related(
-            "empresa", "departamento", "empleado", "meta_unidad"
-        )
+            "empresa", "departamento", "empleado", "meta_unidad", "creado_por"
+        ).prefetch_related("detalles")
         if getattr(user, "is_superuser", False):
             return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
         return qs.filter(empresa=empresa)
+
+    def perform_create(self, serializer):
+        serializer.save(creado_por=self.request.user)
+
+
+class DashboardRH(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        es_superuser = getattr(user, "is_superuser", False)
+        empresa = None if es_superuser else getattr(user, "empresa", None)
+        if not es_superuser and not empresa:
+            return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+
+        sucursal_id = request.query_params.get('sucursal_id')
+        departamento_id = request.query_params.get('departamento_id')
+        fecha_str = request.query_params.get('fecha')
+        if fecha_str:
+            hoy = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+        else:
+            hoy = date.today()
+        inicio_mes = hoy.replace(day=1)
+        prox_mes = (inicio_mes + timedelta(days=32)).replace(day=1)
+        fin_mes = prox_mes - timedelta(days=1)
+        inicio_semana = hoy - timedelta(days=hoy.weekday())
+        fin_semana = inicio_semana + timedelta(days=6)
+
+        empleados_qs = Empleado.objects.all()
+        asistencias_qs = Asistencia.objects.all()
+        vacaciones_qs = Vacaciones.objects.all()
+        permisos_qs = PermisoAusencia.objects.all()
+        incidencias_qs = Incidencia.objects.all()
+        contratos_qs = Contrato.objects.all()
+        nominas_qs = Nomina.objects.all()
+        capacitaciones_qs = Capacitacion.objects.all()
+        evaluaciones_qs = Evaluacion.objects.all()
+        if not es_superuser:
+            empleados_qs = empleados_qs.filter(empresa=empresa)
+            asistencias_qs = asistencias_qs.filter(empleado__empresa=empresa)
+            vacaciones_qs = vacaciones_qs.filter(empleado__empresa=empresa)
+            permisos_qs = permisos_qs.filter(empleado__empresa=empresa)
+            incidencias_qs = incidencias_qs.filter(empleado__empresa=empresa)
+            contratos_qs = contratos_qs.filter(empleado__empresa=empresa)
+            nominas_qs = nominas_qs.filter(empresa=empresa)
+            capacitaciones_qs = capacitaciones_qs.filter(empleado__empresa=empresa)
+            evaluaciones_qs = evaluaciones_qs.filter(empleado__empresa=empresa)
+        if sucursal_id:
+            empleados_qs = empleados_qs.filter(sucursal_id=sucursal_id)
+            asistencias_qs = asistencias_qs.filter(empleado__sucursal_id=sucursal_id)
+            vacaciones_qs = vacaciones_qs.filter(empleado__sucursal_id=sucursal_id)
+            permisos_qs = permisos_qs.filter(empleado__sucursal_id=sucursal_id)
+            incidencias_qs = incidencias_qs.filter(empleado__sucursal_id=sucursal_id)
+            contratos_qs = contratos_qs.filter(empleado__sucursal_id=sucursal_id)
+            nominas_qs = nominas_qs.filter(sucursal_id=sucursal_id)
+            capacitaciones_qs = capacitaciones_qs.filter(empleado__sucursal_id=sucursal_id)
+            evaluaciones_qs = evaluaciones_qs.filter(empleado__sucursal_id=sucursal_id)
+        if departamento_id:
+            empleados_qs = empleados_qs.filter(departamento_id=departamento_id)
+            asistencias_qs = asistencias_qs.filter(empleado__departamento_id=departamento_id)
+            vacaciones_qs = vacaciones_qs.filter(empleado__departamento_id=departamento_id)
+            permisos_qs = permisos_qs.filter(empleado__departamento_id=departamento_id)
+            incidencias_qs = incidencias_qs.filter(empleado__departamento_id=departamento_id)
+            contratos_qs = contratos_qs.filter(empleado__departamento_id=departamento_id)
+            capacitaciones_qs = capacitaciones_qs.filter(empleado__departamento_id=departamento_id)
+            evaluaciones_qs = evaluaciones_qs.filter(empleado__departamento_id=departamento_id)
+
+        empleados_activos = empleados_qs.filter(activo=True).count()
+        altas_mes = empleados_qs.filter(fecha_ingreso__gte=inicio_mes, fecha_ingreso__lte=fin_mes).count()
+        bajas_mes = empleados_qs.filter(activo=False, actualizado_en__gte=inicio_mes, actualizado_en__lte=fin_mes).count()
+
+        asistencias_hoy_qs = asistencias_qs.filter(fecha=hoy)
+        asistencias_hoy = {
+            'total_registradas': asistencias_hoy_qs.count(),
+            'puntual': asistencias_hoy_qs.filter(estado='puntual').count(),
+            'retardo': asistencias_hoy_qs.filter(estado='retardo').count(),
+            'falta': asistencias_hoy_qs.filter(estado='falta').count(),
+            'salida_registrada': asistencias_hoy_qs.filter(hora_salida__isnull=False).count(),
+        }
+        asistencias_hoy['sin_registrar'] = max(0, empleados_activos - asistencias_hoy['total_registradas'])
+
+        vacaciones_pendientes = vacaciones_qs.filter(estado='pendiente').count()
+        permisos_pendientes = permisos_qs.filter(estado='pendiente').count()
+
+        horas_extra_semana = asistencias_qs.filter(
+            fecha__gte=inicio_semana, fecha__lte=fin_semana
+        ).aggregate(total=Coalesce(Sum('horas_extra'), Value(0, output_field=DecimalField())))['total'] or Decimal('0')
+
+        incidencias_abiertas = incidencias_qs.filter(estado='abierto').count()
+
+        nomina_periodo_actual_qs = nominas_qs.filter(
+            periodo_inicio__lte=hoy,
+            periodo_fin__gte=hoy,
+            estado__in=['pendiente', 'pagada'],
+        )
+        nominas_pendientes_pagar = nominas_qs.filter(estado='pendiente').count()
+        neto_total_periodo_actual = nomina_periodo_actual_qs.aggregate(
+            total=Coalesce(Sum('neto'), Value(0, output_field=DecimalField()))
+        )['total'] or Decimal('0')
+
+        distribucion_por_departamento = list(
+            empleados_qs.filter(activo=True, departamento__isnull=False)
+            .values('departamento__id', 'departamento__nombre')
+            .annotate(total=Count('id'))
+            .order_by('-total')
+        )
+        distribucion_por_sucursal = list(
+            empleados_qs.filter(activo=True, sucursal__isnull=False)
+            .values('sucursal__id', 'sucursal__nombre')
+            .annotate(total=Count('id'))
+            .order_by('-total')
+        )
+
+        if empleados_activos > 0:
+            tasa_rotacion = round(((altas_mes + bajas_mes) / empleados_activos) * 100, 2)
+        else:
+            tasa_rotacion = 0.0
+        rotacion_mes = {'altas': altas_mes, 'bajas': bajas_mes, 'tasa_porcentual': tasa_rotacion}
+
+        capacitaciones_en_curso = capacitaciones_qs.filter(estado='en_curso').count()
+        evaluaciones_pendientes = evaluaciones_qs.filter(estado='pendiente').count()
+
+        return Response({
+            'empleados_activos': empleados_activos,
+            'altas_mes': altas_mes,
+            'bajas_mes': bajas_mes,
+            'asistencias_hoy': asistencias_hoy,
+            'vacaciones_pendientes': vacaciones_pendientes,
+            'permisos_pendientes': permisos_pendientes,
+            'horas_extra_semana': horas_extra_semana,
+            'incidencias_abiertas': incidencias_abiertas,
+            'nominas': {
+                'pendientes_pagar': nominas_pendientes_pagar,
+                'neto_total_periodo_actual': neto_total_periodo_actual,
+            },
+            'distribucion_por_departamento': distribucion_por_departamento,
+            'distribucion_por_sucursal': distribucion_por_sucursal,
+            'rotacion_mes': rotacion_mes,
+            'capacitaciones_en_curso': capacitaciones_en_curso,
+            'evaluaciones_pendientes': evaluaciones_pendientes,
+        })

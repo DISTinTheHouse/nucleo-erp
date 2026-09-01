@@ -4510,3 +4510,752 @@ El asistente valida campos críticos (RFC, SAT) y solicitará datos faltantes.
 - Archivos relevantes:
   - Endpoint DRF: `ia/api/urls.py`, `ia/api/views.py`
   - Configuración: `ERP/settings.py`
+
+---
+
+## 👥 12. Recursos Humanos (RH)
+
+**Base URL**: `/api/v1/hr/`
+
+**Autenticación**: Bearer Token obligatorio en todos los endpoints.
+
+**Multi-tenant / Aislamiento por empresa**:
+- Listados (GET /collection): usuario sin `empresa` asignada recibe `[]` vacío.
+- Detalle (GET /{id}/): registro de otra empresa responde `404 Not Found`.
+- Creación/edición cross-empresa: `400 Bad Request` con detalle del campo que violenta la regla.
+- Superusuario: ve todo (sin scoping).
+
+**Delete = siempre soft-delete** (`activo=False`). Nada se borra físicamente. Si el registro tiene dependencias FK (PROTECT) responde `409 Conflict` con lista de las dependencias que lo bloquean.
+
+**Búsqueda y filtros globales** (todos los endpoints `GET /collection/`):
+| Feature | Uso |
+|---|---|
+| Filtro igualdad | `?campo=valor` |
+| Rango fecha ≥ | `?fecha__gte=2025-09-01` |
+| Rango fecha ≤ | `?fecha__lte=2025-09-30` |
+| Búsqueda de texto | `?search=Juan` (campos específicos por endpoint) |
+| Ordenamiento | `?ordering=fecha` ascendente / `?ordering=-fecha` descendente |
+| Paginado | `?page=1&page_size=50` |
+
+---
+
+### 0) Catálogos base (Onboarding / Catálogos)
+
+Usa estos endpoints para poblar los selects/dropdowns de los formularios de RH.
+
+#### 0.1 Puestos
+- **Listado**: `GET /api/v1/hr/puestos/`
+  - **Query params (opcionales)**: `area`, `activo`, `empresa`
+  - **Search**: `nombre`, `descripcion`
+  - **Ordering**: `nombre`, `salario_base`, `creado_en`
+- **Crear**: `POST /api/v1/hr/puestos/`
+- **Detalle**: `GET /api/v1/hr/puestos/{id}/`
+- **Editar**: `PUT / PATCH /api/v1/hr/puestos/{id}/`
+- **Eliminar (soft)**: `DELETE /api/v1/hr/puestos/{id}/` → `activo=False`
+
+**Body — Crear / Editar**
+```json
+{
+  "empresa": 1,
+  "departamento": 3,
+  "area": 5,
+  "nombre": "Operador de Máquina",
+  "descripcion": "Opera maquinaria de producción",
+  "salario_base": "15000.00",
+  "nivel_riesgo": "medio",
+  "requisitos": "Preparatoria trunca, 1 año experiencia"
+}
+```
+
+#### 0.2 Departamentos (usar `areas/`)
+- **Listado**: `GET /api/v1/hr/areas/`
+  - **Query params**: `departamento`, `activo`, `responsable`
+  - **Search**: `nombre`, `codigo`, `descripcion`
+  - **Ordering**: `nombre`, `codigo`
+- **CRUD**: igual que puestos: `POST`, `GET /{id}/`, `PUT/PATCH /{id}/`, `DELETE /{id}/` (soft)
+
+**Body — Crear Área**
+```json
+{
+  "departamento": 3,
+  "codigo": "PROD",
+  "nombre": "Producción",
+  "responsable": null,
+  "descripcion": "Piso de planta"
+}
+```
+
+#### 0.3 Turnos
+- **Listado**: `GET /api/v1/hr/turnos/`
+  - **Query params**: `activo`, `empresa`, `dias_laborales`
+  - **Search**: `nombre`, `descripcion`
+  - **Ordering**: `nombre`, `hora_entrada`, `hora_salida`, `horas_base_diarias`
+- **CRUD**: estándar
+
+**Body — Crear Turno**
+```json
+{
+  "empresa": 1,
+  "nombre": "Matutino",
+  "hora_entrada": "08:00:00",
+  "hora_salida": "16:30:00",
+  "dias_laborales": ["L", "M", "X", "J", "V"],
+  "horas_base_diarias": "8.00",
+  "tolerancia_retardo_minutos": 5,
+  "descripcion": "Turno de 8 horas con 30 min de comida"
+}
+```
+
+**Validaciones**: `hora_salida > hora_entrada`, `horas_base_diarias` no puede exceder `hora_salida - hora_entrada`.
+
+#### 0.4 Calendarios (feriados, descansos programados)
+- **Listado**: `GET /api/v1/hr/calendarios/`
+  - **Query params**: `turno`, `tipo`, `fecha__gte`, `fecha__lte`
+  - **Search**: `tipo`, `turno__nombre`
+  - **Ordering**: `fecha`, `tipo`
+- **CRUD**: estándar
+
+**Body**
+```json
+{
+  "turno": 1,
+  "fecha": "2025-12-25",
+  "tipo": "feriado",
+  "descripcion": "Navidad"
+}
+```
+Valores `tipo`: `laboral`, `descanso`, `feriado`, `especial`.
+
+---
+
+### 1) Empleados (Expediente completo)
+
+- **Listado**: `GET /api/v1/hr/empleados/`
+  - **Query params**: `sucursal`, `departamento`, `puesto`, `turno`, `activo`, `sexo`, `estado_civil`
+  - **Search**: `nombre`, `apellido_paterno`, `apellido_materno`, `numero_empleado`, `curp`, `rfc`, `email`, `telefono`, `nss`
+  - **Ordering**: `numero_empleado`, `apellido_paterno`, `nombre`, `fecha_ingreso`, `fecha_nacimiento`
+- **Crear**: `POST /api/v1/hr/empleados/`
+- **Detalle**: `GET /api/v1/hr/empleados/{id}/`
+- **Editar**: `PUT / PATCH /api/v1/hr/empleados/{id}/`
+- **Eliminar (soft)**: `DELETE /api/v1/hr/empleados/{id}/` → `activo=False`
+
+**Body — Crear / Editar**
+
+Solo se requieren los campos marcados con `*`. El resto es opcional (blank).
+
+```json
+{
+  "empresa": 1,
+  "sucursal": 2,
+  "departamento": 3,
+  "puesto": 5,
+  "turno": 1,
+  "numero_empleado": "EMP-002",
+  "nombre": "Ana",
+  "apellido_paterno": "López",
+  "apellido_materno": "Martínez",
+  "fecha_nacimiento": "1995-06-20",
+  "sexo": "F",
+  "estado_civil": "soltero",
+  "nacionalidad": "Mexicana",
+  "lugar_nacimiento": "Guadalajara, Jal.",
+  "curp": "LOMA950620MJCSN09",
+  "rfc": "LOMA950620XXX",
+  "nss": "98765432101",
+  "infonavit": "INF-987",
+  "tipo_sangre": "A+",
+  "alergias": "Ninguna",
+  "enfermedades_cronicas": "Asma (controlada)",
+  "email": "ana@empresa.com",
+  "telefono": "3312345678",
+  "calle": "Av. Revolución",
+  "numero_exterior": "456",
+  "numero_interior": null,
+  "colonia": "Lomas del Country",
+  "codigo_postal": "44620",
+  "ciudad": "Guadalajara",
+  "estado": "Jalisco",
+  "banco": "BBVA",
+  "cuenta_bancaria": "012180012345678901",
+  "clabe": "012180012345678901",
+  "moneda_pago": "MXN",
+  "nombre_emergencia": "Carlos López",
+  "parentesco_emergencia": "Padre",
+  "telefono_emergencia": "3387654321",
+  "email_emergencia": "carlos@mail.com",
+  "foto_url": null,
+  "observaciones": "Embarque 2do trimestre 2025",
+  "fecha_ingreso": "2024-01-15",
+  "fecha_baja": null
+}
+```
+
+**Validaciones automáticas backend** (no dependen de frontend):
+- `curp`: exactamente 18 caracteres
+- `rfc`: 12 (moral) o 13 (física) caracteres
+- `nss`: 11 dígitos
+- `clabe`: 18 dígitos
+- `numero_empleado + empresa`: único (no puede repetirse dentro de la misma empresa)
+- Fechas: `fecha_nacimiento < fecha_ingreso`; `fecha_baja > fecha_ingreso`
+
+**Response — GET /empleados/EMP-002/**
+```json
+{
+  "id": 2,
+  "numero_empleado": "EMP-002",
+  "nombre": "Ana",
+  "apellido_paterno": "López",
+  "activo": true,
+  "fecha_ingreso": "2024-01-15",
+  "sucursal_nombre": "Zapopan",
+  "departamento_nombre": "Producción",
+  "puesto_nombre": "Operador",
+  "turno_nombre": "Matutino",
+  "creado_en": "2025-09-01T10:00:00Z"
+}
+```
+
+---
+
+### 2) Asistencia — Control de entradas y salidas
+
+**Endpoints CRUD**:
+- **Listado**: `GET /api/v1/hr/asistencias/`
+  - **Query params**: `empleado`, `turno`, `estado`, `fecha`, `fecha__gte`, `fecha__lte`
+  - **Search**: `observaciones`, `empleado__nombre`, `empleado__numero_empleado`
+  - **Ordering**: `fecha`, `hora_entrada`, `hora_salida`, `minutos_retardo`
+- **Crear manual**: `POST /api/v1/hr/asistencias/` (solo RH)
+- **Detalle**: `GET /api/v1/hr/asistencias/{id}/`
+- **Editar**: `PUT / PATCH /api/v1/hr/asistencias/{id}/`
+- **Eliminar (soft)**: `DELETE /api/v1/hr/asistencias/{id}/`
+
+**Estados de Asistencia** (automáticos, no se envían en body):
+| Valor | Significado |
+|---|---|
+| `puntual` | Llegada ≤ tolerancia_retardo |
+| `retardo` | Llegada > tolerancia |
+| `falta` | Sin registro de entrada al cierre del día |
+| `salida_temprano` | Hora_salida antes de turno |
+| `justificada` | Falta justificada por permiso/vacaciones |
+
+#### 2.1 Registrar Entrada (checador)
+
+- **Endpoint**: `POST /api/v1/hr/asistencias/registrar_entrada/`
+- **Propósito**: UI de reloj checador (solo empleado_id obligatorio)
+
+**Body**
+```json
+{
+  "empleado_id": 1,
+  "fecha": "2025-09-01",
+  "hora":  "2025-09-01 08:05:00"
+}
+```
+- `fecha`: opcional. Default = `hoy` (fecha local del server).
+- `hora`: opcional. Default = `now()`.
+
+**Response 200** (cálculos automáticos):
+```json
+{
+  "id": 50,
+  "empleado": 1,
+  "turno": 1,
+  "fecha": "2025-09-01",
+  "hora_entrada": "2025-09-01T08:05:00Z",
+  "hora_salida": null,
+  "estado": "retardo",
+  "minutos_retardo": 5,
+  "minutos_tolerancia": 5,
+  "horas_normales": null,
+  "horas_extra": null,
+  "observaciones": null,
+  "autorizado_por": null
+}
+```
+
+#### 2.2 Registrar Salida (checador)
+
+- **Endpoint**: `POST /api/v1/hr/asistencias/registrar_salida/`
+
+**Body**
+```json
+{
+  "empleado_id": 1,
+  "fecha": "2025-09-01",
+  "hora": "2025-09-01 19:00:00"
+}
+```
+
+**Response 200** (horas automáticas):
+```json
+{
+  "id": 50,
+  "hora_salida": "2025-09-01T19:00:00Z",
+  "estado": "retardo",
+  "horas_normales": "8.00",
+  "horas_extra": "2.00",
+  "minutos_retardo": 5
+}
+```
+
+**Fórmulas automáticas backend**:
+- `horas_normales = min(horas_trabajadas, turno.horas_base_diarias)`
+- `horas_extra = max(0, horas_trabajadas - turno.horas_base_diarias)`
+
+---
+
+### 3) Control de Horas (actividades específicas / OP)
+
+Registro granular de tiempo invertido por tarea. Se puede vincular a una Asistencia o a una Orden de Producción.
+
+- **Listado**: `GET /api/v1/hr/control-horas/`
+  - **Query params**: `empleado`, `tipo`, `op`, `fecha`, `fecha__gte`, `fecha__lte`
+  - **Search**: `descripcion`, `empleado__numero_empleado`
+  - **Ordering**: `fecha`, `hora_inicio`, `hora_fin`, `horas_trabajadas`
+- **CRUD**: estándar
+
+**Body**
+```json
+{
+  "empleado": 1,
+  "asistencia": 50,
+  "tipo": "produccion",
+  "op": 123,
+  "fecha": "2025-09-01",
+  "hora_inicio": "09:00:00",
+  "hora_fin": "12:00:00",
+  "descripcion": "Bordado pedido 1250",
+  "cantidad_producida": 45
+}
+```
+- `horas_trabajadas`: **automático** (backend calcula `hora_fin - hora_inicio` en save()). No lo mandar.
+- `op`: nullable (FK opcional a OrdenProduccion del módulo producción).
+
+---
+
+### 4) Contratos (historial laboral)
+
+- **Listado**: `GET /api/v1/hr/contratos/`
+  - **Query params**: `empleado`, `tipo`, `estado`, `activo`, `fecha_inicio__gte/__lte`, `fecha_fin__gte/__lte`
+  - **Search**: `archivo_url`, `observaciones`, `prestaciones`
+  - **Ordering**: `fecha_inicio`, `fecha_fin`, `salario`
+- **CRUD**: estándar
+  - `creado_por` lo pone el backend = `request.user`. **No mandar en body.**
+
+**Body — Crear**
+```json
+{
+  "empleado": 1,
+  "tipo": "indefinido",
+  "fecha_inicio": "2024-01-15",
+  "fecha_fin": null,
+  "salario": "25000.00",
+  "periodicidad_pago": "quincenal",
+  "estado": "activo",
+  "jornada": "40 horas/semana",
+  "lugar_trabajo": "Planta Zapopan",
+  "funciones_clave": "Operación, mantenimiento preventivo, reportes diarios",
+  "prestaciones": "Aguinaldo 30 días + Prima vacacional 25% + 15 días vacaciones + IMSS + Infonavit",
+  "archivo_url": "https://contratos/EMP-001-indefinido.pdf",
+  "observaciones": "Renovación después de periodo prueba"
+}
+```
+
+**Tipos de contrato**: `prueba` / `indefinido` / `definido` / `temporada` / `honorarios` / `practicas`.
+**Estados**: `activo` / `inactivo` / `vencido` / `rescindido`.
+
+**Regla validada backend**:
+- Un empleado **solo puede tener 1 contrato con `estado=activo`**. Si intentas crear un 2do activo → `400 Bad Request`.
+
+---
+
+### 5) Vacaciones
+
+**Flujo completo**: Solicitud pendiente → Aprobar / Rechazar (con auditoría del usuario que autorizó).
+
+- **Listado**: `GET /api/v1/hr/vacaciones/`
+  - **Query params**: `empleado`, `estado`, `fecha_inicio__gte`, `fecha_fin__lte`, `fecha_solicitud__gte`, `fecha_solicitud__lte`
+  - **Search**: `motivo`, `motivo_rechazo`
+  - **Ordering**: `fecha_solicitud`, `fecha_inicio`, `fecha_fin`, `dias_solicitados`
+- **Crear solicitud**: `POST /api/v1/hr/vacaciones/`
+- **Detalle**: `GET /api/v1/hr/vacaciones/{id}/`
+- **Editar**: `PUT / PATCH /api/v1/hr/vacaciones/{id}/` (solo si `estado=pendiente`)
+- **Eliminar (soft)**: `DELETE /api/v1/hr/vacaciones/{id}/`
+
+**Estados**: `pendiente` / `aprobado` / `rechazado`.
+
+#### 5.1 Crear solicitud (empleado / RH)
+**Body**
+```json
+{
+  "empleado": 1,
+  "fecha_inicio": "2025-12-20",
+  "fecha_fin": "2025-12-31",
+  "dias_solicitados": 10,
+  "dias_disponibles_al_momento": 12,
+  "motivo": "Navidad con familia en Puerto Vallarta"
+}
+```
+Campos auto-set por backend (**no mandar**):
+- `solicitado_por = request.user`
+- `fecha_solicitud = now()`
+- `estado = "pendiente"`
+
+#### 5.2 Aprobar solicitud
+- **Endpoint**: `POST /api/v1/hr/vacaciones/{id}/aprobar/`
+- **Body**: vacío `{}`
+
+**Response 200**
+```json
+{
+  "id": 5,
+  "estado": "aprobado",
+  "autorizado_por": 3,
+  "fecha_aprobacion": "2025-09-05T14:25:00Z"
+}
+```
+
+#### 5.3 Rechazar solicitud
+- **Endpoint**: `POST /api/v1/hr/vacaciones/{id}/rechazar/`
+
+**Body**
+```json
+{ "motivo_rechazo": "Staff insuficiente en esas fechas (3 empleados más piden mismo periodo)" }
+```
+
+**Response 200**
+```json
+{
+  "id": 5,
+  "estado": "rechazado",
+  "rechazado_por": 3,
+  "fecha_rechazo": "2025-09-05T14:25:00Z",
+  "motivo_rechazo": "Staff insuficiente..."
+}
+```
+
+**Regla**: No se puede aprobar o rechazar una solicitud ya procesada (estado ≠ pendiente) → `400`.
+
+---
+
+### 6) Permisos / Ausencias
+
+Mismo flujo que Vacaciones (pendiente → aprobar / rechazar). Campos adicionales.
+
+- **Listado**: `GET /api/v1/hr/permisos-ausencias/`
+  - **Query params**: `empleado`, `tipo`, `estado`, `con_goce_sueldo`, `fecha_inicio__gte`, `fecha_fin__lte`, `fecha_solicitud__gte`, `fecha_solicitud__lte`
+  - **Search**: `motivo`, `motivo_rechazo`
+  - **Ordering**: `fecha_solicitud`, `fecha_inicio`, `fecha_fin`
+- **Crear solicitud**: `POST /api/v1/hr/permisos-ausencias/`
+- **Aprobar / Rechazar**: `POST /permisos-ausencias/{id}/aprobar/` y `POST /permisos-ausencias/{id}/rechazar/` (mismo body que vacaciones)
+
+**Body — Crear Permiso**
+```json
+{
+  "empleado": 1,
+  "tipo": "incapacidad",
+  "fecha_inicio": "2025-09-08",
+  "fecha_fin": "2025-09-10",
+  "hora_inicio": null,
+  "hora_fin": null,
+  "con_goce_sueldo": true,
+  "motivo": "Gripe severa. Certificado médico IMSS adjunto en URL",
+  "documento_url": "https://incapacidades/EMP-001-sept.pdf"
+}
+```
+
+**Tipos `tipo`**: `permiso` / `incapacidad` / `falta_injustificada` / `comision` / `estudios` / `otro`.
+
+---
+
+### 7) Incidencias
+
+Bitácora de eventos: retardos acumulados, faltas, problemas de conducta, reconocimientos.
+
+- **Listado**: `GET /api/v1/hr/incidencias/`
+  - **Query params**: `empleado`, `tipo`, `gravedad`, `estado`, `activo`, `fecha`, `fecha__gte`, `fecha__lte`
+  - **Search**: `descripcion`, `acciones_tomadas`
+  - **Ordering**: `fecha`, `fecha_reporte`, `gravedad`, `estado`
+- **CRUD**: estándar
+  - `reportado_por = request.user` y `fecha_reporte = now()` (auto, no mandar)
+
+**Body — Crear**
+```json
+{
+  "empleado": 1,
+  "tipo": "retardo",
+  "gravedad": "baja",
+  "fecha": "2025-09-01",
+  "descripcion": "3er retardo del mes por tráfico. Llegó 45 min tarde.",
+  "acciones_tomadas": "Amonestación verbal. Se cita a junta el miércoles 10.",
+  "documento_url": null,
+  "estado": "abierto"
+}
+```
+
+**`tipo`**: `retardo` / `falta` / `conducta` / `actitud` / `rendimiento` / `accidente` / `reconocimiento` / `otro`.
+**`gravedad`**: `baja` / `media` / `alta`.
+**`estado`**: `abierto` (default) / `cerrado`.
+
+---
+
+### 8) Nómina (percepciones / deducciones / neto calculado)
+
+- **Listado**: `GET /api/v1/hr/nominas/`
+  - **Query params**: `empleado`, `sucursal`, `estado`, `periodo_inicio__gte/__lte`, `periodo_fin__gte/__lte`, `fecha_pago__gte/__lte`
+  - **Search**: `observaciones`, `empleado__numero_empleado`, `empleado__nombre`
+  - **Ordering**: `periodo_inicio`, `fecha_pago`, `neto`, `total_percepciones`, `total_deducciones`
+- **CRUD**: `POST /api/v1/hr/nominas/`, `GET /{id}/`, `PUT/PATCH /{id}/`, `DELETE /{id}/` (soft)
+- `creado_por = request.user` y `fecha_generacion = now()` (auto). No mandar.
+
+**Estados nómina**: `pendiente` / `autorizada` / `pagada` / `cancelada`.
+
+#### 8.1 Crear / Editar Nómina individual (Nested + Detalles)
+
+Body puede incluir `detalles[]`. Si va incluido, el backend reemplaza cualquier detalle anterior por el nuevo arreglo.
+
+**Body — Crear**
+```json
+{
+  "empresa": 1,
+  "sucursal": 2,
+  "empleado": 1,
+  "periodo_inicio": "2025-09-01",
+  "periodo_fin":    "2025-09-15",
+  "fecha_pago":     "2025-09-20",
+  "estado": "pendiente",
+  "salario_base": "25000.00",
+  "dias_pagados": 15,
+  "horas_extra_pagadas": "4.00",
+  "observaciones": "Quincena septiembre 1-15. Incluye 4 hrs extra día 5.",
+  "detalles": [
+    { "codigo": "PER001", "concepto": "Salario base",    "tipo": "percepcion", "cantidad": 1,  "unidad": "MXN", "monto": "12500.00" },
+    { "codigo": "PER002", "concepto": "Horas extra x2",  "tipo": "percepcion", "cantidad": 4,  "unidad": "MXN", "monto": "1613.00" },
+    { "codigo": "DED001", "concepto": "ISR",             "tipo": "deduccion",  "cantidad": 1,  "unidad": "MXN", "monto": "1150.00" },
+    { "codigo": "DED002", "concepto": "IMSS",            "tipo": "deduccion",  "cantidad": 1,  "unidad": "MXN", "monto":  "525.00" },
+    { "codigo": "DED003", "concepto": "Infonavit",       "tipo": "deduccion",  "cantidad": 1,  "unidad": "MXN", "monto":  "750.00" }
+  ]
+}
+```
+
+**`tipo` detalle**: `percepcion` / `deduccion`.
+
+**Response 201** (campos calculados automáticamente):
+```json
+{
+  "id": 101,
+  "total_percepciones": "14113.00",
+  "total_deducciones":  "2425.00",
+  "neto":              "11688.00",
+  "fecha_generacion": "2025-09-01T10:30:00Z",
+  "creado_por": 5,
+  "detalles": [
+    { "id": 501, "codigo": "PER001", "concepto": "Salario base", "tipo": "percepcion", "monto": "12500.00" },
+    { "...": "..." }
+  ]
+}
+```
+
+**Fórmula backend**: `neto = total_percepciones - total_deducciones`. Se recalcula solo cada save() de Nómina o NominaDetalle.
+
+#### 8.2 Re-calcular totales de una nómina existente
+
+- **Endpoint**: `POST /api/v1/hr/nominas/{id}/calcular_totales/`
+- **Body**: vacío `{}`
+- **Casos de uso**: editaste detalles por fuera del nested, o ajustaste salario base.
+
+Response 200: misma shape que Response 201 (con totales actualizados).
+
+#### 8.3 Generar período completo (lote de nóminas)
+
+- **Endpoint**: `POST /api/v1/hr/nominas/generar_periodo/`
+- **Propósito**: crear nómina para TODOS los empleados activos de la empresa (o de una sucursal específica).
+
+**Body**
+```json
+{
+  "periodo_inicio": "2025-09-01",
+  "periodo_fin":    "2025-09-15",
+  "sucursal_id":    2,
+  "fecha_pago":     "2025-09-20"
+}
+```
+- `sucursal_id`: opcional. Si no se envía → todas las sucursales de la empresa.
+- `salario_base`: auto = `puesto.salario_base` si existe, si no `contrato_activo.salario`, si no `null`.
+- Auto-crea detalle único: `PER001 Salario base quincenal = (salario/30)*15` redondeado a 2 decimales.
+
+**Response 201**
+```json
+{
+  "creadas": 45,
+  "ids": [101, 102, 103, 104, "... 45 totales"]
+}
+```
+
+---
+
+### 9) Productividad (metas por empleado / departamento)
+
+- **Listado**: `GET /api/v1/hr/productividad/`
+  - **Query params**: `empleado`, `departamento`, `estado`, `fecha__gte`, `fecha__lte`, `meta_unidad`
+  - **Search**: `descripcion`, `empleado__nombre`
+  - **Ordering**: `fecha`, `meta`, `resultado`
+- **CRUD**: estándar
+  - `creado_por = request.user` (auto)
+
+**Body — Crear**
+```json
+{
+  "empresa": 1,
+  "departamento": 3,
+  "empleado": 1,
+  "fecha": "2025-09-01",
+  "meta_unidad": 1,
+  "meta": "100.00",
+  "resultado": "95.50",
+  "descripcion": "Piezas cosidas - OP 1250",
+  "observaciones": "Paró 1 hora por mantenimiento preventivo",
+  "estado": "confirmado"
+}
+```
+- `meta_unidad`: FK a catálogo `UnidadMedida` del módulo inventarios (ej: 1 = pieza, 2 = docena).
+- `estado`: `borrador` / `confirmado`.
+- Se puede agregar `detalles[]` análogo a nóminas por medio de `ProductividadDetalle`.
+
+---
+
+### 10) Evaluaciones
+
+- **Listado**: `GET /api/v1/hr/evaluaciones/`
+  - **Query params**: `empleado`, `evaluador`, `tipo`, `periodo`, `estado`, `fecha__gte/__lte`, `puntaje__gte/__lte`
+  - **Search**: `comentarios`, `empleado__nombre`, `evaluador__nombre`
+  - **Ordering**: `fecha`, `puntaje`, `periodo`
+- **CRUD**: estándar
+
+**Body**
+```json
+{
+  "empleado": 1,
+  "evaluador": 3,
+  "tipo": "desempeno",
+  "periodo": "anual",
+  "fecha": "2025-08-30",
+  "puntaje": "92.00",
+  "resultado": "Supera expectativas",
+  "objetivos_futuros": "Liderar grupo de 5 operadores en Q4",
+  "estado": "completada",
+  "comentarios": "Excelente desempeño anual. Cumplió el 104% de las metas de producción."
+}
+```
+
+**`tipo`**: `desempeno` / `competencias` / `objetivos` / `prueba` / `anual`.
+**`periodo`**: `mensual` / `trimestral` / `semestral` / `anual`.
+**`estado`**: `pendiente` / `en_proceso` / `completada`.
+`puntaje`: escala 0-100 con 2 decimales.
+
+---
+
+### 11) Capacitaciones
+
+- **Listado**: `GET /api/v1/hr/capacitaciones/`
+  - **Query params**: `empleado`, `estado`, `institucion`, `fecha_inicio__gte/__lte`, `fecha_fin__gte/__lte`, `calificacion__gte/__lte`
+  - **Search**: `nombre`, `institucion`, `constancia_url`
+  - **Ordering**: `fecha_inicio`, `fecha_fin`, `horas`, `calificacion`
+- **CRUD**: estándar
+
+**Body**
+```json
+{
+  "empleado": 1,
+  "nombre": "Seguridad Industrial — Manejo de Montacargas",
+  "institucion": "IMSS / STPS",
+  "fecha_inicio": "2025-09-10",
+  "fecha_fin": "2025-09-12",
+  "horas": 16,
+  "proveedor": "Instructor Certificado 1234",
+  "costo": "2500.00",
+  "moneda": "MXN",
+  "lugar": "Aula capacitaciones Planta Zapopan",
+  "objetivos": "Certificar en manejo seguro de montacargas clase I",
+  "contenido": "Teórico 6h + Práctico 10h + Examen",
+  "estado": "inscrito",
+  "calificacion": null,
+  "asistio": null,
+  "aprobado": null,
+  "constancia_url": null,
+  "comentarios": null
+}
+```
+
+**`estado`**: `inscrito` / `en_curso` / `finalizado` / `cancelado`.
+
+---
+
+### 12) Dashboard RH (página principal del módulo)
+
+- **Endpoint**: `GET /api/v1/hr/dashboard/`
+- **Propósito**: cards del dashboard. Un solo request → toda la foto del día/mes.
+
+**Query params (todos opcionales)**:
+| Param | Tipo | Función |
+|---|---|---|
+| `sucursal_id` | int | Filtra todas las métricas por sucursal |
+| `departamento_id` | int | Filtra todas las métricas por departamento |
+| `fecha` | YYYY-MM-DD | Usa esta fecha como "hoy" para asistencias (default hoy server) |
+
+**Response 200** (único JSON, siempre mismo shape):
+```json
+{
+  "empleados_activos": 45,
+  "altas_mes": 2,
+  "bajas_mes": 1,
+  "asistencias_hoy": {
+    "total_registradas": 40,
+    "puntual": 35,
+    "retardo": 3,
+    "falta": 2,
+    "salida_registrada": 10,
+    "sin_registrar": 5
+  },
+  "vacaciones_pendientes": 4,
+  "permisos_pendientes": 2,
+  "horas_extra_semana": "24.50",
+  "incidencias_abiertas": 7,
+  "nominas": {
+    "pendientes_pagar": 45,
+    "neto_total_periodo_actual": "486125.00"
+  },
+  "distribucion_por_departamento": [
+    { "departamento__id": 3, "departamento__nombre": "Producción", "total": 20 },
+    { "departamento__id": 4, "departamento__nombre": "Ventas",     "total": 10 },
+    { "departamento__id": 2, "departamento__nombre": "RH",         "total":  5 }
+  ],
+  "distribucion_por_sucursal": [
+    { "sucursal__id": 2, "sucursal__nombre": "Zapopan",     "total": 45 },
+    { "sucursal__id": 5, "sucursal__nombre": "Tlaquepaque", "total": 0 }
+  ],
+  "rotacion_mes": {
+    "altas": 2,
+    "bajas": 1,
+    "tasa_porcentual": 6.67
+  },
+  "capacitaciones_en_curso": 3,
+  "evaluaciones_pendientes": 12
+}
+```
+
+**Fórmulas**:
+- `tasa_porcentual = 100 * (altas + bajas) / empleados_activos` redondeado a 2 decimales.
+- `sin_registrar = max(0, empleados_activos - total_registradas)` (hoy).
+- `horas_extra_semana`: Suma de `horas_extra` de Asistencia con fecha entre lunes-domingo de la semana actual.
+
+---
+
+### Errores comunes
+
+| HTTP | Motivo | Shape detalle |
+|---|---|---|
+| `400 Bad Request` | Validación fallida | `{ "campo": ["Mensaje."], "non_field_errors": ["Otro mensaje"] }` |
+| `403 Forbidden` | Usuario sin empresa o cross-empresa en @action | `{ "detail": "No autorizado." }` |
+| `404 Not Found` | Registro no existe / otra empresa | `{ "detail": "Not found." }` |
+| `409 Conflict` | DELETE con dependencias FK que lo protegen | `{ "detail": "No se puede eliminar: dependencias en Contratos, Asistencias." }` |

@@ -15,7 +15,8 @@ from hr.api.views import (
     EvaluacionViewSet,
     CapacitacionViewSet,
     NominaViewSet,
-    ProductividadViewSet
+    ProductividadViewSet,
+    DashboardRH,
 )
 
 router = DefaultRouter()
@@ -36,5 +37,6 @@ router.register(r'nominas', NominaViewSet, basename='nominas')
 router.register(r'productividad', ProductividadViewSet, basename='productividad')
 
 urlpatterns = [
+    path('dashboard/', DashboardRH.as_view(), name='rh-dashboard'),
     path('', include(router.urls)),
 ]

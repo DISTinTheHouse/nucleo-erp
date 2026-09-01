@@ -81,7 +81,8 @@ INSTALLED_APPS = [
     'auth_kit',
     'auth_kit.mfa',
     'drf_spectacular',
-    'simple_history'
+    'simple_history',
+    'django_filters',
 ]
 
 AUTH_KIT = {
@@ -304,6 +305,11 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_FILTER_BACKENDS': [
+        'django_filters.rest_framework.DjangoFilterBackend',
+        'rest_framework.filters.SearchFilter',
+        'rest_framework.filters.OrderingFilter',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
