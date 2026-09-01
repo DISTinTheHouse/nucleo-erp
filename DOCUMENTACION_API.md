@@ -1240,6 +1240,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
     > Ejemplo pedido de 500 piezas con 2 pickings de 250 → `pct_asignado_pedido: "100.0000"`, `pct_surtido_pedido: "100.0000"` **independientemente de a qué almacenes fueran destinados cada picking**. Ambos se cuentan igual para el tracker.
     - Fórmulas y SSoT centralizado en [pendientes.py → `armar_tracker_pedido()`](file:///c:/Users/Jesús%Ibarra/Desktop/django-backend-v2/wms/services/picking_pipeline/pendientes.py#L163-L196) y [picking_service.py → `PickingService._armar_tracker`](file:///c:/Users/Jesús%Ibarra/Desktop/django-backend-v2/wms/services/picking_service.py#L61-L69). Onboarding WMS y detalle Pedido devuelven exactamente los mismos valores.
   - **Nuevo (Picking v2 Tracker)**: `folios_picking[]` — lista compacta de **todos los folios picking activos** del pedido (sin filtro de almacén destino) para trazabilidad de ubicación:
+
     ```ts
     type FolioPickingResumen = {
       id: number;
@@ -1260,6 +1261,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
     ```
 
     - Consumo Next.js: renderiza una tabla/grid "Historial de ubicación por picking" — cada renglón representa un folio; click en el folio abre `wms/pickings/${id}` en modal/pestaña nueva para ver el detalle completo de líneas y ubicación.
+
   - **Nuevo (Picking v2 Tracker)**: En cada renglón de `detalles[]` (PedidoDetalleReadSerializer) llega `detalles[].tracker_picking` (mismo shape 5 KPIs pero a nivel de la línea del pedido).
   - **Nuevo (Picking v2 Tracker)**: En cada talla anidada `detalles[].tallas[]` (PedidoDetalleTallaReadSerializer) llegan:
     | Campo | Tipo | Significado |
@@ -1666,6 +1668,294 @@ La recepción es el proceso unificado que afecta existencias tanto para órdenes
   "movimiento_inventario_id": 77
 }
 ```
+
+---
+
+## 💰 Finanzas y Contabilidad (Módulo Completo)
+
+**Base URL**: `/api/v1/finanzas/`
+
+### ⚠️ \*\*Notas Importantes Multi-tenant (antes de integrar módulos Finanzas:
+
+1. **Aislamiento por empresa**: TODO endpoint aplica aislamiento estricto por `empresa` en servidor:
+   - \*\*Usuario normal: solo ve / crea registros de su `user.empresa` (o `[]` vacío si no tiene empresa asignada).
+   - \*\*Detalle cross-empresa responde `404 Not Found` (no expone existencia).
+   - **Superusuario** (`is_superuser=true`) o **Admin Empresa** (`is_admin_empresa=true`) bypass scoping empresa:
+     - **GET**: list = ve TODO (de cualquier empresa).
+     - **POST**: **DEBE** enviar `"empresa": <id>` en el body (si falta → `400 {"empresa": "Superusuario debe especificar la empresa explícitamente."`).
+     - **Dashboard** endpoints agregados** aceptan también **`: `?empresa_id=<id>` para filtrar por una empresa concreta.
+2. \*\*Query params comunes (todos los listados GET collection):
+   - `fecha_inicio` / `fecha_fin` (o `fecha_desde` / `fecha_hasta`) → filtra por fecha principal del modelo.
+   - `ordering` → lo ignora en algunos; pero el `ordering
+   - Campos específicos por cada modelo; revisar `query params específicos sección por endpoint.
+3. \*\*Campo `empresa` en POST/PUT:
+   - Usuario normal: **no lo envíes `empresa`** (el backend lo toma del usuario, si envías una distinta a la tuya → `400`).
+   - Superuser / Admin Empresa: \*\*envíalo siempre en body.
+4. \*\*FK cruzada (cliente / proveedor / banco / etc.) validada para usuario normal; super/admin salta validación.
+
+---
+
+### Índice de Endpoints Finanzas
+
+|   # | Recurso                   | CRUD + Acciones custom                                                                                                    |
+| --: | ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+|   1 | [Clientes (Contabilidad)  | `GET/finanzas/clientes-contabilidad/`                                                                                     |
+|   2 | [Cuentas por Cobrar       | `GET/POST/PATCH/DELETE finanzas/cuentas-por-cobrar/`                                                                      |
+|   3 | [Facturas (Clientes)      | `GET/POST/PATCH/DELETE finanzas/facturas/` + `POST registrar-pendiente-cobro/`                                            |
+|   4 | [Cuentas Contables]       | `GET/POST/PATCH/DELETE finanzas/cuentas-contables/`                                                                       |
+|   5 | [Centros de Costo         | `GET/POST/PATCH/DELETE finanzas/centros-costo/`                                                                           |
+|   6 | [Pólizas Contables        | `GET/POST/PATCH/DELETE finanzas/polizas/`                                                                                 |
+|   7 | [Facturas Proveedor       | `GET/POST/PATCH/DELETE finanzas/facturas-proveedor/`                                                                      |
+|   8 | [Bancos]                  | `GET/POST/PATCH/DELETE finanzas/bancos/`                                                                                  |
+|   9 | [Cuentas Bancarias        | `GET/POST/PATCH/DELETE finanzas/cuentas-bancarias/`                                                                       |
+|  10 | [Cuentas por Pagar        | `GET/POST/PATCH/DELETE finanzas/cuentas-por-pagar/`                                                                       |
+|  11 | [Cobros]                  | `GET/POST/PATCH/DELETE finanzas/cobros/` + `POST {id}/cancelar/`                                                          |
+|  12 | [Pagos]                   | `GET/POST/PATCH/DELETE finanzas/pagos/` + `POST {id}/cancelar/`                                                           |
+|  13 | [Movimientos Bancarios    | `GET/POST/PATCH/DELETE finanzas/movimientos-bancarios/` + `POST {id}/cancelar/`                                           |
+|  14 | [Conciliaciones Bancarias | `GET/POST/PATCH/DELETE finanzas/conciliaciones-bancarias/` + `POST preparar/`, `POST {id}/cerrar/`, `POST {id}/cancelar/` |
+|  15 | [Notas de Crédito         | `GET/POST/PATCH/DELETE finanzas/notas-credito/` + `POST {id}/cancelar/`                                                   |
+|  16 | [Alertas de Mora          | `GET finanzas/alertas-mora/` + `POST generar/`                                                                            |
+|  17 | [Dashboard Financiero     | `GET finanzas/dashboard/`                                                                                                 |
+
+---
+
+### 1) Clientes (Contabilidad)
+
+Catálogo de clientes filtrados para finanzas (vista ligera del catálogo general).
+
+- **Listar**: `GET /api/v1/finanzas/clientes-contabilidad/`
+- **Detalle**: `GET /api/v1/finanzas/clientes-contabilidad/{id}/`
+- **Crear**: `POST /api/v1/finanzas/clientes-contabilidad/`
+- **Editar**: `PATCH /api/v1/finanzas/clientes-contabilidad/{id}/`
+- **Eliminar**: `DELETE /api/v1/finanzas/clientes-contabilidad/{id}/`
+- **Query params (opcionales)**:
+  - `q`: búsqueda por `nombre`, `razon_social`, `rfc`, `email`
+  - `solo_activos`: `1` = `activo=true`
+  - **Multi-empresa`1 / **Bypass bypass bypass para super/admin.
+
+---
+
+### 2) Cuentas por Cobrar (CxC)
+
+**Base**: `GET /api/v1/finanzas/cuentas-por-cobrar/`
+**Detalle**: `GET /api/v1/finanzas/cuentas-por-cobrar/{id}/`
+**Crear**: `POST /api/v1/finanzas/cuentas-por-cobrar/`
+**Editar**: `PATCH /api/v1/finanzas/cuentas-por-cobrar/{id}/`
+**Eliminar**: `DELETE /api/v1/finanzas/cuentas-por-cobrar/{id}/`
+
+**Query params (opcionales)**
+
+| Parámetro                | Descripción                                              |
+| ------------------------ | -------------------------------------------------------- |
+| `cliente` / `cliente_id` | filtra por cliente                                       |
+| `factura` / `factura_id` | filtra por factura                                       |
+| `estatus`                | `Pendiente`, `Parcial`, `Pagada`, `Cancelada`, `Vencida` |
+| `saldo_pendiente`        | `1` = solo `saldo > 0`                                   |
+| `vencidas`               | `1` = solo vencidas con saldo                            |
+| `fecha_inicio`           | fecha emisión >=                                         |
+| `fecha_fin`              | fecha emisión <=                                         |
+| `ordering`               | `-fecha_vencimiento` por default.                        |
+
+**Body POST ejemplo (Super/Admin)** (con `empresa` obligatorio\*\* (normal user: NO lo envíes):
+
+```json
+{
+  "empresa": 1,
+  "factura": 48,
+  "cliente": 15,
+  "fecha_emision": "2026-07-14",
+  "fecha_vencimiento": "2026-07-31",
+  "total": "1160.00",
+  "saldo": "1160.00",
+  "estatus": "Pendiente",
+  "referencia": "PEND-JUL",
+  "observaciones": "CxC generada"
+}
+```
+
+---
+
+### 3) Facturas (Clientes)
+
+- **Listar**: `GET /api/v1/finanzas/facturas/`
+- **Detalle**: `GET /api/v1/finanzas/facturas/{id}/`
+- **Crear**: `POST /api/v1/finanzas/facturas/`
+- **Editar**: `PATCH /api/v1/finanzas/facturas/{id}/`
+- **Eliminar**: `DELETE /api/v1/finanzas/facturas/{id}/`
+- **Registrar factura pendiente cobro**: `POST /api/v1/finanzas/facturas/registrar-pendiente-cobro/` (documentado arriba en la sección 1672).
+
+---
+
+### 4) Cuentas Contables
+
+Catálogo del Plan de Cuentas (estructura padre/hijo, tipo:
+
+- \*\*Listar / Detalle / Crear / Editar / Eliminar`: CRUD estándar en `/api/v1/finanzas/cuentas-contables/`
+- **Query params**: `q`, `tipo` (Activo/Pasivo/Capital/Ingreso/Gasto/Resultado), `codigo`, `solo_activos`, `padre`.
+- **Campos obligatorios POST**: `codigo`, `nombre`, `tipo`, `naturaleza`.
+- **Validaciones**:
+  - Usuario normal `cuenta_padre.empresa_id == user.empresa.
+  - Super/Admin salta validación.
+
+---
+
+### 5) Centros de Costo
+
+- **CRUD**: `/api/v1/finanzas/centros-costo/`
+- **Query params**: `q`, `solo_activos`, `sucursal`.
+
+---
+
+### 6) Pólizas Contables
+
+- **CRUD**: `/api/v1/finanzas/polizas/`
+- **Subtipo**: `Ingreso`, `Egreso`, `Diario`, `Orden`, `Cierre`.
+- **POST body**: incluye `poliza_detalles` anidados:
+  ```json
+  { "cuenta_contable":10, "centro_costo": 2, "cargo": "0.00", "abono": "1160.00", ...}
+  ```
+- **Validaciones de FK cruzada**: `sucursal.empresa` y `centro_costo.empresa` (usuario normal; super/admin skip.
+
+---
+
+### 7) Facturas Proveedor
+
+- **CRUD**: `/api/v1/finanzas/facturas-proveedor/`
+- **Query params**: `proveedor`, `estatus`, `folio`, `fecha_inicio/fin`.
+- **Validaciones**: `orden_compra.empresa` y `recepcion.empresa` (usuario normal.
+
+---
+
+### 8) Bancos
+
+- **CRUD**: `/api/v1/finanzas/bancos/`
+- **Campos**: `nombre`, `codigo_banco`, `activo`.
+- \*\*Multi-tenant bypass estándar.
+
+---
+
+### 9) Cuentas Bancarias
+
+- **CRUD**: `/api/v1/finanzas/cuentas-bancarias/`
+- **Query params**: `banco`, `moneda`, `solo_activos`.
+- **Validaciones FK**: `banco.empresa`, `moneda.empresa`.
+
+---
+
+### 10) Cuentas por Pagar (CxP)
+
+- **CRUD**: `/api/v1/finanzas/cuentas-por-pagar/`
+- **Query params**: `proveedor`, `estatus`, `saldo_pendiente`, `vencidas`.
+- **Nota**: `proveedor` \*\*sin `empresa` es válido (catálogo global proveedores compartido.
+
+---
+
+### 11) Cobros
+
+- **CRUD**: `/api/v1/finanzas/cobros/`
+- **Cancelar cobro**: `POST /api/v1/finanzas/cobros/{id}/cancelar/`
+- **Body POST**: `cobro_detalles` anidado:
+  ```json
+  {
+    "cuenta_por_cobrar": 22,
+    "monto": "500.00",
+    "forma_pago_catalogo_sat": "01"
+  }
+  ```
+- **Validaciones**: `cliente.empresa`, `cuenta_bancaria.empresa`, y cada detalle `cobro_detalle.cuenta_por_cobrar.empresa == empresa`.
+- \*\*Al crear con `estatus=APLICADO` → el backend automáticamente actualiza saldo CxC y genera movimiento bancario.
+
+---
+
+### 12) Pagos
+
+- **CRUD**: `/api/v1/finanzas/pagos/`
+- **Cancelar pago**: `POST /api/v1/finanzas/pagos/{id}/cancelar/`
+- **Body POST**: `pago_detalles` anidado:
+  ```json
+  { "cuenta_por_pagar": 8, "monto": "2000.00" }
+  ```
+- **Validaciones**: `proveedor.empresa`, `cuenta_bancaria.empresa` y cada detalle `pago_detalle.cuenta_por_pagar.empresa == empresa`.
+- `estatus=APLICADO` → backend automáticamente actualiza saldo CxP + movimiento bancario.
+
+---
+
+### 13) Movimientos Bancarios
+
+- **Listar / Detalle**: `/api/v1/finanzas/movimientos-bancarios/`
+- **Crear**: `POST /api/v1/finanzas/movimientos-bancarios/` (manual; los generados por cobros/pagos NO se deben editar.
+- **Cancelar**: `POST /api/v1/finanzas/movimientos-bancarios/{id}/cancelar/`
+- **⚠ PUT / PATCH siempre responde `400`** con mensaje: "Los movimientos bancarios generados por cobros/pagos no se deben editar directamente."`
+- **Query params**: `cuenta_bancaria`, `tipo_movimiento` (DEPOSITO, RETIRO, TRANSFERENCIA, CARGO, ABONO), `referencia`, `conciliado=true`.
+
+---
+
+### 14) Conciliaciones Bancarias
+
+- **CRUD**: `/api/v1/finanzas/conciliaciones-bancarias/`
+- **Preparar conciliación** (acción bulk para fechas + saldo): `POST /api/v1/finanzas/conciliaciones-bancarias/preparar/`
+  ```json
+  {
+    "empresa": 1,
+    "cuenta_bancaria": 5,
+    "fecha_inicio": "2026-07-01",
+    "fecha_final": "2026-07-31",
+    "saldo_estado_cuenta": "150000.00"
+  }
+  ```
+
+  - **Super/Admin**: `empresa` se resuelve desde `cuenta_bancaria.empresa` (no requiere `user.empresa`).
+- **Cerrar**: `POST /api/v1/finanzas/conciliaciones-bancarias/{id}/cerrar/`
+- **Cancelar**: `POST /api/v1/finanzas/conciliaciones-bancarias/{id}/cancelar/`
+- \*\*⚠ DELETE de conciliación CERRADA responde `400` ("Cancelela primero").
+
+---
+
+### 15) Notas de Crédito
+
+- **CRUD**: `/api/v1/finanzas/notas-credito/`
+- **Cancelar**: `POST /api/v1/finanzas/notas-credito/{id}/cancelar/`
+- **Campos**: `factura`, `cliente`, `motivo`, `total`, `estatus` (EMITIDA / CANCELADA).
+- \*\*Al crear con `estatus=EMITIDA` → backend automáticamente aplica abono a CxC.
+- \*\*⚠ DELETE de nota `estatus=EMITIDA` → `400` ("Cancelela primero").
+
+---
+
+### 16) Alertas de Mora
+
+- **Listar alertas**: `GET /api/v1/finanzas/alertas-mora/`
+- **Query params**: `cliente`, `dias_mora_min`, `solo_activas`.
+- **Generar alertas (batch)**: `POST /api/v1/finanzas/alertas-mora/generar/`
+  - **Body (super/admin**:
+    ```json
+    { "empresa_id": 1, "dias_gracia": 3 }
+    ```
+  - **Super/Admin**:
+    - Enviar `empresa_id` (body o query param).
+    - Si lo **omite** `empresa_id` → genera alertas para **TODAS** las empresas.
+  - **Usuario normal**: usa `user.empresa`.
+
+---
+
+### 17) Dashboard Financiero (KPI´s agregados)
+
+- **Listar (único endpoint**: `GET /api/v1/finanzas/dashboard/`
+- **Query params** (súper/admin):
+  - `empresa_id=<id>`: filtra dashboard para una empresa concreta.
+  - Si **NO** envía: si tiene `user.empresa` (super admin sin user.empresa → `400` pidiendo `?empresa_id=`.
+- **Respuesta** 200:\*\*
+  ```json
+  {
+    "cxc_total": "150000.00",
+    "cxc_vencidas": "25000.00",
+    "cxp_total": "80000.00",
+    "cobros_mes": "45000.00",
+    "pagos_mes": "30000.00",
+    "utilidad_mes_ estimado": "15000.00",
+    "rotacion_cxc_dias": 32.5,
+    "empresa_id": 1
+  }
+  ```
 
 ---
 
@@ -2409,33 +2699,33 @@ Campos calculados en `detalles[]` (todos read-only, derivados del SSoT `PedidoDe
 }
 ```
 
-| Campo                                                     | Tipo        | Fuente / Regla                                                                                                                                                                                                                                                                                                                                                                                       |
-| --------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `maquina_asignada`                                        | str/null    | Campo editable. **Texto libre**: el operador escribe "M1", "Máquina 2", "Barudan 1", etc. (sin catálogo hoy).                                                                                                                                                                                                                                                                                        |
-| `proveedor`                                               | int/null    | Campo editable. **FK al catálogo `terceros.Proveedor`** (usa el selector estándar de proveedores igual que Compras/Finanzas). NULL = bordado en planta interna, no subcontratado.                                                                                                                                                                                                                    |
-| `proveedor_nombre`                                        | str/null    | Read-only. Label corto del proveedor: `obj.proveedor.nombre`. NULL si `proveedor` es null.                                                                                                                                                                                                                                                                                                           |
-| `proveedor_display`                                       | object/null | Read-only. Label expandido para chip UI: `{id, codigo, nombre, razon_social, tipo, rfc, email, telefono, contacto_principal}`. NULL si no hay proveedor asignado.                                                                                                                                                                                                                                    |
-| `detalles[].tipo_servicio_bordado`                        | str         | Campo editable **single-pick LEGACY** (8 técnicas). Valores: `Plano`, `3D`, `Chenille`, `Aplicacion`, `Reflectante`, `Metalico`, `Combinado`, `Otro`. Provisto de migración 0032. Se mantiene por data QA existente.                                                                                                                                                                                 |
-| `detalles[].tipo_servicio_bordado_display`                | str         | Read-only. Label humano del single-pick legacy (ej: `"Bordado 3D (Puff)").                                                                                                                                                                                                                                                                                                                           |
-| `detalles[].tipos_servicio`                               | str[]       | 🆕 **READ-ONLY desde SSoT Ventas** (5 checkboxes servicios). Array keys = `PedidoDetalleTalla.bordado_config.tipos_servicio`: `NUEVO_PONCHADO`, `SERIGRAFIA`, `SUBLIMADO`, `DTF`, `REVELADO`. Choices centralizados en `ventas.servicios_bordado.TipoServicioBordado`. NO editable en Producción (si cambia el diseño se edita Ventas). Fallback lee JSON propio de OB por compatibilidad histórica. |
-| `detalles[].tipos_servicio_display`                       | obj[]       | Read-only. Labels humanos traducidos para UI: `[{"value": "NUEVO_PONCHADO", "label": "Nuevo ponchado"}]`.                                                                                                                                                                                                                                                                                            |
-| `detalles[].descripcion_servicio`                         | str/null    | Campo editable **texto libre legacy** (migración 0032). Nota larga sobre técnica empleada. NULL permitido.                                                                                                                                                                                                                                                                                           |
-| `avances[]`                                               | array       | Historial de producción por OB. Lo llena `POST /produccion/bordado-avances/`. Orden: `fecha` DESC.                                                                                                                                                                                                                                                                                                   |
-| `avances[].usuario`                                       | int         | FK al operador. **NO editable desde frontend**: backend siempre usa el `request.user` que envió el POST.                                                                                                                                                                                                                                                                                             |
-| `avances[].orden_bordado_detalle`                         | int/null    | FK al renglón concreto de la OB (la talla/SKU de esta tanda de producción). **Recomendado siempre mandarlo** desde el selector del frontend.                                                                                                                                                                                                                                                         |
-| `avances[].orden_bordado_detalle_display`                 | object      | Label listo para pintar en chip: producto, talla, color, cantidad programada, posición. NULL si el registro es viejo (antes del ajuste por talla).                                                                                                                                                                                                                                                   |
-| `avances[].pedido_detalle_talla`                          | int/null    | FK al `PedidoDetalleTalla`. **Backend lo autocompleta** si mandaste `orden_bordado_detalle_id` (no tienes que buscarlo tú en Ventas).                                                                                                                                                                                                                                                                |
-| `avances[].puntadas_por_pieza`                            | int         | **NUEVO**. Contador de puntadas POR PRENDA (1 pieza). 0 si no se capturó (registros legacy).                                                                                                                                                                                                                                                                                                         |
-| `avances[].puntadas_realizadas`                           | int         | Puntadas REALES de esta tanda (puedes meter el total de la tanda directamente o dejar que `puntadas_total` lo calcule). Distinto de `detalles[].puntadas` = presupuesto estimado por línea.                                                                                                                                                                                                          |
-| `avances[].puntadas_total`                                | int         | **NUEVO y read-only calculado**. Resultado de `puntadas_por_pieza × cantidad_bordada`. Backend lo calcula automáticamente si `puntadas_por_pieza > 0`; si frontend envía valor, se sobreescribe con el cálculo (fuente de verdad).                                                                                                                                                                   |
-| `resumen_avance.porcentaje_avance`                        | float       | **% por PIEZAS**: `cantidad_bordada / cantidad_programada × 100`. Métrica tradicional.                                                                                                                                                                                                                                                                                                               |
-| `resumen_avance.puntadas_presupuesto`                     | int         | Suma pelada de `detalles[].puntadas`, que es el presupuesto **POR PIEZA** de cada renglón (una prenda). **NO es el presupuesto total de la OB** — para eso hay que escalarlo por `cantidad` de cada renglón, que es justo lo que hace el denominador de `puntadas_porcentaje_avance`.                                                                                                                 |
+| Campo                                                     | Tipo        | Fuente / Regla                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maquina_asignada`                                        | str/null    | Campo editable. **Texto libre**: el operador escribe "M1", "Máquina 2", "Barudan 1", etc. (sin catálogo hoy).                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `proveedor`                                               | int/null    | Campo editable. **FK al catálogo `terceros.Proveedor`** (usa el selector estándar de proveedores igual que Compras/Finanzas). NULL = bordado en planta interna, no subcontratado.                                                                                                                                                                                                                                                                                                                                 |
+| `proveedor_nombre`                                        | str/null    | Read-only. Label corto del proveedor: `obj.proveedor.nombre`. NULL si `proveedor` es null.                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `proveedor_display`                                       | object/null | Read-only. Label expandido para chip UI: `{id, codigo, nombre, razon_social, tipo, rfc, email, telefono, contacto_principal}`. NULL si no hay proveedor asignado.                                                                                                                                                                                                                                                                                                                                                 |
+| `detalles[].tipo_servicio_bordado`                        | str         | Campo editable **single-pick LEGACY** (8 técnicas). Valores: `Plano`, `3D`, `Chenille`, `Aplicacion`, `Reflectante`, `Metalico`, `Combinado`, `Otro`. Provisto de migración 0032. Se mantiene por data QA existente.                                                                                                                                                                                                                                                                                              |
+| `detalles[].tipo_servicio_bordado_display`                | str         | Read-only. Label humano del single-pick legacy (ej: `"Bordado 3D (Puff)").                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `detalles[].tipos_servicio`                               | str[]       | 🆕 **READ-ONLY desde SSoT Ventas** (5 checkboxes servicios). Array keys = `PedidoDetalleTalla.bordado_config.tipos_servicio`: `NUEVO_PONCHADO`, `SERIGRAFIA`, `SUBLIMADO`, `DTF`, `REVELADO`. Choices centralizados en `ventas.servicios_bordado.TipoServicioBordado`. NO editable en Producción (si cambia el diseño se edita Ventas). Fallback lee JSON propio de OB por compatibilidad histórica.                                                                                                              |
+| `detalles[].tipos_servicio_display`                       | obj[]       | Read-only. Labels humanos traducidos para UI: `[{"value": "NUEVO_PONCHADO", "label": "Nuevo ponchado"}]`.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `detalles[].descripcion_servicio`                         | str/null    | Campo editable **texto libre legacy** (migración 0032). Nota larga sobre técnica empleada. NULL permitido.                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `avances[]`                                               | array       | Historial de producción por OB. Lo llena `POST /produccion/bordado-avances/`. Orden: `fecha` DESC.                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `avances[].usuario`                                       | int         | FK al operador. **NO editable desde frontend**: backend siempre usa el `request.user` que envió el POST.                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `avances[].orden_bordado_detalle`                         | int/null    | FK al renglón concreto de la OB (la talla/SKU de esta tanda de producción). **Recomendado siempre mandarlo** desde el selector del frontend.                                                                                                                                                                                                                                                                                                                                                                      |
+| `avances[].orden_bordado_detalle_display`                 | object      | Label listo para pintar en chip: producto, talla, color, cantidad programada, posición. NULL si el registro es viejo (antes del ajuste por talla).                                                                                                                                                                                                                                                                                                                                                                |
+| `avances[].pedido_detalle_talla`                          | int/null    | FK al `PedidoDetalleTalla`. **Backend lo autocompleta** si mandaste `orden_bordado_detalle_id` (no tienes que buscarlo tú en Ventas).                                                                                                                                                                                                                                                                                                                                                                             |
+| `avances[].puntadas_por_pieza`                            | int         | **NUEVO**. Contador de puntadas POR PRENDA (1 pieza). 0 si no se capturó (registros legacy).                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `avances[].puntadas_realizadas`                           | int         | Puntadas REALES de esta tanda (puedes meter el total de la tanda directamente o dejar que `puntadas_total` lo calcule). Distinto de `detalles[].puntadas` = presupuesto estimado por línea.                                                                                                                                                                                                                                                                                                                       |
+| `avances[].puntadas_total`                                | int         | **NUEVO y read-only calculado**. Resultado de `puntadas_por_pieza × cantidad_bordada`. Backend lo calcula automáticamente si `puntadas_por_pieza > 0`; si frontend envía valor, se sobreescribe con el cálculo (fuente de verdad).                                                                                                                                                                                                                                                                                |
+| `resumen_avance.porcentaje_avance`                        | float       | **% por PIEZAS**: `cantidad_bordada / cantidad_programada × 100`. Métrica tradicional.                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `resumen_avance.puntadas_presupuesto`                     | int         | Suma pelada de `detalles[].puntadas`, que es el presupuesto **POR PIEZA** de cada renglón (una prenda). **NO es el presupuesto total de la OB** — para eso hay que escalarlo por `cantidad` de cada renglón, que es justo lo que hace el denominador de `puntadas_porcentaje_avance`.                                                                                                                                                                                                                             |
 | `resumen_avance.puntadas_porcentaje_avance`               | float       | 🆕 **% por PUNTADAS** (fórmula 2.0.1): `puntadas_total_global / Σ(puntadas_i × cantidad_i) × 100`, redondeado a 2 decimales. El denominador se ESCALA por las piezas programadas de cada renglón porque `puntadas_total` acumula las puntadas de TODAS las prendas bordadas; dividir entre el presupuesto de una sola prenda daba porcentajes >100%. Si el denominador es 0 devuelve `0.0`. Más fina que el % por piezas porque detecta prendas a media bordada (4000 de 8000 = 50% aunque `cantidad_bordada=0`). |
-| `resumen_avance.por_detalle[]`                            | array       | ⭐ **NUEVO**. Agrupación por cada renglón de la OB: cuánto va, cuánto presupuesto original, % y **quién trabajó ese SKU** (lista de operadores con su aporte). Sirve para pintar el grid "Avance por talla" sin más endpoints.                                                                                                                                                                       |
-| `resumen_avance.por_detalle[].puntadas_porcentaje_avance` | float       | 🆕 % por puntadas calculado POR TALLA/SKU: `puntadas_total / (puntadas_presupuesto × cantidad_programada) × 100`, redondeado a 2 decimales. Misma regla que la global aplicada a un solo renglón. Si el denominador es 0 (`puntadas_presupuesto` o `cantidad_programada` en 0) devuelve `0.0`. La fila sintética "Sin talla/SKU asignado" siempre reporta `0.0`.                                       |
-| `resumen_avance.por_detalle[].operadores[]`               | array       | Suma de `cantidad_bordada` + `puntadas_total` + `puntadas_por_pieza_promedio` agrupado por `usuario_id` para ESE renglón concreto. Ejemplo útil: "María 25pz + Luis 15pz = 40pz talla M = 100%".                                                                                                                                                                                                     |
-| `resumen_avance.puntadas_por_pieza_promedio`              | int         | **NUEVO**. Promedio PONDERADO de `puntadas_por_pieza` en toda la OB: `sum(por_pieza × cantidad) / sum(cantidad)`. 0 si ninguna tanda capturó puntadas por pieza.                                                                                                                                                                                                                                     |
-| `resumen_avance.puntadas_total`                           | int         | **NUEVO**. Suma de TODOS los `avances[].puntadas_total` de la OB. Equivale a `sum(puntadas_por_pieza × pz)` por tanda capturada.                                                                                                                                                                                                                                                                     |
+| `resumen_avance.por_detalle[]`                            | array       | ⭐ **NUEVO**. Agrupación por cada renglón de la OB: cuánto va, cuánto presupuesto original, % y **quién trabajó ese SKU** (lista de operadores con su aporte). Sirve para pintar el grid "Avance por talla" sin más endpoints.                                                                                                                                                                                                                                                                                    |
+| `resumen_avance.por_detalle[].puntadas_porcentaje_avance` | float       | 🆕 % por puntadas calculado POR TALLA/SKU: `puntadas_total / (puntadas_presupuesto × cantidad_programada) × 100`, redondeado a 2 decimales. Misma regla que la global aplicada a un solo renglón. Si el denominador es 0 (`puntadas_presupuesto` o `cantidad_programada` en 0) devuelve `0.0`. La fila sintética "Sin talla/SKU asignado" siempre reporta `0.0`.                                                                                                                                                  |
+| `resumen_avance.por_detalle[].operadores[]`               | array       | Suma de `cantidad_bordada` + `puntadas_total` + `puntadas_por_pieza_promedio` agrupado por `usuario_id` para ESE renglón concreto. Ejemplo útil: "María 25pz + Luis 15pz = 40pz talla M = 100%".                                                                                                                                                                                                                                                                                                                  |
+| `resumen_avance.puntadas_por_pieza_promedio`              | int         | **NUEVO**. Promedio PONDERADO de `puntadas_por_pieza` en toda la OB: `sum(por_pieza × cantidad) / sum(cantidad)`. 0 si ninguna tanda capturó puntadas por pieza.                                                                                                                                                                                                                                                                                                                                                  |
+| `resumen_avance.puntadas_total`                           | int         | **NUEVO**. Suma de TODOS los `avances[].puntadas_total` de la OB. Equivale a `sum(puntadas_por_pieza × pz)` por tanda capturada.                                                                                                                                                                                                                                                                                                                                                                                  |
 
 **Editar encabezado de OB — `PATCH /api/v1/produccion/orden-bordado/{id}/`**
 
@@ -4520,6 +4810,7 @@ El asistente valida campos críticos (RFC, SAT) y solicitará datos faltantes.
 **Autenticación**: Bearer Token obligatorio en todos los endpoints.
 
 **Multi-tenant / Aislamiento por empresa**:
+
 - Listados (GET /collection): usuario sin `empresa` asignada recibe `[]` vacío.
 - Detalle (GET /{id}/): registro de otra empresa responde `404 Not Found`.
 - Creación/edición cross-empresa: `400 Bad Request` con detalle del campo que violenta la regla.
@@ -4544,6 +4835,7 @@ El asistente valida campos críticos (RFC, SAT) y solicitará datos faltantes.
 Usa estos endpoints para poblar los selects/dropdowns de los formularios de RH.
 
 #### 0.1 Puestos
+
 - **Listado**: `GET /api/v1/hr/puestos/`
   - **Query params (opcionales)**: `area`, `activo`, `empresa`
   - **Search**: `nombre`, `descripcion`
@@ -4554,6 +4846,7 @@ Usa estos endpoints para poblar los selects/dropdowns de los formularios de RH.
 - **Eliminar (soft)**: `DELETE /api/v1/hr/puestos/{id}/` → `activo=False`
 
 **Body — Crear / Editar**
+
 ```json
 {
   "empresa": 1,
@@ -4568,6 +4861,7 @@ Usa estos endpoints para poblar los selects/dropdowns de los formularios de RH.
 ```
 
 #### 0.2 Departamentos (usar `areas/`)
+
 - **Listado**: `GET /api/v1/hr/areas/`
   - **Query params**: `departamento`, `activo`, `responsable`
   - **Search**: `nombre`, `codigo`, `descripcion`
@@ -4575,6 +4869,7 @@ Usa estos endpoints para poblar los selects/dropdowns de los formularios de RH.
 - **CRUD**: igual que puestos: `POST`, `GET /{id}/`, `PUT/PATCH /{id}/`, `DELETE /{id}/` (soft)
 
 **Body — Crear Área**
+
 ```json
 {
   "departamento": 3,
@@ -4586,6 +4881,7 @@ Usa estos endpoints para poblar los selects/dropdowns de los formularios de RH.
 ```
 
 #### 0.3 Turnos
+
 - **Listado**: `GET /api/v1/hr/turnos/`
   - **Query params**: `activo`, `empresa`, `dias_laborales`
   - **Search**: `nombre`, `descripcion`
@@ -4593,6 +4889,7 @@ Usa estos endpoints para poblar los selects/dropdowns de los formularios de RH.
 - **CRUD**: estándar
 
 **Body — Crear Turno**
+
 ```json
 {
   "empresa": 1,
@@ -4609,6 +4906,7 @@ Usa estos endpoints para poblar los selects/dropdowns de los formularios de RH.
 **Validaciones**: `hora_salida > hora_entrada`, `horas_base_diarias` no puede exceder `hora_salida - hora_entrada`.
 
 #### 0.4 Calendarios (feriados, descansos programados)
+
 - **Listado**: `GET /api/v1/hr/calendarios/`
   - **Query params**: `turno`, `tipo`, `fecha__gte`, `fecha__lte`
   - **Search**: `tipo`, `turno__nombre`
@@ -4616,6 +4914,7 @@ Usa estos endpoints para poblar los selects/dropdowns de los formularios de RH.
 - **CRUD**: estándar
 
 **Body**
+
 ```json
 {
   "turno": 1,
@@ -4624,6 +4923,7 @@ Usa estos endpoints para poblar los selects/dropdowns de los formularios de RH.
   "descripcion": "Navidad"
 }
 ```
+
 Valores `tipo`: `laboral`, `descanso`, `feriado`, `especial`.
 
 ---
@@ -4691,6 +4991,7 @@ Solo se requieren los campos marcados con `*`. El resto es opcional (blank).
 ```
 
 **Validaciones automáticas backend** (no dependen de frontend):
+
 - `curp`: exactamente 18 caracteres
 - `rfc`: 12 (moral) o 13 (física) caracteres
 - `nss`: 11 dígitos
@@ -4699,6 +5000,7 @@ Solo se requieren los campos marcados con `*`. El resto es opcional (blank).
 - Fechas: `fecha_nacimiento < fecha_ingreso`; `fecha_baja > fecha_ingreso`
 
 **Response — GET /empleados/EMP-002/**
+
 ```json
 {
   "id": 2,
@@ -4720,6 +5022,7 @@ Solo se requieren los campos marcados con `*`. El resto es opcional (blank).
 ### 2) Asistencia — Control de entradas y salidas
 
 **Endpoints CRUD**:
+
 - **Listado**: `GET /api/v1/hr/asistencias/`
   - **Query params**: `empleado`, `turno`, `estado`, `fecha`, `fecha__gte`, `fecha__lte`
   - **Search**: `observaciones`, `empleado__nombre`, `empleado__numero_empleado`
@@ -4744,17 +5047,20 @@ Solo se requieren los campos marcados con `*`. El resto es opcional (blank).
 - **Propósito**: UI de reloj checador (solo empleado_id obligatorio)
 
 **Body**
+
 ```json
 {
   "empleado_id": 1,
   "fecha": "2025-09-01",
-  "hora":  "2025-09-01 08:05:00"
+  "hora": "2025-09-01 08:05:00"
 }
 ```
+
 - `fecha`: opcional. Default = `hoy` (fecha local del server).
 - `hora`: opcional. Default = `now()`.
 
 **Response 200** (cálculos automáticos):
+
 ```json
 {
   "id": 50,
@@ -4778,6 +5084,7 @@ Solo se requieren los campos marcados con `*`. El resto es opcional (blank).
 - **Endpoint**: `POST /api/v1/hr/asistencias/registrar_salida/`
 
 **Body**
+
 ```json
 {
   "empleado_id": 1,
@@ -4787,6 +5094,7 @@ Solo se requieren los campos marcados con `*`. El resto es opcional (blank).
 ```
 
 **Response 200** (horas automáticas):
+
 ```json
 {
   "id": 50,
@@ -4799,6 +5107,7 @@ Solo se requieren los campos marcados con `*`. El resto es opcional (blank).
 ```
 
 **Fórmulas automáticas backend**:
+
 - `horas_normales = min(horas_trabajadas, turno.horas_base_diarias)`
 - `horas_extra = max(0, horas_trabajadas - turno.horas_base_diarias)`
 
@@ -4815,6 +5124,7 @@ Registro granular de tiempo invertido por tarea. Se puede vincular a una Asisten
 - **CRUD**: estándar
 
 **Body**
+
 ```json
 {
   "empleado": 1,
@@ -4828,6 +5138,7 @@ Registro granular de tiempo invertido por tarea. Se puede vincular a una Asisten
   "cantidad_producida": 45
 }
 ```
+
 - `horas_trabajadas`: **automático** (backend calcula `hora_fin - hora_inicio` en save()). No lo mandar.
 - `op`: nullable (FK opcional a OrdenProduccion del módulo producción).
 
@@ -4843,6 +5154,7 @@ Registro granular de tiempo invertido por tarea. Se puede vincular a una Asisten
   - `creado_por` lo pone el backend = `request.user`. **No mandar en body.**
 
 **Body — Crear**
+
 ```json
 {
   "empleado": 1,
@@ -4865,6 +5177,7 @@ Registro granular de tiempo invertido por tarea. Se puede vincular a una Asisten
 **Estados**: `activo` / `inactivo` / `vencido` / `rescindido`.
 
 **Regla validada backend**:
+
 - Un empleado **solo puede tener 1 contrato con `estado=activo`**. Si intentas crear un 2do activo → `400 Bad Request`.
 
 ---
@@ -4885,7 +5198,9 @@ Registro granular de tiempo invertido por tarea. Se puede vincular a una Asisten
 **Estados**: `pendiente` / `aprobado` / `rechazado`.
 
 #### 5.1 Crear solicitud (empleado / RH)
+
 **Body**
+
 ```json
 {
   "empleado": 1,
@@ -4896,16 +5211,20 @@ Registro granular de tiempo invertido por tarea. Se puede vincular a una Asisten
   "motivo": "Navidad con familia en Puerto Vallarta"
 }
 ```
+
 Campos auto-set por backend (**no mandar**):
+
 - `solicitado_por = request.user`
 - `fecha_solicitud = now()`
 - `estado = "pendiente"`
 
 #### 5.2 Aprobar solicitud
+
 - **Endpoint**: `POST /api/v1/hr/vacaciones/{id}/aprobar/`
 - **Body**: vacío `{}`
 
 **Response 200**
+
 ```json
 {
   "id": 5,
@@ -4916,14 +5235,19 @@ Campos auto-set por backend (**no mandar**):
 ```
 
 #### 5.3 Rechazar solicitud
+
 - **Endpoint**: `POST /api/v1/hr/vacaciones/{id}/rechazar/`
 
 **Body**
+
 ```json
-{ "motivo_rechazo": "Staff insuficiente en esas fechas (3 empleados más piden mismo periodo)" }
+{
+  "motivo_rechazo": "Staff insuficiente en esas fechas (3 empleados más piden mismo periodo)"
+}
 ```
 
 **Response 200**
+
 ```json
 {
   "id": 5,
@@ -4950,6 +5274,7 @@ Mismo flujo que Vacaciones (pendiente → aprobar / rechazar). Campos adicionale
 - **Aprobar / Rechazar**: `POST /permisos-ausencias/{id}/aprobar/` y `POST /permisos-ausencias/{id}/rechazar/` (mismo body que vacaciones)
 
 **Body — Crear Permiso**
+
 ```json
 {
   "empleado": 1,
@@ -4980,6 +5305,7 @@ Bitácora de eventos: retardos acumulados, faltas, problemas de conducta, recono
   - `reportado_por = request.user` y `fecha_reporte = now()` (auto, no mandar)
 
 **Body — Crear**
+
 ```json
 {
   "empleado": 1,
@@ -5015,25 +5341,61 @@ Bitácora de eventos: retardos acumulados, faltas, problemas de conducta, recono
 Body puede incluir `detalles[]`. Si va incluido, el backend reemplaza cualquier detalle anterior por el nuevo arreglo.
 
 **Body — Crear**
+
 ```json
 {
   "empresa": 1,
   "sucursal": 2,
   "empleado": 1,
   "periodo_inicio": "2025-09-01",
-  "periodo_fin":    "2025-09-15",
-  "fecha_pago":     "2025-09-20",
+  "periodo_fin": "2025-09-15",
+  "fecha_pago": "2025-09-20",
   "estado": "pendiente",
   "salario_base": "25000.00",
   "dias_pagados": 15,
   "horas_extra_pagadas": "4.00",
   "observaciones": "Quincena septiembre 1-15. Incluye 4 hrs extra día 5.",
   "detalles": [
-    { "codigo": "PER001", "concepto": "Salario base",    "tipo": "percepcion", "cantidad": 1,  "unidad": "MXN", "monto": "12500.00" },
-    { "codigo": "PER002", "concepto": "Horas extra x2",  "tipo": "percepcion", "cantidad": 4,  "unidad": "MXN", "monto": "1613.00" },
-    { "codigo": "DED001", "concepto": "ISR",             "tipo": "deduccion",  "cantidad": 1,  "unidad": "MXN", "monto": "1150.00" },
-    { "codigo": "DED002", "concepto": "IMSS",            "tipo": "deduccion",  "cantidad": 1,  "unidad": "MXN", "monto":  "525.00" },
-    { "codigo": "DED003", "concepto": "Infonavit",       "tipo": "deduccion",  "cantidad": 1,  "unidad": "MXN", "monto":  "750.00" }
+    {
+      "codigo": "PER001",
+      "concepto": "Salario base",
+      "tipo": "percepcion",
+      "cantidad": 1,
+      "unidad": "MXN",
+      "monto": "12500.00"
+    },
+    {
+      "codigo": "PER002",
+      "concepto": "Horas extra x2",
+      "tipo": "percepcion",
+      "cantidad": 4,
+      "unidad": "MXN",
+      "monto": "1613.00"
+    },
+    {
+      "codigo": "DED001",
+      "concepto": "ISR",
+      "tipo": "deduccion",
+      "cantidad": 1,
+      "unidad": "MXN",
+      "monto": "1150.00"
+    },
+    {
+      "codigo": "DED002",
+      "concepto": "IMSS",
+      "tipo": "deduccion",
+      "cantidad": 1,
+      "unidad": "MXN",
+      "monto": "525.00"
+    },
+    {
+      "codigo": "DED003",
+      "concepto": "Infonavit",
+      "tipo": "deduccion",
+      "cantidad": 1,
+      "unidad": "MXN",
+      "monto": "750.00"
+    }
   ]
 }
 ```
@@ -5041,16 +5403,23 @@ Body puede incluir `detalles[]`. Si va incluido, el backend reemplaza cualquier 
 **`tipo` detalle**: `percepcion` / `deduccion`.
 
 **Response 201** (campos calculados automáticamente):
+
 ```json
 {
   "id": 101,
   "total_percepciones": "14113.00",
-  "total_deducciones":  "2425.00",
-  "neto":              "11688.00",
+  "total_deducciones": "2425.00",
+  "neto": "11688.00",
   "fecha_generacion": "2025-09-01T10:30:00Z",
   "creado_por": 5,
   "detalles": [
-    { "id": 501, "codigo": "PER001", "concepto": "Salario base", "tipo": "percepcion", "monto": "12500.00" },
+    {
+      "id": 501,
+      "codigo": "PER001",
+      "concepto": "Salario base",
+      "tipo": "percepcion",
+      "monto": "12500.00"
+    },
     { "...": "..." }
   ]
 }
@@ -5072,19 +5441,22 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 - **Propósito**: crear nómina para TODOS los empleados activos de la empresa (o de una sucursal específica).
 
 **Body**
+
 ```json
 {
   "periodo_inicio": "2025-09-01",
-  "periodo_fin":    "2025-09-15",
-  "sucursal_id":    2,
-  "fecha_pago":     "2025-09-20"
+  "periodo_fin": "2025-09-15",
+  "sucursal_id": 2,
+  "fecha_pago": "2025-09-20"
 }
 ```
+
 - `sucursal_id`: opcional. Si no se envía → todas las sucursales de la empresa.
 - `salario_base`: auto = `puesto.salario_base` si existe, si no `contrato_activo.salario`, si no `null`.
 - Auto-crea detalle único: `PER001 Salario base quincenal = (salario/30)*15` redondeado a 2 decimales.
 
 **Response 201**
+
 ```json
 {
   "creadas": 45,
@@ -5104,6 +5476,7 @@ Response 200: misma shape que Response 201 (con totales actualizados).
   - `creado_por = request.user` (auto)
 
 **Body — Crear**
+
 ```json
 {
   "empresa": 1,
@@ -5118,6 +5491,7 @@ Response 200: misma shape que Response 201 (con totales actualizados).
   "estado": "confirmado"
 }
 ```
+
 - `meta_unidad`: FK a catálogo `UnidadMedida` del módulo inventarios (ej: 1 = pieza, 2 = docena).
 - `estado`: `borrador` / `confirmado`.
 - Se puede agregar `detalles[]` análogo a nóminas por medio de `ProductividadDetalle`.
@@ -5133,6 +5507,7 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 - **CRUD**: estándar
 
 **Body**
+
 ```json
 {
   "empleado": 1,
@@ -5164,6 +5539,7 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 - **CRUD**: estándar
 
 **Body**
+
 ```json
 {
   "empleado": 1,
@@ -5204,6 +5580,7 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 | `fecha` | YYYY-MM-DD | Usa esta fecha como "hoy" para asistencias (default hoy server) |
 
 **Response 200** (único JSON, siempre mismo shape):
+
 ```json
 {
   "empleados_activos": 45,
@@ -5226,12 +5603,16 @@ Response 200: misma shape que Response 201 (con totales actualizados).
     "neto_total_periodo_actual": "486125.00"
   },
   "distribucion_por_departamento": [
-    { "departamento__id": 3, "departamento__nombre": "Producción", "total": 20 },
-    { "departamento__id": 4, "departamento__nombre": "Ventas",     "total": 10 },
-    { "departamento__id": 2, "departamento__nombre": "RH",         "total":  5 }
+    {
+      "departamento__id": 3,
+      "departamento__nombre": "Producción",
+      "total": 20
+    },
+    { "departamento__id": 4, "departamento__nombre": "Ventas", "total": 10 },
+    { "departamento__id": 2, "departamento__nombre": "RH", "total": 5 }
   ],
   "distribucion_por_sucursal": [
-    { "sucursal__id": 2, "sucursal__nombre": "Zapopan",     "total": 45 },
+    { "sucursal__id": 2, "sucursal__nombre": "Zapopan", "total": 45 },
     { "sucursal__id": 5, "sucursal__nombre": "Tlaquepaque", "total": 0 }
   ],
   "rotacion_mes": {
@@ -5245,6 +5626,7 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 ```
 
 **Fórmulas**:
+
 - `tasa_porcentual = 100 * (altas + bajas) / empleados_activos` redondeado a 2 decimales.
 - `sin_registrar = max(0, empleados_activos - total_registradas)` (hoy).
 - `horas_extra_semana`: Suma de `horas_extra` de Asistencia con fecha entre lunes-domingo de la semana actual.
@@ -5253,9 +5635,9 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 
 ### Errores comunes
 
-| HTTP | Motivo | Shape detalle |
-|---|---|---|
-| `400 Bad Request` | Validación fallida | `{ "campo": ["Mensaje."], "non_field_errors": ["Otro mensaje"] }` |
-| `403 Forbidden` | Usuario sin empresa o cross-empresa en @action | `{ "detail": "No autorizado." }` |
-| `404 Not Found` | Registro no existe / otra empresa | `{ "detail": "Not found." }` |
-| `409 Conflict` | DELETE con dependencias FK que lo protegen | `{ "detail": "No se puede eliminar: dependencias en Contratos, Asistencias." }` |
+| HTTP              | Motivo                                         | Shape detalle                                                                   |
+| ----------------- | ---------------------------------------------- | ------------------------------------------------------------------------------- |
+| `400 Bad Request` | Validación fallida                             | `{ "campo": ["Mensaje."], "non_field_errors": ["Otro mensaje"] }`               |
+| `403 Forbidden`   | Usuario sin empresa o cross-empresa en @action | `{ "detail": "No autorizado." }`                                                |
+| `404 Not Found`   | Registro no existe / otra empresa              | `{ "detail": "Not found." }`                                                    |
+| `409 Conflict`    | DELETE con dependencias FK que lo protegen     | `{ "detail": "No se puede eliminar: dependencias en Contratos, Asistencias." }` |
