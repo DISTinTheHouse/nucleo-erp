@@ -1,7 +1,7 @@
 from django.db.models import ProtectedError, Sum, Count, Q, F, Value, DecimalField
 from django.db.models.functions import Coalesce
 from django.utils import timezone
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from rest_framework import mixins, status, filters
@@ -344,7 +344,7 @@ class AsistenciaViewSet(
             except ValueError:
                 return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            fecha = date.today()
+            fecha = timezone.localdate()
 
         hora_str = request.data.get('hora')
         if hora_str:
@@ -397,7 +397,7 @@ class AsistenciaViewSet(
             except ValueError:
                 return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            fecha = date.today()
+            fecha = timezone.localdate()
 
         hora_str = request.data.get('hora')
         if hora_str:
@@ -917,7 +917,7 @@ class DashboardRH(APIView):
             except ValueError:
                 return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            hoy = date.today()
+            hoy = timezone.localdate()
         inicio_mes = hoy.replace(day=1)
         prox_mes = (inicio_mes + timedelta(days=32)).replace(day=1)
         fin_mes = prox_mes - timedelta(days=1)

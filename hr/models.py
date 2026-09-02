@@ -3,7 +3,7 @@ from django.db import models
 from django.db.models import Sum
 from django.utils import timezone
 from nucleo.models import StatusLifecycleModel
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 
@@ -120,8 +120,56 @@ class Empleado(StatusLifecycleModel):
     def antiguedad_meses(self):
         if not self.fecha_ingreso:
             return 0
-        fin = self.fecha_baja or date.today()
+        fin = self.fecha_baja or timezone.localdate()
         return (fin.year - self.fecha_ingreso.year) * 12 + (fin.month - self.fecha_ingreso.month)
+
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        instance = super().from_db(db, field_names, values)
+        # Se recuerda el valor con el que vino de la BD para poder detectar en
+        # save() la transicion de 'activo'. Si el campo venia diferido no hay
+        # estado previo confiable y no se infiere ninguna transicion.
+        instance._activo_previo = instance.activo if 'activo' in field_names else None
+        return instance
+
+    def save(self, *args, **kwargs):
+        self._sincronizar_fecha_baja(kwargs)
+        super().save(*args, **kwargs)
+        self._activo_previo = self.activo
+
+    def _sincronizar_fecha_baja(self, kwargs):
+        """Sella o limpia 'fecha_baja' segun la transicion de 'activo'.
+
+        Desactivar a un empleado es una baja laboral, asi que se sella la fecha
+        del dia; reactivarlo la limpia. Solo se actua sobre la TRANSICION:
+
+        - Re-guardar a alguien que ya estaba inactivo no toca su 'fecha_baja'.
+        - Una 'fecha_baja' capturada a mano nunca se sobrescribe al desactivar.
+        - Una 'fecha_baja' futura sobre un empleado activo (baja programada) se
+          respeta, porque sin transicion no se limpia nada.
+        - Al crear no hay estado previo, asi que no se sella nada.
+
+        Vive en el modelo y no en ``SoftDeleteDestroyMixin`` porque ese mixin lo
+        comparten seis modelos de RH y solo Empleado tiene 'fecha_baja'. Ademas
+        aqui quedan cubiertas todas las rutas: el DELETE por soft-delete, un
+        PATCH/PUT con 'activo', el admin y el shell.
+        """
+        previo = getattr(self, '_activo_previo', None)
+        if previo is None or previo == self.activo:
+            return
+
+        if not self.activo and self.fecha_baja is None:
+            self.fecha_baja = timezone.localdate()
+        elif self.activo and self.fecha_baja is not None:
+            self.fecha_baja = None
+        else:
+            return
+
+        # soft_delete() y restore() guardan con update_fields=['activo']: sin
+        # ampliarlo, el cambio de 'fecha_baja' no llegaria a la base de datos.
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            kwargs['update_fields'] = set(update_fields) | {'fecha_baja'}
 
 
 class Area(StatusLifecycleModel):
@@ -203,8 +251,8 @@ class Turno(StatusLifecycleModel):
 
     def clean(self):
         from django.core.exceptions import ValidationError
-        entrada_dt = datetime.combine(date.today(), self.hora_entrada)
-        salida_dt = datetime.combine(date.today(), self.hora_salida)
+        entrada_dt = datetime.combine(timezone.localdate(), self.hora_entrada)
+        salida_dt = datetime.combine(timezone.localdate(), self.hora_salida)
         if salida_dt <= entrada_dt:
             raise ValidationError({'hora_salida': 'La hora de salida debe ser posterior a la de entrada.'})
 
