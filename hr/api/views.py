@@ -112,7 +112,7 @@ class PuestoViewSet(
     filter_backends = FILTER_BACKENDS
     filterset_fields = ['area', 'activo', 'empresa']
     search_fields = ['nombre', 'descripcion']
-    ordering_fields = ['nombre', 'salario_base', 'creado_en']
+    ordering_fields = ['nombre', 'salario_base']
     ordering = ['nombre']
 
     def get_queryset(self):
@@ -198,7 +198,14 @@ class ContratoViewSet(
     queryset = Contrato.objects.all()
     serializer_class = ContratoSerializer
     filter_backends = FILTER_BACKENDS
-    filterset_fields = ['empleado', 'tipo', 'estado', 'activo', 'fecha_inicio__gte', 'fecha_inicio__lte', 'fecha_fin__gte', 'fecha_fin__lte']
+    filterset_fields = {
+        'empleado': ['exact'],
+        'tipo': ['exact'],
+        'estado': ['exact'],
+        'activo': ['exact'],
+        'fecha_inicio': ['gte', 'lte'],
+        'fecha_fin': ['gte', 'lte'],
+    }
     search_fields = ['archivo_url', 'observaciones', 'prestaciones']
     ordering_fields = ['fecha_inicio', 'fecha_fin', 'salario']
     ordering = ['-fecha_inicio']
@@ -257,7 +264,11 @@ class CalendarioViewSet(
     queryset = Calendario.objects.all()
     serializer_class = CalendarioSerializer
     filter_backends = FILTER_BACKENDS
-    filterset_fields = ['turno', 'tipo', 'fecha__gte', 'fecha__lte']
+    filterset_fields = {
+        'turno': ['exact'],
+        'tipo': ['exact'],
+        'fecha': ['gte', 'lte'],
+    }
     search_fields = ['tipo', 'turno__nombre']
     ordering_fields = ['fecha', 'tipo']
     ordering = ['-fecha']
@@ -285,10 +296,12 @@ class AsistenciaViewSet(
     queryset = Asistencia.objects.all()
     serializer_class = AsistenciaSerializer
     filter_backends = FILTER_BACKENDS
-    filterset_fields = [
-        'empleado', 'turno', 'estado',
-        'fecha', 'fecha__gte', 'fecha__lte',
-    ]
+    filterset_fields = {
+        'empleado': ['exact'],
+        'turno': ['exact'],
+        'estado': ['exact'],
+        'fecha': ['exact', 'gte', 'lte'],
+    }
     search_fields = ['observaciones', 'empleado__nombre', 'empleado__numero_empleado']
     ordering_fields = ['fecha', 'hora_entrada', 'hora_salida', 'minutos_retardo']
     ordering = ['-fecha']
@@ -326,13 +339,19 @@ class AsistenciaViewSet(
 
         fecha_str = request.data.get('fecha')
         if fecha_str:
-            fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            try:
+                fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
         else:
             fecha = date.today()
 
         hora_str = request.data.get('hora')
         if hora_str:
-            ahora = datetime.strptime(hora_str, '%Y-%m-%d %H:%M:%S')
+            try:
+                ahora = datetime.strptime(hora_str, '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                return Response({'detail': 'Formato de hora inválido (YYYY-MM-DD HH:MM:SS).'}, status=status.HTTP_400_BAD_REQUEST)
         else:
             ahora = timezone.now()
 
@@ -373,13 +392,19 @@ class AsistenciaViewSet(
 
         fecha_str = request.data.get('fecha')
         if fecha_str:
-            fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            try:
+                fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
         else:
             fecha = date.today()
 
         hora_str = request.data.get('hora')
         if hora_str:
-            ahora = datetime.strptime(hora_str, '%Y-%m-%d %H:%M:%S')
+            try:
+                ahora = datetime.strptime(hora_str, '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                return Response({'detail': 'Formato de hora inválido (YYYY-MM-DD HH:MM:SS).'}, status=status.HTTP_400_BAD_REQUEST)
         else:
             ahora = timezone.now()
 
@@ -411,7 +436,12 @@ class ControlHorasViewSet(
     queryset = ControlHoras.objects.all()
     serializer_class = ControlHorasSerializer
     filter_backends = FILTER_BACKENDS
-    filterset_fields = ['empleado', 'tipo', 'op', 'fecha', 'fecha__gte', 'fecha__lte']
+    filterset_fields = {
+        'empleado': ['exact'],
+        'tipo': ['exact'],
+        'op': ['exact'],
+        'fecha': ['exact', 'gte', 'lte'],
+    }
     search_fields = ['descripcion', 'empleado__numero_empleado']
     ordering_fields = ['fecha', 'hora_inicio', 'hora_fin', 'horas_trabajadas']
     ordering = ['-fecha', '-hora_inicio']
@@ -441,7 +471,13 @@ class VacacionesViewSet(
     queryset = Vacaciones.objects.all()
     serializer_class = VacacionesSerializer
     filter_backends = FILTER_BACKENDS
-    filterset_fields = ['empleado', 'estado', 'fecha_inicio__gte', 'fecha_fin__lte', 'fecha_solicitud__gte', 'fecha_solicitud__lte']
+    filterset_fields = {
+        'empleado': ['exact'],
+        'estado': ['exact'],
+        'fecha_inicio': ['gte'],
+        'fecha_fin': ['lte'],
+        'fecha_solicitud': ['gte', 'lte'],
+    }
     search_fields = ['motivo', 'motivo_rechazo']
     ordering_fields = ['fecha_solicitud', 'fecha_inicio', 'fecha_fin', 'dias_solicitados']
     ordering = ['-fecha_solicitud']
@@ -510,7 +546,15 @@ class PermisoAusenciaViewSet(
     queryset = PermisoAusencia.objects.all()
     serializer_class = PermisoAusenciaSerializer
     filter_backends = FILTER_BACKENDS
-    filterset_fields = ['empleado', 'tipo', 'estado', 'con_goce_sueldo', 'fecha_inicio__gte', 'fecha_fin__lte', 'fecha_solicitud__gte', 'fecha_solicitud__lte']
+    filterset_fields = {
+        'empleado': ['exact'],
+        'tipo': ['exact'],
+        'estado': ['exact'],
+        'con_goce_sueldo': ['exact'],
+        'fecha_inicio': ['gte'],
+        'fecha_fin': ['lte'],
+        'fecha_solicitud': ['gte', 'lte'],
+    }
     search_fields = ['motivo', 'motivo_rechazo']
     ordering_fields = ['fecha_solicitud', 'fecha_inicio', 'fecha_fin']
     ordering = ['-fecha_solicitud']
@@ -579,7 +623,14 @@ class IncidenciaViewSet(
     queryset = Incidencia.objects.all()
     serializer_class = IncidenciaSerializer
     filter_backends = FILTER_BACKENDS
-    filterset_fields = ['empleado', 'tipo', 'gravedad', 'estado', 'activo', 'fecha', 'fecha__gte', 'fecha__lte']
+    filterset_fields = {
+        'empleado': ['exact'],
+        'tipo': ['exact'],
+        'gravedad': ['exact'],
+        'estado': ['exact'],
+        'activo': ['exact'],
+        'fecha': ['exact', 'gte', 'lte'],
+    }
     search_fields = ['descripcion', 'acciones_tomadas']
     ordering_fields = ['fecha', 'fecha_reporte', 'gravedad', 'estado']
     ordering = ['-fecha', '-fecha_reporte']
@@ -612,7 +663,15 @@ class EvaluacionViewSet(
     queryset = Evaluacion.objects.all()
     serializer_class = EvaluacionSerializer
     filter_backends = FILTER_BACKENDS
-    filterset_fields = ['empleado', 'evaluador', 'tipo', 'periodo', 'estado', 'fecha__gte', 'fecha__lte', 'puntaje__gte', 'puntaje__lte']
+    filterset_fields = {
+        'empleado': ['exact'],
+        'evaluador': ['exact'],
+        'tipo': ['exact'],
+        'periodo': ['exact'],
+        'estado': ['exact'],
+        'fecha': ['gte', 'lte'],
+        'puntaje': ['gte', 'lte'],
+    }
     search_fields = ['comentarios', 'empleado__nombre', 'evaluador__nombre']
     ordering_fields = ['fecha', 'puntaje', 'periodo']
     ordering = ['-fecha']
@@ -642,7 +701,14 @@ class CapacitacionViewSet(
     queryset = Capacitacion.objects.all()
     serializer_class = CapacitacionSerializer
     filter_backends = FILTER_BACKENDS
-    filterset_fields = ['empleado', 'estado', 'institucion', 'fecha_inicio__gte', 'fecha_inicio__lte', 'fecha_fin__gte', 'fecha_fin__lte', 'calificacion__gte', 'calificacion__lte']
+    filterset_fields = {
+        'empleado': ['exact'],
+        'estado': ['exact'],
+        'institucion': ['exact'],
+        'fecha_inicio': ['gte', 'lte'],
+        'fecha_fin': ['gte', 'lte'],
+        'calificacion': ['gte', 'lte'],
+    }
     search_fields = ['nombre', 'institucion', 'constancia_url']
     ordering_fields = ['fecha_inicio', 'fecha_fin', 'horas', 'calificacion']
     ordering = ['-fecha_inicio']
@@ -670,12 +736,14 @@ class NominaViewSet(
     queryset = Nomina.objects.all()
     serializer_class = NominaSerializer
     filter_backends = FILTER_BACKENDS
-    filterset_fields = [
-        'empleado', 'sucursal', 'estado',
-        'periodo_inicio__gte', 'periodo_inicio__lte',
-        'periodo_fin__gte', 'periodo_fin__lte',
-        'fecha_pago__gte', 'fecha_pago__lte',
-    ]
+    filterset_fields = {
+        'empleado': ['exact'],
+        'sucursal': ['exact'],
+        'estado': ['exact'],
+        'periodo_inicio': ['gte', 'lte'],
+        'periodo_fin': ['gte', 'lte'],
+        'fecha_pago': ['gte', 'lte'],
+    }
     search_fields = ['observaciones', 'empleado__numero_empleado', 'empleado__nombre']
     ordering_fields = ['periodo_inicio', 'fecha_pago', 'neto', 'total_percepciones', 'total_deducciones']
     ordering = ['-periodo_inicio', '-fecha_generacion']
@@ -725,6 +793,13 @@ class NominaViewSet(
         if pf < pi:
             return Response({'periodo_fin': ['Debe ser posterior a periodo_inicio.']}, status=status.HTTP_400_BAD_REQUEST)
 
+        fpago = None
+        if fecha_pago:
+            try:
+                fpago = datetime.strptime(fecha_pago, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
+
         user = request.user
         empleados_qs = Empleado.objects.filter(activo=True)
         if getattr(user, "is_superuser", False):
@@ -758,7 +833,7 @@ class NominaViewSet(
                 empleado=empleado,
                 periodo_inicio=pi,
                 periodo_fin=pf,
-                fecha_pago=datetime.strptime(fecha_pago, '%Y-%m-%d').date() if fecha_pago else None,
+                fecha_pago=fpago,
                 estado='pendiente',
                 salario_base=salario_base,
                 dias_pagados=15,
@@ -796,11 +871,13 @@ class ProductividadViewSet(
     queryset = Productividad.objects.all()
     serializer_class = ProductividadSerializer
     filter_backends = FILTER_BACKENDS
-    filterset_fields = [
-        'empleado', 'departamento', 'estado',
-        'fecha', 'fecha__gte', 'fecha__lte',
-        'meta_unidad',
-    ]
+    filterset_fields = {
+        'empleado': ['exact'],
+        'departamento': ['exact'],
+        'estado': ['exact'],
+        'fecha': ['exact', 'gte', 'lte'],
+        'meta_unidad': ['exact'],
+    }
     search_fields = ['descripcion', 'empleado__nombre']
     ordering_fields = ['fecha', 'meta', 'resultado']
     ordering = ['-fecha']
@@ -835,7 +912,10 @@ class DashboardRH(APIView):
         departamento_id = request.query_params.get('departamento_id')
         fecha_str = request.query_params.get('fecha')
         if fecha_str:
-            hoy = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            try:
+                hoy = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
         else:
             hoy = date.today()
         inicio_mes = hoy.replace(day=1)
@@ -885,7 +965,7 @@ class DashboardRH(APIView):
 
         empleados_activos = empleados_qs.filter(activo=True).count()
         altas_mes = empleados_qs.filter(fecha_ingreso__gte=inicio_mes, fecha_ingreso__lte=fin_mes).count()
-        bajas_mes = empleados_qs.filter(activo=False, actualizado_en__gte=inicio_mes, actualizado_en__lte=fin_mes).count()
+        bajas_mes = empleados_qs.filter(activo=False, fecha_baja__gte=inicio_mes, fecha_baja__lte=fin_mes).count()
 
         asistencias_hoy_qs = asistencias_qs.filter(fecha=hoy)
         asistencias_hoy = {
@@ -916,15 +996,18 @@ class DashboardRH(APIView):
             total=Coalesce(Sum('neto'), Value(0, output_field=DecimalField()))
         )['total'] or Decimal('0')
 
+        # Departamento y Sucursal usan pk propias (id_departamento / id_sucursal):
+        # no existe un campo 'id' que resolver. Se alias-ea para conservar
+        # intactas las claves 'departamento__id' y 'sucursal__id' de la respuesta.
         distribucion_por_departamento = list(
             empleados_qs.filter(activo=True, departamento__isnull=False)
-            .values('departamento__id', 'departamento__nombre')
+            .values('departamento__nombre', departamento__id=F('departamento__id_departamento'))
             .annotate(total=Count('id'))
             .order_by('-total')
         )
         distribucion_por_sucursal = list(
             empleados_qs.filter(activo=True, sucursal__isnull=False)
-            .values('sucursal__id', 'sucursal__nombre')
+            .values('sucursal__nombre', sucursal__id=F('sucursal__id_sucursal'))
             .annotate(total=Count('id'))
             .order_by('-total')
         )
