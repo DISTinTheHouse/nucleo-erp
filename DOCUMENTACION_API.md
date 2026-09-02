@@ -1894,6 +1894,7 @@ Catálogo del Plan de Cuentas (estructura padre/hijo, tipo:
 
 - **CRUD**: `/api/v1/finanzas/conciliaciones-bancarias/`
 - **Preparar conciliación** (acción bulk para fechas + saldo): `POST /api/v1/finanzas/conciliaciones-bancarias/preparar/`
+
   ```json
   {
     "empresa": 1,
@@ -1905,6 +1906,7 @@ Catálogo del Plan de Cuentas (estructura padre/hijo, tipo:
   ```
 
   - **Super/Admin**: `empresa` se resuelve desde `cuenta_bancaria.empresa` (no requiere `user.empresa`).
+
 - **Cerrar**: `POST /api/v1/finanzas/conciliaciones-bancarias/{id}/cerrar/`
 - **Cancelar**: `POST /api/v1/finanzas/conciliaciones-bancarias/{id}/cancelar/`
 - \*\*⚠ DELETE de conciliación CERRADA responde `400` ("Cancelela primero").
@@ -4774,14 +4776,17 @@ Notas:
 **Autenticación**: `Authorization: Bearer <TOKEN>`
 **Content-Type**: `application/json`
 
-### Quick Start (4 endpoints)
+### Quick Start (5 endpoints)
 
-| Método | Ruta | Para qué |
-|---|---|---|
-| `GET` | `/api/v1/notificaciones/sin-leer/count/` | Badge rojo (contador ligero) |
-| `GET` | `/api/v1/notificaciones/` | Dropdown lista — soporta `?leido=false&modulo=ventas&page=1&page_size=20` |
-| `POST` | `/api/v1/notificaciones/{id}/marcar-leida/` | Marcar 1 notificación como leída |
-| `POST` | `/api/v1/notificaciones/marcar-todas-leidas/` | Marcar TODO como leído |
+| Método | Ruta                                                | Para qué                                                                                   |
+| ------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `GET`  | `/api/v1/notificaciones/sin-leer/count/`            | Badge rojo (contador ligero). Respuesta: `{count, ultima_notificacion_id}`                 |
+| `GET`  | `/api/v1/notificaciones/stream/?token=ACCESS_TOKEN` | **Realtime SSE** — EventSource nativo. Eventos: `abierto`, `nueva`, `ping`, `error`, `fin` |
+| `GET`  | `/api/v1/notificaciones/`                           | Dropdown lista — soporta `?leido=false&modulo=ventas&page=1&page_size=20`                  |
+| `POST` | `/api/v1/notificaciones/{id}/marcar-leida/`         | Marcar 1 notificación como leída                                                           |
+| `POST` | `/api/v1/notificaciones/marcar-todas-leidas/`       | Marcar TODO como leído                                                                     |
+
+> 💡 El SSE dura ~6min y reconecta solo (`EventSource` lo hace automático). Cierra conexiones idle con keep-alive cada 20s. Perfecto para no abrir 100 requests/hour de polling.
 
 ---
 
@@ -4792,7 +4797,7 @@ Notas:
 export async function notificacionesCount(token: string) {
   const res = await fetch(
     "http://localhost:8003/api/v1/notificaciones/sin-leer/count/",
-    { headers: { Authorization: `Bearer ${token}` } }
+    { headers: { Authorization: `Bearer ${token}` } },
   );
   return (await res.json()) as { count: number };
 }
@@ -4806,9 +4811,13 @@ export async function notificacionesLista(token: string, soloSinLeer = true) {
   });
   const res = await fetch(
     `http://localhost:8003/api/v1/notificaciones/?${params}`,
-    { headers: { Authorization: `Bearer ${token}` } }
+    { headers: { Authorization: `Bearer ${token}` } },
   );
-  return (await res.json()) as { count: number; next: string | null; results: Notificacion[] };
+  return (await res.json()) as {
+    count: number;
+    next: string | null;
+    results: Notificacion[];
+  };
 }
 
 // 3) Marcar UNA como leída (onclick notificación)
@@ -4818,9 +4827,62 @@ export async function notificacionMarcarLeida(id: number, token: string) {
     {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
-    }
+    },
   );
   return (await res.json()) as Notificacion;
+}
+
+// 4) Hook de Realtime SSE — pégalo en components/NotificationBell.tsx o AppLayout
+// 0 npm installs, usa EventSource nativo del navegador
+import { useEffect, useState } from "react";
+export function useNotificacionesStream(
+  token: string | undefined | null,
+  onNueva?: () => void,
+) {
+  const [sinLeer, setSinLeer] = useState<number>(0);
+  const [conectado, setConectado] = useState(false);
+
+  useEffect(() => {
+    if (!token) return;
+    const url = `http://localhost:8003/api/v1/notificaciones/stream/?token=${encodeURIComponent(token)}`;
+    const es = new EventSource(url, { withCredentials: false });
+
+    es.addEventListener("abierto", (e: MessageEvent<string>) => {
+      const d = JSON.parse(e.data) as {
+        count: number;
+        ultima_notificacion_id: number;
+      };
+      setSinLeer(d.count);
+      setConectado(true);
+    });
+    es.addEventListener("nueva", (e: MessageEvent<string>) => {
+      const d = JSON.parse(e.data) as {
+        count: number;
+        ultima_notificacion_id: number;
+      };
+      setSinLeer(d.count);
+      onNueva?.(); // refresca la lista del dropdown aquí
+    });
+    es.addEventListener("ping", () => setConectado(true));
+    es.addEventListener("fin", () => setConectado(false));
+    es.addEventListener("error", (e: any) => {
+      setConectado(false);
+      // Si el token expiró, cerramos manualmente (EventSource intentaría reconectar infinito)
+      try {
+        const d = JSON.parse(String(e?.data ?? "{}"));
+        if (d.code === "AUTH_REQUIRED") es.close();
+      } catch {
+        // Evento error sin data = desconexión transitoria; EventSource reconecta solo en ~3s
+      }
+    });
+
+    return () => {
+      es.close();
+      setConectado(false);
+    };
+  }, [token, onNueva]);
+
+  return { sinLeer, conectado };
 }
 ```
 
@@ -4833,8 +4895,8 @@ export interface Notificacion {
   id: number;
   titulo: string;
   mensaje: string;
-  modulo: string;          // "ventas", "compras", etc.
-  tipo: string;            // ej: "cotizacion_en_revision"
+  modulo: string; // "ventas", "compras", etc.
+  tipo: string; // ej: "cotizacion_en_revision"
   leido: boolean;
   leido_at: string | null; // ISO 8601
   data: {
@@ -4866,8 +4928,8 @@ if (n.tipo === "cotizacion_en_revision" && n.data?.cotizacion_id) {
 
 ### Tipos emitidos hoy
 
-| `tipo` | `modulo` | Trigger |
-|---|---|---|
+| `tipo`                   | `modulo` | Trigger                                                                                                                                               |
+| ------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cotizacion_en_revision` | `ventas` | Vendedor llama `POST /ventas/cotizaciones/{id}/enviar-revision/` → usuarios con Rol `MESA-DE-CONTROL` de la misma empresa reciben 1 notificación c/u. |
 
 ### Consultas soportadas
