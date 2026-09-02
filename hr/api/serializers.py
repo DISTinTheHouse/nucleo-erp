@@ -196,7 +196,7 @@ class TurnoSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer)
         hora_entrada = data.get('hora_entrada') or getattr(self.instance, 'hora_entrada', None)
         hora_salida = data.get('hora_salida') or getattr(self.instance, 'hora_salida', None)
         if hora_entrada and hora_salida:
-            hoy = timezone.now().date()
+            hoy = timezone.localdate()
             from datetime import datetime as _dt
             e = _dt.combine(hoy, hora_entrada)
             s = _dt.combine(hoy, hora_salida)
