@@ -1350,9 +1350,17 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             )
 
     def _require_mesa_control(self, user):
+        from seguridad.models import UsuarioRol
+
         if getattr(user, "is_superuser", False):
             return
         if getattr(user, "is_admin_empresa", False):
+            return
+        if UsuarioRol.objects.filter(
+            usuario=user,
+            rol__codigo__iexact="MESA-DE-CONTROL",
+            rol__estatus="activo",
+        ).exists():
             return
         raise ValidationError(
             {"permiso": "Acción disponible solo para mesa de control."}
@@ -1873,8 +1881,66 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 {"estatus": "La cotización ya está en revisión o autorizada."}
             )
 
-        cotizacion.estatus = 2
-        cotizacion.save(update_fields=["estatus", "updated_at"])
+        with transaction.atomic():
+            cotizacion.estatus = 2
+            cotizacion.save(update_fields=["estatus", "updated_at"])
+
+            # --- Notificación a Mesa de Control ---
+            from notificaciones.services.notificacion_service import (
+                crear_notificacion_por_rol,
+            )
+
+            vendedor_nombre = "Sistema"
+            if cotizacion.vendedor:
+                if hasattr(cotizacion.vendedor, "get_full_name"):
+                    nombre_full = cotizacion.vendedor.get_full_name()
+                    if nombre_full:
+                        vendedor_nombre = nombre_full
+                    else:
+                        vendedor_nombre = getattr(
+                            cotizacion.vendedor, "username", "Sistema"
+                        )
+                else:
+                    vendedor_nombre = getattr(
+                        cotizacion.vendedor, "username", "Sistema"
+                    )
+
+            cliente_nombre = None
+            if cotizacion.cliente_id:
+                cliente_nombre = getattr(
+                    cotizacion.cliente, "razon_social", None
+                ) or getattr(cotizacion.cliente, "nombre", None)
+
+            enviada_en = (
+                cotizacion.updated_at.isoformat()
+                if cotizacion.updated_at
+                else None
+            )
+
+            crear_notificacion_por_rol(
+                empresa=cotizacion.empresa,
+                codigo_rol="MESA-DE-CONTROL",
+                titulo="Nueva cotización en revisión",
+                mensaje=(
+                    f"El vendedor {vendedor_nombre} envió la cotización #{cotizacion.id} "
+                    f"({cliente_nombre or 'Sin cliente asignado'}) a revisión."
+                ),
+                modulo="ventas",
+                tipo="cotizacion_en_revision",
+                data={
+                    "cotizacion_id": cotizacion.id,
+                    "vendedor_id": cotizacion.vendedor_id,
+                    "vendedor_nombre": vendedor_nombre,
+                    "cliente_nombre": cliente_nombre,
+                    "gran_total": (
+                        float(cotizacion.gran_total)
+                        if cotizacion.gran_total is not None
+                        else 0.0
+                    ),
+                    "enviada_en": enviada_en,
+                },
+            )
+            # --- Fin Notificación ---
 
         return Response(
             {

@@ -76,6 +76,7 @@ INSTALLED_APPS = [
     'logistica',
     'finanzas',
     'hr',
+    'notificaciones',
     'allauth',
     'allauth.account',
     'auth_kit',

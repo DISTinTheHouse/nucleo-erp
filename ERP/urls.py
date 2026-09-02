@@ -54,6 +54,7 @@ urlpatterns = [
     path('api/v1/ai/', include('ia.api.urls')),
     path('api/v1/hr/', include('hr.api.urls')),
     path('api/v1/wms/', include('wms.api.urls')),
+    path('api/v1/notificaciones/', include('notificaciones.api.urls')),
     path('auditoria/', include('auditoria.urls')),
     path('accounts/', include('django.contrib.auth.urls')),
     path('QA/', include('QA.urls')),

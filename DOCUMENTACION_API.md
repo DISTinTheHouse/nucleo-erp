@@ -4766,6 +4766,110 @@ Notas:
 }
 ```
 
+---
+
+## 🔔 N. Sistema de Notificaciones
+
+**Base URL**: `/api/v1/notificaciones/`
+**Autenticación**: `Authorization: Bearer <TOKEN>`
+**Content-Type**: `application/json`
+
+### Quick Start (4 endpoints)
+
+| Método | Ruta | Para qué |
+|---|---|---|
+| `GET` | `/api/v1/notificaciones/sin-leer/count/` | Badge rojo (contador ligero) |
+| `GET` | `/api/v1/notificaciones/` | Dropdown lista — soporta `?leido=false&modulo=ventas&page=1&page_size=20` |
+| `POST` | `/api/v1/notificaciones/{id}/marcar-leida/` | Marcar 1 notificación como leída |
+| `POST` | `/api/v1/notificaciones/marcar-todas-leidas/` | Marcar TODO como leído |
+
+---
+
+### Ejemplos copiar/pegar (TypeScript / fetch)
+
+```ts
+// 1) Contador sin leer (badge)
+export async function notificacionesCount(token: string) {
+  const res = await fetch(
+    "http://localhost:8003/api/v1/notificaciones/sin-leer/count/",
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  return (await res.json()) as { count: number };
+}
+
+// 2) Lista las 20 más recientes (sin leer)
+export async function notificacionesLista(token: string, soloSinLeer = true) {
+  const params = new URLSearchParams({
+    leido: soloSinLeer ? "false" : "true",
+    page: "1",
+    page_size: "20",
+  });
+  const res = await fetch(
+    `http://localhost:8003/api/v1/notificaciones/?${params}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  return (await res.json()) as { count: number; next: string | null; results: Notificacion[] };
+}
+
+// 3) Marcar UNA como leída (onclick notificación)
+export async function notificacionMarcarLeida(id: number, token: string) {
+  const res = await fetch(
+    `http://localhost:8003/api/v1/notificaciones/${id}/marcar-leida/`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    }
+  );
+  return (await res.json()) as Notificacion;
+}
+```
+
+---
+
+### Tipos TypeScript
+
+```ts
+export interface Notificacion {
+  id: number;
+  titulo: string;
+  mensaje: string;
+  modulo: string;          // "ventas", "compras", etc.
+  tipo: string;            // ej: "cotizacion_en_revision"
+  leido: boolean;
+  leido_at: string | null; // ISO 8601
+  data: {
+    cotizacion_id?: number;
+    vendedor_id?: number | null;
+    vendedor_nombre?: string;
+    cliente_nombre?: string | null;
+    gran_total?: number;
+    enviada_en?: string; // ISO 8601
+    [k: string]: any;
+  } | null;
+  created_at: string; // ISO 8601
+}
+```
+
+---
+
+### Navegación onclick
+
+```ts
+// Cuando el usuario da click en una notificación:
+if (n.tipo === "cotizacion_en_revision" && n.data?.cotizacion_id) {
+  router.push(`/ventas/cotizaciones/${n.data.cotizacion_id}`);
+  await notificacionMarcarLeida(n.id, token);
+}
+```
+
+---
+
+### Tipos emitidos hoy
+
+| `tipo` | `modulo` | Trigger |
+|---|---|---|
+| `cotizacion_en_revision` | `ventas` | Vendedor llama `POST /ventas/cotizaciones/{id}/enviar-revision/` → usuarios con Rol `MESA-DE-CONTROL` de la misma empresa reciben 1 notificación c/u. |
+
 ### Consultas soportadas
 
 - Conteos: “¿Cuántas empresas/usuarios/cotizaciones hay?”
