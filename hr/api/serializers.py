@@ -91,6 +91,18 @@ class EmpresaScopedSerializerMixin:
         )
         return turno
 
+    def validate_autorizado_por(self, autorizado_por):
+        # ``autorizado_por`` es un ``usuarios.Usuario``, que llega a la empresa por
+        # su FK directa ``empresa`` (misma ruta que usa el pipeline de picking en
+        # ``wms.services.picking_pipeline.context`` para validar al operador).
+        if autorizado_por is None:
+            return autorizado_por
+        self._validar_empresa_id(
+            autorizado_por.empresa_id,
+            "El usuario autorizador no pertenece a la empresa del usuario.",
+        )
+        return autorizado_por
+
     def validate_meta_unidad(self, meta_unidad):
         return meta_unidad
 
@@ -153,6 +165,11 @@ class ContratoSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializ
     class Meta:
         model = Contrato
         fields = '__all__'
+        # Campo de auditoria: lo fija el servidor en ContratoViewSet.perform_create.
+        # Sin esto un PUT/PATCH podia apuntarlo al usuario de otra empresa. Misma
+        # convencion que 'creado_por' en NominaSerializer y 'reportado_por' en
+        # IncidenciaSerializer; sigue presente en la respuesta.
+        read_only_fields = ('creado_por',)
 
     def validate(self, data):
         empleado = data.get('empleado') or getattr(self.instance, 'empleado', None)
@@ -301,15 +318,10 @@ class NominaDetalleSerializer(EmpresaScopedSerializerMixin, serializers.ModelSer
     class Meta:
         model = NominaDetalle
         fields = '__all__'
-
-    def validate_nomina(self, nomina):
-        if nomina is None:
-            return nomina
-        self._validar_empresa_id(
-            nomina.empresa_id,
-            "La nómina no pertenece a la empresa del usuario.",
-        )
-        return nomina
+        # Se escribe siempre desde la nomina padre en NominaSerializer.create/update.
+        # Como entrada obligatoria chocaba con ese nomina=nomina (TypeError por
+        # argumento duplicado); sigue visible en la respuesta.
+        read_only_fields = ('nomina',)
 
     def validate(self, data):
         monto = data.get('monto')
@@ -362,6 +374,10 @@ class ProductividadSerializer(EmpresaScopedSerializerMixin, serializers.ModelSer
     class Meta:
         model = Productividad
         fields = '__all__'
+        # Campo de auditoria: lo fija el servidor en ProductividadViewSet.perform_create.
+        # Sin esto un PUT/PATCH podia apuntarlo al usuario de otra empresa. Misma
+        # convencion que 'creado_por' en NominaSerializer; sigue en la respuesta.
+        read_only_fields = ('creado_por',)
 
 
 class ProductividadDetalleSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):

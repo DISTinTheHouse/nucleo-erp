@@ -1,9 +1,25 @@
+from django.conf import settings
 from django.db import models
 from django.db.models import Sum
 from django.utils import timezone
 from nucleo.models import StatusLifecycleModel
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+
+
+def _con_zona_horaria(valor):
+    """Normaliza un datetime a la zona horaria activa.
+
+    Con ``USE_TZ`` habilitado, ``hora_entrada``/``hora_salida`` pueden llegar
+    aware (DRF, ``timezone.now()``) o naive (``datetime.strptime`` en los
+    endpoints del checador), y ``datetime.combine`` del turno siempre es naive.
+    Restar uno de otro lanzaba ``TypeError``. Se usa la misma zona con la que
+    Django convertiría un valor naive al guardarlo, así que el instante
+    almacenado no cambia.
+    """
+    if valor is None or not settings.USE_TZ or timezone.is_aware(valor):
+        return valor
+    return timezone.make_aware(valor, timezone.get_current_timezone())
 
 
 class Puesto(StatusLifecycleModel):
@@ -251,15 +267,18 @@ class Asistencia(models.Model):
         super().save(*args, **kwargs)
 
     def _calcular_estado_y_horas(self):
+        hora_entrada = _con_zona_horaria(self.hora_entrada)
+        hora_salida = _con_zona_horaria(self.hora_salida)
+
         if self.turno:
             self.minutos_tolerancia = self.turno.tolerancia_retardo_minutos
             base_diarias = self.turno.horas_base_diarias
         else:
             base_diarias = Decimal('8.00')
 
-        if self.hora_entrada and self.turno:
-            turno_entrada = datetime.combine(self.fecha, self.turno.hora_entrada)
-            diff = (self.hora_entrada - turno_entrada).total_seconds() / 60
+        if hora_entrada and self.turno:
+            turno_entrada = _con_zona_horaria(datetime.combine(self.fecha, self.turno.hora_entrada))
+            diff = (hora_entrada - turno_entrada).total_seconds() / 60
             if diff > self.minutos_tolerancia:
                 self.minutos_retardo = int(diff - self.minutos_tolerancia)
                 if self.estado in ('puntual',):
@@ -271,8 +290,8 @@ class Asistencia(models.Model):
                 if self.estado in ('retardo',):
                     pass
 
-        if self.hora_salida and self.hora_entrada:
-            total_segundos = (self.hora_salida - self.hora_entrada).total_seconds()
+        if hora_salida and hora_entrada:
+            total_segundos = (hora_salida - hora_entrada).total_seconds()
             total_horas = Decimal(str(total_segundos / 3600)).quantize(Decimal('0.01'))
             if total_horas > base_diarias:
                 self.horas_normales = base_diarias
