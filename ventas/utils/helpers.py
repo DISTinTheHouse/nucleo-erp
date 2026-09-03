@@ -268,12 +268,16 @@ def _save_servicios_extras(cotizacion_obj, rows):
 
 
 def _save_pedido_detalle(pedido_obj, rows, empresa, user):
-    PedidoDetalle.objects.filter(pedido=pedido_obj).delete()
-    rows = _merge_detalle(rows)
-    for item in rows:
+    existing_detalles = {
+        detalle.pk: detalle
+        for detalle in PedidoDetalle.objects.filter(pedido=pedido_obj).prefetch_related("tallas")
+    }
+    touched_ids = set()
+    for item in rows or []:
         producto = None
         producto_nombre_externo = item.get("producto_nombre_externo")
         producto_id = item.get("producto")
+        detalle_id = item.get("id")
 
         if not producto_nombre_externo and producto_id not in (None, "", 0):
             try:
@@ -337,17 +341,42 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
         if precio_lista is None:
             precio_lista = getattr(producto, "precio_base", None) or 0
 
-        pedido_det = PedidoDetalle.objects.create(
-            pedido=pedido_obj,
-            producto=producto,
-            producto_nombre_externo=producto_nombre_externo,
-            color=color_obj,
-            direccion_envio_cliente=direccion_obj,
-            precio_lista=precio_lista,
-            precio_unitario=precio_unitario,
-            costo_unitario=item.get("costo_unitario"),
-            subtotal_linea=0,
+        pedido_det = None
+        if detalle_id not in (None, "", 0):
+            try:
+                detalle_id = int(detalle_id)
+            except Exception:
+                detalle_id = None
+            pedido_det = existing_detalles.get(detalle_id)
+            if pedido_det is None:
+                raise ValidationError(
+                    {"detalle": f"El renglón de pedido no existe: {item.get('id')}"}
+                )
+        else:
+            pedido_det = PedidoDetalle(pedido=pedido_obj)
+
+        pedido_det.producto = producto
+        pedido_det.producto_nombre_externo = producto_nombre_externo
+        pedido_det.color = color_obj
+        pedido_det.direccion_envio_cliente = direccion_obj
+        pedido_det.precio_lista = precio_lista
+        pedido_det.precio_unitario = precio_unitario
+        pedido_det.costo_unitario = item.get("costo_unitario")
+        pedido_det.subtotal_linea = 0
+        pedido_det.save()
+        touched_ids.add(pedido_det.pk)
+
+        existing_tallas = {
+            talla.pedido_detalle_id: []
+            for talla in PedidoDetalleTalla.objects.filter(pedido_detalle=pedido_det)
+        }
+        tallas_actuales = list(
+            PedidoDetalleTalla.objects.filter(pedido_detalle=pedido_det).select_related("talla")
         )
+        for talla_row in tallas_actuales:
+            existing_tallas.setdefault(talla_row.pedido_detalle_id, []).append(talla_row)
+        tallas_usadas = set()
+
         for t in item.get("tallas") or []:
             talla = Talla.objects.filter(pk=t["talla"], activo=True).first()
             if not talla:
@@ -407,31 +436,76 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
                     empresa=pedido_obj.empresa,
                 ).first()
 
-            PedidoDetalleTalla.objects.create(
-                pedido_detalle=pedido_det,
-                talla=talla,
-                cantidad=t["cantidad"],
-                precio_unitario=precio_unitario,
-                subtotal_talla=0,
-                lleva_bordado=bool(t.get("lleva_bordado")),
-                bordado_config=t.get("bordado_config"),
-                lleva_reflejante=lleva_reflejante,
-                reflejante_config=reflejante_config,
-                lleva_corte_manga=bool(t.get("lleva_corte_manga")),
-                corte_manga_config=t.get("corte_manga_config"),
-                lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
-                cambio_talla_config=t.get("cambio_talla_config"),
-                variante=variante_obj,
+            talla_existente = next(
+                (
+                    row
+                    for row in tallas_actuales
+                    if row.talla_id == talla.pk and row.pk not in tallas_usadas
+                ),
+                None,
             )
+            if talla_existente is None:
+                talla_existente = PedidoDetalleTalla(pedido_detalle=pedido_det, talla=talla)
+
+            talla_existente.cantidad = t["cantidad"]
+            talla_existente.precio_unitario = precio_unitario
+            talla_existente.subtotal_talla = 0
+            talla_existente.lleva_bordado = bool(t.get("lleva_bordado"))
+            talla_existente.bordado_config = t.get("bordado_config")
+            talla_existente.lleva_reflejante = lleva_reflejante
+            talla_existente.reflejante_config = reflejante_config
+            talla_existente.lleva_corte_manga = bool(t.get("lleva_corte_manga"))
+            talla_existente.corte_manga_config = t.get("corte_manga_config")
+            talla_existente.lleva_cambio_talla = bool(t.get("lleva_cambio_talla"))
+            talla_existente.cambio_talla_config = t.get("cambio_talla_config")
+            talla_existente.variante = variante_obj
+            talla_existente.save()
+            tallas_usadas.add(talla_existente.pk)
+
+        sobrantes = [row for row in tallas_actuales if row.pk not in tallas_usadas]
+        if sobrantes:
+            sobrantes_ids = ", ".join(str(row.pk) for row in sobrantes)
+            raise ValidationError(
+                {
+                    "detalle": (
+                        "No se puede quitar tallas existentes del pedido mientras "
+                        f"haya trazabilidad asociada. Tallas sobrantes: {sobrantes_ids}."
+                    )
+                }
+            )
+
+    sobrantes_detalle = [
+        detalle_id for detalle_id in existing_detalles.keys() if detalle_id not in touched_ids
+    ]
+    if sobrantes_detalle:
+        raise ValidationError(
+            {
+                "detalle": (
+                    "No se pueden eliminar renglones existentes del pedido en edición "
+                    "estricta. Deben cancelarse primero los documentos ligados o "
+                    "conservar el renglón original en el payload."
+                )
+            }
+        )
 
 
 def _save_pedido_servicios_extras(pedido_obj, rows):
-    PedidoServicioExtra.objects.filter(pedido=pedido_obj).delete()
-    for row in rows or []:
-        PedidoServicioExtra.objects.create(
-            pedido=pedido_obj,
-            nombre=row.get("nombre") or "",
-            monto=row.get("monto") or 0,
-            cantidad=row.get("cantidad") or 1,
-            visible_en_factura=bool(row.get("visible_en_factura", True)),
+    existentes = list(PedidoServicioExtra.objects.filter(pedido=pedido_obj).order_by("id"))
+    rows = rows or []
+    for index, row in enumerate(rows):
+        extra = existentes[index] if index < len(existentes) else PedidoServicioExtra(pedido=pedido_obj)
+        extra.nombre = row.get("nombre") or ""
+        extra.monto = row.get("monto") or 0
+        extra.cantidad = row.get("cantidad") or 1
+        extra.visible_en_factura = bool(row.get("visible_en_factura", True))
+        extra.save()
+    if len(existentes) > len(rows):
+        raise ValidationError(
+            {
+                "servicios_extras": (
+                    "No se pueden eliminar servicios extras existentes desde la edición "
+                    "estricta. Manténgalos en el payload o regularice primero los "
+                    "documentos ligados."
+                )
+            }
         )

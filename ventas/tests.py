@@ -14,9 +14,12 @@ from rest_framework.test import APIClient
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Producto, Talla
 from inventarios.models import MovimientoInventario
+from finanzas.models import Factura, FacturaDetalle
+from inventarios.models import Almacen, TipoAlmacen
 from nucleo.models import Empresa, Moneda, Sucursal
 from terceros.models import Cliente
 from usuarios.models import Usuario
+from wms.models import Picking, PickingDetalle
 from ventas.models import (
     Cotizacion,
     CotizacionServicioExtra,
@@ -37,6 +40,10 @@ COTIZACION_ONBOARDING_URL = "/api/v1/ventas/cotizaciones/onboarding/"
 
 def pedido_editar_mesa_control_url(pedido_id):
     return f"/api/v1/ventas/pedidos/{pedido_id}/editar-mesa-control/"
+
+
+def pedido_editar_mesa_control_contexto_url(pedido_id):
+    return f"/api/v1/ventas/pedidos/{pedido_id}/editar-mesa-control-contexto/"
 
 
 class PedidoViewSetScopeTenantTests(TestCase):
@@ -667,6 +674,14 @@ class PedidoMesaControlUpdateTests(TestCase):
             nombre="Cliente ACME",
             razon_social="Cliente ACME SA",
         )
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            codigo="ALM-PT",
+            nombre="Almacen PT",
+            tipo_almacen=TipoAlmacen.PRODUCTO_TERMINADO,
+            permite_salida=True,
+        )
         cls.talla_m = Talla.objects.create(nombre="M")
         cls.talla_l = Talla.objects.create(nombre="L")
         cls.producto_a = Producto.objects.create(
@@ -799,6 +814,8 @@ class PedidoMesaControlUpdateTests(TestCase):
         return client
 
     def _payload(self):
+        pedido_detalle = self.pedido.detalles.first()
+        talla_existente = pedido_detalle.tallas.first()
         return {
             "pedido": {
                 "sucursal": self.sucursal.pk,
@@ -872,20 +889,17 @@ class PedidoMesaControlUpdateTests(TestCase):
             },
             "detalle": [
                 {
-                    "producto": self.producto_b.pk,
-                    "precio_lista": "120.00",
-                    "precio_unitario": "110.00",
-                    "costo_unitario": "80.00",
+                    "id": pedido_detalle.pk,
+                    "producto": self.producto_a.pk,
+                    "precio_lista": "150.00",
+                    "precio_unitario": "125.00",
+                    "costo_unitario": "82.00",
                     "tallas": [
                         {
-                            "talla": self.talla_m.pk,
+                            "talla": talla_existente.talla_id,
                             "cantidad": 3,
                             "lleva_bordado": True,
                             "bordado_config": {"ubicaciones": [{"codigo": "PE"}]},
-                        },
-                        {
-                            "talla": self.talla_l.pk,
-                            "cantidad": 4,
                         },
                     ],
                 }
@@ -926,6 +940,17 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("pedido", response.json())
 
+    def test_contexto_reporta_pedido_editable_sin_bloqueos(self):
+        response = self._client(self.admin_mesa).get(
+            pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["editable"])
+        self.assertEqual(body["modo"], "estricto_contable_operativo")
+        self.assertTrue(body["requiere_ids_detalle"])
+        self.assertEqual(body["bloqueos"], [])
+
     def test_edicion_mesa_control_actualiza_pedido_y_cotizacion_sin_inventario(self):
         response = self._client(self.admin_mesa).post(
             pedido_editar_mesa_control_url(self.pedido.pk),
@@ -934,6 +959,7 @@ class PedidoMesaControlUpdateTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["sincronizado"])
+        self.assertEqual(response.json()["modo"], "estricto_contable_operativo")
 
         self.pedido.refresh_from_db()
         self.cotizacion.refresh_from_db()
@@ -952,18 +978,14 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertIsNotNone(self.cotizacion.aprobado_snapshot)
 
         pedido_detalle = self.pedido.detalles.get()
-        self.assertEqual(pedido_detalle.producto_id, self.producto_b.pk)
-        self.assertEqual(pedido_detalle.tallas.count(), 2)
-        self.assertEqual(
-            sorted(pedido_detalle.tallas.values_list("cantidad", flat=True)), [3, 4]
-        )
+        self.assertEqual(pedido_detalle.producto_id, self.producto_a.pk)
+        self.assertEqual(pedido_detalle.tallas.count(), 1)
+        self.assertEqual(pedido_detalle.tallas.get().cantidad, 3)
 
         cot_detalle = self.cotizacion.cotizaciondetalle.get()
-        self.assertEqual(cot_detalle.producto_id, self.producto_b.pk)
-        self.assertEqual(cot_detalle.tallas.count(), 2)
-        self.assertEqual(
-            sorted(cot_detalle.tallas.values_list("cantidad", flat=True)), [3, 4]
-        )
+        self.assertEqual(cot_detalle.producto_id, self.producto_a.pk)
+        self.assertEqual(cot_detalle.tallas.count(), 1)
+        self.assertEqual(cot_detalle.tallas.get().cantidad, 3)
         self.assertTrue(
             cot_detalle.tallas.filter(
                 talla=self.talla_m, lleva_bordado=True
@@ -989,3 +1011,74 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(
             AuditoriaEvento.objects.filter(modulo="inventarios").count(), 0
         )
+
+    def test_bloquea_edicion_si_hay_factura_emitida_ligada(self):
+        factura = Factura.objects.create(
+            empresa=self.empresa,
+            sucursal=self.sucursal,
+            cliente=self.cliente,
+            pedido=self.pedido,
+            moneda=self.moneda,
+            folio="FAC-0001",
+            subtotal="100.00",
+            descuento="0.00",
+            impuestos="16.00",
+            total="116.00",
+            estatus=Factura.FacturaStatus.EMITIDA,
+        )
+        FacturaDetalle.objects.create(
+            factura=factura,
+            pedido_detalle=self.pedido.detalles.get(),
+            producto=self.producto_a,
+            cantidad="2.00",
+            precio_unitario="95.00",
+            descuento="0.00",
+            impuesto="0.00",
+            subtotal="190.00",
+            total="190.00",
+        )
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk),
+            self._payload(),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(response.json()["editable"])
+        self.assertEqual(response.json()["codigo"], "pedido_con_bloqueos")
+        self.assertIn("bloqueos", response.json())
+        self.assertEqual(response.json()["bloqueos"][0]["tipo"], "factura_emitida")
+
+    def test_bloquea_edicion_si_hay_picking_activo(self):
+        picking = Picking.objects.create(
+            folio="PK-001",
+            empresa=self.empresa,
+            sucursal=self.sucursal,
+            pedido=self.pedido,
+            operador=self.admin_mesa,
+            almacen=self.almacen,
+            prioridad=Picking.Prioridad.MEDIA,
+            tipo=Picking.TipoPicking.ORDER_PICKING,
+            estado=Picking.Estado.EN_PROCESO,
+            usuario=self.admin_mesa,
+        )
+        detalle = self.pedido.detalles.get()
+        PickingDetalle.objects.create(
+            picking=picking,
+            pedido_detalle=detalle,
+            pedido_detalle_talla=detalle.tallas.get(),
+            producto=self.producto_a,
+            cantidad_solicitada="2.0000",
+            cantidad_asignada="1.0000",
+            cantidad_surtida="0.0000",
+            estado=PickingDetalle.EstadoLinea.PENDIENTE,
+        )
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk),
+            self._payload(),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(response.json()["editable"])
+        self.assertIn("bloqueos", response.json())
+        tipos = {item["tipo"] for item in response.json()["bloqueos"]}
+        self.assertIn("picking_activo", tipos)

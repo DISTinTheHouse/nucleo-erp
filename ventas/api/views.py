@@ -20,7 +20,9 @@ from inventarios.models import (
     MovimientoInventario,
     MovimientoInventarioDetalle,
     TipoMovimiento,
+    inventario_reservas,
 )
+from finanzas.models import Factura, FacturaDetalle, NotaCreditoDetalle
 from ventas.models import (
     Cotizacion,
     CotizacionDetalle,
@@ -50,6 +52,7 @@ from ventas.api.serializers import (
 
 from nucleo.models import SerieFolio, Empresa
 from produccion.models import (
+    OrdenProduccionDetalle,
     OrdenesBordado,
     OrdenBordadoDetalle,
     OrdenesReflejante,
@@ -73,9 +76,11 @@ from ventas.utils.helpers import (
     _save_pedido_servicios_extras,
 )
 from ventas.services.pedido_field_filter_service import filtrar_campos_contabilidad_pedido
+from wms.models import Picking, PickingDetalle
 
 logger = logging.getLogger(__name__)
 QTY_PRECISION = Decimal("0.0001")
+MODO_EDICION_MESA_CONTROL = "estricto_contable_operativo"
 PEDIDO_COTIZACION_MIRROR_FIELDS = (
     "sucursal",
     "cliente",
@@ -2438,6 +2443,233 @@ class PedidoViewSet(viewsets.ModelViewSet):
         )
         _save_servicios_extras(cotizacion, servicios_extras_data)
 
+    def _get_bloqueos_edicion_estricta(self, pedido):
+        bloqueos = []
+
+        facturas_emitidas = list(
+            Factura.objects.filter(
+                pedido=pedido,
+                activo=True,
+                estatus=Factura.FacturaStatus.EMITIDA,
+            ).values("id", "folio", "estatus")
+        )
+        for factura in facturas_emitidas:
+            bloqueos.append(
+                {
+                    "tipo": "factura_emitida",
+                    "id": factura["id"],
+                    "folio": factura["folio"],
+                    "estatus": factura["estatus"],
+                    "accion_requerida": "Cancelar la factura o emitir la nota de crédito correspondiente antes de editar el pedido.",
+                }
+            )
+
+        ordenes_bordado = list(
+            OrdenesBordado.objects.filter(pedido=pedido, activo=True).values(
+                "id", "folio_bordado", "estatus_bordado"
+            )
+        )
+        for orden in ordenes_bordado:
+            bloqueos.append(
+                {
+                    "tipo": "orden_bordado_activa",
+                    "id": orden["id"],
+                    "folio": orden["folio_bordado"],
+                    "estatus": orden["estatus_bordado"],
+                    "accion_requerida": "Cancelar y dar de baja la orden de bordado antes de editar el pedido.",
+                }
+            )
+
+        ordenes_reflejante = list(
+            OrdenesReflejante.objects.filter(pedido=pedido, activo=True).values(
+                "id", "folio_reflejante", "estatus_reflejante"
+            )
+        )
+        for orden in ordenes_reflejante:
+            bloqueos.append(
+                {
+                    "tipo": "orden_reflejante_activa",
+                    "id": orden["id"],
+                    "folio": orden["folio_reflejante"],
+                    "estatus": orden["estatus_reflejante"],
+                    "accion_requerida": "Cancelar y dar de baja la orden de reflejante antes de editar el pedido.",
+                }
+            )
+
+        ordenes_corte = list(
+            OrdenesCorteManga.objects.filter(pedido=pedido, activo=True).values(
+                "id", "folio_ocm", "estatus_corte"
+            )
+        )
+        for orden in ordenes_corte:
+            bloqueos.append(
+                {
+                    "tipo": "orden_corte_manga_activa",
+                    "id": orden["id"],
+                    "folio": orden["folio_ocm"],
+                    "estatus": orden["estatus_corte"],
+                    "accion_requerida": "Cancelar y dar de baja la orden de corte de manga antes de editar el pedido.",
+                }
+            )
+
+        ordenes_produccion = list(
+            OrdenProduccion.objects.filter(pedido=pedido, activo=True).values(
+                "op_id", "folio_op", "estatus_op"
+            )
+        )
+        for orden in ordenes_produccion:
+            bloqueos.append(
+                {
+                    "tipo": "orden_produccion_activa",
+                    "id": orden["op_id"],
+                    "folio": orden["folio_op"],
+                    "estatus": orden["estatus_op"],
+                    "accion_requerida": "Cancelar y dar de baja la orden de producción antes de editar el pedido.",
+                }
+            )
+
+        pickings = list(
+            Picking.objects.filter(pedido=pedido).exclude(
+                estado=Picking.Estado.CANCELADO
+            ).values("id", "folio", "estado")
+        )
+        for picking in pickings:
+            bloqueos.append(
+                {
+                    "tipo": "picking_activo",
+                    "id": picking["id"],
+                    "folio": picking["folio"],
+                    "estatus": picking["estado"],
+                    "accion_requerida": "Cancelar el picking antes de editar el pedido.",
+                }
+            )
+
+        detalle_ids = list(
+            PedidoDetalle.objects.filter(pedido=pedido).values_list("pk", flat=True)
+        )
+        talla_ids = list(
+            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido).values_list(
+                "pk", flat=True
+            )
+        )
+
+        if detalle_ids:
+            if FacturaDetalle.objects.filter(pedido_detalle_id__in=detalle_ids).exists():
+                bloqueos.append(
+                    {
+                        "tipo": "factura_detalle_ligado",
+                        "accion_requerida": "Cancelar la factura y limpiar su detalle antes de editar el pedido.",
+                    }
+                )
+            if NotaCreditoDetalle.objects.filter(
+                factura_detalle__pedido_detalle_id__in=detalle_ids
+            ).exists():
+                bloqueos.append(
+                    {
+                        "tipo": "nota_credito_ligada",
+                        "accion_requerida": "Revisar/cancelar la nota de crédito ligada antes de editar el pedido.",
+                    }
+                )
+            if OrdenBordadoDetalle.objects.filter(pedido_detalle_id__in=detalle_ids).exists():
+                bloqueos.append(
+                    {
+                        "tipo": "orden_bordado_detalle_ligado",
+                        "accion_requerida": "Dar de baja los renglones de bordado ligados antes de editar el pedido.",
+                    }
+                )
+            if OrdenReflejanteDetalle.objects.filter(
+                pedido_detalle_id__in=detalle_ids
+            ).exists():
+                bloqueos.append(
+                    {
+                        "tipo": "orden_reflejante_detalle_ligado",
+                        "accion_requerida": "Dar de baja los renglones de reflejante ligados antes de editar el pedido.",
+                    }
+                )
+            if OrdenCorteMangaDetalle.objects.filter(
+                pedido_detalle_id__in=detalle_ids
+            ).exists():
+                bloqueos.append(
+                    {
+                        "tipo": "orden_corte_manga_detalle_ligado",
+                        "accion_requerida": "Dar de baja los renglones de corte de manga ligados antes de editar el pedido.",
+                    }
+                )
+            if OrdenProduccionDetalle.objects.filter(
+                pedido_detalle_id__in=detalle_ids
+            ).exists():
+                bloqueos.append(
+                    {
+                        "tipo": "orden_produccion_detalle_ligado",
+                        "accion_requerida": "Dar de baja los renglones de producción ligados antes de editar el pedido.",
+                    }
+                )
+            if PickingDetalle.objects.filter(pedido_detalle_id__in=detalle_ids).exists():
+                bloqueos.append(
+                    {
+                        "tipo": "picking_detalle_ligado",
+                        "accion_requerida": "Cancelar el picking y sus líneas antes de editar el pedido.",
+                    }
+                )
+            if inventario_reservas.objects.filter(
+                pedido_detalle_id__in=detalle_ids
+            ).exclude(
+                estado__in=[
+                    inventario_reservas.Estado.CANCELADA,
+                    inventario_reservas.Estado.LIBERADA,
+                ]
+            ).exists():
+                bloqueos.append(
+                    {
+                        "tipo": "reserva_inventario_activa",
+                        "accion_requerida": "Liberar o cancelar las reservas de inventario antes de editar el pedido.",
+                    }
+                )
+
+        if talla_ids and inventario_reservas.objects.filter(
+            pedido_detalle_talla_id__in=talla_ids
+        ).exclude(
+            estado__in=[
+                inventario_reservas.Estado.CANCELADA,
+                inventario_reservas.Estado.LIBERADA,
+            ]
+        ).exists():
+            bloqueos.append(
+                {
+                    "tipo": "reserva_talla_activa",
+                    "accion_requerida": "Liberar o cancelar las reservas por talla antes de editar el pedido.",
+                }
+            )
+
+        return bloqueos
+
+    def _build_editar_mesa_control_contexto(self, pedido, bloqueos=None):
+        bloqueos = list(bloqueos or [])
+        editable = len(bloqueos) == 0
+        return {
+            "pedido_id": pedido.pk,
+            "folio": pedido.folio,
+            "editable": editable,
+            "modo": MODO_EDICION_MESA_CONTROL,
+            "requiere_ids_detalle": True,
+            "permite_eliminar_renglones": False,
+            "permite_eliminar_tallas": False,
+            "permite_eliminar_servicios_extras": False,
+            "requiere_cancelacion_previa": not editable,
+            "codigo": None if editable else "pedido_con_bloqueos",
+            "mensaje": (
+                "Pedido editable desde mesa de control."
+                if editable
+                else (
+                    "El pedido tiene documentos operativos/contables/logísticos "
+                    "ligados. Deben cancelarse o darse de baja manualmente antes "
+                    "de editarlo desde mesa de control."
+                )
+            ),
+            "bloqueos": bloqueos,
+            "tipos_bloqueo": [item.get("tipo") for item in bloqueos],
+        }
+
     def get_queryset(self):
         user = self.request.user
         # Queryset base + aislamiento multi-tenant, común a todas las acciones.
@@ -2485,19 +2717,19 @@ class PedidoViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         instance.soft_delete()
 
+    @action(detail=True, methods=["get"], url_path="editar-mesa-control-contexto")
+    def editar_mesa_control_contexto(self, request, pk=None):
+        user = request.user
+        self._require_mesa_control(user)
+        pedido = self.get_object()
+        bloqueos = self._get_bloqueos_edicion_estricta(pedido)
+        return Response(self._build_editar_mesa_control_contexto(pedido, bloqueos))
+
     @action(detail=True, methods=["post"], url_path="editar-mesa-control")
     def editar_mesa_control(self, request, pk=None):
         user = request.user
         self._require_mesa_control(user)
         base_pedido = self.get_object()
-        serializer = PedidoMesaControlUpdateSerializer(
-            data=request.data, context=self.get_serializer_context()
-        )
-        serializer.is_valid(raise_exception=True)
-
-        pedido_data = dict(serializer.validated_data["pedido"])
-        detalle_data = serializer.validated_data["detalle"]
-        servicios_extras_data = serializer.validated_data.get("servicios_extras") or []
 
         with transaction.atomic():
             # Sin ``select_related("cotizacion")``: ``Pedido.cotizacion`` es
@@ -2532,6 +2764,23 @@ class PedidoViewSet(viewsets.ModelViewSet):
                         "cotizacion": "No se encontró la cotización relacionada para sincronizar."
                     }
                 )
+            bloqueos = self._get_bloqueos_edicion_estricta(pedido)
+            if bloqueos:
+                return Response(
+                    self._build_editar_mesa_control_contexto(pedido, bloqueos),
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            serializer = PedidoMesaControlUpdateSerializer(
+                data=request.data, context=self.get_serializer_context()
+            )
+            serializer.is_valid(raise_exception=True)
+
+            pedido_data = dict(serializer.validated_data["pedido"])
+            detalle_data = serializer.validated_data["detalle"]
+            servicios_extras_data = (
+                serializer.validated_data.get("servicios_extras") or []
+            )
 
             for field, value in pedido_data.items():
                 setattr(pedido, field, value)
@@ -2564,6 +2813,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 "pedido": pedido_payload,
                 "cotizacion": CotizacionSerializer(cotizacion).data,
                 "sincronizado": True,
+                "modo": MODO_EDICION_MESA_CONTROL,
             }
         )
 

@@ -1399,9 +1399,35 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar-cambios/`
   - Efecto: se **revierte** la cotización al `aprobado_snapshot` (incluye detalle y `servicios_extras`) y vuelve a `Autorizada (3)`; el `Pedido` no se modifica.
 - Editar pedido desde mesa de control:
+  - **Precheck / contexto recomendado para frontend**: `GET /api/v1/ventas/pedidos/{id}/editar-mesa-control-contexto/`
+  - Respuesta sugerida para Next.js:
+
+    ```json
+    {
+      "pedido_id": 45,
+      "folio": "P-000045",
+      "editable": true,
+      "modo": "estricto_contable_operativo",
+      "requiere_ids_detalle": true,
+      "permite_eliminar_renglones": false,
+      "permite_eliminar_tallas": false,
+      "permite_eliminar_servicios_extras": false,
+      "requiere_cancelacion_previa": false,
+      "codigo": null,
+      "mensaje": "Pedido editable desde mesa de control.",
+      "bloqueos": [],
+      "tipos_bloqueo": []
+    }
+    ```
+
+  - Uso recomendado en Next.js:
+    - llamar primero el endpoint de contexto al abrir la pantalla
+    - si `editable=true`, habilitar edición
+    - si `editable=false`, mostrar la lista `bloqueos` sin intentar guardar
   - **Endpoint**: `POST /api/v1/ventas/pedidos/{id}/editar-mesa-control/`
   - Permiso: `is_superuser`, `is_admin_empresa` o rol activo `MESA-DE-CONTROL`.
-  - Body: payload completo tipo documento:
+  - Modo de operación: **estricto contable/operativo**.
+  - Body: payload completo tipo documento. En edición segura, cada renglón existente del pedido debe enviarse con su `id` para actualizarlo sin romper referencias ligadas:
 
     ```json
     {
@@ -1424,6 +1450,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
       },
       "detalle": [
         {
+          "id": 123,
           "producto": 77,
           "precio_lista": "120.00",
           "precio_unitario": "110.00",
@@ -1434,8 +1461,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
               "cantidad": 3,
               "lleva_bordado": true,
               "bordado_config": { "ubicaciones": [{ "codigo": "PE" }] }
-            },
-            { "talla": 5, "cantidad": 4 }
+            }
           ]
         }
       ],
@@ -1452,11 +1478,60 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
   - Efecto:
     - actualiza el `Pedido` completo sin regenerar el folio
-    - reemplaza `detalles`, `tallas` y `servicios_extras`
+    - actualiza el encabezado y **edita sobre los mismos renglones existentes** del pedido cuando éstos se identifican por `id`
     - refleja esos mismos cambios a la `Cotizacion` relacionada para que ambos documentos queden con match
     - actualiza `aprobado_snapshot` de la cotización
     - **no toca inventario**, no genera `MovimientoInventario` y no requiere `aceptar-cambios`
-  - Restricción: si el pedido no tiene `cotizacion` relacionada, responde error `400`.
+    - responde `200` con `pedido`, `cotizacion`, `sincronizado=true` y `modo="estricto_contable_operativo"`
+  - Restricciones duras:
+    - si el pedido no tiene `cotizacion` relacionada, responde error `400`
+    - si el pedido tiene documentos contables, operativos o logísticos ligados, responde error **`409 Conflict`** con payload amigable para frontend
+    - si se intenta **quitar** renglones/tallas/servicios extras ya existentes desde este endpoint, responde error `400`
+  - Ejemplo de bloqueo (`409`):
+
+    ```json
+    {
+      "pedido_id": 45,
+      "folio": "P-000045",
+      "editable": false,
+      "modo": "estricto_contable_operativo",
+      "requiere_ids_detalle": true,
+      "permite_eliminar_renglones": false,
+      "permite_eliminar_tallas": false,
+      "permite_eliminar_servicios_extras": false,
+      "requiere_cancelacion_previa": true,
+      "codigo": "pedido_con_bloqueos",
+      "mensaje": "El pedido tiene documentos operativos/contables/logísticos ligados. Deben cancelarse o darse de baja manualmente antes de editarlo desde mesa de control.",
+      "bloqueos": [
+        {
+          "tipo": "factura_emitida",
+          "id": 88,
+          "folio": "FAC-000088",
+          "estatus": "Emitida",
+          "accion_requerida": "Cancelar la factura o emitir la nota de crédito correspondiente antes de editar el pedido."
+        }
+      ],
+      "tipos_bloqueo": ["factura_emitida"]
+    }
+    ```
+
+  - Documentos que bloquean la edición estricta:
+    - factura emitida o detalle de factura ligado al `PedidoDetalle`
+    - nota de crédito ligada al detalle facturado
+    - órdenes de bordado activas
+    - órdenes de reflejante activas
+    - órdenes de corte de manga activas
+    - órdenes de producción activas
+    - pickings no cancelados
+    - reservas de inventario activas por detalle o por talla
+  - Regla operativa obligatoria:
+    - **antes de editar el pedido**, mesa de control debe cancelar o dar de baja manualmente los documentos ligados
+    - cancelar sólo por estatus no siempre basta; en producción las órdenes canceladas pero aún `activo=true` siguen amarrando el pedido, por lo que debe aplicarse la baja/cancelación según el módulo correspondiente
+  - Objetivo del modo estricto:
+    - evitar borrado en cascada de renglones ligados a producción, WMS o finanzas
+    - preservar integridad contable y trazabilidad operativa del folio `P`
+  - Nota de integración:
+    - el `GET /api/v1/ventas/pedidos/{id}/` ya devuelve `detalles[].id` y `tallas[]`, así que el frontend puede reutilizar ese payload para construir el body de edición sin tener que inventar IDs o hacer mapeos especiales
 
 ---
 

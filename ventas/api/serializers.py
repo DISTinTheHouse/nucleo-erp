@@ -557,6 +557,7 @@ class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
 
 
 class PedidoMesaControlDetalleInputSerializer(serializers.Serializer):
+    id = serializers.IntegerField(required=False, allow_null=True)
     producto = serializers.IntegerField(required=False, allow_null=True)
     producto_nombre_externo = serializers.CharField(
         max_length=350, required=False, allow_null=True, allow_blank=True
