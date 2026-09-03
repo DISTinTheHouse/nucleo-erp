@@ -45,6 +45,7 @@ from ventas.api.serializers import (
     PedidoDetalleTallaSerializer,
     PedidoDetalleWithTallasSerializer,
     CotizacionOnboardingCreateSerializer,
+    PedidoMesaControlUpdateSerializer,
 )
 
 from nucleo.models import SerieFolio, Empresa
@@ -65,11 +66,76 @@ from ventas.scope import (
     pedidos_base,
     pedidos_visibles,
 )
-from ventas.utils.helpers import _save_cotizacion_detalle, _save_servicios_extras
+from ventas.utils.helpers import (
+    _save_cotizacion_detalle,
+    _save_servicios_extras,
+    _save_pedido_detalle,
+    _save_pedido_servicios_extras,
+)
 from ventas.services.pedido_field_filter_service import filtrar_campos_contabilidad_pedido
 
 logger = logging.getLogger(__name__)
 QTY_PRECISION = Decimal("0.0001")
+PEDIDO_COTIZACION_MIRROR_FIELDS = (
+    "sucursal",
+    "cliente",
+    "moneda",
+    "tipo_pedido",
+    "recompra",
+    "chat_online",
+    "pedido_online",
+    "prospeccion",
+    "recomendacion",
+    "amazon",
+    "google",
+    "publicidad",
+    "mercado_libre",
+    "redes_sociales",
+    "otro",
+    "mailing",
+    "persona_pagos",
+    "correo_facturas",
+    "telefono_pagos",
+    "oc",
+    "forma_pago",
+    "metodo_pago",
+    "uso_cfdi",
+    "anticipo_total",
+    "anticipo_parcial",
+    "vendedor_autoriza",
+    "pago_antes_embarque",
+    "por_confirmar",
+    "otra_cantidad",
+    "monto",
+    "empaque_ecologico",
+    "embarque_parcial",
+    "comentarios_parcialidad",
+    "destinatario",
+    "empresa_envio",
+    "telefono_envio",
+    "celular_envio",
+    "direccion_envio",
+    "colonia_envio",
+    "codigo_postal",
+    "ciudad_envio",
+    "estado_envio",
+    "referencias",
+    "envio",
+    "programa_bordados",
+    "bordado_pantalones_extras",
+    "bordado_logotipo",
+    "serigrafia",
+    "reflejante",
+    "observaciones",
+    "flete",
+    "seguros",
+    "anticipo",
+    "subtotal",
+    "descuento_global",
+    "ieps",
+    "iva",
+    "gran_total",
+)
 
 
 def _pedido_detalles_prefetch():
@@ -2337,6 +2403,41 @@ class PedidoViewSet(viewsets.ModelViewSet):
         pedido.folio_consecutivo = nuevo_consecutivo
         pedido.save(update_fields=["serie_folio", "folio", "folio_consecutivo"])
 
+    def _require_mesa_control(self, user):
+        from seguridad.models import UsuarioRol
+
+        if getattr(user, "is_superuser", False):
+            return
+        if getattr(user, "is_admin_empresa", False):
+            return
+        empresa = getattr(user, "empresa", None)
+        if empresa and UsuarioRol.objects.filter(
+            usuario=user,
+            rol__empresa=empresa,
+            rol__codigo="MESA-DE-CONTROL",
+            rol__estatus="activo",
+        ).exists():
+            return
+        raise ValidationError(
+            {"permiso": "Acción disponible solo para mesa de control."}
+        )
+
+    def _aplicar_pedido_a_cotizacion(
+        self, pedido, cotizacion, detalle_data, servicios_extras_data
+    ):
+        for field in PEDIDO_COTIZACION_MIRROR_FIELDS:
+            setattr(cotizacion, field, getattr(pedido, field))
+        cotizacion.estatus = 3
+        cotizacion.cambios_solicitados_at = None
+        cotizacion.save(
+            update_fields=list(PEDIDO_COTIZACION_MIRROR_FIELDS)
+            + ["estatus", "cambios_solicitados_at", "updated_at"]
+        )
+        _save_cotizacion_detalle(
+            cotizacion, detalle_data, cotizacion.empresa, self.request.user
+        )
+        _save_servicios_extras(cotizacion, servicios_extras_data)
+
     def get_queryset(self):
         user = self.request.user
         # Queryset base + aislamiento multi-tenant, común a todas las acciones.
@@ -2383,6 +2484,82 @@ class PedidoViewSet(viewsets.ModelViewSet):
 
     def perform_destroy(self, instance):
         instance.soft_delete()
+
+    @action(detail=True, methods=["post"], url_path="editar-mesa-control")
+    def editar_mesa_control(self, request, pk=None):
+        user = request.user
+        self._require_mesa_control(user)
+        base_pedido = self.get_object()
+        serializer = PedidoMesaControlUpdateSerializer(
+            data=request.data, context=self.get_serializer_context()
+        )
+        serializer.is_valid(raise_exception=True)
+
+        pedido_data = dict(serializer.validated_data["pedido"])
+        detalle_data = serializer.validated_data["detalle"]
+        servicios_extras_data = serializer.validated_data.get("servicios_extras") or []
+
+        with transaction.atomic():
+            pedido = (
+                Pedido.objects.select_for_update()
+                .select_related("cotizacion")
+                .filter(pk=base_pedido.pk)
+                .first()
+            )
+            if not pedido:
+                raise ValidationError({"pedido": "No se encontró el pedido."})
+            if not pedido.cotizacion_id:
+                raise ValidationError(
+                    {
+                        "pedido": "El pedido no tiene cotización relacionada para sincronizar."
+                    }
+                )
+
+            cotizacion = (
+                Cotizacion.objects.select_for_update()
+                .filter(pk=pedido.cotizacion_id)
+                .first()
+            )
+            if not cotizacion:
+                raise ValidationError(
+                    {
+                        "cotizacion": "No se encontró la cotización relacionada para sincronizar."
+                    }
+                )
+
+            for field, value in pedido_data.items():
+                setattr(pedido, field, value)
+            pedido.save(update_fields=list(pedido_data.keys()) + ["updated_at"])
+            self._snapshot_facturacion(pedido)
+            _save_pedido_detalle(pedido, detalle_data, pedido.empresa, user)
+            _save_pedido_servicios_extras(pedido, servicios_extras_data)
+            self._aplicar_pedido_a_cotizacion(
+                pedido, cotizacion, detalle_data, servicios_extras_data
+            )
+            cotizacion.aprobado_snapshot = CotizacionViewSet._snapshot_cotizacion(
+                self, cotizacion
+            )
+            cotizacion.save(update_fields=["aprobado_snapshot", "updated_at"])
+
+        pedido = (
+            Pedido.objects.filter(pk=pedido.pk)
+            .prefetch_related(
+                _pedido_detalles_prefetch(),
+                _pedido_servicios_extras_prefetch(),
+            )
+            .first()
+        )
+        cotizacion = Cotizacion.objects.filter(pk=cotizacion.pk).first()
+        pedido_payload = filtrar_campos_contabilidad_pedido(
+            PedidoSerializer(pedido, context=self.get_serializer_context()).data, user
+        )
+        return Response(
+            {
+                "pedido": pedido_payload,
+                "cotizacion": CotizacionSerializer(cotizacion).data,
+                "sincronizado": True,
+            }
+        )
 
 
 class PedidoDetalleViewSet(viewsets.ModelViewSet):

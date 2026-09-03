@@ -1,5 +1,12 @@
 from catalogo.models import Talla, Producto, ProductoVariante
-from ventas.models import CotizacionServicioExtra, CotizacionDetalle, CotizacionDetalleTalla
+from ventas.models import (
+    CotizacionServicioExtra,
+    CotizacionDetalle,
+    CotizacionDetalleTalla,
+    PedidoServicioExtra,
+    PedidoDetalle,
+    PedidoDetalleTalla,
+)
 from rest_framework.exceptions import ValidationError
 
 # ``validar_tipos_servicio_array`` es agnóstico del framework y siempre lanza la
@@ -65,6 +72,7 @@ def _merge_detalle(rows):
                 "producto_nombre_externo": producto_nombre_externo,
                 "color": color_id,
                 "direccion_envio_cliente": direccion_id,
+                "precio_lista": row.get("precio_lista"),
                 "precio_unitario": row.get("precio_unitario"),
                 "costo_unitario": row.get("costo_unitario"),
                 "tallas": [],
@@ -252,6 +260,176 @@ def _save_servicios_extras(cotizacion_obj, rows):
     for row in rows or []:
         CotizacionServicioExtra.objects.create(
             cotizacion=cotizacion_obj,
+            nombre=row.get("nombre") or "",
+            monto=row.get("monto") or 0,
+            cantidad=row.get("cantidad") or 1,
+            visible_en_factura=bool(row.get("visible_en_factura", True)),
+        )
+
+
+def _save_pedido_detalle(pedido_obj, rows, empresa, user):
+    PedidoDetalle.objects.filter(pedido=pedido_obj).delete()
+    rows = _merge_detalle(rows)
+    for item in rows:
+        producto = None
+        producto_nombre_externo = item.get("producto_nombre_externo")
+        producto_id = item.get("producto")
+
+        if not producto_nombre_externo and producto_id not in (None, "", 0):
+            try:
+                producto_id = int(producto_id)
+            except Exception:
+                producto_id = None
+            if producto_id:
+                producto = Producto.objects.filter(pk=producto_id, activo=True).first()
+                if not getattr(user, "is_superuser", False) and empresa:
+                    producto = Producto.objects.filter(
+                        pk=producto_id, empresa=empresa, activo=True
+                    ).first()
+                if not producto:
+                    raise ValidationError({"detalle": f"Producto inválido: {producto_id}"})
+
+        if producto is None and not producto_nombre_externo:
+            raise ValidationError(
+                {
+                    "detalle": "Debe indicar un producto del catálogo o un producto_nombre_externo."
+                }
+            )
+
+        color_obj = None
+        color_id = item.get("color")
+        if color_id not in (None, "", 0):
+            try:
+                from catalogo.models import Color as ColorModel
+
+                color_obj = ColorModel.objects.filter(
+                    pk=int(color_id), activo=True
+                ).first()
+            except Exception:
+                color_obj = None
+            if not color_obj:
+                raise ValidationError({"detalle": f"Color inválido: {color_id}"})
+
+        direccion_obj = None
+        direccion_id = item.get("direccion_envio_cliente")
+        if direccion_id not in (None, "", 0):
+            try:
+                from terceros.models import DireccionCliente as DirModel
+
+                direccion_obj = DirModel.objects.filter(
+                    pk=int(direccion_id),
+                    activo=True,
+                    empresa=pedido_obj.empresa,
+                    cliente_id=getattr(pedido_obj, "cliente_id", None),
+                ).first()
+            except Exception:
+                direccion_obj = None
+            if not direccion_obj:
+                raise ValidationError(
+                    {"detalle": f"Dirección de envío inválida: {direccion_id}"}
+                )
+
+        precio_unitario = item.get("precio_unitario")
+        if precio_unitario is None:
+            precio_unitario = getattr(producto, "precio_base", None) or 0
+
+        precio_lista = item.get("precio_lista")
+        if precio_lista is None:
+            precio_lista = getattr(producto, "precio_base", None) or 0
+
+        pedido_det = PedidoDetalle.objects.create(
+            pedido=pedido_obj,
+            producto=producto,
+            producto_nombre_externo=producto_nombre_externo,
+            color=color_obj,
+            direccion_envio_cliente=direccion_obj,
+            precio_lista=precio_lista,
+            precio_unitario=precio_unitario,
+            costo_unitario=item.get("costo_unitario"),
+            subtotal_linea=0,
+        )
+        for t in item.get("tallas") or []:
+            talla = Talla.objects.filter(pk=t["talla"], activo=True).first()
+            if not talla:
+                raise ValidationError({"detalle": f"Talla inválida: {t['talla']}"})
+            if t.get("lleva_bordado") and t.get("bordado_config") is None:
+                raise ValidationError(
+                    {
+                        "detalle": "Falta bordado_config en una talla marcada con lleva_bordado=true."
+                    }
+                )
+            bruto_cfg = t.get("bordado_config") or {}
+            if isinstance(bruto_cfg, dict) and "tipos_servicio" in bruto_cfg:
+                from ventas.servicios_bordado import validar_tipos_servicio_array
+
+                try:
+                    bruto_cfg["tipos_servicio"] = validar_tipos_servicio_array(
+                        bruto_cfg["tipos_servicio"],
+                        campo_label="bordado_config.tipos_servicio",
+                    )
+                except DjangoValidationError as e:
+                    raise ValidationError({"detalle": "; ".join(e.messages)})
+            lleva_reflejante = bool(
+                t.get("lleva_reflejante") or t.get("lleva_serigrafia")
+            )
+            reflejante_config = t.get("reflejante_config")
+            if _is_empty_json(reflejante_config):
+                reflejante_config = t.get("serigrafia_config")
+            if lleva_reflejante and _is_empty_json(reflejante_config):
+                raise ValidationError(
+                    {
+                        "detalle": "Falta reflejante_config en una talla marcada con lleva_reflejante=true."
+                    }
+                )
+            if t.get("lleva_corte_manga") and _is_empty_json(
+                t.get("corte_manga_config")
+            ):
+                raise ValidationError(
+                    {
+                        "detalle": "Falta corte_manga_config en una talla marcada con lleva_corte_manga=true."
+                    }
+                )
+            if t.get("lleva_cambio_talla") and _is_empty_json(
+                t.get("cambio_talla_config")
+            ):
+                raise ValidationError(
+                    {
+                        "detalle": "Falta cambio_talla_config en una talla marcada con lleva_cambio_talla=true."
+                    }
+                )
+
+            variante_obj = None
+            if producto:
+                variante_obj = ProductoVariante.objects.filter(
+                    producto=producto,
+                    color=color_obj,
+                    talla=talla,
+                    empresa=pedido_obj.empresa,
+                ).first()
+
+            PedidoDetalleTalla.objects.create(
+                pedido_detalle=pedido_det,
+                talla=talla,
+                cantidad=t["cantidad"],
+                precio_unitario=precio_unitario,
+                subtotal_talla=0,
+                lleva_bordado=bool(t.get("lleva_bordado")),
+                bordado_config=t.get("bordado_config"),
+                lleva_reflejante=lleva_reflejante,
+                reflejante_config=reflejante_config,
+                lleva_corte_manga=bool(t.get("lleva_corte_manga")),
+                corte_manga_config=t.get("corte_manga_config"),
+                lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
+                cambio_talla_config=t.get("cambio_talla_config"),
+                variante=variante_obj,
+            )
+
+
+def _save_pedido_servicios_extras(pedido_obj, rows):
+    PedidoServicioExtra.objects.filter(pedido=pedido_obj).delete()
+    for row in rows or []:
+        PedidoServicioExtra.objects.create(
+            pedido=pedido_obj,
             nombre=row.get("nombre") or "",
             monto=row.get("monto") or 0,
             cantidad=row.get("cantidad") or 1,

@@ -1201,7 +1201,7 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 
 - **Endpoint**: `PATCH /api/v1/ventas/cotizaciones/{id}/`
 - Regla: la edición está permitida dentro del periodo configurado. Si la cotización ya estaba `Autorizada (3)`, al editar pasa a `Cambios Por Autorizar (5)` y mesa de control debe decidir.
-- La edición **no** modifica el `Pedido` automáticamente. El `Pedido` solo se actualiza si mesa de control ejecuta `aceptar-cambios`.
+- La edición **no** modifica el `Pedido` automáticamente en este flujo de vendedor. El `Pedido` solo se actualiza si mesa de control ejecuta `aceptar-cambios` o usa el endpoint directo de edición de pedido documentado más abajo.
 - Para editar también el detalle (productos/tallas/bordado), re-envía `POST /api/v1/ventas/cotizaciones/onboarding/` agregando `cotizacion_id` (y el detalle completo actualizado).
 
 ---
@@ -1398,12 +1398,71 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 - Rechazar cambios:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar-cambios/`
   - Efecto: se **revierte** la cotización al `aprobado_snapshot` (incluye detalle y `servicios_extras`) y vuelve a `Autorizada (3)`; el `Pedido` no se modifica.
+- Editar pedido desde mesa de control:
+  - **Endpoint**: `POST /api/v1/ventas/pedidos/{id}/editar-mesa-control/`
+  - Permiso: `is_superuser`, `is_admin_empresa` o rol activo `MESA-DE-CONTROL`.
+  - Body: payload completo tipo documento:
+
+    ```json
+    {
+      "pedido": {
+        "sucursal": 1,
+        "cliente": 15,
+        "moneda": 1,
+        "tipo_pedido": 2,
+        "persona_pagos": "Pagos Mesa",
+        "correo_facturas": "mesa@cliente.com",
+        "telefono_pagos": "8111111111",
+        "oc": "OC-123",
+        "forma_pago": "03",
+        "metodo_pago": "PUE",
+        "uso_cfdi": "G03",
+        "direccion_envio": "Calle Entrega 456",
+        "subtotal": "250.00",
+        "iva": 16,
+        "gran_total": "290.00"
+      },
+      "detalle": [
+        {
+          "producto": 77,
+          "precio_lista": "120.00",
+          "precio_unitario": "110.00",
+          "costo_unitario": "80.00",
+          "tallas": [
+            {
+              "talla": 4,
+              "cantidad": 3,
+              "lleva_bordado": true,
+              "bordado_config": { "ubicaciones": [{ "codigo": "PE" }] }
+            },
+            { "talla": 5, "cantidad": 4 }
+          ]
+        }
+      ],
+      "servicios_extras": [
+        {
+          "nombre": "Urgencia",
+          "monto": "50.00",
+          "cantidad": 2,
+          "visible_en_factura": false
+        }
+      ]
+    }
+    ```
+
+  - Efecto:
+    - actualiza el `Pedido` completo sin regenerar el folio
+    - reemplaza `detalles`, `tallas` y `servicios_extras`
+    - refleja esos mismos cambios a la `Cotizacion` relacionada para que ambos documentos queden con match
+    - actualiza `aprobado_snapshot` de la cotización
+    - **no toca inventario**, no genera `MovimientoInventario` y no requiere `aceptar-cambios`
+  - Restricción: si el pedido no tiene `cotizacion` relacionada, responde error `400`.
 
 ---
 
 ## 🔐 Seguridad y Reglas
 
-- Acciones de mesa de control (autorizar/rechazar/aceptar-cambios/rechazar-cambios) requieren usuario con `is_superuser` o `is_admin_empresa`.
+- Acciones de mesa de control (autorizar/rechazar/aceptar-cambios/rechazar-cambios/editar pedido) requieren usuario con `is_superuser`, `is_admin_empresa` o rol activo `MESA-DE-CONTROL`.
 - El vendedor puede crear y editar cotizaciones dentro de la ventana de tolerancia configurada; si excede, el backend rechaza la edición.
 
 ---

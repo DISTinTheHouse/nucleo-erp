@@ -11,16 +11,20 @@ from django.test import TestCase
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
+from auditoria.models import AuditoriaEvento
 from catalogo.models import Producto, Talla
+from inventarios.models import MovimientoInventario
 from nucleo.models import Empresa, Moneda, Sucursal
 from terceros.models import Cliente
 from usuarios.models import Usuario
 from ventas.models import (
     Cotizacion,
+    CotizacionServicioExtra,
     CotizacionDetalleTalla,
     Pedido,
     PedidoDetalle,
     PedidoDetalleTalla,
+    PedidoServicioExtra,
 )
 from ventas.servicios_bordado import TipoServicioBordado, validar_tipos_servicio_array
 from ventas.utils.helpers import _save_cotizacion_detalle
@@ -29,6 +33,10 @@ PEDIDOS_URL = "/api/v1/ventas/pedidos/"
 PEDIDO_DETALLE_URL = "/api/v1/ventas/pedido-detalle/"
 PEDIDO_DETALLE_TALLA_URL = "/api/v1/ventas/pedido-detalle-talla/"
 COTIZACION_ONBOARDING_URL = "/api/v1/ventas/cotizaciones/onboarding/"
+
+
+def pedido_editar_mesa_control_url(pedido_id):
+    return f"/api/v1/ventas/pedidos/{pedido_id}/editar-mesa-control/"
 
 
 class PedidoViewSetScopeTenantTests(TestCase):
@@ -638,3 +646,346 @@ class TiposServicioBordadoValidacionTests(TestCase):
         self.assertEqual(resp.status_code, 201)
         fila = CotizacionDetalleTalla.objects.get()
         self.assertNotIn("tipos_servicio", fila.bordado_config)
+
+
+class PedidoMesaControlUpdateTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.empresa_b = Empresa.objects.create(
+            codigo="globex", razon_social="Globex SA"
+        )
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Matriz"
+        )
+        cls.sucursal_b = Sucursal.objects.create(
+            empresa=cls.empresa_b, codigo="GDL", nombre="GDL"
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(
+            empresa=cls.empresa,
+            nombre="Cliente ACME",
+            razon_social="Cliente ACME SA",
+        )
+        cls.talla_m = Talla.objects.create(nombre="M")
+        cls.talla_l = Talla.objects.create(nombre="L")
+        cls.producto_a = Producto.objects.create(
+            empresa=cls.empresa, nombre="Playera Industrial", codigo="PLAY"
+        )
+        cls.producto_b = Producto.objects.create(
+            empresa=cls.empresa, nombre="Chamarra Softshell", codigo="CHAM"
+        )
+        cls.admin_mesa = Usuario.objects.create(
+            username="mesa_admin",
+            email="mesa_admin@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
+        )
+        cls.usuario_sin_permiso = Usuario.objects.create(
+            username="vendedor",
+            email="vendedor@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+        )
+        cls.admin_otra_empresa = Usuario.objects.create(
+            username="mesa_globex",
+            email="mesa_globex@globex.test",
+            empresa=cls.empresa_b,
+            sucursal_default=cls.sucursal_b,
+            is_admin_empresa=True,
+        )
+
+        cls.cotizacion = Cotizacion.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            cliente=cls.cliente,
+            moneda=cls.moneda,
+            tipo_pedido=1,
+            estatus=3,
+            persona_pagos="Pagos Iniciales",
+            correo_facturas="facturas@acme.test",
+            telefono_pagos="8100000000",
+            forma_pago="03",
+            metodo_pago="PUE",
+            uso_cfdi="G03",
+            subtotal="100.00",
+            gran_total="116.00",
+        )
+        _save_cotizacion_detalle(
+            cls.cotizacion,
+            [
+                {
+                    "producto": cls.producto_a.pk,
+                    "precio_lista": "100.00",
+                    "precio_unitario": "95.00",
+                    "costo_unitario": "70.00",
+                    "tallas": [{"talla": cls.talla_m.pk, "cantidad": 2}],
+                }
+            ],
+            cls.empresa,
+            cls.admin_mesa,
+        )
+        CotizacionServicioExtra.objects.create(
+            cotizacion=cls.cotizacion,
+            nombre="Servicio inicial",
+            monto="20.00",
+            cantidad=1,
+            visible_en_factura=True,
+        )
+
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            cliente=cls.cliente,
+            cotizacion=cls.cotizacion,
+            moneda=cls.moneda,
+            tipo_pedido=1,
+            estatus=3,
+            folio="P-000001",
+            folio_consecutivo=1,
+            persona_pagos="Pagos Iniciales",
+            correo_facturas="facturas@acme.test",
+            telefono_pagos="8100000000",
+            forma_pago="03",
+            metodo_pago="PUE",
+            uso_cfdi="G03",
+            subtotal="100.00",
+            gran_total="116.00",
+        )
+        pedido_det = PedidoDetalle.objects.create(
+            pedido=cls.pedido,
+            producto=cls.producto_a,
+            precio_lista="100.00",
+            precio_unitario="95.00",
+            costo_unitario="70.00",
+            subtotal_linea="0.00",
+        )
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=pedido_det,
+            talla=cls.talla_m,
+            cantidad=2,
+            precio_unitario="95.00",
+            subtotal_talla="0.00",
+        )
+        PedidoServicioExtra.objects.create(
+            pedido=cls.pedido,
+            nombre="Servicio inicial",
+            monto="20.00",
+            cantidad=1,
+            visible_en_factura=True,
+        )
+
+        cls.pedido_sin_cotizacion = Pedido.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            cliente=cls.cliente,
+            moneda=cls.moneda,
+            tipo_pedido=1,
+            estatus=3,
+            folio="P-000002",
+            folio_consecutivo=2,
+            persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test",
+            telefono_pagos="8100000011",
+            forma_pago="03",
+            metodo_pago="PUE",
+            uso_cfdi="G03",
+        )
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _payload(self):
+        return {
+            "pedido": {
+                "sucursal": self.sucursal.pk,
+                "cliente": self.cliente.pk,
+                "moneda": self.moneda.pk,
+                "tipo_pedido": 2,
+                "recompra": True,
+                "chat_online": False,
+                "pedido_online": True,
+                "prospeccion": False,
+                "recomendacion": False,
+                "amazon": False,
+                "google": True,
+                "publicidad": False,
+                "mercado_libre": False,
+                "redes_sociales": True,
+                "otro": False,
+                "mailing": False,
+                "persona_pagos": "Pagos Mesa",
+                "correo_facturas": "mesa@acme.test",
+                "telefono_pagos": "8111111111",
+                "oc": "OC-MESA-01",
+                "forma_pago": "03",
+                "metodo_pago": "PUE",
+                "uso_cfdi": "G03",
+                "cliente_razon_social": "Cliente ACME SA",
+                "cliente_nombre": "Cliente ACME",
+                "cliente_rfc": "XAXX010101000",
+                "cliente_regimen_fiscal": None,
+                "cliente_direccion_fiscal": "Av. Siempre Viva 123",
+                "cliente_colonia": "Centro",
+                "cliente_codigo_postal": "64000",
+                "cliente_ciudad": "Monterrey",
+                "cliente_estado": "Nuevo Leon",
+                "cliente_giro_empresarial": "Industria",
+                "anticipo_total": False,
+                "anticipo_parcial": True,
+                "vendedor_autoriza": True,
+                "pago_antes_embarque": False,
+                "por_confirmar": False,
+                "otra_cantidad": False,
+                "monto": "25.00",
+                "empaque_ecologico": True,
+                "embarque_parcial": False,
+                "comentarios_parcialidad": "Sin parcialidades",
+                "destinatario": "Recibo General",
+                "empresa_envio": "Paqueteria Demo",
+                "telefono_envio": "8222222222",
+                "celular_envio": "8333333333",
+                "direccion_envio": "Calle Entrega 456",
+                "colonia_envio": "Obrera",
+                "codigo_postal": "64100",
+                "ciudad_envio": "Monterrey",
+                "estado_envio": "Nuevo Leon",
+                "referencias": "Puerta 3",
+                "envio": "15.00",
+                "programa_bordados": "0.00",
+                "bordado_pantalones_extras": "0.00",
+                "bordado_logotipo": False,
+                "serigrafia": "10.00",
+                "reflejante": "5.00",
+                "observaciones": "Actualizado por mesa",
+                "flete": "12.00",
+                "seguros": "3.00",
+                "anticipo": "0.00",
+                "subtotal": "250.00",
+                "descuento_global": "0.00",
+                "ieps": "0.00",
+                "iva": 16,
+                "gran_total": "290.00",
+            },
+            "detalle": [
+                {
+                    "producto": self.producto_b.pk,
+                    "precio_lista": "120.00",
+                    "precio_unitario": "110.00",
+                    "costo_unitario": "80.00",
+                    "tallas": [
+                        {
+                            "talla": self.talla_m.pk,
+                            "cantidad": 3,
+                            "lleva_bordado": True,
+                            "bordado_config": {"ubicaciones": [{"codigo": "PE"}]},
+                        },
+                        {
+                            "talla": self.talla_l.pk,
+                            "cantidad": 4,
+                        },
+                    ],
+                }
+            ],
+            "servicios_extras": [
+                {
+                    "nombre": "Urgencia",
+                    "monto": "50.00",
+                    "cantidad": 2,
+                    "visible_en_factura": False,
+                }
+            ],
+        }
+
+    def test_usuario_sin_permiso_recibe_error(self):
+        response = self._client(self.usuario_sin_permiso).post(
+            pedido_editar_mesa_control_url(self.pedido.pk),
+            self._payload(),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("permiso", response.json())
+
+    def test_admin_de_otra_empresa_recibe_404(self):
+        response = self._client(self.admin_otra_empresa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk),
+            self._payload(),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_falla_si_el_pedido_no_tiene_cotizacion_relacionada(self):
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido_sin_cotizacion.pk),
+            self._payload(),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("pedido", response.json())
+
+    def test_edicion_mesa_control_actualiza_pedido_y_cotizacion_sin_inventario(self):
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk),
+            self._payload(),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["sincronizado"])
+
+        self.pedido.refresh_from_db()
+        self.cotizacion.refresh_from_db()
+
+        self.assertEqual(self.pedido.tipo_pedido, 2)
+        self.assertEqual(self.pedido.persona_pagos, "Pagos Mesa")
+        self.assertEqual(self.pedido.oc, "OC-MESA-01")
+        self.assertEqual(str(self.pedido.subtotal), "250.00")
+        self.assertEqual(self.pedido.folio, "P-000001")
+
+        self.assertEqual(self.cotizacion.tipo_pedido, 2)
+        self.assertEqual(self.cotizacion.persona_pagos, "Pagos Mesa")
+        self.assertEqual(self.cotizacion.oc, "OC-MESA-01")
+        self.assertEqual(str(self.cotizacion.subtotal), "250.00")
+        self.assertEqual(self.cotizacion.estatus, 3)
+        self.assertIsNotNone(self.cotizacion.aprobado_snapshot)
+
+        pedido_detalle = self.pedido.detalles.get()
+        self.assertEqual(pedido_detalle.producto_id, self.producto_b.pk)
+        self.assertEqual(pedido_detalle.tallas.count(), 2)
+        self.assertEqual(
+            sorted(pedido_detalle.tallas.values_list("cantidad", flat=True)), [3, 4]
+        )
+
+        cot_detalle = self.cotizacion.cotizaciondetalle.get()
+        self.assertEqual(cot_detalle.producto_id, self.producto_b.pk)
+        self.assertEqual(cot_detalle.tallas.count(), 2)
+        self.assertEqual(
+            sorted(cot_detalle.tallas.values_list("cantidad", flat=True)), [3, 4]
+        )
+        self.assertTrue(
+            cot_detalle.tallas.filter(
+                talla=self.talla_m, lleva_bordado=True
+            ).exists()
+        )
+
+        pedido_servicio = self.pedido.servicios_extras.get()
+        self.assertEqual(pedido_servicio.nombre, "Urgencia")
+        self.assertEqual(pedido_servicio.cantidad, 2)
+        self.assertFalse(pedido_servicio.visible_en_factura)
+
+        cot_servicio = self.cotizacion.servicios_extras.get()
+        self.assertEqual(cot_servicio.nombre, "Urgencia")
+        self.assertEqual(cot_servicio.cantidad, 2)
+        self.assertFalse(cot_servicio.visible_en_factura)
+
+        snapshot = self.cotizacion.aprobado_snapshot or {}
+        self.assertEqual(snapshot.get("cotizacion", {}).get("oc"), "OC-MESA-01")
+        self.assertEqual(len(snapshot.get("detalles") or []), 1)
+        self.assertEqual(len(snapshot.get("servicios_extras") or []), 1)
+
+        self.assertEqual(MovimientoInventario.objects.count(), 0)
+        self.assertEqual(
+            AuditoriaEvento.objects.filter(modulo="inventarios").count(), 0
+        )

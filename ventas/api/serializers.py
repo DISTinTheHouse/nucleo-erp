@@ -514,6 +514,74 @@ class PedidoOnboardingCreateSerializer(serializers.Serializer):
     detalle = PedidoOnboardingDetalleInputSerializer(many=True)
     servicios_extras = ServicioExtraInputSerializer(many=True, required=False)
 
+
+class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Pedido
+        exclude = [
+            "empresa",
+            "serie_folio",
+            "folio",
+            "folio_consecutivo",
+            "cotizacion",
+            "estatus",
+            "activo",
+            "created_at",
+            "updated_at",
+            "fecha_confirmacion",
+        ]
+
+    def validate_cliente(self, cliente):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if getattr(user, "is_superuser", False):
+            return cliente
+        empresa = getattr(user, "empresa", None)
+        if empresa is None or getattr(cliente, "empresa_id", None) != empresa.pk:
+            raise serializers.ValidationError(
+                "El cliente no pertenece a la empresa del usuario."
+            )
+        return cliente
+
+    def validate_sucursal(self, sucursal):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if getattr(user, "is_superuser", False):
+            return sucursal
+        empresa = getattr(user, "empresa", None)
+        if empresa is None or getattr(sucursal, "empresa_id", None) != empresa.pk:
+            raise serializers.ValidationError(
+                "La sucursal no pertenece a la empresa del usuario."
+            )
+        return sucursal
+
+
+class PedidoMesaControlDetalleInputSerializer(serializers.Serializer):
+    producto = serializers.IntegerField(required=False, allow_null=True)
+    producto_nombre_externo = serializers.CharField(
+        max_length=350, required=False, allow_null=True, allow_blank=True
+    )
+    color = serializers.IntegerField(required=False, allow_null=True)
+    color_id = serializers.IntegerField(required=False, allow_null=True)
+    direccion_envio_cliente = serializers.IntegerField(required=False, allow_null=True)
+    direccion_envio = serializers.IntegerField(required=False, allow_null=True)
+    precio_lista = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, allow_null=True
+    )
+    precio_unitario = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, allow_null=True
+    )
+    costo_unitario = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, allow_null=True
+    )
+    tallas = PedidoOnboardingTallaInputSerializer(many=True)
+
+
+class PedidoMesaControlUpdateSerializer(serializers.Serializer):
+    pedido = PedidoMesaControlHeaderSerializer()
+    detalle = PedidoMesaControlDetalleInputSerializer(many=True)
+    servicios_extras = ServicioExtraInputSerializer(many=True, required=False)
+
 class CotizacionOnboardingTallaInputSerializer(serializers.Serializer):
     talla = serializers.IntegerField()
     cantidad = serializers.IntegerField(min_value=1)
