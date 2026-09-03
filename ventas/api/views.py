@@ -2500,9 +2500,15 @@ class PedidoViewSet(viewsets.ModelViewSet):
         servicios_extras_data = serializer.validated_data.get("servicios_extras") or []
 
         with transaction.atomic():
+            # Sin ``select_related("cotizacion")``: ``Pedido.cotizacion`` es
+            # NULL-able, así que Django la resolvía como LEFT OUTER JOIN y
+            # PostgreSQL rechaza ``FOR UPDATE`` contra el lado nullable de un
+            # outer join (``NotSupportedError`` -> 500 en cada llamada). El join
+            # además no servía para nada: abajo sólo se lee ``cotizacion_id``
+            # (columna propia de ``pedidos``) y la cotización se vuelve a traer
+            # con su propio ``select_for_update`` unas líneas más adelante.
             pedido = (
                 Pedido.objects.select_for_update()
-                .select_related("cotizacion")
                 .filter(pk=base_pedido.pk)
                 .first()
             )
