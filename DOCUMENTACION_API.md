@@ -1809,289 +1809,261 @@ La recepción es el proceso unificado que afecta existencias tanto para órdenes
 
 **Base URL**: `/api/v1/finanzas/`
 
-### ⚠️ \*\*Notas Importantes Multi-tenant (antes de integrar módulos Finanzas:
+### Integración rápida para Next.js
 
-1. **Aislamiento por empresa**: TODO endpoint aplica aislamiento estricto por `empresa` en servidor:
-   - \*\*Usuario normal: solo ve / crea registros de su `user.empresa` (o `[]` vacío si no tiene empresa asignada).
-   - \*\*Detalle cross-empresa responde `404 Not Found` (no expone existencia).
-   - **Superusuario** (`is_superuser=true`) o **Admin Empresa** (`is_admin_empresa=true`) bypass scoping empresa:
-     - **GET**: list = ve TODO (de cualquier empresa).
-     - **POST**: **DEBE** enviar `"empresa": <id>` en el body (si falta → `400 {"empresa": "Superusuario debe especificar la empresa explícitamente."`).
-     - **Dashboard** endpoints agregados** aceptan también **`: `?empresa_id=<id>` para filtrar por una empresa concreta.
-2. \*\*Query params comunes (todos los listados GET collection):
-   - `fecha_inicio` / `fecha_fin` (o `fecha_desde` / `fecha_hasta`) → filtra por fecha principal del modelo.
-   - `ordering` → lo ignora en algunos; pero el `ordering
-   - Campos específicos por cada modelo; revisar `query params específicos sección por endpoint.
-3. \*\*Campo `empresa` en POST/PUT:
-   - Usuario normal: **no lo envíes `empresa`** (el backend lo toma del usuario, si envías una distinta a la tuya → `400`).
-   - Superuser / Admin Empresa: \*\*envíalo siempre en body.
-4. \*\*FK cruzada (cliente / proveedor / banco / etc.) validada para usuario normal; super/admin salta validación.
+La forma más simple de integrar este módulo es pensar en 4 flujos:
 
----
+1. **Ventas / Cobranza**
+   - `pedido -> factura -> cuenta_por_cobrar -> cobro -> movimiento_bancario -> conciliacion`
+2. **Compras / Pago a proveedor**
+   - `orden_compra / recepcion -> factura_proveedor -> cuenta_por_pagar -> pago -> movimiento_bancario -> conciliacion`
+3. **Catálogos contables**
+   - `clientes-contabilidad`, `bancos`, `cuentas-bancarias`, `cuentas-contables`, `centros-costo`
+4. **Seguimiento**
+   - `notas-credito`, `alertas-mora`, `dashboard`, `polizas`
 
-### Índice de Endpoints Finanzas
+### Reglas que simplifican la integración
 
-|   # | Recurso                   | CRUD + Acciones custom                                                                                                    |
-| --: | ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-|   1 | [Clientes (Contabilidad)  | `GET/finanzas/clientes-contabilidad/`                                                                                     |
-|   2 | [Cuentas por Cobrar       | `GET/POST/PATCH/DELETE finanzas/cuentas-por-cobrar/`                                                                      |
-|   3 | [Facturas (Clientes)      | `GET/POST/PATCH/DELETE finanzas/facturas/` + `POST registrar-pendiente-cobro/`                                            |
-|   4 | [Cuentas Contables]       | `GET/POST/PATCH/DELETE finanzas/cuentas-contables/`                                                                       |
-|   5 | [Centros de Costo         | `GET/POST/PATCH/DELETE finanzas/centros-costo/`                                                                           |
-|   6 | [Pólizas Contables        | `GET/POST/PATCH/DELETE finanzas/polizas/`                                                                                 |
-|   7 | [Facturas Proveedor       | `GET/POST/PATCH/DELETE finanzas/facturas-proveedor/`                                                                      |
-|   8 | [Bancos]                  | `GET/POST/PATCH/DELETE finanzas/bancos/`                                                                                  |
-|   9 | [Cuentas Bancarias        | `GET/POST/PATCH/DELETE finanzas/cuentas-bancarias/`                                                                       |
-|  10 | [Cuentas por Pagar        | `GET/POST/PATCH/DELETE finanzas/cuentas-por-pagar/`                                                                       |
-|  11 | [Cobros]                  | `GET/POST/PATCH/DELETE finanzas/cobros/` + `POST {id}/cancelar/`                                                          |
-|  12 | [Pagos]                   | `GET/POST/PATCH/DELETE finanzas/pagos/` + `POST {id}/cancelar/`                                                           |
-|  13 | [Movimientos Bancarios    | `GET/POST/PATCH/DELETE finanzas/movimientos-bancarios/` + `POST {id}/cancelar/`                                           |
-|  14 | [Conciliaciones Bancarias | `GET/POST/PATCH/DELETE finanzas/conciliaciones-bancarias/` + `POST preparar/`, `POST {id}/cerrar/`, `POST {id}/cancelar/` |
-|  15 | [Notas de Crédito         | `GET/POST/PATCH/DELETE finanzas/notas-credito/` + `POST {id}/cancelar/`                                                   |
-|  16 | [Alertas de Mora          | `GET finanzas/alertas-mora/` + `POST generar/`                                                                            |
-|  17 | [Dashboard Financiero     | `GET finanzas/dashboard/`                                                                                                 |
+1. **Usuario normal**: no mandes `empresa` en el body. El backend la toma del usuario.
+2. **Superusuario / Admin Empresa**: manda siempre `empresa` en `POST` y `PUT`, excepto en acciones que solo piden ids concretos.
+3. **Usa ids directos**. No intentes reconstruir relaciones en frontend.
+4. **Cobros** usan `cobro_detalles[].cxc` e `importe_aplicado`.
+5. **Pagos** usan `pago_detalles[].cxp` e `importe_aplicado`.
+6. **Conciliación preparar** solo recibe `cuenta_bancaria`, `fecha_inicio`, `fecha_final`, `saldo_estado_cuenta`.
+7. **Movimientos bancarios generados por cobros/pagos no se editan**. Se cancelan desde el origen o con su acción de cancelar.
 
----
+### Mapa de trazabilidad por id
 
-### 1) Clientes (Contabilidad)
+#### Flujo venta -> cobranza
 
-Catálogo de clientes filtrados para finanzas (vista ligera del catálogo general).
+| Paso | Tabla / recurso         | Id que liga                                        |
+| ---- | ----------------------- | -------------------------------------------------- |
+| 1    | `facturas`              | `pedido_id`, `cliente_id`, `id`                    |
+| 2    | `cuentas_por_cobrar`    | `factura_id`, `cliente_id`, `id`                   |
+| 3    | `cobros`                | `cliente_id`, `cuenta_bancaria_id`, `id`           |
+| 4    | `cobro_detalle`         | `cobro_id`, `cxc`                                  |
+| 5    | `movimientos_bancarios` | `cobro_id`, `cuenta_bancaria_id`, `id`             |
+| 6    | `conciliacion_detalle`  | `conciliacion_id`, `movimiento_bancario_id`        |
+| 7    | `poliza_detalle`        | `factura_id`, `cobro_id`, `movimiento_bancario_id` |
 
-- **Listar**: `GET /api/v1/finanzas/clientes-contabilidad/`
-- **Detalle**: `GET /api/v1/finanzas/clientes-contabilidad/{id}/`
-- **Crear**: `POST /api/v1/finanzas/clientes-contabilidad/`
-- **Editar**: `PATCH /api/v1/finanzas/clientes-contabilidad/{id}/`
-- **Eliminar**: `DELETE /api/v1/finanzas/clientes-contabilidad/{id}/`
-- **Query params (opcionales)**:
-  - `q`: búsqueda por `nombre`, `razon_social`, `rfc`, `email`
-  - `solo_activos`: `1` = `activo=true`
-  - **Multi-empresa`1 / **Bypass bypass bypass para super/admin.
+#### Flujo compra -> pago
 
----
+| Paso | Tabla / recurso         | Id que liga                                                 |
+| ---- | ----------------------- | ----------------------------------------------------------- |
+| 1    | `facturas_proveedor`    | `oc_id`, `recepcion_id`, `proveedor_id`, `id`               |
+| 2    | `cuentas_por_pagar`     | `factura_proveedor_id`, `proveedor_id`, `id`                |
+| 3    | `pagos`                 | `proveedor_id`, `cuenta_bancaria_id`, `id`                  |
+| 4    | `pago_detalle`          | `pago_id`, `cxp`                                            |
+| 5    | `movimientos_bancarios` | `pago_id`, `cuenta_bancaria_id`, `id`                       |
+| 6    | `conciliacion_detalle`  | `conciliacion_id`, `movimiento_bancario_id`                 |
+| 7    | `poliza_detalle`        | `factura_proveedor_id`, `pago_id`, `movimiento_bancario_id` |
 
-### 2) Cuentas por Cobrar (CxC)
+#### Flujo bancos / contabilidad
 
-**Base**: `GET /api/v1/finanzas/cuentas-por-cobrar/`
-**Detalle**: `GET /api/v1/finanzas/cuentas-por-cobrar/{id}/`
-**Crear**: `POST /api/v1/finanzas/cuentas-por-cobrar/`
-**Editar**: `PATCH /api/v1/finanzas/cuentas-por-cobrar/{id}/`
-**Eliminar**: `DELETE /api/v1/finanzas/cuentas-por-cobrar/{id}/`
+| Recurso             | Ids clave                                                                                                                                                 |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bancos`            | `id`, `empresa_id`                                                                                                                                        |
+| `cuentas_bancarias` | `id`, `banco_id`, `moneda_id`, `empresa_id`                                                                                                               |
+| `cuentas_contables` | `id`, `empresa_id`, `cuenta_padre_id`                                                                                                                     |
+| `centros_costo`     | `id`, `empresa_id`                                                                                                                                        |
+| `polizas`           | `id`, `empresa_id`, `sucursal_id`, `centro_costo_id`                                                                                                      |
+| `poliza_detalle`    | `id`, `poliza_id`, `cuenta_contable_id`, `centro_costo_id` y vínculos opcionales a `factura`, `factura_proveedor`, `pago`, `cobro`, `movimiento_bancario` |
 
-**Query params (opcionales)**
+### Catálogo oficial de endpoints
 
-| Parámetro                | Descripción                                              |
-| ------------------------ | -------------------------------------------------------- |
-| `cliente` / `cliente_id` | filtra por cliente                                       |
-| `factura` / `factura_id` | filtra por factura                                       |
-| `estatus`                | `Pendiente`, `Parcial`, `Pagada`, `Cancelada`, `Vencida` |
-| `saldo_pendiente`        | `1` = solo `saldo > 0`                                   |
-| `vencidas`               | `1` = solo vencidas con saldo                            |
-| `fecha_inicio`           | fecha emisión >=                                         |
-| `fecha_fin`              | fecha emisión <=                                         |
-| `ordering`               | `-fecha_vencimiento` por default.                        |
+| Pantalla Next.js         | Endpoint principal                                    | Acciones útiles                                                                                           | Ids clave                                                   |
+| ------------------------ | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Clientes contabilidad    | `GET /api/v1/finanzas/clientes-contabilidad/`         | solo lectura                                                                                              | `id`                                                        |
+| Facturas clientes        | `GET/POST /api/v1/finanzas/facturas/`                 | `POST /facturas/onboarding/`, `POST /facturas/desde-pedido/`, `POST /facturas/registrar-pendiente-cobro/` | `id`, `pedido`, `cliente`                                   |
+| Cuentas por cobrar       | `GET/POST /api/v1/finanzas/cuentas-por-cobrar/`       | detalle `GET /{id}/` trae factura y pólizas relacionadas                                                  | `id`, `factura_id`, `cliente`                               |
+| Cobros                   | `GET/POST /api/v1/finanzas/cobros/`                   | `POST /cobros/{id}/cancelar/`                                                                             | `id`, `cliente`, `cuenta_bancaria`, `cobro_detalles[].cxc`  |
+| Facturas proveedor       | `GET/POST /api/v1/finanzas/facturas-proveedor/`       | CRUD estándar                                                                                             | `id`, `oc`, `recepcion`, `proveedor`                        |
+| Cuentas por pagar        | `GET/POST /api/v1/finanzas/cuentas-por-pagar/`        | CRUD estándar                                                                                             | `id`, `factura_proveedor`, `proveedor`                      |
+| Pagos                    | `GET/POST /api/v1/finanzas/pagos/`                    | `POST /pagos/{id}/cancelar/`                                                                              | `id`, `proveedor`, `cuenta_bancaria`, `pago_detalles[].cxp` |
+| Bancos                   | `GET/POST /api/v1/finanzas/bancos/`                   | CRUD estándar                                                                                             | `id`                                                        |
+| Cuentas bancarias        | `GET/POST /api/v1/finanzas/cuentas-bancarias/`        | `GET /cuentas-bancarias/{id}/resumen/`                                                                    | `id`, `banco`, `moneda`                                     |
+| Movimientos bancarios    | `GET/POST /api/v1/finanzas/movimientos-bancarios/`    | `POST /movimientos-bancarios/{id}/cancelar/`                                                              | `id`, `cuenta_bancaria`, `cobro`, `pago`                    |
+| Conciliaciones bancarias | `GET/POST /api/v1/finanzas/conciliaciones-bancarias/` | `POST /preparar/`, `POST /{id}/cerrar/`, `POST /{id}/cancelar/`                                           | `id`, `cuenta_bancaria`                                     |
+| Notas de crédito         | `GET/POST /api/v1/finanzas/notas-credito/`            | `POST /notas-credito/{id}/cancelar/`                                                                      | `id`, `factura`, `cliente`                                  |
+| Cuentas contables        | `GET/POST /api/v1/finanzas/cuentas-contables/`        | CRUD estándar                                                                                             | `id`, `cuenta_padre`                                        |
+| Centros de costo         | `GET/POST /api/v1/finanzas/centros-costo/`            | CRUD estándar                                                                                             | `id`                                                        |
+| Pólizas                  | `GET/POST /api/v1/finanzas/polizas/`                  | `POST /polizas/{id}/contabilizar/`, `POST /polizas/{id}/validar-cuadre/`, `POST /polizas/{id}/cancelar/`  | `id`, `sucursal`, `centro_costo`                            |
+| Alertas de mora          | `GET /api/v1/finanzas/alertas-mora/`                  | `POST /alertas-mora/generar/`                                                                             | `id`, `cuenta_por_cobrar`, `cuenta_por_pagar`               |
+| Dashboard                | `GET /api/v1/finanzas/dashboard/`                     | lectura agregada                                                                                          | `empresa_id`                                                |
 
-**Body POST ejemplo (Super/Admin)** (con `empresa` obligatorio\*\* (normal user: NO lo envíes):
+### Query params realmente soportados
+
+#### Facturas
+
+- `cliente`, `cliente_id`
+- `estatus`
+- `folio`
+- `moneda`, `moneda_id`
+- `pedido`, `pedido_id`
+- `saldo_pendiente`
+- `fecha_inicio`, `fecha_fin`
+- `ordering`
+
+#### Cuentas por cobrar
+
+- `cliente`, `cliente_id`
+- `factura`, `factura_id`
+- `estatus`
+- `saldo_pendiente`
+- `vencidas`
+- `fecha_inicio`, `fecha_fin`
+- `ordering`
+
+#### Facturas proveedor
+
+- `proveedor`, `proveedor_id`
+- `estatus`
+- `folio`
+- `moneda`, `moneda_id`
+- `oc`, `orden_compra`, `orden_compra_id`
+- `recepcion`, `recepcion_id`
+- `fecha_inicio`, `fecha_fin`
+- `ordering`
+
+#### Cuentas por pagar
+
+- `proveedor`, `proveedor_id`
+- `estatus`
+- `saldo_pendiente`
+- `vencidas`
+- `folio`
+- `moneda`, `moneda_id`
+- `factura_proveedor`, `factura_proveedor_id`
+- `fecha_inicio`, `fecha_fin`
+- `ordering`
+
+#### Cobros
+
+- `cliente`, `cliente_id`
+- `metodo_pago`
+- `estatus`
+- `cuenta_bancaria`, `cuenta_bancaria_id`
+- `referencia`, `referencia_operacion`
+- `fecha_inicio`, `fecha_fin`
+- `ordering`
+
+#### Pagos
+
+- `proveedor`, `proveedor_id`
+- `metodo_pago`
+- `estatus`
+- `cuenta_bancaria`, `cuenta_bancaria_id`
+- `referencia`, `referencia_operacion`
+- `fecha_inicio`, `fecha_fin`
+- `ordering`
+
+#### Movimientos bancarios
+
+- `cuenta_bancaria`, `cuenta_bancaria_id`
+- `tipo_movimiento`
+- `estatus`
+- `origen`
+- `concepto`
+- `referencia`
+- `cobro`, `cobro_id`
+- `pago`, `pago_id`
+- `fecha_inicio`, `fecha_fin`
+- `ordering`
+
+#### Conciliaciones bancarias
+
+- `cuenta_bancaria`, `cuenta_bancaria_id`
+- `estatus`
+- `fecha_inicio`, `fecha_desde`
+- `fecha_fin`, `fecha_hasta`
+- `ordering`
+
+#### Notas de crédito
+
+- `cliente`, `cliente_id`
+- `estatus`
+- `folio`
+- `factura`, `factura_id`
+- `motivo`
+- `fecha_inicio`, `fecha_fin`
+- `ordering`
+
+#### Alertas de mora
+
+- `tipo_cuenta`
+- `nivel`
+- `cuenta_por_cobrar`, `cxc`
+- `cuenta_por_pagar`, `cxp`
+- `notificado`
+- `ordering`
+
+#### Dashboard
+
+- `empresa`, `empresa_id`
+- `fecha_inicio`, `fecha_desde`
+- `fecha_fin`, `fecha_hasta`
+- `moneda`, `moneda_id`
+
+### Bodies mínimos recomendados
+
+#### Cobro
 
 ```json
 {
-  "empresa": 1,
-  "factura": 48,
   "cliente": 15,
-  "fecha_emision": "2026-07-14",
-  "fecha_vencimiento": "2026-07-31",
-  "total": "1160.00",
-  "saldo": "1160.00",
-  "estatus": "Pendiente",
-  "referencia": "PEND-JUL",
-  "observaciones": "CxC generada"
+  "cuenta_bancaria": 3,
+  "fecha_cobro": "2026-09-03",
+  "metodo_pago": "Transferencia",
+  "referencia_operacion": "SPEI-001",
+  "total_cobrado": "500.00",
+  "estatus": "Aplicado",
+  "cobro_detalles": [
+    {
+      "cxc": 22,
+      "importe_aplicado": "500.00"
+    }
+  ]
 }
 ```
 
----
+#### Pago
 
-### 3) Facturas (Clientes)
+```json
+{
+  "proveedor": 8,
+  "cuenta_bancaria": 3,
+  "fecha_pago": "2026-09-03",
+  "metodo_pago": "Transferencia",
+  "referencia_operacion": "SPEI-002",
+  "total_pagado": "2000.00",
+  "estatus": "Aplicado",
+  "pago_detalles": [
+    {
+      "cxp": 14,
+      "importe_aplicado": "2000.00"
+    }
+  ]
+}
+```
 
-- **Listar**: `GET /api/v1/finanzas/facturas/`
-- **Detalle**: `GET /api/v1/finanzas/facturas/{id}/`
-- **Crear**: `POST /api/v1/finanzas/facturas/`
-- **Editar**: `PATCH /api/v1/finanzas/facturas/{id}/`
-- **Eliminar**: `DELETE /api/v1/finanzas/facturas/{id}/`
-- **Registrar factura pendiente cobro**: `POST /api/v1/finanzas/facturas/registrar-pendiente-cobro/` (documentado arriba en la sección 1672).
+#### Preparar conciliación
 
----
+```json
+{
+  "cuenta_bancaria": 5,
+  "fecha_inicio": "2026-09-01",
+  "fecha_final": "2026-09-30",
+  "saldo_estado_cuenta": "150000.00"
+}
+```
 
-### 4) Cuentas Contables
+### Recomendación de implementación para Next.js
 
-Catálogo del Plan de Cuentas (estructura padre/hijo, tipo:
-
-- \*\*Listar / Detalle / Crear / Editar / Eliminar`: CRUD estándar en `/api/v1/finanzas/cuentas-contables/`
-- **Query params**: `q`, `tipo` (Activo/Pasivo/Capital/Ingreso/Gasto/Resultado), `codigo`, `solo_activos`, `padre`.
-- **Campos obligatorios POST**: `codigo`, `nombre`, `tipo`, `naturaleza`.
-- **Validaciones**:
-  - Usuario normal `cuenta_padre.empresa_id == user.empresa.
-  - Super/Admin salta validación.
-
----
-
-### 5) Centros de Costo
-
-- **CRUD**: `/api/v1/finanzas/centros-costo/`
-- **Query params**: `q`, `solo_activos`, `sucursal`.
-
----
-
-### 6) Pólizas Contables
-
-- **CRUD**: `/api/v1/finanzas/polizas/`
-- **Subtipo**: `Ingreso`, `Egreso`, `Diario`, `Orden`, `Cierre`.
-- **POST body**: incluye `poliza_detalles` anidados:
-  ```json
-  { "cuenta_contable":10, "centro_costo": 2, "cargo": "0.00", "abono": "1160.00", ...}
-  ```
-- **Validaciones de FK cruzada**: `sucursal.empresa` y `centro_costo.empresa` (usuario normal; super/admin skip.
-
----
-
-### 7) Facturas Proveedor
-
-- **CRUD**: `/api/v1/finanzas/facturas-proveedor/`
-- **Query params**: `proveedor`, `estatus`, `folio`, `fecha_inicio/fin`.
-- **Validaciones**: `orden_compra.empresa` y `recepcion.empresa` (usuario normal.
-
----
-
-### 8) Bancos
-
-- **CRUD**: `/api/v1/finanzas/bancos/`
-- **Campos**: `nombre`, `codigo_banco`, `activo`.
-- \*\*Multi-tenant bypass estándar.
-
----
-
-### 9) Cuentas Bancarias
-
-- **CRUD**: `/api/v1/finanzas/cuentas-bancarias/`
-- **Query params**: `banco`, `moneda`, `solo_activos`.
-- **Validaciones FK**: `banco.empresa`, `moneda.empresa`.
-
----
-
-### 10) Cuentas por Pagar (CxP)
-
-- **CRUD**: `/api/v1/finanzas/cuentas-por-pagar/`
-- **Query params**: `proveedor`, `estatus`, `saldo_pendiente`, `vencidas`.
-- **Nota**: `proveedor` \*\*sin `empresa` es válido (catálogo global proveedores compartido.
-
----
-
-### 11) Cobros
-
-- **CRUD**: `/api/v1/finanzas/cobros/`
-- **Cancelar cobro**: `POST /api/v1/finanzas/cobros/{id}/cancelar/`
-- **Body POST**: `cobro_detalles` anidado:
-  ```json
-  {
-    "cuenta_por_cobrar": 22,
-    "monto": "500.00",
-    "forma_pago_catalogo_sat": "01"
-  }
-  ```
-- **Validaciones**: `cliente.empresa`, `cuenta_bancaria.empresa`, y cada detalle `cobro_detalle.cuenta_por_cobrar.empresa == empresa`.
-- \*\*Al crear con `estatus=APLICADO` → el backend automáticamente actualiza saldo CxC y genera movimiento bancario.
-
----
-
-### 12) Pagos
-
-- **CRUD**: `/api/v1/finanzas/pagos/`
-- **Cancelar pago**: `POST /api/v1/finanzas/pagos/{id}/cancelar/`
-- **Body POST**: `pago_detalles` anidado:
-  ```json
-  { "cuenta_por_pagar": 8, "monto": "2000.00" }
-  ```
-- **Validaciones**: `proveedor.empresa`, `cuenta_bancaria.empresa` y cada detalle `pago_detalle.cuenta_por_pagar.empresa == empresa`.
-- `estatus=APLICADO` → backend automáticamente actualiza saldo CxP + movimiento bancario.
-
----
-
-### 13) Movimientos Bancarios
-
-- **Listar / Detalle**: `/api/v1/finanzas/movimientos-bancarios/`
-- **Crear**: `POST /api/v1/finanzas/movimientos-bancarios/` (manual; los generados por cobros/pagos NO se deben editar.
-- **Cancelar**: `POST /api/v1/finanzas/movimientos-bancarios/{id}/cancelar/`
-- **⚠ PUT / PATCH siempre responde `400`** con mensaje: "Los movimientos bancarios generados por cobros/pagos no se deben editar directamente."`
-- **Query params**: `cuenta_bancaria`, `tipo_movimiento` (DEPOSITO, RETIRO, TRANSFERENCIA, CARGO, ABONO), `referencia`, `conciliado=true`.
-
----
-
-### 14) Conciliaciones Bancarias
-
-- **CRUD**: `/api/v1/finanzas/conciliaciones-bancarias/`
-- **Preparar conciliación** (acción bulk para fechas + saldo): `POST /api/v1/finanzas/conciliaciones-bancarias/preparar/`
-
-  ```json
-  {
-    "empresa": 1,
-    "cuenta_bancaria": 5,
-    "fecha_inicio": "2026-07-01",
-    "fecha_final": "2026-07-31",
-    "saldo_estado_cuenta": "150000.00"
-  }
-  ```
-
-  - **Super/Admin**: `empresa` se resuelve desde `cuenta_bancaria.empresa` (no requiere `user.empresa`).
-
-- **Cerrar**: `POST /api/v1/finanzas/conciliaciones-bancarias/{id}/cerrar/`
-- **Cancelar**: `POST /api/v1/finanzas/conciliaciones-bancarias/{id}/cancelar/`
-- \*\*⚠ DELETE de conciliación CERRADA responde `400` ("Cancelela primero").
-
----
-
-### 15) Notas de Crédito
-
-- **CRUD**: `/api/v1/finanzas/notas-credito/`
-- **Cancelar**: `POST /api/v1/finanzas/notas-credito/{id}/cancelar/`
-- **Campos**: `factura`, `cliente`, `motivo`, `total`, `estatus` (EMITIDA / CANCELADA).
-- \*\*Al crear con `estatus=EMITIDA` → backend automáticamente aplica abono a CxC.
-- \*\*⚠ DELETE de nota `estatus=EMITIDA` → `400` ("Cancelela primero").
-
----
-
-### 16) Alertas de Mora
-
-- **Listar alertas**: `GET /api/v1/finanzas/alertas-mora/`
-- **Query params**: `cliente`, `dias_mora_min`, `solo_activas`.
-- **Generar alertas (batch)**: `POST /api/v1/finanzas/alertas-mora/generar/`
-  - **Body (super/admin**:
-    ```json
-    { "empresa_id": 1, "dias_gracia": 3 }
-    ```
-  - **Super/Admin**:
-    - Enviar `empresa_id` (body o query param).
-    - Si lo **omite** `empresa_id` → genera alertas para **TODAS** las empresas.
-  - **Usuario normal**: usa `user.empresa`.
-
----
-
-### 17) Dashboard Financiero (KPI´s agregados)
-
-- **Listar (único endpoint**: `GET /api/v1/finanzas/dashboard/`
-- **Query params** (súper/admin):
-  - `empresa_id=<id>`: filtra dashboard para una empresa concreta.
-  - Si **NO** envía: si tiene `user.empresa` (super admin sin user.empresa → `400` pidiendo `?empresa_id=`.
-- **Respuesta** 200:\*\*
-  ```json
-  {
-    "cxc_total": "150000.00",
-    "cxc_vencidas": "25000.00",
-    "cxp_total": "80000.00",
-    "cobros_mes": "45000.00",
-    "pagos_mes": "30000.00",
-    "utilidad_mes_ estimado": "15000.00",
-    "rotacion_cxc_dias": 32.5,
-    "empresa_id": 1
-  }
-  ```
+1. **Facturación simple**: usa `POST /facturas/desde-pedido/` cuando toda la factura sale del pedido.
+2. **Facturación manual o saldo pendiente**: usa `POST /facturas/registrar-pendiente-cobro/`.
+3. **No intentes crear movimientos bancarios para cobros/pagos desde frontend** si ya estás usando cobros o pagos aplicados; el backend los genera.
+4. **Usa los detalles** de `cuentas-por-cobrar/{id}` para mostrar factura ligada y pólizas relacionadas sin armar joins en frontend.
+5. **Usa `cuentas-bancarias/{id}/resumen/`** para cards rápidas de cuenta bancaria.
 
 ---
 
