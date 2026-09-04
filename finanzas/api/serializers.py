@@ -29,6 +29,58 @@ from finanzas.models import (
 )
 
 
+class EmpresaResueltaEnServidorMixin:
+    """``empresa`` la fija el servidor, no el cliente.
+
+    Estos serializers usan ``fields = "__all__"`` sobre modelos cuya FK
+    ``empresa`` es NOT NULL, así que DRF la generaba como
+    ``PrimaryKeyRelatedField(required=True)``. Como ``is_valid()`` corre ANTES de
+    ``perform_create()``, un alta sin ``empresa`` moría en la validación del
+    serializer con ``{"empresa": ["Este campo es requerido."]}`` y el
+    ``_resolve_empresa()`` del ViewSet —que ya sabe deducirla de ``user.empresa``—
+    nunca llegaba a ejecutarse. Era código muerto en la ruta de create.
+
+    Reglas, decididas con el equipo:
+
+    - **Update (PUT/PATCH): de sólo lectura para TODOS**, superusuario incluido.
+      Reasignar el tenant por PATCH arrastraba facturas, CxC, pólizas y
+      movimientos a otra empresa sin ninguna validación de consistencia; hoy eso
+      era posible para el superusuario (medido: HTTP 200 moviendo un banco de la
+      empresa 1 a la 2).
+    - **Create: de sólo lectura salvo para el superusuario**, que la sigue
+      mandando explícitamente. Es la capacidad que ``_resolve_empresa()``
+      documenta ("puede crear para cualquier empresa") y que un ``read_only``
+      incondicional habría eliminado.
+
+    Para el resto de usuarios el campo desaparece de la entrada, así que
+    ``_resolve_empresa()`` cae en ``user.empresa``. El aislamiento no se relaja:
+    lo que el cliente mande ya no se usa, y ``perform_create()`` sigue pasando la
+    empresa resuelta a ``serializer.save(empresa=...)``.
+
+    ``empresa`` sigue apareciendo en la RESPUESTA: los campos de sólo lectura se
+    serializan igual. Es un cambio de escritura, no de shape.
+    """
+
+    def _empresa_es_escribible(self):
+        # En update ``self.instance`` es el objeto que se edita. En list, DRF
+        # instancia el hijo del ``ListSerializer`` sin instancia, pero ahí sólo
+        # se serializa: que el campo quede escribible no tiene efecto.
+        if self.instance is not None:
+            return False
+        user = getattr(self.context.get("request"), "user", None)
+        return bool(getattr(user, "is_superuser", False))
+
+    def get_extra_kwargs(self):
+        extra_kwargs = super().get_extra_kwargs()
+        if not self._empresa_es_escribible():
+            kwargs = dict(extra_kwargs.get("empresa", {}))
+            kwargs["read_only"] = True
+            # ``read_only`` y ``required`` son incompatibles en DRF.
+            kwargs.pop("required", None)
+            extra_kwargs["empresa"] = kwargs
+        return extra_kwargs
+
+
 class FacturaDesdePedidoInputSerializer(serializers.Serializer):
     pedido = serializers.IntegerField(min_value=1)
 
@@ -237,7 +289,7 @@ class CuentaPorCobrarDetalleSerializer(CuentaPorCobrarSerializer):
         return list(polizas_map.values())
 
 
-class CuentaContableSerializer(serializers.ModelSerializer):
+class CuentaContableSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     class Meta:
         model = CuentaContable
         fields = "__all__"
@@ -252,7 +304,7 @@ class CuentaContableSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class CentroCostoSerializer(serializers.ModelSerializer):
+class CentroCostoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     class Meta:
         model = CentroCosto
         fields = "__all__"
@@ -273,7 +325,7 @@ class PolizaDetalleSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
-class PolizaSerializer(serializers.ModelSerializer):
+class PolizaSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     poliza_detalles = PolizaDetalleSerializer(many=True, required=False, read_only=True)
     total_cargos = serializers.SerializerMethodField()
     total_abonos = serializers.SerializerMethodField()
@@ -305,9 +357,15 @@ class PolizaSerializer(serializers.ModelSerializer):
             cc = attrs.get("centro_costo")
             if user_empresa and emp and getattr(emp, "pk", emp) != getattr(user_empresa, "pk", user_empresa):
                 raise ValidationError({"empresa": "Empresa no autorizada."})
-            if suc and emp and getattr(suc, "empresa_id", None) and suc.empresa_id != getattr(emp, "pk", getattr(user_empresa, "pk", None)):
+            # Misma resolución que FacturaProveedor/CuentaBancaria/CuentaPorPagar/
+            # Cobro/Pago: ``empresa`` la fija el servidor y no llega en ``attrs``,
+            # así que las comprobaciones de FK se apoyan en la empresa del usuario.
+            # Colgarlas de ``emp`` las dejaba muertas y permitía guardar una
+            # sucursal de otra empresa en un update.
+            emp_id = getattr(emp, "pk", emp) if emp else getattr(user_empresa, "pk", None)
+            if suc and emp_id and getattr(suc, "empresa_id", None) and suc.empresa_id != emp_id:
                 raise ValidationError({"sucursal": "Sucursal no pertenece a la empresa."})
-            if cc and emp and getattr(cc, "empresa_id", None) and cc.empresa_id != getattr(emp, "pk", getattr(user_empresa, "pk", None)):
+            if cc and emp_id and getattr(cc, "empresa_id", None) and cc.empresa_id != emp_id:
                 raise ValidationError({"centro_costo": "Centro de costo no pertenece a la empresa."})
         return attrs
 
@@ -318,7 +376,7 @@ class FacturaProveedorDetalleSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
-class FacturaProveedorSerializer(serializers.ModelSerializer):
+class FacturaProveedorSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     factura_proveedor_detalles = FacturaProveedorDetalleSerializer(many=True, required=False, read_only=True)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     moneda_codigo = serializers.CharField(source="moneda.codigo_iso", read_only=True)
@@ -350,7 +408,7 @@ class FacturaProveedorSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class BancoSerializer(serializers.ModelSerializer):
+class BancoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     class Meta:
         model = Banco
         fields = "__all__"
@@ -365,7 +423,7 @@ class BancoSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class CuentaBancariaSerializer(serializers.ModelSerializer):
+class CuentaBancariaSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     banco_nombre = serializers.CharField(source="banco.nombre", read_only=True)
     moneda_codigo = serializers.CharField(source="moneda.codigo_iso", read_only=True)
 
@@ -387,7 +445,7 @@ class CuentaBancariaSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class CuentaPorPagarSerializer(serializers.ModelSerializer):
+class CuentaPorPagarSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     factura_proveedor_folio = serializers.CharField(source="factura_proveedor.folio", read_only=True)
     moneda_id = serializers.IntegerField(source="factura_proveedor.moneda_id", read_only=True)
@@ -425,7 +483,7 @@ class CobroDetalleSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
-class CobroSerializer(serializers.ModelSerializer):
+class CobroSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     cobro_detalles = CobroDetalleSerializer(many=True, required=False)
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)
@@ -457,7 +515,7 @@ class PagoDetalleSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
-class PagoSerializer(serializers.ModelSerializer):
+class PagoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     pago_detalles = PagoDetalleSerializer(many=True, required=False)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)
