@@ -73,9 +73,17 @@ def _bool_param(v):
 
 
 def _puede_ver_todo(user):
-    return bool(
-        getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)
-    )
+    """Quién ve fuera de su empresa: SÓLO el superusuario.
+
+    ``is_admin_empresa`` NO entra aquí. En el patrón canónico del proyecto ese
+    flag relaja un sub-alcance MÁS ESTRECHO dentro de la empresa —el vendedor en
+    ``ventas.scope.alcance_cotizaciones()``, la sucursal en
+    ``wms``/``produccion.get_queryset()``— y nunca quita el filtro por empresa.
+    Incluirlo en este predicado abría los 17 endpoints de finanzas a los
+    registros de las demás empresas del tenant compartido, en contra de lo que
+    ya documentaban ``_aplicar_scope_empresa`` y ``_resolve_empresa`` aquí abajo.
+    """
+    return bool(getattr(user, "is_superuser", False))
 
 
 def _user_empresa_or_none(user):
@@ -756,12 +764,15 @@ class CuentaContableViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset()
-        if _puede_ver_todo(user):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
+        # El alcance decide QUÉ filas, no CÓMO se filtran: con ``return qs`` en
+        # esta rama el superusuario se saltaba también los query params y el
+        # ordering, y recibía la lista completa sin filtrar ni ordenar. Misma
+        # forma que ``PolizaViewSet``/``BancoViewSet.get_queryset()``.
+        if not _puede_ver_todo(user):
+            empresa = getattr(user, "empresa", None)
+            if not empresa:
+                return qs.none()
+            qs = qs.filter(empresa=empresa)
         qp = self.request.query_params
         codigo = (qp.get("codigo") or "").strip()
         nombre = (qp.get("nombre") or "").strip()
@@ -818,12 +829,13 @@ class CentroCostoViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset()
-        if _puede_ver_todo(user):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
+        # Igual que en ``CuentaContableViewSet``: el alcance no debe llevarse por
+        # delante los query params ni el ordering del superusuario.
+        if not _puede_ver_todo(user):
+            empresa = getattr(user, "empresa", None)
+            if not empresa:
+                return qs.none()
+            qs = qs.filter(empresa=empresa)
         qp = self.request.query_params
         codigo = (qp.get("codigo") or "").strip()
         nombre = (qp.get("nombre") or "").strip()
@@ -1238,11 +1250,21 @@ class CobroViewSet(viewsets.ModelViewSet):
         detalles_data = serializer.validated_data.pop("cobro_detalles", [])
         cobro = serializer.save(empresa=empresa)
         for d in detalles_data:
-            cxc = d.get("cuenta_por_cobrar")
-            if cxc and not _puede_ver_todo(user):
+            # El campo real de ``CobroDetalle`` es ``cxc``: leer
+            # ``cuenta_por_cobrar`` devolvía siempre ``None`` y esta validación no
+            # se ejecutaba nunca. Se compara contra la empresa del DOCUMENTO padre
+            # y sin excluir al superusuario, porque una línea de otra empresa es
+            # incoherente la escriba quien la escriba. ``CobroService`` sólo la
+            # cazaba con ``estatus="Aplicado"``; en ``Borrador`` no corre.
+            cxc = d.get("cxc")
+            if cxc is not None:
+                # ``CuentaPorCobrar.empresa`` es NULL-able: las filas antiguas se
+                # resuelven por su factura, igual que en ``get_queryset``.
                 cxc_emp = getattr(cxc, "empresa_id", None) or getattr(getattr(cxc, "factura", None), "empresa_id", None)
-                if cxc_emp and cxc_emp != empresa.pk:
-                    raise ValidationError({"cuenta_por_cobrar": "Cuenta por cobrar no pertenece a la empresa."})
+                if cxc_emp and cxc_emp != cobro.empresa_id:
+                    raise ValidationError(
+                        {"cobro_detalles": f"La CxC {cxc.pk} no pertenece a la misma empresa que el cobro."}
+                    )
             CobroDetalle.objects.create(cobro=cobro, **d)
         if cobro.estatus == Cobro.Estatus.APLICADO:
             CobroService.aplicar_cobro(cobro)
@@ -1329,11 +1351,18 @@ class PagoViewSet(viewsets.ModelViewSet):
         detalles_data = serializer.validated_data.pop("pago_detalles", [])
         pago = serializer.save(empresa=empresa)
         for d in detalles_data:
-            cxp = d.get("cuenta_por_pagar")
-            if cxp and not _puede_ver_todo(user):
+            # El campo real de ``PagoDetalle`` es ``cxp``: leer
+            # ``cuenta_por_pagar`` devolvía siempre ``None``. Se compara contra la
+            # empresa del documento padre y sin excluir al superusuario, igual que
+            # en ``CobroViewSet``. ``PagoService`` repite el guard, pero sólo con
+            # ``estatus="Aplicado"``; en ``Borrador`` nadie lo cubría.
+            cxp = d.get("cxp")
+            if cxp is not None:
                 cxp_emp = getattr(cxp, "empresa_id", None)
-                if cxp_emp and cxp_emp != empresa.pk:
-                    raise ValidationError({"cuenta_por_pagar": "Cuenta por pagar no pertenece a la empresa."})
+                if cxp_emp and cxp_emp != pago.empresa_id:
+                    raise ValidationError(
+                        {"pago_detalles": f"La CxP {cxp.pk} no pertenece a la misma empresa que el pago."}
+                    )
             PagoDetalle.objects.create(pago=pago, **d)
         if pago.estatus == Pago.Estatus.APLICADO:
             PagoService.aplicar_pago(pago)
