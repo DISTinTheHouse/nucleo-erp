@@ -37,6 +37,7 @@ PEDIDOS_URL = "/api/v1/ventas/pedidos/"
 PEDIDO_DETALLE_URL = "/api/v1/ventas/pedido-detalle/"
 PEDIDO_DETALLE_TALLA_URL = "/api/v1/ventas/pedido-detalle-talla/"
 COTIZACION_ONBOARDING_URL = "/api/v1/ventas/cotizaciones/onboarding/"
+MESA_CONTROL_URL = "/api/v1/ventas/mesa-control/"
 
 
 def pedido_editar_mesa_control_url(pedido_id):
@@ -1108,3 +1109,167 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertIn("bloqueos", response.json())
         tipos = {item["tipo"] for item in response.json()["bloqueos"]}
         self.assertIn("picking_activo", tipos)
+
+
+class MesaControlListScopeTests(TestCase):
+    """``MesaControlViewSet.get_queryset()``: quién ve el listado en revisión.
+
+    El branch de interés: el guard sólo admitía ``is_superuser`` /
+    ``is_admin_empresa``, así que un usuario operativo de mesa de control podía
+    ejecutar las acciones POST (``_require_mesa_control``) pero recibía una tabla
+    vacía. Al abrirlo hay que evitar además el sub-scope por ``vendedor`` de
+    ``ventas.scope``, que dejaría fuera justo lo que debe revisar.
+    """
+
+    @classmethod
+    def _cotizacion(cls, empresa, sucursal, cliente, estatus, vendedor=None):
+        return Cotizacion.objects.create(
+            empresa=empresa,
+            sucursal=sucursal,
+            cliente=cliente,
+            moneda=cls.moneda,
+            vendedor=vendedor,
+            tipo_pedido=1,
+            estatus=estatus,
+            persona_pagos="Pagos",
+            correo_facturas="facturas@acme.test",
+            telefono_pagos="8100000000",
+            forma_pago="03",
+            metodo_pago="PUE",
+            uso_cfdi="G03",
+            subtotal="100.00",
+            gran_total="116.00",
+        )
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme-mc", razon_social="ACME SA")
+        cls.empresa_b = Empresa.objects.create(
+            codigo="globex-mc", razon_social="Globex SA"
+        )
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Matriz"
+        )
+        cls.sucursal_b = Sucursal.objects.create(
+            empresa=cls.empresa_b, codigo="GDL", nombre="GDL"
+        )
+        cls.cliente = Cliente.objects.create(
+            empresa=cls.empresa, nombre="Cliente ACME", razon_social="Cliente ACME SA"
+        )
+        cls.cliente_b = Cliente.objects.create(
+            empresa=cls.empresa_b, nombre="Cliente Globex", razon_social="Globex SA"
+        )
+
+        cls.vendedor = Usuario.objects.create(
+            username="vendedor_mc",
+            email="vendedor_mc@acme.test",
+            empresa=cls.empresa,
+        )
+        cls.mesa_no_admin = Usuario.objects.create(
+            username="mesa_mc",
+            email="mesa_mc@acme.test",
+            empresa=cls.empresa,
+        )
+        cls.admin_empresa = Usuario.objects.create(
+            username="admin_mc",
+            email="admin_mc@acme.test",
+            empresa=cls.empresa,
+            is_admin_empresa=True,
+        )
+        cls.mesa_sin_empresa = Usuario.objects.create(
+            username="mesa_sin_empresa",
+            email="mesa_sin_empresa@acme.test",
+            empresa=None,
+        )
+        cls.mesa_otra_empresa = Usuario.objects.create(
+            username="mesa_globex",
+            email="mesa_globex@globex.test",
+            empresa=cls.empresa_b,
+        )
+
+        cls.rol_mesa = Rol.objects.create(
+            empresa=cls.empresa,
+            codigo="MESACONTROL-0002",
+            nombre="Mesa-de-control",
+            estatus=Rol.Estatus.ACTIVO,
+            clave_departamento=None,
+        )
+        cls.rol_mesa_b = Rol.objects.create(
+            empresa=cls.empresa_b,
+            codigo="MESACONTROL-0002",
+            nombre="Mesa-de-control",
+            estatus=Rol.Estatus.ACTIVO,
+            clave_departamento=None,
+        )
+        UsuarioRol.objects.create(
+            usuario=cls.mesa_no_admin, rol=cls.rol_mesa, empresa=cls.empresa
+        )
+        UsuarioRol.objects.create(
+            usuario=cls.mesa_sin_empresa, rol=cls.rol_mesa, empresa=cls.empresa
+        )
+        UsuarioRol.objects.create(
+            usuario=cls.mesa_otra_empresa, rol=cls.rol_mesa_b, empresa=cls.empresa_b
+        )
+
+        # Las dos que mesa de control debe ver: de otro vendedor, no suyas.
+        cls.cot_en_revision = cls._cotizacion(
+            cls.empresa, cls.sucursal, cls.cliente, 2, vendedor=cls.vendedor
+        )
+        cls.cot_cambios = cls._cotizacion(
+            cls.empresa, cls.sucursal, cls.cliente, 5, vendedor=cls.vendedor
+        )
+        # Fuera del listado por estatus.
+        cls.cot_autorizada = cls._cotizacion(
+            cls.empresa, cls.sucursal, cls.cliente, 3, vendedor=cls.vendedor
+        )
+        # Fuera del listado por empresa.
+        cls.cot_otra_empresa = cls._cotizacion(
+            cls.empresa_b, cls.sucursal_b, cls.cliente_b, 2
+        )
+
+    def _ids(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get(MESA_CONTROL_URL)
+        self.assertEqual(resp.status_code, 200)
+        return {row["id"] for row in resp.json()}
+
+    # --- el branch roto -------------------------------------------------------
+
+    def test_mesa_control_no_admin_ve_las_cotizaciones_de_su_empresa(self):
+        """Antes el guard lo dejaba fuera y recibía ``200 []``."""
+        self.assertEqual(
+            self._ids(self.mesa_no_admin),
+            {self.cot_en_revision.pk, self.cot_cambios.pk},
+        )
+
+    def test_mesa_control_no_admin_no_queda_acotado_a_sus_propias_cotizaciones(self):
+        """El sub-scope por ``vendedor`` de ``ventas.scope`` no debe aplicar."""
+        self.assertNotIn(self.mesa_no_admin.pk, {self.vendedor.pk})
+        self.assertIn(self.cot_en_revision.pk, self._ids(self.mesa_no_admin))
+
+    # --- aislamiento multi-tenant y estatus -----------------------------------
+
+    def test_mesa_control_no_admin_no_ve_otras_empresas(self):
+        self.assertNotIn(self.cot_otra_empresa.pk, self._ids(self.mesa_no_admin))
+        self.assertNotIn(self.cot_en_revision.pk, self._ids(self.mesa_otra_empresa))
+        self.assertEqual(self._ids(self.mesa_otra_empresa), {self.cot_otra_empresa.pk})
+
+    def test_mesa_control_no_admin_no_ve_otros_estatus(self):
+        self.assertNotIn(self.cot_autorizada.pk, self._ids(self.mesa_no_admin))
+
+    def test_mesa_control_sin_empresa_no_ve_nada(self):
+        """Se falla cerrado aunque tenga el rol asignado."""
+        self.assertEqual(self._ids(self.mesa_sin_empresa), set())
+
+    # --- no regresión en las ramas que ya eran correctas ----------------------
+
+    def test_admin_empresa_sigue_viendo_las_de_su_empresa(self):
+        self.assertEqual(
+            self._ids(self.admin_empresa),
+            {self.cot_en_revision.pk, self.cot_cambios.pk},
+        )
+
+    def test_usuario_sin_rol_mesa_control_sigue_sin_ver_nada(self):
+        self.assertEqual(self._ids(self.vendedor), set())
