@@ -2874,20 +2874,35 @@ class MesaControlViewSet(CotizacionViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        # Solo mesa de control o superusuarios
-        if not getattr(user, "is_superuser", False) and not getattr(
-            user, "is_admin_empresa", False
-        ):
+        empresa = getattr(user, "empresa", None)
+        es_superuser = getattr(user, "is_superuser", False)
+        es_admin_empresa = getattr(user, "is_admin_empresa", False)
+        # Mesa de control se resuelve con el MISMO criterio que
+        # ``_require_mesa_control`` (``seguridad.role_identity``), no con
+        # ``is_admin_empresa``: un usuario operativo de mesa de control podía
+        # ejecutar las acciones POST pero no veía el listado sobre el que actúa.
+        # Sin empresa no se evalúa el rol: se falla cerrado.
+        es_mesa_control = bool(empresa) and usuario_tiene_clave_departamento(
+            user,
+            CLAVE_DEPARTAMENTO_MESA_CONTROL,
+            empresa=empresa,
+        )
+        if not es_superuser and not es_admin_empresa and not es_mesa_control:
             return Cotizacion.objects.none()
 
-        # Mismo alcance que ``CotizacionViewSet`` y que el buscador global: una
-        # sola definición en ``ventas.scope``. El sub-scope por ``vendedor`` no
-        # llega a aplicar porque el guard de arriba ya dejó fuera a quien no es
-        # admin de empresa ni superusuario.
-        qs = cotizaciones_visibles(
-            cotizaciones_base().filter(estatus__in=[2, 5]),  # EN REVISION o CAMBIOS SOLICITADOS
-            user,
-        )
+        base = cotizaciones_base().filter(estatus__in=[2, 5])  # EN REVISION o CAMBIOS SOLICITADOS
+        if not es_superuser and not es_admin_empresa:
+            # Mesa de control NO admin: ve toda la empresa en estos dos estatus.
+            # No se pasa por ``cotizaciones_visibles`` porque su sub-scope por
+            # ``vendedor`` (decidido sólo con ``is_admin_empresa``) dejaría fuera
+            # justo las cotizaciones que mesa de control debe revisar, y
+            # ``ventas.scope`` es compartido con ``CotizacionViewSet`` y el
+            # buscador global: no puede ampliarse sólo para este listado.
+            qs = base.filter(empresa=empresa)
+        else:
+            # Mismo alcance que ``CotizacionViewSet`` y que el buscador global:
+            # una sola definición en ``ventas.scope``.
+            qs = cotizaciones_visibles(base, user)
 
         # Se delega en ``_apply_filters`` (heredado de ``CotizacionViewSet``) el
         # ordenamiento y los filtros de query params, en vez de duplicar aquí una
