@@ -943,6 +943,11 @@ class PolizaViewSet(viewsets.ModelViewSet):
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha")
         return _aplicar_ordering(qs, qp, ["-fecha", "-folio_consecutivo", "-id"])
 
+    # El encabezado y sus renglones entran juntos: las líneas se crean DESPUÉS
+    # del ``save()``, así que sin la transacción un renglón rechazado dejaba la
+    # póliza ya confirmada y huérfana, con el cliente recibiendo un 400. Mismo
+    # decorador que Cobro/Pago/MovimientoBancario/Conciliación/NotaCrédito.
+    @transaction.atomic
     def perform_create(self, serializer):
         user = self.request.user
         empresa = _resolve_empresa(user, serializer.validated_data, required=True)
@@ -1045,6 +1050,10 @@ class FacturaProveedorViewSet(viewsets.ModelViewSet):
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha_emision")
         return _aplicar_ordering(qs, qp, ["-fecha_emision", "-id"])
 
+    # Mismo motivo que en ``PolizaViewSet.perform_create``: los renglones se
+    # crean tras el ``save()`` del encabezado, y un renglón rechazado dejaba la
+    # factura de proveedor huérfana.
+    @transaction.atomic
     def perform_create(self, serializer):
         user = self.request.user
         empresa = _resolve_empresa(user, serializer.validated_data, required=True)
