@@ -1,6 +1,10 @@
 import copy
 import logging
-import re
+
+from seguridad.role_identity import (
+    CLAVES_CONTABILIDAD_VENTAS,
+    claves_departamento_usuario,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,36 +24,6 @@ CAMPOS_CONTABILIDAD_DETALLE = [
 CAMPOS_CONTABILIDAD_TALLA = ["precio_unitario", "subtotal_talla"]
 CAMPOS_CONTABILIDAD_SERVICIO = ["monto"]
 
-TOKENS_ROL_VER_TODO = {"MESACONTROL", "VENTAS", "CONTAVENTAS", "MESACONTROLYVENTAS"}
-
-
-def _normalizar_token(s: str) -> str:
-    try:
-        return re.sub(r"[^A-Z0-9]", "", str(s or "").upper())
-    except Exception:
-        return ""
-
-
-def _tokens_roles_usuario(user) -> set:
-    tokens = set()
-    try:
-        asignaciones = user.asignaciones_roles.select_related("rol").all()
-    except Exception:
-        try:
-            asignaciones = user.asignaciones_roles.all()
-        except Exception:
-            return tokens
-
-    for ur in asignaciones:
-        rol = getattr(ur, "rol", None)
-        if not rol:
-            continue
-        for attr in ("codigo", "nombre", "clave_departamento"):
-            tok = _normalizar_token(getattr(rol, attr, None))
-            if tok:
-                tokens.add(tok)
-    return tokens
-
 
 def puede_ver_contabilidad(user) -> bool:
     if getattr(user, "is_superuser", False):
@@ -57,8 +31,8 @@ def puede_ver_contabilidad(user) -> bool:
     if getattr(user, "is_admin_empresa", False):
         return True
 
-    tokens = _tokens_roles_usuario(user)
-    return bool(tokens & TOKENS_ROL_VER_TODO) if tokens else False
+    claves = claves_departamento_usuario(user)
+    return bool(claves & CLAVES_CONTABILIDAD_VENTAS) if claves else False
 
 
 def _drop_keys(d: dict, keys: list) -> None:

@@ -1425,7 +1425,11 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
     - si `editable=true`, habilitar edición
     - si `editable=false`, mostrar la lista `bloqueos` sin intentar guardar
   - **Endpoint**: `POST /api/v1/ventas/pedidos/{id}/editar-mesa-control/`
-  - Permiso: `is_superuser`, `is_admin_empresa` o rol activo `MESA-DE-CONTROL`.
+  - Permiso: `is_superuser`, `is_admin_empresa` o usuario con rol activo de Mesa de Control.
+  - Regla de autorización vigente:
+    - backend resuelve Mesa de Control por `clave_departamento="MESACONTROL"`
+    - también reconoce roles legacy como `codigo="MESACONTROL-0002"` o `nombre="Mesa-de-control"`
+    - por lo tanto, un usuario de Mesa de Control **no necesita** ser `is_admin_empresa` para usar estos endpoints
   - Modo de operación: **estricto contable/operativo**.
   - Body: payload completo tipo documento. En edición segura, cada renglón existente del pedido debe enviarse con su `id` para actualizarlo sin romper referencias ligadas:
 
@@ -1484,6 +1488,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
     - **no toca inventario**, no genera `MovimientoInventario` y no requiere `aceptar-cambios`
     - responde `200` con `pedido`, `cotizacion`, `sincronizado=true` y `modo="estricto_contable_operativo"`
   - Restricciones duras:
+    - si el usuario autenticado no es Mesa de Control ni admin/superuser, responde `400` con `{"permiso": "Acción disponible solo para mesa de control."}`
     - si el pedido no tiene `cotizacion` relacionada, responde error `400`
     - si el pedido tiene documentos contables, operativos o logísticos ligados, responde error **`409 Conflict`** con payload amigable para frontend
     - si se intenta **quitar** renglones/tallas/servicios extras ya existentes desde este endpoint, responde error `400`

@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import logging
+
 from django.db import transaction
 from django.utils import timezone
 
+from seguridad.role_identity import (
+    canonicalizar_clave_departamento,
+    inferir_clave_departamento,
+    usuarios_ids_por_clave_departamento,
+)
+
 from ..models import Notificacion
+
+logger = logging.getLogger(__name__)
 
 
 def _puede_ver_todo(user) -> bool:
@@ -31,27 +41,29 @@ def notificaciones_para_usuario(qs, user):
 @transaction.atomic
 def crear_notificacion_por_rol(
     empresa,
-    codigo_rol: str,
+    codigo_rol: str | None,
     titulo: str,
     mensaje: str,
     modulo: str,
     tipo: str,
     data: dict | None = None,
+    clave_departamento: str | None = None,
 ) -> int:
-    from seguridad.models import UsuarioRol
-    from usuarios.models import Usuario
-
-    usuarios_ids = (
-        UsuarioRol.objects.filter(
-            rol__empresa=empresa,
-            rol__codigo__iexact=codigo_rol,
-            rol__estatus="activo",
-            usuario__estatus=Usuario.Estatus.ACTIVO,
-        )
-        .values_list("usuario_id", flat=True)
-        .distinct()
+    clave_objetivo = canonicalizar_clave_departamento(
+        clave_departamento or inferir_clave_departamento(codigo_rol)
     )
+    usuarios_ids = usuarios_ids_por_clave_departamento(empresa, clave_objetivo)
     if not usuarios_ids:
+        logger.warning(
+            "No se encontraron usuarios activos para notificacion por rol",
+            extra={
+                "empresa_id": getattr(empresa, "pk", None),
+                "clave_departamento": clave_objetivo,
+                "codigo_rol": codigo_rol,
+                "modulo": modulo,
+                "tipo": tipo,
+            },
+        )
         return 0
 
     notifs = [

@@ -61,6 +61,10 @@ from produccion.models import (
     OrdenesCorteManga,
     OrdenCorteMangaDetalle,
 )
+from seguridad.role_identity import (
+    CLAVE_DEPARTAMENTO_MESA_CONTROL,
+    usuario_tiene_clave_departamento,
+)
 
 from ventas.scope import (
     alcance_cotizaciones,
@@ -1421,17 +1425,16 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             )
 
     def _require_mesa_control(self, user):
-        from seguridad.models import UsuarioRol
-
         if getattr(user, "is_superuser", False):
             return
         if getattr(user, "is_admin_empresa", False):
             return
-        if UsuarioRol.objects.filter(
-            usuario=user,
-            rol__codigo__iexact="MESA-DE-CONTROL",
-            rol__estatus="activo",
-        ).exists():
+        empresa = getattr(user, "empresa", None)
+        if usuario_tiene_clave_departamento(
+            user,
+            CLAVE_DEPARTAMENTO_MESA_CONTROL,
+            empresa=empresa,
+        ):
             return
         raise ValidationError(
             {"permiso": "Acción disponible solo para mesa de control."}
@@ -2010,6 +2013,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     ),
                     "enviada_en": enviada_en,
                 },
+                clave_departamento=CLAVE_DEPARTAMENTO_MESA_CONTROL,
             )
             # --- Fin Notificación ---
 
@@ -2409,19 +2413,16 @@ class PedidoViewSet(viewsets.ModelViewSet):
         pedido.save(update_fields=["serie_folio", "folio", "folio_consecutivo"])
 
     def _require_mesa_control(self, user):
-        from seguridad.models import UsuarioRol
-
         if getattr(user, "is_superuser", False):
             return
         if getattr(user, "is_admin_empresa", False):
             return
         empresa = getattr(user, "empresa", None)
-        if empresa and UsuarioRol.objects.filter(
-            usuario=user,
-            rol__empresa=empresa,
-            rol__codigo="MESA-DE-CONTROL",
-            rol__estatus="activo",
-        ).exists():
+        if usuario_tiene_clave_departamento(
+            user,
+            CLAVE_DEPARTAMENTO_MESA_CONTROL,
+            empresa=empresa,
+        ):
             return
         raise ValidationError(
             {"permiso": "Acción disponible solo para mesa de control."}

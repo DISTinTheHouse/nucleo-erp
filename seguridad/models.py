@@ -1,4 +1,5 @@
 from django.db import models
+from .role_identity import canonicalizar_clave_departamento, inferir_clave_departamento
 
 
 class Permiso(models.Model):
@@ -63,6 +64,17 @@ class Rol(models.Model):
 
     def __str__(self):
         return f"{self.empresa.codigo} - {self.nombre}"
+
+    def save(self, *args, **kwargs):
+        clave_departamento = canonicalizar_clave_departamento(self.clave_departamento)
+        if clave_departamento:
+            self.clave_departamento = clave_departamento
+        else:
+            self.clave_departamento = inferir_clave_departamento(
+                self.nombre,
+                self.codigo,
+            ) or None
+        super().save(*args, **kwargs)
 
 
 class UsuarioRol(models.Model):

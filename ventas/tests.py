@@ -17,6 +17,7 @@ from inventarios.models import MovimientoInventario
 from finanzas.models import Factura, FacturaDetalle
 from inventarios.models import Almacen, TipoAlmacen
 from nucleo.models import Empresa, Moneda, Sucursal
+from seguridad.models import Rol, UsuarioRol
 from terceros.models import Cliente
 from usuarios.models import Usuario
 from wms.models import Picking, PickingDetalle
@@ -703,12 +704,30 @@ class PedidoMesaControlUpdateTests(TestCase):
             empresa=cls.empresa,
             sucursal_default=cls.sucursal,
         )
+        cls.mesa_no_admin = Usuario.objects.create(
+            username="mesa_operativa",
+            email="mesa_operativa@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+        )
         cls.admin_otra_empresa = Usuario.objects.create(
             username="mesa_globex",
             email="mesa_globex@globex.test",
             empresa=cls.empresa_b,
             sucursal_default=cls.sucursal_b,
             is_admin_empresa=True,
+        )
+        cls.rol_mesa_control = Rol.objects.create(
+            empresa=cls.empresa,
+            codigo="MESACONTROL-0002",
+            nombre="Mesa-de-control",
+            estatus=Rol.Estatus.ACTIVO,
+            clave_departamento=None,
+        )
+        UsuarioRol.objects.create(
+            usuario=cls.mesa_no_admin,
+            rol=cls.rol_mesa_control,
+            empresa=cls.empresa,
         )
 
         cls.cotizacion = Cotizacion.objects.create(
@@ -950,6 +969,13 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(body["modo"], "estricto_contable_operativo")
         self.assertTrue(body["requiere_ids_detalle"])
         self.assertEqual(body["bloqueos"], [])
+
+    def test_usuario_mesa_control_no_admin_si_puede_abrir_contexto(self):
+        response = self._client(self.mesa_no_admin).get(
+            pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["editable"])
 
     def test_edicion_mesa_control_actualiza_pedido_y_cotizacion_sin_inventario(self):
         response = self._client(self.admin_mesa).post(
