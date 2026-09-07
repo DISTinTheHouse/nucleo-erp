@@ -1,8 +1,8 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.core.exceptions import ValidationError
 
+from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import Poliza, PolizaDetalle
 
 
@@ -24,7 +24,7 @@ class PolizaService:
     def validar_suma_cero(poliza: Poliza):
         cargos, abonos = PolizaService.calcular_sumas(poliza)
         if abs(cargos - abonos) > Decimal("0.01"):
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {
                     "poliza_detalles": (
                         f"La suma de cargos ({cargos}) debe ser igual a la "
@@ -40,7 +40,7 @@ class PolizaService:
         if poliza.estatus == Poliza.PolizaStatus.CONTABILIZADA:
             return
         if poliza.estatus == Poliza.PolizaStatus.CANCELADA:
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {"estatus": "No se puede contabilizar una póliza cancelada."}
             )
         PolizaService.validar_suma_cero(poliza)

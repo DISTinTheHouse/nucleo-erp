@@ -1,6 +1,5 @@
 from decimal import Decimal
 
-from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
@@ -10,6 +9,7 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 from rest_framework.fields import get_error_detail
 from rest_framework.response import Response
 
+from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import (
     AlertaMora,
     Banco,
@@ -207,20 +207,26 @@ def _validate_related_parent_empresa(related_obj, field_name, parent_empresa):
 
 
 class ErroresDeNegocioComo400Mixin:
-    """Traduce la ``ValidationError`` de Django que lanzan los servicios a la de DRF.
+    """Traduce el ``ErrorDeNegocio`` que lanzan los servicios a la 400 de DRF.
 
-    Los siete servicios de ``finanzas`` levantan
-    ``django.core.exceptions.ValidationError`` —correcto: deben seguir siendo
-    agnósticos del framework—, pero DRF no la conoce y la dejaba escapar como un
-    500. El resultado era que cada regla de negocio violada (importe que excede
-    el saldo, pago sin detalle, póliza descuadrada) llegaba al frontend como un
-    error opaco. Antes del alta de líneas anidadas esos caminos eran
-    inalcanzables; ahora son de uso diario.
+    Los servicios de ``finanzas`` no pueden levantar la ``ValidationError`` de
+    DRF —deben seguir siendo agnósticos del framework—, así que DRF no las
+    conocía y las dejaba escapar como un 500. Cada regla de negocio violada
+    (importe que excede el saldo, pago sin detalle, póliza descuadrada) llegaba
+    al frontend como un error opaco. Antes del alta de líneas anidadas esos
+    caminos eran inalcanzables; ahora son de uso diario.
+
+    Se convierte **sólo** ``ErrorDeNegocio``, no la ``ValidationError`` de Django
+    a secas: un ``Model.clean()``, un validador de campo o una librería de
+    terceros levantan esa misma clase ante datos corruptos o un bug de
+    configuración, y eso es un 500 legítimo que debe verse en monitoreo, no un
+    400 que el cliente no puede accionar. La subclase es la que marca "esto sí es
+    para el cliente".
 
     Se traduce aquí, en la frontera HTTP de finanzas, y no con un
     ``EXCEPTION_HANDLER`` global, para no cambiar el comportamiento de las demás
     apps. Va en ``handle_exception`` y no en cada ``perform_*`` porque cubre de
-    una sola vez las ~20 llamadas a servicios repartidas entre ``perform_create``,
+    una sola vez las ~26 llamadas a servicios repartidas entre ``perform_create``,
     ``perform_update``, ``perform_destroy`` y las acciones ``@action``, sin que
     una ruta nueva se quede fuera por olvido.
 
@@ -231,7 +237,7 @@ class ErroresDeNegocioComo400Mixin:
     """
 
     def handle_exception(self, exc):
-        if isinstance(exc, DjangoValidationError):
+        if isinstance(exc, ErrorDeNegocio):
             exc = ValidationError(get_error_detail(exc))
         return super().handle_exception(exc)
 

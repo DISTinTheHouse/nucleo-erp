@@ -1,9 +1,9 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.core.exceptions import ValidationError
 from django.utils import timezone
 
+from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import (
     CuentaBancaria,
     CuentaPorPagar,
@@ -23,7 +23,7 @@ class PagoService:
             .filter(pago=pago)
         )
         if not detalles:
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {"pago_detalles": "El pago debe tener al menos un detalle."}
             )
 
@@ -39,21 +39,21 @@ class PagoService:
         for det in detalles:
             cxp = cxps.get(det.cxp_id)
             if cxp is None:
-                raise ValidationError(
+                raise ErrorDeNegocio(
                     {"pago_detalles": f"CxP {det.cxp_id} no encontrada."}
                 )
             if cxp.empresa_id and pago.empresa_id and cxp.empresa_id != pago.empresa_id:
-                raise ValidationError(
+                raise ErrorDeNegocio(
                     {"pago_detalles": "CxP no pertenece a la misma empresa que el pago."}
                 )
             importe = Decimal(str(det.importe_aplicado or 0))
             if importe <= 0:
-                raise ValidationError(
+                raise ErrorDeNegocio(
                     {"pago_detalles": "Cada importe aplicado debe ser mayor a 0."}
                 )
             saldo_actual = Decimal(str(cxp.saldo or 0))
             if importe > saldo_actual + Decimal("0.0001"):
-                raise ValidationError(
+                raise ErrorDeNegocio(
                     {
                         "pago_detalles": (
                             f"Importe {importe} excede saldo {saldo_actual} "
@@ -65,7 +65,7 @@ class PagoService:
 
         total_pagado = Decimal(str(pago.total_pagado or 0))
         if abs(suma_aplicado - total_pagado) > Decimal("0.01"):
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {
                     "total_pagado": (
                         f"La suma de importes aplicados ({suma_aplicado}) "
@@ -89,7 +89,7 @@ class PagoService:
 
         cuenta = CuentaBancaria.objects.select_for_update().get(pk=pago.cuenta_bancaria_id)
         if pago.empresa_id and cuenta.empresa_id and cuenta.empresa_id != pago.empresa_id:
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {"cuenta_bancaria": "Cuenta bancaria no pertenece a la empresa."}
             )
         saldo_anterior = Decimal(str(cuenta.saldo_actual or 0))

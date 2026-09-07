@@ -1,9 +1,9 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.core.exceptions import ValidationError
 from django.utils import timezone
 
+from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import (
     ConciliacionBancaria,
     ConciliacionDetalle,
@@ -25,15 +25,15 @@ class ConciliacionService:
     ):
         cuenta = CuentaBancaria.objects.filter(pk=cuenta_bancaria_id).first()
         if cuenta is None:
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {"cuenta_bancaria": "Cuenta bancaria no encontrada."}
             )
         if cuenta.empresa_id and empresa and cuenta.empresa_id != getattr(empresa, "pk", empresa):
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {"cuenta_bancaria": "Cuenta bancaria no pertenece a la empresa."}
             )
         if fecha_inicio and fecha_final and fecha_inicio > fecha_final:
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {"fecha_inicio": "La fecha inicial no puede ser mayor a la final."}
             )
 
@@ -126,12 +126,12 @@ class ConciliacionService:
         if conciliacion.estatus == ConciliacionBancaria.Estatus.CERRADA:
             return conciliacion
         if conciliacion.estatus == ConciliacionBancaria.Estatus.CANCELADA:
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {"estatus": "No se puede cerrar una conciliación cancelada."}
             )
         diferencia = conciliacion.saldo_estado_cuenta - conciliacion.saldo_libros
         if abs(diferencia) > Decimal("0.01"):
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {
                     "diferencia": (
                         f"La diferencia ({diferencia}) debe ser 0.00 para cerrar "

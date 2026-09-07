@@ -1,9 +1,9 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.core.exceptions import ValidationError
 from django.utils import timezone
 
+from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import (
     Cobro,
     CobroDetalle,
@@ -23,7 +23,7 @@ class CobroService:
             .filter(cobro=cobro)
         )
         if not detalles:
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {"cobro_detalles": "El cobro debe tener al menos un detalle."}
             )
 
@@ -39,21 +39,21 @@ class CobroService:
         for det in detalles:
             cxc = cxcs.get(det.cxc_id)
             if cxc is None:
-                raise ValidationError(
+                raise ErrorDeNegocio(
                     {"cobro_detalles": f"CxC {det.cxc_id} no encontrada."}
                 )
             if det.cxc.empresa_id and cobro.empresa_id and det.cxc.empresa_id != cobro.empresa_id:
-                raise ValidationError(
+                raise ErrorDeNegocio(
                     {"cobro_detalles": "CxC no pertenece a la misma empresa que el cobro."}
                 )
             importe = Decimal(str(det.importe_aplicado or 0))
             if importe <= 0:
-                raise ValidationError(
+                raise ErrorDeNegocio(
                     {"cobro_detalles": "Cada importe aplicado debe ser mayor a 0."}
                 )
             saldo_actual = Decimal(str(cxc.saldo or 0))
             if importe > saldo_actual + Decimal("0.0001"):
-                raise ValidationError(
+                raise ErrorDeNegocio(
                     {
                         "cobro_detalles": (
                             f"Importe {importe} excede saldo {saldo_actual} "
@@ -65,7 +65,7 @@ class CobroService:
 
         total_cobrado = Decimal(str(cobro.total_cobrado or 0))
         if abs(suma_aplicado - total_cobrado) > Decimal("0.01"):
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {
                     "total_cobrado": (
                         f"La suma de importes aplicados ({suma_aplicado}) "
@@ -89,7 +89,7 @@ class CobroService:
 
         cuenta = CuentaBancaria.objects.select_for_update().get(pk=cobro.cuenta_bancaria_id)
         if cobro.empresa_id and cuenta.empresa_id and cuenta.empresa_id != cobro.empresa_id:
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {"cuenta_bancaria": "Cuenta bancaria no pertenece a la empresa."}
             )
         saldo_anterior = Decimal(str(cuenta.saldo_actual or 0))
