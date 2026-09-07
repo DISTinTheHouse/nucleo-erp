@@ -202,7 +202,7 @@ def _validate_related_parent_empresa(related_obj, field_name, parent_empresa):
     parent_empresa_id = getattr(parent_empresa, "pk", parent_empresa)
     if related_empresa_id is not None and related_empresa_id != parent_empresa_id:
         raise ValidationError(
-            {field_name: f"{field_name.replace('_', ' ').capitalize()} no pertenece a la misma empresa del documento."}
+            {field_name: [f"{field_name.replace('_', ' ').capitalize()} no pertenece a la misma empresa del documento."]}
         )
 
 
@@ -1103,13 +1103,13 @@ class FacturaProveedorViewSet(viewsets.ModelViewSet):
             _validate_related_parent_empresa(recepcion_detalle, "recepcion_detalle", empresa)
             _validate_related_parent_empresa(producto, "producto", empresa)
             if oc_detalle is not None and oc_detalle.orden_compra_id != factura_proveedor.oc_id:
-                raise ValidationError({"oc_detalle": "Detalle de OC no corresponde a la orden de compra de la factura."})
+                raise ValidationError({"oc_detalle": ["Detalle de OC no corresponde a la orden de compra de la factura."]})
             if recepcion_detalle is not None and recepcion_detalle.recepcion_id != factura_proveedor.recepcion_id:
-                raise ValidationError({"recepcion_detalle": "Detalle de recepción no corresponde a la recepción de la factura."})
+                raise ValidationError({"recepcion_detalle": ["Detalle de recepción no corresponde a la recepción de la factura."]})
             if producto is not None and oc_detalle is not None and oc_detalle.producto_id != producto.pk:
-                raise ValidationError({"producto": "Producto no coincide con el detalle de orden de compra."})
+                raise ValidationError({"producto": ["Producto no coincide con el detalle de orden de compra."]})
             if producto is not None and recepcion_detalle is not None and recepcion_detalle.producto_id != producto.pk:
-                raise ValidationError({"producto": "Producto no coincide con el detalle de recepción."})
+                raise ValidationError({"producto": ["Producto no coincide con el detalle de recepción."]})
             FacturaProveedorDetalle.objects.create(
                 factura_proveedor=factura_proveedor,
                 **detalle_data,
@@ -1377,7 +1377,7 @@ class CobroViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
                 cxc_emp = getattr(cxc, "empresa_id", None) or getattr(getattr(cxc, "factura", None), "empresa_id", None)
                 if cxc_emp and cxc_emp != cobro.empresa_id:
                     raise ValidationError(
-                        {"cobro_detalles": f"La CxC {cxc.pk} no pertenece a la misma empresa que el cobro."}
+                        {"cobro_detalles": [f"La CxC {cxc.pk} no pertenece a la misma empresa que el cobro."]}
                     )
             CobroDetalle.objects.create(cobro=cobro, **d)
         if cobro.estatus == Cobro.Estatus.APLICADO:
@@ -1475,7 +1475,7 @@ class PagoViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
                 cxp_emp = getattr(cxp, "empresa_id", None)
                 if cxp_emp and cxp_emp != pago.empresa_id:
                     raise ValidationError(
-                        {"pago_detalles": f"La CxP {cxp.pk} no pertenece a la misma empresa que el pago."}
+                        {"pago_detalles": [f"La CxP {cxp.pk} no pertenece a la misma empresa que el pago."]}
                     )
             PagoDetalle.objects.create(pago=pago, **d)
         if pago.estatus == Pago.Estatus.APLICADO:
