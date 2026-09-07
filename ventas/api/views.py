@@ -2881,11 +2881,20 @@ class MesaControlViewSet(CotizacionViewSet):
         # ``_require_mesa_control`` (``seguridad.role_identity``), no con
         # ``is_admin_empresa``: un usuario operativo de mesa de control podía
         # ejecutar las acciones POST pero no veía el listado sobre el que actúa.
-        # Sin empresa no se evalúa el rol: se falla cerrado.
-        es_mesa_control = bool(empresa) and usuario_tiene_clave_departamento(
-            user,
-            CLAVE_DEPARTAMENTO_MESA_CONTROL,
-            empresa=empresa,
+        # Sin empresa no se evalúa el rol: se falla cerrado. Las dos consultas
+        # de ``usuario_tiene_clave_departamento`` van al final del ``and``: para
+        # un superusuario o un admin de empresa su resultado no se usa —ambos
+        # entran por su propia rama y salen por ``cotizaciones_visibles``—, así
+        # que ni siquiera se ejecutan.
+        es_mesa_control = (
+            not es_superuser
+            and not es_admin_empresa
+            and bool(empresa)
+            and usuario_tiene_clave_departamento(
+                user,
+                CLAVE_DEPARTAMENTO_MESA_CONTROL,
+                empresa=empresa,
+            )
         )
         if not es_superuser and not es_admin_empresa and not es_mesa_control:
             return Cotizacion.objects.none()
