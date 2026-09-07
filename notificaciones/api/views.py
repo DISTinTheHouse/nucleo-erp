@@ -11,7 +11,6 @@ from rest_framework.request import Request
 
 from ..models import Notificacion
 from ..services.notificacion_service import (
-    _aplicar_scope_empresa,
     notificaciones_para_usuario,
     marcar_leida as marcar_leida_svc,
     marcar_todas_leidas as marcar_todas_leidas_svc,
@@ -60,7 +59,11 @@ class NotificacionViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = Notificacion.objects.all()
-        qs = _aplicar_scope_empresa(qs, user, lookup="empresa")
+        # El único alcance es el destinatario. Un filtro extra por
+        # ``Notificacion.empresa`` no añade aislamiento —``usuario`` ya es más
+        # estricto— y sí quitaba filas propias: las de un usuario multiempresa
+        # creadas para otra de sus empresas, y TODAS las de un superusuario sin
+        # ``empresa`` asignada. Mismo criterio que ``marcar_todas_leidas()``.
         qs = notificaciones_para_usuario(qs, user)
 
         leido_param = self.request.query_params.get("leido")
@@ -126,7 +129,6 @@ class NotificacionViewSet(viewsets.ModelViewSet):
             )
 
         qs_base = Notificacion.objects.filter(usuario=user, leido=False)
-        qs_base = _aplicar_scope_empresa(qs_base, user, lookup="empresa")
 
         def generar_eventos():
             ultimo_count = qs_base.count()

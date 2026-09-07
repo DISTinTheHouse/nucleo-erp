@@ -16,25 +16,15 @@ from ..models import Notificacion
 logger = logging.getLogger(__name__)
 
 
-def _puede_ver_todo(user) -> bool:
-    return bool(
-        getattr(user, "is_superuser", False)
-        or getattr(user, "is_admin_empresa", False)
-    )
-
-
-def _aplicar_scope_empresa(qs, user, lookup="empresa"):
-    if _puede_ver_todo(user):
-        return qs
-    empresa = getattr(user, "empresa", None)
-    if empresa is None:
-        return qs.none()
-    return qs.filter(**{lookup: empresa})
-
-
 def notificaciones_para_usuario(qs, user):
-    if _puede_ver_todo(user):
-        return qs
+    """Sólo las notificaciones de las que ``user`` es el destinatario.
+
+    ``Notificacion.usuario`` es NOT NULL y hay una fila por destinatario: esa FK
+    ES el aislamiento, y no admite rama de admin/superuser —ser
+    ``is_admin_empresa`` no te vuelve destinatario de la notificación de otro—
+    ni necesita un filtro por empresa encima, que sólo podía restar filas
+    propias. Es el mismo criterio que ``marcar_todas_leidas()`` y el stream SSE.
+    """
     return qs.filter(usuario=user)
 
 
@@ -86,7 +76,9 @@ def crear_notificacion_por_rol(
 def marcar_leida(notificacion: Notificacion, user) -> Notificacion:
     from rest_framework.exceptions import PermissionDenied
 
-    if not _puede_ver_todo(user) and notificacion.usuario_id != user.pk:
+    # Sin excepción para admin/superuser: marcar como leída la notificación de
+    # otro se la desaparecía del pendiente a su verdadero destinatario.
+    if notificacion.usuario_id != user.pk:
         raise PermissionDenied("No tienes acceso a esta notificación.")
     if not notificacion.leido:
         notificacion.leido = True
