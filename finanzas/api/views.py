@@ -242,6 +242,25 @@ class ErroresDeNegocioComo400Mixin:
         return super().handle_exception(exc)
 
 
+# Los tres viewsets base de finanzas. Existen para que la traducción de errores
+# de negocio sea por construcción y no por memoria: antes el mixin se aplicaba
+# clase por clase y siete viewsets se habían quedado fuera, de modo que volvían a
+# responder 500 en cuanto su ``perform_*`` llamara a un servicio. Cada base
+# conserva la clase de DRF que ya usaba el viewset, así que ninguna superficie
+# HTTP cambia: ``AlertaMoraViewSet`` sigue siendo de sólo lectura y
+# ``DashboardFinancieroViewSet`` sigue sin rutas de detalle.
+class FinanzasBaseViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
+    pass
+
+
+class FinanzasBaseReadOnlyViewSet(ErroresDeNegocioComo400Mixin, viewsets.ReadOnlyModelViewSet):
+    pass
+
+
+class FinanzasBaseSimpleViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
+    pass
+
+
 def _aplicar_filtros_fecha(qs, params, fecha_campo="fecha"):
     fi = params.get("fecha_inicio") or params.get("fecha_desde")
     ff = params.get("fecha_fin") or params.get("fecha_hasta")
@@ -263,7 +282,7 @@ def _aplicar_ordering(qs, params, default):
     return qs.order_by(*default)
 
 
-class ClienteViewSetContabilidad(viewsets.ModelViewSet):
+class ClienteViewSetContabilidad(FinanzasBaseViewSet):
     queryset = Cliente.objects.filter(activo=True)
     serializer_class = ClienteSerializer
     http_method_names = ['get']
@@ -285,7 +304,7 @@ class ClienteViewSetContabilidad(viewsets.ModelViewSet):
 ClienteViewSet = ClienteViewSetContabilidad
 
 
-class CuentaPorCobrarViewSet(viewsets.ModelViewSet):
+class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
     serializer_class = CuentaPorCobrarSerializer
     http_method_names = ['get', 'post', 'put', 'patch']
 
@@ -368,7 +387,7 @@ class CuentaPorCobrarViewSet(viewsets.ModelViewSet):
             serializer.save(empresa=emp)
 
 
-class FacturaViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
+class FacturaViewSet(FinanzasBaseViewSet):
     serializer_class = FacturaSerializer
     http_method_names = ['delete', 'get', 'post', 'put', 'patch']
 
@@ -835,7 +854,7 @@ class FacturaViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
         return factura
 
 
-class CuentaContableViewSet(viewsets.ModelViewSet):
+class CuentaContableViewSet(FinanzasBaseViewSet):
     queryset = CuentaContable.objects.all()
     serializer_class = CuentaContableSerializer
 
@@ -900,7 +919,7 @@ class CuentaContableViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class CentroCostoViewSet(viewsets.ModelViewSet):
+class CentroCostoViewSet(FinanzasBaseViewSet):
     queryset = CentroCosto.objects.all()
     serializer_class = CentroCostoSerializer
 
@@ -948,7 +967,7 @@ class CentroCostoViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class PolizaViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
+class PolizaViewSet(FinanzasBaseViewSet):
     queryset = Poliza.objects.all()
     serializer_class = PolizaSerializer
 
@@ -1052,7 +1071,7 @@ class PolizaViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
         })
 
 
-class FacturaProveedorViewSet(viewsets.ModelViewSet):
+class FacturaProveedorViewSet(FinanzasBaseViewSet):
     queryset = FacturaProveedor.objects.all()
     serializer_class = FacturaProveedorSerializer
 
@@ -1138,7 +1157,7 @@ class FacturaProveedorViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class BancoViewSet(viewsets.ModelViewSet):
+class BancoViewSet(FinanzasBaseViewSet):
     queryset = Banco.objects.all()
     serializer_class = BancoSerializer
 
@@ -1189,7 +1208,7 @@ class BancoViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class CuentaBancariaViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
+class CuentaBancariaViewSet(FinanzasBaseViewSet):
     queryset = CuentaBancaria.objects.all()
     serializer_class = CuentaBancariaSerializer
 
@@ -1252,7 +1271,7 @@ class CuentaBancariaViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet)
         return Response(MovimientoBancarioService.resumen_cuenta(cuenta))
 
 
-class CuentaPorPagarViewSet(viewsets.ModelViewSet):
+class CuentaPorPagarViewSet(FinanzasBaseViewSet):
     queryset = CuentaPorPagar.objects.all()
     serializer_class = CuentaPorPagarSerializer
 
@@ -1324,7 +1343,7 @@ class CuentaPorPagarViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class CobroViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
+class CobroViewSet(FinanzasBaseViewSet):
     queryset = Cobro.objects.all()
     serializer_class = CobroSerializer
 
@@ -1425,7 +1444,7 @@ class CobroViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
         return Response(CobroSerializer(cobro).data)
 
 
-class PagoViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
+class PagoViewSet(FinanzasBaseViewSet):
     queryset = Pago.objects.all()
     serializer_class = PagoSerializer
 
@@ -1523,7 +1542,7 @@ class PagoViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
         return Response(PagoSerializer(pago).data)
 
 
-class MovimientoBancarioViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
+class MovimientoBancarioViewSet(FinanzasBaseViewSet):
     queryset = MovimientoBancario.objects.all()
     serializer_class = MovimientoBancarioSerializer
 
@@ -1617,7 +1636,7 @@ class MovimientoBancarioViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelView
         return Response(MovimientoBancarioSerializer(mb).data)
 
 
-class ConciliacionBancariaViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
+class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
     queryset = ConciliacionBancaria.objects.all()
     serializer_class = ConciliacionBancariaSerializer
 
@@ -1742,7 +1761,7 @@ class ConciliacionBancariaViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelVi
         return Response(ConciliacionBancariaSerializer(conciliacion).data)
 
 
-class NotaCreditoViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
+class NotaCreditoViewSet(FinanzasBaseViewSet):
     queryset = NotaCredito.objects.all()
     serializer_class = NotaCreditoSerializer
 
@@ -1840,7 +1859,7 @@ class NotaCreditoViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
         return Response(NotaCreditoSerializer(nota).data)
 
 
-class AlertaMoraViewSet(ErroresDeNegocioComo400Mixin, viewsets.ReadOnlyModelViewSet):
+class AlertaMoraViewSet(FinanzasBaseReadOnlyViewSet):
     queryset = AlertaMora.objects.all()
     serializer_class = AlertaMoraSerializer
 
@@ -1893,7 +1912,7 @@ class AlertaMoraViewSet(ErroresDeNegocioComo400Mixin, viewsets.ReadOnlyModelView
         return Response({"alertas_generadas": total})
 
 
-class DashboardFinancieroViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
+class DashboardFinancieroViewSet(FinanzasBaseSimpleViewSet):
     http_method_names = ["get"]
 
     def list(self, request):
