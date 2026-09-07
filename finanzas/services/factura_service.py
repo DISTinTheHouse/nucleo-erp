@@ -1,6 +1,6 @@
 from decimal import Decimal
 from django.db import transaction
-from django.core.exceptions import ValidationError
+from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import Factura, FacturaDetalle
 from finanzas.utils.folios import generate_factura_folio
 
@@ -15,7 +15,7 @@ class FacturaService:
         sucursal_id = sucursal
 
         pedido =  validated_data.pop('pedido')
-        if not pedido: raise ValidationError({'pedido': 'El pedido no existe'})
+        if not pedido: raise ErrorDeNegocio({'pedido': 'El pedido no existe'})
 
         folio_factura = generate_factura_folio(empresa_id, sucursal_id)
         factura_rows = validated_data.pop('factura_detalles', [])

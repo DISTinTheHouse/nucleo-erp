@@ -1,8 +1,8 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.core.exceptions import ValidationError
 
+from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import (
     CuentaPorCobrar,
     NotaCredito,
@@ -27,7 +27,7 @@ class NotaCreditoService:
             return
         saldo = Decimal(str(cxc.saldo or 0))
         if total_nc > saldo + Decimal("0.0001"):
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {
                     "total": (
                         f"El total de la nota ({total_nc}) no puede superar "

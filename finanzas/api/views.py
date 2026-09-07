@@ -6,8 +6,10 @@ from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.fields import get_error_detail
 from rest_framework.response import Response
 
+from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import (
     AlertaMora,
     Banco,
@@ -200,8 +202,63 @@ def _validate_related_parent_empresa(related_obj, field_name, parent_empresa):
     parent_empresa_id = getattr(parent_empresa, "pk", parent_empresa)
     if related_empresa_id is not None and related_empresa_id != parent_empresa_id:
         raise ValidationError(
-            {field_name: f"{field_name.replace('_', ' ').capitalize()} no pertenece a la misma empresa del documento."}
+            {field_name: [f"{field_name.replace('_', ' ').capitalize()} no pertenece a la misma empresa del documento."]}
         )
+
+
+class ErroresDeNegocioComo400Mixin:
+    """Traduce el ``ErrorDeNegocio`` que lanzan los servicios a la 400 de DRF.
+
+    Los servicios de ``finanzas`` no pueden levantar la ``ValidationError`` de
+    DRF —deben seguir siendo agnósticos del framework—, así que DRF no las
+    conocía y las dejaba escapar como un 500. Cada regla de negocio violada
+    (importe que excede el saldo, pago sin detalle, póliza descuadrada) llegaba
+    al frontend como un error opaco. Antes del alta de líneas anidadas esos
+    caminos eran inalcanzables; ahora son de uso diario.
+
+    Se convierte **sólo** ``ErrorDeNegocio``, no la ``ValidationError`` de Django
+    a secas: un ``Model.clean()``, un validador de campo o una librería de
+    terceros levantan esa misma clase ante datos corruptos o un bug de
+    configuración, y eso es un 500 legítimo que debe verse en monitoreo, no un
+    400 que el cliente no puede accionar. La subclase es la que marca "esto sí es
+    para el cliente".
+
+    Se traduce aquí, en la frontera HTTP de finanzas, y no con un
+    ``EXCEPTION_HANDLER`` global, para no cambiar el comportamiento de las demás
+    apps. Va en ``handle_exception`` y no en cada ``perform_*`` porque cubre de
+    una sola vez las ~26 llamadas a servicios repartidas entre ``perform_create``,
+    ``perform_update``, ``perform_destroy`` y las acciones ``@action``, sin que
+    una ruta nueva se quede fuera por olvido.
+
+    Se conserva la forma del mensaje: los servicios lanzan diccionarios como
+    ``{"cobro_detalles": [...]}`` y así llegan al cliente, que puede mapear el
+    error a su campo. La conversión la hace ``get_error_detail`` de DRF, que
+    además preserva el ``code`` de cada error e interpola sus ``params``.
+    """
+
+    def handle_exception(self, exc):
+        if isinstance(exc, ErrorDeNegocio):
+            exc = ValidationError(get_error_detail(exc))
+        return super().handle_exception(exc)
+
+
+# Los tres viewsets base de finanzas. Existen para que la traducción de errores
+# de negocio sea por construcción y no por memoria: antes el mixin se aplicaba
+# clase por clase y siete viewsets se habían quedado fuera, de modo que volvían a
+# responder 500 en cuanto su ``perform_*`` llamara a un servicio. Cada base
+# conserva la clase de DRF que ya usaba el viewset, así que ninguna superficie
+# HTTP cambia: ``AlertaMoraViewSet`` sigue siendo de sólo lectura y
+# ``DashboardFinancieroViewSet`` sigue sin rutas de detalle.
+class FinanzasBaseViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
+    pass
+
+
+class FinanzasBaseReadOnlyViewSet(ErroresDeNegocioComo400Mixin, viewsets.ReadOnlyModelViewSet):
+    pass
+
+
+class FinanzasBaseSimpleViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
+    pass
 
 
 def _aplicar_filtros_fecha(qs, params, fecha_campo="fecha"):
@@ -225,7 +282,7 @@ def _aplicar_ordering(qs, params, default):
     return qs.order_by(*default)
 
 
-class ClienteViewSetContabilidad(viewsets.ModelViewSet):
+class ClienteViewSetContabilidad(FinanzasBaseViewSet):
     queryset = Cliente.objects.filter(activo=True)
     serializer_class = ClienteSerializer
     http_method_names = ['get']
@@ -247,7 +304,7 @@ class ClienteViewSetContabilidad(viewsets.ModelViewSet):
 ClienteViewSet = ClienteViewSetContabilidad
 
 
-class CuentaPorCobrarViewSet(viewsets.ModelViewSet):
+class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
     serializer_class = CuentaPorCobrarSerializer
     http_method_names = ['get', 'post', 'put', 'patch']
 
@@ -330,7 +387,7 @@ class CuentaPorCobrarViewSet(viewsets.ModelViewSet):
             serializer.save(empresa=emp)
 
 
-class FacturaViewSet(viewsets.ModelViewSet):
+class FacturaViewSet(FinanzasBaseViewSet):
     serializer_class = FacturaSerializer
     http_method_names = ['delete', 'get', 'post', 'put', 'patch']
 
@@ -797,7 +854,7 @@ class FacturaViewSet(viewsets.ModelViewSet):
         return factura
 
 
-class CuentaContableViewSet(viewsets.ModelViewSet):
+class CuentaContableViewSet(FinanzasBaseViewSet):
     queryset = CuentaContable.objects.all()
     serializer_class = CuentaContableSerializer
 
@@ -862,7 +919,7 @@ class CuentaContableViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class CentroCostoViewSet(viewsets.ModelViewSet):
+class CentroCostoViewSet(FinanzasBaseViewSet):
     queryset = CentroCosto.objects.all()
     serializer_class = CentroCostoSerializer
 
@@ -910,7 +967,7 @@ class CentroCostoViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class PolizaViewSet(viewsets.ModelViewSet):
+class PolizaViewSet(FinanzasBaseViewSet):
     queryset = Poliza.objects.all()
     serializer_class = PolizaSerializer
 
@@ -943,6 +1000,11 @@ class PolizaViewSet(viewsets.ModelViewSet):
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha")
         return _aplicar_ordering(qs, qp, ["-fecha", "-folio_consecutivo", "-id"])
 
+    # El encabezado y sus renglones entran juntos: las líneas se crean DESPUÉS
+    # del ``save()``, así que sin la transacción un renglón rechazado dejaba la
+    # póliza ya confirmada y huérfana, con el cliente recibiendo un 400. Mismo
+    # decorador que Cobro/Pago/MovimientoBancario/Conciliación/NotaCrédito.
+    @transaction.atomic
     def perform_create(self, serializer):
         user = self.request.user
         empresa = _resolve_empresa(user, serializer.validated_data, required=True)
@@ -1009,7 +1071,7 @@ class PolizaViewSet(viewsets.ModelViewSet):
         })
 
 
-class FacturaProveedorViewSet(viewsets.ModelViewSet):
+class FacturaProveedorViewSet(FinanzasBaseViewSet):
     queryset = FacturaProveedor.objects.all()
     serializer_class = FacturaProveedorSerializer
 
@@ -1045,6 +1107,10 @@ class FacturaProveedorViewSet(viewsets.ModelViewSet):
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha_emision")
         return _aplicar_ordering(qs, qp, ["-fecha_emision", "-id"])
 
+    # Mismo motivo que en ``PolizaViewSet.perform_create``: los renglones se
+    # crean tras el ``save()`` del encabezado, y un renglón rechazado dejaba la
+    # factura de proveedor huérfana.
+    @transaction.atomic
     def perform_create(self, serializer):
         user = self.request.user
         empresa = _resolve_empresa(user, serializer.validated_data, required=True)
@@ -1062,13 +1128,13 @@ class FacturaProveedorViewSet(viewsets.ModelViewSet):
             _validate_related_parent_empresa(recepcion_detalle, "recepcion_detalle", empresa)
             _validate_related_parent_empresa(producto, "producto", empresa)
             if oc_detalle is not None and oc_detalle.orden_compra_id != factura_proveedor.oc_id:
-                raise ValidationError({"oc_detalle": "Detalle de OC no corresponde a la orden de compra de la factura."})
+                raise ValidationError({"oc_detalle": ["Detalle de OC no corresponde a la orden de compra de la factura."]})
             if recepcion_detalle is not None and recepcion_detalle.recepcion_id != factura_proveedor.recepcion_id:
-                raise ValidationError({"recepcion_detalle": "Detalle de recepción no corresponde a la recepción de la factura."})
+                raise ValidationError({"recepcion_detalle": ["Detalle de recepción no corresponde a la recepción de la factura."]})
             if producto is not None and oc_detalle is not None and oc_detalle.producto_id != producto.pk:
-                raise ValidationError({"producto": "Producto no coincide con el detalle de orden de compra."})
+                raise ValidationError({"producto": ["Producto no coincide con el detalle de orden de compra."]})
             if producto is not None and recepcion_detalle is not None and recepcion_detalle.producto_id != producto.pk:
-                raise ValidationError({"producto": "Producto no coincide con el detalle de recepción."})
+                raise ValidationError({"producto": ["Producto no coincide con el detalle de recepción."]})
             FacturaProveedorDetalle.objects.create(
                 factura_proveedor=factura_proveedor,
                 **detalle_data,
@@ -1091,7 +1157,7 @@ class FacturaProveedorViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class BancoViewSet(viewsets.ModelViewSet):
+class BancoViewSet(FinanzasBaseViewSet):
     queryset = Banco.objects.all()
     serializer_class = BancoSerializer
 
@@ -1142,7 +1208,7 @@ class BancoViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class CuentaBancariaViewSet(viewsets.ModelViewSet):
+class CuentaBancariaViewSet(FinanzasBaseViewSet):
     queryset = CuentaBancaria.objects.all()
     serializer_class = CuentaBancariaSerializer
 
@@ -1205,7 +1271,7 @@ class CuentaBancariaViewSet(viewsets.ModelViewSet):
         return Response(MovimientoBancarioService.resumen_cuenta(cuenta))
 
 
-class CuentaPorPagarViewSet(viewsets.ModelViewSet):
+class CuentaPorPagarViewSet(FinanzasBaseViewSet):
     queryset = CuentaPorPagar.objects.all()
     serializer_class = CuentaPorPagarSerializer
 
@@ -1277,7 +1343,7 @@ class CuentaPorPagarViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class CobroViewSet(viewsets.ModelViewSet):
+class CobroViewSet(FinanzasBaseViewSet):
     queryset = Cobro.objects.all()
     serializer_class = CobroSerializer
 
@@ -1336,7 +1402,7 @@ class CobroViewSet(viewsets.ModelViewSet):
                 cxc_emp = getattr(cxc, "empresa_id", None) or getattr(getattr(cxc, "factura", None), "empresa_id", None)
                 if cxc_emp and cxc_emp != cobro.empresa_id:
                     raise ValidationError(
-                        {"cobro_detalles": f"La CxC {cxc.pk} no pertenece a la misma empresa que el cobro."}
+                        {"cobro_detalles": [f"La CxC {cxc.pk} no pertenece a la misma empresa que el cobro."]}
                     )
             CobroDetalle.objects.create(cobro=cobro, **d)
         if cobro.estatus == Cobro.Estatus.APLICADO:
@@ -1378,7 +1444,7 @@ class CobroViewSet(viewsets.ModelViewSet):
         return Response(CobroSerializer(cobro).data)
 
 
-class PagoViewSet(viewsets.ModelViewSet):
+class PagoViewSet(FinanzasBaseViewSet):
     queryset = Pago.objects.all()
     serializer_class = PagoSerializer
 
@@ -1434,7 +1500,7 @@ class PagoViewSet(viewsets.ModelViewSet):
                 cxp_emp = getattr(cxp, "empresa_id", None)
                 if cxp_emp and cxp_emp != pago.empresa_id:
                     raise ValidationError(
-                        {"pago_detalles": f"La CxP {cxp.pk} no pertenece a la misma empresa que el pago."}
+                        {"pago_detalles": [f"La CxP {cxp.pk} no pertenece a la misma empresa que el pago."]}
                     )
             PagoDetalle.objects.create(pago=pago, **d)
         if pago.estatus == Pago.Estatus.APLICADO:
@@ -1476,7 +1542,7 @@ class PagoViewSet(viewsets.ModelViewSet):
         return Response(PagoSerializer(pago).data)
 
 
-class MovimientoBancarioViewSet(viewsets.ModelViewSet):
+class MovimientoBancarioViewSet(FinanzasBaseViewSet):
     queryset = MovimientoBancario.objects.all()
     serializer_class = MovimientoBancarioSerializer
 
@@ -1570,7 +1636,7 @@ class MovimientoBancarioViewSet(viewsets.ModelViewSet):
         return Response(MovimientoBancarioSerializer(mb).data)
 
 
-class ConciliacionBancariaViewSet(viewsets.ModelViewSet):
+class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
     queryset = ConciliacionBancaria.objects.all()
     serializer_class = ConciliacionBancariaSerializer
 
@@ -1695,7 +1761,7 @@ class ConciliacionBancariaViewSet(viewsets.ModelViewSet):
         return Response(ConciliacionBancariaSerializer(conciliacion).data)
 
 
-class NotaCreditoViewSet(viewsets.ModelViewSet):
+class NotaCreditoViewSet(FinanzasBaseViewSet):
     queryset = NotaCredito.objects.all()
     serializer_class = NotaCreditoSerializer
 
@@ -1793,7 +1859,7 @@ class NotaCreditoViewSet(viewsets.ModelViewSet):
         return Response(NotaCreditoSerializer(nota).data)
 
 
-class AlertaMoraViewSet(viewsets.ReadOnlyModelViewSet):
+class AlertaMoraViewSet(FinanzasBaseReadOnlyViewSet):
     queryset = AlertaMora.objects.all()
     serializer_class = AlertaMoraSerializer
 
@@ -1846,7 +1912,7 @@ class AlertaMoraViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({"alertas_generadas": total})
 
 
-class DashboardFinancieroViewSet(viewsets.ViewSet):
+class DashboardFinancieroViewSet(FinanzasBaseSimpleViewSet):
     http_method_names = ["get"]
 
     def list(self, request):

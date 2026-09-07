@@ -511,7 +511,8 @@ class CobroDetalleSerializer(serializers.ModelSerializer):
         }
 
 
-class CobroSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+    nested_write_on_create_only = ("cobro_detalles",)
     cobro_detalles = CobroDetalleSerializer(many=True, required=False)
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)
@@ -546,7 +547,8 @@ class PagoDetalleSerializer(serializers.ModelSerializer):
         }
 
 
-class PagoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+    nested_write_on_create_only = ("pago_detalles",)
     pago_detalles = PagoDetalleSerializer(many=True, required=False)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)

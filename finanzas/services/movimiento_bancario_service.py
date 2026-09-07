@@ -1,9 +1,9 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.core.exceptions import ValidationError
 from django.utils import timezone
 
+from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import CuentaBancaria, MovimientoBancario
 
 
@@ -11,7 +11,7 @@ class MovimientoBancarioService:
     @staticmethod
     def _validar_empresa(cuenta: CuentaBancaria, empresa_id=None):
         if empresa_id and cuenta.empresa_id and cuenta.empresa_id != empresa_id:
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {"cuenta_bancaria": "Cuenta bancaria no pertenece a la empresa."}
             )
 
@@ -27,7 +27,7 @@ class MovimientoBancarioService:
 
         importe = Decimal(str(movimiento.importe or 0))
         if importe <= 0:
-            raise ValidationError({"importe": "El importe debe ser mayor a 0."})
+            raise ErrorDeNegocio({"importe": "El importe debe ser mayor a 0."})
 
         if movimiento.tipo_movimiento == MovimientoBancario.TipoMovimiento.CARGO:
             nuevo_saldo = (Decimal(str(cuenta.saldo_actual or 0)) - importe).quantize(
@@ -47,7 +47,7 @@ class MovimientoBancarioService:
         if movimiento.estatus == MovimientoBancario.Estatus.CANCELADO:
             return
         if movimiento.cobro_id or movimiento.pago_id:
-            raise ValidationError(
+            raise ErrorDeNegocio(
                 {
                     "movimiento_bancario": (
                         "Los movimientos generados por cobros o pagos se "
