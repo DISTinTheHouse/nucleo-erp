@@ -22,8 +22,10 @@ from finanzas.models import (
     Factura,
     FacturaDetalle,
     FacturaProveedor,
+    FacturaProveedorDetalle,
     MovimientoBancario,
     NotaCredito,
+    NotaCreditoDetalle,
     Pago,
     PagoDetalle,
     Poliza,
@@ -161,6 +163,44 @@ def _validate_fk_empresa(user, related_obj, field_name, user_emp):
     if obj_emp != user_emp.pk:
         raise ValidationError(
             {field_name: f"{field_name.replace('_', ' ').capitalize()} no pertenece a la empresa."}
+        )
+
+
+def _attr_chain(obj, *attrs):
+    current = obj
+    for attr in attrs:
+        current = getattr(current, attr, None)
+        if current is None:
+            return None
+    return current
+
+
+def _empresa_id_relacionada(obj):
+    """Empresa de un objeto, directa o vía FK padre (varios detalles no la cargan directo)."""
+    for chain in (
+        ("empresa_id",),
+        ("factura", "empresa_id"),
+        ("factura_proveedor", "empresa_id"),
+        ("cuenta_bancaria", "empresa_id"),
+        ("orden_compra", "empresa_id"),
+        ("recepcion", "empresa_id"),
+        ("poliza", "empresa_id"),
+    ):
+        empresa_id = _attr_chain(obj, *chain)
+        if empresa_id is not None:
+            return empresa_id
+    return None
+
+
+def _validate_related_parent_empresa(related_obj, field_name, parent_empresa):
+    """Línea hija debe pertenecer a la empresa del documento padre. Corre siempre, incluso superuser."""
+    if related_obj is None or parent_empresa is None:
+        return
+    related_empresa_id = _empresa_id_relacionada(related_obj)
+    parent_empresa_id = getattr(parent_empresa, "pk", parent_empresa)
+    if related_empresa_id is not None and related_empresa_id != parent_empresa_id:
+        raise ValidationError(
+            {field_name: f"{field_name.replace('_', ' ').capitalize()} no pertenece a la misma empresa del documento."}
         )
 
 
@@ -910,10 +950,23 @@ class PolizaViewSet(viewsets.ModelViewSet):
         _validate_fk_empresa(user, suc, "sucursal", empresa)
         cc = serializer.validated_data.get("centro_costo")
         _validate_fk_empresa(user, cc, "centro_costo", empresa)
-        serializer.save(
+        detalles_data = serializer.validated_data.pop("poliza_detalles", [])
+        poliza = serializer.save(
             empresa=empresa,
             usuario_creacion=serializer.validated_data.get("usuario_creacion") or user,
         )
+        for detalle_data in detalles_data:
+            for field_name in (
+                "cuenta_contable",
+                "centro_costo",
+                "factura",
+                "factura_proveedor",
+                "pago",
+                "cobro",
+                "movimiento_bancario",
+            ):
+                _validate_related_parent_empresa(detalle_data.get(field_name), field_name, empresa)
+            PolizaDetalle.objects.create(poliza=poliza, **detalle_data)
 
     def perform_update(self, serializer):
         user = self.request.user
@@ -999,7 +1052,27 @@ class FacturaProveedorViewSet(viewsets.ModelViewSet):
         _validate_fk_empresa(user, oc, "oc", empresa)
         recep = serializer.validated_data.get("recepcion")
         _validate_fk_empresa(user, recep, "recepcion", empresa)
-        serializer.save(empresa=empresa)
+        detalles_data = serializer.validated_data.pop("factura_proveedor_detalles", [])
+        factura_proveedor = serializer.save(empresa=empresa)
+        for detalle_data in detalles_data:
+            oc_detalle = detalle_data.get("oc_detalle")
+            recepcion_detalle = detalle_data.get("recepcion_detalle")
+            producto = detalle_data.get("producto")
+            _validate_related_parent_empresa(oc_detalle, "oc_detalle", empresa)
+            _validate_related_parent_empresa(recepcion_detalle, "recepcion_detalle", empresa)
+            _validate_related_parent_empresa(producto, "producto", empresa)
+            if oc_detalle is not None and oc_detalle.orden_compra_id != factura_proveedor.oc_id:
+                raise ValidationError({"oc_detalle": "Detalle de OC no corresponde a la orden de compra de la factura."})
+            if recepcion_detalle is not None and recepcion_detalle.recepcion_id != factura_proveedor.recepcion_id:
+                raise ValidationError({"recepcion_detalle": "Detalle de recepción no corresponde a la recepción de la factura."})
+            if producto is not None and oc_detalle is not None and oc_detalle.producto_id != producto.pk:
+                raise ValidationError({"producto": "Producto no coincide con el detalle de orden de compra."})
+            if producto is not None and recepcion_detalle is not None and recepcion_detalle.producto_id != producto.pk:
+                raise ValidationError({"producto": "Producto no coincide con el detalle de recepción."})
+            FacturaProveedorDetalle.objects.create(
+                factura_proveedor=factura_proveedor,
+                **detalle_data,
+            )
 
     def perform_update(self, serializer):
         user = self.request.user
@@ -1672,7 +1745,13 @@ class NotaCreditoViewSet(viewsets.ModelViewSet):
                 cli_emp = getattr(cliente, "empresa_id", None)
                 if cli_emp and cli_emp != user_emp.pk:
                     raise ValidationError({"cliente": "Cliente no pertenece a la empresa."})
+        detalles_data = serializer.validated_data.pop("nota_credito_detalles", [])
         nota = serializer.save()
+        for detalle_data in detalles_data:
+            factura_detalle = detalle_data.get("factura_detalle")
+            if factura_detalle is not None and factura_detalle.factura_id != nota.factura_id:
+                raise ValidationError({"factura_detalle": "Detalle de factura no corresponde a la factura de la nota."})
+            NotaCreditoDetalle.objects.create(nota_credito=nota, **detalle_data)
         if nota.estatus == NotaCredito.Estatus.EMITIDA:
             NotaCreditoService.aplicar_nota_credito(nota)
 

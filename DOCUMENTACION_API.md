@@ -1836,6 +1836,7 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 5. **Pagos** usan `pago_detalles[].cxp` e `importe_aplicado`.
 6. **Conciliación preparar** solo recibe `cuenta_bancaria`, `fecha_inicio`, `fecha_final`, `saldo_estado_cuenta`.
 7. **Movimientos bancarios generados por cobros/pagos no se editan**. Se cancelan desde el origen o con su acción de cancelar.
+8. **Líneas hijas solo en `POST`.** `poliza_detalles`, `cobro_detalles`, `pago_detalles`, `nota_credito_detalles`, `factura_proveedor_detalles`: van anidadas al crear el padre. En `PATCH`/`PUT` se ignoran (sin edición de renglones todavía). Para corregir, cancela y crea de nuevo.
 
 ### Mapa de trazabilidad por id
 
@@ -1882,17 +1883,17 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 | Facturas clientes        | `GET/POST /api/v1/finanzas/facturas/`                 | `POST /facturas/onboarding/`, `POST /facturas/desde-pedido/`, `POST /facturas/registrar-pendiente-cobro/` | `id`, `pedido`, `cliente`                                   |
 | Cuentas por cobrar       | `GET/POST /api/v1/finanzas/cuentas-por-cobrar/`       | detalle `GET /{id}/` trae factura y pólizas relacionadas                                                  | `id`, `factura_id`, `cliente`                               |
 | Cobros                   | `GET/POST /api/v1/finanzas/cobros/`                   | `POST /cobros/{id}/cancelar/`                                                                             | `id`, `cliente`, `cuenta_bancaria`, `cobro_detalles[].cxc`  |
-| Facturas proveedor       | `GET/POST /api/v1/finanzas/facturas-proveedor/`       | CRUD estándar                                                                                             | `id`, `oc`, `recepcion`, `proveedor`                        |
+| Facturas proveedor       | `GET/POST /api/v1/finanzas/facturas-proveedor/`       | CRUD estándar                                                                                             | `id`, `oc`, `recepcion`, `proveedor`, `factura_proveedor_detalles[].oc_detalle` |
 | Cuentas por pagar        | `GET/POST /api/v1/finanzas/cuentas-por-pagar/`        | CRUD estándar                                                                                             | `id`, `factura_proveedor`, `proveedor`                      |
 | Pagos                    | `GET/POST /api/v1/finanzas/pagos/`                    | `POST /pagos/{id}/cancelar/`                                                                              | `id`, `proveedor`, `cuenta_bancaria`, `pago_detalles[].cxp` |
 | Bancos                   | `GET/POST /api/v1/finanzas/bancos/`                   | CRUD estándar                                                                                             | `id`                                                        |
 | Cuentas bancarias        | `GET/POST /api/v1/finanzas/cuentas-bancarias/`        | `GET /cuentas-bancarias/{id}/resumen/`                                                                    | `id`, `banco`, `moneda`                                     |
 | Movimientos bancarios    | `GET/POST /api/v1/finanzas/movimientos-bancarios/`    | `POST /movimientos-bancarios/{id}/cancelar/`                                                              | `id`, `cuenta_bancaria`, `cobro`, `pago`                    |
 | Conciliaciones bancarias | `GET/POST /api/v1/finanzas/conciliaciones-bancarias/` | `POST /preparar/`, `POST /{id}/cerrar/`, `POST /{id}/cancelar/`                                           | `id`, `cuenta_bancaria`                                     |
-| Notas de crédito         | `GET/POST /api/v1/finanzas/notas-credito/`            | `POST /notas-credito/{id}/cancelar/`                                                                      | `id`, `factura`, `cliente`                                  |
+| Notas de crédito         | `GET/POST /api/v1/finanzas/notas-credito/`            | `POST /notas-credito/{id}/cancelar/`                                                                      | `id`, `factura`, `cliente`, `nota_credito_detalles[].factura_detalle` |
 | Cuentas contables        | `GET/POST /api/v1/finanzas/cuentas-contables/`        | CRUD estándar                                                                                             | `id`, `cuenta_padre`                                        |
 | Centros de costo         | `GET/POST /api/v1/finanzas/centros-costo/`            | CRUD estándar                                                                                             | `id`                                                        |
-| Pólizas                  | `GET/POST /api/v1/finanzas/polizas/`                  | `POST /polizas/{id}/contabilizar/`, `POST /polizas/{id}/validar-cuadre/`, `POST /polizas/{id}/cancelar/`  | `id`, `sucursal`, `centro_costo`                            |
+| Pólizas                  | `GET/POST /api/v1/finanzas/polizas/`                  | `POST /polizas/{id}/contabilizar/`, `POST /polizas/{id}/validar-cuadre/`, `POST /polizas/{id}/cancelar/`  | `id`, `sucursal`, `centro_costo`, `poliza_detalles[].cuenta_contable` |
 | Alertas de mora          | `GET /api/v1/finanzas/alertas-mora/`                  | `POST /alertas-mora/generar/`                                                                             | `id`, `cuenta_por_cobrar`, `cuenta_por_pagar`               |
 | Dashboard                | `GET /api/v1/finanzas/dashboard/`                     | lectura agregada                                                                                          | `empresa_id`                                                |
 
@@ -2011,6 +2012,8 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 
 ### Bodies mínimos recomendados
 
+> Alta de líneas hijas corregida (ver [Historial de correcciones](#historial-de-correcciones---alta-de-lineas-hijas-en-finanzas)). Los ejemplos de abajo ya funcionan.
+
 #### Cobro
 
 ```json
@@ -2030,6 +2033,8 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
   ]
 }
 ```
+
+No mandes `cobro` dentro de `cobro_detalles`: es read-only, lo asigna el backend.
 
 #### Pago
 
@@ -2051,6 +2056,73 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 }
 ```
 
+No mandes `pago` dentro de `pago_detalles`: mismo caso.
+
+#### Póliza
+
+```json
+{
+  "sucursal": 2,
+  "centro_costo": 4,
+  "tipo": "Diario",
+  "concepto": "Registro manual de gastos de viaje",
+  "poliza_detalles": [
+    { "cuenta_contable": 101, "centro_costo": 4, "cargo": "1160.00", "abono": "0.00", "orden": 1 },
+    { "cuenta_contable": 208, "centro_costo": 4, "cargo": "0.00", "abono": "1160.00", "orden": 2 }
+  ]
+}
+```
+
+- `poliza` no va en el renglón: es read-only.
+- El cuadre (cargos == abonos) no se valida al crear, solo en `contabilizar`/`validar-cuadre`. Puedes crear una póliza descuadrada en Borrador.
+- Cada renglón puede referenciar `factura`, `factura_proveedor`, `pago`, `cobro`, `movimiento_bancario` — se valida misma empresa, no coherencia de negocio.
+
+#### Nota de crédito
+
+```json
+{
+  "factura": 55,
+  "cliente": 15,
+  "motivo": "Descuento por devolución parcial",
+  "estatus": "Emitida",
+  "subtotal": "100.00",
+  "impuestos": "16.00",
+  "total": "116.00",
+  "nota_credito_detalles": [
+    { "factura_detalle": 210, "cantidad": "1", "precio_unitario": "100.00", "impuesto": "16.00", "subtotal": "100.00", "total": "116.00" }
+  ]
+}
+```
+
+- `factura_detalle` debe ser de la misma `factura` de la nota, si no → 400.
+- `estatus: "Emitida"` aplica la nota contra la CxC en el mismo POST (reduce saldo). Cancelar la nota NO revierte ese saldo todavía.
+
+#### Factura de proveedor
+
+```json
+{
+  "proveedor": 8,
+  "sucursal": 2,
+  "oc": 30,
+  "recepcion": 44,
+  "moneda": 1,
+  "factura_proveedor_detalles": [
+    {
+      "oc_detalle": 120,
+      "recepcion_detalle": 88,
+      "producto": 300,
+      "cantidad": "10",
+      "precio_unitario": "50.00",
+      "subtotal": "500.00",
+      "total": "500.00"
+    }
+  ]
+}
+```
+
+- `oc_detalle` debe ser de la `oc` del encabezado y `recepcion_detalle` de la `recepcion`; si no coinciden → 400.
+- No genera CxP automática. Crea `cuenta-por-pagar` aparte con `factura_proveedor` = id devuelto.
+
 #### Preparar conciliación
 
 ```json
@@ -2069,6 +2141,16 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 3. **No intentes crear movimientos bancarios para cobros/pagos desde frontend** si ya estás usando cobros o pagos aplicados; el backend los genera.
 4. **Usa los detalles** de `cuentas-por-cobrar/{id}` para mostrar factura ligada y pólizas relacionadas sin armar joins en frontend.
 5. **Usa `cuentas-bancarias/{id}/resumen/`** para cards rápidas de cuenta bancaria.
+
+### Historial de correcciones - alta de líneas hijas en finanzas
+
+**Corregido.** `polizas`, `cobros`, `pagos`, `notas-credito`, `facturas-proveedor` no dejaban crear renglones. Causas:
+
+- **Póliza / Nota de crédito / Factura de proveedor**: el arreglo de detalles era `read_only=True` en el encabezado → 201 sin líneas. Fix: escribible solo en `create`.
+- **Cobro / Pago**: el detalle exigía la FK del padre (`cobro`/`pago`), que aún no existe al validar → 400/500. Fix: esa FK ahora es read-only en el detalle.
+- Multi-tenant: cada línea se valida contra la empresa del documento padre, incluso para superuser.
+
+**Fuera de alcance** (decisiones de negocio pendientes, no bugs): edición de líneas, CxP automática en factura de proveedor, reversión de CxC al cancelar nota de crédito, validación de cuadre al crear póliza (sigue siendo solo al contabilizar). Detalle en `doc/bloqueo-lineas-hijas-finanzas.md`.
 
 ---
 

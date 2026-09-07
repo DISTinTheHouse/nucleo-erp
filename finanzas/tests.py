@@ -14,22 +14,39 @@ from datetime import date
 from decimal import Decimal
 
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from catalogo.models import Producto, Talla
+from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 from finanzas.api.serializers import PolizaDetalleRelacionadoSerializer
 from finanzas.models import (
+    Banco,
     CentroCosto,
+    Cobro,
+    CuentaBancaria,
     CuentaContable,
     CuentaPorCobrar,
     CuentaPorPagar,
     Factura,
+    FacturaDetalle,
     FacturaProveedor,
+    NotaCredito,
+    Pago,
     Poliza,
     PolizaDetalle,
 )
-from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal
-from terceros.models import Cliente
+from inventarios.models import Almacen
+from nucleo.models import (
+    Empresa,
+    Moneda,
+    SatFormaPago,
+    SatMetodoPago,
+    SatRegimenFiscal,
+    SerieFolio,
+    Sucursal,
+)
+from terceros.models import Cliente, Proveedor
 from usuarios.models import Usuario
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
 
@@ -37,6 +54,11 @@ ONBOARDING_URL = "/api/v1/finanzas/facturas/onboarding/"
 DESDE_PEDIDO_URL = "/api/v1/finanzas/facturas/desde-pedido/"
 PENDIENTE_COBRO_URL = "/api/v1/finanzas/facturas/registrar-pendiente-cobro/"
 CXC_URL = "/api/v1/finanzas/cuentas-por-cobrar/"
+POLIZAS_URL = "/api/v1/finanzas/polizas/"
+COBROS_URL = "/api/v1/finanzas/cobros/"
+PAGOS_URL = "/api/v1/finanzas/pagos/"
+NOTAS_CREDITO_URL = "/api/v1/finanzas/notas-credito/"
+FACTURAS_PROVEEDOR_URL = "/api/v1/finanzas/facturas-proveedor/"
 
 
 class FinanzasBase(TestCase):
@@ -96,6 +118,9 @@ class FinanzasBase(TestCase):
     def setUpTestData(cls):
         cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
         cls.talla = Talla.objects.create(nombre="M")
+        cls.sat_regimen_fiscal = SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley")
+        cls.sat_forma_pago = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        cls.sat_metodo_pago = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
         cls.a = cls._tenant("acme", "MTY", "a@acme.test")
         cls.b = cls._tenant("globex", "GDL", "b@globex.test")
 
@@ -597,3 +622,343 @@ class Defecto5PendienteCobroDobleFacturacion(FinanzasBase):
         )
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertEqual(Factura.objects.count(), 1)
+
+
+class Defecto6AltaLineasHijas(FinanzasBase):
+    """Alta de líneas hijas en los 5 documentos de finanzas. Solo ``create()``;
+    ``update()`` de renglones queda fuera (ver doc/bloqueo-lineas-hijas-finanzas.md)."""
+
+    def _crear_cuentas_contables(self, empresa):
+        cuenta_cargo = CuentaContable.objects.create(
+            empresa=empresa, codigo="1050", nombre="Clientes",
+            tipo=CuentaContable.CuentaTipo.ACTIVO,
+        )
+        cuenta_abono = CuentaContable.objects.create(
+            empresa=empresa, codigo="4000", nombre="Ventas",
+            tipo=CuentaContable.CuentaTipo.INGRESO,
+        )
+        centro_costo = CentroCosto.objects.create(empresa=empresa, codigo="CC01", nombre="General")
+        return cuenta_cargo, cuenta_abono, centro_costo
+
+    def _crear_cuenta_bancaria(self, empresa):
+        banco = Banco.objects.create(empresa=empresa, nombre="Banco Test")
+        return CuentaBancaria.objects.create(
+            empresa=empresa, banco=banco, moneda=self.moneda, alias="Cuenta operativa",
+        )
+
+    def _crear_oc_recepcion_y_factura_proveedor(self, empresa, sucursal, usuario):
+        proveedor = Proveedor.objects.create(
+            empresa=empresa, nombre="Proveedor Test", moneda=self.moneda,
+            sat_regimen_fiscal=self.sat_regimen_fiscal, sat_forma_pago=self.sat_forma_pago,
+            sat_metodo_pago=self.sat_metodo_pago, codigo=f"PROV-{empresa.pk}", razon_social="Proveedor Test SA",
+            telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000",
+            email="proveedor@test.mx",
+        )
+        producto = Producto.objects.create(empresa=empresa, nombre="Insumo Test")
+        oc = OrdenCompra.objects.create(
+            empresa=empresa, sucursal=sucursal, proveedor=proveedor, moneda=self.moneda,
+            usuario=usuario, fecha_oc=date.today(),
+        )
+        oc_detalle = OrdenCompraDetalle.objects.create(
+            orden_compra=oc, producto=producto, sucursal=sucursal, cantidad=10, precio=Decimal("50.00"),
+        )
+        almacen = Almacen.objects.create(
+            empresa=empresa, sucursal=sucursal, codigo=f"A-{oc.pk}", nombre="Almacen Test",
+        )
+        recepcion = Recepcion.objects.create(
+            orden_compra=oc, empresa=empresa, sucursal=sucursal, proveedor=proveedor,
+            almacen=almacen, usuario=usuario, folio=f"REC-{empresa.pk}-{oc.pk}",
+            fecha_recepcion=timezone.now(),
+        )
+        recepcion_detalle = RecepcionDetalle.objects.create(
+            recepcion=recepcion, orden_compra_detalle=oc_detalle, producto=producto,
+            cantidad_recibida=10,
+        )
+        factura_proveedor = FacturaProveedor.objects.create(
+            empresa=empresa, sucursal=sucursal, proveedor=proveedor, oc=oc,
+            recepcion=recepcion, moneda=self.moneda,
+        )
+        return proveedor, producto, oc, oc_detalle, recepcion, recepcion_detalle, factura_proveedor
+
+    # -- Póliza -----------------------------------------------------------
+
+    def test_poliza_crea_detalles_anidados(self):
+        empresa = self.a["empresa"]
+        cuenta_cargo, cuenta_abono, centro_costo = self._crear_cuentas_contables(empresa)
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            POLIZAS_URL,
+            {
+                "sucursal": self.a["sucursal"].pk,
+                "centro_costo": centro_costo.pk,
+                "tipo": Poliza.PolizaTipo.DIARIO.value,
+                "poliza_detalles": [
+                    {"cuenta_contable": cuenta_cargo.pk, "centro_costo": centro_costo.pk, "cargo": "100.00", "abono": "0.00", "orden": 1},
+                    {"cuenta_contable": cuenta_abono.pk, "centro_costo": centro_costo.pk, "cargo": "0.00", "abono": "100.00", "orden": 2},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(pk=resp.data["id"])
+        self.assertEqual(poliza.poliza_detalles.count(), 2)
+        self.assertEqual(resp.data["total_cargos"], "100.00")
+        self.assertEqual(resp.data["total_abonos"], "100.00")
+
+    def test_poliza_rechaza_cuenta_contable_de_otra_empresa(self):
+        empresa_a = self.a["empresa"]
+        _, _, centro_costo = self._crear_cuentas_contables(empresa_a)
+        cuenta_ajena, _, _ = self._crear_cuentas_contables(self.b["empresa"])
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            POLIZAS_URL,
+            {
+                "sucursal": self.a["sucursal"].pk,
+                "centro_costo": centro_costo.pk,
+                "poliza_detalles": [
+                    {"cuenta_contable": cuenta_ajena.pk, "cargo": "100.00", "abono": "0.00"},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cuenta_contable", resp.data)
+        self.assertFalse(PolizaDetalle.objects.filter(poliza__empresa=empresa_a).exists())
+
+    def test_poliza_update_no_escribe_detalles(self):
+        """PATCH con poliza_detalles no crea/edita líneas."""
+        empresa = self.a["empresa"]
+        cuenta_cargo, _, centro_costo = self._crear_cuentas_contables(empresa)
+        poliza = Poliza.objects.create(empresa=empresa, sucursal=self.a["sucursal"], centro_costo=centro_costo)
+        client = self._client(self.a["usuario"])
+
+        resp = client.patch(
+            f"{POLIZAS_URL}{poliza.pk}/",
+            {"poliza_detalles": [{"cuenta_contable": cuenta_cargo.pk, "cargo": "50.00"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(poliza.poliza_detalles.count(), 0)
+
+    # -- Cobro --------------------------------------------------------------
+
+    def test_cobro_crea_detalle_y_aplica_saldo(self):
+        empresa = self.a["empresa"]
+        cuenta_bancaria = self._crear_cuenta_bancaria(empresa)
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"], cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=empresa, cliente=self.a["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            COBROS_URL,
+            {
+                "cliente": self.a["cliente"].pk,
+                "cuenta_bancaria": cuenta_bancaria.pk,
+                "total_cobrado": "100.00",
+                "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "100.00"}],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        cobro = Cobro.objects.get(pk=resp.data["id"])
+        self.assertEqual(cobro.cobro_detalles.count(), 1)
+        self.assertEqual(cobro.estatus, Cobro.Estatus.APLICADO)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("0.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PAGADA)
+
+    def test_cobro_rechaza_cxc_de_otra_empresa(self):
+        empresa_a = self.a["empresa"]
+        cuenta_bancaria = self._crear_cuenta_bancaria(empresa_a)
+        factura_b = Factura.objects.create(
+            empresa=self.b["empresa"], sucursal=self.b["sucursal"], cliente=self.b["cliente"], moneda=self.moneda,
+        )
+        cxc_ajena = CuentaPorCobrar.objects.create(
+            empresa=self.b["empresa"], cliente=self.b["cliente"], factura=factura_b,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            COBROS_URL,
+            {
+                "cliente": self.a["cliente"].pk,
+                "cuenta_bancaria": cuenta_bancaria.pk,
+                "total_cobrado": "100.00",
+                "cobro_detalles": [{"cxc": cxc_ajena.pk, "importe_aplicado": "100.00"}],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cobro_detalles", resp.data)
+
+    # -- Pago -----------------------------------------------------------------
+
+    def test_pago_crea_detalle_y_aplica_saldo(self):
+        empresa = self.a["empresa"]
+        cuenta_bancaria = self._crear_cuenta_bancaria(empresa)
+        _, _, _, _, _, _, factura_proveedor = self._crear_oc_recepcion_y_factura_proveedor(
+            empresa, self.a["sucursal"], self.a["usuario"]
+        )
+        cxp = CuentaPorPagar.objects.create(
+            empresa=empresa, proveedor=factura_proveedor.proveedor, factura_proveedor=factura_proveedor,
+            total=Decimal("50.00"), saldo=Decimal("50.00"),
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            PAGOS_URL,
+            {
+                "proveedor": factura_proveedor.proveedor.pk,
+                "cuenta_bancaria": cuenta_bancaria.pk,
+                "total_pagado": "50.00",
+                "pago_detalles": [{"cxp": cxp.pk, "importe_aplicado": "50.00"}],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        pago = Pago.objects.get(pk=resp.data["id"])
+        self.assertEqual(pago.pago_detalles.count(), 1)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.saldo, Decimal("0.00"))
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PAGADA)
+
+    # -- Nota de crédito --------------------------------------------------------
+
+    def test_nota_credito_crea_detalle(self):
+        empresa = self.a["empresa"]
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"], cliente=self.a["cliente"], moneda=self.moneda,
+            total=Decimal("116.00"),
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=empresa, cliente=self.a["cliente"], factura=factura,
+            total=Decimal("116.00"), saldo=Decimal("116.00"),
+        )
+        factura_detalle = FacturaDetalle.objects.create(
+            factura=factura, pedido_detalle=self.a["detalle"], producto=self.a["producto"],
+            cantidad=1, precio_unitario=Decimal("100.00"), total=Decimal("116.00"),
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            NOTAS_CREDITO_URL,
+            {
+                "factura": factura.pk,
+                "cliente": self.a["cliente"].pk,
+                "estatus": NotaCredito.Estatus.EMITIDA.value,
+                "total": "116.00",
+                "nota_credito_detalles": [
+                    {"factura_detalle": factura_detalle.pk, "cantidad": 1, "total": "116.00"},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        nota = NotaCredito.objects.get(pk=resp.data["id"])
+        self.assertEqual(nota.nota_credito_detalles.count(), 1)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("0.00"))
+
+    def test_nota_credito_rechaza_factura_detalle_de_otra_factura(self):
+        empresa = self.a["empresa"]
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"], cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        otra_factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"], cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        detalle_ajeno = FacturaDetalle.objects.create(
+            factura=otra_factura, pedido_detalle=self.a["detalle"], producto=self.a["producto"],
+            cantidad=1, total=Decimal("50.00"),
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            NOTAS_CREDITO_URL,
+            {
+                "factura": factura.pk,
+                "cliente": self.a["cliente"].pk,
+                "total": "50.00",
+                "nota_credito_detalles": [
+                    {"factura_detalle": detalle_ajeno.pk, "cantidad": 1, "total": "50.00"},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("factura_detalle", resp.data)
+
+    # -- Factura de proveedor ----------------------------------------------
+
+    def test_factura_proveedor_crea_detalle(self):
+        empresa = self.a["empresa"]
+        (
+            proveedor, producto, oc, oc_detalle, recepcion, recepcion_detalle, _,
+        ) = self._crear_oc_recepcion_y_factura_proveedor(empresa, self.a["sucursal"], self.a["usuario"])
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            FACTURAS_PROVEEDOR_URL,
+            {
+                "proveedor": proveedor.pk,
+                "sucursal": self.a["sucursal"].pk,
+                "oc": oc.pk,
+                "recepcion": recepcion.pk,
+                "moneda": self.moneda.pk,
+                "factura_proveedor_detalles": [
+                    {
+                        "oc_detalle": oc_detalle.pk,
+                        "recepcion_detalle": recepcion_detalle.pk,
+                        "producto": producto.pk,
+                        "cantidad": "10",
+                        "precio_unitario": "50.00",
+                        "total": "500.00",
+                    },
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        factura_proveedor = FacturaProveedor.objects.get(pk=resp.data["id"])
+        self.assertEqual(factura_proveedor.factura_proveedor_detalles.count(), 1)
+
+    def test_factura_proveedor_rechaza_detalle_de_otra_oc(self):
+        empresa = self.a["empresa"]
+        (
+            proveedor, producto, oc, _oc_detalle, recepcion, recepcion_detalle, _,
+        ) = self._crear_oc_recepcion_y_factura_proveedor(empresa, self.a["sucursal"], self.a["usuario"])
+        _, _, otra_oc, otro_oc_detalle, _, _, _ = self._crear_oc_recepcion_y_factura_proveedor(
+            empresa, self.a["sucursal"], self.a["usuario"]
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            FACTURAS_PROVEEDOR_URL,
+            {
+                "proveedor": proveedor.pk,
+                "sucursal": self.a["sucursal"].pk,
+                "oc": oc.pk,
+                "recepcion": recepcion.pk,
+                "moneda": self.moneda.pk,
+                "factura_proveedor_detalles": [
+                    {
+                        "oc_detalle": otro_oc_detalle.pk,
+                        "recepcion_detalle": recepcion_detalle.pk,
+                        "producto": producto.pk,
+                        "cantidad": "10",
+                        "total": "500.00",
+                    },
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("oc_detalle", resp.data)

@@ -81,6 +81,23 @@ class EmpresaResueltaEnServidorMixin:
         return extra_kwargs
 
 
+class CreateOnlyNestedLinesMixin:
+    """Líneas anidadas escribibles solo en create; en update quedan read-only."""
+
+    nested_write_on_create_only = ()
+
+    def get_fields(self):
+        fields = super().get_fields()
+        if self.instance is not None:
+            for name in self.nested_write_on_create_only:
+                field = fields.get(name)
+                if field is None:
+                    continue
+                field.read_only = True
+                field.required = False
+        return fields
+
+
 class FacturaDesdePedidoInputSerializer(serializers.Serializer):
     pedido = serializers.IntegerField(min_value=1)
 
@@ -323,10 +340,14 @@ class PolizaDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = PolizaDetalle
         fields = "__all__"
+        extra_kwargs = {
+            "poliza": {"read_only": True},
+        }
 
 
-class PolizaSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
-    poliza_detalles = PolizaDetalleSerializer(many=True, required=False, read_only=True)
+class PolizaSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+    nested_write_on_create_only = ("poliza_detalles",)
+    poliza_detalles = PolizaDetalleSerializer(many=True, required=False)
     total_cargos = serializers.SerializerMethodField()
     total_abonos = serializers.SerializerMethodField()
     cuadre_correcto = serializers.SerializerMethodField()
@@ -374,10 +395,14 @@ class FacturaProveedorDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = FacturaProveedorDetalle
         fields = "__all__"
+        extra_kwargs = {
+            "factura_proveedor": {"read_only": True},
+        }
 
 
-class FacturaProveedorSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
-    factura_proveedor_detalles = FacturaProveedorDetalleSerializer(many=True, required=False, read_only=True)
+class FacturaProveedorSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+    nested_write_on_create_only = ("factura_proveedor_detalles",)
+    factura_proveedor_detalles = FacturaProveedorDetalleSerializer(many=True, required=False)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     moneda_codigo = serializers.CharField(source="moneda.codigo_iso", read_only=True)
 
@@ -481,6 +506,9 @@ class CobroDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = CobroDetalle
         fields = "__all__"
+        extra_kwargs = {
+            "cobro": {"read_only": True},
+        }
 
 
 class CobroSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
@@ -513,6 +541,9 @@ class PagoDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = PagoDetalle
         fields = "__all__"
+        extra_kwargs = {
+            "pago": {"read_only": True},
+        }
 
 
 class PagoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
@@ -578,10 +609,14 @@ class NotaCreditoDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = NotaCreditoDetalle
         fields = "__all__"
+        extra_kwargs = {
+            "nota_credito": {"read_only": True},
+        }
 
 
-class NotaCreditoSerializer(serializers.ModelSerializer):
-    nota_credito_detalles = NotaCreditoDetalleSerializer(many=True, required=False, read_only=True)
+class NotaCreditoSerializer(CreateOnlyNestedLinesMixin, serializers.ModelSerializer):
+    nested_write_on_create_only = ("nota_credito_detalles",)
+    nota_credito_detalles = NotaCreditoDetalleSerializer(many=True, required=False)
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     factura_folio = serializers.CharField(source="factura.folio", read_only=True)
 
