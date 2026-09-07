@@ -10,16 +10,26 @@ soporte), así que estos tests cubren el filtro por empresa y los guards, no la
 semántica del lock.
 """
 
+import inspect
 from datetime import date
 from decimal import Decimal
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
+from rest_framework.viewsets import ViewSetMixin
 
 from catalogo.models import Producto, Talla
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+from finanzas.api import views as finanzas_views
 from finanzas.api.serializers import PolizaDetalleRelacionadoSerializer
+from finanzas.api.views import (
+    CobroViewSet,
+    ErroresDeNegocioComo400Mixin,
+    FacturaProveedorViewSet,
+)
+from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import (
     Banco,
     CentroCosto,
@@ -128,6 +138,58 @@ class FinanzasBase(TestCase):
         client = APIClient()
         client.force_authenticate(user=user)
         return client
+
+    def _crear_cuentas_contables(self, empresa):
+        cuenta_cargo = CuentaContable.objects.create(
+            empresa=empresa, codigo="1050", nombre="Clientes",
+            tipo=CuentaContable.CuentaTipo.ACTIVO,
+        )
+        cuenta_abono = CuentaContable.objects.create(
+            empresa=empresa, codigo="4000", nombre="Ventas",
+            tipo=CuentaContable.CuentaTipo.INGRESO,
+        )
+        centro_costo = CentroCosto.objects.create(empresa=empresa, codigo="CC01", nombre="General")
+        return cuenta_cargo, cuenta_abono, centro_costo
+
+    def _crear_cuenta_bancaria(self, empresa):
+        banco = Banco.objects.create(empresa=empresa, nombre="Banco Test")
+        return CuentaBancaria.objects.create(
+            empresa=empresa, banco=banco, moneda=self.moneda, alias="Cuenta operativa",
+        )
+
+    def _crear_oc_recepcion_y_factura_proveedor(self, empresa, sucursal, usuario):
+        proveedor = Proveedor.objects.create(
+            empresa=empresa, nombre="Proveedor Test", moneda=self.moneda,
+            sat_regimen_fiscal=self.sat_regimen_fiscal, sat_forma_pago=self.sat_forma_pago,
+            sat_metodo_pago=self.sat_metodo_pago, codigo=f"PROV-{empresa.pk}", razon_social="Proveedor Test SA",
+            telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000",
+            email="proveedor@test.mx",
+        )
+        producto = Producto.objects.create(empresa=empresa, nombre="Insumo Test")
+        oc = OrdenCompra.objects.create(
+            empresa=empresa, sucursal=sucursal, proveedor=proveedor, moneda=self.moneda,
+            usuario=usuario, fecha_oc=date.today(),
+        )
+        oc_detalle = OrdenCompraDetalle.objects.create(
+            orden_compra=oc, producto=producto, sucursal=sucursal, cantidad=10, precio=Decimal("50.00"),
+        )
+        almacen = Almacen.objects.create(
+            empresa=empresa, sucursal=sucursal, codigo=f"A-{oc.pk}", nombre="Almacen Test",
+        )
+        recepcion = Recepcion.objects.create(
+            orden_compra=oc, empresa=empresa, sucursal=sucursal, proveedor=proveedor,
+            almacen=almacen, usuario=usuario, folio=f"REC-{empresa.pk}-{oc.pk}",
+            fecha_recepcion=timezone.now(),
+        )
+        recepcion_detalle = RecepcionDetalle.objects.create(
+            recepcion=recepcion, orden_compra_detalle=oc_detalle, producto=producto,
+            cantidad_recibida=10,
+        )
+        factura_proveedor = FacturaProveedor.objects.create(
+            empresa=empresa, sucursal=sucursal, proveedor=proveedor, oc=oc,
+            recepcion=recepcion, moneda=self.moneda,
+        )
+        return proveedor, producto, oc, oc_detalle, recepcion, recepcion_detalle, factura_proveedor
 
 
 class Defecto1OnboardingAislamiento(FinanzasBase):
@@ -628,58 +690,6 @@ class Defecto6AltaLineasHijas(FinanzasBase):
     """Alta de líneas hijas en los 5 documentos de finanzas. Solo ``create()``;
     ``update()`` de renglones queda fuera (ver doc/bloqueo-lineas-hijas-finanzas.md)."""
 
-    def _crear_cuentas_contables(self, empresa):
-        cuenta_cargo = CuentaContable.objects.create(
-            empresa=empresa, codigo="1050", nombre="Clientes",
-            tipo=CuentaContable.CuentaTipo.ACTIVO,
-        )
-        cuenta_abono = CuentaContable.objects.create(
-            empresa=empresa, codigo="4000", nombre="Ventas",
-            tipo=CuentaContable.CuentaTipo.INGRESO,
-        )
-        centro_costo = CentroCosto.objects.create(empresa=empresa, codigo="CC01", nombre="General")
-        return cuenta_cargo, cuenta_abono, centro_costo
-
-    def _crear_cuenta_bancaria(self, empresa):
-        banco = Banco.objects.create(empresa=empresa, nombre="Banco Test")
-        return CuentaBancaria.objects.create(
-            empresa=empresa, banco=banco, moneda=self.moneda, alias="Cuenta operativa",
-        )
-
-    def _crear_oc_recepcion_y_factura_proveedor(self, empresa, sucursal, usuario):
-        proveedor = Proveedor.objects.create(
-            empresa=empresa, nombre="Proveedor Test", moneda=self.moneda,
-            sat_regimen_fiscal=self.sat_regimen_fiscal, sat_forma_pago=self.sat_forma_pago,
-            sat_metodo_pago=self.sat_metodo_pago, codigo=f"PROV-{empresa.pk}", razon_social="Proveedor Test SA",
-            telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000",
-            email="proveedor@test.mx",
-        )
-        producto = Producto.objects.create(empresa=empresa, nombre="Insumo Test")
-        oc = OrdenCompra.objects.create(
-            empresa=empresa, sucursal=sucursal, proveedor=proveedor, moneda=self.moneda,
-            usuario=usuario, fecha_oc=date.today(),
-        )
-        oc_detalle = OrdenCompraDetalle.objects.create(
-            orden_compra=oc, producto=producto, sucursal=sucursal, cantidad=10, precio=Decimal("50.00"),
-        )
-        almacen = Almacen.objects.create(
-            empresa=empresa, sucursal=sucursal, codigo=f"A-{oc.pk}", nombre="Almacen Test",
-        )
-        recepcion = Recepcion.objects.create(
-            orden_compra=oc, empresa=empresa, sucursal=sucursal, proveedor=proveedor,
-            almacen=almacen, usuario=usuario, folio=f"REC-{empresa.pk}-{oc.pk}",
-            fecha_recepcion=timezone.now(),
-        )
-        recepcion_detalle = RecepcionDetalle.objects.create(
-            recepcion=recepcion, orden_compra_detalle=oc_detalle, producto=producto,
-            cantidad_recibida=10,
-        )
-        factura_proveedor = FacturaProveedor.objects.create(
-            empresa=empresa, sucursal=sucursal, proveedor=proveedor, oc=oc,
-            recepcion=recepcion, moneda=self.moneda,
-        )
-        return proveedor, producto, oc, oc_detalle, recepcion, recepcion_detalle, factura_proveedor
-
     # -- Póliza -----------------------------------------------------------
 
     def test_poliza_crea_detalles_anidados(self):
@@ -962,3 +972,544 @@ class Defecto6AltaLineasHijas(FinanzasBase):
         )
         self.assertEqual(resp.status_code, 400, resp.data)
         self.assertIn("oc_detalle", resp.data)
+
+
+class Defecto7ErroresDeNegocioYTransacciones(FinanzasBase):
+    """Regresión de los arreglos de plomería de errores y de transacciones.
+
+    Cada bloque anota el arreglo que blinda. Todos fallan si ese arreglo se
+    revierte: es justo lo que faltó en 5898286, cuyos 10 tests pasaban igual con
+    el bug puesto.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Únicos fixtures nuevos: los dos perfiles que la base no tenía y que
+        # las pruebas de ``empresa`` server-side necesitan.
+        cls.superusuario = Usuario.objects.create_superuser(
+            username="root@test.mx", email="root@test.mx", password="x",
+        )
+        cls.admin_empresa = Usuario.objects.create(
+            username="admin@acme.test", email="admin@acme.test",
+            empresa=cls.a["empresa"], sucursal_default=cls.a["sucursal"],
+            is_admin_empresa=True,
+        )
+
+    # -- helpers locales ----------------------------------------------------
+
+    def _cxc(self, monto="100.00"):
+        empresa = self.a["empresa"]
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"],
+            cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        return CuentaPorCobrar.objects.create(
+            empresa=empresa, cliente=self.a["cliente"], factura=factura,
+            total=Decimal(monto), saldo=Decimal(monto),
+        )
+
+    def _cxp(self, tenant, monto="100.00"):
+        proveedor, _, _, _, _, _, factura_proveedor = self._crear_oc_recepcion_y_factura_proveedor(
+            tenant["empresa"], tenant["sucursal"], tenant["usuario"],
+        )
+        cxp = CuentaPorPagar.objects.create(
+            empresa=tenant["empresa"], proveedor=proveedor,
+            factura_proveedor=factura_proveedor,
+            total=Decimal(monto), saldo=Decimal(monto),
+        )
+        return proveedor, cxp
+
+    def _poliza_cuadrada(self, client, centro_costo, cargo, abono):
+        return client.post(
+            POLIZAS_URL,
+            {
+                "sucursal": self.a["sucursal"].pk,
+                "centro_costo": centro_costo.pk,
+                "tipo": Poliza.PolizaTipo.DIARIO.value,
+                "poliza_detalles": [
+                    {"cuenta_contable": cargo.pk, "cargo": "100.00", "abono": "0.00"},
+                    {"cuenta_contable": abono.pk, "cargo": "0.00", "abono": "100.00"},
+                ],
+            },
+            format="json",
+        )
+
+    def _asserta_error_de_campo(self, resp, campo, fragmento=None):
+        """El cuerpo de error siempre es ``{"campo": ["mensaje", ...]}``."""
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn(campo, resp.data)
+        self.assertIsInstance(resp.data[campo], list, resp.data)
+        self.assertTrue(resp.data[campo], resp.data)
+        if fragmento is not None:
+            self.assertIn(fragmento, str(resp.data[campo][0]))
+
+    # == 2. PATCH con líneas anidadas se ignora, no revienta =================
+    # Blinda: CreateOnlyNestedLinesMixin en CobroSerializer y PagoSerializer.
+    # Sin el mixin, DRF levanta AssertionError en raise_errors_on_nested_writes
+    # y estas pruebas fallan con 500.
+
+    def test_cobro_patch_ignora_lineas_y_actualiza_encabezado(self):
+        cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
+        cxc = self._cxc()
+        cobro = Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"],
+            cuenta_bancaria=cuenta_bancaria, total_cobrado=Decimal("0.00"),
+            estatus=Cobro.Estatus.BORRADOR.value, observaciones="antes",
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.patch(
+            f"{COBROS_URL}{cobro.pk}/",
+            {
+                "observaciones": "despues",
+                "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "10.00"}],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cobro.refresh_from_db()
+        self.assertEqual(cobro.cobro_detalles.count(), 0)
+        self.assertEqual(cobro.observaciones, "despues")
+
+    def test_pago_patch_ignora_lineas_y_actualiza_encabezado(self):
+        cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
+        proveedor, cxp = self._cxp(self.a)
+        pago = Pago.objects.create(
+            empresa=self.a["empresa"], proveedor=proveedor,
+            cuenta_bancaria=cuenta_bancaria, total_pagado=Decimal("0.00"),
+            estatus=Pago.Estatus.BORRADOR.value, observaciones="antes",
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.patch(
+            f"{PAGOS_URL}{pago.pk}/",
+            {
+                "observaciones": "despues",
+                "pago_detalles": [{"cxp": cxp.pk, "importe_aplicado": "10.00"}],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        pago.refresh_from_db()
+        self.assertEqual(pago.pago_detalles.count(), 0)
+        self.assertEqual(pago.observaciones, "despues")
+
+    def test_nota_credito_patch_ignora_lineas(self):
+        empresa = self.a["empresa"]
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"],
+            cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        factura_detalle = FacturaDetalle.objects.create(
+            factura=factura, pedido_detalle=self.a["detalle"], producto=self.a["producto"],
+            cantidad=1, total=Decimal("50.00"),
+        )
+        nota = NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"], total=Decimal("50.00"),
+            estatus=NotaCredito.Estatus.BORRADOR.value, motivo="antes",
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.patch(
+            f"{NOTAS_CREDITO_URL}{nota.pk}/",
+            {
+                "motivo": "despues",
+                "nota_credito_detalles": [
+                    {"factura_detalle": factura_detalle.pk, "cantidad": 1, "total": "50.00"},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        nota.refresh_from_db()
+        self.assertEqual(nota.nota_credito_detalles.count(), 0)
+        self.assertEqual(nota.motivo, "despues")
+
+    def test_factura_proveedor_patch_ignora_lineas(self):
+        (
+            _, producto, _, oc_detalle, _, recepcion_detalle, factura_proveedor,
+        ) = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"],
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.patch(
+            f"{FACTURAS_PROVEEDOR_URL}{factura_proveedor.pk}/",
+            {
+                "observaciones": "despues",
+                "factura_proveedor_detalles": [
+                    {
+                        "oc_detalle": oc_detalle.pk,
+                        "recepcion_detalle": recepcion_detalle.pk,
+                        "producto": producto.pk,
+                        "cantidad": "1.00",
+                    },
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura_proveedor.refresh_from_db()
+        self.assertEqual(factura_proveedor.factura_proveedor_detalles.count(), 0)
+        self.assertEqual(factura_proveedor.observaciones, "despues")
+
+    # == 3. Póliza: contabilizar y cancelar ==================================
+    # Blinda: quitar ``updated_at`` de ``update_fields`` en PolizaService.
+    # Con el campo inexistente, Django levanta ValueError y ambas dan 500.
+
+    def test_poliza_contabilizar_cambia_estatus(self):
+        cargo, abono, centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+        client = self._client(self.a["usuario"])
+        creada = self._poliza_cuadrada(client, centro_costo, cargo, abono)
+        self.assertEqual(creada.status_code, 201, creada.data)
+
+        resp = client.post(f"{POLIZAS_URL}{creada.data['id']}/contabilizar/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        poliza = Poliza.objects.get(pk=creada.data["id"])
+        self.assertEqual(poliza.estatus, Poliza.PolizaStatus.CONTABILIZADA.value)
+
+    def test_poliza_cancelar_cambia_estatus(self):
+        cargo, abono, centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+        client = self._client(self.a["usuario"])
+        creada = self._poliza_cuadrada(client, centro_costo, cargo, abono)
+
+        resp = client.post(f"{POLIZAS_URL}{creada.data['id']}/cancelar/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        poliza = Poliza.objects.get(pk=creada.data["id"])
+        self.assertEqual(poliza.estatus, Poliza.PolizaStatus.CANCELADA.value)
+
+    # == 4 y 6. Reglas de negocio: 400 con cuerpo en forma de lista ==========
+    # Blinda: ErroresDeNegocioComo400Mixin + ErrorDeNegocio en los servicios.
+    # Sin la traducción, la ValidationError de Django escapa como 500.
+
+    def test_cobro_importe_mayor_al_saldo_devuelve_400(self):
+        cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
+        cxc = self._cxc("100.00")
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            COBROS_URL,
+            {
+                "cliente": self.a["cliente"].pk,
+                "cuenta_bancaria": cuenta_bancaria.pk,
+                "total_cobrado": "500.00",
+                "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "500.00"}],
+            },
+            format="json",
+        )
+        self._asserta_error_de_campo(resp, "cobro_detalles", "excede saldo")
+        self.assertEqual(Cobro.objects.count(), 0)
+
+    def test_cobro_suma_distinta_al_total_devuelve_400(self):
+        cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
+        cxc = self._cxc("100.00")
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            COBROS_URL,
+            {
+                "cliente": self.a["cliente"].pk,
+                "cuenta_bancaria": cuenta_bancaria.pk,
+                "total_cobrado": "100.00",
+                "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "50.00"}],
+            },
+            format="json",
+        )
+        self._asserta_error_de_campo(resp, "total_cobrado", "debe coincidir con total_cobrado")
+
+    def test_pago_sin_lineas_devuelve_400(self):
+        cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
+        proveedor, _ = self._cxp(self.a)
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            PAGOS_URL,
+            {
+                "proveedor": proveedor.pk,
+                "cuenta_bancaria": cuenta_bancaria.pk,
+                "total_pagado": "100.00",
+            },
+            format="json",
+        )
+        self._asserta_error_de_campo(resp, "pago_detalles", "al menos un detalle")
+        self.assertEqual(Pago.objects.count(), 0)
+
+    def test_contabilizar_poliza_descuadrada_devuelve_400(self):
+        cargo, _, centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+        client = self._client(self.a["usuario"])
+        creada = client.post(
+            POLIZAS_URL,
+            {
+                "sucursal": self.a["sucursal"].pk,
+                "centro_costo": centro_costo.pk,
+                "poliza_detalles": [{"cuenta_contable": cargo.pk, "cargo": "100.00", "abono": "0.00"}],
+            },
+            format="json",
+        )
+        self.assertEqual(creada.status_code, 201, creada.data)
+
+        resp = client.post(f"{POLIZAS_URL}{creada.data['id']}/contabilizar/", {}, format="json")
+
+        self._asserta_error_de_campo(resp, "poliza_detalles", "debe ser igual a la")
+        poliza = Poliza.objects.get(pk=creada.data["id"])
+        self.assertEqual(poliza.estatus, Poliza.PolizaStatus.BORRADOR.value)
+
+    def test_validacion_del_viewset_tambien_viene_en_lista(self):
+        """Las dos fuentes de error —viewset y servicio— comparten forma."""
+        _, _, centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+        cuenta_ajena, _, _ = self._crear_cuentas_contables(self.b["empresa"])
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            POLIZAS_URL,
+            {
+                "sucursal": self.a["sucursal"].pk,
+                "centro_costo": centro_costo.pk,
+                "poliza_detalles": [{"cuenta_contable": cuenta_ajena.pk, "cargo": "100.00"}],
+            },
+            format="json",
+        )
+        self._asserta_error_de_campo(resp, "cuenta_contable", "no pertenece a la misma empresa")
+
+    # == 5 y 9. El estrechamiento y la cobertura por construcción ============
+    # Blinda: ``isinstance(exc, ErrorDeNegocio)`` en el mixin y las bases
+    # FinanzasBase*ViewSet. No hay endpoint que levante una ValidationError de
+    # Django no-de-negocio sin añadir código de producción, así que el
+    # estrechamiento se prueba en la propia frontera.
+
+    def test_mixin_convierte_error_de_negocio_a_400(self):
+        viewset = CobroViewSet()
+        viewset.headers = {}
+
+        resp = viewset.handle_exception(
+            ErrorDeNegocio({"cobro_detalles": ["Importe excede saldo."]})
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("cobro_detalles", resp.data)
+        self.assertIsInstance(resp.data["cobro_detalles"], list)
+
+    def test_mixin_deja_pasar_la_validation_error_de_django(self):
+        viewset = CobroViewSet()
+        viewset.headers = {}
+
+        with self.assertRaises(DjangoValidationError):
+            viewset.handle_exception(
+                DjangoValidationError({"campo": ["Dato corrupto en base."]})
+            )
+
+    def test_todos_los_viewsets_de_finanzas_traducen_el_error_de_negocio(self):
+        # Se filtra por herencia y no por sufijo del nombre: hay viewsets que no
+        # terminan en "ViewSet" (``ClienteViewSetContabilidad``) y un filtro por
+        # nombre los dejaría fuera del barrido sin avisar.
+        # ``dict.fromkeys`` deduplica: ``ClienteViewSet`` es un alias de
+        # ``ClienteViewSetContabilidad`` y ``getmembers`` lo devuelve dos veces.
+        viewsets_finanzas = list(dict.fromkeys(
+            clase
+            for _, clase in inspect.getmembers(finanzas_views, inspect.isclass)
+            if clase.__module__ == finanzas_views.__name__
+            and issubclass(clase, ViewSetMixin)
+            and not clase.__name__.startswith("FinanzasBase")
+        ))
+        self.assertEqual(len(viewsets_finanzas), 17, sorted(c.__name__ for c in viewsets_finanzas))
+        sin_cubrir = [
+            c.__name__ for c in viewsets_finanzas
+            if not issubclass(c, ErroresDeNegocioComo400Mixin)
+        ]
+        self.assertEqual(sin_cubrir, [])
+
+    def test_un_viewset_sin_servicios_tambien_traduce(self):
+        """FacturaProveedorViewSet no llevaba el mixin antes de las bases."""
+        viewset = FacturaProveedorViewSet()
+        viewset.headers = {}
+
+        resp = viewset.handle_exception(ErrorDeNegocio({"oc": ["Regla de negocio."]}))
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("oc", resp.data)
+
+    # == 7. Tenencia por línea: 400 y CERO filas =============================
+    # Blinda: ``@transaction.atomic`` en PolizaViewSet.perform_create y en
+    # FacturaProveedorViewSet.perform_create. Sin él el encabezado ya está
+    # confirmado y queda huérfano pese al 400.
+
+    def test_poliza_con_linea_ajena_no_deja_encabezado_huerfano(self):
+        _, _, centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+        cuenta_ajena, _, _ = self._crear_cuentas_contables(self.b["empresa"])
+        client = self._client(self.a["usuario"])
+        polizas_antes = Poliza.objects.count()
+
+        resp = client.post(
+            POLIZAS_URL,
+            {
+                "sucursal": self.a["sucursal"].pk,
+                "centro_costo": centro_costo.pk,
+                "poliza_detalles": [{"cuenta_contable": cuenta_ajena.pk, "cargo": "100.00"}],
+            },
+            format="json",
+        )
+
+        self._asserta_error_de_campo(resp, "cuenta_contable")
+        self.assertEqual(Poliza.objects.count(), polizas_antes)
+        self.assertEqual(PolizaDetalle.objects.count(), 0)
+
+    def test_poliza_con_segunda_linea_ajena_revierte_la_primera(self):
+        cargo, _, centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+        cuenta_ajena, _, _ = self._crear_cuentas_contables(self.b["empresa"])
+        client = self._client(self.a["usuario"])
+        polizas_antes = Poliza.objects.count()
+
+        resp = client.post(
+            POLIZAS_URL,
+            {
+                "sucursal": self.a["sucursal"].pk,
+                "centro_costo": centro_costo.pk,
+                "poliza_detalles": [
+                    {"cuenta_contable": cargo.pk, "cargo": "100.00", "abono": "0.00"},
+                    {"cuenta_contable": cuenta_ajena.pk, "cargo": "0.00", "abono": "100.00"},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(Poliza.objects.count(), polizas_antes)
+        self.assertEqual(PolizaDetalle.objects.count(), 0)
+
+    def test_factura_proveedor_con_linea_invalida_no_deja_encabezado_huerfano(self):
+        (
+            proveedor, _, oc, oc_detalle, recepcion, recepcion_detalle, _,
+        ) = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"],
+        )
+        producto_ajeno = Producto.objects.create(empresa=self.b["empresa"], nombre="Insumo ajeno")
+        client = self._client(self.a["usuario"])
+        facturas_antes = FacturaProveedor.objects.count()
+
+        resp = client.post(
+            FACTURAS_PROVEEDOR_URL,
+            {
+                "sucursal": self.a["sucursal"].pk,
+                "proveedor": proveedor.pk,
+                "oc": oc.pk,
+                "recepcion": recepcion.pk,
+                "moneda": self.moneda.pk,
+                "folio": "FP-HUERFANA",
+                "factura_proveedor_detalles": [
+                    {
+                        "oc_detalle": oc_detalle.pk,
+                        "recepcion_detalle": recepcion_detalle.pk,
+                        "producto": producto_ajeno.pk,
+                        "cantidad": "1.00",
+                    },
+                ],
+            },
+            format="json",
+        )
+
+        self._asserta_error_de_campo(resp, "producto", "no pertenece a la misma empresa")
+        self.assertEqual(FacturaProveedor.objects.count(), facturas_antes)
+        self.assertFalse(FacturaProveedor.objects.filter(folio="FP-HUERFANA").exists())
+
+    def test_pago_con_cxp_de_otra_empresa_se_rechaza(self):
+        cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
+        proveedor_propio, _ = self._cxp(self.a)
+        _, cxp_ajena = self._cxp(self.b)
+        client = self._client(self.a["usuario"])
+        pagos_antes = Pago.objects.count()
+
+        resp = client.post(
+            PAGOS_URL,
+            {
+                "proveedor": proveedor_propio.pk,
+                "cuenta_bancaria": cuenta_bancaria.pk,
+                "total_pagado": "100.00",
+                "estatus": Pago.Estatus.BORRADOR.value,
+                "pago_detalles": [{"cxp": cxp_ajena.pk, "importe_aplicado": "100.00"}],
+            },
+            format="json",
+        )
+
+        self._asserta_error_de_campo(resp, "pago_detalles", "no pertenece a la misma empresa")
+        self.assertEqual(Pago.objects.count(), pagos_antes)
+
+    # == 8. ``empresa`` la resuelve el servidor ==============================
+    # Blinda: EmpresaResueltaEnServidorMixin.
+
+    def test_usuario_normal_no_manda_empresa_y_cae_en_la_suya(self):
+        cargo, _, centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            POLIZAS_URL,
+            {
+                "sucursal": self.a["sucursal"].pk,
+                "centro_costo": centro_costo.pk,
+                "poliza_detalles": [{"cuenta_contable": cargo.pk, "cargo": "1.00"}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(pk=resp.data["id"])
+        self.assertEqual(poliza.empresa_id, self.a["empresa"].pk)
+
+    def test_empresa_ajena_en_el_payload_se_ignora(self):
+        cargo, _, centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+        client = self._client(self.admin_empresa)
+
+        resp = client.post(
+            POLIZAS_URL,
+            {
+                "empresa": self.b["empresa"].pk,
+                "sucursal": self.a["sucursal"].pk,
+                "centro_costo": centro_costo.pk,
+                "poliza_detalles": [{"cuenta_contable": cargo.pk, "cargo": "1.00"}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(pk=resp.data["id"])
+        self.assertEqual(poliza.empresa_id, self.a["empresa"].pk)
+        self.assertFalse(Poliza.objects.filter(empresa=self.b["empresa"]).exists())
+
+    def test_superusuario_si_manda_empresa_explicita(self):
+        cargo, _, centro_costo = self._crear_cuentas_contables(self.b["empresa"])
+        client = self._client(self.superusuario)
+
+        resp = client.post(
+            POLIZAS_URL,
+            {
+                "empresa": self.b["empresa"].pk,
+                "sucursal": self.b["sucursal"].pk,
+                "centro_costo": centro_costo.pk,
+                "poliza_detalles": [{"cuenta_contable": cargo.pk, "cargo": "1.00"}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(pk=resp.data["id"])
+        self.assertEqual(poliza.empresa_id, self.b["empresa"].pk)
+
+    def test_patch_no_reasigna_la_empresa(self):
+        _, _, centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+        poliza = Poliza.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], centro_costo=centro_costo,
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.patch(
+            f"{POLIZAS_URL}{poliza.pk}/",
+            {"empresa": self.b["empresa"].pk, "concepto": "editado"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        poliza.refresh_from_db()
+        self.assertEqual(poliza.empresa_id, self.a["empresa"].pk)
+        self.assertEqual(poliza.concepto, "editado")
