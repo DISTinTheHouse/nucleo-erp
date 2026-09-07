@@ -45,7 +45,9 @@ class PolizaService:
             )
         PolizaService.validar_suma_cero(poliza)
         poliza.estatus = Poliza.PolizaStatus.CONTABILIZADA
-        poliza.save(update_fields=["estatus", "updated_at"])
+        # ``Poliza`` no tiene ``updated_at``: incluirlo en ``update_fields``
+        # reventaba con ValueError y dejaba la póliza atrapada en Borrador.
+        poliza.save(update_fields=["estatus"])
 
     @staticmethod
     @transaction.atomic
@@ -53,4 +55,5 @@ class PolizaService:
         if poliza.estatus == Poliza.PolizaStatus.CANCELADA:
             return
         poliza.estatus = Poliza.PolizaStatus.CANCELADA
-        poliza.save(update_fields=["estatus", "updated_at"])
+        # Mismo motivo que en ``contabilizar``: el modelo no tiene ``updated_at``.
+        poliza.save(update_fields=["estatus"])
