@@ -1,11 +1,13 @@
 from decimal import Decimal
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.fields import get_error_detail
 from rest_framework.response import Response
 
 from finanzas.models import (
@@ -204,6 +206,36 @@ def _validate_related_parent_empresa(related_obj, field_name, parent_empresa):
         )
 
 
+class ErroresDeNegocioComo400Mixin:
+    """Traduce la ``ValidationError`` de Django que lanzan los servicios a la de DRF.
+
+    Los siete servicios de ``finanzas`` levantan
+    ``django.core.exceptions.ValidationError`` —correcto: deben seguir siendo
+    agnósticos del framework—, pero DRF no la conoce y la dejaba escapar como un
+    500. El resultado era que cada regla de negocio violada (importe que excede
+    el saldo, pago sin detalle, póliza descuadrada) llegaba al frontend como un
+    error opaco. Antes del alta de líneas anidadas esos caminos eran
+    inalcanzables; ahora son de uso diario.
+
+    Se traduce aquí, en la frontera HTTP de finanzas, y no con un
+    ``EXCEPTION_HANDLER`` global, para no cambiar el comportamiento de las demás
+    apps. Va en ``handle_exception`` y no en cada ``perform_*`` porque cubre de
+    una sola vez las ~20 llamadas a servicios repartidas entre ``perform_create``,
+    ``perform_update``, ``perform_destroy`` y las acciones ``@action``, sin que
+    una ruta nueva se quede fuera por olvido.
+
+    Se conserva la forma del mensaje: los servicios lanzan diccionarios como
+    ``{"cobro_detalles": [...]}`` y así llegan al cliente, que puede mapear el
+    error a su campo. La conversión la hace ``get_error_detail`` de DRF, que
+    además preserva el ``code`` de cada error e interpola sus ``params``.
+    """
+
+    def handle_exception(self, exc):
+        if isinstance(exc, DjangoValidationError):
+            exc = ValidationError(get_error_detail(exc))
+        return super().handle_exception(exc)
+
+
 def _aplicar_filtros_fecha(qs, params, fecha_campo="fecha"):
     fi = params.get("fecha_inicio") or params.get("fecha_desde")
     ff = params.get("fecha_fin") or params.get("fecha_hasta")
@@ -330,7 +362,7 @@ class CuentaPorCobrarViewSet(viewsets.ModelViewSet):
             serializer.save(empresa=emp)
 
 
-class FacturaViewSet(viewsets.ModelViewSet):
+class FacturaViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
     serializer_class = FacturaSerializer
     http_method_names = ['delete', 'get', 'post', 'put', 'patch']
 
@@ -910,7 +942,7 @@ class CentroCostoViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class PolizaViewSet(viewsets.ModelViewSet):
+class PolizaViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
     queryset = Poliza.objects.all()
     serializer_class = PolizaSerializer
 
@@ -1151,7 +1183,7 @@ class BancoViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class CuentaBancariaViewSet(viewsets.ModelViewSet):
+class CuentaBancariaViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
     queryset = CuentaBancaria.objects.all()
     serializer_class = CuentaBancariaSerializer
 
@@ -1286,7 +1318,7 @@ class CuentaPorPagarViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class CobroViewSet(viewsets.ModelViewSet):
+class CobroViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
     queryset = Cobro.objects.all()
     serializer_class = CobroSerializer
 
@@ -1387,7 +1419,7 @@ class CobroViewSet(viewsets.ModelViewSet):
         return Response(CobroSerializer(cobro).data)
 
 
-class PagoViewSet(viewsets.ModelViewSet):
+class PagoViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
     queryset = Pago.objects.all()
     serializer_class = PagoSerializer
 
@@ -1485,7 +1517,7 @@ class PagoViewSet(viewsets.ModelViewSet):
         return Response(PagoSerializer(pago).data)
 
 
-class MovimientoBancarioViewSet(viewsets.ModelViewSet):
+class MovimientoBancarioViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
     queryset = MovimientoBancario.objects.all()
     serializer_class = MovimientoBancarioSerializer
 
@@ -1579,7 +1611,7 @@ class MovimientoBancarioViewSet(viewsets.ModelViewSet):
         return Response(MovimientoBancarioSerializer(mb).data)
 
 
-class ConciliacionBancariaViewSet(viewsets.ModelViewSet):
+class ConciliacionBancariaViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
     queryset = ConciliacionBancaria.objects.all()
     serializer_class = ConciliacionBancariaSerializer
 
@@ -1704,7 +1736,7 @@ class ConciliacionBancariaViewSet(viewsets.ModelViewSet):
         return Response(ConciliacionBancariaSerializer(conciliacion).data)
 
 
-class NotaCreditoViewSet(viewsets.ModelViewSet):
+class NotaCreditoViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
     queryset = NotaCredito.objects.all()
     serializer_class = NotaCreditoSerializer
 
@@ -1802,7 +1834,7 @@ class NotaCreditoViewSet(viewsets.ModelViewSet):
         return Response(NotaCreditoSerializer(nota).data)
 
 
-class AlertaMoraViewSet(viewsets.ReadOnlyModelViewSet):
+class AlertaMoraViewSet(ErroresDeNegocioComo400Mixin, viewsets.ReadOnlyModelViewSet):
     queryset = AlertaMora.objects.all()
     serializer_class = AlertaMoraSerializer
 
@@ -1855,7 +1887,7 @@ class AlertaMoraViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({"alertas_generadas": total})
 
 
-class DashboardFinancieroViewSet(viewsets.ViewSet):
+class DashboardFinancieroViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
     http_method_names = ["get"]
 
     def list(self, request):
