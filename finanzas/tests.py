@@ -1513,3 +1513,132 @@ class Defecto7ErroresDeNegocioYTransacciones(FinanzasBase):
         poliza.refresh_from_db()
         self.assertEqual(poliza.empresa_id, self.a["empresa"].pk)
         self.assertEqual(poliza.concepto, "editado")
+
+
+class Defecto8NotaCreditoCancelarRevierteCxC(FinanzasBase):
+    """Cancelar una nota de crédito emitida devuelve el importe a la CxC.
+
+    Antes, ``cancelar`` sólo cambiaba el estatus: el saldo de la CxC quedaba
+    rebajado para siempre. Cobro y Pago sí revierten al cancelar.
+    """
+
+    def _factura_con_cxc(self, total="1000.00"):
+        empresa = self.a["empresa"]
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"],
+            cliente=self.a["cliente"], moneda=self.moneda, total=Decimal(total),
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=empresa, cliente=self.a["cliente"], factura=factura,
+            total=Decimal(total), saldo=Decimal(total),
+        )
+        return factura, cxc
+
+    def test_cancelar_nota_emitida_devuelve_el_saldo_y_recalcula_estatus(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            NOTAS_CREDITO_URL,
+            {
+                "factura": factura.pk, "cliente": self.a["cliente"].pk,
+                "estatus": NotaCredito.Estatus.EMITIDA.value, "total": "250.00",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        nota_id = resp.data["id"]
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PARCIAL)
+
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["estatus"], NotaCredito.Estatus.CANCELADA.value)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
+
+    def test_cancelar_nota_que_dejo_la_cxc_pagada_la_regresa_a_pendiente(self):
+        factura, cxc = self._factura_con_cxc("500.00")
+        client = self._client(self.a["usuario"])
+        resp = client.post(
+            NOTAS_CREDITO_URL,
+            {
+                "factura": factura.pk, "cliente": self.a["cliente"].pk,
+                "estatus": NotaCredito.Estatus.EMITIDA.value, "total": "500.00",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("0.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PAGADA)
+
+        client.post(f"{NOTAS_CREDITO_URL}{resp.data['id']}/cancelar/", {}, format="json")
+
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("500.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
+
+    def test_cancelar_nota_en_borrador_no_acredita_nada(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"], total=Decimal("300.00"),
+            estatus=NotaCredito.Estatus.BORRADOR.value,
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        nota.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.CANCELADA.value)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
+
+    def test_cancelar_dos_veces_no_revierte_dos_veces(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+        client = self._client(self.a["usuario"])
+        resp = client.post(
+            NOTAS_CREDITO_URL,
+            {
+                "factura": factura.pk, "cliente": self.a["cliente"].pk,
+                "estatus": NotaCredito.Estatus.EMITIDA.value, "total": "400.00",
+            },
+            format="json",
+        )
+        nota_id = resp.data["id"]
+        client.post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/", {}, format="json")
+
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+
+    def test_cancelar_nota_de_otra_empresa_sigue_fuera_de_alcance(self):
+        empresa_b = self.b["empresa"]
+        factura = Factura.objects.create(
+            empresa=empresa_b, sucursal=self.b["sucursal"],
+            cliente=self.b["cliente"], moneda=self.moneda, total=Decimal("100.00"),
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=empresa_b, cliente=self.b["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+        nota = NotaCredito.objects.create(
+            factura=factura, cliente=self.b["cliente"], total=Decimal("100.00"),
+            estatus=NotaCredito.Estatus.EMITIDA.value,
+        )
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 404)
+        nota.refresh_from_db()
+        cxc.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.EMITIDA.value)
+        self.assertEqual(cxc.saldo, Decimal("100.00"))

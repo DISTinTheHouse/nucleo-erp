@@ -1852,10 +1852,8 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         nota = self.get_object()
-        if nota.estatus == NotaCredito.Estatus.CANCELADA:
-            return Response(NotaCreditoSerializer(nota).data)
-        nota.estatus = NotaCredito.Estatus.CANCELADA
-        nota.save()
+        with transaction.atomic():
+            NotaCreditoService.cancelar_nota_credito(nota)
         return Response(NotaCreditoSerializer(nota).data)
 
 
