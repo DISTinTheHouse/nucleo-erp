@@ -11,7 +11,7 @@ semántica del lock.
 """
 
 import inspect
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -1641,4 +1641,128 @@ class Defecto8NotaCreditoCancelarRevierteCxC(FinanzasBase):
         nota.refresh_from_db()
         cxc.refresh_from_db()
         self.assertEqual(nota.estatus, NotaCredito.Estatus.EMITIDA.value)
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+
+
+class Defecto9NotaCreditoFechaEmisionYCxCFaltante(FinanzasBase):
+    """``fecha_emision`` deja de moverse y emitir sin CxC deja de pasar en silencio.
+
+    ``fecha_emision`` era ``auto_now``: cancelar la nota la reescribía al día
+    de hoy. Y ``aplicar_nota_credito`` hacía ``return`` cuando la factura no
+    tenía CxC, así que la emisión respondía 201 sin acreditar nada.
+    """
+
+    def _factura(self, total="1000.00"):
+        return Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"],
+            cliente=self.a["cliente"], moneda=self.moneda, total=Decimal(total),
+        )
+
+    def _factura_con_cxc(self, total="1000.00"):
+        factura = self._factura(total)
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+            total=Decimal(total), saldo=Decimal(total),
+        )
+        return factura, cxc
+
+    def _emitir(self, client, factura, total):
+        return client.post(
+            NOTAS_CREDITO_URL,
+            {
+                "factura": factura.pk, "cliente": self.a["cliente"].pk,
+                "estatus": NotaCredito.Estatus.EMITIDA.value, "total": total,
+            },
+            format="json",
+        )
+
+    def test_fecha_emision_se_estampa_al_emitir(self):
+        factura, _ = self._factura_con_cxc()
+        resp = self._emitir(self._client(self.a["usuario"]), factura, "100.00")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        nota = NotaCredito.objects.get(pk=resp.data["id"])
+        self.assertEqual(nota.fecha_emision, timezone.localdate())
+
+    def test_cancelar_no_mueve_la_fecha_de_emision(self):
+        factura, _ = self._factura_con_cxc()
+        client = self._client(self.a["usuario"])
+        resp = self._emitir(client, factura, "100.00")
+        nota = NotaCredito.objects.get(pk=resp.data["id"])
+        # La nota se emitió hace un mes; ``auto_now`` reescribía este valor en
+        # cada save(), incluido el de cancelar.
+        ayer = timezone.localdate() - timedelta(days=30)
+        NotaCredito.objects.filter(pk=nota.pk).update(fecha_emision=ayer)
+
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        nota.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.CANCELADA.value)
+        self.assertEqual(nota.fecha_emision, ayer)
+
+    def test_editar_una_nota_no_mueve_la_fecha_de_emision(self):
+        factura = self._factura()
+        nota = NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"], total=Decimal("50.00"),
+            estatus=NotaCredito.Estatus.BORRADOR.value, motivo="antes",
+        )
+        ayer = timezone.localdate() - timedelta(days=30)
+        NotaCredito.objects.filter(pk=nota.pk).update(fecha_emision=ayer)
+
+        resp = self._client(self.a["usuario"]).patch(
+            f"{NOTAS_CREDITO_URL}{nota.pk}/", {"motivo": "despues"}, format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        nota.refresh_from_db()
+        self.assertEqual(nota.motivo, "despues")
+        self.assertEqual(nota.fecha_emision, ayer)
+
+    def test_emitir_sin_cxc_es_rechazado(self):
+        factura = self._factura()
+
+        resp = self._emitir(self._client(self.a["usuario"]), factura, "100.00")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("factura", resp.data)
+        self.assertIsInstance(resp.data["factura"], list)
+        self.assertEqual(NotaCredito.objects.count(), 0)
+
+    def test_patch_a_emitida_sin_cxc_es_rechazado(self):
+        factura = self._factura()
+        nota = NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"], total=Decimal("100.00"),
+            estatus=NotaCredito.Estatus.BORRADOR.value,
+        )
+
+        resp = self._client(self.a["usuario"]).patch(
+            f"{NOTAS_CREDITO_URL}{nota.pk}/",
+            {"estatus": NotaCredito.Estatus.EMITIDA.value},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["factura"], list)
+        nota.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.BORRADOR.value)
+
+    def test_emitir_con_cxc_sigue_aplicando(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+
+        resp = self._emitir(self._client(self.a["usuario"]), factura, "400.00")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("600.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PARCIAL)
+
+    def test_emitir_por_encima_del_saldo_sigue_rechazado(self):
+        factura, cxc = self._factura_con_cxc("100.00")
+
+        resp = self._emitir(self._client(self.a["usuario"]), factura, "999.00")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["total"], list)
+        cxc.refresh_from_db()
         self.assertEqual(cxc.saldo, Decimal("100.00"))
