@@ -21,7 +21,16 @@ class NotaCreditoService:
             .first()
         )
         if cxc is None:
-            return
+            # Sin CxC no hay nada que acreditar: emitir devolvía 201 y dejaba la
+            # nota como Emitida sin haber aplicado nada.
+            raise ErrorDeNegocio(
+                {
+                    "factura": (
+                        "La factura de la nota no tiene una cuenta por cobrar; "
+                        "no hay saldo al cual aplicar el crédito."
+                    )
+                }
+            )
         total_nc = Decimal(str(nota.total or 0))
         if total_nc <= 0:
             return

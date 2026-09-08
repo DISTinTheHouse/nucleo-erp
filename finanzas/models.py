@@ -530,7 +530,10 @@ class NotaCredito(models.Model):
 
     factura = models.ForeignKey(Factura, on_delete=models.CASCADE, related_name="nota_creditos")
     cliente = models.ForeignKey('terceros.Cliente', on_delete=models.CASCADE, related_name="nota_creditos")
-    fecha_emision = models.DateField(auto_now=True, null=True, blank=True)
+    # Fecha de emisión: se fija al crear. Con ``auto_now`` se reescribía en cada
+    # save(), así que cancelar la nota la movía al día de hoy. Mismo arreglo que
+    # en ``Factura``/``FacturaProveedor``.
+    fecha_emision = models.DateField(auto_now_add=True, null=True, blank=True)
     folio = models.CharField(max_length=30, null=True, blank=True)
     motivo = models.CharField(max_length=255, null=True, blank=True)
     subtotal = models.DecimalField(max_digits=18, decimal_places=2, default=0)
