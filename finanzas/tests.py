@@ -13,6 +13,7 @@ semántica del lock.
 import inspect
 from datetime import date, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import TestCase
@@ -28,6 +29,7 @@ from finanzas.api.views import (
     CobroViewSet,
     ErroresDeNegocioComo400Mixin,
     FacturaProveedorViewSet,
+    NotaCreditoViewSet,
 )
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import (
@@ -1766,3 +1768,479 @@ class Defecto9NotaCreditoFechaEmisionYCxCFaltante(FinanzasBase):
         self.assertIsInstance(resp.data["total"], list)
         cxc.refresh_from_db()
         self.assertEqual(cxc.saldo, Decimal("100.00"))
+
+
+class Defecto10NotaCreditoDobleAplicacionConcurrente(FinanzasBase):
+    """Emitir/cancelar la misma nota dos veces a la vez ya no duplica el crédito.
+
+    ``perform_update`` leía el estatus previo (``anterior``) del objeto cargado
+    fuera de cualquier lock, y ``cancelar_nota_credito`` evaluaba su guard de
+    doble cancelación igual. Dos peticiones simultáneas (dos pestañas, un
+    reintento, la API directa) leían ambas el estado viejo, concluían las dos
+    que eran la primera y aplicaban/revertían el importe dos veces sobre la CxC.
+
+    Ahora la fila de la nota se bloquea (``select_for_update``) *antes* de leer
+    el estatus que decide, en el mismo orden nota -> CxC que ya usaba el
+    servicio, así que la segunda petición espera y ve el estado ya cambiado.
+
+    Limitación de estos tests: SQLite ignora ``select_for_update()``, así que no
+    se puede reproducir la carrera con hilos reales. Se simula de forma
+    determinista lo único que el lock arregla —la lectura obsoleta— haciendo que
+    la segunda petición entre con la instancia que cargó *antes* de que la
+    primera confirmara. Con el código anterior estos tests fallan (el saldo se
+    mueve dos veces); con el lock la relectura ve el estado real.
+    """
+
+    def _factura_con_cxc(self, total="1000.00"):
+        empresa = self.a["empresa"]
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"],
+            cliente=self.a["cliente"], moneda=self.moneda, total=Decimal(total),
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=empresa, cliente=self.a["cliente"], factura=factura,
+            total=Decimal(total), saldo=Decimal(total),
+        )
+        return factura, cxc
+
+    def _nota_borrador(self, factura, total="250.00"):
+        return NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"], total=Decimal(total),
+            estatus=NotaCredito.Estatus.BORRADOR.value,
+        )
+
+    def _emitir(self, client, nota):
+        return client.patch(
+            f"{NOTAS_CREDITO_URL}{nota.pk}/",
+            {"estatus": NotaCredito.Estatus.EMITIDA.value},
+            format="json",
+        )
+
+    def test_emitir_dos_veces_seguidas_no_aplica_el_credito_dos_veces(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        client = self._client(self.a["usuario"])
+
+        resp = self._emitir(client, nota)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        saldo_tras_la_primera = cxc.saldo
+        self.assertEqual(saldo_tras_la_primera, Decimal("750.00"))
+
+        resp = self._emitir(client, nota)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, saldo_tras_la_primera)
+
+    def test_emision_concurrente_simulada_no_aplica_el_credito_dos_veces(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        client = self._client(self.a["usuario"])
+        # Instancia tal como la cargó la petición B antes de que A confirmara:
+        # para ella la nota sigue en Borrador.
+        obsoleta = NotaCredito.objects.get(pk=nota.pk)
+        self.assertEqual(obsoleta.estatus, NotaCredito.Estatus.BORRADOR.value)
+
+        self.assertEqual(self._emitir(client, nota).status_code, 200)
+        cxc.refresh_from_db()
+        saldo_tras_la_primera = cxc.saldo
+        self.assertEqual(saldo_tras_la_primera, Decimal("750.00"))
+
+        with patch.object(NotaCreditoViewSet, "get_object", return_value=obsoleta):
+            resp = self._emitir(client, nota)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, saldo_tras_la_primera)
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PARCIAL)
+        nota.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.EMITIDA.value)
+
+    def test_cancelacion_concurrente_simulada_no_revierte_dos_veces(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        client = self._client(self.a["usuario"])
+        self.assertEqual(self._emitir(client, nota).status_code, 200)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+        # Instancia de la petición B: cargada cuando la nota aún estaba Emitida.
+        obsoleta = NotaCredito.objects.get(pk=nota.pk)
+        self.assertEqual(obsoleta.estatus, NotaCredito.Estatus.EMITIDA.value)
+
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        saldo_tras_la_primera = cxc.saldo
+        self.assertEqual(saldo_tras_la_primera, Decimal("1000.00"))
+
+        with patch.object(NotaCreditoViewSet, "get_object", return_value=obsoleta):
+            resp = client.post(
+                f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json",
+            )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["estatus"], NotaCredito.Estatus.CANCELADA.value)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, saldo_tras_la_primera)
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
+
+    def test_emision_y_cancelacion_normales_no_cambian(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        ayer = timezone.localdate() - timedelta(days=30)
+        NotaCredito.objects.filter(pk=nota.pk).update(fecha_emision=ayer)
+        client = self._client(self.a["usuario"])
+
+        resp = self._emitir(client, nota)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PARCIAL)
+
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+        nota.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.CANCELADA.value)
+        self.assertEqual(nota.fecha_emision, ayer)
+
+    def test_el_lock_no_afecta_al_rechazo_por_total_mayor_al_saldo(self):
+        factura, cxc = self._factura_con_cxc("100.00")
+        nota = self._nota_borrador(factura, "300.00")
+
+        resp = self._emitir(self._client(self.a["usuario"]), nota)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("total", resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+        nota.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.BORRADOR.value)
+
+    def test_emitir_una_nota_borrada_a_la_vez_responde_404_y_no_la_resucita(self):
+        # Si la fila desaparece entre get_object() y el lock, continuar con la
+        # instancia obsoleta hacía que save() la reinsertara con el mismo pk
+        # (UPDATE de 0 filas -> INSERT) y aplicara el crédito igualmente.
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        obsoleta = NotaCredito.objects.get(pk=nota.pk)
+        NotaCredito.objects.filter(pk=nota.pk).delete()
+
+        with patch.object(NotaCreditoViewSet, "get_object", return_value=obsoleta):
+            resp = self._emitir(self._client(self.a["usuario"]), nota)
+
+        self.assertEqual(resp.status_code, 404, resp.data)
+        self.assertEqual(NotaCredito.objects.count(), 0)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+
+    def test_cancelar_una_nota_borrada_a_la_vez_responde_404(self):
+        # El servicio salía en silencio y la vista respondía 200 serializando el
+        # objeto en memoria: el cliente veía éxito sin cancelación ni devolución.
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        client = self._client(self.a["usuario"])
+        self.assertEqual(self._emitir(client, nota).status_code, 200)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+        obsoleta = NotaCredito.objects.get(pk=nota.pk)
+        NotaCredito.objects.filter(pk=nota.pk).delete()
+
+        with patch.object(NotaCreditoViewSet, "get_object", return_value=obsoleta):
+            resp = client.post(
+                f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json",
+            )
+
+        self.assertEqual(resp.status_code, 404, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+
+    def test_editar_una_nota_de_otra_empresa_sigue_fuera_de_alcance(self):
+        factura = Factura.objects.create(
+            empresa=self.b["empresa"], sucursal=self.b["sucursal"],
+            cliente=self.b["cliente"], moneda=self.moneda, total=Decimal("100.00"),
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=self.b["empresa"], cliente=self.b["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+        nota = NotaCredito.objects.create(
+            factura=factura, cliente=self.b["cliente"], total=Decimal("50.00"),
+            estatus=NotaCredito.Estatus.BORRADOR.value,
+        )
+
+        resp = self._emitir(self._client(self.a["usuario"]), nota)
+
+        self.assertEqual(resp.status_code, 404)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+        nota.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.BORRADOR.value)
+
+
+class Defecto11NotaCreditoTransicionesDeEstatus(FinanzasBase):
+    """El ``estatus`` deja de ser un campo que el cliente pueda mover a mano.
+
+    ``estatus`` es escribible (``fields = "__all__"``) y ``perform_update`` sólo
+    bloqueaba editar una nota ya Cancelada, así que dos rutas SECUENCIALES —que
+    el lock de concurrencia no cubre— corrompían el saldo de la CxC:
+
+    * ``Emitida -> Borrador`` no revertía nada, y la siguiente emisión volvía a
+      descontar el total: la misma doble aplicación, sin concurrencia.
+    * ``PATCH estatus="Cancelada"`` cancelaba saltándose
+      ``cancelar_nota_credito``, así que el importe nunca regresaba a la CxC, y
+      encima dejaba la nota inservible (ya no se puede editar por cancelada y la
+      acción ``cancelar`` sale por su guard de doble cancelación).
+
+    Y ``perform_destroy`` leía el estatus fuera de todo bloqueo y sin
+    transacción: un borrado concurrente con una emisión borraba el documento y
+    dejaba la CxC rebajada sin nada que lo respalde.
+
+    Ninguna de las dos transiciones malas es alcanzable desde la UI (sólo manda
+    ``PATCH {estatus: "Emitida"}`` sobre borradores), así que estos 400 son un
+    blindaje del API, no un cambio visible en el flujo del usuario.
+    """
+
+    def _factura_con_cxc(self, total="1000.00"):
+        empresa = self.a["empresa"]
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"],
+            cliente=self.a["cliente"], moneda=self.moneda, total=Decimal(total),
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=empresa, cliente=self.a["cliente"], factura=factura,
+            total=Decimal(total), saldo=Decimal(total),
+        )
+        return factura, cxc
+
+    def _nota_borrador(self, factura, total="250.00"):
+        return NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"], total=Decimal(total),
+            estatus=NotaCredito.Estatus.BORRADOR.value, motivo="antes",
+        )
+
+    def _patch_estatus(self, client, nota, estatus):
+        return client.patch(
+            f"{NOTAS_CREDITO_URL}{nota.pk}/", {"estatus": estatus}, format="json",
+        )
+
+    def test_bajar_una_nota_emitida_a_borrador_es_rechazado(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        client = self._client(self.a["usuario"])
+        self._patch_estatus(client, nota, NotaCredito.Estatus.EMITIDA.value)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+
+        resp = self._patch_estatus(client, nota, NotaCredito.Estatus.BORRADOR.value)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["estatus"], list)
+        self.assertIn("Cancélala", str(resp.data["estatus"][0]))
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+        nota.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.EMITIDA.value)
+
+    def test_el_rodeo_emitida_borrador_emitida_ya_no_aplica_dos_veces(self):
+        # El bug completo: el paso intermedio a Borrador era el que dejaba a la
+        # nota "sin emitir" para el backend sin haber devuelto nada a la CxC.
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        client = self._client(self.a["usuario"])
+        self._patch_estatus(client, nota, NotaCredito.Estatus.EMITIDA.value)
+        cxc.refresh_from_db()
+        saldo_tras_emitir = cxc.saldo
+        self.assertEqual(saldo_tras_emitir, Decimal("750.00"))
+
+        self._patch_estatus(client, nota, NotaCredito.Estatus.BORRADOR.value)
+        self._patch_estatus(client, nota, NotaCredito.Estatus.EMITIDA.value)
+
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, saldo_tras_emitir)
+
+    def test_cancelar_una_emitida_por_patch_de_estatus_es_rechazado(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        client = self._client(self.a["usuario"])
+        self._patch_estatus(client, nota, NotaCredito.Estatus.EMITIDA.value)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+
+        resp = self._patch_estatus(client, nota, NotaCredito.Estatus.CANCELADA.value)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["estatus"], list)
+        self.assertIn("cancelar", str(resp.data["estatus"][0]))
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+        nota.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.EMITIDA.value)
+
+        # La puerta buena sigue abierta y sí devuelve el importe.
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
+
+    def test_cancelar_un_borrador_por_patch_de_estatus_tambien_es_rechazado(self):
+        # Aquí no hay saldo que arruinar (un borrador nunca tocó la CxC), pero
+        # la cancelación tiene una sola puerta: el cliente no puede saber si la
+        # nota sigue en Borrador, y ese es justo el estado que se lee obsoleto.
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        client = self._client(self.a["usuario"])
+
+        resp = self._patch_estatus(client, nota, NotaCredito.Estatus.CANCELADA.value)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        nota.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.BORRADOR.value)
+
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        nota.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.CANCELADA.value)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+
+    def test_reemitir_una_nota_ya_emitida_sigue_siendo_un_200_idempotente(self):
+        # La UI ofrece "Emitir" según el estatus del renglón cacheado: con la
+        # lista desactualizada manda Emitida sobre una Emitida. No es una
+        # transición (el estatus no cambia) y debe seguir respondiendo 200.
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        client = self._client(self.a["usuario"])
+        self._patch_estatus(client, nota, NotaCredito.Estatus.EMITIDA.value)
+        cxc.refresh_from_db()
+        saldo_tras_emitir = cxc.saldo
+
+        resp = self._patch_estatus(client, nota, NotaCredito.Estatus.EMITIDA.value)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, saldo_tras_emitir)
+
+    def test_el_ciclo_de_vida_legitimo_completo_sigue_funcionando(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+        client = self._client(self.a["usuario"])
+
+        resp = client.post(
+            NOTAS_CREDITO_URL,
+            {
+                "factura": factura.pk, "cliente": self.a["cliente"].pk,
+                "estatus": NotaCredito.Estatus.BORRADOR.value, "total": "250.00",
+                "motivo": "antes",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        nota = NotaCredito.objects.get(pk=resp.data["id"])
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+
+        # Editar la cabecera de un borrador, sin tocar el estatus, sigue siendo
+        # una edición legítima.
+        resp = client.patch(
+            f"{NOTAS_CREDITO_URL}{nota.pk}/", {"motivo": "despues"}, format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        nota.refresh_from_db()
+        self.assertEqual(nota.motivo, "despues")
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.BORRADOR.value)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+
+        resp = self._patch_estatus(client, nota, NotaCredito.Estatus.EMITIDA.value)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PARCIAL)
+
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
+        nota.refresh_from_db()
+        self.assertEqual(nota.estatus, NotaCredito.Estatus.CANCELADA.value)
+
+    def test_eliminar_un_borrador_sigue_funcionando(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+
+        resp = self._client(self.a["usuario"]).delete(f"{NOTAS_CREDITO_URL}{nota.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(NotaCredito.objects.count(), 0)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+
+    def test_eliminar_una_nota_emitida_sigue_rechazado(self):
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        client = self._client(self.a["usuario"])
+        self._patch_estatus(client, nota, NotaCredito.Estatus.EMITIDA.value)
+
+        resp = client.delete(f"{NOTAS_CREDITO_URL}{nota.pk}/")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(NotaCredito.objects.filter(pk=nota.pk).count(), 1)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+
+    def test_borrado_concurrente_con_una_emision_no_descuadra_la_cxc(self):
+        # B carga la nota en Borrador y decide borrarla; A la emite y confirma
+        # antes. Sin lock ni relectura, B pasaba su guard con el estatus viejo y
+        # borraba el documento: la CxC quedaba rebajada 250 sin nada detrás.
+        factura, cxc = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        client = self._client(self.a["usuario"])
+        obsoleta = NotaCredito.objects.get(pk=nota.pk)
+        self.assertEqual(obsoleta.estatus, NotaCredito.Estatus.BORRADOR.value)
+
+        self._patch_estatus(client, nota, NotaCredito.Estatus.EMITIDA.value)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+
+        with patch.object(NotaCreditoViewSet, "get_object", return_value=obsoleta):
+            resp = client.delete(f"{NOTAS_CREDITO_URL}{nota.pk}/")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(NotaCredito.objects.filter(pk=nota.pk).count(), 1)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("750.00"))
+
+    def test_eliminar_una_nota_borrada_a_la_vez_responde_404(self):
+        factura, _ = self._factura_con_cxc("1000.00")
+        nota = self._nota_borrador(factura, "250.00")
+        obsoleta = NotaCredito.objects.get(pk=nota.pk)
+        NotaCredito.objects.filter(pk=nota.pk).delete()
+
+        with patch.object(NotaCreditoViewSet, "get_object", return_value=obsoleta):
+            resp = self._client(self.a["usuario"]).delete(
+                f"{NOTAS_CREDITO_URL}{nota.pk}/"
+            )
+
+        self.assertEqual(resp.status_code, 404)
+
+    def test_eliminar_una_nota_de_otra_empresa_sigue_fuera_de_alcance(self):
+        factura = Factura.objects.create(
+            empresa=self.b["empresa"], sucursal=self.b["sucursal"],
+            cliente=self.b["cliente"], moneda=self.moneda, total=Decimal("100.00"),
+        )
+        nota = NotaCredito.objects.create(
+            factura=factura, cliente=self.b["cliente"], total=Decimal("50.00"),
+            estatus=NotaCredito.Estatus.BORRADOR.value,
+        )
+
+        resp = self._client(self.a["usuario"]).delete(f"{NOTAS_CREDITO_URL}{nota.pk}/")
+
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(NotaCredito.objects.filter(pk=nota.pk).count(), 1)

@@ -1761,6 +1761,47 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
         return Response(ConciliacionBancariaSerializer(conciliacion).data)
 
 
+# Ciclo de vida del estatus de una nota de crédito, como pares
+# (actual, solicitado) que ``perform_update`` acepta. Sólo hay uno: emitir un
+# borrador. El resto de los movimientos no son ediciones de un campo:
+#
+#   - crear en Borrador o en Emitida  -> ``perform_create``
+#   - Emitida -> Cancelada            -> acción ``cancelar``, que es la única
+#     que devuelve el importe acreditado a la cuenta por cobrar
+#
+# ``estatus`` es escribible (el serializer declara ``fields = "__all__"``) y
+# ``perform_update`` sólo bloqueaba editar una nota ya Cancelada, así que dos
+# rutas secuenciales corrompían el saldo: bajar una Emitida a Borrador no
+# revertía la CxC y la siguiente emisión volvía a descontar el total, y un
+# ``PATCH estatus="Cancelada"`` cancelaba sin devolver nada y dejaba la nota
+# inservible (ya no se puede editar por cancelada, y la acción ``cancelar`` sale
+# por su guard). Un cambio de estatus fuera de esta tabla es ahora un 400.
+TRANSICIONES_ESTATUS_NOTA_CREDITO = frozenset(
+    {
+        (NotaCredito.Estatus.BORRADOR, NotaCredito.Estatus.EMITIDA),
+    }
+)
+
+
+def _mensaje_transicion_invalida(anterior, solicitado):
+    """Motivo accionable del rechazo, en términos del saldo de la CxC."""
+    if solicitado == NotaCredito.Estatus.CANCELADA:
+        return (
+            "Una nota de crédito no se cancela editando su estatus: usa la "
+            "acción cancelar (POST /notas-credito/{id}/cancelar/), que además "
+            "devuelve el importe acreditado al saldo de la cuenta por cobrar."
+        )
+    if anterior == NotaCredito.Estatus.EMITIDA:
+        return (
+            "Una nota de crédito emitida no puede regresar a Borrador: su "
+            "importe ya se aplicó a la cuenta por cobrar. Cancélala para "
+            "devolver el saldo."
+        )
+    return (
+        f"Transición de estatus no permitida: de {anterior} a {solicitado}."
+    )
+
+
 class NotaCreditoViewSet(FinanzasBaseViewSet):
     queryset = NotaCredito.objects.all()
     serializer_class = NotaCreditoSerializer
@@ -1830,13 +1871,45 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
                 fact = getattr(serializer.instance, "factura", None)
                 if fact and getattr(fact, "empresa_id", None) and fact.empresa_id != empresa.pk:
                     raise PermissionDenied()
+        # La decisión "esta petición es la que emite" se toma con la fila de la
+        # nota bloqueada. Leyendo el estatus previo del objeto cargado antes del
+        # lock, dos emisiones concurrentes veían ambas "Borrador" y aplicaban el
+        # crédito dos veces a la CxC. Orden de bloqueo: nota -> CxC, el mismo que
+        # ya usa NotaCreditoService.
+        bloqueada = (
+            NotaCredito.objects.select_for_update()
+            .filter(pk=serializer.instance.pk)
+            .first()
+        )
+        if bloqueada is None:
+            # La nota se borró entre get_object() y el lock. Seguir con la
+            # instancia obsoleta haría que save() la reinsertara con el mismo pk
+            # (UPDATE de 0 filas -> INSERT) y aplicara el crédito sobre una nota
+            # que ya no existía.
+            raise NotFound("La nota de crédito ya no existe.")
+        # Se reemplaza la instancia obsoleta para no reescribir con save() los
+        # valores leídos antes del lock.
+        serializer.instance = bloqueada
         if serializer.instance.estatus == NotaCredito.Estatus.CANCELADA:
             raise ValidationError("No se puede editar una nota de crédito cancelada.")
         anterior = serializer.instance.estatus
+        # El estatus solicitado se compara contra el de la fila bloqueada, no
+        # contra el que traía la instancia obsoleta: un cliente con la lista
+        # desactualizada no puede colar una transición leyendo un estado viejo.
+        # Si el cuerpo no trae ``estatus`` (una edición de cabecera, o un PUT
+        # sin el campo) no hay transición que validar.
+        solicitado = serializer.validated_data.get("estatus", anterior)
+        if solicitado != anterior and (
+            (anterior, solicitado) not in TRANSICIONES_ESTATUS_NOTA_CREDITO
+        ):
+            raise ErrorDeNegocio(
+                {"estatus": _mensaje_transicion_invalida(anterior, solicitado)}
+            )
         nota = serializer.save()
         if nota.estatus == NotaCredito.Estatus.EMITIDA and anterior != NotaCredito.Estatus.EMITIDA:
             NotaCreditoService.aplicar_nota_credito(nota)
 
+    @transaction.atomic
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
@@ -1845,15 +1918,29 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
                 fact = getattr(instance, "factura", None)
                 if fact and getattr(fact, "empresa_id", None) and fact.empresa_id != empresa.pk:
                     raise PermissionDenied()
-        if instance.estatus == NotaCredito.Estatus.EMITIDA:
+        # Mismo bloqueo y relectura que perform_update, y en el mismo orden
+        # nota -> CxC. El estatus se leía del objeto cargado por get_object(),
+        # fuera de toda transacción: una emisión concurrente podía aplicar el
+        # crédito y confirmar mientras este borrado seguía viendo "Borrador",
+        # dejando la CxC rebajada sin ningún documento que lo respalde.
+        bloqueada = (
+            NotaCredito.objects.select_for_update().filter(pk=instance.pk).first()
+        )
+        if bloqueada is None:
+            raise NotFound("La nota de crédito ya no existe.")
+        if bloqueada.estatus == NotaCredito.Estatus.EMITIDA:
             raise ValidationError("No se puede eliminar una nota de crédito emitida. Cancelela primero.")
-        instance.delete()
+        bloqueada.delete()
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         nota = self.get_object()
-        with transaction.atomic():
-            NotaCreditoService.cancelar_nota_credito(nota)
+        try:
+            with transaction.atomic():
+                NotaCreditoService.cancelar_nota_credito(nota)
+        except NotaCredito.DoesNotExist:
+            # Borrada entre get_object() y el lock del servicio.
+            raise NotFound("La nota de crédito ya no existe.")
         return Response(NotaCreditoSerializer(nota).data)
 
 
