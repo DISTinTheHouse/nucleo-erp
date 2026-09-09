@@ -1110,6 +1110,44 @@ class PedidoMesaControlUpdateTests(TestCase):
         tipos = {item["tipo"] for item in response.json()["bloqueos"]}
         self.assertIn("picking_activo", tipos)
 
+    def test_mesa_control_programa_fechas_y_cantidades_de_surtido(self):
+        payload = self._payload()
+        payload["pedido"]["fecha_surtir_bordado"] = "2026-09-15"
+        payload["pedido"]["cantidad_surtir_bordado"] = 3
+        payload["pedido"]["fecha_surtir_apartados"] = "2026-09-18"
+        payload["pedido"]["cantidad_surtir_apartados"] = 1
+        payload["pedido"]["fecha_embarque"] = "2026-09-22"
+        payload["pedido"]["cantidad_embarque"] = 4
+
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk),
+            payload,
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+
+        self.pedido.refresh_from_db()
+        self.assertEqual(str(self.pedido.fecha_surtir_bordado), "2026-09-15")
+        self.assertEqual(self.pedido.cantidad_surtir_bordado, 3)
+        self.assertEqual(str(self.pedido.fecha_surtir_apartados), "2026-09-18")
+        self.assertEqual(self.pedido.cantidad_surtir_apartados, 1)
+        self.assertEqual(str(self.pedido.fecha_embarque), "2026-09-22")
+        self.assertEqual(self.pedido.cantidad_embarque, 4)
+
+    def test_patch_generico_no_puede_programar_fechas(self):
+        """La programación de mesa de control no se salta por PATCH directo a
+        /pedidos/{id}/: los 6 campos son de solo lectura fuera de
+        editar-mesa-control (PedidoSerializer.Meta.read_only_fields)."""
+        response = self._client(self.admin_mesa).patch(
+            f"/api/v1/ventas/pedidos/{self.pedido.pk}/",
+            {"fecha_embarque": "2026-09-22", "cantidad_embarque": 4},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        self.pedido.refresh_from_db()
+        self.assertIsNone(self.pedido.fecha_embarque)
+        self.assertIsNone(self.pedido.cantidad_embarque)
+
 
 class MesaControlListScopeTests(TestCase):
     """``MesaControlViewSet.get_queryset()``: quién ve el listado en revisión.

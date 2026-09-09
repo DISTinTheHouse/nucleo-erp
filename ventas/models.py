@@ -311,6 +311,16 @@ class Pedido(StatusLifecycleModel):
     iva = models.IntegerField(default=16)
     gran_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
+    # Programación de mesa de control: metas de surtido/embarque, no lo ya
+    # realizado. Solo editables desde ``editar-mesa-control``; de solo lectura
+    # en el resto de la API (ver ``PedidoSerializer``).
+    fecha_surtir_bordado = models.DateField(null=True, blank=True)
+    cantidad_surtir_bordado = models.PositiveIntegerField(null=True, blank=True)
+    fecha_surtir_apartados = models.DateField(null=True, blank=True)
+    cantidad_surtir_apartados = models.PositiveIntegerField(null=True, blank=True)
+    fecha_embarque = models.DateField(null=True, blank=True)
+    cantidad_embarque = models.PositiveIntegerField(null=True, blank=True)
+
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)

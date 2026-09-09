@@ -415,7 +415,19 @@ class PedidoSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Pedido
-        read_only_fields = ['empresa']
+        # Programación de mesa de control: solo se escribe vía
+        # ``editar-mesa-control`` (``PedidoMesaControlHeaderSerializer``, que no
+        # las excluye). Aquí de solo lectura para que un PATCH genérico no se
+        # salte ese flujo — mismo motivo que ``empresa``.
+        read_only_fields = [
+            'empresa',
+            'fecha_surtir_bordado',
+            'cantidad_surtir_bordado',
+            'fecha_surtir_apartados',
+            'cantidad_surtir_apartados',
+            'fecha_embarque',
+            'cantidad_embarque',
+        ]
         fields = '__all__'
         extra_kwargs = {
             'cotizacion': {'required': False, 'allow_null': True},
