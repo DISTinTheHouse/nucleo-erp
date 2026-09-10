@@ -780,10 +780,10 @@ class HealthChecksTests(TestCase):
         self.assertIn("latency_ms", body["checks"]["database"])
 
     def test_readyz_503_si_la_db_falla(self):
-        with patch(
-            "nucleo.api.api_views.connections",
-            **{"__getitem__.return_value.cursor.side_effect": Exception("conexión rechazada")},
-        ):
+        # ``connection`` (default alias) y ``connections["default"]`` resuelven
+        # al mismo objeto subyacente -- se parchea el método directamente en
+        # vez de reconstruir la cadena de mocks de ``connections`` a mano.
+        with patch.object(connection, "cursor", side_effect=Exception("conexión rechazada")):
             resp = APIClient().get("/readyz/")
         self.assertEqual(resp.status_code, 503)
         body = resp.json()
