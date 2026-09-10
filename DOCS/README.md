@@ -14,6 +14,7 @@
 - [separacion-capas-frontend-backend-db.md](arquitectura/separacion-capas-frontend-backend-db.md) — auditoría de responsabilidades frontend/backend/DB.
 - [flujo-comunicacion-nextjs-django-postgres.md](arquitectura/flujo-comunicacion-nextjs-django-postgres.md) — auth, CORS, conexión a Postgres, diagrama de componentes.
 - [flujo-cotizacion-pedido-wms-inventario.md](arquitectura/flujo-cotizacion-pedido-wms-inventario.md) — flujo transaccional Cotización → Pedido → WMS → Inventario.
+- [pipeline-despliegue-backend.md](arquitectura/pipeline-despliegue-backend.md) — CI/CD paso a paso (GitHub Actions → Supabase → Vercel), con hallazgos.
 
 ## `seguridad/`
 - [CIBERSEGURIDAD.md](seguridad/CIBERSEGURIDAD.md), [SECURITY.md](seguridad/SECURITY.md) — postura de seguridad y reporte de vulnerabilidades.

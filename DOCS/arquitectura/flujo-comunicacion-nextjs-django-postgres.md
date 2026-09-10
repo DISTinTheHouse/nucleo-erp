@@ -37,11 +37,13 @@ Alterno de contingencia: **Render** (`render.yaml`), gunicorn, sí corre `migrat
 
 ## Topología de despliegue
 
+Detalle completo del pipeline (jobs, orden, hallazgos): [pipeline-despliegue-backend.md](pipeline-despliegue-backend.md).
+
 | Componente | Host | Notas |
 |---|---|---|
 | Next.js | deploy propio (repo separado) | no cubierto aquí |
-| Django | Vercel serverless (WSGI) | entry `api/index.py` → `ERP.wsgi.application`; `vercel.json` enruta todo (`/(.*)`) a `ERP/wsgi.py`; migraciones **no** corren en deploy |
-| Migraciones producción | GitHub Actions (`vercel.yml`, job `migrate_production`) | al hacer push a `main`, contra Supabase, después del deploy checks |
+| Django | Vercel serverless (WSGI) | entry activo: `ERP/wsgi.py` (exporta `app`), vía `builds` explícito en `vercel.json` — `api/index.py` es probablemente código muerto (mismo WSGI, pero por la ruta de auto-detección que `vercel.json` ya no usa); migraciones **no** corren en deploy |
+| Migraciones producción | GitHub Actions (`vercel.yml`, job `migrate_production`) | al hacer push a `main`, contra Supabase, después de `ci` (checks + suite completa) |
 | Postgres | Supabase | **transaction pooler, puerto 6543** — el workflow de CI rechaza explícitamente el session pooler (5432) |
 | Postgres local (dev) | `LOCAL_POSTGRES_*` | `USE_REMOTE_DB=False` |
 
