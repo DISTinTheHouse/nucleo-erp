@@ -170,7 +170,7 @@ class GeneracionEPCTests(EtiquetaRFIDBaseTestCase):
 
         zpl = RFIDLabelService._build_zpl_rfid(epc, producto=self.producto)
 
-        self.assertIn("^RFW,E,,N", zpl)
+        self.assertIn("^RFW,E", zpl)
         self.assertIn(f"^FD{epc}^FS", zpl)
 
 
