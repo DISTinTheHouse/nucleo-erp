@@ -131,6 +131,7 @@ class AIAssistantAPIView(APIView):
             "tools": tools,
             "tool_choice": "auto",
             "temperature": 0.2,
+            "stream": False,
         }
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
