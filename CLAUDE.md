@@ -85,7 +85,7 @@ def get_queryset(self):
     if empresa:
         qs = qs.filter(empresa=empresa)
         if not user.is_admin_empresa:  # non-admins are further scoped (e.g. own records)
-            qs = qs.filter(vendedor=user)
+            qs = qs.filter(vendedor=user)   
         return qs
     return qs.none()                   # no company -> see nothing
 ```
@@ -113,5 +113,5 @@ Two ways to ask, one rule: `tiene_permiso(clave)` for a single key, and **`nucle
 - **Contingency: Render** via `render.yaml` + `build.sh` (gunicorn; `build.sh` does run `migrate` + `collectstatic`, unlike Vercel).
 - CI/CD in `.github/workflows/vercel.yml`: PR → checks; push to `main` → checks, Supabase migrate, axes_reset, then `vercel deploy --prod`. The workflow rejects a Supabase URL using the Session pooler (port 5432) — production must use the Transaction pooler (6543).
 
-## Reference docs (Spanish, in repo root)
-`ARQUITECTURA_APP.md` (architecture & security hardening), `DOCUMENTACION_API.md` (endpoint reference), `ESQUEMA_BD.md` (data model), `CIBERSEGURIDAD.md`/`SECURITY.md` (security), `ASISTENTE_IA.md` (AI assistant), `GUIA_USUARIO.md` (user manual).
+## Reference docs (Spanish, under `DOCS/`)
+`DOCS/api/DOCUMENTACION_API.md` (endpoint reference), `DOCS/arquitectura/ARQUITECTURA_APP.md` (architecture & security hardening), `DOCS/arquitectura/ESQUEMA_BD.md` (data model), `DOCS/seguridad/CIBERSEGURIDAD.md`/`DOCS/seguridad/SECURITY.md` (security), `DOCS/negocio/ASISTENTE_IA.md` (AI assistant), `DOCS/negocio/GUIA_USUARIO.md` (user manual). Deeper investigation write-ups (architecture audits, flow traces) live alongside them under `DOCS/arquitectura/` and `DOCS/api/`; `DOCS/wms/` and `DOCS/varios/` hold internal planning notes; `DOCS/datos/` holds data exports, not docs.

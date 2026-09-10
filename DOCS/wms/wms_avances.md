@@ -137,8 +137,8 @@ Estado actual:
 Empacar mercancía.
 
 - [ ] ¿TERMINADO?
-- [ ] packing
-- [ ] packing_detalle
+- [x] packing
+- [x] packing_detalle
 
 Funciones
 

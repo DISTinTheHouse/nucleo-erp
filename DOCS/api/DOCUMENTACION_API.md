@@ -2150,7 +2150,7 @@ No mandes `pago` dentro de `pago_detalles`: mismo caso.
 - **Cobro / Pago**: el detalle exigía la FK del padre (`cobro`/`pago`), que aún no existe al validar → 400/500. Fix: esa FK ahora es read-only en el detalle.
 - Multi-tenant: cada línea se valida contra la empresa del documento padre, incluso para superuser.
 
-**Fuera de alcance** (decisiones de negocio pendientes, no bugs): edición de líneas, CxP automática en factura de proveedor, reversión de CxC al cancelar nota de crédito, validación de cuadre al crear póliza (sigue siendo solo al contabilizar). Detalle en `doc/bloqueo-lineas-hijas-finanzas.md`.
+**Fuera de alcance** (decisiones de negocio pendientes, no bugs): edición de líneas, CxP automática en factura de proveedor, reversión de CxC al cancelar nota de crédito, validación de cuadre al crear póliza (sigue siendo solo al contabilizar). Detalle en [DOCS/negocio/bloqueo-lineas-hijas-finanzas.md](../negocio/bloqueo-lineas-hijas-finanzas.md).
 
 ---
 
@@ -3916,7 +3916,7 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 
 - `despacho` va ligado a `packing` y opcionalmente a `envio`
 - `despacho_detalle` va ligado a `despacho` y `packing_detalle`
-- esto sigue exactamente la estructura de `doc/dbdiagram.io.md`
+- esto sigue exactamente la estructura de [DOCS/arquitectura/dbdiagram.io.md](../arquitectura/dbdiagram.io.md)
 
 **Flujo**
 

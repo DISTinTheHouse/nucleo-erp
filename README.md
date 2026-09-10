@@ -21,26 +21,32 @@ El sistema sigue una arquitectura **Headless / Desacoplada**:
 
 ## 📚 Mapa de Documentación
 
-Hemos preparado documentación detallada para cada aspecto del sistema. ¿Qué necesitas saber hoy?
+Hemos preparado documentación detallada para cada aspecto del sistema. ¿Qué necesitas saber hoy? Índice completo en **[DOCS/README.md](./DOCS/README.md)**.
 
 ### 🔌 Para Desarrolladores Frontend / Integración
 
 > _"Necesito conectar mi app de Next.js con el backend."_
 
-- 👉 **[DOCUMENTACION_API.md](./DOCUMENTACION_API.md)**: Referencia completa de endpoints, métodos, autenticación, payloads JSON y respuestas de error.
+- 👉 **[DOCS/api/DOCUMENTACION_API.md](./DOCS/api/DOCUMENTACION_API.md)**: Referencia completa de endpoints, métodos, autenticación, payloads JSON y respuestas de error.
+- 👉 **[DOCS/api/contratos-api-request-response.md](./DOCS/api/contratos-api-request-response.md)**: Consistencia de request/response entre endpoints (errores, paginación, campos de estado).
 
 ### 🏗️ Para Arquitectos de Software / DevOps
 
 > _"¿Cómo está construido esto? ¿Es seguro?"_
 
-- 👉 **[ARQUITECTURA_APP.md](./ARQUITECTURA_APP.md)**: Explica el stack tecnológico, estrategias de seguridad (Blindaje), manejo de sesiones y flujo de datos.
-- 👉 **[ESQUEMA_BD.md](./ESQUEMA_BD.md)**: Diagrama y descripción de los modelos de base de datos y sus relaciones.
+- 👉 **[DOCS/arquitectura/ARQUITECTURA_APP.md](./DOCS/arquitectura/ARQUITECTURA_APP.md)**: Explica el stack tecnológico, estrategias de seguridad (Blindaje), manejo de sesiones y flujo de datos.
+- 👉 **[DOCS/arquitectura/ESQUEMA_BD.md](./DOCS/arquitectura/ESQUEMA_BD.md)**: Diagrama y descripción de los modelos de base de datos y sus relaciones.
+- 👉 **[DOCS/arquitectura/separacion-capas-frontend-backend-db.md](./DOCS/arquitectura/separacion-capas-frontend-backend-db.md)**: Validación de responsabilidades entre frontend, backend y DB.
+- 👉 **[DOCS/arquitectura/flujo-comunicacion-nextjs-django-postgres.md](./DOCS/arquitectura/flujo-comunicacion-nextjs-django-postgres.md)**: Auth, CORS y conexión a Postgres, con diagrama de componentes.
+- 👉 **[DOCS/arquitectura/flujo-cotizacion-pedido-wms-inventario.md](./DOCS/arquitectura/flujo-cotizacion-pedido-wms-inventario.md)**: Flujo transaccional Cotización → Pedido → WMS → Inventario.
+- 👉 **[DOCS/seguridad/CIBERSEGURIDAD.md](./DOCS/seguridad/CIBERSEGURIDAD.md)** / **[SECURITY.md](./DOCS/seguridad/SECURITY.md)**: Postura de seguridad y política de reporte de vulnerabilidades.
 
 ### 👤 Para Usuarios Finales / Testing
 
 > _"¿Cómo uso la aplicación? ¿Qué hace cada botón?"_
 
-- 👉 **[GUIA_USUARIO.md](./GUIA_USUARIO.md)**: Manual operativo sobre cómo dar de alta empresas, gestionar sucursales y configurar aspectos fiscales.
+- 👉 **[DOCS/negocio/GUIA_USUARIO.md](./DOCS/negocio/GUIA_USUARIO.md)**: Manual operativo sobre cómo dar de alta empresas, gestionar sucursales y configurar aspectos fiscales.
+- 👉 **[DOCS/negocio/ASISTENTE_IA.md](./DOCS/negocio/ASISTENTE_IA.md)**: Qué hace el asistente de IA y cómo se integra con Google Drive.
 
 ---
 

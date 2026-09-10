@@ -1,0 +1,59 @@
+{
+  "scans": [
+    {
+      "ENDPOINT": "https://nucleo-erp.vercel.app/QA/scanner_rfid/get/?epc=000012E32827000147C0C5F5",
+      "id": 3856,
+      "epc": "000012e32827000147c0c5f5",
+      "timestamp": "2026-08-07T19:51:45.490950+00:00",
+      "antenna": 1,
+      "rssi": -45,
+      "reader_ip": "187.188.149.179",
+      "match_impresion": true,
+      "impresion_folio": "LAB-000022",
+      "impresion_id": 22,
+      "producto_nombre": "CAMISA MANGA LARGA RAYAS THAI PREMIUM VINO",
+      "sku": "1000503G",
+      "color": "VINO",
+      "talla": "G",
+      "barcode_value": "1000503G",
+      "serial": "0001",
+      "estado": "IMPRESO",
+      "detalle_id": 62,
+      "match_debug": {
+        "scan_epc": "000012e32827000147c0c5f5",
+        "scan_epc_len": 24,
+        "variants_tried": [
+          "12e32827000147c0c5f5",
+          "000012e32827000147c0c5f5"
+        ],
+        "variant_used": "12e32827000147c0c5f5",
+        "detalle_epc_raw": "000012E32827000147C0C5F5",
+        "detalle_epc_len": 24,
+        "detalle_epc_variants": [
+          "000012e32827000147c0c5f5",
+          "12e32827000147c0c5f5"
+        ]
+      }
+    }
+  ],
+  "debug_get": {
+    "scans_returned": 1,
+    "scans_total_max_50": 1,
+    "lookup_detalle_count": 2,
+    "unique_epc_in_50_scans_count": 1,
+    "unique_epc_prefixes_head30": [
+      "0000"
+    ],
+    "query_epc_search": {
+      "query_epc": "000012e32827000147c0c5f5",
+      "query_epc_len": 24,
+      "variants_count": 2,
+      "variants_head5": [
+        "000012e32827000147c0c5f5",
+        "12e32827000147c0c5f5"
+      ],
+      "found_in_scans": true,
+      "hit_variant": "000012e32827000147c0c5f5"
+    }
+  }
+}

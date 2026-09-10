@@ -43,7 +43,7 @@ Cotizacion (ventas)
 
 ## 2. Cotización → Pedido
 
-Conversión: `_copiar_cotizacion_a_pedido()`, [ventas/api/views.py:1443-1583](../ventas/api/views.py), llamada únicamente desde `autorizar()` ([:2028-2096](../ventas/api/views.py)).
+Conversión: `_copiar_cotizacion_a_pedido()`, [ventas/api/views.py:1443-1583](../../ventas/api/views.py), llamada únicamente desde `autorizar()` ([:2028-2096](../../ventas/api/views.py)).
 
 | Paso | Endpoint | Quién | Precondición | Efecto |
 |---|---|---|---|---|
@@ -58,7 +58,7 @@ Conversión: `_copiar_cotizacion_a_pedido()`, [ventas/api/views.py:1443-1583](..
 
 **Qué copia `_copiar_cotizacion_a_pedido`**:
 - Encabezado 1:1 (moneda, tipo_pedido, condiciones de pago, envío, totales) — `Pedido.objects.create(...)`, hardcodea `estatus=3` en el mismo create.
-- Defaults si la cotización los dejó vacíos: `forma_pago/metodo_pago/uso_cfdi` → `TRANSFERENCIA/PUE/G03`; `persona_pagos/correo_facturas/telefono_pagos` → datos del cliente, con fallback a un correo sintético `nombre@example.com` si no hay nada (frágil — [:1490-1493](../ventas/api/views.py)).
+- Defaults si la cotización los dejó vacíos: `forma_pago/metodo_pago/uso_cfdi` → `TRANSFERENCIA/PUE/G03`; `persona_pagos/correo_facturas/telefono_pagos` → datos del cliente, con fallback a un correo sintético `nombre@example.com` si no hay nada (frágil — [:1490-1493](../../ventas/api/views.py)).
 - Folio: `_asignar_folio_pedido` (consecutivo de `SerieFolio`, tipo `PEDIDO`).
 - Snapshot fiscal: `_snapshot_facturacion_pedido` copia razón social/RFC del cliente a columnas del Pedido.
 - Líneas: `CotizacionDetalle → PedidoDetalle`, `CotizacionDetalleTalla → PedidoDetalleTalla`, `CotizacionServicioExtra → PedidoServicioExtra`, copia 1:1 incluyendo config de bordado/reflejante/corte_manga.
@@ -73,7 +73,7 @@ WMS no valida `Pedido.estatus`. La única señal de "listo para picking" es que 
 
 ### Picking
 
-- Creación: `PickingService.handle_store()`, [wms/services/picking_service.py:254-346](../wms/services/picking_service.py).
+- Creación: `PickingService.handle_store()`, [wms/services/picking_service.py:254-346](../../wms/services/picking_service.py).
 - Endpoints: `POST /api/v1/wms/pickings/` y `POST /api/v1/wms/pickings/onboarding/`.
 - Contrato explícito en el docstring del servicio: crea `Picking` + `PickingDetalle` + folio. **No mueve inventario, no crea transferencias, no crea reservas.**
 - `tipo` (ORDER/BATCH/WAVE/ZONE picking) se guarda pero no hay lógica que agrupe varios pedidos en un mismo picking — es siempre un pedido por picking.
@@ -81,14 +81,14 @@ WMS no valida `Pedido.estatus`. La única señal de "listo para picking" es que 
 
 ### Packing
 
-- Creación desde un Picking: `PackingService.handle_store()`, [wms/services/packing_service.py:311-347](../wms/services/packing_service.py).
+- Creación desde un Picking: `PackingService.handle_store()`, [wms/services/packing_service.py:311-347](../../wms/services/packing_service.py).
 - Endpoints: `POST /api/v1/wms/packings/` y `/onboarding/`.
 - Bloquea el Picking (`select_for_update`), valida que no esté cancelado, valida cantidades solicitadas contra `PickingDetalle.cantidad_asignada` (no contra `cantidad_surtida`, que está muerto).
 - Sin escritura a inventario. Sin endpoint de update.
 
 ### Despacho
 
-- Creación desde un Packing: `DespachoService.handle_store()`, [wms/services/despacho_service.py:285-317](../wms/services/despacho_service.py).
+- Creación desde un Packing: `DespachoService.handle_store()`, [wms/services/despacho_service.py:285-317](../../wms/services/despacho_service.py).
 - Endpoints: `POST /api/v1/wms/despachos/` y `/onboarding/`.
 - Bloquea el Packing, valida opcionalmente contra un `Envio` de logística.
 - Sin campo `estatus` en el modelo — completitud = existencia de filas `DespachoDetalle`. Sin cancelación posible.
@@ -106,12 +106,12 @@ WMS no valida `Pedido.estatus`. La única señal de "listo para picking" es que 
 
 Todo ocurre en `ventas/api/views.py`, dentro de `CotizacionViewSet`, en el momento de autorizar — **no en WMS**.
 
-- `_descontar_existencias_pedido()` ([:943-969](../ventas/api/views.py)), llamada desde `autorizar()` ([:2063-2067](../ventas/api/views.py)):
+- `_descontar_existencias_pedido()` ([:943-969](../../ventas/api/views.py)), llamada desde `autorizar()` ([:2063-2067](../../ventas/api/views.py)):
   1. `_build_pedido_inventory_plan()` suma cantidad requerida por (producto, variante) desde `PedidoDetalleTalla`.
   2. `_discount_existencias_pedido()` bloquea filas de `Existencia` (`select_for_update`, ordenadas por mayor cantidad), consume FIFO por saldo, lanza `ValidationError` si no alcanza.
   3. `_registrar_movimiento_inventario_pedido()` crea un `MovimientoInventario` (`tipo=SALIDA`, `pedido=pedido`) + `MovimientoInventarioDetalle` por línea.
   4. `_registrar_auditoria_inventario_pedido()` escribe `AuditoriaEvento` con el balance antes/después por ítem — se usa después para saber a qué almacén/ubicación restituir stock si la cotización se edita.
-- `_ajustar_existencias_cambios_pedido()` ([:971-1023](../ventas/api/views.py)), llamada desde `aceptar_cambios()`: calcula el delta entre el plan del Pedido existente y el de la Cotización editada, emite `ENTRADA` (restitución) y/o `SALIDA` según corresponda.
+- `_ajustar_existencias_cambios_pedido()` ([:971-1023](../../ventas/api/views.py)), llamada desde `aceptar_cambios()`: calcula el delta entre el plan del Pedido existente y el de la Cotización editada, emite `ENTRADA` (restitución) y/o `SALIDA` según corresponda.
 
 **No es** vía `OperacionInventarioViewSet` (`POST /api/v1/inventarios/operaciones/{entrada,salida,ajuste}/`) — ese endpoint es una vía manual separada, no la usa este flujo. `AjusteInventario` tampoco participa aquí; solo lo usa `OperacionInventarioViewSet` para el tipo `AJUSTE`.
 

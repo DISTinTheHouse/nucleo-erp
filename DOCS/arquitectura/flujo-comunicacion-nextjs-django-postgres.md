@@ -49,7 +49,7 @@ Alterno de contingencia: **Render** (`render.yaml`), gunicorn, sí corre `migrat
 
 ## 1. Autenticación
 
-JWT en cookie HttpOnly, vía `auth_kit` + MFA. `AUTH_KIT.USE_MFA=True` ([ERP/settings.py:89-94](../ERP/settings.py)).
+JWT en cookie HttpOnly, vía `auth_kit` + MFA. `AUTH_KIT.USE_MFA=True` ([ERP/settings.py:89-94](../../ERP/settings.py)).
 
 **Endpoints** (`/api/auth/`, `auth_kit.urls` + `auth_kit.mfa.urls`):
 
@@ -64,9 +64,9 @@ JWT en cookie HttpOnly, vía `auth_kit` + MFA. `AUTH_KIT.USE_MFA=True` ([ERP/set
 | `/api/auth/user/` | GET | usuario autenticado actual |
 | `/api/auth/mfa/` | CRUD | métodos MFA del usuario |
 
-**Cookies**: `AUTH_COOKIE_SAMESITE=None`, `AUTH_COOKIE_SECURE=True` en producción ([:92-93](../ERP/settings.py)) — obliga a Next.js a llamar con `credentials: 'include'` y a que ambos estén en HTTPS.
+**Cookies**: `AUTH_COOKIE_SAMESITE=None`, `AUTH_COOKIE_SECURE=True` en producción ([:92-93](../../ERP/settings.py)) — obliga a Next.js a llamar con `credentials: 'include'` y a que ambos estén en HTTPS.
 
-**Sesión deslizante**: `ACCESS_TOKEN_LIFETIME=15min`, `REFRESH_TOKEN_LIFETIME=1 día`, `ROTATE_REFRESH_TOKENS=True` — cada refresh emite un refresh token nuevo con ventana completa ([ERP/settings.py:99-111](../ERP/settings.py)). **`BLACKLIST_AFTER_ROTATION=False` a propósito**: no hay revocación real de tokens todavía (requeriría la app `token_blacklist` + migraciones, pendiente).
+**Sesión deslizante**: `ACCESS_TOKEN_LIFETIME=15min`, `REFRESH_TOKEN_LIFETIME=1 día`, `ROTATE_REFRESH_TOKENS=True` — cada refresh emite un refresh token nuevo con ventana completa ([ERP/settings.py:99-111](../../ERP/settings.py)). **`BLACKLIST_AFTER_ROTATION=False` a propósito**: no hay revocación real de tokens todavía (requeriría la app `token_blacklist` + migraciones, pendiente).
 
 ```mermaid
 sequenceDiagram
@@ -84,7 +84,7 @@ sequenceDiagram
 
 ### Anti-CSRF: validación de Origin
 
-Como la cookie usa `SameSite=None`, cualquier página podría disparar requests autenticadas. Se cierra con `OriginEnforcedJWTCookieAuthentication` ([nucleo/authentication.py](../nucleo/authentication.py)), usada como `DEFAULT_AUTHENTICATION_CLASSES` ([ERP/settings.py:301-306](../ERP/settings.py)):
+Como la cookie usa `SameSite=None`, cualquier página podría disparar requests autenticadas. Se cierra con `OriginEnforcedJWTCookieAuthentication` ([nucleo/authentication.py](../../nucleo/authentication.py)), usada como `DEFAULT_AUTHENTICATION_CLASSES` ([ERP/settings.py:301-306](../../ERP/settings.py)):
 
 - GET/HEAD/OPTIONS o auth por header `Authorization`: sin validar.
 - Escritura autenticada por cookie: exige header `Origin` presente y que matchee `CORS_ALLOWED_ORIGINS`/`CORS_ALLOWED_ORIGIN_REGEXES` (reutiliza el matcher de `django-cors-headers`, misma whitelist).

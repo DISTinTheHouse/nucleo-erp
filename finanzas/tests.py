@@ -690,7 +690,7 @@ class Defecto5PendienteCobroDobleFacturacion(FinanzasBase):
 
 class Defecto6AltaLineasHijas(FinanzasBase):
     """Alta de líneas hijas en los 5 documentos de finanzas. Solo ``create()``;
-    ``update()`` de renglones queda fuera (ver doc/bloqueo-lineas-hijas-finanzas.md)."""
+    ``update()`` de renglones queda fuera (ver DOCS/negocio/bloqueo-lineas-hijas-finanzas.md)."""
 
     # -- Póliza -----------------------------------------------------------
 

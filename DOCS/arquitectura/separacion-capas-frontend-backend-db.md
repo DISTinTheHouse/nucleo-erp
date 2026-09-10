@@ -63,8 +63,8 @@ Misma relación conceptual (producto referenciado desde una línea de documento)
 
 ### 2.4 Referencias cruzadas (ya documentadas, no se repiten aquí)
 
-- **Estados declarados que nadie ejerce** (`Picking.estado`, `Packing.estado`, `Pedido.estatus`): el modelo declara la responsabilidad de una máquina de estados, pero ni backend ni frontend la recorren — no hay endpoint que la mueva. Ver [doc/flujo-cotizacion-pedido-wms-inventario.md](flujo-cotizacion-pedido-wms-inventario.md) §5-6.
-- **Migraciones no corren en el deploy de Vercel**: hay una ventana donde el código backend asume un esquema que la DB de producción todavía no tiene. Ver [doc/flujo-comunicacion-nextjs-django-postgres.md](flujo-comunicacion-nextjs-django-postgres.md) §5.
+- **Estados declarados que nadie ejerce** (`Picking.estado`, `Packing.estado`, `Pedido.estatus`): el modelo declara la responsabilidad de una máquina de estados, pero ni backend ni frontend la recorren — no hay endpoint que la mueva. Ver [flujo-cotizacion-pedido-wms-inventario.md](flujo-cotizacion-pedido-wms-inventario.md) §5-6.
+- **Migraciones no corren en el deploy de Vercel**: hay una ventana donde el código backend asume un esquema que la DB de producción todavía no tiene. Ver [flujo-comunicacion-nextjs-django-postgres.md](flujo-comunicacion-nextjs-django-postgres.md) §5.
 
 ---
 

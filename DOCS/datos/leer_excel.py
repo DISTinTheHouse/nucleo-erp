@@ -143,7 +143,7 @@ def asignar_codigo(categoria):
     return codigo
 
 #leer el excel
-archivo = pd.read_excel('./doc/TODOS-LOS-PRODUCTOS.xlsx')
+archivo = pd.read_excel('./TODOS-LOS-PRODUCTOS.xlsx')
 print(archivo.head())
 print('-----------------')
 
@@ -156,4 +156,4 @@ print("---------- RESULTADO ----------")
 print(archivo[["PRODUCTOS", "CATEGORIA", "CATEGORIA_PADRE", "CODIGO_CALCULADO", "SKU"]].head(30))
 
 #crear archivo excel
-archivo.to_excel('./doc/TODOS-LOS-PRODUCTOS-CON-CODIGOS.xlsx', index=False)
+archivo.to_excel('./TODOS-LOS-PRODUCTOS-CON-CODIGOS.xlsx', index=False)
