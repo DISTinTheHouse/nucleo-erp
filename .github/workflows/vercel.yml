@@ -50,6 +50,12 @@ jobs:
           python manage.py check
           python manage.py makemigrations --dry-run --check
 
+      - name: Test suite (SQLite en memoria, nunca contra Supabase)
+        env:
+          SECRET_KEY: ci-secret-key
+          DEBUG: "false"
+        run: python manage.py test --settings=sqlite_settings
+
   migrate_production:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [ci]
