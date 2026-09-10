@@ -11,6 +11,8 @@ producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test nucleo --settings=sqlite_settings
 """
 
+from unittest.mock import patch
+
 from django.contrib.auth.models import AnonymousUser
 from django.db import connection
 from django.test import TestCase
@@ -756,3 +758,35 @@ class MesaControlUsaElAlcanceCanonicoTests(BusquedaGlobalBaseTestCase):
         resp = self._get(self.sin_empresa, "/api/v1/terceros/clientes-mesa-control/")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), [])
+
+
+class HealthChecksTests(TestCase):
+    """``/healthz/`` (liveness) y ``/readyz/`` (readiness, valida DB). Sin
+    auth: son para monitoreo externo, no para un usuario logueado."""
+
+    def test_healthz_no_toca_la_db(self):
+        with CaptureQueriesContext(connection) as ctx:
+            resp = APIClient().get("/healthz/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"ok": True})
+        self.assertEqual(len(ctx.captured_queries), 0)
+
+    def test_readyz_ok_con_db_disponible(self):
+        resp = APIClient().get("/readyz/")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["checks"]["database"]["ok"])
+        self.assertIn("latency_ms", body["checks"]["database"])
+
+    def test_readyz_503_si_la_db_falla(self):
+        with patch(
+            "nucleo.api.api_views.connections",
+            **{"__getitem__.return_value.cursor.side_effect": Exception("conexión rechazada")},
+        ):
+            resp = APIClient().get("/readyz/")
+        self.assertEqual(resp.status_code, 503)
+        body = resp.json()
+        self.assertFalse(body["ok"])
+        self.assertFalse(body["checks"]["database"]["ok"])
+        self.assertIn("conexión rechazada", body["checks"]["database"]["error"])

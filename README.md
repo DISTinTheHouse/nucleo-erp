@@ -123,7 +123,7 @@ Guía rápida:
 
 - Configura variables en Vercel: SECRET_KEY, DEBUG=False, y credenciales de PostgreSQL (Supabase).
 - CI/CD: los workflows en `.github/workflows` ejecutan checks y despliegue automático a Vercel (Preview en PR, Production en main/master).
-- Endpoint de salud: `/healthz/`.
+- Endpoints de salud: `/healthz/` (liveness) y `/readyz/` (readiness — valida conexión a la base de datos, `503` si falla).
 
 Notas:
 

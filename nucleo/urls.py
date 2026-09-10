@@ -4,8 +4,8 @@ from .api.api_views import (
     EmpresaViewSet, SucursalViewSet, DepartamentoViewSet, MonedaViewSet, SerieFolioViewSet,
     SatClaveProdServViewSet, SatClaveUnidadViewSet,
     UnidadMedidaViewSet, ImpuestoViewSet,
-    UserEmpresasAPIView, UserSucursalesAPIView, SatCatalogosAPIView, 
-    EmpresaSatConfigUpdateView, HealthzAPIView
+    UserEmpresasAPIView, UserSucursalesAPIView, SatCatalogosAPIView,
+    EmpresaSatConfigUpdateView, HealthzAPIView, ReadyzAPIView
 )
 from .api.search import BusquedaGlobalAPIView
 from .views import (
@@ -49,6 +49,7 @@ urlpatterns = [
     # ventas y terceros) y el path de primer nivel es requisito de producto.
     path('api/v1/search/', BusquedaGlobalAPIView.as_view(), name='api_busqueda_global'),
     path('healthz/', HealthzAPIView.as_view(), name='healthz'),
+    path('readyz/', ReadyzAPIView.as_view(), name='readyz'),
 
     # WEB CORE - DASHBOARD
     path('core/dashboard/', CoreDashboardView.as_view(), name='dashboard'),

@@ -1,9 +1,11 @@
+import time
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status, viewsets, permissions
 from django.shortcuts import get_object_or_404
-from django.db import models
+from django.db import connections, models
 from ..choices import StatusChoices
 from ..models import (
     Empresa, Sucursal, Departamento, Moneda, SerieFolio,
@@ -223,10 +225,50 @@ class ImpuestoViewSet(viewsets.ReadOnlyModelViewSet):
 # --- API VIEWS CUSTOM ---
 
 class HealthzAPIView(APIView):
+    """Liveness: el proceso WSGI levantó. No toca la DB a propósito -- debe
+    responder rápido y sin depender de nada externo. Para disponibilidad real
+    (¿puede este proceso hablar con Postgres?) usa ``ReadyzAPIView``."""
     permission_classes = []
 
     def get(self, request):
         return Response({"ok": True}, status=200)
+
+
+class ReadyzAPIView(APIView):
+    """Readiness: valida que el backend pueda atender tráfico de verdad,
+    no solo que el proceso esté vivo. Pensado para monitoreo externo de
+    disponibilidad (uptime checks) -- nada en el pipeline de deploy lo
+    consulta hoy.
+
+    Solo prueba la base de datos por ahora: es la única dependencia externa
+    dura para servir una request (ver DATABASES en ERP/settings.py). Si se
+    agregan otras dependencias críticas (cache, servicio externo síncrono),
+    se agregan aquí como una entrada más de ``checks``, no un endpoint nuevo.
+    """
+    permission_classes = []
+
+    def get(self, request):
+        checks = {}
+        healthy = True
+
+        start = time.monotonic()
+        try:
+            with connections["default"].cursor() as cursor:
+                cursor.execute("SELECT 1")
+            checks["database"] = {
+                "ok": True,
+                "latency_ms": round((time.monotonic() - start) * 1000, 1),
+            }
+        except Exception as exc:
+            healthy = False
+            # Mensaje acotado: no se quiere filtrar credenciales de conexión
+            # en un endpoint sin autenticación si la excepción las incluyera.
+            checks["database"] = {"ok": False, "error": str(exc)[:200]}
+
+        return Response(
+            {"ok": healthy, "checks": checks},
+            status=200 if healthy else 503,
+        )
 
 class EmpresaSatConfigUpdateView(APIView):
     permission_classes = [IsAuthenticated]

@@ -84,9 +84,12 @@ El `git log` de ambos archivos lo confirma: `api/index.py` no tiene commits desp
 
 Único caso soportado hoy: `fake_migration` — aplica `manage.py migrate <app> <migracion> --fake` y luego `migrate --noinput`. Existe para cuando el estado de Supabase diverge del historial de migraciones (p. ej. alguien migró a mano, o una migración se aplicó parcialmente). Cualquier otro valor de `task` sale con `exit 1` explícito — no falla en silencio.
 
-## 5. Post-deploy: `/healthz/`
+## 5. Post-deploy: `/healthz/` y `/readyz/`
 
-`GET /healthz/` ([nucleo/api/api_views.py:225-229](../../nucleo/api/api_views.py)) — `AllowAny`, responde `{"ok": true}` sin tocar la base de datos. Confirma que el proceso WSGI levantó, **no** que Django puede hablar con Postgres. Nada en el pipeline lo llama automáticamente después del deploy; es un endpoint para monitoreo externo (uptime checks), no un gate del workflow.
+Dos endpoints, sin auth, pensados para monitoreo externo (uptime checks) — ninguno lo llama el pipeline automáticamente, no son gate del workflow.
+
+- `GET /healthz/` ([nucleo/api/api_views.py](../../nucleo/api/api_views.py)) — liveness. Responde `{"ok": true}` sin tocar nada externo. Confirma solo que el proceso WSGI levantó.
+- `GET /readyz/` ([nucleo/api/api_views.py](../../nucleo/api/api_views.py)) — readiness. Ejecuta `SELECT 1` contra la DB configurada; `200 {"ok": true, "checks": {"database": {"ok": true, "latency_ms": ...}}}` si responde, `503 {"ok": false, ...}` si no. Es el que detecta un Supabase caído o inalcanzable — apunta el monitor de disponibilidad aquí, no a `/healthz/`.
 
 ## 6. Contingencia: Render
 
@@ -99,7 +102,7 @@ El `git log` de ambos archivos lo confirma: `api/index.py` no tiene commits desp
 | Hallazgo | Severidad |
 |---|---|
 | `api/index.py` es código muerto — el entrypoint real es `ERP/wsgi.py` vía `vercel.json`, y `CLAUDE.md` documenta el que ya no aplica | baja, pero confunde a quien lea la doc |
-| `/healthz/` no valida conexión a DB | media — un Supabase caído no lo detecta |
+| ~~`/healthz/` no valida conexión a DB~~ | resuelto — `/readyz/` cubre esto, `/healthz/` se deja como liveness puro a propósito |
 | Sin paso de rollback automatizado tras un deploy o migración fallida | media |
 | Validación del pooler duplicada entre `migrate_production` y `maintenance` | baja, cosmético |
 | Render (contingencia) migra en build-time, Vercel migra en un job aparte — comportamiento distinto bajo el mismo código | media si se activa Render sin ajustar expectativas |
