@@ -2244,3 +2244,57 @@ class Defecto11NotaCreditoTransicionesDeEstatus(FinanzasBase):
 
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(NotaCredito.objects.filter(pk=nota.pk).count(), 1)
+
+
+class AdminFinanzasSmokeTests(TestCase):
+    """El registro en el admin (finanzas/admin.py) no lo cubre ningún otro
+    test: ``manage.py check`` valida que ``autocomplete_fields`` apunte a un
+    ModelAdmin registrado, pero no que el changelist realmente renderice (un
+    campo mal escrito en ``list_display``/``search_fields`` sólo revienta en
+    request). Recorre TODO lo que finanzas tenga registrado en el admin, así
+    que un modelo nuevo queda cubierto sin tocar este test."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.superuser = Usuario.objects.create(
+            username="admin_finanzas",
+            email="admin_finanzas@test.mx",
+            is_superuser=True,
+            is_staff=True,
+            is_active=True,
+        )
+
+    def test_changelist_de_cada_modelo_de_finanzas_renderiza(self):
+        from django.contrib import admin as django_admin
+        from django.urls import reverse
+
+        self.client.force_login(self.superuser)
+        modelos_finanzas = [
+            model for model in django_admin.site._registry
+            if model._meta.app_label == "finanzas"
+        ]
+        self.assertTrue(modelos_finanzas, "no hay ningún modelo de finanzas registrado en el admin")
+
+        for model in modelos_finanzas:
+            url = reverse(f"admin:finanzas_{model._meta.model_name}_changelist")
+            with self.subTest(modelo=model._meta.model_name):
+                resp = self.client.get(url)
+                self.assertEqual(resp.status_code, 200, f"{model._meta.model_name}: {resp.status_code}")
+
+    def test_add_de_cada_modelo_de_finanzas_renderiza(self):
+        """Cubre autocomplete_fields/inlines mal referenciados: el form de
+        alta es donde Django los resuelve, el changelist no los toca."""
+        from django.contrib import admin as django_admin
+        from django.urls import reverse
+
+        self.client.force_login(self.superuser)
+        modelos_finanzas = [
+            model for model in django_admin.site._registry
+            if model._meta.app_label == "finanzas"
+        ]
+
+        for model in modelos_finanzas:
+            url = reverse(f"admin:finanzas_{model._meta.model_name}_add")
+            with self.subTest(modelo=model._meta.model_name):
+                resp = self.client.get(url)
+                self.assertEqual(resp.status_code, 200, f"{model._meta.model_name}: {resp.status_code}")
