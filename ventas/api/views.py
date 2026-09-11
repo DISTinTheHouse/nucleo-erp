@@ -144,6 +144,7 @@ PEDIDO_COTIZACION_MIRROR_FIELDS = (
     "ieps",
     "iva",
     "gran_total",
+    "clasificacion",
 )
 
 

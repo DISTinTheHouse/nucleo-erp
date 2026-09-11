@@ -50,6 +50,15 @@ class Cotizacion(models.Model):
         GO1 = 'G01', 'G01 - ADQUISICIÓN DE MERCANCIAS'
         IO1 = 'I01', 'I01 - CONSTRUCCIONES'
 
+    class Clasificacion(models.TextChoices):
+        A = 'A', 'A - 2 a 5 días'
+        B = 'B', 'B - 5 a 8 días'
+        C = 'C', 'C - 5 a 15 días'
+        D = 'D', 'D - 4 a 6 semanas'
+        E = 'E', 'E - 6 a 8 semanas'
+        F = 'F', 'F - 8 a 10 semanas'
+        X = 'X', 'X - Solo para facturar'
+
     CHOICES_ESTATUS = (
         (1, "BORRADOR"),
         (2, "EN REVISION"),
@@ -132,6 +141,15 @@ class Cotizacion(models.Model):
     iva = models.IntegerField(default=16)
     gran_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
+    # Clasificación del pedido: solo modificable por mesa de control
+    clasificacion = models.CharField(
+        max_length=1,
+        choices=Clasificacion.choices,
+        null=True,
+        blank=True,
+        help_text="Clasificación de tiempo de entrega"
+    )
+
     history = HistoricalRecords()
 
     class Meta:
@@ -211,16 +229,25 @@ class Pedido(StatusLifecycleModel):
         EFECTIVO = '01', '01 - EFECTIVO'
         TRANSFERENCIA = '03', '03 - TRANSFERENCIA'
         TARJETA = '04', '04 - TARJETA'
-    
+
     class MetodoPago(models.TextChoices):
         PUE = 'PUE', 'PUE - PAGO EN UNA SOLA EXIBICIÓN'
         PPD = 'PPD', 'PPD - PAGO EN PARCIALIDADES'
         NA = 'NA', 'N/A'
-    
+
     class UsoCfdi(models.TextChoices):
         GO3 = 'G03', 'G03 - GASTOS EN GENERAL (OTROS) (OTROS)'
         GO1 = 'G01', 'G01 - ADQUISICIÓN DE MERCANCIAS'
         IO1 = 'I01', 'I01 - CONSTRUCCIONES'
+
+    class Clasificacion(models.TextChoices):
+        A = 'A', 'A - 2 a 5 días'
+        B = 'B', 'B - 5 a 8 días'
+        C = 'C', 'C - 5 a 15 días'
+        D = 'D', 'D - 4 a 6 semanas'
+        E = 'E', 'E - 6 a 8 semanas'
+        F = 'F', 'F - 8 a 10 semanas'
+        X = 'X', 'X - Solo para facturar'
 
     CHOICES_ESTATUS = (
         (1, "BORRADOR"),
@@ -320,6 +347,17 @@ class Pedido(StatusLifecycleModel):
     cantidad_surtir_apartados = models.PositiveIntegerField(null=True, blank=True)
     fecha_embarque = models.DateField(null=True, blank=True)
     cantidad_embarque = models.PositiveIntegerField(null=True, blank=True)
+
+    # Clasificación del pedido: solo editable desde mesa de control
+    # Define los tiempos de entrega esperados
+    clasificacion = models.CharField(
+        max_length=1,
+        choices=Clasificacion.choices,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Clasificación de tiempo de entrega: A=2-5d, B=5-8d, C=5-15d, D=4-6sem, E=6-8sem, F=8-10sem, X=Solo facturar"
+    )
 
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)

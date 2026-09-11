@@ -528,6 +528,13 @@ class PedidoOnboardingCreateSerializer(serializers.Serializer):
 
 
 class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
+    clasificacion = serializers.ChoiceField(
+        choices=Pedido.Clasificacion.choices,
+        required=False,
+        allow_null=True,
+        help_text="Clasificación de tiempo de entrega"
+    )
+
     class Meta:
         model = Pedido
         exclude = [
