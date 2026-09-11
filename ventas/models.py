@@ -150,6 +150,14 @@ class Cotizacion(models.Model):
         help_text="Clasificación de tiempo de entrega"
     )
 
+    # Programación de maquila (múltiples parcialidades)
+    programacion_conf = models.JSONField(
+        default=dict,
+        blank=True,
+        null=True,
+        help_text="Programación de maquila con múltiples fechas y cantidades de entrega"
+    )
+
     history = HistoricalRecords()
 
     class Meta:
@@ -338,15 +346,15 @@ class Pedido(StatusLifecycleModel):
     iva = models.IntegerField(default=16)
     gran_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
-    # Programación de mesa de control: metas de surtido/embarque, no lo ya
-    # realizado. Solo editables desde ``editar-mesa-control``; de solo lectura
-    # en el resto de la API (ver ``PedidoSerializer``).
-    fecha_surtir_bordado = models.DateField(null=True, blank=True)
-    cantidad_surtir_bordado = models.PositiveIntegerField(null=True, blank=True)
-    fecha_surtir_apartados = models.DateField(null=True, blank=True)
-    cantidad_surtir_apartados = models.PositiveIntegerField(null=True, blank=True)
-    fecha_embarque = models.DateField(null=True, blank=True)
-    cantidad_embarque = models.PositiveIntegerField(null=True, blank=True)
+    # Programación de mesa de control (maquila): múltiples parcialidades
+    # Estructura: {"programaciones": [{"fecha": "YYYY-MM-DD", "cantidad": N}, ...]}
+    # Solo editable desde ``editar-mesa-control``; de solo lectura en el resto de la API
+    programacion_conf = models.JSONField(
+        default=dict,
+        blank=True,
+        null=True,
+        help_text="Programación de maquila con múltiples fechas y cantidades de entrega"
+    )
 
     # Clasificación del pedido: solo editable desde mesa de control
     # Define los tiempos de entrega esperados

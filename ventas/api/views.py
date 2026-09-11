@@ -145,6 +145,7 @@ PEDIDO_COTIZACION_MIRROR_FIELDS = (
     "iva",
     "gran_total",
     "clasificacion",
+    "programacion_conf",
 )
 
 
