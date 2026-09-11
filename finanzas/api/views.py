@@ -1,15 +1,21 @@
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import OperationalError, transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.fields import get_error_detail
 from rest_framework.response import Response
 
-from finanzas.exceptions import ErrorDeNegocio
+from finanzas.exceptions import (
+    CONCURRENCY_SQLSTATES,
+    CONCURRENT_OPERATION_MESSAGE,
+    ConcurrentOperationError,
+    ErrorDeNegocio,
+    database_error_sqlstate,
+)
 from finanzas.models import (
     AlertaMora,
     Banco,
@@ -45,6 +51,7 @@ from finanzas.api.serializers import (
     CuentaContableSerializer,
     CuentaPorCobrarDetalleSerializer,
     CuentaPorCobrarSerializer,
+    CuentaPorPagarCreateSerializer,
     CuentaPorPagarSerializer,
     FacturaSerializer,
     FacturaDesdePedidoInputSerializer,
@@ -59,6 +66,7 @@ from finanzas.api.serializers import (
 from finanzas.services.alerta_mora_service import AlertaMoraService
 from finanzas.services.cobro_service import CobroService
 from finanzas.services.conciliacion_service import ConciliacionService
+from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
 from finanzas.services.dashboard_service import DashboardFinancieroService
 from finanzas.services.factura_service import FacturaService
 from finanzas.services.movimiento_bancario_service import MovimientoBancarioService
@@ -242,22 +250,60 @@ class ErroresDeNegocioComo400Mixin:
         return super().handle_exception(exc)
 
 
+class ConcurrentOperationConflict(APIException):
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = CONCURRENT_OPERATION_MESSAGE
+    default_code = "operacion_concurrente"
+
+
+class ConcurrencyConflictsAs409Mixin:
+    """Traduce los choques con otra transacción a 409 en lugar de un 500.
+
+    Dos fuentes, y sólo ésas:
+
+    - ``ConcurrentOperationError``: un servicio pidió sus bloqueos con NOWAIT y
+      otra transacción ya los tenía (el guard de borrado de CxP).
+    - Un ``OperationalError`` de Postgres con SQLSTATE 40P01 (deadlock) o 55P03
+      (bloqueo no disponible), venga de donde venga. ``PagoService`` bloquea en dos
+      órdenes opuestos, así que un deadlock residual sigue siendo posible: Postgres
+      aborta a una de las transacciones y aquí sale como algo que el cliente puede
+      reintentar.
+
+    Cualquier otro ``DatabaseError`` sigue saliendo como 500. El 409 es el de
+    ``hr`` y ``produccion`` (subclase de ``APIException``); el cuerpo es una lista
+    con el mensaje, como los demás errores sin campo de finanzas.
+    """
+
+    def handle_exception(self, exc):
+        if isinstance(exc, ConcurrentOperationError):
+            exc = ConcurrentOperationConflict([str(exc)])
+        elif (
+            isinstance(exc, OperationalError)
+            and database_error_sqlstate(exc) in CONCURRENCY_SQLSTATES
+        ):
+            exc = ConcurrentOperationConflict([CONCURRENT_OPERATION_MESSAGE])
+        return super().handle_exception(exc)
+
+
 # Los tres viewsets base de finanzas. Existen para que la traducción de errores
 # de negocio sea por construcción y no por memoria: antes el mixin se aplicaba
 # clase por clase y siete viewsets se habían quedado fuera, de modo que volvían a
 # responder 500 en cuanto su ``perform_*`` llamara a un servicio. Cada base
 # conserva la clase de DRF que ya usaba el viewset, así que ninguna superficie
 # HTTP cambia: ``AlertaMoraViewSet`` sigue siendo de sólo lectura y
-# ``DashboardFinancieroViewSet`` sigue sin rutas de detalle.
-class FinanzasBaseViewSet(ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
+# ``DashboardFinancieroViewSet`` sigue sin rutas de detalle. El mapeo de choques
+# de concurrencia a 409 va en las mismas bases por la misma razón.
+class FinanzasBaseViewSet(ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
     pass
 
 
-class FinanzasBaseReadOnlyViewSet(ErroresDeNegocioComo400Mixin, viewsets.ReadOnlyModelViewSet):
+class FinanzasBaseReadOnlyViewSet(
+    ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ReadOnlyModelViewSet
+):
     pass
 
 
-class FinanzasBaseSimpleViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
+class FinanzasBaseSimpleViewSet(ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
     pass
 
 
@@ -1139,22 +1185,48 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
                 factura_proveedor=factura_proveedor,
                 **detalle_data,
             )
+        # Crear la factura directamente como Registrada también la registra.
+        if factura_proveedor.estatus == FacturaProveedor.FacturaProveedorStatus.REGISTRADA:
+            CuentaPorPagarService.generate_for_invoice(factura_proveedor)
 
+    @transaction.atomic
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
             empresa = getattr(user, "empresa", None)
             if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
-        serializer.save()
+        # La decisión "esta petición es la que registra la factura" se toma con la
+        # fila bloqueada, igual que en NotaCreditoViewSet.perform_update: con el
+        # estatus del objeto cargado antes del lock, dos registros concurrentes
+        # veían ambos "Borrador" e intentaban generar la CxP dos veces.
+        locked = FacturaProveedor.objects.select_for_update().filter(pk=serializer.instance.pk).first()
+        if locked is None:
+            raise NotFound("La factura de proveedor ya no existe.")
+        serializer.instance = locked
+        previous_status = locked.estatus
+        factura_proveedor = serializer.save()
+        if (
+            factura_proveedor.estatus == FacturaProveedor.FacturaProveedorStatus.REGISTRADA
+            and previous_status != FacturaProveedor.FacturaProveedorStatus.REGISTRADA
+        ):
+            CuentaPorPagarService.generate_for_invoice(factura_proveedor)
 
+    @transaction.atomic
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
             empresa = getattr(user, "empresa", None)
             if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
-        instance.delete()
+        # Borrar la factura arrastra en cascada su CxP y los PagoDetalle de ésta.
+        # Se bloquea primero la factura para no competir con un registro
+        # concurrente que esté generando su CxP.
+        locked = FacturaProveedor.objects.select_for_update().filter(pk=instance.pk).first()
+        if locked is None:
+            raise NotFound("La factura de proveedor ya no existe.")
+        CuentaPorPagarService.ensure_invoice_deletable(locked)
+        locked.delete()
 
 
 class BancoViewSet(FinanzasBaseViewSet):
@@ -1314,6 +1386,26 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha_emision")
         return _aplicar_ordering(qs, qp, ["-fecha_emision", "-id"])
 
+    def get_serializer_class(self):
+        # El alta usa su propia clase para que el esquema OpenAPI del POST y el del
+        # PUT/PATCH difieran como difieren en ejecución: ver
+        # CuentaPorPagarCreateSerializer.
+        if self.action == "create":
+            return CuentaPorPagarCreateSerializer
+        return super().get_serializer_class()
+
+    @staticmethod
+    def _lock_invoice(factura):
+        # La factura se bloquea antes de crear o mover una CxP hacia ella, igual que
+        # al registrarla y al borrarla. Sin el lock, una CxP que llegaba a la factura
+        # mientras ésta se borraba quedaba fuera de la comprobación de pagos
+        # aplicados del borrado, y la cascada se la llevaba junto con esos pagos.
+        locked = FacturaProveedor.objects.select_for_update().filter(pk=factura.pk).first()
+        if locked is None:
+            raise ErrorDeNegocio({"factura_proveedor": "La factura de proveedor ya no existe."})
+        return locked
+
+    @transaction.atomic
     def perform_create(self, serializer):
         user = self.request.user
         empresa = _resolve_empresa(user, serializer.validated_data, required=True)
@@ -1324,22 +1416,58 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             prov_emp_id = getattr(prov, "empresa_id", None)
             if prov_emp_id not in (None, empresa.pk):
                 raise ValidationError({"proveedor": "Proveedor no pertenece a la empresa."})
-        serializer.save(empresa=empresa)
+        invoice = self._lock_invoice(fp)
+        # Una CxP manual nace cuadrada: saldo = total y Pendiente. El serializer ya
+        # no acepta saldo/estatus al crear y validó total contra la factura.
+        total = serializer.validated_data.get("total", Decimal("0.00"))
+        # Mismo origen que la generación automática: vence cuando vence la
+        # factura, salvo que el cliente mande una fecha real. Un null explícito
+        # cuenta como ausente: un campo de fecha vacío en el formulario no debe
+        # dejar la CxP sin vencimiento.
+        due_date = {}
+        if serializer.validated_data.get("fecha_vencimiento") is None:
+            due_date["fecha_vencimiento"] = invoice.fecha_vencimiento
+        with CuentaPorPagarService.duplicate_invoice_as_business_error(invoice.pk):
+            serializer.save(
+                empresa=empresa,
+                saldo=total,
+                estatus=CuentaPorPagar.EstatusCxP.PENDIENTE,
+                **due_date,
+            )
 
+    @transaction.atomic
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
             empresa = getattr(user, "empresa", None)
             if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
-        serializer.save()
+        factura = serializer.validated_data.get("factura_proveedor")
+        if factura is not None:
+            # Factura antes que CxP: el mismo orden que su borrado.
+            self._lock_invoice(factura)
+        # El candado se evalúa con la fila bloqueada y releída. PagoService también
+        # bloquea la CxP antes de descontar, así que un pago concurrente no se cuela
+        # entre la comprobación y el guardado.
+        locked = CuentaPorPagar.objects.select_for_update().filter(pk=serializer.instance.pk).first()
+        if locked is None:
+            raise NotFound("La cuenta por pagar ya no existe.")
+        serializer.instance = locked
+        CuentaPorPagarService.ensure_frozen_fields_unchanged(locked, serializer.validated_data)
+        factura_id = factura.pk if factura is not None else locked.factura_proveedor_id
+        with CuentaPorPagarService.duplicate_invoice_as_business_error(
+            factura_id, excluding_account_id=locked.pk
+        ):
+            serializer.save()
 
+    @transaction.atomic
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
             empresa = getattr(user, "empresa", None)
             if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
+        CuentaPorPagarService.ensure_account_deletable(instance)
         instance.delete()
 
 

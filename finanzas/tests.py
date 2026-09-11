@@ -10,28 +10,38 @@ soporte), así que estos tests cubren el filtro por empresa y los guards, no la
 semántica del lock.
 """
 
+import importlib
 import inspect
 from datetime import date, timedelta
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from django.apps import apps as django_apps
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, OperationalError, transaction
+from django.db.models.signals import post_delete
 from django.test import TestCase
 from django.utils import timezone
+from drf_spectacular.generators import SchemaGenerator
 from rest_framework.test import APIClient
 from rest_framework.viewsets import ViewSetMixin
 
 from catalogo.models import Producto, Talla
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 from finanzas.api import views as finanzas_views
-from finanzas.api.serializers import PolizaDetalleRelacionadoSerializer
+from finanzas.api.serializers import CuentaPorPagarSerializer, PolizaDetalleRelacionadoSerializer
 from finanzas.api.views import (
     CobroViewSet,
+    CuentaPorPagarViewSet,
     ErroresDeNegocioComo400Mixin,
     FacturaProveedorViewSet,
     NotaCreditoViewSet,
 )
-from finanzas.exceptions import ErrorDeNegocio
+from finanzas.exceptions import (
+    CONCURRENT_OPERATION_MESSAGE,
+    ConcurrentOperationError,
+    ErrorDeNegocio,
+)
 from finanzas.models import (
     Banco,
     CentroCosto,
@@ -44,7 +54,9 @@ from finanzas.models import (
     FacturaDetalle,
     FacturaProveedor,
     NotaCredito,
+    NotaCreditoDetalle,
     Pago,
+    PagoDetalle,
     Poliza,
     PolizaDetalle,
 )
@@ -2298,3 +2310,865 @@ class AdminFinanzasSmokeTests(TestCase):
             with self.subTest(modelo=model._meta.model_name):
                 resp = self.client.get(url)
                 self.assertEqual(resp.status_code, 200, f"{model._meta.model_name}: {resp.status_code}")
+
+
+class Defecto12BorradoSinLineasHuerfanas(FinanzasBase):
+    """Borrar una póliza o una nota de crédito se lleva también sus líneas.
+
+    ``PolizaDetalle.poliza`` era ``SET_NULL``: borrar la póliza dejaba sus
+    renglones en ``poliza_detalle`` con cuenta, cargo y abono intactos pero sin
+    padre -- y sin empresa, porque la línea no tiene columna propia --. Un
+    reporte agrupado por cuenta los habría sumado. ``NotaCreditoDetalle`` ya
+    era ``CASCADE``; sus pruebas blindan que siga así.
+    """
+
+    def _poliza_con_lineas(self, estatus, tenant=None):
+        tenant = tenant or self.a
+        cargo, abono, centro_costo = self._crear_cuentas_contables(tenant["empresa"])
+        poliza = Poliza.objects.create(
+            empresa=tenant["empresa"], sucursal=tenant["sucursal"],
+            centro_costo=centro_costo, estatus=estatus,
+        )
+        PolizaDetalle.objects.create(
+            poliza=poliza, cuenta_contable=cargo, centro_costo=centro_costo,
+            cargo=Decimal("100.00"), orden=1,
+        )
+        PolizaDetalle.objects.create(
+            poliza=poliza, cuenta_contable=abono, centro_costo=centro_costo,
+            abono=Decimal("100.00"), orden=2,
+        )
+        return poliza
+
+    def _nota_con_linea(self, estatus):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"],
+            cliente=self.a["cliente"], moneda=self.moneda, total=Decimal("116.00"),
+        )
+        factura_detalle = FacturaDetalle.objects.create(
+            factura=factura, pedido_detalle=self.a["detalle"], producto=self.a["producto"],
+            cantidad=1, precio_unitario=Decimal("100.00"), total=Decimal("116.00"),
+        )
+        nota = NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"], total=Decimal("116.00"),
+            estatus=estatus,
+        )
+        NotaCreditoDetalle.objects.create(
+            nota_credito=nota, factura_detalle=factura_detalle,
+            cantidad=1, total=Decimal("116.00"),
+        )
+        return nota
+
+    def _asserta_sin_polizas_huerfanas(self):
+        self.assertEqual(PolizaDetalle.objects.filter(poliza__isnull=True).count(), 0)
+
+    # -- Póliza --------------------------------------------------------------
+
+    def test_borrar_poliza_en_borrador_elimina_sus_lineas(self):
+        poliza = self._poliza_con_lineas(Poliza.PolizaStatus.BORRADOR.value)
+        self.assertEqual(PolizaDetalle.objects.count(), 2)
+
+        resp = self._client(self.a["usuario"]).delete(f"{POLIZAS_URL}{poliza.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Poliza.objects.filter(pk=poliza.pk).exists())
+        self.assertEqual(PolizaDetalle.objects.count(), 0)
+        self._asserta_sin_polizas_huerfanas()
+
+    def test_borrar_poliza_cancelada_elimina_sus_lineas(self):
+        poliza = self._poliza_con_lineas(Poliza.PolizaStatus.CANCELADA.value)
+
+        resp = self._client(self.a["usuario"]).delete(f"{POLIZAS_URL}{poliza.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(PolizaDetalle.objects.count(), 0)
+        self._asserta_sin_polizas_huerfanas()
+
+    def test_borrar_poliza_fuera_de_la_api_tambien_elimina_sus_lineas(self):
+        # El admin y los borrados en cascada (empresa, sucursal, centro de costo,
+        # usuario) no pasan por perform_destroy: la regla vive en el FK.
+        poliza = self._poliza_con_lineas(Poliza.PolizaStatus.BORRADOR.value)
+
+        Poliza.objects.filter(pk=poliza.pk).delete()
+
+        self.assertEqual(PolizaDetalle.objects.count(), 0)
+        self._asserta_sin_polizas_huerfanas()
+
+    def test_borrar_poliza_contabilizada_sigue_rechazado(self):
+        poliza = self._poliza_con_lineas(Poliza.PolizaStatus.CONTABILIZADA.value)
+
+        resp = self._client(self.a["usuario"]).delete(f"{POLIZAS_URL}{poliza.pk}/")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertTrue(Poliza.objects.filter(pk=poliza.pk).exists())
+        self.assertEqual(poliza.poliza_detalles.count(), 2)
+
+    def test_borrar_poliza_de_otra_empresa_sigue_fuera_de_alcance(self):
+        poliza = self._poliza_con_lineas(Poliza.PolizaStatus.BORRADOR.value, tenant=self.b)
+
+        resp = self._client(self.a["usuario"]).delete(f"{POLIZAS_URL}{poliza.pk}/")
+
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(poliza.poliza_detalles.count(), 2)
+
+    def test_borrado_que_falla_a_mitad_no_deja_la_poliza_a_medias(self):
+        poliza = self._poliza_con_lineas(Poliza.PolizaStatus.BORRADOR.value)
+        lineas_al_fallar = []
+
+        def falla_tras_borrar(sender, instance, **kwargs):
+            # Para cuando se borra el encabezado las líneas ya salieron.
+            lineas_al_fallar.append(PolizaDetalle.objects.filter(poliza_id=instance.pk).count())
+            raise RuntimeError("fallo a mitad del borrado")
+
+        post_delete.connect(falla_tras_borrar, sender=Poliza, dispatch_uid="falla_tras_borrar")
+        self.addCleanup(post_delete.disconnect, sender=Poliza, dispatch_uid="falla_tras_borrar")
+        with self.assertRaises(RuntimeError):
+            # Punto de guardado propio: sin él, el rollback arrastraría la
+            # transacción envolvente de TestCase.
+            with transaction.atomic():
+                self._client(self.a["usuario"]).delete(f"{POLIZAS_URL}{poliza.pk}/")
+
+        self.assertEqual(lineas_al_fallar, [0])
+        self.assertTrue(Poliza.objects.filter(pk=poliza.pk).exists())
+        self.assertEqual(poliza.poliza_detalles.count(), 2)
+
+    # -- Nota de crédito ------------------------------------------------------
+
+    def test_borrar_nota_en_borrador_elimina_sus_lineas(self):
+        nota = self._nota_con_linea(NotaCredito.Estatus.BORRADOR.value)
+        self.assertEqual(NotaCreditoDetalle.objects.count(), 1)
+
+        resp = self._client(self.a["usuario"]).delete(f"{NOTAS_CREDITO_URL}{nota.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(NotaCredito.objects.filter(pk=nota.pk).exists())
+        self.assertEqual(NotaCreditoDetalle.objects.count(), 0)
+
+    def test_borrar_nota_cancelada_elimina_sus_lineas(self):
+        nota = self._nota_con_linea(NotaCredito.Estatus.CANCELADA.value)
+
+        resp = self._client(self.a["usuario"]).delete(f"{NOTAS_CREDITO_URL}{nota.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(NotaCreditoDetalle.objects.count(), 0)
+
+    def test_borrar_nota_emitida_sigue_rechazado_y_conserva_sus_lineas(self):
+        nota = self._nota_con_linea(NotaCredito.Estatus.EMITIDA.value)
+
+        resp = self._client(self.a["usuario"]).delete(f"{NOTAS_CREDITO_URL}{nota.pk}/")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertTrue(NotaCredito.objects.filter(pk=nota.pk).exists())
+        self.assertEqual(nota.nota_credito_detalles.count(), 1)
+
+
+class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
+    """EC-133: la CxP nace del registro de la factura de proveedor, el alta
+    manual ya no la descuadra, y con pagos aplicados no se edita ni se borra."""
+
+    ACCOUNTS_URL = "/api/v1/finanzas/cuentas-por-pagar/"
+    MIGRATION = "finanzas.migrations.0013_cxp_unique_invoice_without_vencida"
+
+    def _purchase_documents(self):
+        proveedor, _, oc, _, recepcion, _, factura = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"],
+        )
+        return proveedor, oc, recepcion, factura
+
+    def _invoice(self, total="1160.00", fecha_vencimiento=None):
+        proveedor, _, _, factura = self._purchase_documents()
+        factura.total = Decimal(total)
+        factura.fecha_vencimiento = fecha_vencimiento
+        factura.save()
+        return proveedor, factura
+
+    def _account(self, total="1000.00"):
+        proveedor, factura = self._invoice(total)
+        cxp = CuentaPorPagar.objects.create(
+            empresa=self.a["empresa"], proveedor=proveedor, factura_proveedor=factura,
+            total=Decimal(total), saldo=Decimal(total),
+        )
+        return proveedor, factura, cxp
+
+    def _pay(self, proveedor, cxp, importe, estatus=None):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        payload = {
+            "proveedor": proveedor.pk,
+            "cuenta_bancaria": cuenta.pk,
+            "total_pagado": importe,
+            "pago_detalles": [{"cxp": cxp.pk, "importe_aplicado": importe}],
+        }
+        if estatus is not None:
+            payload["estatus"] = estatus
+        resp = self._client(self.a["usuario"]).post(PAGOS_URL, payload, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return Pago.objects.get(pk=resp.data["id"])
+
+    def _post_invoice(self, **overrides):
+        proveedor, oc, recepcion, _ = self._purchase_documents()
+        payload = {
+            "sucursal": self.a["sucursal"].pk,
+            "proveedor": proveedor.pk,
+            "oc": oc.pk,
+            "recepcion": recepcion.pk,
+            "moneda": self.moneda.pk,
+            "total": "1160.00",
+            "fecha_vencimiento": "2026-10-15",
+            "estatus": FacturaProveedor.FacturaProveedorStatus.REGISTRADA.value,
+        }
+        payload.update(overrides)
+        return self._client(self.a["usuario"]).post(FACTURAS_PROVEEDOR_URL, payload, format="json")
+
+    def _post_account(self, data):
+        return self._client(self.a["usuario"]).post(self.ACCOUNTS_URL, data, format="json")
+
+    def _patch(self, url, data):
+        return self._client(self.a["usuario"]).patch(url, data, format="json")
+
+    # -- Origen automático ------------------------------------------------------
+
+    def test_creating_invoice_as_registered_generates_one_account(self):
+        resp = self._post_invoice()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        factura = FacturaProveedor.objects.get(pk=resp.data["id"])
+        cxp = CuentaPorPagar.objects.get(factura_proveedor=factura)
+        self.assertEqual(cxp.empresa_id, factura.empresa_id)
+        self.assertEqual(cxp.proveedor_id, factura.proveedor_id)
+        self.assertEqual(cxp.total, Decimal("1160.00"))
+        self.assertEqual(cxp.saldo, Decimal("1160.00"))
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PENDIENTE)
+        self.assertEqual(cxp.fecha_vencimiento, date(2026, 10, 15))
+
+    def test_creating_draft_invoice_generates_nothing(self):
+        resp = self._post_invoice(estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR.value)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertFalse(CuentaPorPagar.objects.exists())
+
+    def test_registering_draft_invoice_generates_account(self):
+        _, factura = self._invoice("500.00", fecha_vencimiento=date(2026, 11, 30))
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Registrada"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxp = CuentaPorPagar.objects.get(factura_proveedor=factura)
+        self.assertEqual((cxp.total, cxp.saldo), (Decimal("500.00"), Decimal("500.00")))
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PENDIENTE)
+        self.assertEqual(cxp.fecha_vencimiento, date(2026, 11, 30))
+
+    def test_zero_total_invoice_generates_zero_pending_account(self):
+        _, factura = self._invoice("0.00")
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Registrada"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxp = CuentaPorPagar.objects.get(factura_proveedor=factura)
+        self.assertEqual((cxp.total, cxp.saldo), (Decimal("0.00"), Decimal("0.00")))
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PENDIENTE)
+
+    def test_reentering_registered_neither_duplicates_nor_updates_account(self):
+        _, factura = self._invoice("500.00")
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+
+        for data in (
+            {"estatus": "Registrada"},
+            {"estatus": "Borrador", "total": "999.00"},
+            {"estatus": "Registrada"},
+            {"observaciones": "re-guardada"},
+        ):
+            resp = self._patch(url, data)
+            self.assertEqual(resp.status_code, 200, resp.data)
+
+        accounts = CuentaPorPagar.objects.filter(factura_proveedor=factura)
+        self.assertEqual(accounts.count(), 1)
+        self.assertEqual(accounts.get().total, Decimal("500.00"))
+        self.assertEqual(accounts.get().saldo, Decimal("500.00"))
+
+    # -- Alta manual ------------------------------------------------------------
+
+    def test_manual_create_is_born_balanced_ignoring_saldo_and_estatus(self):
+        proveedor, factura = self._invoice("300.00")
+
+        resp = self._post_account({
+            "proveedor": proveedor.pk, "factura_proveedor": factura.pk,
+            "total": "300.00", "saldo": "1.00", "estatus": "Pagada",
+        })
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo"], "300.00")
+        self.assertEqual(resp.data["estatus"], CuentaPorPagar.EstatusCxP.PENDIENTE.value)
+
+    def test_manual_create_rejects_total_mismatch(self):
+        proveedor, factura = self._invoice("300.00")
+
+        resp = self._post_account({
+            "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "299.99",
+        })
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["total"], list)
+        self.assertFalse(CuentaPorPagar.objects.exists())
+
+    def test_manual_create_without_total_compares_as_zero(self):
+        proveedor, factura = self._invoice("300.00")
+
+        resp = self._post_account({"proveedor": proveedor.pk, "factura_proveedor": factura.pk})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["total"], list)
+
+    def test_manual_create_rejects_proveedor_mismatch(self):
+        _, factura = self._invoice("300.00")
+        other_proveedor, _, _, _ = self._purchase_documents()
+
+        resp = self._post_account({
+            "proveedor": other_proveedor.pk, "factura_proveedor": factura.pk, "total": "300.00",
+        })
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["proveedor"], list)
+
+    def test_manual_create_rejects_second_account_for_invoice(self):
+        proveedor, factura, _ = self._account("1000.00")
+
+        resp = self._post_account({
+            "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "1000.00",
+        })
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["factura_proveedor"], list)
+        self.assertEqual(CuentaPorPagar.objects.filter(factura_proveedor=factura).count(), 1)
+
+    def test_concurrent_duplicate_is_a_400_not_a_500(self):
+        # Simula la carrera: la validación no ve la otra CxP y el duplicado llega
+        # a la base, donde lo detiene uq_cxp_factura_proveedor.
+        proveedor, factura, _ = self._account("1000.00")
+
+        with patch.object(CuentaPorPagarSerializer, "_validate_single_account_per_invoice"):
+            resp = self._post_account({
+                "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "1000.00",
+            })
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["factura_proveedor"], list)
+        self.assertEqual(CuentaPorPagar.objects.filter(factura_proveedor=factura).count(), 1)
+
+    def test_moving_account_to_invoice_that_has_one_is_rejected(self):
+        _, _, cxp = self._account()
+        _, other_invoice, _ = self._account()
+
+        resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"factura_proveedor": other_invoice.pk})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["factura_proveedor"], list)
+
+    # -- Candado con pagos aplicados ---------------------------------------------
+
+    def test_frozen_fields_rejected_with_applied_payment(self):
+        proveedor, _, cxp = self._account("1000.00")
+        self._pay(proveedor, cxp, "400.00")
+        url = f"{self.ACCOUNTS_URL}{cxp.pk}/"
+
+        for field, value in (("total", "2000.00"), ("saldo", "1000.00"), ("estatus", "Pendiente")):
+            with self.subTest(field=field):
+                resp = self._patch(url, {field: value})
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data[field], list)
+
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.total, Decimal("1000.00"))
+        self.assertEqual(cxp.saldo, Decimal("600.00"))
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PARCIAL)
+
+    def test_resending_current_values_and_editing_free_fields_is_allowed(self):
+        proveedor, _, cxp = self._account("1000.00")
+        self._pay(proveedor, cxp, "400.00")
+
+        resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {
+            "total": "1000.00", "saldo": "600.00",
+            "estatus": CuentaPorPagar.EstatusCxP.PARCIAL.value,
+            "fecha_vencimiento": "2026-12-31", "observaciones": "renegociada",
+        })
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.fecha_vencimiento, date(2026, 12, 31))
+        self.assertEqual(cxp.observaciones, "renegociada")
+
+    def test_frozen_fields_editable_without_applied_payment(self):
+        proveedor, _, cxp = self._account("1000.00")
+        # Un pago en borrador todavía no descontó nada: no congela.
+        self._pay(proveedor, cxp, "400.00", estatus=Pago.Estatus.BORRADOR.value)
+
+        resp = self._patch(
+            f"{self.ACCOUNTS_URL}{cxp.pk}/",
+            {"saldo": "900.00", "estatus": CuentaPorPagar.EstatusCxP.PARCIAL.value},
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.saldo, Decimal("900.00"))
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PARCIAL)
+
+    def test_cancelling_the_payment_lifts_the_freeze(self):
+        proveedor, _, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "400.00")
+        resp = self._client(self.a["usuario"]).post(f"{PAGOS_URL}{pago.pk}/cancelar/", {}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"saldo": "900.00"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_vencida_is_no_longer_an_accepted_estatus(self):
+        _, _, cxp = self._account("1000.00")
+
+        resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"estatus": "Vencida"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["estatus"], list)
+        # Al crear, estatus no es escribible: se ignora y la CxP nace Pendiente.
+        proveedor, factura = self._invoice("50.00")
+        resp = self._post_account({
+            "proveedor": proveedor.pk, "factura_proveedor": factura.pk,
+            "total": "50.00", "estatus": "Vencida",
+        })
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["estatus"], CuentaPorPagar.EstatusCxP.PENDIENTE.value)
+
+    # -- Borrado ----------------------------------------------------------------
+
+    def test_deleting_account_with_applied_payment_is_rejected(self):
+        proveedor, _, cxp = self._account("1000.00")
+        self._pay(proveedor, cxp, "400.00")
+
+        resp = self._client(self.a["usuario"]).delete(f"{self.ACCOUNTS_URL}{cxp.pk}/")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data, list)
+        self.assertTrue(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
+        self.assertEqual(PagoDetalle.objects.filter(cxp=cxp).count(), 1)
+
+    def test_deleting_account_without_applied_payment_is_allowed(self):
+        _, _, cxp = self._account()
+
+        resp = self._client(self.a["usuario"]).delete(f"{self.ACCOUNTS_URL}{cxp.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
+
+    def test_deleting_invoice_whose_account_has_applied_payment_is_rejected(self):
+        proveedor, factura, cxp = self._account("1000.00")
+        self._pay(proveedor, cxp, "400.00")
+
+        resp = self._client(self.a["usuario"]).delete(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data, list)
+        self.assertTrue(FacturaProveedor.objects.filter(pk=factura.pk).exists())
+        self.assertTrue(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
+        self.assertEqual(PagoDetalle.objects.filter(cxp=cxp).count(), 1)
+
+    def test_deleting_invoice_without_applied_payment_cascades_to_account(self):
+        _, factura, cxp = self._account()
+
+        resp = self._client(self.a["usuario"]).delete(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(FacturaProveedor.objects.filter(pk=factura.pk).exists())
+        self.assertFalse(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
+
+    # -- Migración 0013 ---------------------------------------------------------
+
+    def test_migration_remaps_vencida_by_balance_and_is_a_noop_without_rows(self):
+        migration = importlib.import_module(self.MIGRATION)
+        _, _, paid = self._account("100.00")
+        _, _, pending = self._account("100.00")
+        _, _, partial = self._account("100.00")
+        CuentaPorPagar.objects.filter(pk=paid.pk).update(saldo=Decimal("0.00"), estatus="Vencida")
+        CuentaPorPagar.objects.filter(pk=pending.pk).update(estatus="Vencida")
+        CuentaPorPagar.objects.filter(pk=partial.pk).update(saldo=Decimal("40.00"), estatus="Vencida")
+
+        with patch("builtins.print") as printed:
+            migration.remap_vencida_by_balance(django_apps, None)
+            # La segunda pasada ya no encuentra filas: no imprime ni cambia nada.
+            migration.remap_vencida_by_balance(django_apps, None)
+
+        statuses = dict(CuentaPorPagar.objects.values_list("pk", "estatus"))
+        self.assertEqual(statuses[paid.pk], "Pagada")
+        self.assertEqual(statuses[pending.pk], "Pendiente")
+        self.assertEqual(statuses[partial.pk], "Parcial")
+        self.assertEqual(printed.call_count, 3)
+
+    def test_migration_stops_on_duplicate_invoices_without_deleting(self):
+        migration = importlib.import_module(self.MIGRATION)
+        # Sin duplicados es un no-op.
+        migration.fail_on_duplicate_invoices(django_apps, None)
+
+        model = MagicMock()
+        model.objects.values.return_value.annotate.return_value.filter.return_value = [
+            {"factura_proveedor_id": 7, "accounts": 2},
+        ]
+        fake_apps = MagicMock()
+        fake_apps.get_model.return_value = model
+
+        with self.assertRaises(RuntimeError) as ctx:
+            migration.fail_on_duplicate_invoices(fake_apps, None)
+
+        self.assertIn("[7]", str(ctx.exception))
+        self.assertFalse(any("delete" in str(call) for call in model.mock_calls))
+
+    # -- Vencimiento en el alta manual ------------------------------------------
+
+    def test_manual_create_copies_invoice_due_date_when_absent(self):
+        proveedor, factura = self._invoice("300.00", fecha_vencimiento=date(2026, 12, 15))
+
+        resp = self._post_account({
+            "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "300.00",
+        })
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["fecha_vencimiento"], "2026-12-15")
+        cxp = CuentaPorPagar.objects.get(factura_proveedor=factura)
+        self.assertEqual(cxp.fecha_vencimiento, date(2026, 12, 15))
+
+    def test_manual_create_keeps_client_due_date(self):
+        proveedor, factura = self._invoice("300.00", fecha_vencimiento=date(2026, 12, 15))
+
+        resp = self._post_account({
+            "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "300.00",
+            "fecha_vencimiento": "2027-01-31",
+        })
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["fecha_vencimiento"], "2027-01-31")
+
+    def test_manual_create_explicit_null_due_date_falls_back_to_invoice(self):
+        # Un null explícito cuenta como ausente: un campo de fecha vacío en el
+        # formulario no debe dejar la CxP sin vencimiento.
+        proveedor, factura = self._invoice("300.00", fecha_vencimiento=date(2026, 12, 15))
+
+        resp = self._post_account({
+            "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "300.00",
+            "fecha_vencimiento": None,
+        })
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["fecha_vencimiento"], "2026-12-15")
+
+    def test_manual_create_without_due_date_anywhere_stays_null(self):
+        proveedor, factura = self._invoice("300.00", fecha_vencimiento=None)
+
+        resp = self._post_account({
+            "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "300.00",
+        })
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertIsNone(resp.data["fecha_vencimiento"])
+
+    # -- Re-apuntar la CxP a otra factura o proveedor ----------------------------
+
+    def _aligned_invoice_for(self, proveedor, total):
+        # Factura sin CxP del mismo proveedor y total: el cruce contra la factura
+        # pasa, así que sólo el candado puede frenar el cambio.
+        _, oc, recepcion, _ = self._purchase_documents()
+        return FacturaProveedor.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=proveedor,
+            oc=oc, recepcion=recepcion, moneda=self.moneda, total=Decimal(total),
+        )
+
+    def test_moving_paid_account_to_another_invoice_is_frozen(self):
+        proveedor, factura, cxp = self._account("1000.00")
+        self._pay(proveedor, cxp, "400.00")
+        target = self._aligned_invoice_for(proveedor, "1000.00")
+
+        resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"factura_proveedor": target.pk})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["factura_proveedor"], list)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.factura_proveedor_id, factura.pk)
+
+    def test_changing_paid_account_proveedor_is_frozen_even_if_aligned(self):
+        proveedor, factura, cxp = self._account("1000.00")
+        self._pay(proveedor, cxp, "400.00")
+        other_proveedor, _, _, _ = self._purchase_documents()
+        # La factura ya dice el otro proveedor: el cruce pasa y sólo queda el candado.
+        FacturaProveedor.objects.filter(pk=factura.pk).update(proveedor=other_proveedor)
+
+        resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"proveedor": other_proveedor.pk})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pagos aplicados", str(resp.data["proveedor"]))
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.proveedor_id, proveedor.pk)
+
+    def test_unpaid_account_cannot_be_patched_out_of_alignment(self):
+        _, factura, cxp = self._account("1000.00")
+        other_proveedor, _, _, _ = self._purchase_documents()
+        url = f"{self.ACCOUNTS_URL}{cxp.pk}/"
+
+        for data, field in (
+            ({"proveedor": other_proveedor.pk}, "proveedor"),
+            ({"total": "9999.00", "saldo": "9999.00"}, "total"),
+        ):
+            with self.subTest(field=field):
+                resp = self._patch(url, data)
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data[field], list)
+
+        foreign_invoice = self._aligned_invoice_for(other_proveedor, "1000.00")
+        resp = self._patch(url, {"factura_proveedor": foreign_invoice.pk})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["proveedor"], list)
+
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.factura_proveedor_id, factura.pk)
+        self.assertEqual((cxp.total, cxp.saldo), (Decimal("1000.00"), Decimal("1000.00")))
+
+    def test_unpaid_account_can_move_to_an_aligned_invoice(self):
+        proveedor, _, cxp = self._account("1000.00")
+        target = self._aligned_invoice_for(proveedor, "1000.00")
+
+        resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"factura_proveedor": target.pk})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.factura_proveedor_id, target.pk)
+
+    def test_resending_unchanged_values_on_misaligned_account_is_allowed(self):
+        # Una CxP ya desalineada (la factura cambió de total tras registrarse) sigue
+        # editable en lo que no la ata a la factura.
+        proveedor, factura, cxp = self._account("1000.00")
+        FacturaProveedor.objects.filter(pk=factura.pk).update(total=Decimal("999.00"))
+
+        resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {
+            "proveedor": proveedor.pk, "factura_proveedor": factura.pk,
+            "total": "1000.00", "observaciones": "sin cambios de fondo",
+        })
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    # -- Factura bloqueada en el alta manual -------------------------------------
+
+    def test_manual_create_when_invoice_vanishes_before_lock_is_a_400(self):
+        # El lock de la factura cierra la carrera con su borrado. SQLite ignora
+        # select_for_update, así que aquí sólo se ejerce la rama en la que la
+        # factura ya no existe al bloquearla; el orden de bloqueo real sólo se
+        # puede comprobar en Postgres.
+        proveedor, factura = self._invoice("300.00")
+        original_validate = CuentaPorPagarSerializer.validate
+
+        def validate_then_delete_invoice(serializer, attrs):
+            attrs = original_validate(serializer, attrs)
+            FacturaProveedor.objects.filter(pk=factura.pk).delete()
+            return attrs
+
+        with patch.object(CuentaPorPagarSerializer, "validate", validate_then_delete_invoice):
+            resp = self._post_account({
+                "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "300.00",
+            })
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["factura_proveedor"], list)
+        self.assertFalse(CuentaPorPagar.objects.exists())
+
+    # -- Filas borradas entre get_object() y el lock -----------------------------
+
+    def test_patching_invoice_deleted_before_lock_is_404(self):
+        _, factura = self._invoice("500.00")
+        stale = FacturaProveedor.objects.get(pk=factura.pk)
+        FacturaProveedor.objects.filter(pk=factura.pk).delete()
+
+        with patch.object(FacturaProveedorViewSet, "get_object", return_value=stale):
+            resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"observaciones": "x"})
+
+        self.assertEqual(resp.status_code, 404)
+        # Sin el NotFound, save() habría reinsertado la factura con el mismo pk.
+        self.assertFalse(FacturaProveedor.objects.filter(pk=factura.pk).exists())
+
+    def test_deleting_invoice_deleted_before_lock_is_404(self):
+        _, factura = self._invoice("500.00")
+        stale = FacturaProveedor.objects.get(pk=factura.pk)
+        FacturaProveedor.objects.filter(pk=factura.pk).delete()
+
+        with patch.object(FacturaProveedorViewSet, "get_object", return_value=stale):
+            resp = self._client(self.a["usuario"]).delete(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/")
+
+        self.assertEqual(resp.status_code, 404)
+
+    def test_patching_account_deleted_before_lock_is_404(self):
+        _, _, cxp = self._account()
+        stale = CuentaPorPagar.objects.get(pk=cxp.pk)
+        CuentaPorPagar.objects.filter(pk=cxp.pk).delete()
+
+        with patch.object(CuentaPorPagarViewSet, "get_object", return_value=stale):
+            resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"observaciones": "x"})
+
+        self.assertEqual(resp.status_code, 404)
+        self.assertFalse(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
+
+    # -- IntegrityError en la edición --------------------------------------------
+
+    def test_update_duplicate_race_is_a_400(self):
+        proveedor, factura, cxp = self._account("1000.00")
+        target = self._aligned_invoice_for(proveedor, "1000.00")
+        CuentaPorPagar.objects.create(
+            empresa=self.a["empresa"], proveedor=proveedor, factura_proveedor=target,
+            total=Decimal("1000.00"), saldo=Decimal("1000.00"),
+        )
+
+        with patch.object(CuentaPorPagarSerializer, "_validate_single_account_per_invoice"):
+            resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"factura_proveedor": target.pk})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["factura_proveedor"], list)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.factura_proveedor_id, factura.pk)
+
+    def test_unrelated_integrity_error_on_update_is_not_disguised_as_duplicate(self):
+        _, _, cxp = self._account()
+
+        with patch.object(
+            CuentaPorPagarSerializer, "update", side_effect=IntegrityError("otra restricción")
+        ):
+            with self.assertRaises(IntegrityError):
+                self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"observaciones": "x"})
+
+    # -- Esquema OpenAPI ----------------------------------------------------------
+
+    def test_openapi_request_schemas_match_runtime_writability(self):
+        schema = SchemaGenerator().get_schema(request=None, public=True)
+        components = schema["components"]["schemas"]
+        create_fields = components["CuentaPorPagarCreateRequest"]["properties"]
+        update_fields = components["CuentaPorPagarRequest"]["properties"]
+        patch_fields = components["PatchedCuentaPorPagarRequest"]["properties"]
+
+        for field in ("saldo", "estatus"):
+            with self.subTest(field=field):
+                self.assertNotIn(field, create_fields)
+                self.assertIn(field, update_fields)
+                self.assertIn(field, patch_fields)
+
+
+class ConcurrencyConflictMappingTests(FinanzasBase):
+    """Choques con otra transacción: 409, nunca un 500 sin mapear.
+
+    Qué cubre esta suite y qué no. SQLite ignora ``select_for_update`` (con o sin
+    NOWAIT), así que aquí no se pueden reproducir ni la contención real de un
+    bloqueo NOWAIT (55P03) ni un deadlock real (40P01). Se prueba lo alcanzable:
+
+    - que el guard de borrado pide sus bloqueos con ``nowait=True``;
+    - que traduce el 55P03 del driver a ``ConcurrentOperationError`` y deja pasar
+      cualquier otro error de base de datos;
+    - que la frontera HTTP de finanzas convierte 40P01 y 55P03 en 409 y no enmascara
+      los demás ``OperationalError``.
+
+    El comportamiento real bajo contención (que el NOWAIT de verdad no espere y que
+    Postgres aborte el deadlock con 40P01) sólo se puede verificar en Postgres.
+    """
+
+    ACCOUNTS_URL = "/api/v1/finanzas/cuentas-por-pagar/"
+    GUARD_MODULE = "finanzas.services.cuenta_por_pagar_service"
+
+    @staticmethod
+    def _driver_error(sqlstate):
+        # Django relanza el error del driver ``from`` el original: el SQLSTATE queda
+        # en ``__cause__``, como con psycopg.
+        cause = Exception("error del driver")
+        cause.sqlstate = sqlstate
+        error = OperationalError("error de base de datos")
+        error.__cause__ = cause
+        return error
+
+    def _account(self):
+        proveedor, _, _, _, _, _, factura = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"],
+        )
+        return CuentaPorPagar.objects.create(
+            empresa=self.a["empresa"], proveedor=proveedor, factura_proveedor=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+
+    def _delete_account(self, cxp):
+        return self._client(self.a["usuario"]).delete(f"{self.ACCOUNTS_URL}{cxp.pk}/")
+
+    def _guard_lock_mocks(self, failing, sqlstate):
+        # Sustituye los modelos que usa el guard: la consulta de bloqueo de
+        # ``failing`` lanza el error del driver y la otra devuelve filas vacías.
+        payment_lines, accounts = MagicMock(), MagicMock()
+        for mock, name in ((payment_lines, "lines"), (accounts, "accounts")):
+            locked = mock.objects.select_for_update.return_value.filter.return_value.only.return_value
+            if name == failing:
+                locked.__iter__.side_effect = self._driver_error(sqlstate)
+            else:
+                locked.__iter__.return_value = iter([])
+        return payment_lines, accounts
+
+    # -- Frontera HTTP (C) --------------------------------------------------------
+
+    def test_deadlock_and_lock_contention_map_to_409(self):
+        cxp = self._account()
+
+        for sqlstate in ("40P01", "55P03"):
+            with self.subTest(sqlstate=sqlstate):
+                with patch.object(
+                    CuentaPorPagarViewSet, "perform_destroy", side_effect=self._driver_error(sqlstate)
+                ):
+                    resp = self._delete_account(cxp)
+
+                self.assertEqual(resp.status_code, 409, resp.data)
+                self.assertEqual(resp.data, [CONCURRENT_OPERATION_MESSAGE])
+
+    def test_other_database_errors_are_not_masked(self):
+        cxp = self._account()
+
+        with patch.object(
+            CuentaPorPagarViewSet, "perform_destroy", side_effect=self._driver_error("08006")
+        ):
+            with self.assertRaises(OperationalError):
+                self._delete_account(cxp)
+
+    def test_concurrent_operation_error_maps_to_409_with_its_message(self):
+        cxp = self._account()
+
+        with patch.object(
+            CuentaPorPagarViewSet, "perform_destroy",
+            side_effect=ConcurrentOperationError("mensaje del servicio"),
+        ):
+            resp = self._delete_account(cxp)
+
+        self.assertEqual(resp.status_code, 409, resp.data)
+        self.assertEqual(resp.data, ["mensaje del servicio"])
+
+    # -- Guard de borrado con NOWAIT (A) ------------------------------------------
+
+    def test_delete_guard_locks_with_nowait_and_maps_contention_to_409(self):
+        cxp = self._account()
+
+        for failing in ("lines", "accounts"):
+            with self.subTest(failing=failing):
+                payment_lines, accounts = self._guard_lock_mocks(failing, "55P03")
+                with patch(f"{self.GUARD_MODULE}.PagoDetalle", payment_lines), \
+                        patch(f"{self.GUARD_MODULE}.CuentaPorPagar", accounts):
+                    resp = self._delete_account(cxp)
+
+                self.assertEqual(resp.status_code, 409, resp.data)
+                self.assertIn("otra operación", str(resp.data[0]))
+                payment_lines.objects.select_for_update.assert_called_once_with(nowait=True)
+                if failing == "accounts":
+                    accounts.objects.select_for_update.assert_called_once_with(nowait=True)
+                self.assertTrue(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
+
+    def test_delete_guard_leaves_a_deadlock_to_the_http_mapping(self):
+        cxp = self._account()
+        payment_lines, accounts = self._guard_lock_mocks("lines", "40P01")
+
+        with patch(f"{self.GUARD_MODULE}.PagoDetalle", payment_lines), \
+                patch(f"{self.GUARD_MODULE}.CuentaPorPagar", accounts):
+            resp = self._delete_account(cxp)
+
+        # El guard sólo traduce el 55P03; el 40P01 lo mapea la frontera HTTP.
+        self.assertEqual(resp.status_code, 409, resp.data)
+        self.assertEqual(resp.data, [CONCURRENT_OPERATION_MESSAGE])
+        self.assertTrue(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
