@@ -81,7 +81,7 @@ class Producto(models.Model):
     # costo_base = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     precio_base = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     cod_proscai = models.CharField(max_length=50, blank=True, default="")
-    codigo = models.CharField(max_length=4, null=True, blank=True)
+    codigo = models.CharField(max_length=5, null=True, blank=True)
 
     history = HistoricalRecords()
 
@@ -100,6 +100,7 @@ class ProductoVariante(models.Model):
     color = models.ForeignKey(Color, on_delete=models.CASCADE, related_name="variantes")
     talla = models.ForeignKey(Talla, on_delete=models.CASCADE, related_name="variantes")
     sku = models.CharField(max_length=50, unique=True)
+    cod_proscai = models.CharField(max_length=50, blank=True, default="")
     precio_base = models.DecimalField(max_digits=10, decimal_places=2)
     activo = models.BooleanField(default=True)
 
