@@ -457,7 +457,11 @@ class MovimientoBancario(models.Model):
         return str(self.id)
 
 class PolizaDetalle(models.Model):
-    poliza = models.ForeignKey(Poliza, on_delete=models.SET_NULL, related_name="poliza_detalles", null=True)
+    # CASCADE: una línea sin póliza no significa nada -- ni siquiera tiene
+    # empresa propia --. Con SET_NULL, borrar la póliza dejaba sus renglones
+    # huérfanos en poliza_detalle, con cuenta, cargo y abono intactos. Los
+    # demás FKs siguen en SET_NULL: son referencias, no el documento padre.
+    poliza = models.ForeignKey(Poliza, on_delete=models.CASCADE, related_name="poliza_detalles", null=True)
     cuenta_contable = models.ForeignKey(CuentaContable, on_delete=models.SET_NULL, related_name="poliza_detalles", null=True)
     centro_costo = models.ForeignKey(CentroCosto, on_delete=models.SET_NULL, related_name="poliza_detalles", null=True)
     
