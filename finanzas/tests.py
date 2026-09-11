@@ -16,6 +16,8 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
+from django.db.models.signals import post_delete
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -44,6 +46,7 @@ from finanzas.models import (
     FacturaDetalle,
     FacturaProveedor,
     NotaCredito,
+    NotaCreditoDetalle,
     Pago,
     Poliza,
     PolizaDetalle,
@@ -2298,3 +2301,152 @@ class AdminFinanzasSmokeTests(TestCase):
             with self.subTest(modelo=model._meta.model_name):
                 resp = self.client.get(url)
                 self.assertEqual(resp.status_code, 200, f"{model._meta.model_name}: {resp.status_code}")
+
+
+class Defecto12BorradoSinLineasHuerfanas(FinanzasBase):
+    """Borrar una póliza o una nota de crédito se lleva también sus líneas.
+
+    ``PolizaDetalle.poliza`` era ``SET_NULL``: borrar la póliza dejaba sus
+    renglones en ``poliza_detalle`` con cuenta, cargo y abono intactos pero sin
+    padre -- y sin empresa, porque la línea no tiene columna propia --. Un
+    reporte agrupado por cuenta los habría sumado. ``NotaCreditoDetalle`` ya
+    era ``CASCADE``; sus pruebas blindan que siga así.
+    """
+
+    def _poliza_con_lineas(self, estatus, tenant=None):
+        tenant = tenant or self.a
+        cargo, abono, centro_costo = self._crear_cuentas_contables(tenant["empresa"])
+        poliza = Poliza.objects.create(
+            empresa=tenant["empresa"], sucursal=tenant["sucursal"],
+            centro_costo=centro_costo, estatus=estatus,
+        )
+        PolizaDetalle.objects.create(
+            poliza=poliza, cuenta_contable=cargo, centro_costo=centro_costo,
+            cargo=Decimal("100.00"), orden=1,
+        )
+        PolizaDetalle.objects.create(
+            poliza=poliza, cuenta_contable=abono, centro_costo=centro_costo,
+            abono=Decimal("100.00"), orden=2,
+        )
+        return poliza
+
+    def _nota_con_linea(self, estatus):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"],
+            cliente=self.a["cliente"], moneda=self.moneda, total=Decimal("116.00"),
+        )
+        factura_detalle = FacturaDetalle.objects.create(
+            factura=factura, pedido_detalle=self.a["detalle"], producto=self.a["producto"],
+            cantidad=1, precio_unitario=Decimal("100.00"), total=Decimal("116.00"),
+        )
+        nota = NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"], total=Decimal("116.00"),
+            estatus=estatus,
+        )
+        NotaCreditoDetalle.objects.create(
+            nota_credito=nota, factura_detalle=factura_detalle,
+            cantidad=1, total=Decimal("116.00"),
+        )
+        return nota
+
+    def _asserta_sin_polizas_huerfanas(self):
+        self.assertEqual(PolizaDetalle.objects.filter(poliza__isnull=True).count(), 0)
+
+    # -- Póliza --------------------------------------------------------------
+
+    def test_borrar_poliza_en_borrador_elimina_sus_lineas(self):
+        poliza = self._poliza_con_lineas(Poliza.PolizaStatus.BORRADOR.value)
+        self.assertEqual(PolizaDetalle.objects.count(), 2)
+
+        resp = self._client(self.a["usuario"]).delete(f"{POLIZAS_URL}{poliza.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Poliza.objects.filter(pk=poliza.pk).exists())
+        self.assertEqual(PolizaDetalle.objects.count(), 0)
+        self._asserta_sin_polizas_huerfanas()
+
+    def test_borrar_poliza_cancelada_elimina_sus_lineas(self):
+        poliza = self._poliza_con_lineas(Poliza.PolizaStatus.CANCELADA.value)
+
+        resp = self._client(self.a["usuario"]).delete(f"{POLIZAS_URL}{poliza.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(PolizaDetalle.objects.count(), 0)
+        self._asserta_sin_polizas_huerfanas()
+
+    def test_borrar_poliza_fuera_de_la_api_tambien_elimina_sus_lineas(self):
+        # El admin y los borrados en cascada (empresa, sucursal, centro de costo,
+        # usuario) no pasan por perform_destroy: la regla vive en el FK.
+        poliza = self._poliza_con_lineas(Poliza.PolizaStatus.BORRADOR.value)
+
+        Poliza.objects.filter(pk=poliza.pk).delete()
+
+        self.assertEqual(PolizaDetalle.objects.count(), 0)
+        self._asserta_sin_polizas_huerfanas()
+
+    def test_borrar_poliza_contabilizada_sigue_rechazado(self):
+        poliza = self._poliza_con_lineas(Poliza.PolizaStatus.CONTABILIZADA.value)
+
+        resp = self._client(self.a["usuario"]).delete(f"{POLIZAS_URL}{poliza.pk}/")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertTrue(Poliza.objects.filter(pk=poliza.pk).exists())
+        self.assertEqual(poliza.poliza_detalles.count(), 2)
+
+    def test_borrar_poliza_de_otra_empresa_sigue_fuera_de_alcance(self):
+        poliza = self._poliza_con_lineas(Poliza.PolizaStatus.BORRADOR.value, tenant=self.b)
+
+        resp = self._client(self.a["usuario"]).delete(f"{POLIZAS_URL}{poliza.pk}/")
+
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(poliza.poliza_detalles.count(), 2)
+
+    def test_borrado_que_falla_a_mitad_no_deja_la_poliza_a_medias(self):
+        poliza = self._poliza_con_lineas(Poliza.PolizaStatus.BORRADOR.value)
+        lineas_al_fallar = []
+
+        def falla_tras_borrar(sender, instance, **kwargs):
+            # Para cuando se borra el encabezado las líneas ya salieron.
+            lineas_al_fallar.append(PolizaDetalle.objects.filter(poliza_id=instance.pk).count())
+            raise RuntimeError("fallo a mitad del borrado")
+
+        post_delete.connect(falla_tras_borrar, sender=Poliza, dispatch_uid="falla_tras_borrar")
+        self.addCleanup(post_delete.disconnect, sender=Poliza, dispatch_uid="falla_tras_borrar")
+        with self.assertRaises(RuntimeError):
+            # Punto de guardado propio: sin él, el rollback arrastraría la
+            # transacción envolvente de TestCase.
+            with transaction.atomic():
+                self._client(self.a["usuario"]).delete(f"{POLIZAS_URL}{poliza.pk}/")
+
+        self.assertEqual(lineas_al_fallar, [0])
+        self.assertTrue(Poliza.objects.filter(pk=poliza.pk).exists())
+        self.assertEqual(poliza.poliza_detalles.count(), 2)
+
+    # -- Nota de crédito ------------------------------------------------------
+
+    def test_borrar_nota_en_borrador_elimina_sus_lineas(self):
+        nota = self._nota_con_linea(NotaCredito.Estatus.BORRADOR.value)
+        self.assertEqual(NotaCreditoDetalle.objects.count(), 1)
+
+        resp = self._client(self.a["usuario"]).delete(f"{NOTAS_CREDITO_URL}{nota.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(NotaCredito.objects.filter(pk=nota.pk).exists())
+        self.assertEqual(NotaCreditoDetalle.objects.count(), 0)
+
+    def test_borrar_nota_cancelada_elimina_sus_lineas(self):
+        nota = self._nota_con_linea(NotaCredito.Estatus.CANCELADA.value)
+
+        resp = self._client(self.a["usuario"]).delete(f"{NOTAS_CREDITO_URL}{nota.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(NotaCreditoDetalle.objects.count(), 0)
+
+    def test_borrar_nota_emitida_sigue_rechazado_y_conserva_sus_lineas(self):
+        nota = self._nota_con_linea(NotaCredito.Estatus.EMITIDA.value)
+
+        resp = self._client(self.a["usuario"]).delete(f"{NOTAS_CREDITO_URL}{nota.pk}/")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertTrue(NotaCredito.objects.filter(pk=nota.pk).exists())
+        self.assertEqual(nota.nota_credito_detalles.count(), 1)
