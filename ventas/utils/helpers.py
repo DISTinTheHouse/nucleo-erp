@@ -464,29 +464,18 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
 
         sobrantes = [row for row in tallas_actuales if row.pk not in tallas_usadas]
         if sobrantes:
-            sobrantes_ids = ", ".join(str(row.pk) for row in sobrantes)
-            raise ValidationError(
-                {
-                    "detalle": (
-                        "No se puede quitar tallas existentes del pedido mientras "
-                        f"haya trazabilidad asociada. Tallas sobrantes: {sobrantes_ids}."
-                    )
-                }
-            )
+            # Mesa de control puede eliminar tallas desde edición estricta
+            # porque ya validamos en _get_bloqueos_edicion_estricta() que no hay documentos ligados
+            sobrantes_ids = [row.pk for row in sobrantes]
+            PedidoDetalleTalla.objects.filter(pk__in=sobrantes_ids).delete()
 
     sobrantes_detalle = [
         detalle_id for detalle_id in existing_detalles.keys() if detalle_id not in touched_ids
     ]
     if sobrantes_detalle:
-        raise ValidationError(
-            {
-                "detalle": (
-                    "No se pueden eliminar renglones existentes del pedido en edición "
-                    "estricta. Deben cancelarse primero los documentos ligados o "
-                    "conservar el renglón original en el payload."
-                )
-            }
-        )
+        # Mesa de control puede eliminar renglones desde edición estricta
+        # porque ya validamos en _get_bloqueos_edicion_estricta() que no hay documentos ligados
+        PedidoDetalle.objects.filter(pk__in=sobrantes_detalle).delete()
 
 
 def _save_pedido_servicios_extras(pedido_obj, rows):
@@ -500,12 +489,7 @@ def _save_pedido_servicios_extras(pedido_obj, rows):
         extra.visible_en_factura = bool(row.get("visible_en_factura", True))
         extra.save()
     if len(existentes) > len(rows):
-        raise ValidationError(
-            {
-                "servicios_extras": (
-                    "No se pueden eliminar servicios extras existentes desde la edición "
-                    "estricta. Manténgalos en el payload o regularice primero los "
-                    "documentos ligados."
-                )
-            }
-        )
+        # Mesa de control puede eliminar servicios extras desde edición estricta
+        # Eliminar los que no vienen en el payload actual
+        ids_a_eliminar = [existentes[i].pk for i in range(len(rows), len(existentes))]
+        PedidoServicioExtra.objects.filter(pk__in=ids_a_eliminar).delete()

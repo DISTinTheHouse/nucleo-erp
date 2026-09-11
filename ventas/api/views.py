@@ -2653,9 +2653,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
             "editable": editable,
             "modo": MODO_EDICION_MESA_CONTROL,
             "requiere_ids_detalle": True,
-            "permite_eliminar_renglones": False,
-            "permite_eliminar_tallas": False,
-            "permite_eliminar_servicios_extras": False,
+            "permite_eliminar_renglones": True,
+            "permite_eliminar_tallas": True,
+            "permite_eliminar_servicios_extras": True,
             "requiere_cancelacion_previa": not editable,
             "codigo": None if editable else "pedido_con_bloqueos",
             "mensaje": (
