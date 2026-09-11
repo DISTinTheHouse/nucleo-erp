@@ -283,7 +283,8 @@ class CuentaPorPagar(models.Model):
         PARCIAL = 'Parcial', 'Parcial'
         PAGADA = 'Pagada', 'Pagada'
         CANCELADA = 'Cancelada', 'Cancelada'
-        VENCIDA = 'Vencida', 'Vencida'
+        # ``Vencida`` no es un estado de la CxP: se deriva al consultar, de
+        # ``fecha_vencimiento`` y ``saldo``. El estatus sólo sigue al saldo.
 
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="cuentas_por_pagar")
     proveedor = models.ForeignKey('terceros.Proveedor', on_delete=models.CASCADE, related_name="cuentas_por_pagar")
@@ -303,6 +304,10 @@ class CuentaPorPagar(models.Model):
         db_table = "cuentas_por_pagar"
         verbose_name = "Cuenta Por Pagar"
         verbose_name_plural = "Cuentas Por Pagar"
+        constraints = [
+            # Una factura de proveedor origina una sola cuenta por pagar.
+            models.UniqueConstraint(fields=["factura_proveedor"], name="uq_cxp_factura_proveedor"),
+        ]
 
     def __str__(self):
         return str(self.id)

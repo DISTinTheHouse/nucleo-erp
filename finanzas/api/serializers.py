@@ -27,6 +27,7 @@ from finanzas.models import (
     Poliza,
     PolizaDetalle,
 )
+from finanzas.services.cuenta_por_pagar_service import DUPLICATE_INVOICE_MESSAGE
 
 
 class EmpresaResueltaEnServidorMixin:
@@ -499,7 +500,73 @@ class CuentaPorPagarSerializer(EmpresaResueltaEnServidorMixin, serializers.Model
             fp = attrs.get("factura_proveedor")
             if fp and emp_id and getattr(fp, "empresa_id", None) and fp.empresa_id != emp_id:
                 raise ValidationError({"factura_proveedor": "Factura de proveedor no pertenece a la empresa."})
+        factura = attrs.get("factura_proveedor")
+        if factura is not None:
+            self._validate_single_account_per_invoice(factura)
+        if self.instance is None:
+            if factura is not None:
+                self._validate_matches_invoice(attrs.get("proveedor"), attrs.get("total", 0), factura)
+        elif self._changes_invoice_alignment(attrs):
+            # En una edición se vuelve a cruzar contra la factura si cambia algo de
+            # lo que ata la CxP a ella: si no, una CxP creada cuadrada podía
+            # editarse después hacia otra factura, otro proveedor u otro total.
+            self._validate_matches_invoice(
+                attrs.get("proveedor", self.instance.proveedor),
+                attrs.get("total", self.instance.total),
+                factura if factura is not None else self.instance.factura_proveedor,
+            )
         return attrs
+
+    INVOICE_ALIGNED_FIELDS = ("factura_proveedor", "proveedor", "total")
+
+    def _changes_invoice_alignment(self, attrs):
+        # Sólo un valor distinto del vigente cuenta como cambio: un PUT que reenvía
+        # los valores actuales no dispara el cruce.
+        return any(
+            field in attrs and attrs[field] != getattr(self.instance, field)
+            for field in self.INVOICE_ALIGNED_FIELDS
+        )
+
+    def _validate_single_account_per_invoice(self, factura):
+        # DRF no genera validador para un UniqueConstraint sobre un FK: sin esto
+        # el duplicado llegaba a la base y volvía como IntegrityError (500).
+        if self.instance is not None and self.instance.factura_proveedor_id == factura.pk:
+            return
+        if CuentaPorPagar.objects.filter(factura_proveedor=factura).exists():
+            raise ValidationError({"factura_proveedor": DUPLICATE_INVOICE_MESSAGE})
+
+    def _validate_matches_invoice(self, proveedor, total, factura):
+        if proveedor is not None and proveedor.pk != factura.proveedor_id:
+            raise ValidationError(
+                {"proveedor": "El proveedor no coincide con el de la factura de proveedor."}
+            )
+        # ``total`` es opcional en el modelo: si no llega vale 0 y así se compara.
+        submitted = Decimal(str(total or 0)).quantize(Decimal("0.01"))
+        expected = Decimal(str(factura.total or 0)).quantize(Decimal("0.01"))
+        if submitted != expected:
+            raise ValidationError(
+                {
+                    "total": (
+                        f"El total ({submitted}) no coincide con el de la factura "
+                        f"de proveedor ({expected})."
+                    )
+                }
+            )
+
+
+class CuentaPorPagarCreateSerializer(CuentaPorPagarSerializer):
+    """Alta manual: ``saldo`` y ``estatus`` los fija el servidor (saldo = total,
+    Pendiente), así que una CxP manual no puede nacer descuadrada.
+
+    Es una clase aparte, y no un ``read_only`` condicionado a la instancia, para
+    que el esquema OpenAPI refleje la ejecución: drf-spectacular construye los
+    request de PUT/PATCH sin instancia y registra los componentes por nombre de
+    serializer (el primero gana), así que con una sola clase ``saldo``/``estatus``
+    salían de sólo lectura también en la edición, donde sí se aceptan.
+    """
+
+    class Meta(CuentaPorPagarSerializer.Meta):
+        read_only_fields = ("saldo", "estatus")
 
 
 class CobroDetalleSerializer(serializers.ModelSerializer):
