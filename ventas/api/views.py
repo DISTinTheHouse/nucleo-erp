@@ -1174,6 +1174,15 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     },
                 }
             )
+        # Dentro de cada color, tallas en orden canónico (no por ``talla_id``).
+        # ``sort`` es estable y el color va primero en la clave, así que el
+        # orden de colores del queryset se conserva.
+        from catalogo.tallas import talla_sort_key
+
+        for variantes in variantes_por_producto.values():
+            variantes.sort(
+                key=lambda v: (v["color"]["id"], talla_sort_key(v["talla"]["nombre"]))
+            )
         for p in productos:
             p["variantes"] = variantes_por_producto.get(p["id"], [])
 

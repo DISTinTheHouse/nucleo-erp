@@ -1,6 +1,8 @@
 from django.db.models import Exists, OuterRef, Q
 from rest_framework import viewsets
 from rest_framework.exceptions import ValidationError
+from rest_framework.response import Response
+from catalogo.tallas import talla_sort_key
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
 from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoVarianteSerializer
 from produccion.models import ListaMaterialBom
@@ -26,7 +28,18 @@ class TallaViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return Talla.objects.filter(activo=True)
-    
+
+    def list(self, request, *args, **kwargs):
+        # El orden canónico sale de ``nombre`` y no se expresa en SQL: se ordena
+        # en Python solo en ``list`` (``get_queryset`` debe seguir siendo un
+        # queryset para retrieve/update). Un ``?ordering=`` válido manda; uno que
+        # ``OrderingFilter`` descarta deja el queryset sin orden y aplica el canónico.
+        queryset = self.filter_queryset(self.get_queryset())
+        if not queryset.ordered:
+            queryset = sorted(queryset, key=lambda talla: talla_sort_key(talla.nombre))
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
 class ProductoViewSet(viewsets.ModelViewSet):
     queryset = Producto.objects.all()
     serializer_class = ProductoSerializer
