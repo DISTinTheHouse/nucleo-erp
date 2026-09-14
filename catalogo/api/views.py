@@ -1,4 +1,4 @@
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
 from rest_framework import viewsets
 from rest_framework.exceptions import ValidationError
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
@@ -40,6 +40,13 @@ class ProductoViewSet(viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 raise ValidationError({"tipo_id": "Must be an integer."})
             qs = qs.filter(tipo_id=tipo_id)
+        q = (self.request.query_params.get('q') or '').strip()
+        if q:
+            qs = qs.filter(
+                Q(nombre__icontains=q)
+                | Q(codigo__icontains=q)
+                | Q(cod_proscai__icontains=q)
+            )
         return qs.order_by("-created_at", "-id")
 
     def perform_create(self, serializer):
@@ -71,6 +78,15 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
             if empresa:
                 bom_qs = bom_qs.filter(empresa=empresa)
             qs = qs.filter(Exists(bom_qs))
+        q = (self.request.query_params.get('q') or '').strip()
+        if q:
+            qs = qs.filter(
+                Q(sku__icontains=q)
+                | Q(cod_proscai__icontains=q)
+                | Q(producto__cod_proscai__icontains=q)
+                | Q(nombre__icontains=q)
+                | Q(producto__nombre__icontains=q)
+            )
         return qs
 
 

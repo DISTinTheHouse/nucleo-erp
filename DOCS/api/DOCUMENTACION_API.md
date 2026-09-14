@@ -835,6 +835,8 @@ Gestión de productos, variantes, y catálogos auxiliares (Tallas, Colores, Cate
 Entidad principal que agrupa las variantes. Contiene la información general (nombre, descripción, categoría, impuestos).
 
 - **Listar**: `GET /api/v1/catalogo/producto/`
+  - `q` (opcional): busca por coincidencia parcial en `nombre`, `codigo` o `cod_proscai`.
+  - `tipo_id` (opcional): filtra por `TipoProducto`.
 - **Respuesta**:
   ```json
   [
@@ -864,6 +866,8 @@ Entidad principal que agrupa las variantes. Contiene la información general (no
 Gestiona las combinaciones específicas (SKU, color, talla, precio).
 
 - **Listar**: `GET /api/v1/catalogo/producto-variante/`
+  - `q` (opcional): busca por coincidencia parcial en `sku`, `cod_proscai` (propio o del producto), `nombre` de la variante o `nombre` del producto.
+  - `con_bom` (opcional, `true`/`false`): solo variantes con un BOM activo.
 - **Respuesta**:
   ```json
   [
