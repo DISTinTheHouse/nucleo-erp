@@ -12,7 +12,7 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import Producto, Talla
+from catalogo.models import Color, Producto, ProductoVariante, Talla
 from inventarios.models import MovimientoInventario
 from finanzas.models import Factura, FacturaDetalle
 from inventarios.models import Almacen, TipoAlmacen
@@ -1311,3 +1311,67 @@ class MesaControlListScopeTests(TestCase):
 
     def test_usuario_sin_rol_mesa_control_sigue_sin_ver_nada(self):
         self.assertEqual(self._ids(self.vendedor), set())
+
+
+class CotizacionOnboardingOrdenTallasTests(TestCase):
+    """GET onboarding: dentro de cada producto/color las tallas de ``variantes``
+    siguen el orden canónico (``catalogo.tallas.talla_sort_key``), no ``talla_id``;
+    el orden de productos y de colores no cambia."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="acme SA")
+        cls.admin = Usuario.objects.create(
+            username="admin@acme.test",
+            email="admin@acme.test",
+            empresa=cls.empresa,
+            is_admin_empresa=True,
+        )
+        # Alta en orden "sucio": los ids de talla no siguen el orden canónico.
+        tallas = {
+            nombre: Talla.objects.create(nombre=nombre)
+            for nombre in ["CH", "UNI", "30", "2XG", "M", "2XCH", "3", "XCH", "22"]
+        }
+        cls.rojo = Color.objects.create(nombre="Rojo", codigo="ROJ", codigo_hex="#f00")
+        cls.azul = Color.objects.create(nombre="Azul", codigo="AZU", codigo_hex="#00f")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        otro = Producto.objects.create(empresa=cls.empresa, nombre="Pantalón")
+        variantes = [
+            (cls.producto, cls.rojo, ["UNI", "M", "2XCH", "CH", "3", "30", "22"]),
+            (cls.producto, cls.azul, ["2XG", "XCH", "CH"]),
+            (otro, cls.rojo, ["30", "22"]),
+        ]
+        for producto, color, nombres in variantes:
+            for nombre in nombres:
+                ProductoVariante.objects.create(
+                    producto=producto,
+                    empresa=cls.empresa,
+                    color=color,
+                    talla=tallas[nombre],
+                    sku=f"{producto.pk}-{color.codigo}-{nombre}",
+                    precio_base=100,
+                )
+        cls.otro = otro
+
+    def _productos(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        resp = client.get(COTIZACION_ONBOARDING_URL)
+        self.assertEqual(resp.status_code, 200)
+        return {p["id"]: p for p in resp.json()["busqueda"]["productos"]}
+
+    def test_tallas_por_color_en_orden_canonico_y_colores_en_su_orden(self):
+        variantes = self._productos()[self.producto.pk]["variantes"]
+        self.assertEqual(
+            [(v["color"]["id"], v["talla"]["nombre"]) for v in variantes],
+            [(self.rojo.pk, n) for n in ["2XCH", "CH", "M", "22", "30", "3", "UNI"]]
+            + [(self.azul.pk, n) for n in ["XCH", "CH", "2XG"]],
+        )
+
+    def test_orden_de_productos_no_cambia(self):
+        productos = self._productos()
+        self.assertEqual(list(productos), [self.producto.pk, self.otro.pk])
+        self.assertEqual(
+            [v["talla"]["nombre"] for v in productos[self.otro.pk]["variantes"]],
+            ["22", "30"],
+        )
