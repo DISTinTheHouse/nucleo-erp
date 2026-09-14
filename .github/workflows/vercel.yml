@@ -162,6 +162,9 @@ jobs:
             echo "Aplicando --fake a ${{ github.event.inputs.app }} ${{ github.event.inputs.migration }}"
             python manage.py migrate "${{ github.event.inputs.app }}" "${{ github.event.inputs.migration }}" --fake
             python manage.py migrate --noinput
+          elif [ "${{ github.event.inputs.task }}" = "auto_repair" ]; then
+            echo "Reparando drift de migraciones automáticamente..."
+            python manage.py reparar_drift
           else
             echo "Tarea de mantenimiento no soportada: ${{ github.event.inputs.task }}"
             exit 1
