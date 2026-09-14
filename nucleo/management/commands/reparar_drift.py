@@ -26,9 +26,10 @@ class Command(BaseCommand):
             try:
                 call_command("migrate", app, name, verbosity=1)
             except ProgrammingError as exc:
-                if "already exists" not in str(exc):
+                msg = str(exc)
+                if "already exists" not in msg and "does not exist" not in msg:
                     raise
-                self.stdout.write(self.style.WARNING("  ya existe en el esquema, aplicando --fake"))
+                self.stdout.write(self.style.WARNING("  drift de esquema detectado, aplicando --fake"))
                 call_command("migrate", app, name, fake=True, verbosity=1)
 
         self.stdout.write(self.style.SUCCESS("Reparación de drift completa."))
