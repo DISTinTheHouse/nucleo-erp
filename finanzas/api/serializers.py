@@ -27,7 +27,10 @@ from finanzas.models import (
     Poliza,
     PolizaDetalle,
 )
-from finanzas.services.cuenta_por_pagar_service import DUPLICATE_INVOICE_MESSAGE
+from finanzas.services.cuenta_por_pagar_service import (
+    CuentaPorPagarService,
+    DUPLICATE_INVOICE_MESSAGE,
+)
 
 
 class EmpresaResueltaEnServidorMixin:
@@ -505,15 +508,26 @@ class CuentaPorPagarSerializer(EmpresaResueltaEnServidorMixin, serializers.Model
             self._validate_single_account_per_invoice(factura)
         if self.instance is None:
             if factura is not None:
+                # Misma regla que la generación automática: sólo una factura
+                # Registrada origina CxP. DRF convierte a 400 por campo el
+                # ErrorDeNegocio lanzado desde validate().
+                CuentaPorPagarService.ensure_invoice_registered(factura)
                 self._validate_matches_invoice(attrs.get("proveedor"), attrs.get("total", 0), factura)
         elif self._changes_invoice_alignment(attrs):
+            reapunta = factura is not None and factura.pk != self.instance.factura_proveedor_id
+            if reapunta:
+                # Re-apuntar la CxP sigue la misma regla que el alta: la factura
+                # destino tiene que estar Registrada.
+                CuentaPorPagarService.ensure_invoice_registered(factura)
             # En una edición se vuelve a cruzar contra la factura si cambia algo de
             # lo que ata la CxP a ella: si no, una CxP creada cuadrada podía
-            # editarse después hacia otra factura, otro proveedor u otro total.
+            # editarse después hacia otra factura, otro proveedor u otro total. Al
+            # re-apuntarla se cruza además la moneda, que la CxP lee de su factura.
             self._validate_matches_invoice(
                 attrs.get("proveedor", self.instance.proveedor),
                 attrs.get("total", self.instance.total),
                 factura if factura is not None else self.instance.factura_proveedor,
+                moneda_id=self.instance.factura_proveedor.moneda_id if reapunta else None,
             )
         return attrs
 
@@ -535,23 +549,12 @@ class CuentaPorPagarSerializer(EmpresaResueltaEnServidorMixin, serializers.Model
         if CuentaPorPagar.objects.filter(factura_proveedor=factura).exists():
             raise ValidationError({"factura_proveedor": DUPLICATE_INVOICE_MESSAGE})
 
-    def _validate_matches_invoice(self, proveedor, total, factura):
-        if proveedor is not None and proveedor.pk != factura.proveedor_id:
-            raise ValidationError(
-                {"proveedor": "El proveedor no coincide con el de la factura de proveedor."}
-            )
-        # ``total`` es opcional en el modelo: si no llega vale 0 y así se compara.
-        submitted = Decimal(str(total or 0)).quantize(Decimal("0.01"))
-        expected = Decimal(str(factura.total or 0)).quantize(Decimal("0.01"))
-        if submitted != expected:
-            raise ValidationError(
-                {
-                    "total": (
-                        f"El total ({submitted}) no coincide con el de la factura "
-                        f"de proveedor ({expected})."
-                    )
-                }
-            )
+    def _validate_matches_invoice(self, proveedor, total, factura, moneda_id=None):
+        # La comparación vive en el servicio: es la misma que el ViewSet repite con
+        # la factura ya bloqueada.
+        CuentaPorPagarService.ensure_account_matches_invoice(
+            factura, proveedor=proveedor, total=total, moneda_id=moneda_id,
+        )
 
 
 class CuentaPorPagarCreateSerializer(CuentaPorPagarSerializer):

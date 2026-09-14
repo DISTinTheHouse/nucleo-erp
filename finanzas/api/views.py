@@ -1205,6 +1205,9 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
             raise NotFound("La factura de proveedor ya no existe.")
         serializer.instance = locked
         previous_status = locked.estatus
+        # Con CxP, la factura ya no cambia de total ni de proveedor ni vuelve a
+        # Borrador/Cancelada: se compara contra la fila bloqueada, no la de get_object().
+        CuentaPorPagarService.ensure_invoice_edit_keeps_account(locked, serializer.validated_data)
         factura_proveedor = serializer.save()
         if (
             factura_proveedor.estatus == FacturaProveedor.FacturaProveedorStatus.REGISTRADA
@@ -1418,8 +1421,14 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
                 raise ValidationError({"proveedor": "Proveedor no pertenece a la empresa."})
         invoice = self._lock_invoice(fp)
         # Una CxP manual nace cuadrada: saldo = total y Pendiente. El serializer ya
-        # no acepta saldo/estatus al crear y validó total contra la factura.
+        # no acepta saldo/estatus al crear.
         total = serializer.validated_data.get("total", Decimal("0.00"))
+        # El serializer ya exigió factura Registrada y cuadrada; ambas cosas se
+        # repiten con la fila bloqueada porque, sin CxP todavía, nada congela a la
+        # factura: entre la validación y el lock pudo volver a Borrador o cambiar de
+        # total o de proveedor, y ese descuadre ya sería permanente.
+        CuentaPorPagarService.ensure_invoice_registered(invoice)
+        CuentaPorPagarService.ensure_account_matches_invoice(invoice, proveedor=prov, total=total)
         # Mismo origen que la generación automática: vence cuando vence la
         # factura, salvo que el cliente mande una fecha real. Un null explícito
         # cuenta como ausente: un campo de fecha vacío en el formulario no debe
@@ -1443,9 +1452,10 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
         factura = serializer.validated_data.get("factura_proveedor")
+        locked_invoice = None
         if factura is not None:
             # Factura antes que CxP: el mismo orden que su borrado.
-            self._lock_invoice(factura)
+            locked_invoice = self._lock_invoice(factura)
         # El candado se evalúa con la fila bloqueada y releída. PagoService también
         # bloquea la CxP antes de descontar, así que un pago concurrente no se cuela
         # entre la comprobación y el guardado.
@@ -1454,6 +1464,18 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             raise NotFound("La cuenta por pagar ya no existe.")
         serializer.instance = locked
         CuentaPorPagarService.ensure_frozen_fields_unchanged(locked, serializer.validated_data)
+        if locked_invoice is not None and locked_invoice.pk != locked.factura_proveedor_id:
+            # Re-apuntar la CxP: la factura destino todavía no tiene CxP, así que
+            # nada la congelaba. Se repiten con la fila bloqueada las dos
+            # comprobaciones del serializer, igual que en el alta. La moneda vigente
+            # sale de la factura de origen, que sí está congelada por esta CxP.
+            CuentaPorPagarService.ensure_invoice_registered(locked_invoice)
+            CuentaPorPagarService.ensure_account_matches_invoice(
+                locked_invoice,
+                proveedor=serializer.validated_data.get("proveedor", locked.proveedor),
+                total=serializer.validated_data.get("total", locked.total),
+                moneda_id=locked.factura_proveedor.moneda_id,
+            )
         factura_id = factura.pk if factura is not None else locked.factura_proveedor_id
         with CuentaPorPagarService.duplicate_invoice_as_business_error(
             factura_id, excluding_account_id=locked.pk

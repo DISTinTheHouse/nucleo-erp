@@ -60,6 +60,7 @@ from finanzas.models import (
     Poliza,
     PolizaDetalle,
 )
+from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
 from inventarios.models import Almacen
 from nucleo.models import (
     Empresa,
@@ -2474,15 +2475,18 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         )
         return proveedor, oc, recepcion, factura
 
-    def _invoice(self, total="1160.00", fecha_vencimiento=None):
+    def _invoice(self, total="1160.00", fecha_vencimiento=None,
+                 estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA):
+        # Registrada por omisión: es el único estatus del que puede colgar una CxP.
         proveedor, _, _, factura = self._purchase_documents()
         factura.total = Decimal(total)
         factura.fecha_vencimiento = fecha_vencimiento
+        factura.estatus = estatus
         factura.save()
         return proveedor, factura
 
-    def _account(self, total="1000.00"):
-        proveedor, factura = self._invoice(total)
+    def _account(self, total="1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA):
+        proveedor, factura = self._invoice(total, estatus=estatus)
         cxp = CuentaPorPagar.objects.create(
             empresa=self.a["empresa"], proveedor=proveedor, factura_proveedor=factura,
             total=Decimal(total), saldo=Decimal(total),
@@ -2546,7 +2550,10 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         self.assertFalse(CuentaPorPagar.objects.exists())
 
     def test_registering_draft_invoice_generates_account(self):
-        _, factura = self._invoice("500.00", fecha_vencimiento=date(2026, 11, 30))
+        _, factura = self._invoice(
+            "500.00", fecha_vencimiento=date(2026, 11, 30),
+            estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+        )
 
         resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Registrada"})
 
@@ -2557,7 +2564,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         self.assertEqual(cxp.fecha_vencimiento, date(2026, 11, 30))
 
     def test_zero_total_invoice_generates_zero_pending_account(self):
-        _, factura = self._invoice("0.00")
+        _, factura = self._invoice("0.00", estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR)
 
         resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Registrada"})
 
@@ -2566,18 +2573,25 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         self.assertEqual((cxp.total, cxp.saldo), (Decimal("0.00"), Decimal("0.00")))
         self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PENDIENTE)
 
-    def test_reentering_registered_neither_duplicates_nor_updates_account(self):
-        _, factura = self._invoice("500.00")
+    def test_registering_again_neither_duplicates_nor_updates_account(self):
+        _, factura = self._invoice("500.00", estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR)
         url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
 
         for data in (
             {"estatus": "Registrada"},
-            {"estatus": "Borrador", "total": "999.00"},
             {"estatus": "Registrada"},
             {"observaciones": "re-guardada"},
         ):
             resp = self._patch(url, data)
             self.assertEqual(resp.status_code, 200, resp.data)
+
+        # Por la API la factura ya no sale de Registrada ni cambia de total con su
+        # CxP (ver test_invoice_with_account_cannot_leave_registration). La
+        # generación sigue siendo idempotente para quien la invoque con la factura
+        # ya desalineada por otra vía.
+        FacturaProveedor.objects.filter(pk=factura.pk).update(total=Decimal("999.00"))
+        factura.refresh_from_db()
+        CuentaPorPagarService.generate_for_invoice(factura)
 
         accounts = CuentaPorPagar.objects.filter(factura_proveedor=factura)
         self.assertEqual(accounts.count(), 1)
@@ -2627,6 +2641,25 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
 
         self.assertEqual(resp.status_code, 400, resp.data)
         self.assertIsInstance(resp.data["proveedor"], list)
+
+    def test_manual_create_rejects_unregistered_invoice(self):
+        # Misma regla que la generación automática: sólo una factura Registrada
+        # origina CxP, aunque proveedor y total cuadren.
+        for estatus in (
+            FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+            FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        ):
+            with self.subTest(estatus=estatus):
+                proveedor, factura = self._invoice("300.00", estatus=estatus)
+
+                resp = self._post_account({
+                    "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "300.00",
+                })
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["factura_proveedor"], list)
+
+        self.assertFalse(CuentaPorPagar.objects.exists())
 
     def test_manual_create_rejects_second_account_for_invoice(self):
         proveedor, factura, _ = self._account("1000.00")
@@ -2735,6 +2768,311 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         })
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertEqual(resp.data["estatus"], CuentaPorPagar.EstatusCxP.PENDIENTE.value)
+
+    # -- Factura con CxP: edición -------------------------------------------------
+
+    def test_invoice_with_account_rejects_total_and_proveedor_change(self):
+        proveedor, factura, cxp = self._account("1000.00")
+        other_proveedor, _, _, _ = self._purchase_documents()
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+
+        for data, field in (
+            ({"total": "999.00"}, "total"),
+            ({"proveedor": other_proveedor.pk}, "proveedor"),
+        ):
+            with self.subTest(field=field):
+                resp = self._patch(url, data)
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data[field], list)
+
+        factura.refresh_from_db()
+        self.assertEqual((factura.total, factura.proveedor_id), (Decimal("1000.00"), proveedor.pk))
+        cxp.refresh_from_db()
+        self.assertEqual((cxp.total, cxp.proveedor_id), (Decimal("1000.00"), proveedor.pk))
+
+    def test_invoice_with_account_rejects_moneda_change(self):
+        # La CxP no guarda moneda: la lee de su factura (moneda_id/moneda_codigo del
+        # serializer), así que cambiarla movería su moneda sin tocar los importes.
+        _, factura, _ = self._account("1000.00")
+        otra_moneda = Moneda.objects.create(codigo_iso="USD", nombre="Dolar")
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"moneda": otra_moneda.pk})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["moneda"], list)
+        factura.refresh_from_db()
+        self.assertEqual(factura.moneda_id, self.moneda.pk)
+
+    def test_cancelled_account_frees_its_invoice(self):
+        # Una CxP cancelada ya no respalda nada: deja de retener a su factura.
+        _, factura, cxp = self._account("1000.00")
+        resp = self._patch(
+            f"{self.ACCOUNTS_URL}{cxp.pk}/",
+            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+        for data in ({"total": "999.00"}, {"estatus": "Cancelada"}):
+            with self.subTest(data=data):
+                resp = self._patch(url, data)
+                self.assertEqual(resp.status_code, 200, resp.data)
+
+        factura.refresh_from_db()
+        self.assertEqual((factura.total, factura.estatus), (Decimal("999.00"), "Cancelada"))
+
+    # -- Revivificación al re-registrar ------------------------------------------
+
+    def test_reregistering_invoice_revives_its_cancelled_account_in_place(self):
+        proveedor, factura, cxp = self._account("1000.00")
+        self._patch(
+            f"{self.ACCOUNTS_URL}{cxp.pk}/",
+            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+        )
+        cxp.refresh_from_db()
+        original_fecha_emision = cxp.fecha_emision
+        CuentaPorPagar.objects.filter(pk=cxp.pk).update(observaciones="nota vieja")
+        other_proveedor, _, _, _ = self._purchase_documents()
+        FacturaProveedor.objects.filter(pk=factura.pk).update(
+            estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+            total=Decimal("500.00"),
+            proveedor=other_proveedor,
+            fecha_vencimiento=date(2027, 3, 1),
+        )
+        factura.refresh_from_db()
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Registrada"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        accounts = CuentaPorPagar.objects.filter(factura_proveedor=factura)
+        self.assertEqual(accounts.count(), 1)
+        revived = accounts.get()
+        self.assertEqual(revived.pk, cxp.pk)
+        self.assertEqual(
+            (revived.total, revived.saldo, revived.proveedor_id, revived.fecha_vencimiento,
+             revived.estatus, revived.fecha_ultimo_pago),
+            (Decimal("500.00"), Decimal("500.00"), other_proveedor.pk, date(2027, 3, 1),
+             CuentaPorPagar.EstatusCxP.PENDIENTE, None),
+        )
+        # Lo que la revivificación no debe tocar.
+        self.assertEqual(revived.fecha_emision, original_fecha_emision)
+        self.assertEqual(revived.observaciones, "nota vieja")
+        self.assertEqual(revived.empresa_id, self.a["empresa"].pk)
+
+        # La factura vuelve a estar retenida por su CxP ahora viva.
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"total": "1.00"})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"proveedor": proveedor.pk})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"moneda": self.moneda.pk})
+        self.assertEqual(resp.status_code, 200, resp.data)  # sin cambio real: mismo valor
+        otra_moneda = Moneda.objects.create(codigo_iso="USD", nombre="Dolar")
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"moneda": otra_moneda.pk})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Borrador"})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Cancelada"})
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_reregistering_invoice_leaves_a_draft_pago_on_the_revived_account_untouched(self):
+        proveedor, factura, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "300.00", estatus=Pago.Estatus.BORRADOR.value)
+        self._patch(
+            f"{self.ACCOUNTS_URL}{cxp.pk}/",
+            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+        )
+        FacturaProveedor.objects.filter(pk=factura.pk).update(
+            estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+        )
+        factura.refresh_from_db()
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Registrada"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(PagoDetalle.objects.filter(pago=pago, cxp=cxp).exists())
+        pago.refresh_from_db()
+        self.assertEqual(pago.estatus, Pago.Estatus.BORRADOR)
+        cxp.refresh_from_db()
+        self.assertEqual((cxp.saldo, cxp.estatus), (Decimal("1000.00"), CuentaPorPagar.EstatusCxP.PENDIENTE))
+
+    def test_reregistering_invoice_with_pending_partial_or_paid_account_does_not_revive(self):
+        for estatus in (
+            CuentaPorPagar.EstatusCxP.PENDIENTE,
+            CuentaPorPagar.EstatusCxP.PARCIAL,
+            CuentaPorPagar.EstatusCxP.PAGADA,
+        ):
+            with self.subTest(estatus=estatus):
+                _, factura, cxp = self._account(
+                    "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+                )
+                CuentaPorPagar.objects.filter(pk=cxp.pk).update(estatus=estatus, saldo=Decimal("700.00"))
+
+                resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Registrada"})
+
+                self.assertEqual(resp.status_code, 200, resp.data)
+                cxp.refresh_from_db()
+                self.assertEqual((cxp.estatus, cxp.saldo), (estatus, Decimal("700.00")))
+                self.assertEqual(
+                    CuentaPorPagar.objects.filter(factura_proveedor=factura).count(), 1,
+                )
+
+    def test_reregistering_invoice_refuses_to_revive_account_with_applied_payment(self):
+        # No alcanzable por la API (aplicar_pago mueve la CxP a Parcial/Pagada, y
+        # con pagos aplicados no se puede cancelar), pero el guard defensivo cubre
+        # el dato inconsistente si llegara por otra vía (admin, SQL directo).
+        proveedor, factura, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "1000.00")
+        CuentaPorPagar.objects.filter(pk=cxp.pk).update(
+            estatus=CuentaPorPagar.EstatusCxP.CANCELADA,
+        )
+        FacturaProveedor.objects.filter(pk=factura.pk).update(
+            estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+        )
+        factura.refresh_from_db()
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Registrada"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["factura_proveedor"], list)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
+        self.assertEqual(cxp.saldo, Decimal("0.00"))
+        pago.refresh_from_db()
+        self.assertEqual(pago.estatus, Pago.Estatus.APLICADO)
+
+    def test_live_account_still_holds_its_invoice(self):
+        _, factura, cxp = self._account("1000.00")
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+
+        for estatus in (
+            CuentaPorPagar.EstatusCxP.PENDIENTE,
+            CuentaPorPagar.EstatusCxP.PARCIAL,
+            CuentaPorPagar.EstatusCxP.PAGADA,
+        ):
+            with self.subTest(estatus=estatus):
+                CuentaPorPagar.objects.filter(pk=cxp.pk).update(estatus=estatus)
+
+                resp = self._patch(url, {"total": "999.00"})
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["total"], list)
+
+        factura.refresh_from_db()
+        self.assertEqual(factura.total, Decimal("1000.00"))
+
+    def test_invoice_whose_account_has_applied_payment_rejects_total_change(self):
+        proveedor, factura, cxp = self._account("1000.00")
+        self._pay(proveedor, cxp, "400.00")
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"total": "400.00"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["total"], list)
+        factura.refresh_from_db()
+        self.assertEqual(factura.total, Decimal("1000.00"))
+
+    def test_invoice_with_account_cannot_leave_registration(self):
+        _, factura, cxp = self._account("1000.00")
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+
+        for estatus in (
+            FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+            FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        ):
+            with self.subTest(estatus=estatus):
+                resp = self._patch(url, {"estatus": estatus.value})
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["estatus"], list)
+
+        # Si la petición trae varios cambios bloqueados, se reportan todos.
+        resp = self._patch(url, {"estatus": "Borrador", "total": "999.00"})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["estatus"], list)
+        self.assertIsInstance(resp.data["total"], list)
+
+        factura.refresh_from_db()
+        self.assertEqual((factura.estatus, factura.total), ("Registrada", Decimal("1000.00")))
+        cxp.refresh_from_db()
+        self.assertEqual((cxp.total, cxp.saldo), (Decimal("1000.00"), Decimal("1000.00")))
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PENDIENTE)
+
+    def test_invoice_with_account_keeps_free_fields_and_current_values_editable(self):
+        proveedor, factura, _ = self._account("1000.00")
+
+        # total, proveedor y estatus reenviados con su valor vigente no cuentan como
+        # cambio; "1000" y "1000.00" son el mismo importe.
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {
+            "folio": "FP-001", "observaciones": "corregida", "fecha_vencimiento": "2026-12-31",
+            "total": "1000", "proveedor": proveedor.pk, "estatus": "Registrada",
+            "moneda": self.moneda.pk,
+        })
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual(
+            (factura.folio, factura.observaciones, factura.fecha_vencimiento),
+            ("FP-001", "corregida", date(2026, 12, 31)),
+        )
+        self.assertEqual(CuentaPorPagar.objects.filter(factura_proveedor=factura).count(), 1)
+
+    def test_invoice_without_account_stays_fully_editable(self):
+        # Registrada y sin CxP, como las facturas anteriores a EC-133.
+        _, factura = self._invoice("1000.00")
+        other_proveedor, _, _, _ = self._purchase_documents()
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+
+        otra_moneda = Moneda.objects.create(codigo_iso="USD", nombre="Dolar")
+
+        for data in (
+            {"total": "999.00"},
+            {"proveedor": other_proveedor.pk},
+            {"moneda": otra_moneda.pk},
+            {"estatus": "Borrador"},
+            {"estatus": "Cancelada"},
+        ):
+            with self.subTest(data=data):
+                resp = self._patch(url, data)
+                self.assertEqual(resp.status_code, 200, resp.data)
+
+        factura.refresh_from_db()
+        self.assertEqual(
+            (factura.total, factura.proveedor_id, factura.moneda_id, factura.estatus),
+            (Decimal("999.00"), other_proveedor.pk, otra_moneda.pk, "Cancelada"),
+        )
+        self.assertFalse(CuentaPorPagar.objects.exists())
+
+    def test_registering_invoice_that_already_has_account_is_allowed(self):
+        # Entrar a Registrada no es un cambio bloqueado: la generación devuelve la
+        # CxP existente sin crear otra.
+        _, factura, cxp = self._account(
+            "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+        )
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Registrada"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(
+            list(CuentaPorPagar.objects.filter(factura_proveedor=factura).values_list("pk", flat=True)),
+            [cxp.pk],
+        )
+
+    def test_invoice_guard_compares_against_the_locked_row(self):
+        # get_object() carga la factura antes del lock. Aquí la petición la leyó con
+        # total 999 y, antes de bloquearla, otra la retotalizó a 1000 y la registró.
+        # Contra la instancia vieja "999" no sería un cambio; contra la fila
+        # releída bajo el lock sí lo es. SQLite ignora select_for_update: se ejerce
+        # la relectura, no la espera real del bloqueo.
+        _, factura, _ = self._account("1000.00")
+        stale = FacturaProveedor.objects.get(pk=factura.pk)
+        stale.total = Decimal("999.00")
+
+        with patch.object(FacturaProveedorViewSet, "get_object", return_value=stale):
+            resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"total": "999.00"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["total"], list)
+        factura.refresh_from_db()
+        self.assertEqual(factura.total, Decimal("1000.00"))
 
     # -- Borrado ----------------------------------------------------------------
 
@@ -2868,13 +3206,16 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
 
     # -- Re-apuntar la CxP a otra factura o proveedor ----------------------------
 
-    def _aligned_invoice_for(self, proveedor, total):
+    def _aligned_invoice_for(self, proveedor, total,
+                             estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA,
+                             moneda=None):
         # Factura sin CxP del mismo proveedor y total: el cruce contra la factura
         # pasa, así que sólo el candado puede frenar el cambio.
         _, oc, recepcion, _ = self._purchase_documents()
         return FacturaProveedor.objects.create(
             empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=proveedor,
-            oc=oc, recepcion=recepcion, moneda=self.moneda, total=Decimal(total),
+            oc=oc, recepcion=recepcion, moneda=moneda or self.moneda, total=Decimal(total),
+            estatus=estatus,
         )
 
     def test_moving_paid_account_to_another_invoice_is_frozen(self):
@@ -2926,6 +3267,117 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         self.assertEqual(cxp.factura_proveedor_id, factura.pk)
         self.assertEqual((cxp.total, cxp.saldo), (Decimal("1000.00"), Decimal("1000.00")))
 
+    def test_moving_account_to_unregistered_invoice_is_rejected(self):
+        # Misma regla que el alta manual, ahora al re-apuntar una CxP existente.
+        proveedor, factura, cxp = self._account("1000.00")
+
+        for estatus in (
+            FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+            FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        ):
+            with self.subTest(estatus=estatus):
+                target = self._aligned_invoice_for(proveedor, "1000.00", estatus=estatus)
+
+                resp = self._patch(
+                    f"{self.ACCOUNTS_URL}{cxp.pk}/", {"factura_proveedor": target.pk},
+                )
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["factura_proveedor"], list)
+
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.factura_proveedor_id, factura.pk)
+
+    def test_moving_account_to_invoice_of_another_moneda_is_rejected(self):
+        # La CxP no guarda moneda: la lee de su factura. Moverla a una factura de
+        # otra moneda la redenominaría dejando los importes igual.
+        proveedor, factura, cxp = self._account("1000.00")
+        otra_moneda = Moneda.objects.create(codigo_iso="USD", nombre="Dolar")
+        target = self._aligned_invoice_for(proveedor, "1000.00", moneda=otra_moneda)
+
+        resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"factura_proveedor": target.pk})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["moneda"], list)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.factura_proveedor_id, factura.pk)
+
+    def test_manual_create_when_invoice_changes_before_lock_is_a_400(self):
+        # Hasta que la CxP existe, nada congela la factura: entre la validación y el
+        # lock otra petición pudo retotalizarla. El cruce se repite con la fila
+        # bloqueada. SQLite ignora select_for_update: se ejerce la relectura, no la
+        # espera real del bloqueo.
+        proveedor, factura = self._invoice("300.00")
+        original_validate = CuentaPorPagarSerializer.validate
+
+        def validate_then_retotal_invoice(serializer, attrs):
+            attrs = original_validate(serializer, attrs)
+            FacturaProveedor.objects.filter(pk=factura.pk).update(total=Decimal("5000.00"))
+            return attrs
+
+        with patch.object(CuentaPorPagarSerializer, "validate", validate_then_retotal_invoice):
+            resp = self._post_account({
+                "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "300.00",
+            })
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["total"], list)
+        self.assertFalse(CuentaPorPagar.objects.exists())
+
+    def test_manual_create_against_an_unchanged_invoice_still_succeeds(self):
+        proveedor, factura = self._invoice("300.00")
+
+        resp = self._post_account({
+            "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "300.00",
+        })
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(CuentaPorPagar.objects.get().factura_proveedor_id, factura.pk)
+
+    def test_moving_account_when_target_changes_before_lock_is_a_400(self):
+        # Mismo hueco que el alta, al re-apuntar: la factura destino todavía no tiene
+        # CxP, así que nada la congela entre la validación y el lock.
+        proveedor, factura, cxp = self._account("1000.00")
+        target = self._aligned_invoice_for(proveedor, "1000.00")
+        original_validate = CuentaPorPagarSerializer.validate
+
+        def validate_then_retotal_target(serializer, attrs):
+            attrs = original_validate(serializer, attrs)
+            FacturaProveedor.objects.filter(pk=target.pk).update(total=Decimal("5000.00"))
+            return attrs
+
+        with patch.object(CuentaPorPagarSerializer, "validate", validate_then_retotal_target):
+            resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"factura_proveedor": target.pk})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["total"], list)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.factura_proveedor_id, factura.pk)
+
+    def test_moving_account_when_target_leaves_registration_before_lock_is_a_400(self):
+        # La validación ve la factura destino Registrada y, antes del lock, otra
+        # petición la regresa a Borrador. Se vuelve a comprobar con la fila
+        # bloqueada. SQLite ignora select_for_update: se ejerce la relectura, no la
+        # espera real del bloqueo.
+        proveedor, factura, cxp = self._account("1000.00")
+        target = self._aligned_invoice_for(proveedor, "1000.00")
+        original_validate = CuentaPorPagarSerializer.validate
+
+        def validate_then_unregister_target(serializer, attrs):
+            attrs = original_validate(serializer, attrs)
+            FacturaProveedor.objects.filter(pk=target.pk).update(
+                estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+            )
+            return attrs
+
+        with patch.object(CuentaPorPagarSerializer, "validate", validate_then_unregister_target):
+            resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"factura_proveedor": target.pk})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["factura_proveedor"], list)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.factura_proveedor_id, factura.pk)
+
     def test_unpaid_account_can_move_to_an_aligned_invoice(self):
         proveedor, _, cxp = self._account("1000.00")
         target = self._aligned_invoice_for(proveedor, "1000.00")
@@ -2965,6 +3417,30 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
             return attrs
 
         with patch.object(CuentaPorPagarSerializer, "validate", validate_then_delete_invoice):
+            resp = self._post_account({
+                "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "300.00",
+            })
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["factura_proveedor"], list)
+        self.assertFalse(CuentaPorPagar.objects.exists())
+
+    def test_manual_create_when_invoice_leaves_registration_before_lock_is_a_400(self):
+        # La validación ve la factura Registrada y, antes del lock, otra petición la
+        # regresa a Borrador (sin CxP todavía, nada se lo impide). El estatus se
+        # vuelve a comprobar con la factura bloqueada. SQLite ignora
+        # select_for_update: se ejerce la relectura, no la espera real del bloqueo.
+        proveedor, factura = self._invoice("300.00")
+        original_validate = CuentaPorPagarSerializer.validate
+
+        def validate_then_unregister_invoice(serializer, attrs):
+            attrs = original_validate(serializer, attrs)
+            FacturaProveedor.objects.filter(pk=factura.pk).update(
+                estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+            )
+            return attrs
+
+        with patch.object(CuentaPorPagarSerializer, "validate", validate_then_unregister_invoice):
             resp = self._post_account({
                 "proveedor": proveedor.pk, "factura_proveedor": factura.pk, "total": "300.00",
             })
