@@ -2940,6 +2940,95 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         pago.refresh_from_db()
         self.assertEqual(pago.estatus, Pago.Estatus.APLICADO)
 
+    # -- Cancelada es terminal ---------------------------------------------------
+
+    def _cancel_account_and_invoice(self):
+        # El único camino por la API para cancelar una factura con CxP: primero la
+        # CxP (que deja de retenerla) y luego la factura.
+        proveedor, factura, cxp = self._account("1000.00")
+        resp = self._patch(
+            f"{self.ACCOUNTS_URL}{cxp.pk}/",
+            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Cancelada"})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return proveedor, factura, cxp
+
+    def test_cancelled_invoice_cannot_leave_cancellation(self):
+        _, factura = self._invoice(
+            "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        )
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+
+        for data in (
+            {"estatus": "Registrada"},
+            {"estatus": "Borrador"},
+            {"estatus": "Registrada", "total": "1.00", "observaciones": "revivida"},
+        ):
+            with self.subTest(data=data):
+                resp = self._patch(url, data)
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["estatus"], list)
+
+        factura.refresh_from_db()
+        self.assertEqual(
+            (factura.estatus, factura.total),
+            (FacturaProveedor.FacturaProveedorStatus.CANCELADA, Decimal("1000.00")),
+        )
+        self.assertNotEqual(factura.observaciones, "revivida")
+        self.assertFalse(CuentaPorPagar.objects.filter(factura_proveedor=factura).exists())
+
+    def test_registering_cancelled_invoice_does_not_revive_its_cancelled_account(self):
+        _, factura, cxp = self._cancel_account_and_invoice()
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Registrada"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["estatus"], list)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, FacturaProveedor.FacturaProveedorStatus.CANCELADA)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
+        self.assertEqual(CuentaPorPagar.objects.filter(factura_proveedor=factura).count(), 1)
+
+    def test_cancelled_invoice_without_status_change_is_not_a_transition(self):
+        # Reenviar el mismo estatus (un PUT que manda la fila completa) no es salir
+        # de Cancelada.
+        _, factura = self._invoice(
+            "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        )
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Cancelada"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_draft_round_trip_through_the_api_still_revives_the_cancelled_account(self):
+        # El camino que sigue abierto: Registrada -> Borrador -> Registrada, con la
+        # CxP cancelada de por medio y la factura nunca cancelada.
+        _, factura, cxp = self._account("1000.00")
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+        resp = self._patch(
+            f"{self.ACCOUNTS_URL}{cxp.pk}/",
+            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        resp = self._patch(url, {"estatus": "Borrador"})
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        resp = self._patch(url, {"estatus": "Registrada"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        accounts = CuentaPorPagar.objects.filter(factura_proveedor=factura)
+        self.assertEqual(accounts.count(), 1)
+        revived = accounts.get()
+        self.assertEqual(revived.pk, cxp.pk)
+        self.assertEqual(
+            (revived.estatus, revived.total, revived.saldo),
+            (CuentaPorPagar.EstatusCxP.PENDIENTE, Decimal("1000.00"), Decimal("1000.00")),
+        )
+
     def test_live_account_still_holds_its_invoice(self):
         _, factura, cxp = self._account("1000.00")
         url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"

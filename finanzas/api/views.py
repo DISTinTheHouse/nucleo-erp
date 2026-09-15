@@ -1205,6 +1205,24 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
             raise NotFound("La factura de proveedor ya no existe.")
         serializer.instance = locked
         previous_status = locked.estatus
+        # Cancelada es definitiva, igual que en NotaCredito, Poliza y
+        # ConciliacionBancaria. Sin esto, re-registrar una factura cancelada
+        # generaba o revivía su CxP para un documento que alguien dio de baja a
+        # propósito. Se compara contra la fila bloqueada, no contra lo que dice el
+        # cuerpo. Reenviar el mismo estatus no es una transición.
+        requested_status = serializer.validated_data.get("estatus", previous_status)
+        if (
+            previous_status == FacturaProveedor.FacturaProveedorStatus.CANCELADA
+            and requested_status != previous_status
+        ):
+            raise ErrorDeNegocio(
+                {
+                    "estatus": (
+                        f"Una factura de proveedor cancelada no puede pasar a "
+                        f"{requested_status}: la cancelación es definitiva."
+                    )
+                }
+            )
         # Con CxP, la factura ya no cambia de total ni de proveedor ni vuelve a
         # Borrador/Cancelada: se compara contra la fila bloqueada, no la de get_object().
         CuentaPorPagarService.ensure_invoice_edit_keeps_account(locked, serializer.validated_data)
