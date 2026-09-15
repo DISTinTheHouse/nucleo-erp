@@ -3029,6 +3029,49 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
             (CuentaPorPagar.EstatusCxP.PENDIENTE, Decimal("1000.00"), Decimal("1000.00")),
         )
 
+    def test_account_of_cancelled_invoice_cannot_be_revived(self):
+        # La puerta lateral: sin esto, la factura quedaba Cancelada con CxP viva.
+        for estatus in (
+            CuentaPorPagar.EstatusCxP.PENDIENTE,
+            CuentaPorPagar.EstatusCxP.PARCIAL,
+            CuentaPorPagar.EstatusCxP.PAGADA,
+        ):
+            with self.subTest(estatus=estatus):
+                _, factura, cxp = self._cancel_account_and_invoice()
+
+                resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"estatus": estatus.value})
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["estatus"], list)
+                cxp.refresh_from_db()
+                self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
+
+    def test_cancelled_account_of_cancelled_invoice_keeps_other_edits(self):
+        _, _, cxp = self._cancel_account_and_invoice()
+
+        resp = self._patch(
+            f"{self.ACCOUNTS_URL}{cxp.pk}/",
+            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value, "observaciones": "nota"},
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxp.refresh_from_db()
+        self.assertEqual(
+            (cxp.estatus, cxp.observaciones), (CuentaPorPagar.EstatusCxP.CANCELADA, "nota"),
+        )
+
+    def test_cancelled_account_of_registered_invoice_can_still_be_reactivated(self):
+        _, _, cxp = self._account("1000.00")
+        url = f"{self.ACCOUNTS_URL}{cxp.pk}/"
+        resp = self._patch(url, {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value})
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        resp = self._patch(url, {"estatus": CuentaPorPagar.EstatusCxP.PENDIENTE.value})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PENDIENTE)
+
     def test_live_account_still_holds_its_invoice(self):
         _, factura, cxp = self._account("1000.00")
         url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"

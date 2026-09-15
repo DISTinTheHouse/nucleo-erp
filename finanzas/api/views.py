@@ -1470,10 +1470,16 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
         factura = serializer.validated_data.get("factura_proveedor")
+        requested_status = serializer.validated_data.get("estatus")
         locked_invoice = None
         if factura is not None:
             # Factura antes que CxP: el mismo orden que su borrado.
             locked_invoice = self._lock_invoice(factura)
+        elif requested_status not in (None, CuentaPorPagar.EstatusCxP.CANCELADA):
+            # Pedir un estatus vivo puede revivir la CxP: su factura se bloquea
+            # también (mismo orden) para que no se cancele entre la comprobación y
+            # el guardado.
+            locked_invoice = self._lock_invoice(serializer.instance.factura_proveedor)
         # El candado se evalúa con la fila bloqueada y releída. PagoService también
         # bloquea la CxP antes de descontar, así que un pago concurrente no se cuela
         # entre la comprobación y el guardado.
@@ -1482,7 +1488,7 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             raise NotFound("La cuenta por pagar ya no existe.")
         serializer.instance = locked
         CuentaPorPagarService.ensure_frozen_fields_unchanged(locked, serializer.validated_data)
-        if locked_invoice is not None and locked_invoice.pk != locked.factura_proveedor_id:
+        if factura is not None and locked_invoice.pk != locked.factura_proveedor_id:
             # Re-apuntar la CxP: la factura destino todavía no tiene CxP, así que
             # nada la congelaba. Se repiten con la fila bloqueada las dos
             # comprobaciones del serializer, igual que en el alta. La moneda vigente
@@ -1493,6 +1499,16 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
                 proveedor=serializer.validated_data.get("proveedor", locked.proveedor),
                 total=serializer.validated_data.get("total", locked.total),
                 moneda_id=locked.factura_proveedor.moneda_id,
+            )
+        if locked_invoice is not None:
+            # La factura que respaldará a la CxP: la destino si se re-apunta, si no
+            # la actual. Si un re-apuntado concurrente la movió antes de bloquearla,
+            # se bloquea la que la respalda de verdad.
+            backing_invoice = locked_invoice
+            if factura is None and locked_invoice.pk != locked.factura_proveedor_id:
+                backing_invoice = self._lock_invoice(locked.factura_proveedor)
+            CuentaPorPagarService.ensure_account_not_revived_for_cancelled_invoice(
+                locked, backing_invoice, serializer.validated_data
             )
         factura_id = factura.pk if factura is not None else locked.factura_proveedor_id
         with CuentaPorPagarService.duplicate_invoice_as_business_error(
