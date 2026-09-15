@@ -1117,6 +1117,11 @@ class PolizaViewSet(FinanzasBaseViewSet):
         })
 
 
+def _vacio_como_nulo(value):
+    """"" y null valen lo mismo al comparar contra lo guardado."""
+    return None if value == "" else value
+
+
 class FacturaProveedorViewSet(FinanzasBaseViewSet):
     queryset = FacturaProveedor.objects.all()
     serializer_class = FacturaProveedorSerializer
@@ -1205,6 +1210,39 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
             raise NotFound("La factura de proveedor ya no existe.")
         serializer.instance = locked
         previous_status = locked.estatus
+        # Cancelada es definitiva, igual que en NotaCredito, Poliza y
+        # ConciliacionBancaria: ni cambia de estatus ni se edita. Sin esto,
+        # re-registrar una factura cancelada generaba o revivía su CxP para un
+        # documento que alguien dio de baja a propósito. Se compara contra la fila
+        # bloqueada, no contra lo que dice el cuerpo, y como en
+        # ensure_invoice_edit_keeps_account sólo cuenta un valor distinto del
+        # vigente: reenviar la fila tal cual no es una edición. "" y null son el
+        # mismo valor vacío: un formulario manda "" en un campo de texto sin llenar.
+        if previous_status == FacturaProveedor.FacturaProveedorStatus.CANCELADA:
+            changed = []
+            blank_resends = []
+            for field, value in serializer.validated_data.items():
+                stored = getattr(locked, field)
+                if value == stored:
+                    continue
+                if _vacio_como_nulo(value) == _vacio_como_nulo(stored):
+                    blank_resends.append(field)
+                else:
+                    changed.append(field)
+            if changed:
+                errors = {
+                    field: "No se puede modificar una factura de proveedor cancelada."
+                    for field in changed
+                }
+                if "estatus" in errors:
+                    errors["estatus"] = (
+                        f"Una factura de proveedor cancelada no puede pasar a "
+                        f"{serializer.validated_data['estatus']}: la cancelación es definitiva."
+                    )
+                raise ErrorDeNegocio(errors)
+            # Sin cambio real tampoco se reescribe: el null guardado se queda.
+            for field in blank_resends:
+                serializer.validated_data.pop(field)
         # Con CxP, la factura ya no cambia de total ni de proveedor ni vuelve a
         # Borrador/Cancelada: se compara contra la fila bloqueada, no la de get_object().
         CuentaPorPagarService.ensure_invoice_edit_keeps_account(locked, serializer.validated_data)
@@ -1452,10 +1490,16 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
         factura = serializer.validated_data.get("factura_proveedor")
+        requested_status = serializer.validated_data.get("estatus")
         locked_invoice = None
         if factura is not None:
             # Factura antes que CxP: el mismo orden que su borrado.
             locked_invoice = self._lock_invoice(factura)
+        elif requested_status not in (None, CuentaPorPagar.EstatusCxP.CANCELADA):
+            # Un estatus vivo exige factura Registrada: la factura se bloquea
+            # también (mismo orden) para que no deje de estar Registrada entre la
+            # comprobación y el guardado.
+            locked_invoice = self._lock_invoice(serializer.instance.factura_proveedor)
         # El candado se evalúa con la fila bloqueada y releída. PagoService también
         # bloquea la CxP antes de descontar, así que un pago concurrente no se cuela
         # entre la comprobación y el guardado.
@@ -1464,7 +1508,7 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             raise NotFound("La cuenta por pagar ya no existe.")
         serializer.instance = locked
         CuentaPorPagarService.ensure_frozen_fields_unchanged(locked, serializer.validated_data)
-        if locked_invoice is not None and locked_invoice.pk != locked.factura_proveedor_id:
+        if factura is not None and locked_invoice.pk != locked.factura_proveedor_id:
             # Re-apuntar la CxP: la factura destino todavía no tiene CxP, así que
             # nada la congelaba. Se repiten con la fila bloqueada las dos
             # comprobaciones del serializer, igual que en el alta. La moneda vigente
@@ -1475,6 +1519,16 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
                 proveedor=serializer.validated_data.get("proveedor", locked.proveedor),
                 total=serializer.validated_data.get("total", locked.total),
                 moneda_id=locked.factura_proveedor.moneda_id,
+            )
+        if locked_invoice is not None:
+            # La factura que respaldará a la CxP: la destino si se re-apunta, si no
+            # la actual. Si un re-apuntado concurrente la movió antes de bloquearla,
+            # se bloquea la que la respalda de verdad.
+            backing_invoice = locked_invoice
+            if factura is None and locked_invoice.pk != locked.factura_proveedor_id:
+                backing_invoice = self._lock_invoice(locked.factura_proveedor)
+            CuentaPorPagarService.ensure_live_account_has_registered_invoice(
+                locked, backing_invoice, serializer.validated_data
             )
         factura_id = factura.pk if factura is not None else locked.factura_proveedor_id
         with CuentaPorPagarService.duplicate_invoice_as_business_error(
