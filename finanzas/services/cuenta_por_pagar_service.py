@@ -24,8 +24,8 @@ DUPLICATE_INVOICE_MESSAGE = "La factura de proveedor ya tiene una cuenta por pag
 UNREGISTERED_INVOICE_MESSAGE = (
     "Sólo una factura de proveedor Registrada puede tener cuenta por pagar."
 )
-CANCELLED_INVOICE_ACCOUNT_MESSAGE = (
-    "No se puede reactivar la cuenta por pagar de una factura de proveedor cancelada."
+UNREGISTERED_INVOICE_REVIVAL_MESSAGE = (
+    "Sólo se puede reactivar la cuenta por pagar de una factura de proveedor Registrada."
 )
 
 # Lo que la CxP toma de su factura: ``total`` y ``proveedor`` los copió al nacer y
@@ -259,14 +259,15 @@ class CuentaPorPagarService:
             raise ErrorDeNegocio({"factura_proveedor": UNREGISTERED_INVOICE_MESSAGE})
 
     @staticmethod
-    def ensure_account_not_revived_for_cancelled_invoice(cxp, factura, validated_data):
-        """Rechaza sacar de ``Cancelada`` una CxP cuya factura está ``Cancelada``.
+    def ensure_account_revived_only_for_registered_invoice(cxp, factura, validated_data):
+        """Rechaza sacar de ``Cancelada`` una CxP cuya factura no está ``Registrada``.
 
-        Una factura cancelada no vuelve a Registrada, y con una CxP viva quedaría
-        respaldando un documento dado de baja. ``factura`` es la que respaldará a la
-        CxP tras guardar, ya bloqueada. La revivificación de
-        ``generate_for_invoice`` no pasa por aquí: la dispara re-registrar la
-        factura, que ya exige que no venga de Cancelada.
+        Misma regla que el alta y el re-apuntado: sólo una factura Registrada
+        respalda una CxP viva. Con la factura Cancelada quedaría respaldando un
+        documento dado de baja; en Borrador, uno que todavía no se registra.
+        ``factura`` es la que respaldará a la CxP tras guardar, ya bloqueada. La
+        revivificación de ``generate_for_invoice`` no pasa por aquí: la dispara
+        re-registrar la factura, y para entonces ya está Registrada.
         """
         new_status = validated_data.get("estatus", cxp.estatus)
         if (
@@ -274,8 +275,8 @@ class CuentaPorPagarService:
             or new_status == CuentaPorPagar.EstatusCxP.CANCELADA
         ):
             return
-        if factura.estatus == FacturaProveedor.FacturaProveedorStatus.CANCELADA:
-            raise ErrorDeNegocio({"estatus": CANCELLED_INVOICE_ACCOUNT_MESSAGE})
+        if factura.estatus != FacturaProveedor.FacturaProveedorStatus.REGISTRADA:
+            raise ErrorDeNegocio({"estatus": UNREGISTERED_INVOICE_REVIVAL_MESSAGE})
 
     @staticmethod
     @transaction.atomic

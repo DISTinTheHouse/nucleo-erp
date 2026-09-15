@@ -1483,8 +1483,8 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             locked_invoice = self._lock_invoice(factura)
         elif requested_status not in (None, CuentaPorPagar.EstatusCxP.CANCELADA):
             # Pedir un estatus vivo puede revivir la CxP: su factura se bloquea
-            # también (mismo orden) para que no se cancele entre la comprobación y
-            # el guardado.
+            # también (mismo orden) para que no deje de estar Registrada entre la
+            # comprobación y el guardado.
             locked_invoice = self._lock_invoice(serializer.instance.factura_proveedor)
         # El candado se evalúa con la fila bloqueada y releída. PagoService también
         # bloquea la CxP antes de descontar, así que un pago concurrente no se cuela
@@ -1513,7 +1513,7 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             backing_invoice = locked_invoice
             if factura is None and locked_invoice.pk != locked.factura_proveedor_id:
                 backing_invoice = self._lock_invoice(locked.factura_proveedor)
-            CuentaPorPagarService.ensure_account_not_revived_for_cancelled_invoice(
+            CuentaPorPagarService.ensure_account_revived_only_for_registered_invoice(
                 locked, backing_invoice, serializer.validated_data
             )
         factura_id = factura.pk if factura is not None else locked.factura_proveedor_id

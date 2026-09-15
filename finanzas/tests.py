@@ -3121,6 +3121,37 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
                 cxp.refresh_from_db()
                 self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
 
+    def test_account_of_draft_invoice_cannot_be_revived(self):
+        # La misma puerta lateral con la factura en Borrador: la CxP sólo vuelve a
+        # vivir cuando la factura se re-registra.
+        for estatus in (
+            CuentaPorPagar.EstatusCxP.PENDIENTE,
+            CuentaPorPagar.EstatusCxP.PARCIAL,
+            CuentaPorPagar.EstatusCxP.PAGADA,
+        ):
+            with self.subTest(estatus=estatus):
+                _, factura, cxp = self._account("1000.00")
+                invoice_url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+                account_url = f"{self.ACCOUNTS_URL}{cxp.pk}/"
+                resp = self._patch(account_url, {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value})
+                self.assertEqual(resp.status_code, 200, resp.data)
+                resp = self._patch(invoice_url, {"estatus": "Borrador"})
+                self.assertEqual(resp.status_code, 200, resp.data)
+
+                resp = self._patch(account_url, {"estatus": estatus.value})
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["estatus"], list)
+                cxp.refresh_from_db()
+                self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
+
+                # La vía buena sigue abierta: re-registrar la factura la revive.
+                resp = self._patch(invoice_url, {"estatus": "Registrada"})
+
+                self.assertEqual(resp.status_code, 200, resp.data)
+                cxp.refresh_from_db()
+                self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PENDIENTE)
+
     def test_cancelled_account_of_cancelled_invoice_keeps_other_edits(self):
         _, _, cxp = self._cancel_account_and_invoice()
 
