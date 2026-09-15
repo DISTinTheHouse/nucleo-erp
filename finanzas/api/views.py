@@ -1117,6 +1117,11 @@ class PolizaViewSet(FinanzasBaseViewSet):
         })
 
 
+def _vacio_como_nulo(value):
+    """"" y null valen lo mismo al comparar contra lo guardado."""
+    return None if value == "" else value
+
+
 class FacturaProveedorViewSet(FinanzasBaseViewSet):
     queryset = FacturaProveedor.objects.all()
     serializer_class = FacturaProveedorSerializer
@@ -1211,13 +1216,19 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
         # documento que alguien dio de baja a propósito. Se compara contra la fila
         # bloqueada, no contra lo que dice el cuerpo, y como en
         # ensure_invoice_edit_keeps_account sólo cuenta un valor distinto del
-        # vigente: reenviar la fila tal cual no es una edición.
+        # vigente: reenviar la fila tal cual no es una edición. "" y null son el
+        # mismo valor vacío: un formulario manda "" en un campo de texto sin llenar.
         if previous_status == FacturaProveedor.FacturaProveedorStatus.CANCELADA:
-            changed = [
-                field
-                for field, value in serializer.validated_data.items()
-                if value != getattr(locked, field)
-            ]
+            changed = []
+            blank_resends = []
+            for field, value in serializer.validated_data.items():
+                stored = getattr(locked, field)
+                if value == stored:
+                    continue
+                if _vacio_como_nulo(value) == _vacio_como_nulo(stored):
+                    blank_resends.append(field)
+                else:
+                    changed.append(field)
             if changed:
                 errors = {
                     field: "No se puede modificar una factura de proveedor cancelada."
@@ -1229,6 +1240,9 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
                         f"{serializer.validated_data['estatus']}: la cancelación es definitiva."
                     )
                 raise ErrorDeNegocio(errors)
+            # Sin cambio real tampoco se reescribe: el null guardado se queda.
+            for field in blank_resends:
+                serializer.validated_data.pop(field)
         # Con CxP, la factura ya no cambia de total ni de proveedor ni vuelve a
         # Borrador/Cancelada: se compara contra la fila bloqueada, no la de get_object().
         CuentaPorPagarService.ensure_invoice_edit_keeps_account(locked, serializer.validated_data)

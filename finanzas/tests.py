@@ -3065,6 +3065,40 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
 
         self.assertEqual(resp.status_code, 200, resp.data)
 
+    def test_cancelled_invoice_treats_blank_and_null_as_the_same_value(self):
+        # Un formulario que manda "" en un campo de texto vacío no está editando.
+        _, factura = self._invoice(
+            "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        )
+        FacturaProveedor.objects.filter(pk=factura.pk).update(folio=None, observaciones=None)
+
+        resp = self._patch(
+            f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/",
+            {"folio": "", "observaciones": "", "estatus": "Cancelada"},
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura.refresh_from_db()
+        # Tampoco reescribe el null guardado.
+        self.assertEqual((factura.folio, factura.observaciones), (None, None))
+
+    def test_cancelled_invoice_still_rejects_filling_or_clearing_a_text_field(self):
+        _, factura = self._invoice(
+            "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        )
+        FacturaProveedor.objects.filter(pk=factura.pk).update(folio="FP-1", observaciones=None)
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+
+        for data in ({"folio": ""}, {"folio": None}, {"observaciones": "nueva"}):
+            with self.subTest(data=data):
+                resp = self._patch(url, data)
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data[next(iter(data))], list)
+
+        factura.refresh_from_db()
+        self.assertEqual((factura.folio, factura.observaciones), ("FP-1", None))
+
     def test_draft_invoice_without_account_still_edits_its_header(self):
         _, factura = self._invoice(
             "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
