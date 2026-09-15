@@ -3004,6 +3004,81 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
 
         self.assertEqual(resp.status_code, 200, resp.data)
 
+    def _cancelled_invoice_with_header(self):
+        proveedor, factura = self._invoice(
+            "1000.00", fecha_vencimiento=date(2026, 10, 15),
+            estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        )
+        FacturaProveedor.objects.filter(pk=factura.pk).update(folio="FP-1", observaciones="original")
+        factura.refresh_from_db()
+        return proveedor, factura
+
+    def test_cancelled_invoice_header_is_immutable(self):
+        _, factura = self._cancelled_invoice_with_header()
+        other_proveedor, _, _, _ = self._purchase_documents()
+        otra_moneda = Moneda.objects.create(codigo_iso="USD", nombre="Dolar")
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+
+        for data in (
+            {"total": "999.00"},
+            {"proveedor": other_proveedor.pk},
+            {"moneda": otra_moneda.pk},
+            {"folio": "FP-2"},
+            {"fecha_vencimiento": "2027-01-31"},
+            {"observaciones": "editada"},
+        ):
+            with self.subTest(data=data):
+                resp = self._patch(url, data)
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                field = next(iter(data))
+                self.assertIsInstance(resp.data[field], list)
+
+        # Si la petición trae varios cambios, se reportan todos.
+        resp = self._patch(url, {"total": "999.00", "folio": "FP-2"})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(set(resp.data), {"total", "folio"})
+
+        factura.refresh_from_db()
+        self.assertEqual(
+            (factura.total, factura.proveedor_id, factura.moneda_id, factura.folio,
+             factura.fecha_vencimiento, factura.observaciones),
+            (Decimal("1000.00"), factura.proveedor_id, self.moneda.pk, "FP-1",
+             date(2026, 10, 15), "original"),
+        )
+        self.assertNotEqual(factura.proveedor_id, other_proveedor.pk)
+
+    def test_cancelled_invoice_accepts_an_identical_resend(self):
+        # Mismo criterio que los guards de la CxP: sólo cuenta como edición un valor
+        # distinto del vigente.
+        proveedor, factura = self._cancelled_invoice_with_header()
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {
+            "total": "1000.00",
+            "proveedor": proveedor.pk,
+            "moneda": self.moneda.pk,
+            "folio": "FP-1",
+            "fecha_vencimiento": "2026-10-15",
+            "observaciones": "original",
+            "estatus": "Cancelada",
+        })
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_draft_invoice_without_account_still_edits_its_header(self):
+        _, factura = self._invoice(
+            "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+        )
+
+        resp = self._patch(
+            f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/",
+            {"total": "999.00", "folio": "FP-9", "observaciones": "editada"},
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual((factura.total, factura.folio), (Decimal("999.00"), "FP-9"))
+
     def test_draft_round_trip_through_the_api_still_revives_the_cancelled_account(self):
         # El camino que sigue abierto: Registrada -> Borrador -> Registrada, con la
         # CxP cancelada de por medio y la factura nunca cancelada.
