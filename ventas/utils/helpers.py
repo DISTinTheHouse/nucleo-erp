@@ -252,6 +252,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                 lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
                 cambio_talla_config=t.get("cambio_talla_config"),
                 sku=sku_snapshot or None,
+                requiere_produccion=bool(producto_nombre_externo),
                 variante=variante_obj
             )
 
@@ -458,6 +459,7 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
             talla_existente.corte_manga_config = t.get("corte_manga_config")
             talla_existente.lleva_cambio_talla = bool(t.get("lleva_cambio_talla"))
             talla_existente.cambio_talla_config = t.get("cambio_talla_config")
+            talla_existente.requiere_produccion = bool(producto_nombre_externo)
             talla_existente.variante = variante_obj
             talla_existente.save()
             tallas_usadas.add(talla_existente.pk)
