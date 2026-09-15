@@ -427,6 +427,9 @@ class PedidoSerializer(serializers.ModelSerializer):
             'cantidad_surtir_apartados',
             'fecha_embarque',
             'cantidad_embarque',
+            # Sólo se escribe vía ``PATCH /pedidos/{id}/programar/``, que valida
+            # destino/cantidades y sella fecha/usuario en el servidor.
+            'programacion_conf',
         ]
         fields = '__all__'
         extra_kwargs = {
@@ -549,6 +552,9 @@ class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
             "updated_at",
             "fecha_confirmacion",
         ]
+        # Sólo se escribe vía ``PATCH /pedidos/{id}/programar/``: aceptarlo aquí
+        # dejaba que un formulario abierto antes revirtiera la programación nueva.
+        read_only_fields = ["programacion_conf"]
 
     def validate_cliente(self, cliente):
         request = self.context.get("request")
@@ -601,6 +607,54 @@ class PedidoMesaControlUpdateSerializer(serializers.Serializer):
     pedido = PedidoMesaControlHeaderSerializer()
     detalle = PedidoMesaControlDetalleInputSerializer(many=True)
     servicios_extras = ServicioExtraInputSerializer(many=True, required=False)
+
+
+# Lista blanca cerrada por decisión de producto. Los tres primeros replican los
+# códigos de ``wms.PickingOrdenTrabajo.TipoOrden``; se escriben aquí a mano y no
+# se derivan de ese enum para que agregarle un tipo en WMS no amplíe en silencio
+# los destinos programables.
+DESTINOS_PROGRAMACION = ("BORDADO", "REFLEJANTE", "CORTE_MANGA", "EMBARQUE", "APARTADO")
+
+
+class PedidoProgramacionInputSerializer(serializers.Serializer):
+    # Sólo ``destino`` y ``cantidad`` vienen del cliente. ``fecha``,
+    # ``usuario_id`` y ``usuario_nombre`` los sella el servidor; como no están
+    # declarados aquí, ``to_internal_value`` los descarta si el cliente los manda.
+    destino = serializers.ChoiceField(
+        choices=DESTINOS_PROGRAMACION,
+        error_messages={
+            "invalid_choice": (
+                "Destino inválido: \"{input}\". Valores permitidos: "
+                + ", ".join(DESTINOS_PROGRAMACION)
+                + "."
+            )
+        },
+    )
+    cantidad = serializers.IntegerField(min_value=1)
+
+
+class PedidoProgramarSerializer(serializers.Serializer):
+    """Cuerpo de ``PATCH /pedidos/{id}/programar/``.
+
+    Espera ``total_piezas`` en el contexto: la regla "la suma de cantidades no
+    excede las piezas del pedido" depende del pedido, no sólo del payload.
+    """
+
+    programaciones = PedidoProgramacionInputSerializer(many=True, allow_empty=True)
+
+    def validate(self, attrs):
+        total_piezas = self.context["total_piezas"]
+        suma = sum(p["cantidad"] for p in attrs["programaciones"])
+        if suma > total_piezas:
+            raise serializers.ValidationError(
+                {
+                    "programaciones": (
+                        f"La suma de cantidades programadas ({suma}) excede el "
+                        f"total de piezas del pedido ({total_piezas})."
+                    )
+                }
+            )
+        return attrs
 
 class CotizacionOnboardingTallaInputSerializer(serializers.Serializer):
     talla = serializers.IntegerField()

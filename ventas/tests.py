@@ -6,8 +6,11 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test ventas --settings=sqlite_settings
 """
 
+from datetime import datetime
+
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
@@ -17,6 +20,7 @@ from inventarios.models import MovimientoInventario
 from finanzas.models import Factura, FacturaDetalle
 from inventarios.models import Almacen, TipoAlmacen
 from nucleo.models import Empresa, Moneda, Sucursal
+from produccion.models import OrdenesBordado
 from seguridad.models import Rol, UsuarioRol
 from terceros.models import Cliente
 from usuarios.models import Usuario
@@ -1110,6 +1114,66 @@ class PedidoMesaControlUpdateTests(TestCase):
         tipos = {item["tipo"] for item in response.json()["bloqueos"]}
         self.assertIn("picking_activo", tipos)
 
+    PROGRAMACION_VIGENTE = {
+        "programaciones": [
+            {
+                "destino": "BORDADO",
+                "cantidad": 2,
+                "fecha": "2026-09-15T10:00:00+00:00",
+                "usuario_id": 1,
+                "usuario_nombre": "Mesa Original",
+            }
+        ]
+    }
+    PROGRAMACION_AJENA = {
+        "programaciones": [
+            {
+                "destino": "SERIGRAFIA",
+                "cantidad": 999,
+                "fecha": "2000-01-01T00:00:00Z",
+                "usuario_id": 424242,
+                "usuario_nombre": "Suplantado",
+            }
+        ]
+    }
+
+    def test_editar_mesa_control_no_escribe_programacion_conf(self):
+        """Un formulario abierto antes de programar no revierte la programación."""
+        Pedido.objects.filter(pk=self.pedido.pk).update(
+            programacion_conf=self.PROGRAMACION_VIGENTE
+        )
+        payload = self._payload()
+        payload["pedido"]["programacion_conf"] = self.PROGRAMACION_AJENA
+
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk), payload, format="json"
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(
+            response.json()["pedido"]["programacion_conf"], self.PROGRAMACION_VIGENTE
+        )
+
+        self.pedido.refresh_from_db()
+        self.assertEqual(self.pedido.programacion_conf, self.PROGRAMACION_VIGENTE)
+        # Los campos legítimos del flujo sí se escriben.
+        self.assertEqual(self.pedido.persona_pagos, "Pagos Mesa")
+
+    def test_patch_generico_no_escribe_programacion_conf(self):
+        Pedido.objects.filter(pk=self.pedido.pk).update(
+            programacion_conf=self.PROGRAMACION_VIGENTE
+        )
+        response = self._client(self.admin_mesa).patch(
+            f"/api/v1/ventas/pedidos/{self.pedido.pk}/",
+            {"programacion_conf": self.PROGRAMACION_AJENA, "oc": "OC-PATCH-01"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(response.json()["programacion_conf"], self.PROGRAMACION_VIGENTE)
+
+        self.pedido.refresh_from_db()
+        self.assertEqual(self.pedido.programacion_conf, self.PROGRAMACION_VIGENTE)
+        self.assertEqual(self.pedido.oc, "OC-PATCH-01")
+
     def test_mesa_control_programa_fechas_y_cantidades_de_surtido(self):
         payload = self._payload()
         payload["pedido"]["fecha_surtir_bordado"] = "2026-09-15"
@@ -1374,4 +1438,391 @@ class CotizacionOnboardingOrdenTallasTests(TestCase):
         self.assertEqual(
             [v["talla"]["nombre"] for v in productos[self.otro.pk]["variantes"]],
             ["22", "30"],
+        )
+
+
+def pedido_programar_url(pedido_id):
+    return f"/api/v1/ventas/pedidos/{pedido_id}/programar/"
+
+
+class PedidoProgramarTests(TestCase):
+    """``PATCH /pedidos/{id}/programar/``: escribe sólo ``programacion_conf``."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.empresa_b = Empresa.objects.create(codigo="globex", razon_social="Globex SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Matriz"
+        )
+        cls.sucursal_b = Sucursal.objects.create(
+            empresa=cls.empresa_b, codigo="GDL", nombre="GDL"
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(
+            empresa=cls.empresa, nombre="Cliente ACME", razon_social="Cliente ACME SA"
+        )
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            codigo="ALM-PT",
+            nombre="Almacen PT",
+            tipo_almacen=TipoAlmacen.PRODUCTO_TERMINADO,
+            permite_salida=True,
+        )
+        cls.talla_m = Talla.objects.create(nombre="M")
+        cls.talla_l = Talla.objects.create(nombre="L")
+        cls.producto = Producto.objects.create(
+            empresa=cls.empresa, nombre="Playera Industrial", codigo="PLAY"
+        )
+        cls.admin_mesa = Usuario.objects.create(
+            username="mesa_admin",
+            email="mesa_admin@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
+        )
+        cls.mesa_no_admin = Usuario.objects.create(
+            username="mesa_operativa",
+            email="mesa_operativa@acme.test",
+            first_name="Laura",
+            last_name="Mesa",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+        )
+        rol_mesa_control = Rol.objects.create(
+            empresa=cls.empresa,
+            codigo="MESACONTROL-0002",
+            nombre="Mesa-de-control",
+            estatus=Rol.Estatus.ACTIVO,
+            clave_departamento=None,
+        )
+        UsuarioRol.objects.create(
+            usuario=cls.mesa_no_admin, rol=rol_mesa_control, empresa=cls.empresa
+        )
+        cls.vendedor = Usuario.objects.create(
+            username="vendedor",
+            email="vendedor@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+        )
+        cls.admin_otra_empresa = Usuario.objects.create(
+            username="mesa_globex",
+            email="mesa_globex@globex.test",
+            empresa=cls.empresa_b,
+            sucursal_default=cls.sucursal_b,
+            is_admin_empresa=True,
+        )
+
+        cls.cotizacion = Cotizacion.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            cliente=cls.cliente,
+            moneda=cls.moneda,
+            estatus=3,
+        )
+        # 120 piezas: 2 renglones x tallas (50 + 30) y (40).
+        cls.pedido = cls._pedido("P-000001", cotizacion=cls.cotizacion)
+        det_a = PedidoDetalle.objects.create(pedido=cls.pedido, producto=cls.producto)
+        PedidoDetalleTalla.objects.create(pedido_detalle=det_a, talla=cls.talla_m, cantidad=50)
+        PedidoDetalleTalla.objects.create(pedido_detalle=det_a, talla=cls.talla_l, cantidad=30)
+        det_b = PedidoDetalle.objects.create(pedido=cls.pedido, producto=cls.producto)
+        PedidoDetalleTalla.objects.create(pedido_detalle=det_b, talla=cls.talla_m, cantidad=40)
+
+        cls.pedido_sin_tallas = cls._pedido("P-000002")
+
+    @classmethod
+    def _pedido(cls, folio, cotizacion=None):
+        return Pedido.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            cliente=cls.cliente,
+            cotizacion=cotizacion,
+            moneda=cls.moneda,
+            estatus=3,
+            folio=folio,
+            persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test",
+            telefono_pagos="8100000000",
+            forma_pago="03",
+            metodo_pago="PUE",
+            uso_cfdi="G03",
+        )
+
+    def _patch(self, user, payload, pedido=None):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.patch(
+            pedido_programar_url((pedido or self.pedido).pk), payload, format="json"
+        )
+
+    def _programacion_db(self, pedido=None):
+        pedido = pedido or self.pedido
+        pedido.refresh_from_db(fields=["programacion_conf"])
+        return pedido.programacion_conf
+
+    def test_reemplazo_total_con_sello_del_servidor(self):
+        Pedido.objects.filter(pk=self.pedido.pk).update(
+            programacion_conf={"programaciones": [{"destino": "APARTADO", "cantidad": 5}]}
+        )
+        antes = timezone.now()
+        response = self._patch(
+            self.admin_mesa,
+            {
+                "programaciones": [
+                    {"destino": "BORDADO", "cantidad": 50},
+                    {"destino": "EMBARQUE", "cantidad": 70},
+                ]
+            },
+        )
+        despues = timezone.now()
+        self.assertEqual(response.status_code, 200, response.json())
+
+        programaciones = self._programacion_db()["programaciones"]
+        self.assertEqual(
+            [(p["destino"], p["cantidad"]) for p in programaciones],
+            [("BORDADO", 50), ("EMBARQUE", 70)],
+        )
+        for p in programaciones:
+            self.assertEqual(
+                set(p), {"destino", "cantidad", "fecha", "usuario_id", "usuario_nombre"}
+            )
+            self.assertEqual(p["usuario_id"], self.admin_mesa.pk)
+            # Sin nombre capturado: cae al email (precedente de inventarios).
+            self.assertEqual(p["usuario_nombre"], "mesa_admin@acme.test")
+            fecha = datetime.fromisoformat(p["fecha"])
+            self.assertTrue(antes <= fecha <= despues)
+
+    def test_usuario_nombre_usa_nombre_completo_si_existe(self):
+        response = self._patch(
+            self.mesa_no_admin, {"programaciones": [{"destino": "REFLEJANTE", "cantidad": 10}]}
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        p = self._programacion_db()["programaciones"][0]
+        self.assertEqual(p["usuario_id"], self.mesa_no_admin.pk)
+        self.assertEqual(p["usuario_nombre"], "Laura Mesa")
+
+    def test_respuesta_devuelve_programacion_persistida(self):
+        response = self._patch(
+            self.admin_mesa, {"programaciones": [{"destino": "CORTE_MANGA", "cantidad": 3}]}
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        body = response.json()
+        self.assertEqual(body["pedido_id"], self.pedido.pk)
+        self.assertEqual(body["programacion_conf"], self._programacion_db())
+        self.assertEqual(body["total_piezas"], 120)
+
+    def test_acepta_todos_los_destinos_de_la_lista_blanca(self):
+        destinos = ["BORDADO", "REFLEJANTE", "CORTE_MANGA", "EMBARQUE", "APARTADO"]
+        response = self._patch(
+            self.admin_mesa,
+            {"programaciones": [{"destino": d, "cantidad": 1} for d in destinos]},
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(
+            [p["destino"] for p in self._programacion_db()["programaciones"]], destinos
+        )
+
+    def test_rechaza_destino_fuera_de_lista_blanca(self):
+        for destino in ["SERIGRAFIA", "bordado", "Corte de manga", "APARTADOS", ""]:
+            with self.subTest(destino=destino):
+                response = self._patch(
+                    self.admin_mesa,
+                    {"programaciones": [{"destino": destino, "cantidad": 1}]},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("destino", response.json()["programaciones"][0])
+        self.assertEqual(self._programacion_db(), {})
+
+    def test_rechaza_cantidad_cero_o_negativa(self):
+        for cantidad in [0, -5]:
+            with self.subTest(cantidad=cantidad):
+                response = self._patch(
+                    self.admin_mesa,
+                    {"programaciones": [{"destino": "BORDADO", "cantidad": cantidad}]},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("cantidad", response.json()["programaciones"][0])
+        self.assertEqual(self._programacion_db(), {})
+
+    def test_rechaza_suma_mayor_al_total_de_piezas(self):
+        response = self._patch(
+            self.admin_mesa,
+            {
+                "programaciones": [
+                    {"destino": "BORDADO", "cantidad": 100},
+                    {"destino": "EMBARQUE", "cantidad": 21},
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("programaciones", response.json())
+        self.assertIn("121", str(response.json()["programaciones"]))
+        self.assertIn("120", str(response.json()["programaciones"]))
+        self.assertEqual(self._programacion_db(), {})
+
+    def test_acepta_suma_igual_al_total_de_piezas(self):
+        response = self._patch(
+            self.admin_mesa,
+            {
+                "programaciones": [
+                    {"destino": "BORDADO", "cantidad": 100},
+                    {"destino": "EMBARQUE", "cantidad": 20},
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+
+    def test_pedido_sin_tallas_rechaza_cualquier_cantidad(self):
+        response = self._patch(
+            self.admin_mesa,
+            {"programaciones": [{"destino": "BORDADO", "cantidad": 1}]},
+            pedido=self.pedido_sin_tallas,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self._programacion_db(self.pedido_sin_tallas), {})
+
+    def test_lista_vacia_limpia_la_programacion(self):
+        Pedido.objects.filter(pk=self.pedido.pk).update(
+            programacion_conf={"programaciones": [{"destino": "BORDADO", "cantidad": 5}]}
+        )
+        response = self._patch(self.admin_mesa, {"programaciones": []})
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(self._programacion_db(), {"programaciones": []})
+
+    def test_rechaza_estructura_invalida(self):
+        for payload in [{}, {"programaciones": {"destino": "BORDADO"}}, {"programaciones": None}]:
+            with self.subTest(payload=payload):
+                response = self._patch(self.admin_mesa, payload)
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(self._programacion_db(), {})
+
+    def test_ignora_sello_enviado_por_el_cliente(self):
+        response = self._patch(
+            self.admin_mesa,
+            {
+                "programaciones": [
+                    {
+                        "destino": "BORDADO",
+                        "cantidad": 5,
+                        "fecha": "2000-01-01T00:00:00Z",
+                        "usuario": "otro",
+                        "usuario_id": self.vendedor.pk,
+                        "usuario_nombre": "Suplantado",
+                        "extra": "basura",
+                    }
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        p = self._programacion_db()["programaciones"][0]
+        self.assertEqual(
+            set(p), {"destino", "cantidad", "fecha", "usuario_id", "usuario_nombre"}
+        )
+        self.assertEqual(p["usuario_id"], self.admin_mesa.pk)
+        self.assertEqual(p["usuario_nombre"], "mesa_admin@acme.test")
+        self.assertNotEqual(p["fecha"], "2000-01-01T00:00:00Z")
+
+    def test_otra_empresa_recibe_404_y_no_escribe(self):
+        response = self._patch(
+            self.admin_otra_empresa,
+            {"programaciones": [{"destino": "BORDADO", "cantidad": 1}]},
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self._programacion_db(), {})
+
+    def test_usuario_sin_mesa_de_control_recibe_400(self):
+        response = self._patch(
+            self.vendedor, {"programaciones": [{"destino": "BORDADO", "cantidad": 1}]}
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("permiso", response.json())
+        self.assertEqual(self._programacion_db(), {})
+
+    def test_sin_autenticar_no_escribe(self):
+        response = APIClient().patch(
+            pedido_programar_url(self.pedido.pk),
+            {"programaciones": [{"destino": "BORDADO", "cantidad": 1}]},
+            format="json",
+        )
+        self.assertIn(response.status_code, (401, 403))
+        self.assertEqual(self._programacion_db(), {})
+
+    def test_solo_acepta_patch(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin_mesa)
+        payload = {"programaciones": [{"destino": "BORDADO", "cantidad": 1}]}
+        url = pedido_programar_url(self.pedido.pk)
+        self.assertEqual(client.post(url, payload, format="json").status_code, 405)
+        self.assertEqual(client.get(url).status_code, 405)
+
+    def test_no_aplica_bloqueos_de_edicion_estricta(self):
+        picking = Picking.objects.create(
+            folio="PK-001",
+            empresa=self.empresa,
+            sucursal=self.sucursal,
+            pedido=self.pedido,
+            operador=self.admin_mesa,
+            almacen=self.almacen,
+            prioridad=Picking.Prioridad.MEDIA,
+            tipo=Picking.TipoPicking.ORDER_PICKING,
+            estado=Picking.Estado.EN_PROCESO,
+            usuario=self.admin_mesa,
+        )
+        detalle = self.pedido.detalles.first()
+        PickingDetalle.objects.create(
+            picking=picking,
+            pedido_detalle=detalle,
+            pedido_detalle_talla=detalle.tallas.first(),
+            producto=self.producto,
+            cantidad_solicitada="50.0000",
+            cantidad_asignada="10.0000",
+            cantidad_surtida="0.0000",
+            estado=PickingDetalle.EstadoLinea.PENDIENTE,
+        )
+        OrdenesBordado.objects.create(
+            empresa=self.empresa,
+            sucursal=self.sucursal,
+            pedido=self.pedido,
+            folio_bordado="OB-1",
+        )
+        # Precondición: editar-mesa-control sí vería este pedido como bloqueado.
+        from ventas.api.views import PedidoViewSet
+
+        self.assertTrue(PedidoViewSet()._get_bloqueos_edicion_estricta(self.pedido))
+
+        response = self._patch(
+            self.admin_mesa, {"programaciones": [{"destino": "BORDADO", "cantidad": 50}]}
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(self._programacion_db()["programaciones"][0]["cantidad"], 50)
+
+    def test_no_sincroniza_la_cotizacion(self):
+        response = self._patch(
+            self.admin_mesa, {"programaciones": [{"destino": "BORDADO", "cantidad": 5}]}
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        self.cotizacion.refresh_from_db(fields=["programacion_conf"])
+        self.assertEqual(self.cotizacion.programacion_conf, {})
+
+    def test_no_toca_otros_campos_ni_renglones(self):
+        tallas_antes = list(
+            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=self.pedido)
+            .order_by("pk")
+            .values_list("pk", "cantidad")
+        )
+        response = self._patch(
+            self.admin_mesa, {"programaciones": [{"destino": "BORDADO", "cantidad": 5}]}
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        self.pedido.refresh_from_db()
+        self.assertEqual(self.pedido.persona_pagos, "Pagos")
+        self.assertEqual(self.pedido.estatus, 3)
+        self.assertEqual(
+            list(
+                PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=self.pedido)
+                .order_by("pk")
+                .values_list("pk", "cantidad")
+            ),
+            tallas_antes,
         )
