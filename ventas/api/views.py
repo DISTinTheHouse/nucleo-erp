@@ -1582,9 +1582,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     corte_manga_config=t.corte_manga_config,
                     lleva_cambio_talla=t.lleva_cambio_talla,
                     cambio_talla_config=t.cambio_talla_config,
+                    requiere_produccion=t.requiere_produccion,
                     variante=t.variante,
                 )
-                
+
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id"):
             PedidoServicioExtra.objects.create(
                 pedido=pedido,
@@ -1930,6 +1931,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     corte_manga_config=t.corte_manga_config,
                     lleva_cambio_talla=t.lleva_cambio_talla,
                     cambio_talla_config=t.cambio_talla_config,
+                    requiere_produccion=t.requiere_produccion,
                     variante=t.variante,
                 )
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by(

@@ -661,6 +661,93 @@ class TiposServicioBordadoValidacionTests(TestCase):
         self.assertNotIn("tipos_servicio", fila.bordado_config)
 
 
+class RequiereProduccionMuestraTests(TestCase):
+    """``requiere_produccion`` (Cotizacion/Pedido) se deriva de si el renglón
+    trae ``producto_nombre_externo`` (muestra sin catálogo) o no — nunca lo
+    manda el cliente, lo calcula el servidor en cada guardado."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="MTY"
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente ACME")
+        cls.talla = Talla.objects.create(nombre="M")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.vendedor = Usuario.objects.create(
+            username="vendedor_muestra@acme.test",
+            email="vendedor_muestra@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+        )
+
+    def _cotizacion(self):
+        return Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.vendedor, estatus=1
+        )
+
+    def test_muestra_sin_catalogo_activa_requiere_produccion(self):
+        cotizacion = self._cotizacion()
+        _save_cotizacion_detalle(
+            cotizacion,
+            [
+                {
+                    "producto_nombre_externo": "Gorra bordada muestra cliente X",
+                    "precio_unitario": "50.00",
+                    "tallas": [{"talla": self.talla.pk, "cantidad": 1}],
+                }
+            ],
+            self.empresa,
+            self.vendedor,
+        )
+        fila = CotizacionDetalleTalla.objects.get()
+        self.assertTrue(fila.requiere_produccion)
+
+    def test_producto_de_catalogo_no_activa_requiere_produccion(self):
+        cotizacion = self._cotizacion()
+        _save_cotizacion_detalle(
+            cotizacion,
+            [
+                {
+                    "producto": self.producto.pk,
+                    "precio_unitario": "50.00",
+                    "tallas": [{"talla": self.talla.pk, "cantidad": 1}],
+                }
+            ],
+            self.empresa,
+            self.vendedor,
+        )
+        fila = CotizacionDetalleTalla.objects.get()
+        self.assertFalse(fila.requiere_produccion)
+
+    def test_onboarding_end_to_end_marca_requiere_produccion(self):
+        client = APIClient()
+        client.force_authenticate(user=self.vendedor)
+        payload = {
+            "cotizacion": {
+                "cliente": self.cliente.pk,
+                "sucursal": self.sucursal.pk,
+                "moneda": self.moneda.pk,
+                "oportunidad": None,
+                "tipo_pedido": 2,
+            },
+            "detalle": [
+                {
+                    "producto_nombre_externo": "Playera muestra bordado logo",
+                    "precio_unitario": "50.00",
+                    "tallas": [{"talla": self.talla.pk, "cantidad": 1}],
+                }
+            ],
+        }
+        resp = client.post(COTIZACION_ONBOARDING_URL, payload, format="json")
+        self.assertEqual(resp.status_code, 201)
+        fila = CotizacionDetalleTalla.objects.get()
+        self.assertTrue(fila.requiere_produccion)
+        self.assertIsNone(fila.cotizacion_detalle.producto_id)
+
+
 class PedidoMesaControlUpdateTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -1042,6 +1129,23 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(
             AuditoriaEvento.objects.filter(modulo="inventarios").count(), 0
         )
+
+    def test_edicion_mesa_control_muestra_activa_requiere_produccion(self):
+        payload = self._payload()
+        payload["detalle"][0].pop("producto", None)
+        payload["detalle"][0]["producto_nombre_externo"] = "Muestra especial cliente"
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk),
+            payload,
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        pedido_talla = self.pedido.detalles.get().tallas.get()
+        self.assertTrue(pedido_talla.requiere_produccion)
+
+        cot_talla = self.cotizacion.cotizaciondetalle.get().tallas.get()
+        self.assertTrue(cot_talla.requiere_produccion)
 
     def test_bloquea_edicion_si_hay_factura_emitida_ligada(self):
         factura = Factura.objects.create(

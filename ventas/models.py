@@ -456,6 +456,7 @@ class PedidoDetalleTalla(models.Model):
     corte_manga_config = models.JSONField(null=True, blank=True)
     lleva_cambio_talla = models.BooleanField(default=False)
     cambio_talla_config = models.JSONField(null=True, blank=True)
+    requiere_produccion = models.BooleanField(default=False)
     variante = models.ForeignKey(ProductoVariante, on_delete=models.SET_NULL, null=True, blank=True, related_name="pedido_tallas")
 
     class Meta:
