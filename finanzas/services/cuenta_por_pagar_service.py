@@ -270,13 +270,41 @@ class CuentaPorPagarService:
         re-registrar la factura, y para entonces ya está Registrada.
         """
         new_status = validated_data.get("estatus", cxp.estatus)
-        if (
-            cxp.estatus != CuentaPorPagar.EstatusCxP.CANCELADA
-            or new_status == CuentaPorPagar.EstatusCxP.CANCELADA
-        ):
-            return
-        if factura.estatus != FacturaProveedor.FacturaProveedorStatus.REGISTRADA:
+        if CuentaPorPagarService._revives_without_registered_invoice(cxp, factura, new_status):
             raise ErrorDeNegocio({"estatus": UNREGISTERED_INVOICE_REVIVAL_MESSAGE})
+
+    @staticmethod
+    def ensure_payment_revives_accounts_only_for_registered_invoices(cxps, facturas):
+        """La misma regla cuando la CxP revive por aplicarle un pago.
+
+        ``aplicar_pago`` deja cada CxP en Parcial o Pagada sin mirar su estatus: un
+        pago en Borrador que sigue apuntando a una CxP cancelada, o uno nuevo, la
+        revivía aunque su factura estuviera Cancelada o en Borrador. ``cxps`` y
+        ``facturas`` son las filas bloqueadas, indexadas por pk.
+        """
+        for cxp in cxps.values():
+            factura = facturas[cxp.factura_proveedor_id]
+            # Aplicar siempre deja la CxP en un estatus vivo.
+            if CuentaPorPagarService._revives_without_registered_invoice(
+                cxp, factura, CuentaPorPagar.EstatusCxP.PARCIAL
+            ):
+                raise ErrorDeNegocio(
+                    {
+                        "pago_detalles": (
+                            f"No se puede aplicar un pago a la CxP {cxp.pk}: está "
+                            "cancelada y sólo se puede reactivar la cuenta por pagar "
+                            "de una factura de proveedor Registrada."
+                        )
+                    }
+                )
+
+    @staticmethod
+    def _revives_without_registered_invoice(cxp, factura, new_status):
+        return (
+            cxp.estatus == CuentaPorPagar.EstatusCxP.CANCELADA
+            and new_status != CuentaPorPagar.EstatusCxP.CANCELADA
+            and factura.estatus != FacturaProveedor.FacturaProveedorStatus.REGISTRADA
+        )
 
     @staticmethod
     @transaction.atomic

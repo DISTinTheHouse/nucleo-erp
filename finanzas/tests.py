@@ -3178,6 +3178,98 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         cxp.refresh_from_db()
         self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PENDIENTE)
 
+    # -- Aplicar un pago no revive la CxP -----------------------------------------
+
+    def _post_pago(self, proveedor, cxp, importe, estatus=None):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        payload = {
+            "proveedor": proveedor.pk,
+            "cuenta_bancaria": cuenta.pk,
+            "total_pagado": importe,
+            "pago_detalles": [{"cxp": cxp.pk, "importe_aplicado": importe}],
+        }
+        if estatus is not None:
+            payload["estatus"] = estatus
+        return self._client(self.a["usuario"]).post(PAGOS_URL, payload, format="json")
+
+    def _cancel_account_and_move_invoice_to(self, cxp, factura, invoice_status):
+        resp = self._patch(
+            f"{self.ACCOUNTS_URL}{cxp.pk}/",
+            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": invoice_status})
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def _assert_account_still_cancelled(self, cxp, saldo, fecha_ultimo_pago=None):
+        cxp.refresh_from_db()
+        self.assertEqual(
+            (cxp.estatus, cxp.saldo, cxp.fecha_ultimo_pago),
+            (CuentaPorPagar.EstatusCxP.CANCELADA, Decimal(saldo), fecha_ultimo_pago),
+        )
+
+    def test_applied_payment_cannot_revive_account_of_unregistered_invoice(self):
+        for invoice_status in ("Cancelada", "Borrador"):
+            with self.subTest(invoice_status=invoice_status):
+                proveedor, factura, cxp = self._account("1000.00")
+                self._cancel_account_and_move_invoice_to(cxp, factura, invoice_status)
+                pagos_antes = Pago.objects.count()
+
+                resp = self._post_pago(proveedor, cxp, "400.00")
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["pago_detalles"], list)
+                self._assert_account_still_cancelled(cxp, "1000.00")
+                self.assertEqual(Pago.objects.count(), pagos_antes)
+
+    def test_applying_a_draft_payment_cannot_revive_account_of_unregistered_invoice(self):
+        # El pago en Borrador que sigue apuntando a la CxP cancelada: aplicarlo por
+        # PATCH pasa por el mismo servicio.
+        for invoice_status in ("Cancelada", "Borrador"):
+            with self.subTest(invoice_status=invoice_status):
+                proveedor, factura, cxp = self._account("1000.00")
+                pago = self._pay(proveedor, cxp, "400.00", estatus=Pago.Estatus.BORRADOR.value)
+                self._cancel_account_and_move_invoice_to(cxp, factura, invoice_status)
+
+                resp = self._patch(f"{PAGOS_URL}{pago.pk}/", {"estatus": Pago.Estatus.APLICADO.value})
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["pago_detalles"], list)
+                self._assert_account_still_cancelled(cxp, "1000.00")
+                pago.refresh_from_db()
+                self.assertEqual(pago.estatus, Pago.Estatus.BORRADOR)
+
+    def test_payment_deleted_then_reapplied_cannot_revive_account(self):
+        proveedor, factura, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "400.00")
+        resp = self._client(self.a["usuario"]).delete(f"{PAGOS_URL}{pago.pk}/")
+        self.assertEqual(resp.status_code, 204, resp.data)
+        self._cancel_account_and_move_invoice_to(cxp, factura, "Cancelada")
+
+        cxp.refresh_from_db()
+        # El primer pago ya fijó la fecha, y cancelarlo no la limpia.
+        fecha_primer_pago = cxp.fecha_ultimo_pago
+
+        resp = self._post_pago(proveedor, cxp, "400.00")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["pago_detalles"], list)
+        self._assert_account_still_cancelled(cxp, "1000.00", fecha_primer_pago)
+
+    def test_payment_to_live_account_of_registered_invoice_still_applies(self):
+        proveedor, _, cxp = self._account("1000.00")
+
+        for importe, saldo, estatus in (
+            ("400.00", "600.00", CuentaPorPagar.EstatusCxP.PARCIAL),
+            ("600.00", "0.00", CuentaPorPagar.EstatusCxP.PAGADA),
+        ):
+            with self.subTest(importe=importe):
+                resp = self._post_pago(proveedor, cxp, importe)
+
+                self.assertEqual(resp.status_code, 201, resp.data)
+                cxp.refresh_from_db()
+                self.assertEqual((cxp.saldo, cxp.estatus), (Decimal(saldo), estatus))
+
     def test_live_account_still_holds_its_invoice(self):
         _, factura, cxp = self._account("1000.00")
         url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
