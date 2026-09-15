@@ -97,7 +97,7 @@ class PagoService:
                 (factura.pk, factura)
                 for factura in FacturaProveedor.objects.select_for_update().filter(pk__in=faltantes)
             )
-        CuentaPorPagarService.ensure_payment_revives_accounts_only_for_registered_invoices(
+        CuentaPorPagarService.ensure_payment_accounts_have_registered_invoices(
             cxps, facturas
         )
 

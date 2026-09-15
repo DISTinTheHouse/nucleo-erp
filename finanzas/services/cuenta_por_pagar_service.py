@@ -24,8 +24,9 @@ DUPLICATE_INVOICE_MESSAGE = "La factura de proveedor ya tiene una cuenta por pag
 UNREGISTERED_INVOICE_MESSAGE = (
     "Sólo una factura de proveedor Registrada puede tener cuenta por pagar."
 )
-UNREGISTERED_INVOICE_REVIVAL_MESSAGE = (
-    "Sólo se puede reactivar la cuenta por pagar de una factura de proveedor Registrada."
+LIVE_ACCOUNT_UNREGISTERED_INVOICE_MESSAGE = (
+    "Sólo la cuenta por pagar de una factura de proveedor Registrada puede quedar "
+    "Pendiente, Parcial o Pagada."
 )
 
 # Lo que la CxP toma de su factura: ``total`` y ``proveedor`` los copió al nacer y
@@ -259,50 +260,50 @@ class CuentaPorPagarService:
             raise ErrorDeNegocio({"factura_proveedor": UNREGISTERED_INVOICE_MESSAGE})
 
     @staticmethod
-    def ensure_account_revived_only_for_registered_invoice(cxp, factura, validated_data):
-        """Rechaza sacar de ``Cancelada`` una CxP cuya factura no está ``Registrada``.
+    def ensure_live_account_has_registered_invoice(cxp, factura, validated_data):
+        """Rechaza dejar en un estatus vivo una CxP cuya factura no está ``Registrada``.
 
         Misma regla que el alta y el re-apuntado: sólo una factura Registrada
         respalda una CxP viva. Con la factura Cancelada quedaría respaldando un
         documento dado de baja; en Borrador, uno que todavía no se registra.
-        ``factura`` es la que respaldará a la CxP tras guardar, ya bloqueada. La
-        revivificación de ``generate_for_invoice`` no pasa por aquí: la dispara
-        re-registrar la factura, y para entonces ya está Registrada.
+        Cancelarla sí se permite. ``factura`` es la que respaldará a la CxP tras
+        guardar, ya bloqueada. La revivificación de ``generate_for_invoice`` no pasa
+        por aquí: la dispara re-registrar la factura, y para entonces ya está
+        Registrada.
         """
         new_status = validated_data.get("estatus", cxp.estatus)
-        if CuentaPorPagarService._revives_without_registered_invoice(cxp, factura, new_status):
-            raise ErrorDeNegocio({"estatus": UNREGISTERED_INVOICE_REVIVAL_MESSAGE})
+        if CuentaPorPagarService._live_without_registered_invoice(factura, new_status):
+            raise ErrorDeNegocio({"estatus": LIVE_ACCOUNT_UNREGISTERED_INVOICE_MESSAGE})
 
     @staticmethod
-    def ensure_payment_revives_accounts_only_for_registered_invoices(cxps, facturas):
-        """La misma regla cuando la CxP revive por aplicarle un pago.
+    def ensure_payment_accounts_have_registered_invoices(cxps, facturas):
+        """La misma regla cuando la CxP queda viva por aplicarle un pago.
 
-        ``aplicar_pago`` deja cada CxP en Parcial o Pagada sin mirar su estatus: un
-        pago en Borrador que sigue apuntando a una CxP cancelada, o uno nuevo, la
-        revivía aunque su factura estuviera Cancelada o en Borrador. ``cxps`` y
-        ``facturas`` son las filas bloqueadas, indexadas por pk.
+        ``aplicar_pago`` deja cada CxP en Parcial o Pagada sin mirar su estatus ni
+        el de su factura: un pago en Borrador que sigue apuntando a una CxP
+        cancelada, o uno nuevo, la dejaba viva aunque su factura estuviera Cancelada
+        o en Borrador. ``cxps`` y ``facturas`` son las filas bloqueadas, indexadas
+        por pk.
         """
         for cxp in cxps.values():
             factura = facturas[cxp.factura_proveedor_id]
             # Aplicar siempre deja la CxP en un estatus vivo.
-            if CuentaPorPagarService._revives_without_registered_invoice(
-                cxp, factura, CuentaPorPagar.EstatusCxP.PARCIAL
+            if CuentaPorPagarService._live_without_registered_invoice(
+                factura, CuentaPorPagar.EstatusCxP.PARCIAL
             ):
                 raise ErrorDeNegocio(
                     {
                         "pago_detalles": (
-                            f"No se puede aplicar un pago a la CxP {cxp.pk}: está "
-                            "cancelada y sólo se puede reactivar la cuenta por pagar "
-                            "de una factura de proveedor Registrada."
+                            f"No se puede aplicar un pago a la CxP {cxp.pk}: su "
+                            "factura de proveedor no está Registrada."
                         )
                     }
                 )
 
     @staticmethod
-    def _revives_without_registered_invoice(cxp, factura, new_status):
+    def _live_without_registered_invoice(factura, new_status):
         return (
-            cxp.estatus == CuentaPorPagar.EstatusCxP.CANCELADA
-            and new_status != CuentaPorPagar.EstatusCxP.CANCELADA
+            new_status != CuentaPorPagar.EstatusCxP.CANCELADA
             and factura.estatus != FacturaProveedor.FacturaProveedorStatus.REGISTRADA
         )
 
