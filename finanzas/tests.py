@@ -832,6 +832,12 @@ class Defecto6AltaLineasHijas(FinanzasBase):
         _, _, _, _, _, _, factura_proveedor = self._crear_oc_recepcion_y_factura_proveedor(
             empresa, self.a["sucursal"], self.a["usuario"]
         )
+        # La factura se deja Registrada: la API ya no permite una CxP viva sobre una
+        # factura que no lo está, así que ese estado armado por ORM es inalcanzable
+        # y el guard de aplicar_pago lo rechaza. La prueba cubre las líneas y el
+        # saldo, no el estatus de la factura.
+        factura_proveedor.estatus = FacturaProveedor.FacturaProveedorStatus.REGISTRADA
+        factura_proveedor.save()
         cxp = CuentaPorPagar.objects.create(
             empresa=empresa, proveedor=factura_proveedor.proveedor, factura_proveedor=factura_proveedor,
             total=Decimal("50.00"), saldo=Decimal("50.00"),
