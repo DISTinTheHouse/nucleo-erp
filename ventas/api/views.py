@@ -48,6 +48,7 @@ from ventas.api.serializers import (
     PedidoDetalleWithTallasSerializer,
     CotizacionOnboardingCreateSerializer,
     PedidoMesaControlUpdateSerializer,
+    PedidoProgramarSerializer,
 )
 
 from nucleo.models import SerieFolio, Empresa
@@ -2826,6 +2827,66 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 "cotizacion": CotizacionSerializer(cotizacion).data,
                 "sincronizado": True,
                 "modo": MODO_EDICION_MESA_CONTROL,
+            }
+        )
+
+    @action(detail=True, methods=["patch"], url_path="programar")
+    def programar(self, request, pk=None):
+        """Reemplaza ``programacion_conf`` del pedido; no toca nada más.
+
+        Mismo permiso (mesa de control) y mismo alcance por empresa
+        (``get_object`` -> ``pedidos_visibles``) que ``editar-mesa-control``,
+        pero SIN ``_get_bloqueos_edicion_estricta``: esos bloqueos protegen la
+        reescritura de renglones, y aquí no se reescribe ninguno. Tampoco se
+        sincroniza la cotización: la programación vive sólo en el pedido.
+        """
+        user = request.user
+        self._require_mesa_control(user)
+        base_pedido = self.get_object()
+
+        with transaction.atomic():
+            # Bloquea el pedido antes de sumar sus piezas: ``editar-mesa-control``
+            # toma este mismo lock para reescribir las tallas, así que el total
+            # validado no puede cambiar entre la validación y el guardado.
+            pedido = Pedido.objects.select_for_update().get(pk=base_pedido.pk)
+            # Misma agregación que ``armar_tracker_pedido`` (total_prendas_pedido).
+            total_piezas = (
+                PedidoDetalleTalla.objects.filter(
+                    pedido_detalle__pedido=pedido
+                ).aggregate(total=Sum("cantidad"))["total"]
+                or 0
+            )
+
+            serializer = PedidoProgramarSerializer(
+                data=request.data, context={"total_piezas": total_piezas}
+            )
+            serializer.is_valid(raise_exception=True)
+
+            # Sello del servidor, mismo criterio que el reporte de movimientos
+            # de inventarios (``usuario_id`` / ``usuario_nombre``).
+            fecha = timezone.now().isoformat()
+            usuario_nombre = user.get_full_name().strip() or user.email
+            pedido.programacion_conf = {
+                "programaciones": [
+                    {
+                        "destino": p["destino"],
+                        "cantidad": p["cantidad"],
+                        "fecha": fecha,
+                        "usuario_id": user.pk,
+                        "usuario_nombre": usuario_nombre,
+                    }
+                    for p in serializer.validated_data["programaciones"]
+                ]
+            }
+            pedido.save(update_fields=["programacion_conf", "updated_at"])
+
+        # Se relee de BD para que la respuesta refleje lo persistido, no lo enviado.
+        pedido.refresh_from_db(fields=["programacion_conf"])
+        return Response(
+            {
+                "pedido_id": pedido.pk,
+                "total_piezas": total_piezas,
+                "programacion_conf": pedido.programacion_conf,
             }
         )
 
