@@ -178,7 +178,7 @@ def build_snapshots(tallas, pedido, almacen_origen=None, picking_maps=None):
 # de su ubicación física actual).
 # ---------------------------------------------------------------------------
 
-def armar_tracker_pedido(pedido, picking_maps=None):
+def armar_tracker_pedido(pedido, picking_maps=None, total_prendas=None):
     """Devuelve los 5 KPIs de surtido por Picking activo a nivel PEDIDO.
 
     Shape exacto que ``PickingService._armar_tracker`` (SSoT) para que el
@@ -194,6 +194,14 @@ def armar_tracker_pedido(pedido, picking_maps=None):
     ``historical_maps()`` (misma agregación sobre ``PickingDetalle``). Cuando
     llega ``None`` — el resto de llamadores, p.ej. ``PickingService`` — el
     comportamiento es idéntico al de antes: se calcula aquí dentro.
+
+    ``total_prendas`` (opcional): total de piezas del pedido, ya sumado por el
+    llamador a partir de ``pedido.detalles.all()``/``tallas.all()`` cuando esas
+    relaciones ya están prefetcheadas (``PedidoViewSet.retrieve()``). Evita el
+    ``aggregate(Sum("cantidad"))`` de abajo, que si no se pasa vuelve a
+    consultar exactamente lo que el prefetch del detalle ya trajo. Con
+    ``None`` — el resto de llamadores — el comportamiento es idéntico al de
+    antes.
     """
     if pedido is None:
         return {
@@ -203,10 +211,13 @@ def armar_tracker_pedido(pedido, picking_maps=None):
             "total_asignado": "0",
             "total_surtido": "0",
         }
-    total_pedido_qs = PedidoDetalleTalla.objects.filter(
-        pedido_detalle__pedido=pedido
-    ).aggregate(total=Sum("cantidad"))
-    total_pedido = normalizar_decimal(total_pedido_qs["total"] or D("0"))
+    if total_prendas is not None:
+        total_pedido = normalizar_decimal(total_prendas)
+    else:
+        total_pedido_qs = PedidoDetalleTalla.objects.filter(
+            pedido_detalle__pedido=pedido
+        ).aggregate(total=Sum("cantidad"))
+        total_pedido = normalizar_decimal(total_pedido_qs["total"] or D("0"))
     if picking_maps is not None:
         asignado_map = picking_maps.get("asignado_map") or {}
         surtido_map = picking_maps.get("surtido_map") or {}

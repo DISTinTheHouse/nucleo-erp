@@ -363,12 +363,16 @@ class PedidoSerializer(serializers.ModelSerializer):
     def get_tracker_picking(self, obj):
         from wms.services.picking_pipeline.pendientes import armar_tracker_pedido
         try:
-            # ``retrieve()`` ya calculó los mapas históricos una sola vez y los
-            # dejó en el contexto; se los pasamos para que el tracker no repita
-            # la agregación sobre ``PickingDetalle``. Si no hay contexto (POST /
-            # PATCH / mesa-control) va ``None`` y el tracker los calcula solo.
+            # ``retrieve()`` ya calculó los mapas históricos y el total de
+            # piezas una sola vez y los dejó en el contexto; se los pasamos
+            # para que el tracker no repita la agregación sobre
+            # ``PickingDetalle``/``PedidoDetalleTalla``. Si no hay contexto
+            # (POST / PATCH / mesa-control) van en ``None`` y el tracker los
+            # calcula solo, igual que antes.
             return armar_tracker_pedido(
-                obj, picking_maps=self.context.get("_picking_tracking")
+                obj,
+                picking_maps=self.context.get("_picking_tracking"),
+                total_prendas=self.context.get("_total_prendas_pedido"),
             )
         except Exception:
             return {

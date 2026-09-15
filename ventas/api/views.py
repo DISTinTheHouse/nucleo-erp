@@ -2337,9 +2337,24 @@ class PedidoViewSet(viewsets.ModelViewSet):
         except Exception:
             tracking_ctx = {"asignado_map": {}, "surtido_map": {}}
 
+        # Total de piezas del pedido, sumado en Python sobre lo que
+        # ``get_queryset()`` ya prefetcheó (``detalles``+``tallas``) para esta
+        # acción: 0 queries extra. ``armar_tracker_pedido`` sin este dato
+        # repite un ``aggregate(Sum("cantidad"))`` sobre ``PedidoDetalleTalla``
+        # que es exactamente lo que el prefetch ya trajo a memoria.
+        try:
+            total_prendas_pedido = sum(
+                (talla.cantidad or 0)
+                for detalle in instance.detalles.all()
+                for talla in detalle.tallas.all()
+            )
+        except Exception:
+            total_prendas_pedido = None
+
         serializer_class = self.get_serializer_class()
         context = dict(self.get_serializer_context() or {})
         context["_picking_tracking"] = tracking_ctx
+        context["_total_prendas_pedido"] = total_prendas_pedido
         serializer = serializer_class(instance, context=context)
 
         data = filtrar_campos_contabilidad_pedido(serializer.data, request.user)
