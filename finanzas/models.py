@@ -81,7 +81,12 @@ class Poliza(models.Model):
 
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="polizas")
     sucursal = models.ForeignKey('nucleo.Sucursal', on_delete=models.CASCADE, related_name="polizas")
-    centro_costo = models.ForeignKey('finanzas.CentroCosto', on_delete=models.CASCADE, related_name="polizas", null=True, blank=True)
+    # SET_NULL, no CASCADE: el centro de costo es una referencia de la póliza, no
+    # su documento padre. Con CASCADE, borrar un centro --por el admin o por una
+    # consulta directa, fuera de la baja lógica del catálogo-- se llevaba las
+    # pólizas que lo usaban, contabilizadas incluidas. Mismo criterio que la
+    # migración 0008 aplicó a PolizaDetalle.centro_costo.
+    centro_costo = models.ForeignKey('finanzas.CentroCosto', on_delete=models.SET_NULL, related_name="polizas", null=True, blank=True)
     folio = models.CharField(max_length=30, null=True, blank=True)
     folio_consecutivo = models.PositiveIntegerField(null=True, blank=True)
     tipo = models.CharField(max_length=30, choices=PolizaTipo.choices, default=PolizaTipo.DIARIO.value)

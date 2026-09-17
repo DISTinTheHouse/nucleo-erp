@@ -4237,6 +4237,30 @@ class CentroCostoBajaLogicaTests(FinanzasBase):
         self.assertEqual(poliza.estatus, Poliza.PolizaStatus.CONTABILIZADA.value)
         self.assertTrue(PolizaDetalle.objects.filter(pk=detalle.pk).exists())
 
+    def test_un_borrado_fisico_ya_no_arrastra_la_poliza(self):
+        # La baja lógica no cubre el admin ni una consulta directa: ahí sigue
+        # habiendo borrado físico, y con CASCADE se llevaba la póliza. Con
+        # SET_NULL la póliza sobrevive y sólo pierde su centro de costo.
+        cargo, _, centro = self._crear_cuentas_contables(self.a["empresa"])
+        poliza = Poliza.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], centro_costo=centro,
+            folio="POL-000001", folio_consecutivo=1,
+            estatus=Poliza.PolizaStatus.CONTABILIZADA.value,
+        )
+        detalle = PolizaDetalle.objects.create(
+            poliza=poliza, cuenta_contable=cargo, centro_costo=centro,
+            cargo=Decimal("116.00"), abono=Decimal("0.00"), orden=1,
+        )
+
+        CentroCosto.objects.filter(pk=centro.pk).delete()
+
+        poliza.refresh_from_db()
+        self.assertIsNone(poliza.centro_costo_id)
+        self.assertEqual(poliza.estatus, Poliza.PolizaStatus.CONTABILIZADA.value)
+        detalle.refresh_from_db()
+        self.assertIsNone(detalle.centro_costo_id)
+        self.assertEqual(detalle.cargo, Decimal("116.00"))
+
     def test_no_se_da_de_baja_un_centro_de_otra_empresa(self):
         ajeno = self._centro(self.b["empresa"], codigo="CC-99")
 
