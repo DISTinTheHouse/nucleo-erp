@@ -413,10 +413,17 @@ class CentroCostoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSer
         # la condición de la constraint.
         if not codigo:
             return
+        # Y una fila dada de baja tampoco reserva su código: se compara el estatus
+        # con el que la fila QUEDARÁ, no con el que tenía. Así, reactivar por PATCH
+        # una baja cuyo código ya ocupa otra activa se rechaza aquí en vez de
+        # reventar contra la constraint, y darla de alta inactiva no disputa nada.
+        activo = attrs.get("activo", getattr(self.instance, "activo", True))
+        if not activo:
+            return
         empresa_id = self._empresa_del_servidor(attrs)
         if empresa_id is None:
             return
-        gemelos = CentroCosto.objects.filter(empresa_id=empresa_id, codigo=codigo)
+        gemelos = CentroCosto.objects.filter(empresa_id=empresa_id, codigo=codigo, activo=True)
         if self.instance is not None:
             gemelos = gemelos.exclude(pk=self.instance.pk)
         if gemelos.exists():
