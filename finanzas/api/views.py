@@ -1010,7 +1010,13 @@ class CentroCostoViewSet(FinanzasBaseViewSet):
             empresa = getattr(user, "empresa", None)
             if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
-        instance.delete()
+        # Baja lógica, como en FacturaViewSet y en el resto de los catálogos del
+        # proyecto: ``Poliza.centro_costo`` es CASCADE, así que un borrado físico
+        # se llevaba las pólizas que lo usan --contabilizadas incluidas-- saltándose
+        # el guard de PolizaViewSet.perform_destroy. ``CentroCosto`` no hereda de
+        # StatusLifecycleModel, así que no tiene ``soft_delete()``: se asigna aquí.
+        instance.activo = False
+        instance.save(update_fields=["activo"])
 
 
 class PolizaViewSet(FinanzasBaseViewSet):

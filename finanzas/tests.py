@@ -4171,3 +4171,100 @@ class CuentaContableCodigoUnicoTests(FinanzasBase):
         self.assertEqual(resp.status_code, 200, resp.data)
         cuenta.refresh_from_db()
         self.assertEqual(cuenta.codigo, "")
+
+
+class CentroCostoBajaLogicaTests(FinanzasBase):
+    """EC-140: el catálogo da de baja, no borra.
+
+    ``Poliza.centro_costo`` era CASCADE: un borrado físico se llevaba por
+    delante las pólizas que lo usaban, contabilizadas incluidas, saltándose el
+    guard de ``PolizaViewSet.perform_destroy``.
+    """
+
+    URL = "/api/v1/finanzas/centros-costo/"
+
+    def _centro(self, empresa, codigo="CC-01", nombre="Administración"):
+        return CentroCosto.objects.create(empresa=empresa, codigo=codigo, nombre=nombre)
+
+    def _delete(self, centro, user=None):
+        return self._client(user or self.a["usuario"]).delete(f"{self.URL}{centro.pk}/")
+
+    def _patch(self, centro, data, user=None):
+        return self._client(user or self.a["usuario"]).patch(
+            f"{self.URL}{centro.pk}/", data, format="json"
+        )
+
+    def test_delete_da_de_baja_sin_borrar_la_fila(self):
+        centro = self._centro(self.a["empresa"])
+
+        resp = self._delete(centro)
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(resp.data, None)
+        centro.refresh_from_db()
+        self.assertFalse(centro.activo)
+        # Lo demás queda intacto: la baja sólo toca ``activo``.
+        self.assertEqual((centro.codigo, centro.nombre), ("CC-01", "Administración"))
+
+    def test_una_baja_se_revierte_con_patch(self):
+        centro = self._centro(self.a["empresa"])
+        self.assertEqual(self._delete(centro).status_code, 204)
+
+        resp = self._patch(centro, {"activo": True})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        centro.refresh_from_db()
+        self.assertTrue(centro.activo)
+
+    def test_la_baja_no_se_lleva_las_polizas_que_lo_usan(self):
+        # La prueba que fija el arreglo: antes, el DELETE borraba la póliza.
+        cargo, abono, centro = self._crear_cuentas_contables(self.a["empresa"])
+        poliza = Poliza.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], centro_costo=centro,
+            folio="POL-000001", folio_consecutivo=1,
+            estatus=Poliza.PolizaStatus.CONTABILIZADA.value,
+        )
+        detalle = PolizaDetalle.objects.create(
+            poliza=poliza, cuenta_contable=cargo, centro_costo=centro,
+            cargo=Decimal("116.00"), abono=Decimal("0.00"), orden=1,
+        )
+
+        resp = self._delete(centro)
+
+        self.assertEqual(resp.status_code, 204)
+        poliza.refresh_from_db()
+        self.assertEqual(poliza.centro_costo_id, centro.pk)
+        self.assertEqual(poliza.estatus, Poliza.PolizaStatus.CONTABILIZADA.value)
+        self.assertTrue(PolizaDetalle.objects.filter(pk=detalle.pk).exists())
+
+    def test_no_se_da_de_baja_un_centro_de_otra_empresa(self):
+        ajeno = self._centro(self.b["empresa"], codigo="CC-99")
+
+        resp = self._delete(ajeno)
+
+        self.assertEqual(resp.status_code, 404, resp.data)
+        ajeno.refresh_from_db()
+        self.assertTrue(ajeno.activo)
+
+    def test_sin_centro_activo_la_factura_pendiente_de_cobro_devuelve_400(self):
+        # Efecto colateral conocido: ``_crear_poliza_factura_pendiente`` exige un
+        # centro de costo activo.
+        _, _, centro = self._crear_cuentas_contables(self.a["empresa"])
+        self.assertEqual(self._delete(centro).status_code, 204)
+
+        resp = self._client(self.a["usuario"]).post(
+            PENDIENTE_COBRO_URL,
+            {
+                "cliente": self.a["cliente"].pk,
+                "moneda": self.moneda.pk,
+                "folio": "F-001",
+                "subtotal": "100.00",
+                "descuento": "0.00",
+                "impuestos": "0.00",
+                "total": "100.00",
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("centro_costo", resp.data)
