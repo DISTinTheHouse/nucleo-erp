@@ -52,6 +52,17 @@ class CentroCosto(models.Model):
         db_table = "centros_costo"
         verbose_name = "Centro de Costo"
         verbose_name_plural = "Centros de Costo"
+        constraints = [
+            # El código identifica al centro de costo dentro de su empresa. La
+            # condición deja fuera el código en blanco: el campo nace con
+            # ``default=""`` y ``blank=True``, así que sin ella un segundo centro
+            # sin código sería imposible y ``codigo`` quedaría obligatorio de hecho.
+            models.UniqueConstraint(
+                fields=("empresa", "codigo"),
+                condition=~models.Q(codigo=""),
+                name="uq_centro_costo_empresa_codigo",
+            ),
+        ]
     
     def __str__(self):
         return f"{self.codigo} - {self.nombre}"

@@ -4268,3 +4268,115 @@ class CentroCostoBajaLogicaTests(FinanzasBase):
 
         self.assertEqual(resp.status_code, 400, resp.data)
         self.assertIn("centro_costo", resp.data)
+
+
+class CentroCostoCodigoUnicoTests(FinanzasBase):
+    """EC-140: ``codigo`` es único por empresa, salvo el código en blanco.
+
+    Mismo criterio que ``CuentaContableCodigoUnicoTests`` (EC-139): el alcance
+    de la unicidad sale de la empresa que resuelve el servidor, nunca de la que
+    venga en el cuerpo.
+    """
+
+    URL = "/api/v1/finanzas/centros-costo/"
+
+    def _centro(self, empresa, codigo, nombre="Administración"):
+        return CentroCosto.objects.create(empresa=empresa, codigo=codigo, nombre=nombre)
+
+    def _post(self, data, user=None):
+        return self._client(user or self.a["usuario"]).post(self.URL, data, format="json")
+
+    def _patch(self, centro, data, user=None):
+        return self._client(user or self.a["usuario"]).patch(
+            f"{self.URL}{centro.pk}/", data, format="json"
+        )
+
+    def test_codigo_duplicado_en_la_misma_empresa_devuelve_400(self):
+        self._centro(self.a["empresa"], "CC-01")
+
+        resp = self._post({"codigo": "CC-01", "nombre": "Administración 2"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+        self.assertEqual(CentroCosto.objects.filter(codigo="CC-01").count(), 1)
+
+    def test_el_mismo_codigo_en_otra_empresa_si_se_permite(self):
+        self._centro(self.b["empresa"], "CC-01")
+
+        resp = self._post({"codigo": "CC-01", "nombre": "Administración"})
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        creado = CentroCosto.objects.get(pk=resp.data["id"])
+        self.assertEqual(creado.empresa_id, self.a["empresa"].pk)
+
+    def test_la_empresa_del_cuerpo_no_define_el_alcance(self):
+        # La empresa ajena del payload se ignora (campo de sólo lectura): el
+        # centro nace en la empresa del usuario y no choca con la de la otra.
+        self._centro(self.b["empresa"], "CC-01")
+
+        resp = self._post({
+            "codigo": "CC-01", "nombre": "Administración", "empresa": self.b["empresa"].pk,
+        })
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(
+            CentroCosto.objects.get(pk=resp.data["id"]).empresa_id, self.a["empresa"].pk,
+        )
+
+    def test_superusuario_con_empresa_explicita_choca_en_esa_empresa(self):
+        superusuario = Usuario.objects.create_superuser(
+            username="root-ec140@test.mx", email="root-ec140@test.mx", password="x",
+        )
+        self._centro(self.b["empresa"], "CC-01")
+
+        resp = self._post(
+            {"codigo": "CC-01", "nombre": "Administración", "empresa": self.b["empresa"].pk},
+            user=superusuario,
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+
+    def test_dos_centros_con_codigo_en_blanco_siguen_permitidos(self):
+        primero = self._post({"nombre": "Sin codigo"})
+        self.assertEqual(primero.status_code, 201, primero.data)
+
+        segundo = self._post({"codigo": "", "nombre": "Otro sin codigo"})
+
+        self.assertEqual(segundo.status_code, 201, segundo.data)
+        self.assertEqual(CentroCosto.objects.filter(codigo="").count(), 2)
+
+    def test_patch_que_conserva_su_propio_codigo_no_choca_consigo_mismo(self):
+        centro = self._centro(self.a["empresa"], "CC-01")
+
+        with self.subTest("reenvia su codigo"):
+            resp = self._patch(centro, {"codigo": "CC-01", "nombre": "Administración general"})
+            self.assertEqual(resp.status_code, 200, resp.data)
+
+        with self.subTest("edita otro campo"):
+            resp = self._patch(centro, {"nombre": "Administración central"})
+            self.assertEqual(resp.status_code, 200, resp.data)
+
+        centro.refresh_from_db()
+        self.assertEqual((centro.codigo, centro.nombre), ("CC-01", "Administración central"))
+
+    def test_patch_hacia_un_codigo_ya_usado_devuelve_400(self):
+        self._centro(self.a["empresa"], "CC-01")
+        otro = self._centro(self.a["empresa"], "CC-02", nombre="Producción")
+
+        resp = self._patch(otro, {"codigo": "CC-01"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+        otro.refresh_from_db()
+        self.assertEqual(otro.codigo, "CC-02")
+
+    def test_patch_que_vacia_el_codigo_no_choca_con_otro_en_blanco(self):
+        self._centro(self.a["empresa"], "")
+        centro = self._centro(self.a["empresa"], "CC-01")
+
+        resp = self._patch(centro, {"codigo": ""})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        centro.refresh_from_db()
+        self.assertEqual(centro.codigo, "")
