@@ -26,6 +26,17 @@ class CuentaContable(models.Model):
         db_table = "cuentas_contables"
         verbose_name = "Cuenta Contable"
         verbose_name_plural = "Cuentas Contables"
+        constraints = [
+            # El código identifica a la cuenta dentro de su empresa. La condición
+            # deja fuera el código en blanco: el campo nace con ``default=""`` y
+            # ``blank=True``, así que sin ella una segunda cuenta sin código sería
+            # imposible y ``codigo`` quedaría obligatorio de hecho.
+            models.UniqueConstraint(
+                fields=("empresa", "codigo"),
+                condition=~models.Q(codigo=""),
+                name="uq_cuenta_contable_empresa_codigo",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.codigo} - {self.nombre}"
