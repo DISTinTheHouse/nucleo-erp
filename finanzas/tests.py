@@ -46,6 +46,8 @@ from finanzas.models import (
     Banco,
     CentroCosto,
     Cobro,
+    ConciliacionBancaria,
+    ConciliacionDetalle,
     CuentaBancaria,
     CuentaContable,
     CuentaPorCobrar,
@@ -53,6 +55,7 @@ from finanzas.models import (
     Factura,
     FacturaDetalle,
     FacturaProveedor,
+    MovimientoBancario,
     NotaCredito,
     NotaCreditoDetalle,
     Pago,
@@ -4497,3 +4500,267 @@ class CentroCostoCodigoUnicoTests(FinanzasBase):
 
         self.assertEqual(data["centro_costo_id"], centro.pk)
         self.assertEqual(data["centro_costo_nombre"], "Antigua")
+
+
+class ConciliacionSaldoLibrosTests(FinanzasBase):
+    """``saldo_libros`` es el saldo de la cuenta al cierre de ``fecha_final``.
+
+    La fórmula anterior restaba y volvía a sumar los mismos totales del rango,
+    así que siempre devolvía ``cuenta.saldo_actual``: ninguna conciliación de un
+    periodo pasado cuadraba y ``cerrar`` las rechazaba todas.
+    """
+
+    URL = "/api/v1/finanzas/conciliaciones-bancarias/preparar/"
+    CIERRE = date(2026, 1, 31)
+
+    def _cuenta(self, saldo_actual="150000.00"):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        CuentaBancaria.objects.filter(pk=cuenta.pk).update(saldo_actual=Decimal(saldo_actual))
+        cuenta.refresh_from_db()
+        return cuenta
+
+    def _movimiento(self, cuenta, fecha, importe, tipo, estatus=None):
+        return MovimientoBancario.objects.create(
+            cuenta_bancaria=cuenta,
+            fecha=fecha,
+            importe=Decimal(importe),
+            tipo_movimiento=tipo,
+            estatus=estatus or MovimientoBancario.Estatus.PENDIENTE,
+            concepto=f"{tipo} {importe}",
+        )
+
+    def _preparar(self, cuenta, saldo_estado_cuenta="0.00", fecha_inicio=date(2026, 1, 1),
+                  fecha_final=None, user=None):
+        payload = {
+            "cuenta_bancaria": cuenta.pk,
+            "fecha_inicio": str(fecha_inicio),
+            "fecha_final": str(fecha_final or self.CIERRE),
+            "saldo_estado_cuenta": saldo_estado_cuenta,
+        }
+        return self._client(user or self.a["usuario"]).post(self.URL, payload, format="json")
+
+    def test_un_cargo_posterior_al_cierre_se_deshace(self):
+        # 150,000 hoy, pero en enero aún no se había hecho el cargo de febrero.
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, date(2026, 2, 10), "20000.00", MovimientoBancario.TipoMovimiento.CARGO)
+
+        resp = self._preparar(cuenta, saldo_estado_cuenta="170000.00")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "170000.00")
+        self.assertEqual(resp.data["diferencia"], "0.00")
+
+    def test_un_abono_posterior_al_cierre_se_deshace(self):
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, date(2026, 2, 10), "40000.00", MovimientoBancario.TipoMovimiento.ABONO)
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "110000.00")
+
+    def test_un_movimiento_cancelado_posterior_no_se_deshace(self):
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(
+            cuenta, date(2026, 2, 10), "20000.00", MovimientoBancario.TipoMovimiento.CARGO,
+            estatus=MovimientoBancario.Estatus.CANCELADO,
+        )
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "150000.00")
+
+    def test_los_movimientos_del_rango_no_mueven_el_saldo_al_cierre(self):
+        # Lo de enero ya está dentro del saldo al 31 de enero: no se deshace.
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, date(2026, 1, 15), "40000.00", MovimientoBancario.TipoMovimiento.ABONO)
+        self._movimiento(cuenta, date(2026, 1, 20), "10000.00", MovimientoBancario.TipoMovimiento.CARGO)
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "150000.00")
+        self.assertEqual(resp.data["total_abonos_rango"], "40000.00")
+        self.assertEqual(resp.data["total_cargos_rango"], "10000.00")
+
+    def test_el_movimiento_del_dia_del_cierre_cuenta_como_anterior(self):
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, self.CIERRE, "20000.00", MovimientoBancario.TipoMovimiento.CARGO)
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "150000.00")
+
+    def test_muchos_movimientos_posteriores_dan_el_mismo_saldo_que_uno_a_uno(self):
+        # El cálculo pasó de recorrer fila por fila a agregarse en la base: el
+        # número tiene que ser el mismo, y el del día del cierre sigue fuera.
+        cuenta = self._cuenta("150000.00")
+        esperado = Decimal("150000.00")
+        for anio in (2026, 2027, 2028):
+            for mes in (2, 6, 11):
+                self._movimiento(
+                    cuenta, date(anio, mes, 5), "1250.50", MovimientoBancario.TipoMovimiento.ABONO,
+                )
+                esperado -= Decimal("1250.50")
+                self._movimiento(
+                    cuenta, date(anio, mes, 20), "300.25", MovimientoBancario.TipoMovimiento.CARGO,
+                )
+                esperado += Decimal("300.25")
+                self._movimiento(
+                    cuenta, date(anio, mes, 25), "9999.99", MovimientoBancario.TipoMovimiento.ABONO,
+                    estatus=MovimientoBancario.Estatus.CANCELADO,
+                )
+        # En la fecha de cierre y antes: no se deshacen.
+        self._movimiento(cuenta, self.CIERRE, "700.00", MovimientoBancario.TipoMovimiento.ABONO)
+        self._movimiento(cuenta, date(2026, 1, 3), "800.00", MovimientoBancario.TipoMovimiento.CARGO)
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], str(esperado.quantize(Decimal("0.01"))))
+        # 9 pares posteriores: 9 x (-1250.50 + 300.25) = -8552.25 sobre 150000.
+        self.assertEqual(resp.data["saldo_libros"], "141447.75")
+
+    def test_sin_movimientos_posteriores_el_saldo_es_el_vivo(self):
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, date(2026, 1, 15), "40000.00", MovimientoBancario.TipoMovimiento.ABONO)
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "150000.00")
+
+    def test_cerrar_acepta_una_conciliacion_cuadrada_y_rechaza_una_descuadrada(self):
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, date(2026, 2, 10), "20000.00", MovimientoBancario.TipoMovimiento.CARGO)
+        client = self._client(self.a["usuario"])
+
+        descuadrada = self._preparar(cuenta, saldo_estado_cuenta="150000.00")
+        self.assertEqual(descuadrada.status_code, 201, descuadrada.data)
+        resp = client.post(
+            f"/api/v1/finanzas/conciliaciones-bancarias/{descuadrada.data['id']}/cerrar/",
+            {}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("diferencia", resp.data)
+
+        cuadrada = self._preparar(cuenta, saldo_estado_cuenta="170000.00")
+        self.assertEqual(cuadrada.status_code, 201, cuadrada.data)
+        resp = client.post(
+            f"/api/v1/finanzas/conciliaciones-bancarias/{cuadrada.data['id']}/cerrar/",
+            {}, format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["estatus"], ConciliacionBancaria.Estatus.CERRADA.value)
+
+
+class ConciliacionPrepararIdempotenteTests(FinanzasBase):
+    """Preparar dos veces el mismo periodo reutiliza el borrador."""
+
+    URL = "/api/v1/finanzas/conciliaciones-bancarias/preparar/"
+    INICIO = date(2026, 1, 1)
+    CIERRE = date(2026, 1, 31)
+
+    def _cuenta(self):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        CuentaBancaria.objects.filter(pk=cuenta.pk).update(saldo_actual=Decimal("100000.00"))
+        cuenta.refresh_from_db()
+        return cuenta
+
+    def _movimiento(self, cuenta, fecha, importe, estatus=None):
+        return MovimientoBancario.objects.create(
+            cuenta_bancaria=cuenta, fecha=fecha, importe=Decimal(importe),
+            tipo_movimiento=MovimientoBancario.TipoMovimiento.ABONO,
+            estatus=estatus or MovimientoBancario.Estatus.PENDIENTE,
+        )
+
+    def _preparar(self, cuenta, saldo_estado_cuenta="0.00", fecha_final=None):
+        return self._client(self.a["usuario"]).post(
+            self.URL,
+            {
+                "cuenta_bancaria": cuenta.pk,
+                "fecha_inicio": str(self.INICIO),
+                "fecha_final": str(fecha_final or self.CIERRE),
+                "saldo_estado_cuenta": saldo_estado_cuenta,
+            },
+            format="json",
+        )
+
+    def test_preparar_dos_veces_el_mismo_periodo_deja_un_solo_borrador(self):
+        cuenta = self._cuenta()
+        primera = self._preparar(cuenta, saldo_estado_cuenta="1.00")
+        self.assertEqual(primera.status_code, 201, primera.data)
+
+        segunda = self._preparar(cuenta, saldo_estado_cuenta="2.00")
+
+        self.assertEqual(segunda.status_code, 201, segunda.data)
+        self.assertEqual(segunda.data["id"], primera.data["id"])
+        self.assertEqual(ConciliacionBancaria.objects.count(), 1)
+        # El borrador se recalcula con lo que trae la segunda petición.
+        conciliacion = ConciliacionBancaria.objects.get()
+        self.assertEqual(conciliacion.saldo_estado_cuenta, Decimal("2.00"))
+        self.assertEqual(conciliacion.estatus, ConciliacionBancaria.Estatus.BORRADOR)
+
+    def test_al_reutilizar_las_lineas_reflejan_los_movimientos_actuales(self):
+        cuenta = self._cuenta()
+        viejo = self._movimiento(cuenta, date(2026, 1, 10), "500.00")
+        primera = self._preparar(cuenta)
+        self.assertEqual(primera.status_code, 201, primera.data)
+        self.assertEqual(ConciliacionDetalle.objects.count(), 1)
+        nuevo = self._movimiento(cuenta, date(2026, 1, 20), "700.00")
+        MovimientoBancario.objects.filter(pk=viejo.pk).update(
+            estatus=MovimientoBancario.Estatus.CANCELADO,
+        )
+
+        segunda = self._preparar(cuenta)
+
+        self.assertEqual(segunda.status_code, 201, segunda.data)
+        self.assertEqual(
+            sorted(
+                ConciliacionDetalle.objects.filter(
+                    conciliacion_id=segunda.data["id"]
+                ).values_list("movimiento_bancario_id", flat=True)
+            ),
+            [nuevo.pk],
+        )
+        self.assertEqual(
+            [m["id"] for m in segunda.data["movimientos_pendientes"]], [nuevo.pk],
+        )
+
+    def test_no_se_reutiliza_un_borrador_de_otro_periodo_ni_de_otra_cuenta(self):
+        cuenta = self._cuenta()
+        otra_cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        primera = self._preparar(cuenta)
+        self.assertEqual(primera.status_code, 201, primera.data)
+
+        otro_periodo = self._preparar(cuenta, fecha_final=date(2026, 2, 28))
+        otra = self._preparar(otra_cuenta)
+
+        self.assertEqual(otro_periodo.status_code, 201, otro_periodo.data)
+        self.assertEqual(otra.status_code, 201, otra.data)
+        self.assertEqual(
+            len({primera.data["id"], otro_periodo.data["id"], otra.data["id"]}), 3,
+        )
+        self.assertEqual(ConciliacionBancaria.objects.count(), 3)
+
+    def test_una_conciliacion_cerrada_o_cancelada_no_se_reutiliza(self):
+        for estatus in (
+            ConciliacionBancaria.Estatus.CERRADA,
+            ConciliacionBancaria.Estatus.CANCELADA,
+        ):
+            with self.subTest(estatus=estatus):
+                cuenta = self._cuenta()
+                primera = self._preparar(cuenta)
+                self.assertEqual(primera.status_code, 201, primera.data)
+                ConciliacionBancaria.objects.filter(pk=primera.data["id"]).update(estatus=estatus)
+
+                segunda = self._preparar(cuenta)
+
+                self.assertEqual(segunda.status_code, 201, segunda.data)
+                self.assertNotEqual(segunda.data["id"], primera.data["id"])
+                self.assertEqual(
+                    ConciliacionBancaria.objects.filter(cuenta_bancaria=cuenta).count(), 2,
+                )

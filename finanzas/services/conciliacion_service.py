@@ -1,6 +1,8 @@
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import DecimalField, Q, Sum, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from finanzas.exceptions import ErrorDeNegocio
@@ -64,24 +66,49 @@ class ConciliacionService:
             ),
             Decimal("0.00"),
         )
-        saldo_inicial_libros = Decimal(str(cuenta.saldo_actual or 0)) - total_abonos + total_cargos
-        saldo_libros = (saldo_inicial_libros + total_abonos - total_cargos).quantize(
-            Decimal("0.01")
-        )
+        saldo_libros = ConciliacionService._saldo_libros_al_cierre(cuenta, fecha_final)
         diferencia = (
             Decimal(str(saldo_estado_cuenta or 0)) - saldo_libros
         ).quantize(Decimal("0.01"))
 
-        conciliacion = ConciliacionBancaria.objects.create(
-            cuenta_bancaria=cuenta,
-            fecha_inicio=fecha_inicio,
-            fecha_final=fecha_final,
-            saldo_estado_cuenta=Decimal(str(saldo_estado_cuenta or 0)).quantize(
-                Decimal("0.01")
-            ),
-            saldo_libros=saldo_libros,
-            estatus=ConciliacionBancaria.Estatus.BORRADOR,
+        saldo_estado_cuenta = Decimal(str(saldo_estado_cuenta or 0)).quantize(
+            Decimal("0.01")
         )
+        # Preparar dos veces el mismo periodo reescribe el borrador en vez de
+        # dejar otra conciliación colgando: antes cada llamada creaba una nueva,
+        # con sus propias líneas, y el mismo movimiento acababa ligado a varias.
+        # Sólo se reutiliza el borrador: una cerrada o cancelada ya no se toca.
+        conciliacion = (
+            ConciliacionBancaria.objects.filter(
+                cuenta_bancaria=cuenta,
+                fecha_inicio=fecha_inicio,
+                fecha_final=fecha_final,
+                estatus=ConciliacionBancaria.Estatus.BORRADOR,
+            )
+            .order_by("id")
+            .first()
+        )
+        if conciliacion is None:
+            conciliacion = ConciliacionBancaria.objects.create(
+                cuenta_bancaria=cuenta,
+                fecha_inicio=fecha_inicio,
+                fecha_final=fecha_final,
+                saldo_estado_cuenta=saldo_estado_cuenta,
+                saldo_libros=saldo_libros,
+                estatus=ConciliacionBancaria.Estatus.BORRADOR,
+            )
+        else:
+            conciliacion.saldo_estado_cuenta = saldo_estado_cuenta
+            conciliacion.saldo_libros = saldo_libros
+            conciliacion.save(
+                update_fields=["saldo_estado_cuenta", "saldo_libros", "updated_at"]
+            )
+            # Las líneas se ponen al día con los movimientos de ahora: las que
+            # sobran se van --un movimiento cancelado entretanto-- y las que
+            # siguen conservan sus ``observaciones``.
+            ConciliacionDetalle.objects.filter(conciliacion=conciliacion).exclude(
+                movimiento_bancario__in=movimientos
+            ).delete()
         for mov in movimientos:
             ConciliacionDetalle.objects.get_or_create(
                 conciliacion=conciliacion, movimiento_bancario=mov
@@ -119,6 +146,63 @@ class ConciliacionService:
             "estatus": conciliacion.estatus,
             "movimientos_pendientes": movimientos_pendientes,
         }
+
+    @staticmethod
+    def _saldo_libros_al_cierre(cuenta: CuentaBancaria, fecha_final):
+        """Saldo de libros de la cuenta al cierre de ``fecha_final``.
+
+        La cuenta sólo guarda su saldo vivo, así que el saldo histórico se
+        reconstruye hacia atrás: se parte de ``saldo_actual`` y se deshace cada
+        movimiento posterior al cierre --se resta lo abonado y se devuelve lo
+        cargado--, que es la inversa de cómo lo aplicaron ``CobroService``,
+        ``PagoService`` y ``MovimientoBancarioService``.
+
+        Los cancelados quedan fuera, igual que en los totales del rango: su
+        efecto ya se revirtió en ``saldo_actual`` cuando se cancelaron. No se usa
+        ``MovimientoBancario.saldo``: ese campo no se mantiene en la vía manual.
+
+        Sin ``fecha_final`` no hay cierre que reconstruir y el saldo de libros es
+        el vivo.
+        """
+        saldo = Decimal(str(cuenta.saldo_actual or 0))
+        if fecha_final is None:
+            return saldo.quantize(Decimal("0.01"))
+        # Los dos totales salen en una sola consulta: recorrer fila por fila
+        # costaba toda la historia posterior al cierre, que no está acotada por
+        # el rango pedido.
+        cero = Value(Decimal("0.00"), output_field=DecimalField(max_digits=18, decimal_places=2))
+        posteriores = (
+            MovimientoBancario.objects.filter(
+                cuenta_bancaria=cuenta, fecha__gt=fecha_final
+            )
+            .exclude(estatus=MovimientoBancario.Estatus.CANCELADO)
+            .aggregate(
+                abonos=Coalesce(
+                    Sum(
+                        "importe",
+                        filter=Q(
+                            tipo_movimiento=MovimientoBancario.TipoMovimiento.ABONO
+                        ),
+                    ),
+                    cero,
+                ),
+                cargos=Coalesce(
+                    Sum(
+                        "importe",
+                        filter=Q(
+                            tipo_movimiento=MovimientoBancario.TipoMovimiento.CARGO
+                        ),
+                    ),
+                    cero,
+                ),
+            )
+        )
+        saldo = (
+            saldo
+            - Decimal(str(posteriores["abonos"]))
+            + Decimal(str(posteriores["cargos"]))
+        )
+        return saldo.quantize(Decimal("0.01"))
 
     @staticmethod
     @transaction.atomic
