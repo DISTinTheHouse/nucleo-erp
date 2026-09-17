@@ -4593,6 +4593,45 @@ class ConciliacionSaldoLibrosTests(FinanzasBase):
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertEqual(resp.data["saldo_libros"], "150000.00")
 
+    def test_muchos_movimientos_posteriores_dan_el_mismo_saldo_que_uno_a_uno(self):
+        # El cálculo pasó de recorrer fila por fila a agregarse en la base: el
+        # número tiene que ser el mismo, y el del día del cierre sigue fuera.
+        cuenta = self._cuenta("150000.00")
+        esperado = Decimal("150000.00")
+        for anio in (2026, 2027, 2028):
+            for mes in (2, 6, 11):
+                self._movimiento(
+                    cuenta, date(anio, mes, 5), "1250.50", MovimientoBancario.TipoMovimiento.ABONO,
+                )
+                esperado -= Decimal("1250.50")
+                self._movimiento(
+                    cuenta, date(anio, mes, 20), "300.25", MovimientoBancario.TipoMovimiento.CARGO,
+                )
+                esperado += Decimal("300.25")
+                self._movimiento(
+                    cuenta, date(anio, mes, 25), "9999.99", MovimientoBancario.TipoMovimiento.ABONO,
+                    estatus=MovimientoBancario.Estatus.CANCELADO,
+                )
+        # En la fecha de cierre y antes: no se deshacen.
+        self._movimiento(cuenta, self.CIERRE, "700.00", MovimientoBancario.TipoMovimiento.ABONO)
+        self._movimiento(cuenta, date(2026, 1, 3), "800.00", MovimientoBancario.TipoMovimiento.CARGO)
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], str(esperado.quantize(Decimal("0.01"))))
+        # 9 pares posteriores: 9 x (-1250.50 + 300.25) = -8552.25 sobre 150000.
+        self.assertEqual(resp.data["saldo_libros"], "141447.75")
+
+    def test_sin_movimientos_posteriores_el_saldo_es_el_vivo(self):
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, date(2026, 1, 15), "40000.00", MovimientoBancario.TipoMovimiento.ABONO)
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "150000.00")
+
     def test_cerrar_acepta_una_conciliacion_cuadrada_y_rechaza_una_descuadrada(self):
         cuenta = self._cuenta("150000.00")
         self._movimiento(cuenta, date(2026, 2, 10), "20000.00", MovimientoBancario.TipoMovimiento.CARGO)

@@ -1,6 +1,8 @@
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import DecimalField, Q, Sum, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from finanzas.exceptions import ErrorDeNegocio
@@ -165,19 +167,41 @@ class ConciliacionService:
         saldo = Decimal(str(cuenta.saldo_actual or 0))
         if fecha_final is None:
             return saldo.quantize(Decimal("0.01"))
+        # Los dos totales salen en una sola consulta: recorrer fila por fila
+        # costaba toda la historia posterior al cierre, que no está acotada por
+        # el rango pedido.
+        cero = Value(Decimal("0.00"), output_field=DecimalField(max_digits=18, decimal_places=2))
         posteriores = (
             MovimientoBancario.objects.filter(
                 cuenta_bancaria=cuenta, fecha__gt=fecha_final
             )
             .exclude(estatus=MovimientoBancario.Estatus.CANCELADO)
-            .only("importe", "tipo_movimiento")
+            .aggregate(
+                abonos=Coalesce(
+                    Sum(
+                        "importe",
+                        filter=Q(
+                            tipo_movimiento=MovimientoBancario.TipoMovimiento.ABONO
+                        ),
+                    ),
+                    cero,
+                ),
+                cargos=Coalesce(
+                    Sum(
+                        "importe",
+                        filter=Q(
+                            tipo_movimiento=MovimientoBancario.TipoMovimiento.CARGO
+                        ),
+                    ),
+                    cero,
+                ),
+            )
         )
-        for mov in posteriores:
-            importe = Decimal(str(mov.importe or 0))
-            if mov.tipo_movimiento == MovimientoBancario.TipoMovimiento.ABONO:
-                saldo -= importe
-            else:
-                saldo += importe
+        saldo = (
+            saldo
+            - Decimal(str(posteriores["abonos"]))
+            + Decimal(str(posteriores["cargos"]))
+        )
         return saldo.quantize(Decimal("0.01"))
 
     @staticmethod
