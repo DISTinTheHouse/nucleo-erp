@@ -53,13 +53,18 @@ class CentroCosto(models.Model):
         verbose_name = "Centro de Costo"
         verbose_name_plural = "Centros de Costo"
         constraints = [
-            # El código identifica al centro de costo dentro de su empresa. La
-            # condición deja fuera el código en blanco: el campo nace con
-            # ``default=""`` y ``blank=True``, así que sin ella un segundo centro
-            # sin código sería imposible y ``codigo`` quedaría obligatorio de hecho.
+            # El código identifica al centro de costo ACTIVO dentro de su empresa.
+            # La condición deja fuera dos casos:
+            #   - el código en blanco, porque el campo nace con ``default=""`` y
+            #     ``blank=True``: sin esto un segundo centro sin código sería
+            #     imposible y ``codigo`` quedaría obligatorio de hecho;
+            #   - las filas dadas de baja, porque el borrado del catálogo es
+            #     lógico: una baja conserva su fila, y sin esto se quedaría con el
+            #     código secuestrado para siempre. Un código que libera una baja
+            #     se puede volver a usar, y ambas filas conviven.
             models.UniqueConstraint(
                 fields=("empresa", "codigo"),
-                condition=~models.Q(codigo=""),
+                condition=~models.Q(codigo="") & models.Q(activo=True),
                 name="uq_centro_costo_empresa_codigo",
             ),
         ]

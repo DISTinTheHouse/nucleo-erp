@@ -4404,3 +4404,96 @@ class CentroCostoCodigoUnicoTests(FinanzasBase):
         self.assertEqual(resp.status_code, 200, resp.data)
         centro.refresh_from_db()
         self.assertEqual(centro.codigo, "")
+
+    # -- El código que libera una baja se puede reutilizar -------------------------
+
+    def _dar_de_baja(self, centro):
+        resp = self._client(self.a["usuario"]).delete(f"{self.URL}{centro.pk}/")
+        self.assertEqual(resp.status_code, 204)
+        centro.refresh_from_db()
+        self.assertFalse(centro.activo)
+        return centro
+
+    def test_el_codigo_de_un_centro_dado_de_baja_se_reutiliza(self):
+        dado_de_baja = self._dar_de_baja(self._centro(self.a["empresa"], "CC-01"))
+
+        resp = self._post({"codigo": "CC-01", "nombre": "Administración nueva"})
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        nuevo = CentroCosto.objects.get(pk=resp.data["id"])
+        # Conviven: la baja conserva su código y el alta estrena el mismo.
+        self.assertNotEqual(nuevo.pk, dado_de_baja.pk)
+        self.assertEqual(
+            list(
+                CentroCosto.objects.filter(empresa=self.a["empresa"], codigo="CC-01")
+                .order_by("id").values_list("id", "activo")
+            ),
+            [(dado_de_baja.pk, False), (nuevo.pk, True)],
+        )
+
+    def test_dos_centros_activos_con_el_mismo_codigo_siguen_rechazados(self):
+        self._centro(self.a["empresa"], "CC-01")
+
+        resp = self._post({"codigo": "CC-01", "nombre": "Administración 2"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+
+    def test_reactivar_una_baja_cuyo_codigo_ya_esta_ocupado_devuelve_400(self):
+        # El caso límite: reactivar dejaría dos filas activas con el mismo código,
+        # que es justo lo que prohíbe la constraint. Se reporta en ``codigo``,
+        # aunque el campo que la petición cambia sea ``activo``.
+        dado_de_baja = self._dar_de_baja(self._centro(self.a["empresa"], "CC-01"))
+        self.assertEqual(
+            self._post({"codigo": "CC-01", "nombre": "Administración nueva"}).status_code, 201,
+        )
+
+        resp = self._patch(dado_de_baja, {"activo": True})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+        dado_de_baja.refresh_from_db()
+        self.assertFalse(dado_de_baja.activo)
+
+    def test_reactivar_una_baja_con_su_codigo_libre_si_se_permite(self):
+        dado_de_baja = self._dar_de_baja(self._centro(self.a["empresa"], "CC-01"))
+
+        resp = self._patch(dado_de_baja, {"activo": True})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        dado_de_baja.refresh_from_db()
+        self.assertTrue(dado_de_baja.activo)
+
+    def test_un_alta_inactiva_no_choca_con_el_codigo_de_una_activa(self):
+        # Una fila inactiva no reserva su código, así que tampoco lo disputa.
+        activo = self._centro(self.a["empresa"], "CC-01")
+
+        resp = self._post({"codigo": "CC-01", "nombre": "Histórica", "activo": False})
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertNotEqual(resp.data["id"], activo.pk)
+        self.assertFalse(CentroCosto.objects.get(pk=resp.data["id"]).activo)
+
+    def test_la_poliza_sigue_leyendo_el_nombre_de_su_propio_centro(self):
+        # Se fija el efecto de la desnormalización, no se corrige: el renglón lee
+        # el nombre de la fila a la que apunta, no del código reutilizado.
+        cargo, _, centro = self._crear_cuentas_contables(self.a["empresa"])
+        CentroCosto.objects.filter(pk=centro.pk).update(codigo="CC-01", nombre="Antigua")
+        poliza = Poliza.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], centro_costo=centro,
+            folio="POL-000001", folio_consecutivo=1,
+            estatus=Poliza.PolizaStatus.CONTABILIZADA.value,
+        )
+        detalle = PolizaDetalle.objects.create(
+            poliza=poliza, cuenta_contable=cargo, centro_costo=centro,
+            cargo=Decimal("116.00"), abono=Decimal("0.00"), orden=1,
+        )
+        centro.refresh_from_db()
+        self._dar_de_baja(centro)
+        nuevo = self._post({"codigo": "CC-01", "nombre": "Nueva"})
+        self.assertEqual(nuevo.status_code, 201, nuevo.data)
+
+        data = PolizaDetalleRelacionadoSerializer(detalle).data
+
+        self.assertEqual(data["centro_costo_id"], centro.pk)
+        self.assertEqual(data["centro_costo_nombre"], "Antigua")
