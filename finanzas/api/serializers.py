@@ -314,6 +314,13 @@ class CuentaContableSerializer(EmpresaResueltaEnServidorMixin, serializers.Model
     class Meta:
         model = CuentaContable
         fields = "__all__"
+        # DRF deriva un ``UniqueTogetherValidator`` de
+        # ``uq_cuenta_contable_empresa_codigo``, pero sólo corre cuando el cliente
+        # manda ``empresa`` --el superusuario-- y reporta en ``non_field_errors``,
+        # ignorando además la condición del código en blanco. Se desactiva para
+        # que la unicidad hable siempre por ``codigo``, la mande quien la mande:
+        # de eso se encarga ``_validar_codigo_unico_en_la_empresa``.
+        validators = []
 
     def validate(self, attrs):
         req = self.context.get("request")
@@ -322,7 +329,45 @@ class CuentaContableSerializer(EmpresaResueltaEnServidorMixin, serializers.Model
             emp = attrs.get("empresa")
             if user_empresa and emp and getattr(emp, "pk", emp) != getattr(user_empresa, "pk", user_empresa):
                 raise ValidationError({"empresa": "Empresa no autorizada."})
+        self._validar_codigo_unico_en_la_empresa(attrs)
         return attrs
+
+    def _validar_codigo_unico_en_la_empresa(self, attrs):
+        """Devuelve un 400 por campo donde la constraint daría un 500.
+
+        ``uq_cuenta_contable_empresa_codigo`` es la garantía real; esto es su
+        mensaje. No se usa ``UniqueTogetherValidator``: ``empresa`` es de sólo
+        lectura para el usuario normal (``EmpresaResueltaEnServidorMixin``), así
+        que no llega en ``attrs`` y el validador de DRF la exigiría como campo
+        escribible --el alcance saldría del cuerpo de la petición, que es justo
+        lo que el aislamiento por empresa no permite. La empresa se toma de la
+        misma fuente que ``perform_create``: la del superusuario cuando la manda
+        explícitamente, si no la del usuario; y en una edición, la de la fila.
+        """
+        codigo = attrs.get("codigo", getattr(self.instance, "codigo", "") or "")
+        # El código en blanco no es identidad: repetirlo es válido, igual que en
+        # la condición de la constraint.
+        if not codigo:
+            return
+        empresa_id = self._empresa_del_servidor(attrs)
+        if empresa_id is None:
+            return
+        gemelas = CuentaContable.objects.filter(empresa_id=empresa_id, codigo=codigo)
+        if self.instance is not None:
+            gemelas = gemelas.exclude(pk=self.instance.pk)
+        if gemelas.exists():
+            raise ValidationError(
+                {"codigo": "Ya existe una cuenta contable con este código en la empresa."}
+            )
+
+    def _empresa_del_servidor(self, attrs):
+        if self.instance is not None:
+            return self.instance.empresa_id
+        emp = attrs.get("empresa")
+        if emp is not None:
+            return getattr(emp, "pk", emp)
+        user = getattr(self.context.get("request"), "user", None)
+        return getattr(getattr(user, "empresa", None), "pk", None)
 
 
 class CentroCostoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):

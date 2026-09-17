@@ -4058,3 +4058,116 @@ class ConcurrencyConflictMappingTests(FinanzasBase):
         self.assertEqual(resp.status_code, 409, resp.data)
         self.assertEqual(resp.data, [CONCURRENT_OPERATION_MESSAGE])
         self.assertTrue(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
+
+
+class CuentaContableCodigoUnicoTests(FinanzasBase):
+    """EC-139: ``codigo`` es único por empresa, salvo el código en blanco.
+
+    El alcance de la unicidad sale de la empresa que resuelve el servidor, nunca
+    de la que venga en el cuerpo: ``empresa`` es de sólo lectura para el usuario
+    normal (``EmpresaResueltaEnServidorMixin``).
+    """
+
+    URL = "/api/v1/finanzas/cuentas-contables/"
+
+    def _cuenta(self, empresa, codigo, nombre="Caja"):
+        return CuentaContable.objects.create(empresa=empresa, codigo=codigo, nombre=nombre)
+
+    def _post(self, data, user=None):
+        return self._client(user or self.a["usuario"]).post(self.URL, data, format="json")
+
+    def _patch(self, cuenta, data, user=None):
+        return self._client(user or self.a["usuario"]).patch(
+            f"{self.URL}{cuenta.pk}/", data, format="json"
+        )
+
+    def test_codigo_duplicado_en_la_misma_empresa_devuelve_400(self):
+        self._cuenta(self.a["empresa"], "1101")
+
+        resp = self._post({"codigo": "1101", "nombre": "Caja chica", "tipo": "Activo"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+        self.assertEqual(CuentaContable.objects.filter(codigo="1101").count(), 1)
+
+    def test_el_mismo_codigo_en_otra_empresa_si_se_permite(self):
+        self._cuenta(self.b["empresa"], "1101")
+
+        resp = self._post({"codigo": "1101", "nombre": "Caja", "tipo": "Activo"})
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        creada = CuentaContable.objects.get(pk=resp.data["id"])
+        self.assertEqual(creada.empresa_id, self.a["empresa"].pk)
+
+    def test_la_empresa_del_cuerpo_no_define_el_alcance(self):
+        # La empresa ajena del payload se ignora (campo de sólo lectura): la
+        # cuenta nace en la empresa del usuario y no choca con la de la otra.
+        self._cuenta(self.b["empresa"], "1101")
+
+        resp = self._post({
+            "codigo": "1101", "nombre": "Caja", "tipo": "Activo",
+            "empresa": self.b["empresa"].pk,
+        })
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(
+            CuentaContable.objects.get(pk=resp.data["id"]).empresa_id, self.a["empresa"].pk,
+        )
+
+    def test_superusuario_con_empresa_explicita_choca_en_esa_empresa(self):
+        superusuario = Usuario.objects.create_superuser(
+            username="root-ec139@test.mx", email="root-ec139@test.mx", password="x",
+        )
+        self._cuenta(self.b["empresa"], "1101")
+
+        resp = self._post(
+            {"codigo": "1101", "nombre": "Caja", "tipo": "Activo", "empresa": self.b["empresa"].pk},
+            user=superusuario,
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+
+    def test_dos_cuentas_con_codigo_en_blanco_siguen_permitidas(self):
+        primera = self._post({"nombre": "Sin codigo", "tipo": "Activo"})
+        self.assertEqual(primera.status_code, 201, primera.data)
+
+        segunda = self._post({"codigo": "", "nombre": "Otra sin codigo", "tipo": "Activo"})
+
+        self.assertEqual(segunda.status_code, 201, segunda.data)
+        self.assertEqual(CuentaContable.objects.filter(codigo="").count(), 2)
+
+    def test_patch_que_conserva_su_propio_codigo_no_choca_consigo_misma(self):
+        cuenta = self._cuenta(self.a["empresa"], "1101")
+
+        with self.subTest("reenvia su codigo"):
+            resp = self._patch(cuenta, {"codigo": "1101", "nombre": "Caja general"})
+            self.assertEqual(resp.status_code, 200, resp.data)
+
+        with self.subTest("edita otro campo"):
+            resp = self._patch(cuenta, {"nombre": "Caja principal"})
+            self.assertEqual(resp.status_code, 200, resp.data)
+
+        cuenta.refresh_from_db()
+        self.assertEqual((cuenta.codigo, cuenta.nombre), ("1101", "Caja principal"))
+
+    def test_patch_hacia_un_codigo_ya_usado_devuelve_400(self):
+        self._cuenta(self.a["empresa"], "1101")
+        otra = self._cuenta(self.a["empresa"], "1102", nombre="Bancos")
+
+        resp = self._patch(otra, {"codigo": "1101"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+        otra.refresh_from_db()
+        self.assertEqual(otra.codigo, "1102")
+
+    def test_patch_que_vacia_el_codigo_no_choca_con_otro_en_blanco(self):
+        self._cuenta(self.a["empresa"], "")
+        cuenta = self._cuenta(self.a["empresa"], "1101")
+
+        resp = self._patch(cuenta, {"codigo": ""})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cuenta.refresh_from_db()
+        self.assertEqual(cuenta.codigo, "")
