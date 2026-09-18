@@ -23,6 +23,12 @@ class CategoriaProducto(models.Model):
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    tallas = models.ManyToManyField(
+        "Talla",
+        through="CategoriaProductoTalla",
+        related_name="categorias_producto",
+        blank=True,
+    )
 
     history = HistoricalRecords()
 
@@ -30,7 +36,7 @@ class CategoriaProducto(models.Model):
         db_table = "categorias_producto"
         verbose_name = "Categoria Producto"
         verbose_name_plural = "Categorias Producto"
-    
+
     def __str__(self):
         return self.nombre
 
@@ -60,9 +66,25 @@ class Talla(models.Model):
         db_table = "tallas"
         verbose_name = "Talla"
         verbose_name_plural = "Tallas"
-    
+
     def __str__(self):
         return self.nombre
+
+class CategoriaProductoTalla(models.Model):
+    categoria_producto = models.ForeignKey(CategoriaProducto, on_delete=models.CASCADE, related_name="tallas_permitidas")
+    talla = models.ForeignKey(Talla, on_delete=models.CASCADE, related_name="categorias_permitidas")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "categorias_producto_tallas"
+        verbose_name = "Talla por Categoria"
+        verbose_name_plural = "Tallas por Categoria"
+        constraints = [
+            models.UniqueConstraint(fields=["categoria_producto", "talla"], name="uq_categoria_producto_talla"),
+        ]
+
+    def __str__(self):
+        return f"{self.categoria_producto.nombre} - {self.talla.nombre}"
 
 class Producto(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="productos")
