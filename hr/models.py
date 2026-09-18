@@ -194,6 +194,7 @@ class Area(StatusLifecycleModel):
 # constraint de ``Contrato`` y ``Contrato.hay_otro_vigente``: una sola definición.
 CONTRATO_VIGENTE = models.Q(activo=True, estado='activo')
 MENSAJE_CONTRATO_VIGENTE_DUPLICADO = 'Este empleado ya tiene un contrato activo.'
+MENSAJE_CONTRATO_VIGENTE_EMPLEADO_INACTIVO = 'No se puede dejar vigente un contrato de un empleado inactivo.'
 
 
 class Contrato(StatusLifecycleModel):
@@ -256,10 +257,24 @@ class Contrato(StatusLifecycleModel):
             otros = otros.exclude(pk=excluir_pk)
         return otros.exists()
 
+    @staticmethod
+    def vigente_con_empleado_inactivo(empleado, *, activo, estado):
+        """¿El contrato QUEDARÍA vigente para un empleado dado de baja?
+
+        Sólo cuenta lo que quedaría vigente: un contrato histórico ('terminado',
+        'renovado' o dado de baja) de un empleado inactivo se puede capturar y
+        editar. Como ``hay_otro_vigente``, recibe los valores finales.
+        """
+        return bool(activo and estado == 'activo' and empleado is not None and not empleado.activo)
+
     def clean(self):
         from django.core.exceptions import ValidationError
         if self.fecha_fin and self.fecha_fin < self.fecha_inicio:
             raise ValidationError({'fecha_fin': 'La fecha de fin no puede ser anterior a la de inicio.'})
+        if Contrato.vigente_con_empleado_inactivo(
+            self.empleado if self.empleado_id else None, activo=self.activo, estado=self.estado,
+        ):
+            raise ValidationError({'empleado': MENSAJE_CONTRATO_VIGENTE_EMPLEADO_INACTIVO})
         if Contrato.hay_otro_vigente(
             self.empleado_id, activo=self.activo, estado=self.estado, excluir_pk=self.pk,
         ):

@@ -4,6 +4,7 @@ from django.db import IntegrityError, transaction
 from rest_framework import serializers
 from hr.models import (
     MENSAJE_CONTRATO_VIGENTE_DUPLICADO,
+    MENSAJE_CONTRATO_VIGENTE_EMPLEADO_INACTIVO,
     Puesto,
     Empleado,
     Area,
@@ -176,6 +177,12 @@ class ContratoSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializ
         read_only_fields = ('creado_por',)
 
     def validate(self, data):
+        if Contrato.vigente_con_empleado_inactivo(
+            self._final(data, 'empleado'),
+            activo=self._final(data, 'activo'),
+            estado=self._final(data, 'estado'),
+        ):
+            raise serializers.ValidationError({'empleado': MENSAJE_CONTRATO_VIGENTE_EMPLEADO_INACTIVO})
         if self._chocaria_con_otro_vigente(data):
             raise serializers.ValidationError({'estado': MENSAJE_CONTRATO_VIGENTE_DUPLICADO})
         fecha_inicio = data.get('fecha_inicio')
@@ -192,28 +199,30 @@ class ContratoSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializ
         with self._choque_de_vigente_como_400(validated_data):
             return super().update(instance, validated_data)
 
-    def _chocaria_con_otro_vigente(self, data):
-        """Aplica ``uq_contrato_vigente_por_empleado`` con los valores finales.
+    def _final(self, data, campo):
+        """Valor con el que QUEDARÁ ``campo`` tras guardar.
 
         Lo que no viene en la petición conserva el valor de la fila en una
         edición y, en un alta, toma el default del modelo --el mismo con el que
         se guardará--. Antes un alta sin ``estado`` resolvía a ``None``, se
         saltaba la revisión y nacía 'activo' por el default.
+        """
+        if campo in data:
+            return data[campo]
+        if self.instance is not None:
+            return getattr(self.instance, campo)
+        return Contrato._meta.get_field(campo).get_default()
+
+    def _chocaria_con_otro_vigente(self, data):
+        """Aplica ``uq_contrato_vigente_por_empleado`` con los valores finales.
 
         ``empleado`` ya pasó por ``validate_empleado`` (o viene de una fila que
         ``get_queryset`` dejó ver), así que la consulta no cruza empresas.
         """
-        def final(campo):
-            if campo in data:
-                return data[campo]
-            if self.instance is not None:
-                return getattr(self.instance, campo)
-            return Contrato._meta.get_field(campo).get_default()
-
         return Contrato.hay_otro_vigente(
-            getattr(final('empleado'), 'pk', None),
-            activo=final('activo'),
-            estado=final('estado'),
+            getattr(self._final(data, 'empleado'), 'pk', None),
+            activo=self._final(data, 'activo'),
+            estado=self._final(data, 'estado'),
             excluir_pk=getattr(self.instance, 'pk', None),
         )
 

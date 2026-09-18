@@ -398,3 +398,152 @@ class GenerarPeriodoSalarioTests(HrBase):
 
         self.assertEqual(nomina.salario_base, Decimal("15000.00"))
         self.assertEqual(self._percepcion(nomina), [Decimal("7500.00")])
+
+
+MENSAJE_EMPLEADO_INACTIVO = "No se puede dejar vigente un contrato de un empleado inactivo."
+
+
+class ContratoEmpleadoInactivoApiTests(HrBase):
+    """Un contrato no puede QUEDAR vigente si su empleado está inactivo.
+
+    Sólo se rechaza lo que quedaría vigente (``activo=True`` Y
+    ``estado='activo'``, con los valores finales): capturar o editar contratos
+    históricos de un empleado dado de baja sigue permitido.
+    """
+
+    def setUp(self):
+        self.inactivo = self._empleado(self.a, "E-INA")
+        self.inactivo.soft_delete()
+        self.inactivo.refresh_from_db()
+        self.assertFalse(self.inactivo.activo)
+
+    def _contrato(self, empleado, **kwargs):
+        datos = {"fecha_inicio": date(2026, 1, 1), "salario": "12000.00"}
+        datos.update(kwargs)
+        return Contrato.objects.create(empleado=empleado, **datos)
+
+    def _payload(self, empleado, **kwargs):
+        datos = {
+            "empleado": empleado.pk,
+            "tipo": "indefinido",
+            "fecha_inicio": "2026-06-01",
+            "salario": "15000.00",
+        }
+        datos.update(kwargs)
+        return datos
+
+    def _post(self, data):
+        return self._client().post(CONTRATOS_URL, data, format="json")
+
+    def _patch(self, contrato, data):
+        return self._client().patch(f"{CONTRATOS_URL}{contrato.pk}/", data, format="json")
+
+    def _assert_rechazo_por_inactivo(self, resp):
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"empleado": [MENSAJE_EMPLEADO_INACTIVO]})
+
+    def test_alta_vigente_para_un_empleado_inactivo_devuelve_400(self):
+        for extra in ({}, {"estado": "activo"}):
+            with self.subTest(**extra):
+                resp = self._post(self._payload(self.inactivo, **extra))
+
+                self._assert_rechazo_por_inactivo(resp)
+        self.assertFalse(Contrato.objects.filter(empleado=self.inactivo).exists())
+
+    def test_reactivar_una_baja_de_un_empleado_inactivo_devuelve_400(self):
+        baja = self._contrato(self.inactivo, activo=False)
+
+        resp = self._patch(baja, {"activo": True})
+
+        self._assert_rechazo_por_inactivo(resp)
+        baja.refresh_from_db()
+        self.assertFalse(baja.activo)
+
+    def test_volver_a_activo_un_terminado_de_un_empleado_inactivo_devuelve_400(self):
+        terminado = self._contrato(self.inactivo, estado="terminado")
+
+        resp = self._patch(terminado, {"estado": "activo"})
+
+        self._assert_rechazo_por_inactivo(resp)
+        terminado.refresh_from_db()
+        self.assertEqual(terminado.estado, "terminado")
+
+    def test_mover_un_contrato_vigente_a_un_empleado_inactivo_devuelve_400(self):
+        # El ``empleado`` final es el que viene en la petición.
+        vigente = self._contrato(self.empleado)
+
+        resp = self._patch(vigente, {"empleado": self.inactivo.pk})
+
+        self._assert_rechazo_por_inactivo(resp)
+        vigente.refresh_from_db()
+        self.assertEqual(vigente.empleado_id, self.empleado.pk)
+
+    def test_editar_un_contrato_no_vigente_de_un_empleado_inactivo_se_permite(self):
+        terminado = self._contrato(self.inactivo, estado="terminado")
+        baja = self._contrato(self.inactivo, activo=False, fecha_inicio=date(2026, 3, 1))
+
+        for contrato in (terminado, baja):
+            with self.subTest(contrato=contrato.pk):
+                resp = self._patch(contrato, {"observaciones": "Finiquito entregado."})
+
+                self.assertEqual(resp.status_code, 200, resp.content)
+                contrato.refresh_from_db()
+                self.assertEqual(contrato.observaciones, "Finiquito entregado.")
+
+    def test_alta_historica_para_un_empleado_inactivo_se_permite(self):
+        for extra in ({"estado": "terminado"}, {"estado": "renovado"}, {"activo": False}):
+            with self.subTest(**extra):
+                resp = self._post(self._payload(self.inactivo, **extra))
+
+                self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_un_vigente_que_quedo_de_un_empleado_inactivo_se_puede_terminar(self):
+        # Contrato vigente de un empleado que se dio de baja después (la baja del
+        # empleado no toca sus contratos). Editarlo sin terminarlo lo dejaría
+        # vigente y se rechaza; terminarlo es la salida.
+        empleado = self._empleado(self.a, "E-BAJA")
+        vigente = self._contrato(empleado)
+        empleado.soft_delete()
+
+        with self.subTest("sin terminarlo"):
+            resp = self._patch(vigente, {"observaciones": "Nota"})
+            self._assert_rechazo_por_inactivo(resp)
+
+        with self.subTest("terminándolo"):
+            resp = self._patch(vigente, {"estado": "terminado", "fecha_fin": "2026-08-31"})
+            self.assertEqual(resp.status_code, 200, resp.content)
+
+        vigente.refresh_from_db()
+        self.assertEqual(vigente.estado, "terminado")
+
+    def test_con_un_empleado_activo_nada_cambia(self):
+        resp = self._post(self._payload(self.empleado))
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        contrato = Contrato.objects.get(pk=resp.json()["id"])
+        resp = self._patch(contrato, {"observaciones": "Sin cambios", "activo": True, "estado": "activo"})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+
+class ContratoEmpleadoInactivoModeloTests(HrBase):
+    """``clean()`` aplica la misma regla: cubre el admin (``full_clean()``)."""
+
+    def test_full_clean_rechaza_un_vigente_de_un_empleado_inactivo(self):
+        inactivo = self._empleado(self.a, "E-INA")
+        inactivo.soft_delete()
+        base = {"empleado": inactivo, "fecha_inicio": date(2026, 1, 1), "salario": "12000.00"}
+
+        with self.subTest("vigente"):
+            with self.assertRaises(DjangoValidationError) as ctx:
+                Contrato(**base).full_clean()
+            self.assertEqual(ctx.exception.message_dict, {"empleado": [MENSAJE_EMPLEADO_INACTIVO]})
+
+        with self.subTest("terminado"):
+            Contrato(estado="terminado", **base).full_clean()
+
+        with self.subTest("dado de baja"):
+            Contrato(activo=False, **base).full_clean()
+
+        with self.subTest("empleado activo"):
+            Contrato(**{**base, "empleado": self.empleado}).full_clean()
