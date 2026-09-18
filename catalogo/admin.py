@@ -1,11 +1,17 @@
 from django.contrib import admin
-from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
+from catalogo.models import TipoProducto, CategoriaProducto, CategoriaProductoTalla, Color, Talla, Producto, ProductoVariante
 
 @admin.register(TipoProducto)
 class TipoProductoAdmin(admin.ModelAdmin):
     list_display = ("id", "codigo")
     search_fields = ("codigo",)
     ordering = ("codigo", "id")
+
+
+class CategoriaProductoTallaInline(admin.TabularInline):
+    model = CategoriaProductoTalla
+    extra = 1
+    autocomplete_fields = ("talla",)
 
 
 @admin.register(CategoriaProducto)
@@ -16,6 +22,7 @@ class CategoriaProductoAdmin(admin.ModelAdmin):
     ordering = ("nombre", "id")
     autocomplete_fields = ("empresa",)
     list_select_related = ("empresa",)
+    inlines = (CategoriaProductoTallaInline,)
 
 
 @admin.register(Color)
