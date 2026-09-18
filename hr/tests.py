@@ -8,6 +8,7 @@ apunte ``DATABASES`` a ``django.db.backends.sqlite3`` / ``:memory:``.
 """
 
 from datetime import date
+from decimal import Decimal
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -16,7 +17,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from hr.api.serializers import ContratoSerializer
-from hr.models import Contrato, Empleado, Puesto
+from hr.models import Contrato, Empleado, Nomina, Puesto
 from nucleo.models import Departamento, Empresa, Sucursal
 from usuarios.models import Usuario
 
@@ -331,3 +332,69 @@ class ContratoVigenteUnicoModeloTests(HrBase):
         vigente.soft_delete()
         with self.subTest("la baja ya no bloquea"):
             self._nuevo().full_clean()
+
+
+class GenerarPeriodoSalarioTests(HrBase):
+    """``generar_periodo`` toma el salario sólo de un contrato vigente.
+
+    Contaba por ``estado='activo'`` sin mirar ``activo``: una baja lógica, que
+    conserva ``estado='activo'``, seguía dando el salario. Sin contrato vigente
+    se cae al ``salario_base`` del puesto, y sin éste no hay percepción.
+    """
+
+    URL = "/api/v1/hr/nominas/generar_periodo/"
+
+    def setUp(self):
+        Puesto.objects.filter(pk=self.a["puesto"].pk).update(salario_base=Decimal("9000.00"))
+
+    def _contrato(self, salario, fecha_inicio=date(2026, 1, 1), **kwargs):
+        return Contrato.objects.create(
+            empleado=self.empleado, fecha_inicio=fecha_inicio, salario=salario, **kwargs,
+        )
+
+    def _generar(self):
+        resp = self._client().post(
+            self.URL, {"periodo_inicio": "2026-07-01", "periodo_fin": "2026-07-15"}, format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        return Nomina.objects.get(pk__in=resp.json()["ids"], empleado=self.empleado)
+
+    def _percepcion(self, nomina):
+        return list(nomina.detalles.filter(codigo="PER001").values_list("monto", flat=True))
+
+    def test_con_contrato_vigente_usa_su_salario(self):
+        self._contrato("12000.00")
+
+        nomina = self._generar()
+
+        self.assertEqual(nomina.salario_base, Decimal("12000.00"))
+        self.assertEqual(self._percepcion(nomina), [Decimal("6000.00")])
+
+    def test_una_baja_sin_reemplazo_cae_al_salario_del_puesto(self):
+        self._contrato("12000.00").soft_delete()
+
+        nomina = self._generar()
+
+        self.assertEqual(nomina.salario_base, Decimal("9000.00"))
+        self.assertEqual(self._percepcion(nomina), [Decimal("4500.00")])
+
+    def test_una_baja_sin_reemplazo_ni_salario_de_puesto_no_genera_percepcion(self):
+        Puesto.objects.filter(pk=self.a["puesto"].pk).update(salario_base=None)
+        self._contrato("12000.00").soft_delete()
+
+        nomina = self._generar()
+
+        self.assertIsNone(nomina.salario_base)
+        self.assertEqual(self._percepcion(nomina), [])
+
+    def test_una_baja_con_reemplazo_vigente_usa_el_del_reemplazo(self):
+        # La baja es la más reciente: ordenar por ``fecha_inicio`` la elegía. Nace
+        # ya dada de baja --``activo=False``, ``estado='activo'``, lo mismo que
+        # deja ``soft_delete()``-- porque la constraint no admite dos vigentes.
+        self._contrato("15000.00", fecha_inicio=date(2026, 1, 1))
+        self._contrato("20000.00", fecha_inicio=date(2026, 6, 1), activo=False)
+
+        nomina = self._generar()
+
+        self.assertEqual(nomina.salario_base, Decimal("15000.00"))
+        self.assertEqual(self._percepcion(nomina), [Decimal("7500.00")])
