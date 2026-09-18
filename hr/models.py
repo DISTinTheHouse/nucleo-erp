@@ -188,6 +188,14 @@ class Area(StatusLifecycleModel):
         return self.nombre
 
 
+# Un contrato es "vigente" sólo si está vivo (no dado de baja) y en estado
+# 'activo'. La baja lógica toca ``activo`` pero no ``estado``, así que contar
+# sólo por ``estado`` dejaba a una baja bloqueando a su reemplazo. La usan la
+# constraint de ``Contrato`` y ``Contrato.hay_otro_vigente``: una sola definición.
+CONTRATO_VIGENTE = models.Q(activo=True, estado='activo')
+MENSAJE_CONTRATO_VIGENTE_DUPLICADO = 'Este empleado ya tiene un contrato activo.'
+
+
 class Contrato(StatusLifecycleModel):
     TIPO_CHOICES = [
         ('indefinido', 'Indefinido'),
@@ -215,20 +223,47 @@ class Contrato(StatusLifecycleModel):
         db_table = "contratos"
         verbose_name = "Contrato"
         verbose_name_plural = "Contratos"
+        constraints = [
+            # A lo más un contrato vigente por empleado. Es la garantía real: la
+            # validación del serializer y ``clean()`` sólo le ponen mensaje, y
+            # esto cubre también el admin, scripts y la carrera entre dos altas.
+            # Una baja o un 'terminado'/'renovado' quedan fuera del índice, así
+            # que no bloquean al contrato que los reemplaza.
+            models.UniqueConstraint(
+                fields=['empleado'],
+                condition=CONTRATO_VIGENTE,
+                name='uq_contrato_vigente_por_empleado',
+                violation_error_message=MENSAJE_CONTRATO_VIGENTE_DUPLICADO,
+            ),
+        ]
 
     def __str__(self):
         return str(self.id)
+
+    @classmethod
+    def hay_otro_vigente(cls, empleado_id, *, activo, estado, excluir_pk=None):
+        """¿Chocaría con otro vigente un contrato del empleado que quede así?
+
+        ``activo`` y ``estado`` son los valores con los que el contrato QUEDARÁ,
+        no los que tenía: así reactivar una baja o volver a 'activo' un
+        terminado también se revisa. Mismo criterio que
+        ``uq_contrato_vigente_por_empleado``.
+        """
+        if not empleado_id or not (activo and estado == 'activo'):
+            return False
+        otros = cls.objects.filter(CONTRATO_VIGENTE, empleado_id=empleado_id)
+        if excluir_pk is not None:
+            otros = otros.exclude(pk=excluir_pk)
+        return otros.exists()
 
     def clean(self):
         from django.core.exceptions import ValidationError
         if self.fecha_fin and self.fecha_fin < self.fecha_inicio:
             raise ValidationError({'fecha_fin': 'La fecha de fin no puede ser anterior a la de inicio.'})
-        if self.estado == 'activo' and self.empleado_id:
-            qs = Contrato.objects.filter(empleado=self.empleado, estado='activo')
-            if self.pk:
-                qs = qs.exclude(pk=self.pk)
-            if qs.exists():
-                raise ValidationError({'estado': 'Este empleado ya tiene un contrato activo.'})
+        if Contrato.hay_otro_vigente(
+            self.empleado_id, activo=self.activo, estado=self.estado, excluir_pk=self.pk,
+        ):
+            raise ValidationError({'estado': MENSAJE_CONTRATO_VIGENTE_DUPLICADO})
 
 
 class Turno(StatusLifecycleModel):
