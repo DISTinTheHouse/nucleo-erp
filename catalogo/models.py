@@ -44,6 +44,7 @@ class Color(models.Model):
     nombre = models.CharField(max_length=50)
     codigo = models.CharField(max_length=3)
     codigo_hex = models.CharField(max_length=7)
+    pantone = models.CharField(max_length=20, blank=True, default="")
     activo = models.BooleanField(default=True)
 
     history = HistoricalRecords()
