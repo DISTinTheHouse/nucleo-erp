@@ -918,6 +918,14 @@ Todos soportan CRUD estándar (`GET`, `POST`, `PATCH`, `DELETE`).
 - **Colores**: `/api/v1/catalogo/color/` — incluye `pantone` (opcional).
 - **Tallas**: `/api/v1/catalogo/talla/` — `?categoria_producto={id}` (opcional) filtra solo las tallas permitidas para esa categoría (via `CategoriaProductoTalla`); sin el parámetro regresa todas.
 
+**Convención de tallas por categoría** (para dar de alta categorías nuevas — configurar en el admin, inline de `CategoriaProducto`):
+- **Ropa de letra** (blusa, camisa, playera, chamarra, sudadera, vestido, etc.): `2XCH, XCH, CH, M, G, XG, 2XG, 3XG, 4XG, 5XG, 6XG`.
+- **Pantalón/bermuda/short** (cintura): `28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50`.
+- **Calzado** (botas, tenis, zapatos): `1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31`.
+- **Todo lo demás** (accesorios, EPP, telas, avíos, hogar — sin talla real): `UNI` únicamente.
+
+Una categoría sin ninguna talla configurada rechaza el alta de variante por completo (ver arriba) — cualquier categoría nueva necesita al menos una fila en `CategoriaProductoTalla` antes de poder usarse en `/producto-variante/onboarding/`.
+
 ---
 
 ## ⚙️ 10. Configuración Fiscal (CSD)
