@@ -916,7 +916,7 @@ Todos soportan CRUD estándar (`GET`, `POST`, `PATCH`, `DELETE`).
 - **Tipos de Producto**: `/api/v1/catalogo/tipo-producto/`
 - **Categorías**: `/api/v1/catalogo/categoria-producto/` — incluye `unidad_medida` (FK opcional, la que hereda `Producto` en el onboarding) y `tallas` (M2M vía `CategoriaProductoTalla`: qué tallas son válidas para productos de esta categoría; se administra desde el admin de Django, inline en cada categoría).
 - **Colores**: `/api/v1/catalogo/color/` — incluye `pantone` (opcional).
-- **Tallas**: `/api/v1/catalogo/talla/`
+- **Tallas**: `/api/v1/catalogo/talla/` — `?categoria_producto={id}` (opcional) filtra solo las tallas permitidas para esa categoría (via `CategoriaProductoTalla`); sin el parámetro regresa todas.
 
 ---
 
