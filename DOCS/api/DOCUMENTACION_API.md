@@ -857,7 +857,7 @@ Entidad principal que agrupa las variantes. Contiene la información general (no
     }
   ]
   ```
-- **Crear**: `POST /api/v1/catalogo/producto/`
+- **Crear**: `POST /api/v1/catalogo/producto/` — si mandas `categoria_producto`, el servidor genera `codigo` solo (mismo correlativo que `/onboarding/`); cualquier `codigo` que mandes en el body se ignora. Sin `categoria_producto`, `codigo` queda `null`.
 - **Editar**: `PATCH /api/v1/catalogo/producto/{id}/`
 - **Eliminar**: `DELETE /api/v1/catalogo/producto/{id}/`
 
@@ -883,18 +883,48 @@ Gestiona las combinaciones específicas (SKU, color, talla, precio).
     }
   ]
   ```
-- **Crear**: `POST /api/v1/catalogo/producto-variante/`
-- **Editar**: `PATCH /api/v1/catalogo/producto-variante/{id}/`
+- **Crear**: `POST /api/v1/catalogo/producto-variante/` — rechaza (`400`) si `talla` no está permitida para la categoría del `producto` (ver `CategoriaProductoTalla` abajo); sin categoría en el producto, no hay restricción.
+- **Editar**: `PATCH /api/v1/catalogo/producto-variante/{id}/` — misma validación si cambias `producto` o `talla`.
 - **Eliminar**: `DELETE /api/v1/catalogo/producto-variante/{id}/`
+
+### Onboarding de Alta (SKU simplificado)
+
+Flujo guiado para que producción dé de alta un Producto y su(s) variante(s) (SKU) con el mínimo de campos posible — el resto se infiere en el servidor. Dos pasos.
+
+**Paso 1 — Producto**: `POST /api/v1/catalogo/producto/onboarding/`
+- Body: `{ "nombre", "tipo", "categoria_producto", "precio_base" }` — sin `descripcion`.
+- El servidor infiere `codigo` (correlativo por categoría: prefijo = `categoria_producto.codigo` + consecutivo con ceros a la izquierda hasta llenar 5 caracteres, ej. categoría `"100"` → `"10000"`, `"10001"`, `"10002"`...) y `unidad_medida` (la que tenga configurada la categoría, si tiene).
+- `empresa` se autoasigna al usuario autenticado; `categoria_producto` debe pertenecer a esa empresa (`400` si no).
+- Respuesta: el `Producto` completo, ya con `id` y `codigo` asignados — listo para el paso 2.
+
+**Preview del código antes de crear**: `GET /api/v1/catalogo/producto/siguiente-codigo/?categoria_producto={id}`
+- Respuesta: `{ "codigo": "10002" }`.
+- Solo lectura, no reserva nada. El valor real se recalcula (con lock, dentro de la misma transacción del INSERT) al momento del `POST /onboarding/`, así que puede avanzar si otra alta ocurre entre el preview y el submit — úsalo solo como referencia visual, no lo mandes de vuelta al crear.
+
+**Paso 2 — Variante (SKU)**: `POST /api/v1/catalogo/producto-variante/onboarding/`
+- Body: `{ "producto", "color", "talla", "precio_base" }`.
+- El servidor arma el SKU: `codigo_producto-codigo_color-talla.nombre` (ej. `"10000-70-CH"`).
+- Valida que la `talla` esté permitida para la categoría del `producto` (tabla puente `CategoriaProductoTalla`, ver abajo) — si no está permitida, `400`. Si la categoría no tiene ninguna talla configurada, **cualquier** talla se rechaza hasta que se configure.
+- Rechaza si el SKU resultante ya existe (`400`).
+- `empresa` se toma de `producto.empresa` (no del usuario que hace la petición).
+- `producto` debe pertenecer a la empresa del usuario (`400` si no, salvo superusuario).
 
 ### Catálogos Auxiliares
 
 Todos soportan CRUD estándar (`GET`, `POST`, `PATCH`, `DELETE`).
 
 - **Tipos de Producto**: `/api/v1/catalogo/tipo-producto/`
-- **Categorías**: `/api/v1/catalogo/categoria-producto/`
-- **Colores**: `/api/v1/catalogo/color/`
-- **Tallas**: `/api/v1/catalogo/talla/`
+- **Categorías**: `/api/v1/catalogo/categoria-producto/` — incluye `unidad_medida` (FK opcional, la que hereda `Producto` en el onboarding) y `tallas` (M2M vía `CategoriaProductoTalla`: qué tallas son válidas para productos de esta categoría; se administra desde el admin de Django, inline en cada categoría).
+- **Colores**: `/api/v1/catalogo/color/` — incluye `pantone` (opcional).
+- **Tallas**: `/api/v1/catalogo/talla/` — `?categoria_producto={id}` (opcional) filtra solo las tallas permitidas para esa categoría (via `CategoriaProductoTalla`); sin el parámetro regresa todas.
+
+**Convención de tallas por categoría** (para dar de alta categorías nuevas — configurar en el admin, inline de `CategoriaProducto`):
+- **Ropa de letra** (blusa, camisa, playera, chamarra, sudadera, vestido, etc.): `2XCH, XCH, CH, M, G, XG, 2XG, 3XG, 4XG, 5XG, 6XG`.
+- **Pantalón/bermuda/short** (cintura): `28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50`.
+- **Calzado** (botas, tenis, zapatos): `1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31`.
+- **Todo lo demás** (accesorios, EPP, telas, avíos, hogar — sin talla real): `UNI` únicamente.
+
+Una categoría sin ninguna talla configurada rechaza el alta de variante por completo (ver arriba) — cualquier categoría nueva necesita al menos una fila en `CategoriaProductoTalla` antes de poder usarse en `/producto-variante/onboarding/`.
 
 ---
 
@@ -3378,6 +3408,14 @@ Cuando la solicitud de OCM parcial sí excede el cupo restante (validación de s
   - `_cantidades_asignadas_por_linea()` + check `ya_asignado + nuevo <= disponible` por cada `(pedido_detalle, talla)`.
 
 **Estados y cancelación**: la protección de cupo se libera **sólo** al dar de baja la OCM (soft delete, `activo=false`). Cambiar el estatus a `CANCELADO` **no** libera el pedido por sí solo: la OCM sigue `activo=true`, así que sigue consumiendo cupo hasta que la OCM previa se dé de baja. Se quitó la constraint `uq_orden_corte_manga_activa_por_pedido` de Postgres para permitir múltiples OCMs parciales por el mismo pedido; la guardia de consistencia ahora se valida en el service (suma por línea).
+
+### Pedidos con Producción Especial (muestras)
+
+Solo lectura, para que producción vea qué pedidos traen muestras/renglones sin SKU de catálogo (`producto_nombre_externo`), sin cargar el resto del pedido.
+
+- **Listar**: `GET /api/v1/produccion/pedidos-especiales/` — solo pedidos con al menos una línea especial (`PedidoDetalleTalla.requiere_produccion=True`). Respuesta ligera: `id`, `folio`, `cliente_nombre`, `clasificacion`, `fecha_confirmacion`.
+- **Detalle**: `GET /api/v1/produccion/pedidos-especiales/{id}/` — igual que el listado, más `detalles[]` con **solo** las líneas/tallas especiales (nunca las líneas de catálogo normales del mismo pedido, ni precios). Cada detalle trae `producto_nombre_externo`, `color_nombre`, y por talla: `cantidad` y los flags/config de bordado, reflejante, corte de manga y cambio de talla.
+- Un pedido sin líneas especiales responde `404` en el detalle (no existe para este endpoint, aunque exista como pedido normal).
 
 ---
 

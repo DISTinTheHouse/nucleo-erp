@@ -7,16 +7,30 @@ from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import (
     CuentaBancaria,
     CuentaPorPagar,
+    FacturaProveedor,
     MovimientoBancario,
     Pago,
     PagoDetalle,
 )
+from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
 
 
 class PagoService:
     @staticmethod
     @transaction.atomic
     def aplicar_pago(pago: Pago):
+        # Facturas antes que CxP, el mismo orden que el registro de la factura y la
+        # edición de la CxP: así la factura no deja de estar Registrada entre la
+        # comprobación de abajo y el guardado.
+        factura_ids = set(
+            PagoDetalle.objects.filter(pago=pago).values_list("cxp__factura_proveedor_id", flat=True)
+        )
+        facturas = {
+            factura.pk: factura
+            for factura in FacturaProveedor.objects.select_for_update()
+            .filter(pk__in=factura_ids)
+            .order_by("pk")
+        }
         detalles = list(
             PagoDetalle.objects.select_for_update()
             .select_related("cxp")
@@ -73,6 +87,19 @@ class PagoService:
                     )
                 }
             )
+
+        # Después de las validaciones previas, para no cambiar cuál error sale
+        # primero. Si un re-apuntado concurrente movió una CxP antes de bloquearla,
+        # se bloquea también la factura que la respalda ahora.
+        faltantes = {cxp.factura_proveedor_id for cxp in cxps.values()} - facturas.keys()
+        if faltantes:
+            facturas.update(
+                (factura.pk, factura)
+                for factura in FacturaProveedor.objects.select_for_update().filter(pk__in=faltantes)
+            )
+        CuentaPorPagarService.ensure_payment_accounts_have_registered_invoices(
+            cxps, facturas
+        )
 
         hoy = timezone.localdate()
         for det in detalles:

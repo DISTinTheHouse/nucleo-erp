@@ -20,9 +20,18 @@ class CategoriaProducto(models.Model):
     nombre = models.CharField(max_length=100)
     codigo = models.CharField(max_length=3)
     descripcion = models.CharField(max_length=150)
+    unidad_medida = models.ForeignKey(
+        UnidadMedida, on_delete=models.SET_NULL, related_name="categorias_producto", null=True, blank=True,
+    )
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    tallas = models.ManyToManyField(
+        "Talla",
+        through="CategoriaProductoTalla",
+        related_name="categorias_producto",
+        blank=True,
+    )
 
     history = HistoricalRecords()
 
@@ -30,7 +39,7 @@ class CategoriaProducto(models.Model):
         db_table = "categorias_producto"
         verbose_name = "Categoria Producto"
         verbose_name_plural = "Categorias Producto"
-    
+
     def __str__(self):
         return self.nombre
 
@@ -38,6 +47,7 @@ class Color(models.Model):
     nombre = models.CharField(max_length=50)
     codigo = models.CharField(max_length=3)
     codigo_hex = models.CharField(max_length=7)
+    pantone = models.CharField(max_length=20, blank=True, default="")
     activo = models.BooleanField(default=True)
 
     history = HistoricalRecords()
@@ -60,9 +70,25 @@ class Talla(models.Model):
         db_table = "tallas"
         verbose_name = "Talla"
         verbose_name_plural = "Tallas"
-    
+
     def __str__(self):
         return self.nombre
+
+class CategoriaProductoTalla(models.Model):
+    categoria_producto = models.ForeignKey(CategoriaProducto, on_delete=models.CASCADE, related_name="tallas_permitidas")
+    talla = models.ForeignKey(Talla, on_delete=models.CASCADE, related_name="categorias_permitidas")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "categorias_producto_tallas"
+        verbose_name = "Talla por Categoria"
+        verbose_name_plural = "Tallas por Categoria"
+        constraints = [
+            models.UniqueConstraint(fields=["categoria_producto", "talla"], name="uq_categoria_producto_talla"),
+        ]
+
+    def __str__(self):
+        return f"{self.categoria_producto.nombre} - {self.talla.nombre}"
 
 class Producto(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="productos")
@@ -98,7 +124,7 @@ class ProductoVariante(models.Model):
     nombre = models.CharField(max_length=150, blank=True, default="")
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="variantes")
     color = models.ForeignKey(Color, on_delete=models.CASCADE, related_name="variantes")
-    talla = models.ForeignKey(Talla, on_delete=models.CASCADE, related_name="variantes")
+    talla = models.ForeignKey(Talla, on_delete=models.CASCADE, related_name="variantes", null=True, blank=True)
     sku = models.CharField(max_length=50, unique=True)
     cod_proscai = models.CharField(max_length=50, blank=True, default="")
     precio_base = models.DecimalField(max_digits=10, decimal_places=2)
@@ -113,14 +139,17 @@ class ProductoVariante(models.Model):
 
     @property
     def nombre_completo(self):
-        return f"{self.producto.nombre} - {self.color.nombre} - {self.talla.nombre}"
+        partes = [self.producto.nombre, self.color.nombre]
+        if self.talla_id:
+            partes.append(self.talla.nombre)
+        return " - ".join(partes)
 
     def save(self, *args, **kwargs):
-        self.nombre = f"{self.producto.nombre} - {self.color.nombre} - {self.talla.nombre}"
+        self.nombre = self.nombre_completo
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.producto.nombre} - {self.color.nombre} - {self.talla.nombre}"
+        return self.nombre_completo
 
 class VarianteProductoProduccion(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="variantes_produccion")

@@ -1,4 +1,4 @@
-from django.db.models import Prefetch, prefetch_related_objects
+from django.db.models import Exists, OuterRef, Prefetch, prefetch_related_objects
 from django.db import transaction
 from rest_framework import status, viewsets, mixins
 from rest_framework.decorators import action
@@ -6,7 +6,7 @@ from rest_framework.viewsets import GenericViewSet
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 
-from ventas.models import Pedido, PedidoDetalleTalla
+from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
 from usuarios.models import Usuario
 
 from produccion.services.common import config_como_dict, pendientes_por_linea
@@ -50,7 +50,9 @@ from produccion.api.serializers import (
     ReflejanteIncidenciasSerializer,
     OrdenesCorteMangaSerializer,
     OrdenesCorteMangaListSerializer,
-    OrdenesCorteMangaRetrieveSerializer
+    OrdenesCorteMangaRetrieveSerializer,
+    PedidoEspecialListSerializer,
+    PedidoEspecialDetailSerializer,
 )
 
 from produccion.services.orden_bordado_service import OrdenBordadoService
@@ -1315,3 +1317,52 @@ class OrdenesCorteMangaViewSet(
             ).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
+    """Solo lectura: pedidos con produccion especial (muestras sin SKU de catalogo).
+
+    ``requiere_produccion=True`` en PedidoDetalleTalla es el flag que ya pone
+    ventas/utils/helpers.py cuando la linea trae producto_nombre_externo. El
+    listado usa ``Exists`` (no join) para no aparecer pesado, y el detalle
+    solo trae las lineas/tallas especiales -- nada de precios ni del resto
+    del pedido, que no le interesa a produccion.
+    """
+
+    def get_serializer_class(self):
+        return PedidoEspecialDetailSerializer if self.action == "retrieve" else PedidoEspecialListSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        empresa = getattr(user, "empresa", None)
+        if empresa is None:
+            return Pedido.objects.none()
+        tallas_especiales = PedidoDetalleTalla.objects.filter(
+            pedido_detalle__pedido=OuterRef("pk"), requiere_produccion=True,
+        )
+        return (
+            Pedido.objects.filter(empresa=empresa)
+            .filter(Exists(tallas_especiales))
+            .only("id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "empresa")
+            .order_by("-fecha_confirmacion", "-id")
+        )
+
+    def retrieve(self, request, *args, **kwargs):
+        pedido = self.get_object()
+        detalles = list(
+            PedidoDetalle.objects.filter(pedido=pedido, tallas__requiere_produccion=True)
+            .distinct()
+            .select_related("color")
+            .prefetch_related(
+                Prefetch(
+                    "tallas",
+                    queryset=PedidoDetalleTalla.objects.filter(
+                        requiere_produccion=True
+                    ).select_related("talla").order_by("id"),
+                    to_attr="tallas_especiales",
+                )
+            )
+        )
+        pedido.detalles_especiales = detalles
+        serializer = self.get_serializer(pedido)
+        return Response(serializer.data)

@@ -14,6 +14,7 @@ from rest_framework.viewsets import GenericViewSet
 from django_filters.rest_framework import DjangoFilterBackend
 
 from hr.models import (
+    CONTRATO_VIGENTE,
     Puesto,
     Empleado,
     Area,
@@ -823,7 +824,7 @@ class NominaViewSet(
         creadas = []
         for empleado in empleados_qs.select_related('sucursal', 'empresa', 'puesto').all():
             salario_base = empleado.puesto.salario_base if (empleado.puesto and empleado.puesto.salario_base) else None
-            contrato_activo = empleado.contratos.filter(estado='activo').order_by('-fecha_inicio').first()
+            contrato_activo = empleado.contratos.filter(CONTRATO_VIGENTE).first()
             if contrato_activo and contrato_activo.salario:
                 salario_base = contrato_activo.salario
 

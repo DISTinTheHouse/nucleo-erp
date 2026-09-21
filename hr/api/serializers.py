@@ -1,5 +1,10 @@
+from contextlib import contextmanager
+
+from django.db import IntegrityError, transaction
 from rest_framework import serializers
 from hr.models import (
+    MENSAJE_CONTRATO_VIGENTE_DUPLICADO,
+    MENSAJE_CONTRATO_VIGENTE_EMPLEADO_INACTIVO,
     Puesto,
     Empleado,
     Area,
@@ -172,19 +177,77 @@ class ContratoSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializ
         read_only_fields = ('creado_por',)
 
     def validate(self, data):
-        empleado = data.get('empleado') or getattr(self.instance, 'empleado', None)
-        estado = data.get('estado') or getattr(self.instance, 'estado', None)
-        if empleado and estado == 'activo':
-            qs = Contrato.objects.filter(empleado=empleado, estado='activo')
-            if self.instance:
-                qs = qs.exclude(pk=self.instance.pk)
-            if qs.exists():
-                raise serializers.ValidationError({'estado': 'Este empleado ya tiene un contrato activo.'})
+        if Contrato.vigente_con_empleado_inactivo(
+            self._final(data, 'empleado'),
+            activo=self._final(data, 'activo'),
+            estado=self._final(data, 'estado'),
+        ):
+            raise serializers.ValidationError({'empleado': MENSAJE_CONTRATO_VIGENTE_EMPLEADO_INACTIVO})
+        if self._chocaria_con_otro_vigente(data):
+            raise serializers.ValidationError({'estado': MENSAJE_CONTRATO_VIGENTE_DUPLICADO})
         fecha_inicio = data.get('fecha_inicio')
         fecha_fin = data.get('fecha_fin')
         if fecha_inicio and fecha_fin and fecha_fin < fecha_inicio:
             raise serializers.ValidationError({'fecha_fin': 'La fecha de fin no puede ser anterior a la de inicio.'})
         return data
+
+    def create(self, validated_data):
+        with self._choque_de_vigente_como_400(validated_data):
+            return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        with self._choque_de_vigente_como_400(validated_data):
+            return super().update(instance, validated_data)
+
+    def _final(self, data, campo):
+        """Valor con el que QUEDARÁ ``campo`` tras guardar.
+
+        Lo que no viene en la petición conserva el valor de la fila en una
+        edición y, en un alta, toma el default del modelo --el mismo con el que
+        se guardará--. Antes un alta sin ``estado`` resolvía a ``None``, se
+        saltaba la revisión y nacía 'activo' por el default.
+        """
+        if campo in data:
+            return data[campo]
+        if self.instance is not None:
+            return getattr(self.instance, campo)
+        return Contrato._meta.get_field(campo).get_default()
+
+    def _chocaria_con_otro_vigente(self, data):
+        """Aplica ``uq_contrato_vigente_por_empleado`` con los valores finales.
+
+        ``empleado`` ya pasó por ``validate_empleado`` (o viene de una fila que
+        ``get_queryset`` dejó ver), así que la consulta no cruza empresas.
+        """
+        return Contrato.hay_otro_vigente(
+            getattr(self._final(data, 'empleado'), 'pk', None),
+            activo=self._final(data, 'activo'),
+            estado=self._final(data, 'estado'),
+            excluir_pk=getattr(self.instance, 'pk', None),
+        )
+
+    @contextmanager
+    def _choque_de_vigente_como_400(self, validated_data):
+        """Traduce la violación de la constraint al mismo 400 de ``validate``.
+
+        Pasa si otra petición deja vigente un contrato del mismo empleado entre
+        ``validate`` y el INSERT/UPDATE. No se lee el texto del
+        ``IntegrityError`` (PostgreSQL nombra la constraint, SQLite no): se
+        re-consulta, como en ``produccion.services.common``, y cualquier otro
+        ``IntegrityError`` se re-lanza. El savepoint deja usable la transacción
+        para esa re-consulta.
+        """
+        try:
+            with transaction.atomic():
+                yield
+        except IntegrityError as exc:
+            if not self._chocaria_con_otro_vigente(validated_data):
+                raise
+            # Fuera de ``validate`` DRF no envuelve el mensaje en una lista; se
+            # hace aquí para que el cuerpo sea idéntico al de la ruta normal.
+            raise serializers.ValidationError(
+                {'estado': [MENSAJE_CONTRATO_VIGENTE_DUPLICADO]}
+            ) from exc
 
 
 class TurnoSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer):

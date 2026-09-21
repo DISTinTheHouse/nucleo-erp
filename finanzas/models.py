@@ -26,6 +26,17 @@ class CuentaContable(models.Model):
         db_table = "cuentas_contables"
         verbose_name = "Cuenta Contable"
         verbose_name_plural = "Cuentas Contables"
+        constraints = [
+            # El código identifica a la cuenta dentro de su empresa. La condición
+            # deja fuera el código en blanco: el campo nace con ``default=""`` y
+            # ``blank=True``, así que sin ella una segunda cuenta sin código sería
+            # imposible y ``codigo`` quedaría obligatorio de hecho.
+            models.UniqueConstraint(
+                fields=("empresa", "codigo"),
+                condition=~models.Q(codigo=""),
+                name="uq_cuenta_contable_empresa_codigo",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.codigo} - {self.nombre}"
@@ -41,6 +52,22 @@ class CentroCosto(models.Model):
         db_table = "centros_costo"
         verbose_name = "Centro de Costo"
         verbose_name_plural = "Centros de Costo"
+        constraints = [
+            # El código identifica al centro de costo ACTIVO dentro de su empresa.
+            # La condición deja fuera dos casos:
+            #   - el código en blanco, porque el campo nace con ``default=""`` y
+            #     ``blank=True``: sin esto un segundo centro sin código sería
+            #     imposible y ``codigo`` quedaría obligatorio de hecho;
+            #   - las filas dadas de baja, porque el borrado del catálogo es
+            #     lógico: una baja conserva su fila, y sin esto se quedaría con el
+            #     código secuestrado para siempre. Un código que libera una baja
+            #     se puede volver a usar, y ambas filas conviven.
+            models.UniqueConstraint(
+                fields=("empresa", "codigo"),
+                condition=~models.Q(codigo="") & models.Q(activo=True),
+                name="uq_centro_costo_empresa_codigo",
+            ),
+        ]
     
     def __str__(self):
         return f"{self.codigo} - {self.nombre}"
@@ -59,7 +86,12 @@ class Poliza(models.Model):
 
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="polizas")
     sucursal = models.ForeignKey('nucleo.Sucursal', on_delete=models.CASCADE, related_name="polizas")
-    centro_costo = models.ForeignKey('finanzas.CentroCosto', on_delete=models.CASCADE, related_name="polizas", null=True, blank=True)
+    # SET_NULL, no CASCADE: el centro de costo es una referencia de la póliza, no
+    # su documento padre. Con CASCADE, borrar un centro --por el admin o por una
+    # consulta directa, fuera de la baja lógica del catálogo-- se llevaba las
+    # pólizas que lo usaban, contabilizadas incluidas. Mismo criterio que la
+    # migración 0008 aplicó a PolizaDetalle.centro_costo.
+    centro_costo = models.ForeignKey('finanzas.CentroCosto', on_delete=models.SET_NULL, related_name="polizas", null=True, blank=True)
     folio = models.CharField(max_length=30, null=True, blank=True)
     folio_consecutivo = models.PositiveIntegerField(null=True, blank=True)
     tipo = models.CharField(max_length=30, choices=PolizaTipo.choices, default=PolizaTipo.DIARIO.value)

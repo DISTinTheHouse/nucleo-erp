@@ -3116,7 +3116,7 @@ class MesaControlViewSet(CotizacionViewSet):
 
         for det in detalles:
             item = {
-                "producto": det.producto.nombre,
+                "producto": det.producto.nombre if det.producto else (det.producto_nombre_externo or "Muestra sin producto"),
                 "color": det.color.nombre if det.color else "N/A",
                 "tallas": [],
             }

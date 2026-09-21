@@ -46,6 +46,8 @@ from finanzas.models import (
     Banco,
     CentroCosto,
     Cobro,
+    ConciliacionBancaria,
+    ConciliacionDetalle,
     CuentaBancaria,
     CuentaContable,
     CuentaPorCobrar,
@@ -53,6 +55,7 @@ from finanzas.models import (
     Factura,
     FacturaDetalle,
     FacturaProveedor,
+    MovimientoBancario,
     NotaCredito,
     NotaCreditoDetalle,
     Pago,
@@ -832,6 +835,12 @@ class Defecto6AltaLineasHijas(FinanzasBase):
         _, _, _, _, _, _, factura_proveedor = self._crear_oc_recepcion_y_factura_proveedor(
             empresa, self.a["sucursal"], self.a["usuario"]
         )
+        # La factura se deja Registrada: la API ya no permite una CxP viva sobre una
+        # factura que no lo está, así que ese estado armado por ORM es inalcanzable
+        # y el guard de aplicar_pago lo rechaza. La prueba cubre las líneas y el
+        # saldo, no el estatus de la factura.
+        factura_proveedor.estatus = FacturaProveedor.FacturaProveedorStatus.REGISTRADA
+        factura_proveedor.save()
         cxp = CuentaPorPagar.objects.create(
             empresa=empresa, proveedor=factura_proveedor.proveedor, factura_proveedor=factura_proveedor,
             total=Decimal("50.00"), saldo=Decimal("50.00"),
@@ -2940,6 +2949,410 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         pago.refresh_from_db()
         self.assertEqual(pago.estatus, Pago.Estatus.APLICADO)
 
+    # -- Cancelada es terminal ---------------------------------------------------
+
+    def _cancel_account_and_invoice(self):
+        # El único camino por la API para cancelar una factura con CxP: primero la
+        # CxP (que deja de retenerla) y luego la factura.
+        proveedor, factura, cxp = self._account("1000.00")
+        resp = self._patch(
+            f"{self.ACCOUNTS_URL}{cxp.pk}/",
+            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Cancelada"})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return proveedor, factura, cxp
+
+    def test_cancelled_invoice_cannot_leave_cancellation(self):
+        _, factura = self._invoice(
+            "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        )
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+
+        for data in (
+            {"estatus": "Registrada"},
+            {"estatus": "Borrador"},
+            {"estatus": "Registrada", "total": "1.00", "observaciones": "revivida"},
+        ):
+            with self.subTest(data=data):
+                resp = self._patch(url, data)
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["estatus"], list)
+
+        factura.refresh_from_db()
+        self.assertEqual(
+            (factura.estatus, factura.total),
+            (FacturaProveedor.FacturaProveedorStatus.CANCELADA, Decimal("1000.00")),
+        )
+        self.assertNotEqual(factura.observaciones, "revivida")
+        self.assertFalse(CuentaPorPagar.objects.filter(factura_proveedor=factura).exists())
+
+    def test_registering_cancelled_invoice_does_not_revive_its_cancelled_account(self):
+        _, factura, cxp = self._cancel_account_and_invoice()
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Registrada"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["estatus"], list)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, FacturaProveedor.FacturaProveedorStatus.CANCELADA)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
+        self.assertEqual(CuentaPorPagar.objects.filter(factura_proveedor=factura).count(), 1)
+
+    def test_cancelled_invoice_without_status_change_is_not_a_transition(self):
+        # Reenviar el mismo estatus (un PUT que manda la fila completa) no es salir
+        # de Cancelada.
+        _, factura = self._invoice(
+            "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        )
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Cancelada"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def _cancelled_invoice_with_header(self):
+        proveedor, factura = self._invoice(
+            "1000.00", fecha_vencimiento=date(2026, 10, 15),
+            estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        )
+        FacturaProveedor.objects.filter(pk=factura.pk).update(folio="FP-1", observaciones="original")
+        factura.refresh_from_db()
+        return proveedor, factura
+
+    def test_cancelled_invoice_header_is_immutable(self):
+        _, factura = self._cancelled_invoice_with_header()
+        other_proveedor, _, _, _ = self._purchase_documents()
+        otra_moneda = Moneda.objects.create(codigo_iso="USD", nombre="Dolar")
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+
+        for data in (
+            {"total": "999.00"},
+            {"proveedor": other_proveedor.pk},
+            {"moneda": otra_moneda.pk},
+            {"folio": "FP-2"},
+            {"fecha_vencimiento": "2027-01-31"},
+            {"observaciones": "editada"},
+        ):
+            with self.subTest(data=data):
+                resp = self._patch(url, data)
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                field = next(iter(data))
+                self.assertIsInstance(resp.data[field], list)
+
+        # Si la petición trae varios cambios, se reportan todos.
+        resp = self._patch(url, {"total": "999.00", "folio": "FP-2"})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(set(resp.data), {"total", "folio"})
+
+        factura.refresh_from_db()
+        self.assertEqual(
+            (factura.total, factura.proveedor_id, factura.moneda_id, factura.folio,
+             factura.fecha_vencimiento, factura.observaciones),
+            (Decimal("1000.00"), factura.proveedor_id, self.moneda.pk, "FP-1",
+             date(2026, 10, 15), "original"),
+        )
+        self.assertNotEqual(factura.proveedor_id, other_proveedor.pk)
+
+    def test_cancelled_invoice_accepts_an_identical_resend(self):
+        # Mismo criterio que los guards de la CxP: sólo cuenta como edición un valor
+        # distinto del vigente.
+        proveedor, factura = self._cancelled_invoice_with_header()
+
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {
+            "total": "1000.00",
+            "proveedor": proveedor.pk,
+            "moneda": self.moneda.pk,
+            "folio": "FP-1",
+            "fecha_vencimiento": "2026-10-15",
+            "observaciones": "original",
+            "estatus": "Cancelada",
+        })
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_cancelled_invoice_treats_blank_and_null_as_the_same_value(self):
+        # Un formulario que manda "" en un campo de texto vacío no está editando.
+        _, factura = self._invoice(
+            "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        )
+        FacturaProveedor.objects.filter(pk=factura.pk).update(folio=None, observaciones=None)
+
+        resp = self._patch(
+            f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/",
+            {"folio": "", "observaciones": "", "estatus": "Cancelada"},
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura.refresh_from_db()
+        # Tampoco reescribe el null guardado.
+        self.assertEqual((factura.folio, factura.observaciones), (None, None))
+
+    def test_cancelled_invoice_still_rejects_filling_or_clearing_a_text_field(self):
+        _, factura = self._invoice(
+            "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        )
+        FacturaProveedor.objects.filter(pk=factura.pk).update(folio="FP-1", observaciones=None)
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+
+        for data in ({"folio": ""}, {"folio": None}, {"observaciones": "nueva"}):
+            with self.subTest(data=data):
+                resp = self._patch(url, data)
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data[next(iter(data))], list)
+
+        factura.refresh_from_db()
+        self.assertEqual((factura.folio, factura.observaciones), ("FP-1", None))
+
+    def test_draft_invoice_without_account_still_edits_its_header(self):
+        _, factura = self._invoice(
+            "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+        )
+
+        resp = self._patch(
+            f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/",
+            {"total": "999.00", "folio": "FP-9", "observaciones": "editada"},
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual((factura.total, factura.folio), (Decimal("999.00"), "FP-9"))
+
+    def test_draft_round_trip_through_the_api_still_revives_the_cancelled_account(self):
+        # El camino que sigue abierto: Registrada -> Borrador -> Registrada, con la
+        # CxP cancelada de por medio y la factura nunca cancelada.
+        _, factura, cxp = self._account("1000.00")
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+        resp = self._patch(
+            f"{self.ACCOUNTS_URL}{cxp.pk}/",
+            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        resp = self._patch(url, {"estatus": "Borrador"})
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        resp = self._patch(url, {"estatus": "Registrada"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        accounts = CuentaPorPagar.objects.filter(factura_proveedor=factura)
+        self.assertEqual(accounts.count(), 1)
+        revived = accounts.get()
+        self.assertEqual(revived.pk, cxp.pk)
+        self.assertEqual(
+            (revived.estatus, revived.total, revived.saldo),
+            (CuentaPorPagar.EstatusCxP.PENDIENTE, Decimal("1000.00"), Decimal("1000.00")),
+        )
+
+    def test_account_of_cancelled_invoice_cannot_be_revived(self):
+        # La puerta lateral: sin esto, la factura quedaba Cancelada con CxP viva.
+        for estatus in (
+            CuentaPorPagar.EstatusCxP.PENDIENTE,
+            CuentaPorPagar.EstatusCxP.PARCIAL,
+            CuentaPorPagar.EstatusCxP.PAGADA,
+        ):
+            with self.subTest(estatus=estatus):
+                _, factura, cxp = self._cancel_account_and_invoice()
+
+                resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"estatus": estatus.value})
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["estatus"], list)
+                cxp.refresh_from_db()
+                self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
+
+    def test_account_of_draft_invoice_cannot_be_revived(self):
+        # La misma puerta lateral con la factura en Borrador: la CxP sólo vuelve a
+        # vivir cuando la factura se re-registra.
+        for estatus in (
+            CuentaPorPagar.EstatusCxP.PENDIENTE,
+            CuentaPorPagar.EstatusCxP.PARCIAL,
+            CuentaPorPagar.EstatusCxP.PAGADA,
+        ):
+            with self.subTest(estatus=estatus):
+                _, factura, cxp = self._account("1000.00")
+                invoice_url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
+                account_url = f"{self.ACCOUNTS_URL}{cxp.pk}/"
+                resp = self._patch(account_url, {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value})
+                self.assertEqual(resp.status_code, 200, resp.data)
+                resp = self._patch(invoice_url, {"estatus": "Borrador"})
+                self.assertEqual(resp.status_code, 200, resp.data)
+
+                resp = self._patch(account_url, {"estatus": estatus.value})
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["estatus"], list)
+                cxp.refresh_from_db()
+                self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
+
+                # La vía buena sigue abierta: re-registrar la factura la revive.
+                resp = self._patch(invoice_url, {"estatus": "Registrada"})
+
+                self.assertEqual(resp.status_code, 200, resp.data)
+                cxp.refresh_from_db()
+                self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PENDIENTE)
+
+    def test_cancelled_account_of_cancelled_invoice_keeps_other_edits(self):
+        _, _, cxp = self._cancel_account_and_invoice()
+
+        resp = self._patch(
+            f"{self.ACCOUNTS_URL}{cxp.pk}/",
+            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value, "observaciones": "nota"},
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxp.refresh_from_db()
+        self.assertEqual(
+            (cxp.estatus, cxp.observaciones), (CuentaPorPagar.EstatusCxP.CANCELADA, "nota"),
+        )
+
+    def test_cancelled_account_of_registered_invoice_can_still_be_reactivated(self):
+        _, _, cxp = self._account("1000.00")
+        url = f"{self.ACCOUNTS_URL}{cxp.pk}/"
+        resp = self._patch(url, {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value})
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        resp = self._patch(url, {"estatus": CuentaPorPagar.EstatusCxP.PENDIENTE.value})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PENDIENTE)
+
+    # -- Aplicar un pago no revive la CxP -----------------------------------------
+
+    def _post_pago(self, proveedor, cxp, importe, estatus=None):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        payload = {
+            "proveedor": proveedor.pk,
+            "cuenta_bancaria": cuenta.pk,
+            "total_pagado": importe,
+            "pago_detalles": [{"cxp": cxp.pk, "importe_aplicado": importe}],
+        }
+        if estatus is not None:
+            payload["estatus"] = estatus
+        return self._client(self.a["usuario"]).post(PAGOS_URL, payload, format="json")
+
+    def _cancel_account_and_move_invoice_to(self, cxp, factura, invoice_status):
+        resp = self._patch(
+            f"{self.ACCOUNTS_URL}{cxp.pk}/",
+            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": invoice_status})
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def _assert_account_still_cancelled(self, cxp, saldo, fecha_ultimo_pago=None):
+        cxp.refresh_from_db()
+        self.assertEqual(
+            (cxp.estatus, cxp.saldo, cxp.fecha_ultimo_pago),
+            (CuentaPorPagar.EstatusCxP.CANCELADA, Decimal(saldo), fecha_ultimo_pago),
+        )
+
+    def test_applied_payment_cannot_revive_account_of_unregistered_invoice(self):
+        for invoice_status in ("Cancelada", "Borrador"):
+            with self.subTest(invoice_status=invoice_status):
+                proveedor, factura, cxp = self._account("1000.00")
+                self._cancel_account_and_move_invoice_to(cxp, factura, invoice_status)
+                pagos_antes = Pago.objects.count()
+
+                resp = self._post_pago(proveedor, cxp, "400.00")
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["pago_detalles"], list)
+                self._assert_account_still_cancelled(cxp, "1000.00")
+                self.assertEqual(Pago.objects.count(), pagos_antes)
+
+    def test_applying_a_draft_payment_cannot_revive_account_of_unregistered_invoice(self):
+        # El pago en Borrador que sigue apuntando a la CxP cancelada: aplicarlo por
+        # PATCH pasa por el mismo servicio.
+        for invoice_status in ("Cancelada", "Borrador"):
+            with self.subTest(invoice_status=invoice_status):
+                proveedor, factura, cxp = self._account("1000.00")
+                pago = self._pay(proveedor, cxp, "400.00", estatus=Pago.Estatus.BORRADOR.value)
+                self._cancel_account_and_move_invoice_to(cxp, factura, invoice_status)
+
+                resp = self._patch(f"{PAGOS_URL}{pago.pk}/", {"estatus": Pago.Estatus.APLICADO.value})
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["pago_detalles"], list)
+                self._assert_account_still_cancelled(cxp, "1000.00")
+                pago.refresh_from_db()
+                self.assertEqual(pago.estatus, Pago.Estatus.BORRADOR)
+
+    def test_payment_deleted_then_reapplied_cannot_revive_account(self):
+        proveedor, factura, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "400.00")
+        resp = self._client(self.a["usuario"]).delete(f"{PAGOS_URL}{pago.pk}/")
+        self.assertEqual(resp.status_code, 204, resp.data)
+        self._cancel_account_and_move_invoice_to(cxp, factura, "Cancelada")
+
+        cxp.refresh_from_db()
+        # El primer pago ya fijó la fecha, y cancelarlo no la limpia.
+        fecha_primer_pago = cxp.fecha_ultimo_pago
+
+        resp = self._post_pago(proveedor, cxp, "400.00")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["pago_detalles"], list)
+        self._assert_account_still_cancelled(cxp, "1000.00", fecha_primer_pago)
+
+    def test_payment_to_live_account_of_unregistered_invoice_is_rejected(self):
+        # Estado que la API ya no permite (una CxP viva sólo cuelga de una factura
+        # Registrada); se arma por ORM porque es justo el que el guard cierra.
+        for invoice_status in (
+            FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+            FacturaProveedor.FacturaProveedorStatus.CANCELADA,
+        ):
+            with self.subTest(invoice_status=invoice_status):
+                proveedor, _, cxp = self._account("1000.00", estatus=invoice_status)
+                pagos_antes = Pago.objects.count()
+
+                resp = self._post_pago(proveedor, cxp, "400.00")
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIsInstance(resp.data["pago_detalles"], list)
+                cxp.refresh_from_db()
+                self.assertEqual(
+                    (cxp.estatus, cxp.saldo, cxp.fecha_ultimo_pago),
+                    (CuentaPorPagar.EstatusCxP.PENDIENTE, Decimal("1000.00"), None),
+                )
+                self.assertEqual(Pago.objects.count(), pagos_antes)
+
+    def test_live_account_of_unregistered_invoice_cannot_move_to_another_live_status(self):
+        # La misma regla compartida por el PATCH de la CxP: cancelarla sí se permite.
+        proveedor, _, cxp = self._account(
+            "1000.00", estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
+        )
+        url = f"{self.ACCOUNTS_URL}{cxp.pk}/"
+
+        resp = self._patch(url, {"estatus": CuentaPorPagar.EstatusCxP.PARCIAL.value})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["estatus"], list)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PENDIENTE)
+
+        resp = self._patch(url, {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_payment_to_live_account_of_registered_invoice_still_applies(self):
+        proveedor, _, cxp = self._account("1000.00")
+
+        for importe, saldo, estatus in (
+            ("400.00", "600.00", CuentaPorPagar.EstatusCxP.PARCIAL),
+            ("600.00", "0.00", CuentaPorPagar.EstatusCxP.PAGADA),
+        ):
+            with self.subTest(importe=importe):
+                resp = self._post_pago(proveedor, cxp, importe)
+
+                self.assertEqual(resp.status_code, 201, resp.data)
+                cxp.refresh_from_db()
+                self.assertEqual((cxp.saldo, cxp.estatus), (Decimal(saldo), estatus))
+
     def test_live_account_still_holds_its_invoice(self):
         _, factura, cxp = self._account("1000.00")
         url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
@@ -3648,3 +4061,706 @@ class ConcurrencyConflictMappingTests(FinanzasBase):
         self.assertEqual(resp.status_code, 409, resp.data)
         self.assertEqual(resp.data, [CONCURRENT_OPERATION_MESSAGE])
         self.assertTrue(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
+
+
+class CuentaContableCodigoUnicoTests(FinanzasBase):
+    """EC-139: ``codigo`` es único por empresa, salvo el código en blanco.
+
+    El alcance de la unicidad sale de la empresa que resuelve el servidor, nunca
+    de la que venga en el cuerpo: ``empresa`` es de sólo lectura para el usuario
+    normal (``EmpresaResueltaEnServidorMixin``).
+    """
+
+    URL = "/api/v1/finanzas/cuentas-contables/"
+
+    def _cuenta(self, empresa, codigo, nombre="Caja"):
+        return CuentaContable.objects.create(empresa=empresa, codigo=codigo, nombre=nombre)
+
+    def _post(self, data, user=None):
+        return self._client(user or self.a["usuario"]).post(self.URL, data, format="json")
+
+    def _patch(self, cuenta, data, user=None):
+        return self._client(user or self.a["usuario"]).patch(
+            f"{self.URL}{cuenta.pk}/", data, format="json"
+        )
+
+    def test_codigo_duplicado_en_la_misma_empresa_devuelve_400(self):
+        self._cuenta(self.a["empresa"], "1101")
+
+        resp = self._post({"codigo": "1101", "nombre": "Caja chica", "tipo": "Activo"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+        self.assertEqual(CuentaContable.objects.filter(codigo="1101").count(), 1)
+
+    def test_el_mismo_codigo_en_otra_empresa_si_se_permite(self):
+        self._cuenta(self.b["empresa"], "1101")
+
+        resp = self._post({"codigo": "1101", "nombre": "Caja", "tipo": "Activo"})
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        creada = CuentaContable.objects.get(pk=resp.data["id"])
+        self.assertEqual(creada.empresa_id, self.a["empresa"].pk)
+
+    def test_la_empresa_del_cuerpo_no_define_el_alcance(self):
+        # La empresa ajena del payload se ignora (campo de sólo lectura): la
+        # cuenta nace en la empresa del usuario y no choca con la de la otra.
+        self._cuenta(self.b["empresa"], "1101")
+
+        resp = self._post({
+            "codigo": "1101", "nombre": "Caja", "tipo": "Activo",
+            "empresa": self.b["empresa"].pk,
+        })
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(
+            CuentaContable.objects.get(pk=resp.data["id"]).empresa_id, self.a["empresa"].pk,
+        )
+
+    def test_superusuario_con_empresa_explicita_choca_en_esa_empresa(self):
+        superusuario = Usuario.objects.create_superuser(
+            username="root-ec139@test.mx", email="root-ec139@test.mx", password="x",
+        )
+        self._cuenta(self.b["empresa"], "1101")
+
+        resp = self._post(
+            {"codigo": "1101", "nombre": "Caja", "tipo": "Activo", "empresa": self.b["empresa"].pk},
+            user=superusuario,
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+
+    def test_dos_cuentas_con_codigo_en_blanco_siguen_permitidas(self):
+        primera = self._post({"nombre": "Sin codigo", "tipo": "Activo"})
+        self.assertEqual(primera.status_code, 201, primera.data)
+
+        segunda = self._post({"codigo": "", "nombre": "Otra sin codigo", "tipo": "Activo"})
+
+        self.assertEqual(segunda.status_code, 201, segunda.data)
+        self.assertEqual(CuentaContable.objects.filter(codigo="").count(), 2)
+
+    def test_patch_que_conserva_su_propio_codigo_no_choca_consigo_misma(self):
+        cuenta = self._cuenta(self.a["empresa"], "1101")
+
+        with self.subTest("reenvia su codigo"):
+            resp = self._patch(cuenta, {"codigo": "1101", "nombre": "Caja general"})
+            self.assertEqual(resp.status_code, 200, resp.data)
+
+        with self.subTest("edita otro campo"):
+            resp = self._patch(cuenta, {"nombre": "Caja principal"})
+            self.assertEqual(resp.status_code, 200, resp.data)
+
+        cuenta.refresh_from_db()
+        self.assertEqual((cuenta.codigo, cuenta.nombre), ("1101", "Caja principal"))
+
+    def test_patch_hacia_un_codigo_ya_usado_devuelve_400(self):
+        self._cuenta(self.a["empresa"], "1101")
+        otra = self._cuenta(self.a["empresa"], "1102", nombre="Bancos")
+
+        resp = self._patch(otra, {"codigo": "1101"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+        otra.refresh_from_db()
+        self.assertEqual(otra.codigo, "1102")
+
+    def test_patch_que_vacia_el_codigo_no_choca_con_otro_en_blanco(self):
+        self._cuenta(self.a["empresa"], "")
+        cuenta = self._cuenta(self.a["empresa"], "1101")
+
+        resp = self._patch(cuenta, {"codigo": ""})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cuenta.refresh_from_db()
+        self.assertEqual(cuenta.codigo, "")
+
+
+class CentroCostoBajaLogicaTests(FinanzasBase):
+    """EC-140: el catálogo da de baja, no borra.
+
+    ``Poliza.centro_costo`` era CASCADE: un borrado físico se llevaba por
+    delante las pólizas que lo usaban, contabilizadas incluidas, saltándose el
+    guard de ``PolizaViewSet.perform_destroy``.
+    """
+
+    URL = "/api/v1/finanzas/centros-costo/"
+
+    def _centro(self, empresa, codigo="CC-01", nombre="Administración"):
+        return CentroCosto.objects.create(empresa=empresa, codigo=codigo, nombre=nombre)
+
+    def _delete(self, centro, user=None):
+        return self._client(user or self.a["usuario"]).delete(f"{self.URL}{centro.pk}/")
+
+    def _patch(self, centro, data, user=None):
+        return self._client(user or self.a["usuario"]).patch(
+            f"{self.URL}{centro.pk}/", data, format="json"
+        )
+
+    def test_delete_da_de_baja_sin_borrar_la_fila(self):
+        centro = self._centro(self.a["empresa"])
+
+        resp = self._delete(centro)
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(resp.data, None)
+        centro.refresh_from_db()
+        self.assertFalse(centro.activo)
+        # Lo demás queda intacto: la baja sólo toca ``activo``.
+        self.assertEqual((centro.codigo, centro.nombre), ("CC-01", "Administración"))
+
+    def test_una_baja_se_revierte_con_patch(self):
+        centro = self._centro(self.a["empresa"])
+        self.assertEqual(self._delete(centro).status_code, 204)
+
+        resp = self._patch(centro, {"activo": True})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        centro.refresh_from_db()
+        self.assertTrue(centro.activo)
+
+    def test_la_baja_no_se_lleva_las_polizas_que_lo_usan(self):
+        # La prueba que fija el arreglo: antes, el DELETE borraba la póliza.
+        cargo, abono, centro = self._crear_cuentas_contables(self.a["empresa"])
+        poliza = Poliza.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], centro_costo=centro,
+            folio="POL-000001", folio_consecutivo=1,
+            estatus=Poliza.PolizaStatus.CONTABILIZADA.value,
+        )
+        detalle = PolizaDetalle.objects.create(
+            poliza=poliza, cuenta_contable=cargo, centro_costo=centro,
+            cargo=Decimal("116.00"), abono=Decimal("0.00"), orden=1,
+        )
+
+        resp = self._delete(centro)
+
+        self.assertEqual(resp.status_code, 204)
+        poliza.refresh_from_db()
+        self.assertEqual(poliza.centro_costo_id, centro.pk)
+        self.assertEqual(poliza.estatus, Poliza.PolizaStatus.CONTABILIZADA.value)
+        self.assertTrue(PolizaDetalle.objects.filter(pk=detalle.pk).exists())
+
+    def test_un_borrado_fisico_ya_no_arrastra_la_poliza(self):
+        # La baja lógica no cubre el admin ni una consulta directa: ahí sigue
+        # habiendo borrado físico, y con CASCADE se llevaba la póliza. Con
+        # SET_NULL la póliza sobrevive y sólo pierde su centro de costo.
+        cargo, _, centro = self._crear_cuentas_contables(self.a["empresa"])
+        poliza = Poliza.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], centro_costo=centro,
+            folio="POL-000001", folio_consecutivo=1,
+            estatus=Poliza.PolizaStatus.CONTABILIZADA.value,
+        )
+        detalle = PolizaDetalle.objects.create(
+            poliza=poliza, cuenta_contable=cargo, centro_costo=centro,
+            cargo=Decimal("116.00"), abono=Decimal("0.00"), orden=1,
+        )
+
+        CentroCosto.objects.filter(pk=centro.pk).delete()
+
+        poliza.refresh_from_db()
+        self.assertIsNone(poliza.centro_costo_id)
+        self.assertEqual(poliza.estatus, Poliza.PolizaStatus.CONTABILIZADA.value)
+        detalle.refresh_from_db()
+        self.assertIsNone(detalle.centro_costo_id)
+        self.assertEqual(detalle.cargo, Decimal("116.00"))
+
+    def test_no_se_da_de_baja_un_centro_de_otra_empresa(self):
+        ajeno = self._centro(self.b["empresa"], codigo="CC-99")
+
+        resp = self._delete(ajeno)
+
+        self.assertEqual(resp.status_code, 404, resp.data)
+        ajeno.refresh_from_db()
+        self.assertTrue(ajeno.activo)
+
+    def test_sin_centro_activo_la_factura_pendiente_de_cobro_devuelve_400(self):
+        # Efecto colateral conocido: ``_crear_poliza_factura_pendiente`` exige un
+        # centro de costo activo.
+        _, _, centro = self._crear_cuentas_contables(self.a["empresa"])
+        self.assertEqual(self._delete(centro).status_code, 204)
+
+        resp = self._client(self.a["usuario"]).post(
+            PENDIENTE_COBRO_URL,
+            {
+                "cliente": self.a["cliente"].pk,
+                "moneda": self.moneda.pk,
+                "folio": "F-001",
+                "subtotal": "100.00",
+                "descuento": "0.00",
+                "impuestos": "0.00",
+                "total": "100.00",
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("centro_costo", resp.data)
+
+
+class CentroCostoCodigoUnicoTests(FinanzasBase):
+    """EC-140: ``codigo`` es único por empresa, salvo el código en blanco.
+
+    Mismo criterio que ``CuentaContableCodigoUnicoTests`` (EC-139): el alcance
+    de la unicidad sale de la empresa que resuelve el servidor, nunca de la que
+    venga en el cuerpo.
+    """
+
+    URL = "/api/v1/finanzas/centros-costo/"
+
+    def _centro(self, empresa, codigo, nombre="Administración"):
+        return CentroCosto.objects.create(empresa=empresa, codigo=codigo, nombre=nombre)
+
+    def _post(self, data, user=None):
+        return self._client(user or self.a["usuario"]).post(self.URL, data, format="json")
+
+    def _patch(self, centro, data, user=None):
+        return self._client(user or self.a["usuario"]).patch(
+            f"{self.URL}{centro.pk}/", data, format="json"
+        )
+
+    def test_codigo_duplicado_en_la_misma_empresa_devuelve_400(self):
+        self._centro(self.a["empresa"], "CC-01")
+
+        resp = self._post({"codigo": "CC-01", "nombre": "Administración 2"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+        self.assertEqual(CentroCosto.objects.filter(codigo="CC-01").count(), 1)
+
+    def test_el_mismo_codigo_en_otra_empresa_si_se_permite(self):
+        self._centro(self.b["empresa"], "CC-01")
+
+        resp = self._post({"codigo": "CC-01", "nombre": "Administración"})
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        creado = CentroCosto.objects.get(pk=resp.data["id"])
+        self.assertEqual(creado.empresa_id, self.a["empresa"].pk)
+
+    def test_la_empresa_del_cuerpo_no_define_el_alcance(self):
+        # La empresa ajena del payload se ignora (campo de sólo lectura): el
+        # centro nace en la empresa del usuario y no choca con la de la otra.
+        self._centro(self.b["empresa"], "CC-01")
+
+        resp = self._post({
+            "codigo": "CC-01", "nombre": "Administración", "empresa": self.b["empresa"].pk,
+        })
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(
+            CentroCosto.objects.get(pk=resp.data["id"]).empresa_id, self.a["empresa"].pk,
+        )
+
+    def test_superusuario_con_empresa_explicita_choca_en_esa_empresa(self):
+        superusuario = Usuario.objects.create_superuser(
+            username="root-ec140@test.mx", email="root-ec140@test.mx", password="x",
+        )
+        self._centro(self.b["empresa"], "CC-01")
+
+        resp = self._post(
+            {"codigo": "CC-01", "nombre": "Administración", "empresa": self.b["empresa"].pk},
+            user=superusuario,
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+
+    def test_dos_centros_con_codigo_en_blanco_siguen_permitidos(self):
+        primero = self._post({"nombre": "Sin codigo"})
+        self.assertEqual(primero.status_code, 201, primero.data)
+
+        segundo = self._post({"codigo": "", "nombre": "Otro sin codigo"})
+
+        self.assertEqual(segundo.status_code, 201, segundo.data)
+        self.assertEqual(CentroCosto.objects.filter(codigo="").count(), 2)
+
+    def test_patch_que_conserva_su_propio_codigo_no_choca_consigo_mismo(self):
+        centro = self._centro(self.a["empresa"], "CC-01")
+
+        with self.subTest("reenvia su codigo"):
+            resp = self._patch(centro, {"codigo": "CC-01", "nombre": "Administración general"})
+            self.assertEqual(resp.status_code, 200, resp.data)
+
+        with self.subTest("edita otro campo"):
+            resp = self._patch(centro, {"nombre": "Administración central"})
+            self.assertEqual(resp.status_code, 200, resp.data)
+
+        centro.refresh_from_db()
+        self.assertEqual((centro.codigo, centro.nombre), ("CC-01", "Administración central"))
+
+    def test_patch_hacia_un_codigo_ya_usado_devuelve_400(self):
+        self._centro(self.a["empresa"], "CC-01")
+        otro = self._centro(self.a["empresa"], "CC-02", nombre="Producción")
+
+        resp = self._patch(otro, {"codigo": "CC-01"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+        otro.refresh_from_db()
+        self.assertEqual(otro.codigo, "CC-02")
+
+    def test_patch_que_vacia_el_codigo_no_choca_con_otro_en_blanco(self):
+        self._centro(self.a["empresa"], "")
+        centro = self._centro(self.a["empresa"], "CC-01")
+
+        resp = self._patch(centro, {"codigo": ""})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        centro.refresh_from_db()
+        self.assertEqual(centro.codigo, "")
+
+    # -- El código que libera una baja se puede reutilizar -------------------------
+
+    def _dar_de_baja(self, centro):
+        resp = self._client(self.a["usuario"]).delete(f"{self.URL}{centro.pk}/")
+        self.assertEqual(resp.status_code, 204)
+        centro.refresh_from_db()
+        self.assertFalse(centro.activo)
+        return centro
+
+    def test_el_codigo_de_un_centro_dado_de_baja_se_reutiliza(self):
+        dado_de_baja = self._dar_de_baja(self._centro(self.a["empresa"], "CC-01"))
+
+        resp = self._post({"codigo": "CC-01", "nombre": "Administración nueva"})
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        nuevo = CentroCosto.objects.get(pk=resp.data["id"])
+        # Conviven: la baja conserva su código y el alta estrena el mismo.
+        self.assertNotEqual(nuevo.pk, dado_de_baja.pk)
+        self.assertEqual(
+            list(
+                CentroCosto.objects.filter(empresa=self.a["empresa"], codigo="CC-01")
+                .order_by("id").values_list("id", "activo")
+            ),
+            [(dado_de_baja.pk, False), (nuevo.pk, True)],
+        )
+
+    def test_dos_centros_activos_con_el_mismo_codigo_siguen_rechazados(self):
+        self._centro(self.a["empresa"], "CC-01")
+
+        resp = self._post({"codigo": "CC-01", "nombre": "Administración 2"})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+
+    def test_reactivar_una_baja_cuyo_codigo_ya_esta_ocupado_devuelve_400(self):
+        # El caso límite: reactivar dejaría dos filas activas con el mismo código,
+        # que es justo lo que prohíbe la constraint. Se reporta en ``codigo``,
+        # aunque el campo que la petición cambia sea ``activo``.
+        dado_de_baja = self._dar_de_baja(self._centro(self.a["empresa"], "CC-01"))
+        self.assertEqual(
+            self._post({"codigo": "CC-01", "nombre": "Administración nueva"}).status_code, 201,
+        )
+
+        resp = self._patch(dado_de_baja, {"activo": True})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["codigo"], list)
+        dado_de_baja.refresh_from_db()
+        self.assertFalse(dado_de_baja.activo)
+
+    def test_reactivar_una_baja_con_su_codigo_libre_si_se_permite(self):
+        dado_de_baja = self._dar_de_baja(self._centro(self.a["empresa"], "CC-01"))
+
+        resp = self._patch(dado_de_baja, {"activo": True})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        dado_de_baja.refresh_from_db()
+        self.assertTrue(dado_de_baja.activo)
+
+    def test_un_alta_inactiva_no_choca_con_el_codigo_de_una_activa(self):
+        # Una fila inactiva no reserva su código, así que tampoco lo disputa.
+        activo = self._centro(self.a["empresa"], "CC-01")
+
+        resp = self._post({"codigo": "CC-01", "nombre": "Histórica", "activo": False})
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertNotEqual(resp.data["id"], activo.pk)
+        self.assertFalse(CentroCosto.objects.get(pk=resp.data["id"]).activo)
+
+    def test_la_poliza_sigue_leyendo_el_nombre_de_su_propio_centro(self):
+        # Se fija el efecto de la desnormalización, no se corrige: el renglón lee
+        # el nombre de la fila a la que apunta, no del código reutilizado.
+        cargo, _, centro = self._crear_cuentas_contables(self.a["empresa"])
+        CentroCosto.objects.filter(pk=centro.pk).update(codigo="CC-01", nombre="Antigua")
+        poliza = Poliza.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], centro_costo=centro,
+            folio="POL-000001", folio_consecutivo=1,
+            estatus=Poliza.PolizaStatus.CONTABILIZADA.value,
+        )
+        detalle = PolizaDetalle.objects.create(
+            poliza=poliza, cuenta_contable=cargo, centro_costo=centro,
+            cargo=Decimal("116.00"), abono=Decimal("0.00"), orden=1,
+        )
+        centro.refresh_from_db()
+        self._dar_de_baja(centro)
+        nuevo = self._post({"codigo": "CC-01", "nombre": "Nueva"})
+        self.assertEqual(nuevo.status_code, 201, nuevo.data)
+
+        data = PolizaDetalleRelacionadoSerializer(detalle).data
+
+        self.assertEqual(data["centro_costo_id"], centro.pk)
+        self.assertEqual(data["centro_costo_nombre"], "Antigua")
+
+
+class ConciliacionSaldoLibrosTests(FinanzasBase):
+    """``saldo_libros`` es el saldo de la cuenta al cierre de ``fecha_final``.
+
+    La fórmula anterior restaba y volvía a sumar los mismos totales del rango,
+    así que siempre devolvía ``cuenta.saldo_actual``: ninguna conciliación de un
+    periodo pasado cuadraba y ``cerrar`` las rechazaba todas.
+    """
+
+    URL = "/api/v1/finanzas/conciliaciones-bancarias/preparar/"
+    CIERRE = date(2026, 1, 31)
+
+    def _cuenta(self, saldo_actual="150000.00"):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        CuentaBancaria.objects.filter(pk=cuenta.pk).update(saldo_actual=Decimal(saldo_actual))
+        cuenta.refresh_from_db()
+        return cuenta
+
+    def _movimiento(self, cuenta, fecha, importe, tipo, estatus=None):
+        return MovimientoBancario.objects.create(
+            cuenta_bancaria=cuenta,
+            fecha=fecha,
+            importe=Decimal(importe),
+            tipo_movimiento=tipo,
+            estatus=estatus or MovimientoBancario.Estatus.PENDIENTE,
+            concepto=f"{tipo} {importe}",
+        )
+
+    def _preparar(self, cuenta, saldo_estado_cuenta="0.00", fecha_inicio=date(2026, 1, 1),
+                  fecha_final=None, user=None):
+        payload = {
+            "cuenta_bancaria": cuenta.pk,
+            "fecha_inicio": str(fecha_inicio),
+            "fecha_final": str(fecha_final or self.CIERRE),
+            "saldo_estado_cuenta": saldo_estado_cuenta,
+        }
+        return self._client(user or self.a["usuario"]).post(self.URL, payload, format="json")
+
+    def test_un_cargo_posterior_al_cierre_se_deshace(self):
+        # 150,000 hoy, pero en enero aún no se había hecho el cargo de febrero.
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, date(2026, 2, 10), "20000.00", MovimientoBancario.TipoMovimiento.CARGO)
+
+        resp = self._preparar(cuenta, saldo_estado_cuenta="170000.00")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "170000.00")
+        self.assertEqual(resp.data["diferencia"], "0.00")
+
+    def test_un_abono_posterior_al_cierre_se_deshace(self):
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, date(2026, 2, 10), "40000.00", MovimientoBancario.TipoMovimiento.ABONO)
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "110000.00")
+
+    def test_un_movimiento_cancelado_posterior_no_se_deshace(self):
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(
+            cuenta, date(2026, 2, 10), "20000.00", MovimientoBancario.TipoMovimiento.CARGO,
+            estatus=MovimientoBancario.Estatus.CANCELADO,
+        )
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "150000.00")
+
+    def test_los_movimientos_del_rango_no_mueven_el_saldo_al_cierre(self):
+        # Lo de enero ya está dentro del saldo al 31 de enero: no se deshace.
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, date(2026, 1, 15), "40000.00", MovimientoBancario.TipoMovimiento.ABONO)
+        self._movimiento(cuenta, date(2026, 1, 20), "10000.00", MovimientoBancario.TipoMovimiento.CARGO)
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "150000.00")
+        self.assertEqual(resp.data["total_abonos_rango"], "40000.00")
+        self.assertEqual(resp.data["total_cargos_rango"], "10000.00")
+
+    def test_el_movimiento_del_dia_del_cierre_cuenta_como_anterior(self):
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, self.CIERRE, "20000.00", MovimientoBancario.TipoMovimiento.CARGO)
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "150000.00")
+
+    def test_muchos_movimientos_posteriores_dan_el_mismo_saldo_que_uno_a_uno(self):
+        # El cálculo pasó de recorrer fila por fila a agregarse en la base: el
+        # número tiene que ser el mismo, y el del día del cierre sigue fuera.
+        cuenta = self._cuenta("150000.00")
+        esperado = Decimal("150000.00")
+        for anio in (2026, 2027, 2028):
+            for mes in (2, 6, 11):
+                self._movimiento(
+                    cuenta, date(anio, mes, 5), "1250.50", MovimientoBancario.TipoMovimiento.ABONO,
+                )
+                esperado -= Decimal("1250.50")
+                self._movimiento(
+                    cuenta, date(anio, mes, 20), "300.25", MovimientoBancario.TipoMovimiento.CARGO,
+                )
+                esperado += Decimal("300.25")
+                self._movimiento(
+                    cuenta, date(anio, mes, 25), "9999.99", MovimientoBancario.TipoMovimiento.ABONO,
+                    estatus=MovimientoBancario.Estatus.CANCELADO,
+                )
+        # En la fecha de cierre y antes: no se deshacen.
+        self._movimiento(cuenta, self.CIERRE, "700.00", MovimientoBancario.TipoMovimiento.ABONO)
+        self._movimiento(cuenta, date(2026, 1, 3), "800.00", MovimientoBancario.TipoMovimiento.CARGO)
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], str(esperado.quantize(Decimal("0.01"))))
+        # 9 pares posteriores: 9 x (-1250.50 + 300.25) = -8552.25 sobre 150000.
+        self.assertEqual(resp.data["saldo_libros"], "141447.75")
+
+    def test_sin_movimientos_posteriores_el_saldo_es_el_vivo(self):
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, date(2026, 1, 15), "40000.00", MovimientoBancario.TipoMovimiento.ABONO)
+
+        resp = self._preparar(cuenta)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["saldo_libros"], "150000.00")
+
+    def test_cerrar_acepta_una_conciliacion_cuadrada_y_rechaza_una_descuadrada(self):
+        cuenta = self._cuenta("150000.00")
+        self._movimiento(cuenta, date(2026, 2, 10), "20000.00", MovimientoBancario.TipoMovimiento.CARGO)
+        client = self._client(self.a["usuario"])
+
+        descuadrada = self._preparar(cuenta, saldo_estado_cuenta="150000.00")
+        self.assertEqual(descuadrada.status_code, 201, descuadrada.data)
+        resp = client.post(
+            f"/api/v1/finanzas/conciliaciones-bancarias/{descuadrada.data['id']}/cerrar/",
+            {}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("diferencia", resp.data)
+
+        cuadrada = self._preparar(cuenta, saldo_estado_cuenta="170000.00")
+        self.assertEqual(cuadrada.status_code, 201, cuadrada.data)
+        resp = client.post(
+            f"/api/v1/finanzas/conciliaciones-bancarias/{cuadrada.data['id']}/cerrar/",
+            {}, format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["estatus"], ConciliacionBancaria.Estatus.CERRADA.value)
+
+
+class ConciliacionPrepararIdempotenteTests(FinanzasBase):
+    """Preparar dos veces el mismo periodo reutiliza el borrador."""
+
+    URL = "/api/v1/finanzas/conciliaciones-bancarias/preparar/"
+    INICIO = date(2026, 1, 1)
+    CIERRE = date(2026, 1, 31)
+
+    def _cuenta(self):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        CuentaBancaria.objects.filter(pk=cuenta.pk).update(saldo_actual=Decimal("100000.00"))
+        cuenta.refresh_from_db()
+        return cuenta
+
+    def _movimiento(self, cuenta, fecha, importe, estatus=None):
+        return MovimientoBancario.objects.create(
+            cuenta_bancaria=cuenta, fecha=fecha, importe=Decimal(importe),
+            tipo_movimiento=MovimientoBancario.TipoMovimiento.ABONO,
+            estatus=estatus or MovimientoBancario.Estatus.PENDIENTE,
+        )
+
+    def _preparar(self, cuenta, saldo_estado_cuenta="0.00", fecha_final=None):
+        return self._client(self.a["usuario"]).post(
+            self.URL,
+            {
+                "cuenta_bancaria": cuenta.pk,
+                "fecha_inicio": str(self.INICIO),
+                "fecha_final": str(fecha_final or self.CIERRE),
+                "saldo_estado_cuenta": saldo_estado_cuenta,
+            },
+            format="json",
+        )
+
+    def test_preparar_dos_veces_el_mismo_periodo_deja_un_solo_borrador(self):
+        cuenta = self._cuenta()
+        primera = self._preparar(cuenta, saldo_estado_cuenta="1.00")
+        self.assertEqual(primera.status_code, 201, primera.data)
+
+        segunda = self._preparar(cuenta, saldo_estado_cuenta="2.00")
+
+        self.assertEqual(segunda.status_code, 201, segunda.data)
+        self.assertEqual(segunda.data["id"], primera.data["id"])
+        self.assertEqual(ConciliacionBancaria.objects.count(), 1)
+        # El borrador se recalcula con lo que trae la segunda petición.
+        conciliacion = ConciliacionBancaria.objects.get()
+        self.assertEqual(conciliacion.saldo_estado_cuenta, Decimal("2.00"))
+        self.assertEqual(conciliacion.estatus, ConciliacionBancaria.Estatus.BORRADOR)
+
+    def test_al_reutilizar_las_lineas_reflejan_los_movimientos_actuales(self):
+        cuenta = self._cuenta()
+        viejo = self._movimiento(cuenta, date(2026, 1, 10), "500.00")
+        primera = self._preparar(cuenta)
+        self.assertEqual(primera.status_code, 201, primera.data)
+        self.assertEqual(ConciliacionDetalle.objects.count(), 1)
+        nuevo = self._movimiento(cuenta, date(2026, 1, 20), "700.00")
+        MovimientoBancario.objects.filter(pk=viejo.pk).update(
+            estatus=MovimientoBancario.Estatus.CANCELADO,
+        )
+
+        segunda = self._preparar(cuenta)
+
+        self.assertEqual(segunda.status_code, 201, segunda.data)
+        self.assertEqual(
+            sorted(
+                ConciliacionDetalle.objects.filter(
+                    conciliacion_id=segunda.data["id"]
+                ).values_list("movimiento_bancario_id", flat=True)
+            ),
+            [nuevo.pk],
+        )
+        self.assertEqual(
+            [m["id"] for m in segunda.data["movimientos_pendientes"]], [nuevo.pk],
+        )
+
+    def test_no_se_reutiliza_un_borrador_de_otro_periodo_ni_de_otra_cuenta(self):
+        cuenta = self._cuenta()
+        otra_cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        primera = self._preparar(cuenta)
+        self.assertEqual(primera.status_code, 201, primera.data)
+
+        otro_periodo = self._preparar(cuenta, fecha_final=date(2026, 2, 28))
+        otra = self._preparar(otra_cuenta)
+
+        self.assertEqual(otro_periodo.status_code, 201, otro_periodo.data)
+        self.assertEqual(otra.status_code, 201, otra.data)
+        self.assertEqual(
+            len({primera.data["id"], otro_periodo.data["id"], otra.data["id"]}), 3,
+        )
+        self.assertEqual(ConciliacionBancaria.objects.count(), 3)
+
+    def test_una_conciliacion_cerrada_o_cancelada_no_se_reutiliza(self):
+        for estatus in (
+            ConciliacionBancaria.Estatus.CERRADA,
+            ConciliacionBancaria.Estatus.CANCELADA,
+        ):
+            with self.subTest(estatus=estatus):
+                cuenta = self._cuenta()
+                primera = self._preparar(cuenta)
+                self.assertEqual(primera.status_code, 201, primera.data)
+                ConciliacionBancaria.objects.filter(pk=primera.data["id"]).update(estatus=estatus)
+
+                segunda = self._preparar(cuenta)
+
+                self.assertEqual(segunda.status_code, 201, segunda.data)
+                self.assertNotEqual(segunda.data["id"], primera.data["id"])
+                self.assertEqual(
+                    ConciliacionBancaria.objects.filter(cuenta_bancaria=cuenta).count(), 2,
+                )

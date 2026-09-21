@@ -1,11 +1,33 @@
+from django.db import transaction
 from django.db.models import Exists, OuterRef, Q
+from django.db.models.functions import Lower
 from rest_framework import viewsets
+from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
+from catalogo.codigos import siguiente_codigo_producto
 from catalogo.tallas import talla_sort_key
+from catalogo.validaciones import talla_permitida_para_producto
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
-from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoVarianteSerializer
+from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
 from produccion.models import ListaMaterialBom
+
+# Solo Producto Terminado exige talla en el onboarding de variante; materia
+# prima, compras, etc. no tienen tallas. Mismo id que usa el picker del
+# frontend (useProductVariantForm.ts) para filtrar el selector de producto.
+TIPO_PRODUCTO_TERMINADO_ID = 3
+
+
+def _alcance_empresa(qs, user):
+    # Aislamiento multi-tenant: superusuario ve todo, el resto sólo su empresa y
+    # quien no tiene empresa no ve nada. Detalle ajeno -> 404, listado -> 200 [].
+    if getattr(user, "is_superuser", False):
+        return qs
+    empresa = getattr(user, "empresa", None)
+    if empresa:
+        return qs.filter(empresa=empresa)
+    return qs.none()
+
 
 class TipoProductoViewSet(viewsets.ModelViewSet):
     queryset = TipoProducto.objects.all()
@@ -15,19 +37,28 @@ class CategoriaProductoViewSet(viewsets.ModelViewSet):
     serializer_class = CategoriaProductoSerializer
 
     def get_queryset(self):
-        return CategoriaProducto.objects.filter(activo=True).order_by("-created_at", "-id")
+        qs = CategoriaProducto.objects.filter(activo=True).order_by("-created_at", "-id")
+        return _alcance_empresa(qs, self.request.user)
 
 class ColorViewSet(viewsets.ModelViewSet):
     serializer_class = ColorSerializer
 
     def get_queryset(self):
-        return Color.objects.filter(activo=True)
+        return Color.objects.filter(activo=True).order_by(Lower("nombre"), "id")
 
 class TallaViewSet(viewsets.ModelViewSet):
     serializer_class = TallaSerializer
 
     def get_queryset(self):
-        return Talla.objects.filter(activo=True)
+        qs = Talla.objects.filter(activo=True)
+        categoria_id = self.request.query_params.get('categoria_producto')
+        if categoria_id:
+            try:
+                categoria_id = int(categoria_id)
+            except (TypeError, ValueError):
+                raise ValidationError({"categoria_producto": "Debe ser un entero."})
+            qs = qs.filter(categorias_producto__id=categoria_id).distinct()
+        return qs
 
     def list(self, request, *args, **kwargs):
         # El orden canónico sale de ``nombre`` y no se expresa en SQL: se ordena
@@ -45,14 +76,16 @@ class ProductoViewSet(viewsets.ModelViewSet):
     serializer_class = ProductoSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        tipo_id = self.request.query_params.get('tipo_id')
-        if tipo_id is not None:
+        qs = _alcance_empresa(super().get_queryset(), self.request.user)
+        # ``tipo_id`` acepta uno o varios: repetido (``?tipo_id=1&tipo_id=3``) o
+        # separado por comas (``?tipo_id=1,3``). Un solo valor filtra igual que antes.
+        tipo_ids = self.request.query_params.getlist('tipo_id')
+        if tipo_ids:
             try:
-                tipo_id = int(tipo_id)
+                tipo_ids = [int(valor) for crudo in tipo_ids for valor in crudo.split(',')]
             except (TypeError, ValueError):
                 raise ValidationError({"tipo_id": "Must be an integer."})
-            qs = qs.filter(tipo_id=tipo_id)
+            qs = qs.filter(tipo_id__in=tipo_ids)
         q = (self.request.query_params.get('q') or '').strip()
         if q:
             qs = qs.filter(
@@ -63,13 +96,71 @@ class ProductoViewSet(viewsets.ModelViewSet):
         return qs.order_by("-created_at", "-id")
 
     def perform_create(self, serializer):
+        # Mismo codigo que /onboarding/: sale del servidor via categoria, nunca
+        # del cliente (issue #231 -- el alta legacy no lo generaba y quedaban
+        # productos con codigo=null que /producto-variante/onboarding/ rechaza).
         user = self.request.user
         empresa = getattr(user, "empresa", None)
+        extra = {}
         if not getattr(user, "is_superuser", False) and empresa:
-            serializer.save(empresa=empresa)
+            extra["empresa"] = empresa
+
+        categoria = serializer.validated_data.get("categoria_producto")
+        if categoria is not None:
+            with transaction.atomic():
+                extra["codigo"] = siguiente_codigo_producto(categoria)
+                serializer.save(**extra)
             return
-        serializer.save()
-    
+        serializer.save(**extra)
+
+    def _categoria_del_request(self, request, categoria_id):
+        if not categoria_id:
+            raise ValidationError({"categoria_producto": "Este parametro es requerido."})
+        try:
+            categoria = CategoriaProducto.objects.get(pk=categoria_id)
+        except (CategoriaProducto.DoesNotExist, ValueError, TypeError):
+            raise ValidationError({"categoria_producto": "No existe."})
+
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        is_superuser = getattr(user, "is_superuser", False)
+        if not is_superuser and empresa and categoria.empresa_id != empresa.pk:
+            raise ValidationError({"categoria_producto": "No pertenece a tu empresa."})
+        return categoria
+
+    @action(detail=False, methods=['get'], url_path='siguiente-codigo')
+    def siguiente_codigo(self, request):
+        # Preview de solo lectura para el formulario de alta: no reserva nada,
+        # el codigo real se recalcula con lock al momento de crear en /onboarding/.
+        categoria = self._categoria_del_request(request, request.query_params.get('categoria_producto'))
+        codigo = siguiente_codigo_producto(categoria, lock=False)
+        return Response({"codigo": codigo})
+
+    @action(detail=False, methods=['post'])
+    def onboarding(self, request):
+        # Alta simplificada para producción: nombre + tipo + categoria + precio, sin descripcion.
+        # codigo y unidad_medida se infieren de la categoria, no se piden.
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        is_superuser = getattr(user, "is_superuser", False)
+
+        serializer = ProductoOnboardingSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        categoria = serializer.validated_data['categoria_producto']
+        if not is_superuser and empresa and categoria.empresa_id != empresa.pk:
+            raise ValidationError({"categoria_producto": "No pertenece a tu empresa."})
+
+        with transaction.atomic():
+            codigo = siguiente_codigo_producto(categoria)
+            # empresa siempre sale de la categoria (no de request.user): un
+            # superusuario no tiene user.empresa, y aun asi el producto debe
+            # quedar en la empresa dueña de la categoria que eligio.
+            producto = serializer.save(
+                codigo=codigo, unidad_medida=categoria.unidad_medida, empresa=categoria.empresa,
+            )
+        return Response(ProductoSerializer(producto).data, status=201)
+
 class ProductoVarianteViewSet(viewsets.ModelViewSet):
     # producto_nombre/color_nombre/talla_nombre (agregados en 0599352) recorren las FK
     # producto, color y talla por su atributo .nombre. Con un queryset .all() sin
@@ -81,7 +172,9 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
     serializer_class = ProductoVarianteSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        # ``ProductoVariante.empresa`` es FK propia (el onboarding la copia de
+        # ``producto.empresa``); se acota por ella, no por ``producto__empresa``.
+        qs = _alcance_empresa(super().get_queryset(), self.request.user)
         if self.request.query_params.get('con_bom', '').lower() == 'true':
             bom_qs = ListaMaterialBom.objects.filter(
                 producto_variante=OuterRef('pk'),
@@ -101,5 +194,44 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
                 | Q(producto__nombre__icontains=q)
             )
         return qs
+
+    @action(detail=False, methods=['post'])
+    def onboarding(self, request):
+        # Alta simplificada de variante: producto + color + talla + precio.
+        # El SKU se calcula en el server: codigo_producto-codigo_color-talla.nombre.
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        is_superuser = getattr(user, "is_superuser", False)
+
+        serializer = ProductoVarianteOnboardingSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        producto = serializer.validated_data['producto']
+        color = serializer.validated_data['color']
+        talla = serializer.validated_data.get('talla')
+
+        if not is_superuser and empresa and producto.empresa_id != empresa.pk:
+            raise ValidationError({"producto": "No pertenece a tu empresa."})
+
+        if not producto.codigo:
+            raise ValidationError({"producto": "El producto no tiene codigo asignado; no se puede generar el SKU."})
+
+        # Solo Producto Terminado exige talla -- materia prima, compras, etc. no.
+        es_producto_terminado = producto.tipo_id == TIPO_PRODUCTO_TERMINADO_ID
+        if es_producto_terminado and talla is None:
+            raise ValidationError({"talla": "Requerida para variantes de Producto Terminado."})
+
+        if talla is not None and not talla_permitida_para_producto(producto, talla):
+            raise ValidationError({"talla": "Esta talla no esta permitida para la categoria de este producto."})
+
+        partes_sku = [producto.codigo, color.codigo] + ([talla.nombre] if talla else [])
+        sku = "-".join(partes_sku).strip().upper()
+        if len(sku) > 50:
+            raise ValidationError({"sku": "El SKU generado excede el largo maximo permitido."})
+        if ProductoVariante.objects.filter(sku=sku).exists():
+            raise ValidationError({"sku": f"El SKU '{sku}' ya existe."})
+
+        variante = serializer.save(sku=sku, empresa=producto.empresa, talla=talla)
+        return Response(ProductoVarianteSerializer(variante).data, status=201)
 
 

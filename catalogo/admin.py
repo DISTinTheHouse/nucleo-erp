@@ -1,5 +1,5 @@
 from django.contrib import admin
-from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
+from catalogo.models import TipoProducto, CategoriaProducto, CategoriaProductoTalla, Color, Talla, Producto, ProductoVariante
 
 @admin.register(TipoProducto)
 class TipoProductoAdmin(admin.ModelAdmin):
@@ -8,21 +8,28 @@ class TipoProductoAdmin(admin.ModelAdmin):
     ordering = ("codigo", "id")
 
 
+class CategoriaProductoTallaInline(admin.TabularInline):
+    model = CategoriaProductoTalla
+    extra = 1
+    autocomplete_fields = ("talla",)
+
+
 @admin.register(CategoriaProducto)
 class CategoriaProductoAdmin(admin.ModelAdmin):
-    list_display = ("nombre", "codigo", "empresa", "activo", "created_at")
-    list_filter = ("empresa", "activo", "created_at")
+    list_display = ("nombre", "codigo", "empresa", "unidad_medida", "activo", "created_at")
+    list_filter = ("empresa", "activo", "unidad_medida", "created_at")
     search_fields = ("nombre", "codigo", "descripcion", "empresa__codigo", "empresa__razon_social")
     ordering = ("nombre", "id")
-    autocomplete_fields = ("empresa",)
-    list_select_related = ("empresa",)
+    autocomplete_fields = ("empresa", "unidad_medida")
+    list_select_related = ("empresa", "unidad_medida")
+    inlines = (CategoriaProductoTallaInline,)
 
 
 @admin.register(Color)
 class ColorAdmin(admin.ModelAdmin):
-    list_display = ("nombre", "codigo_hex", "activo")
+    list_display = ("nombre", "codigo_hex", "pantone", "activo")
     list_filter = ("activo",)
-    search_fields = ("nombre", "codigo_hex")
+    search_fields = ("nombre", "codigo_hex", "pantone")
     ordering = ("nombre", "id")
 
 
