@@ -1,12 +1,50 @@
 from rest_framework import serializers
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
+from finanzas.api.serializers import EmpresaResueltaEnServidorMixin
+
+
+class EmpresaValidadaEnCreateMixin:
+    """``empresa`` no se reasigna por update y en create debe ser la del usuario.
+
+    Para los ViewSets SIN ``perform_create`` que inyecte la empresa (categoría y
+    variante): el cliente la sigue mandando en el POST, así que no puede volverse
+    de sólo lectura en create sin romper el alta (FK NOT NULL -> IntegrityError).
+
+    - **Update (PUT/PATCH): de sólo lectura para TODOS**, superusuario incluido,
+      igual que ``EmpresaResueltaEnServidorMixin``.
+    - **Create: se valida** contra ``user.empresa``; el superusuario puede mandar
+      cualquiera.
+
+    ``empresa`` sigue apareciendo en la RESPUESTA: es un cambio de escritura, no
+    de shape.
+    """
+
+    def get_extra_kwargs(self):
+        extra_kwargs = super().get_extra_kwargs()
+        if self.instance is not None:
+            kwargs = dict(extra_kwargs.get("empresa", {}))
+            kwargs["read_only"] = True
+            # ``read_only`` y ``required`` son incompatibles en DRF.
+            kwargs.pop("required", None)
+            extra_kwargs["empresa"] = kwargs
+        return extra_kwargs
+
+    def validate_empresa(self, empresa):
+        user = getattr(self.context.get("request"), "user", None)
+        if getattr(user, "is_superuser", False):
+            return empresa
+        empresa_usuario = getattr(user, "empresa", None)
+        if empresa_usuario is None or empresa.pk != empresa_usuario.pk:
+            raise serializers.ValidationError("La empresa no corresponde a la empresa del usuario.")
+        return empresa
+
 
 class TipoProductoSerializer(serializers.ModelSerializer):
     class Meta:
         model = TipoProducto
         fields = '__all__'
 
-class CategoriaProductoSerializer(serializers.ModelSerializer):
+class CategoriaProductoSerializer(EmpresaValidadaEnCreateMixin, serializers.ModelSerializer):
     class Meta:
         model = CategoriaProducto
         exclude = ['activo', 'created_at', 'updated_at']
@@ -21,7 +59,10 @@ class TallaSerializer(serializers.ModelSerializer):
         model = Talla
         exclude = ['activo']
 
-class ProductoSerializer(serializers.ModelSerializer):
+class ProductoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+    # ``perform_create`` de ``ProductoViewSet`` ya inyecta ``user.empresa``, que es
+    # justo el contrato de ``EmpresaResueltaEnServidorMixin``: sólo lectura en update
+    # para todos; en create sólo la manda el superusuario.
     class Meta:
         model = Producto
         fields = '__all__'
@@ -51,7 +92,7 @@ class ProductoVarianteOnboardingSerializer(serializers.ModelSerializer):
         fields = ['id', 'producto', 'color', 'talla', 'precio_base', 'sku']
         read_only_fields = ['sku']
 
-class ProductoVarianteSerializer(serializers.ModelSerializer):
+class ProductoVarianteSerializer(EmpresaValidadaEnCreateMixin, serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True)
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
