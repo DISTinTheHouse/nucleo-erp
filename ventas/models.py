@@ -346,9 +346,12 @@ class Pedido(StatusLifecycleModel):
     iva = models.IntegerField(default=16)
     gran_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
-    # Programación de mesa de control (maquila): múltiples parcialidades
-    # Estructura: {"programaciones": [{"fecha": "YYYY-MM-DD", "cantidad": N}, ...]}
-    # Solo editable desde ``editar-mesa-control``; de solo lectura en el resto de la API
+    # Programación de mesa de control (maquila): múltiples parcialidades.
+    # Estructura: {"programaciones": [{"destino", "cantidad", "fecha", "usuario_id",
+    # "usuario_nombre"}, ...]} -- fecha/usuario los sella el servidor, el cliente
+    # solo manda destino/cantidad.
+    # Solo editable desde ``PATCH /pedidos/{id}/programar/``; de solo lectura en el
+    # resto de la API (incluido ``editar-mesa-control``).
     programacion_conf = models.JSONField(
         default=dict,
         blank=True,
