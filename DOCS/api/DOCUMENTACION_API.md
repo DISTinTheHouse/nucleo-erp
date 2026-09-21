@@ -883,8 +883,8 @@ Gestiona las combinaciones específicas (SKU, color, talla, precio).
     }
   ]
   ```
-- **Crear**: `POST /api/v1/catalogo/producto-variante/`
-- **Editar**: `PATCH /api/v1/catalogo/producto-variante/{id}/`
+- **Crear**: `POST /api/v1/catalogo/producto-variante/` — rechaza (`400`) si `talla` no está permitida para la categoría del `producto` (ver `CategoriaProductoTalla` abajo); sin categoría en el producto, no hay restricción.
+- **Editar**: `PATCH /api/v1/catalogo/producto-variante/{id}/` — misma validación si cambias `producto` o `talla`.
 - **Eliminar**: `DELETE /api/v1/catalogo/producto-variante/{id}/`
 
 ### Onboarding de Alta (SKU simplificado)

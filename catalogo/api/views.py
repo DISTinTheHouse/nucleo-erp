@@ -7,7 +7,8 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from catalogo.codigos import siguiente_codigo_producto
 from catalogo.tallas import talla_sort_key
-from catalogo.models import TipoProducto, CategoriaProducto, CategoriaProductoTalla, Color, Talla, Producto, ProductoVariante
+from catalogo.validaciones import talla_permitida_para_producto
+from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
 from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
 from produccion.models import ListaMaterialBom
 
@@ -218,14 +219,8 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
         if es_producto_terminado and talla is None:
             raise ValidationError({"talla": "Requerida para variantes de Producto Terminado."})
 
-        if talla is not None:
-            categoria = producto.categoria_producto
-            if categoria is not None:
-                talla_permitida = CategoriaProductoTalla.objects.filter(
-                    categoria_producto=categoria, talla=talla,
-                ).exists()
-                if not talla_permitida:
-                    raise ValidationError({"talla": "Esta talla no esta permitida para la categoria de este producto."})
+        if talla is not None and not talla_permitida_para_producto(producto, talla):
+            raise ValidationError({"talla": "Esta talla no esta permitida para la categoria de este producto."})
 
         partes_sku = [producto.codigo, color.codigo] + ([talla.nombre] if talla else [])
         sku = "-".join(partes_sku).strip().upper()

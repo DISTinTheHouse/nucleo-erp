@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
+from catalogo.validaciones import talla_permitida_para_producto
 from finanzas.api.serializers import EmpresaResueltaEnServidorMixin
 
 
@@ -102,3 +103,12 @@ class ProductoVarianteSerializer(EmpresaValidadaEnCreateMixin, serializers.Model
     class Meta:
         model = ProductoVariante
         fields = '__all__'
+
+    def validate(self, attrs):
+        producto = attrs.get('producto') or getattr(self.instance, 'producto', None)
+        talla = attrs['talla'] if 'talla' in attrs else getattr(self.instance, 'talla', None)
+        if producto and talla is not None and not talla_permitida_para_producto(producto, talla):
+            raise serializers.ValidationError(
+                {"talla": "Esta talla no esta permitida para la categoria de este producto."}
+            )
+        return attrs
