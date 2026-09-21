@@ -11,6 +11,18 @@ from catalogo.models import TipoProducto, CategoriaProducto, CategoriaProductoTa
 from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
 from produccion.models import ListaMaterialBom
 
+
+def _alcance_empresa(qs, user):
+    # Aislamiento multi-tenant: superusuario ve todo, el resto sólo su empresa y
+    # quien no tiene empresa no ve nada. Detalle ajeno -> 404, listado -> 200 [].
+    if getattr(user, "is_superuser", False):
+        return qs
+    empresa = getattr(user, "empresa", None)
+    if empresa:
+        return qs.filter(empresa=empresa)
+    return qs.none()
+
+
 class TipoProductoViewSet(viewsets.ModelViewSet):
     queryset = TipoProducto.objects.all()
     serializer_class = TipoProductoSerializer
@@ -19,7 +31,8 @@ class CategoriaProductoViewSet(viewsets.ModelViewSet):
     serializer_class = CategoriaProductoSerializer
 
     def get_queryset(self):
-        return CategoriaProducto.objects.filter(activo=True).order_by("-created_at", "-id")
+        qs = CategoriaProducto.objects.filter(activo=True).order_by("-created_at", "-id")
+        return _alcance_empresa(qs, self.request.user)
 
 class ColorViewSet(viewsets.ModelViewSet):
     serializer_class = ColorSerializer
@@ -49,7 +62,7 @@ class ProductoViewSet(viewsets.ModelViewSet):
     serializer_class = ProductoSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = _alcance_empresa(super().get_queryset(), self.request.user)
         tipo_id = self.request.query_params.get('tipo_id')
         if tipo_id is not None:
             try:
@@ -131,7 +144,9 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
     serializer_class = ProductoVarianteSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        # ``ProductoVariante.empresa`` es FK propia (el onboarding la copia de
+        # ``producto.empresa``); se acota por ella, no por ``producto__empresa``.
+        qs = _alcance_empresa(super().get_queryset(), self.request.user)
         if self.request.query_params.get('con_bom', '').lower() == 'true':
             bom_qs = ListaMaterialBom.objects.filter(
                 producto_variante=OuterRef('pk'),
