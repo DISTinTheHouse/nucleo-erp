@@ -1,11 +1,13 @@
+from django.db import transaction
 from django.db.models import Exists, OuterRef, Q
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
+from catalogo.codigos import siguiente_codigo_producto
 from catalogo.tallas import talla_sort_key
-from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
-from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer
+from catalogo.models import TipoProducto, CategoriaProducto, CategoriaProductoTalla, Color, Talla, Producto, ProductoVariante
+from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
 from produccion.models import ListaMaterialBom
 
 class TipoProductoViewSet(viewsets.ModelViewSet):
@@ -74,6 +76,7 @@ class ProductoViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def onboarding(self, request):
         # Alta simplificada para producción: nombre + tipo + categoria + precio, sin descripcion.
+        # El codigo (base del SKU) se genera solo: prefijo de la categoria + consecutivo.
         user = request.user
         empresa = getattr(user, "empresa", None)
         is_superuser = getattr(user, "is_superuser", False)
@@ -85,10 +88,12 @@ class ProductoViewSet(viewsets.ModelViewSet):
         if not is_superuser and empresa and categoria.empresa_id != empresa.pk:
             raise ValidationError({"categoria_producto": "No pertenece a tu empresa."})
 
-        if not is_superuser and empresa:
-            producto = serializer.save(empresa=empresa)
-        else:
-            producto = serializer.save()
+        with transaction.atomic():
+            codigo = siguiente_codigo_producto(categoria)
+            if not is_superuser and empresa:
+                producto = serializer.save(empresa=empresa, codigo=codigo)
+            else:
+                producto = serializer.save(codigo=codigo)
         return Response(ProductoSerializer(producto).data, status=201)
 
 class ProductoVarianteViewSet(viewsets.ModelViewSet):
@@ -122,5 +127,43 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
                 | Q(producto__nombre__icontains=q)
             )
         return qs
+
+    @action(detail=False, methods=['post'])
+    def onboarding(self, request):
+        # Alta simplificada de variante: producto + color + talla + precio.
+        # El SKU se calcula en el server: codigo_producto-codigo_color-talla.nombre.
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        is_superuser = getattr(user, "is_superuser", False)
+
+        serializer = ProductoVarianteOnboardingSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        producto = serializer.validated_data['producto']
+        color = serializer.validated_data['color']
+        talla = serializer.validated_data['talla']
+
+        if not is_superuser and empresa and producto.empresa_id != empresa.pk:
+            raise ValidationError({"producto": "No pertenece a tu empresa."})
+
+        if not producto.codigo:
+            raise ValidationError({"producto": "El producto no tiene codigo asignado; no se puede generar el SKU."})
+
+        categoria = producto.categoria_producto
+        if categoria is not None:
+            talla_permitida = CategoriaProductoTalla.objects.filter(
+                categoria_producto=categoria, talla=talla,
+            ).exists()
+            if not talla_permitida:
+                raise ValidationError({"talla": "Esta talla no esta permitida para la categoria de este producto."})
+
+        sku = f"{producto.codigo}-{color.codigo}-{talla.nombre}".strip().upper()
+        if len(sku) > 50:
+            raise ValidationError({"sku": "El SKU generado excede el largo maximo permitido."})
+        if ProductoVariante.objects.filter(sku=sku).exists():
+            raise ValidationError({"sku": f"El SKU '{sku}' ya existe."})
+
+        variante = serializer.save(sku=sku, empresa=producto.empresa)
+        return Response(ProductoVarianteSerializer(variante).data, status=201)
 
 
