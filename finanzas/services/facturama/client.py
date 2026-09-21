@@ -5,7 +5,6 @@ from .exceptions import FacturamaAPIException
 class FacturamaClient:
 
     def __init__(self):
-        print(settings)
         self.base_url = settings.FACTURAMA_BASE_URL
         self.username = settings.FACTURAMA_USERNAME
         self.password = settings.FACTURAMA_PASSWORD
