@@ -11,6 +11,11 @@ from catalogo.models import TipoProducto, CategoriaProducto, CategoriaProductoTa
 from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
 from produccion.models import ListaMaterialBom
 
+# Solo Producto Terminado exige talla en el onboarding de variante; materia
+# prima, compras, etc. no tienen tallas. Mismo id que usa el picker del
+# frontend (useProductVariantForm.ts) para filtrar el selector de producto.
+TIPO_PRODUCTO_TERMINADO_ID = 3
+
 
 def _alcance_empresa(qs, user):
     # Aislamiento multi-tenant: superusuario ve todo, el resto sólo su empresa y
@@ -188,7 +193,7 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
 
         producto = serializer.validated_data['producto']
         color = serializer.validated_data['color']
-        talla = serializer.validated_data['talla']
+        talla = serializer.validated_data.get('talla')
 
         if not is_superuser and empresa and producto.empresa_id != empresa.pk:
             raise ValidationError({"producto": "No pertenece a tu empresa."})
@@ -196,21 +201,28 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
         if not producto.codigo:
             raise ValidationError({"producto": "El producto no tiene codigo asignado; no se puede generar el SKU."})
 
-        categoria = producto.categoria_producto
-        if categoria is not None:
-            talla_permitida = CategoriaProductoTalla.objects.filter(
-                categoria_producto=categoria, talla=talla,
-            ).exists()
-            if not talla_permitida:
-                raise ValidationError({"talla": "Esta talla no esta permitida para la categoria de este producto."})
+        # Solo Producto Terminado exige talla -- materia prima, compras, etc. no.
+        es_producto_terminado = producto.tipo_id == TIPO_PRODUCTO_TERMINADO_ID
+        if es_producto_terminado and talla is None:
+            raise ValidationError({"talla": "Requerida para variantes de Producto Terminado."})
 
-        sku = f"{producto.codigo}-{color.codigo}-{talla.nombre}".strip().upper()
+        if talla is not None:
+            categoria = producto.categoria_producto
+            if categoria is not None:
+                talla_permitida = CategoriaProductoTalla.objects.filter(
+                    categoria_producto=categoria, talla=talla,
+                ).exists()
+                if not talla_permitida:
+                    raise ValidationError({"talla": "Esta talla no esta permitida para la categoria de este producto."})
+
+        partes_sku = [producto.codigo, color.codigo] + ([talla.nombre] if talla else [])
+        sku = "-".join(partes_sku).strip().upper()
         if len(sku) > 50:
             raise ValidationError({"sku": "El SKU generado excede el largo maximo permitido."})
         if ProductoVariante.objects.filter(sku=sku).exists():
             raise ValidationError({"sku": f"El SKU '{sku}' ya existe."})
 
-        variante = serializer.save(sku=sku, empresa=producto.empresa)
+        variante = serializer.save(sku=sku, empresa=producto.empresa, talla=talla)
         return Response(ProductoVarianteSerializer(variante).data, status=201)
 
 

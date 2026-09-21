@@ -81,10 +81,11 @@ class ProductoOnboardingSerializer(serializers.ModelSerializer):
         fields = ['id', 'nombre', 'tipo', 'categoria_producto', 'precio_base']
 
 class ProductoVarianteOnboardingSerializer(serializers.ModelSerializer):
-    """Alta simplificada de ProductoVariante: producto + color + talla + precio, el SKU se calcula en el server."""
+    """Alta simplificada de ProductoVariante: producto + color + talla + precio, el SKU se calcula en el server.
+    talla es opcional: materia prima (tipo != Producto Terminado) no la exige, ver onboarding() en views.py."""
     producto = serializers.PrimaryKeyRelatedField(queryset=Producto.objects.all())
     color = serializers.PrimaryKeyRelatedField(queryset=Color.objects.all())
-    talla = serializers.PrimaryKeyRelatedField(queryset=Talla.objects.all())
+    talla = serializers.PrimaryKeyRelatedField(queryset=Talla.objects.all(), required=False, allow_null=True)
     precio_base = serializers.DecimalField(max_digits=10, decimal_places=2)
 
     class Meta:
