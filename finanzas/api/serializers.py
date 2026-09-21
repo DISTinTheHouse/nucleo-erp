@@ -823,3 +823,322 @@ class AlertaMoraSerializer(serializers.ModelSerializer):
             if user_empresa and emp and getattr(emp, "pk", emp) != getattr(user_empresa, "pk", user_empresa):
                 raise ValidationError({"empresa": "Empresa no autorizada."})
         return attrs
+
+FEDERAL_TAXES = {"IVA", "ISR", "IEPS"}
+# Catálogo c_ObjetoImp del SAT.
+OBJETO_IMP_CHOICES = ["01", "02", "03", "04", "05"]
+UNIT_CODE_RE = r"^[A-Za-z0-9]{2,3}$"          # c_ClaveUnidad (p. ej. E48, H87, KGM)
+CODE_PROD_SERV_RE = r"^[0-9]{8}$"             # c_ClaveProdServ (8 dígitos)
+CUENTA_PREDIAL_RE = r"^[0-9]{1,150}$"         # según la documentación
+PEDIMENTO_RE = r"^[0-9]{2} [0-9]{2} [0-9]{4} [0-9]{7}$"  # "21 47 3807 8003832"
+ 
+
+class ProductTaxSerializer(serializers.Serializer):
+    Name = serializers.CharField(max_length=50)
+    # Doc: [0-4][0-9]?.[0-9]{1,6}|0  ->  de 0 a 49.999999 con hasta 6 decimales
+    Rate = serializers.DecimalField(
+        max_digits=8,
+        decimal_places=6,
+        min_value=Decimal("0"),
+        max_value=Decimal("49.999999"),
+        required=False,
+    )
+    IsRetention = serializers.BooleanField(default=False)
+    IsFederalTax = serializers.BooleanField(default=True)
+    IsQuota = serializers.BooleanField(default=False)
+    # Doc: [0-9]{1,18}(.[0-9]{1,6})?
+    Total = serializers.DecimalField(
+        max_digits=24,
+        decimal_places=6,
+        min_value=Decimal("0"),
+        required=False,
+    )
+ 
+    def validate(self, attrs):
+        if "Rate" not in attrs and "Total" not in attrs:
+            raise serializers.ValidationError("Debes indicar 'Rate' o 'Total'.")
+ 
+        if attrs.get("IsFederalTax", True):
+            name = attrs.get("Name", "").upper()
+            if name and name not in FEDERAL_TAXES:
+                raise serializers.ValidationError(
+                    {"Name": f"Un impuesto federal debe ser uno de: {', '.join(sorted(FEDERAL_TAXES))}."}
+                )
+            attrs["Name"] = name
+        return attrs
+ 
+class ItemComplementSerializer(serializers.Serializer):
+    EducationalInstitution = serializers.DictField(required=False)
+    ThirdPartyAccount = serializers.DictField(required=False)
+    HidroYPetro = serializers.DictField(required=False)
+
+class FacturamaProductSerializer(serializers.Serializer):
+    Unit = serializers.CharField(min_length=1, max_length=20)
+    UnitCode = serializers.RegexField(
+        UNIT_CODE_RE,
+        error_messages={"invalid": "Clave de unidad SAT inválida (2 o 3 caracteres alfanuméricos, p. ej. E48, H87)."},
+    )
+    IdentificationNumber = serializers.CharField(
+        max_length=50, required=False, allow_blank=True, allow_null=True
+    )
+    Name = serializers.CharField(min_length=2, max_length=50)
+    Description = serializers.CharField(max_length=1000)
+    Price = serializers.DecimalField(
+        max_digits=24, decimal_places=6, min_value=Decimal("0")
+    )
+    CodeProdServ = serializers.RegexField(
+        CODE_PROD_SERV_RE,
+        error_messages={"invalid": "La clave de producto/servicio del SAT debe tener 8 dígitos."},
+    )
+    CodeProdServName = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    CuentaPredial = serializers.RegexField(
+        CUENTA_PREDIAL_RE,
+        required=False,
+        allow_null=True,
+        error_messages={"invalid": "La cuenta predial solo admite dígitos (1 a 150)."},
+    )
+    CuentasPredial = serializers.ListField(
+        child=serializers.RegexField(
+            CUENTA_PREDIAL_RE,
+            error_messages={"invalid": "La cuenta predial solo admite dígitos (1 a 150)."},
+        ),
+        required=False,
+        allow_null=True,
+    )
+    NumerosPedimento = serializers.ListField(
+        child=serializers.RegexField(
+            PEDIMENTO_RE,
+            error_messages={"invalid": "Formato de pedimento inválido. Usa 'AA AA NNNN NNNNNNN'."},
+        ),
+        required=False,
+        allow_null=True,
+    )
+    Complement = ItemComplementSerializer(required=False, allow_null=True)
+    Taxes = ProductTaxSerializer(many=True, required=False, allow_null=True)
+    ObjetoImp = serializers.ChoiceField(
+        choices=OBJETO_IMP_CHOICES, required=False, allow_null=True
+    )
+ 
+ 
+    def validate_UnitCode(self, value):
+        return value.upper()
+ 
+    def validate_Taxes(self, taxes):
+        seen = set()
+        for tax in taxes or []:
+            key = (
+                tax["Name"].upper(),
+                tax.get("IsRetention", False),
+                tax.get("IsFederalTax", True),
+            )
+            if key in seen:
+                kind = "retención" if key[1] else "traslado"
+                raise serializers.ValidationError(
+                    f"El impuesto '{key[0]}' ({kind}) está repetido."
+                )
+            seen.add(key)
+        return taxes
+ 
+    def validate(self, attrs):
+        objeto_imp = attrs.get("ObjetoImp")
+        taxes = attrs.get("Taxes")
+ 
+        if objeto_imp == "01" and taxes:
+            raise serializers.ValidationError(
+                {"Taxes": "Con ObjetoImp '01' (no objeto de impuesto) no se deben enviar impuestos."}
+            )
+        if objeto_imp == "02" and not self.partial and not taxes:
+            raise serializers.ValidationError(
+                {"Taxes": "Con ObjetoImp '02' (sí objeto de impuesto) se requiere al menos un impuesto."}
+            )
+        return attrs
+ 
+ 
+    def to_facturama_payload(self) -> dict:
+        return _clean(self.validated_data)
+ 
+def _clean(value):
+    if isinstance(value, dict):
+        return {k: _clean(v) for k, v in value.items() if v is not None}
+    if isinstance(value, (list, tuple)):
+        return [_clean(v) for v in value]
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
+
+class FacturamaReceiverSerializer(serializers.Serializer):
+    Rfc = serializers.CharField(
+        max_length=13,
+        min_length=12
+    )
+    Name = serializers.CharField(
+        max_length=254
+    )
+    CfdiUse = serializers.CharField()
+    FiscalRegime = serializers.CharField()
+    TaxZipCode = serializers.CharField(
+        max_length=5,
+        min_length=5
+    )
+
+class FacturamaItemSerializer(serializers.Serializer):
+    ProductCode = serializers.CharField()
+    Description = serializers.CharField(
+        max_length=1000
+    )
+    UnitCode = serializers.CharField()
+    Quantity = serializers.DecimalField(
+        max_digits=18,
+        decimal_places=6
+    )
+    UnitPrice = serializers.DecimalField(
+        max_digits=18,
+        decimal_places=6
+    )
+    TaxObject = serializers.CharField()
+
+class FacturamaCfdiCreateSerializer(serializers.Serializer):
+    NameId = serializers.IntegerField(
+        required=False,
+        default=1
+    )
+
+    Date = serializers.DateTimeField()
+
+    Currency = serializers.CharField(
+        max_length=3,
+        min_length=3
+    )
+
+    ExpeditionPlace = serializers.CharField(
+        max_length=5,
+        min_length=5
+    )
+
+    Exportation = serializers.ChoiceField(
+        choices=[
+            ("01", "No aplica"),
+            ("02", "Definitiva con clave A1"),
+            ("03", "Temporal"),
+            ("04", "Definitiva distinta de A1"),
+        ]
+    )
+
+    CfdiType = serializers.ChoiceField(
+        choices=[
+            ("I", "Ingreso"),
+            ("E", "Egreso"),
+            ("T", "Traslado"),
+            ("N", "Nómina"),
+            ("P", "Pago"),
+        ]
+    )
+
+    PaymentForm = serializers.ChoiceField(
+        choices=[
+            ("01", "Efectivo"),
+            ("02", "Cheque nominativo"),
+            ("03", "Transferencia electrónica"),
+            ("04", "Tarjeta de crédito"),
+            ("05", "Monedero electrónico"),
+            ("06", "Dinero electrónico"),
+            ("08", "Vales de despensa"),
+            ("12", "Dación en pago"),
+            ("13", "Pago por subrogación"),
+            ("14", "Pago por consignación"),
+            ("15", "Condonación"),
+            ("17", "Compensación"),
+            ("23", "Novación"),
+            ("24", "Confusión"),
+            ("25", "Remisión de deuda"),
+            ("26", "Prescripción o caducidad"),
+            ("27", "A satisfacción del acreedor"),
+            ("28", "Tarjeta de débito"),
+            ("29", "Tarjeta de servicios"),
+            ("30", "Aplicación de anticipos"),
+            ("31", "Intermediario pagos"),
+            ("99", "Por definir"),
+        ],
+        required=False
+    )
+
+    PaymentMethod = serializers.ChoiceField(
+        choices=[
+            ("PUE", "Pago en una sola exhibición"),
+            ("PPD", "Pago en parcialidades o diferido"),
+        ],
+        required=False
+    )
+
+    Receiver = FacturamaReceiverSerializer()
+
+    Items = FacturamaItemSerializer(
+        many=True,
+        allow_empty=False
+    )
+
+    def validate(self, attrs):
+        payment_method = attrs.get("PaymentMethod")
+        payment_form = attrs.get("PaymentForm")
+
+        if payment_method == "PPD" and payment_form != "99":
+            raise serializers.ValidationError({
+                "PaymentForm": (
+                    "PaymentForm debe ser '99' cuando "
+                    "PaymentMethod es 'PPD'."
+                )
+            })
+
+        return attrs
+
+class FacturamaCfdiFileSerializer(serializers.Serializer):
+
+    FORMAT_CHOICES = [
+        ("pdf", "PDF"),
+        ("html", "HTML"),
+        ("xml", "XML"),
+    ]
+
+    TYPE_CHOICES = [
+        ("payroll", "Payroll"),
+        ("received", "Received"),
+        ("issued", "Issued"),
+        ("issuedLite", "Issued Lite"),
+    ]
+
+    format = serializers.ChoiceField(
+        choices=FORMAT_CHOICES
+    )
+
+    type = serializers.ChoiceField(
+        choices=TYPE_CHOICES
+    )
+
+    id = serializers.CharField(
+        required=True
+    )
+
+class FacturamaAcuseSerializer(serializers.Serializer):
+
+    FORMAT_CHOICES = [
+        ("pdf", "PDF"),
+        ("html", "HTML"),
+    ]
+
+    TYPE_CHOICES = [
+        ("payroll", "Payroll"),
+        ("issued", "Issued"),
+        ("issuedLite", "Issued Lite"),
+    ]
+
+    format = serializers.ChoiceField(
+        choices=FORMAT_CHOICES
+    )
+
+    type = serializers.ChoiceField(
+        choices=TYPE_CHOICES
+    )
+
+    id = serializers.CharField(
+        required=True
+    )
