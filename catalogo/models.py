@@ -124,7 +124,7 @@ class ProductoVariante(models.Model):
     nombre = models.CharField(max_length=150, blank=True, default="")
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="variantes")
     color = models.ForeignKey(Color, on_delete=models.CASCADE, related_name="variantes")
-    talla = models.ForeignKey(Talla, on_delete=models.CASCADE, related_name="variantes")
+    talla = models.ForeignKey(Talla, on_delete=models.CASCADE, related_name="variantes", null=True, blank=True)
     sku = models.CharField(max_length=50, unique=True)
     cod_proscai = models.CharField(max_length=50, blank=True, default="")
     precio_base = models.DecimalField(max_digits=10, decimal_places=2)
@@ -139,14 +139,17 @@ class ProductoVariante(models.Model):
 
     @property
     def nombre_completo(self):
-        return f"{self.producto.nombre} - {self.color.nombre} - {self.talla.nombre}"
+        partes = [self.producto.nombre, self.color.nombre]
+        if self.talla_id:
+            partes.append(self.talla.nombre)
+        return " - ".join(partes)
 
     def save(self, *args, **kwargs):
-        self.nombre = f"{self.producto.nombre} - {self.color.nombre} - {self.talla.nombre}"
+        self.nombre = self.nombre_completo
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.producto.nombre} - {self.color.nombre} - {self.talla.nombre}"
+        return self.nombre_completo
 
 class VarianteProductoProduccion(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="variantes_produccion")
