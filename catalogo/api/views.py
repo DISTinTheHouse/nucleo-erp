@@ -1,10 +1,11 @@
 from django.db.models import Exists, OuterRef, Q
 from rest_framework import viewsets
+from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from catalogo.tallas import talla_sort_key
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
-from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoVarianteSerializer
+from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer
 from produccion.models import ListaMaterialBom
 
 class TipoProductoViewSet(viewsets.ModelViewSet):
@@ -69,7 +70,27 @@ class ProductoViewSet(viewsets.ModelViewSet):
             serializer.save(empresa=empresa)
             return
         serializer.save()
-    
+
+    @action(detail=False, methods=['post'])
+    def onboarding(self, request):
+        # Alta simplificada para producción: nombre + tipo + categoria + precio, sin descripcion.
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        is_superuser = getattr(user, "is_superuser", False)
+
+        serializer = ProductoOnboardingSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        categoria = serializer.validated_data['categoria_producto']
+        if not is_superuser and empresa and categoria.empresa_id != empresa.pk:
+            raise ValidationError({"categoria_producto": "No pertenece a tu empresa."})
+
+        if not is_superuser and empresa:
+            producto = serializer.save(empresa=empresa)
+        else:
+            producto = serializer.save()
+        return Response(ProductoSerializer(producto).data, status=201)
+
 class ProductoVarianteViewSet(viewsets.ModelViewSet):
     # producto_nombre/color_nombre/talla_nombre (agregados en 0599352) recorren las FK
     # producto, color y talla por su atributo .nombre. Con un queryset .all() sin

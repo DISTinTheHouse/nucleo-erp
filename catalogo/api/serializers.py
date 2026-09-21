@@ -29,6 +29,16 @@ class ProductoSerializer(serializers.ModelSerializer):
             'empresa': {'required': False},
         }
 
+class ProductoOnboardingSerializer(serializers.ModelSerializer):
+    """Alta simplificada de Producto para producción: nombre + tipo + categoria + precio, sin descripcion."""
+    tipo = serializers.PrimaryKeyRelatedField(queryset=TipoProducto.objects.all())
+    categoria_producto = serializers.PrimaryKeyRelatedField(queryset=CategoriaProducto.objects.all())
+    precio_base = serializers.DecimalField(max_digits=10, decimal_places=2)
+
+    class Meta:
+        model = Producto
+        fields = ['id', 'nombre', 'tipo', 'categoria_producto', 'precio_base']
+
 class ProductoVarianteSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True)
