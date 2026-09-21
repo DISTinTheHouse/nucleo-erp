@@ -140,10 +140,12 @@ class ProductoViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             codigo = siguiente_codigo_producto(categoria)
-            extra = {"codigo": codigo, "unidad_medida": categoria.unidad_medida}
-            if not is_superuser and empresa:
-                extra["empresa"] = empresa
-            producto = serializer.save(**extra)
+            # empresa siempre sale de la categoria (no de request.user): un
+            # superusuario no tiene user.empresa, y aun asi el producto debe
+            # quedar en la empresa dueña de la categoria que eligio.
+            producto = serializer.save(
+                codigo=codigo, unidad_medida=categoria.unidad_medida, empresa=categoria.empresa,
+            )
         return Response(ProductoSerializer(producto).data, status=201)
 
 class ProductoVarianteViewSet(viewsets.ModelViewSet):
