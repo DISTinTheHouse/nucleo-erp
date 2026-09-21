@@ -93,12 +93,22 @@ class ProductoViewSet(viewsets.ModelViewSet):
         return qs.order_by("-created_at", "-id")
 
     def perform_create(self, serializer):
+        # Mismo codigo que /onboarding/: sale del servidor via categoria, nunca
+        # del cliente (issue #231 -- el alta legacy no lo generaba y quedaban
+        # productos con codigo=null que /producto-variante/onboarding/ rechaza).
         user = self.request.user
         empresa = getattr(user, "empresa", None)
+        extra = {}
         if not getattr(user, "is_superuser", False) and empresa:
-            serializer.save(empresa=empresa)
+            extra["empresa"] = empresa
+
+        categoria = serializer.validated_data.get("categoria_producto")
+        if categoria is not None:
+            with transaction.atomic():
+                extra["codigo"] = siguiente_codigo_producto(categoria)
+                serializer.save(**extra)
             return
-        serializer.save()
+        serializer.save(**extra)
 
     def _categoria_del_request(self, request, categoria_id):
         if not categoria_id:
