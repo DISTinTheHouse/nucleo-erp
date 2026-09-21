@@ -857,7 +857,7 @@ Entidad principal que agrupa las variantes. Contiene la información general (no
     }
   ]
   ```
-- **Crear**: `POST /api/v1/catalogo/producto/`
+- **Crear**: `POST /api/v1/catalogo/producto/` — si mandas `categoria_producto`, el servidor genera `codigo` solo (mismo correlativo que `/onboarding/`); cualquier `codigo` que mandes en el body se ignora. Sin `categoria_producto`, `codigo` queda `null`.
 - **Editar**: `PATCH /api/v1/catalogo/producto/{id}/`
 - **Eliminar**: `DELETE /api/v1/catalogo/producto/{id}/`
 
