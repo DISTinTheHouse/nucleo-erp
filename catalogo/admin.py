@@ -27,9 +27,9 @@ class CategoriaProductoAdmin(admin.ModelAdmin):
 
 @admin.register(Color)
 class ColorAdmin(admin.ModelAdmin):
-    list_display = ("nombre", "codigo_hex", "activo")
+    list_display = ("nombre", "codigo_hex", "pantone", "activo")
     list_filter = ("activo",)
-    search_fields = ("nombre", "codigo_hex")
+    search_fields = ("nombre", "codigo_hex", "pantone")
     ordering = ("nombre", "id")
 
 
