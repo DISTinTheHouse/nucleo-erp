@@ -887,13 +887,35 @@ Gestiona las combinaciones específicas (SKU, color, talla, precio).
 - **Editar**: `PATCH /api/v1/catalogo/producto-variante/{id}/`
 - **Eliminar**: `DELETE /api/v1/catalogo/producto-variante/{id}/`
 
+### Onboarding de Alta (SKU simplificado)
+
+Flujo guiado para que producción dé de alta un Producto y su(s) variante(s) (SKU) con el mínimo de campos posible — el resto se infiere en el servidor. Dos pasos.
+
+**Paso 1 — Producto**: `POST /api/v1/catalogo/producto/onboarding/`
+- Body: `{ "nombre", "tipo", "categoria_producto", "precio_base" }` — sin `descripcion`.
+- El servidor infiere `codigo` (correlativo por categoría: prefijo = `categoria_producto.codigo` + consecutivo con ceros a la izquierda hasta llenar 5 caracteres, ej. categoría `"100"` → `"10000"`, `"10001"`, `"10002"`...) y `unidad_medida` (la que tenga configurada la categoría, si tiene).
+- `empresa` se autoasigna al usuario autenticado; `categoria_producto` debe pertenecer a esa empresa (`400` si no).
+- Respuesta: el `Producto` completo, ya con `id` y `codigo` asignados — listo para el paso 2.
+
+**Preview del código antes de crear**: `GET /api/v1/catalogo/producto/siguiente-codigo/?categoria_producto={id}`
+- Respuesta: `{ "codigo": "10002" }`.
+- Solo lectura, no reserva nada. El valor real se recalcula (con lock, dentro de la misma transacción del INSERT) al momento del `POST /onboarding/`, así que puede avanzar si otra alta ocurre entre el preview y el submit — úsalo solo como referencia visual, no lo mandes de vuelta al crear.
+
+**Paso 2 — Variante (SKU)**: `POST /api/v1/catalogo/producto-variante/onboarding/`
+- Body: `{ "producto", "color", "talla", "precio_base" }`.
+- El servidor arma el SKU: `codigo_producto-codigo_color-talla.nombre` (ej. `"10000-70-CH"`).
+- Valida que la `talla` esté permitida para la categoría del `producto` (tabla puente `CategoriaProductoTalla`, ver abajo) — si no está permitida, `400`. Si la categoría no tiene ninguna talla configurada, **cualquier** talla se rechaza hasta que se configure.
+- Rechaza si el SKU resultante ya existe (`400`).
+- `empresa` se toma de `producto.empresa` (no del usuario que hace la petición).
+- `producto` debe pertenecer a la empresa del usuario (`400` si no, salvo superusuario).
+
 ### Catálogos Auxiliares
 
 Todos soportan CRUD estándar (`GET`, `POST`, `PATCH`, `DELETE`).
 
 - **Tipos de Producto**: `/api/v1/catalogo/tipo-producto/`
-- **Categorías**: `/api/v1/catalogo/categoria-producto/`
-- **Colores**: `/api/v1/catalogo/color/`
+- **Categorías**: `/api/v1/catalogo/categoria-producto/` — incluye `unidad_medida` (FK opcional, la que hereda `Producto` en el onboarding) y `tallas` (M2M vía `CategoriaProductoTalla`: qué tallas son válidas para productos de esta categoría; se administra desde el admin de Django, inline en cada categoría).
+- **Colores**: `/api/v1/catalogo/color/` — incluye `pantone` (opcional).
 - **Tallas**: `/api/v1/catalogo/talla/`
 
 ---

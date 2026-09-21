@@ -16,12 +16,12 @@ class CategoriaProductoTallaInline(admin.TabularInline):
 
 @admin.register(CategoriaProducto)
 class CategoriaProductoAdmin(admin.ModelAdmin):
-    list_display = ("nombre", "codigo", "empresa", "activo", "created_at")
-    list_filter = ("empresa", "activo", "created_at")
+    list_display = ("nombre", "codigo", "empresa", "unidad_medida", "activo", "created_at")
+    list_filter = ("empresa", "activo", "unidad_medida", "created_at")
     search_fields = ("nombre", "codigo", "descripcion", "empresa__codigo", "empresa__razon_social")
     ordering = ("nombre", "id")
-    autocomplete_fields = ("empresa",)
-    list_select_related = ("empresa",)
+    autocomplete_fields = ("empresa", "unidad_medida")
+    list_select_related = ("empresa", "unidad_medida")
     inlines = (CategoriaProductoTallaInline,)
 
 

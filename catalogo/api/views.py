@@ -74,10 +74,33 @@ class ProductoViewSet(viewsets.ModelViewSet):
             return
         serializer.save()
 
+    def _categoria_del_request(self, request, categoria_id):
+        if not categoria_id:
+            raise ValidationError({"categoria_producto": "Este parametro es requerido."})
+        try:
+            categoria = CategoriaProducto.objects.get(pk=categoria_id)
+        except (CategoriaProducto.DoesNotExist, ValueError, TypeError):
+            raise ValidationError({"categoria_producto": "No existe."})
+
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        is_superuser = getattr(user, "is_superuser", False)
+        if not is_superuser and empresa and categoria.empresa_id != empresa.pk:
+            raise ValidationError({"categoria_producto": "No pertenece a tu empresa."})
+        return categoria
+
+    @action(detail=False, methods=['get'], url_path='siguiente-codigo')
+    def siguiente_codigo(self, request):
+        # Preview de solo lectura para el formulario de alta: no reserva nada,
+        # el codigo real se recalcula con lock al momento de crear en /onboarding/.
+        categoria = self._categoria_del_request(request, request.query_params.get('categoria_producto'))
+        codigo = siguiente_codigo_producto(categoria, lock=False)
+        return Response({"codigo": codigo})
+
     @action(detail=False, methods=['post'])
     def onboarding(self, request):
         # Alta simplificada para producción: nombre + tipo + categoria + precio, sin descripcion.
-        # El codigo (base del SKU) se genera solo: prefijo de la categoria + consecutivo.
+        # codigo y unidad_medida se infieren de la categoria, no se piden.
         user = request.user
         empresa = getattr(user, "empresa", None)
         is_superuser = getattr(user, "is_superuser", False)
@@ -91,10 +114,10 @@ class ProductoViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             codigo = siguiente_codigo_producto(categoria)
+            extra = {"codigo": codigo, "unidad_medida": categoria.unidad_medida}
             if not is_superuser and empresa:
-                producto = serializer.save(empresa=empresa, codigo=codigo)
-            else:
-                producto = serializer.save(codigo=codigo)
+                extra["empresa"] = empresa
+            producto = serializer.save(**extra)
         return Response(ProductoSerializer(producto).data, status=201)
 
 class ProductoVarianteViewSet(viewsets.ModelViewSet):
