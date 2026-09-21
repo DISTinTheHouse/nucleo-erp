@@ -39,6 +39,18 @@ class ProductoOnboardingSerializer(serializers.ModelSerializer):
         model = Producto
         fields = ['id', 'nombre', 'tipo', 'categoria_producto', 'precio_base']
 
+class ProductoVarianteOnboardingSerializer(serializers.ModelSerializer):
+    """Alta simplificada de ProductoVariante: producto + color + talla + precio, el SKU se calcula en el server."""
+    producto = serializers.PrimaryKeyRelatedField(queryset=Producto.objects.all())
+    color = serializers.PrimaryKeyRelatedField(queryset=Color.objects.all())
+    talla = serializers.PrimaryKeyRelatedField(queryset=Talla.objects.all())
+    precio_base = serializers.DecimalField(max_digits=10, decimal_places=2)
+
+    class Meta:
+        model = ProductoVariante
+        fields = ['id', 'producto', 'color', 'talla', 'precio_base', 'sku']
+        read_only_fields = ['sku']
+
 class ProductoVarianteSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True)
