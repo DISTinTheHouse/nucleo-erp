@@ -3401,6 +3401,14 @@ Cuando la solicitud de OCM parcial sí excede el cupo restante (validación de s
 
 **Estados y cancelación**: la protección de cupo se libera **sólo** al dar de baja la OCM (soft delete, `activo=false`). Cambiar el estatus a `CANCELADO` **no** libera el pedido por sí solo: la OCM sigue `activo=true`, así que sigue consumiendo cupo hasta que la OCM previa se dé de baja. Se quitó la constraint `uq_orden_corte_manga_activa_por_pedido` de Postgres para permitir múltiples OCMs parciales por el mismo pedido; la guardia de consistencia ahora se valida en el service (suma por línea).
 
+### Pedidos con Producción Especial (muestras)
+
+Solo lectura, para que producción vea qué pedidos traen muestras/renglones sin SKU de catálogo (`producto_nombre_externo`), sin cargar el resto del pedido.
+
+- **Listar**: `GET /api/v1/produccion/pedidos-especiales/` — solo pedidos con al menos una línea especial (`PedidoDetalleTalla.requiere_produccion=True`). Respuesta ligera: `id`, `folio`, `cliente_nombre`, `clasificacion`, `fecha_confirmacion`.
+- **Detalle**: `GET /api/v1/produccion/pedidos-especiales/{id}/` — igual que el listado, más `detalles[]` con **solo** las líneas/tallas especiales (nunca las líneas de catálogo normales del mismo pedido, ni precios). Cada detalle trae `producto_nombre_externo`, `color_nombre`, y por talla: `cantidad` y los flags/config de bordado, reflejante, corte de manga y cambio de talla.
+- Un pedido sin líneas especiales responde `404` en el detalle (no existe para este endpoint, aunque exista como pedido normal).
+
 ---
 
 ## 📦 WMS - Picking

@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from django.db import transaction
 from rest_framework import serializers
 
+from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+
 from produccion.models import (
     ListaMaterialBom,
     BomDetalle,
@@ -2008,3 +2010,59 @@ class OrdenesCorteMangaRetrieveSerializer(OrdenesCorteMangaSerializer):
     def get_pedido_vinculado(self, obj):
         from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
         return armar_pedido_vinculado(obj)
+
+
+# --- Pedidos con produccion especial (muestras) para el modulo de produccion ---
+# ``requiere_produccion`` en PedidoDetalleTalla ya es el flag canonico (lo pone
+# ventas/utils/helpers.py cuando la linea trae producto_nombre_externo, i.e.
+# una muestra sin SKU de catalogo). Aqui solo se lee, no se recalcula.
+
+class PedidoEspecialListSerializer(serializers.ModelSerializer):
+    """Listado ligero: solo lo necesario para que produccion elija cual abrir."""
+
+    class Meta:
+        model = Pedido
+        fields = ["id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion"]
+
+
+class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
+    talla_nombre = serializers.CharField(source="talla.nombre", read_only=True)
+
+    class Meta:
+        model = PedidoDetalleTalla
+        fields = [
+            "id",
+            "talla_nombre",
+            "cantidad",
+            "lleva_bordado",
+            "bordado_config",
+            "lleva_reflejante",
+            "reflejante_config",
+            "lleva_corte_manga",
+            "corte_manga_config",
+            "lleva_cambio_talla",
+            "cambio_talla_config",
+        ]
+
+
+class PedidoDetalleEspecialSerializer(serializers.ModelSerializer):
+    color_nombre = serializers.SerializerMethodField()
+    # Llenado en la vista via Prefetch(..., to_attr="tallas_especiales"): solo
+    # las tallas con requiere_produccion=True de esta linea, no todas.
+    tallas = PedidoDetalleTallaEspecialSerializer(source="tallas_especiales", many=True, read_only=True)
+
+    class Meta:
+        model = PedidoDetalle
+        fields = ["id", "producto_nombre_externo", "color_nombre", "tallas"]
+
+    def get_color_nombre(self, obj):
+        return obj.color.nombre if obj.color else None
+
+
+class PedidoEspecialDetailSerializer(serializers.ModelSerializer):
+    # Llenado en la vista: solo las lineas con al menos una talla especial.
+    detalles = PedidoDetalleEspecialSerializer(source="detalles_especiales", many=True, read_only=True)
+
+    class Meta:
+        model = Pedido
+        fields = ["id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "detalles"]
