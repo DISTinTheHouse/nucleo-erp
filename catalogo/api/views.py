@@ -44,7 +44,15 @@ class TallaViewSet(viewsets.ModelViewSet):
     serializer_class = TallaSerializer
 
     def get_queryset(self):
-        return Talla.objects.filter(activo=True)
+        qs = Talla.objects.filter(activo=True)
+        categoria_id = self.request.query_params.get('categoria_producto')
+        if categoria_id:
+            try:
+                categoria_id = int(categoria_id)
+            except (TypeError, ValueError):
+                raise ValidationError({"categoria_producto": "Debe ser un entero."})
+            qs = qs.filter(categorias_producto__id=categoria_id).distinct()
+        return qs
 
     def list(self, request, *args, **kwargs):
         # El orden canónico sale de ``nombre`` y no se expresa en SQL: se ordena
