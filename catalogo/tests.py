@@ -394,3 +394,60 @@ class AislamientoEmpresaCatalogoTests(TestCase):
         )
         self.assertEqual(ajena.status_code, 400)
         self.assertEqual(ajena.json(), {"producto": "No pertenece a tu empresa."})
+
+
+class ProductoFiltroTipoMultipleTests(TestCase):
+    """``?tipo_id`` acepta varios valores (repetido o separado por comas)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa_a = Empresa.objects.create(codigo="tip-a", razon_social="A SA")
+        cls.empresa_b = Empresa.objects.create(codigo="tip-b", razon_social="B SA")
+        # Mismos ids que producción: 1=COMPRAS, 2=MP, 3=PT, 5=SERVICIO.
+        tipos = {
+            pk: TipoProducto.objects.create(pk=pk, codigo=codigo)
+            for pk, codigo in ((1, "COMPRAS"), (2, "MP"), (3, "PT"), (5, "SERVICIO"))
+        }
+        cls.por_tipo = {
+            pk: Producto.objects.create(empresa=cls.empresa_a, tipo=tipo, nombre=f"A {tipo.codigo}")
+            for pk, tipo in tipos.items()
+        }
+        cls.ajenos = [
+            Producto.objects.create(empresa=cls.empresa_b, tipo=tipos[pk], nombre=f"B {pk}")
+            for pk in (1, 3)
+        ]
+        cls.user_a = Usuario.objects.create(
+            username="a@tip.test", email="a@tip.test", empresa=cls.empresa_a,
+        )
+
+    def _get(self, query):
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        return client.get(f"{PRODUCTOS_URL}?{query}")
+
+    def _ids(self, query):
+        resp = self._get(query)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return {row["id"] for row in resp.json()}
+
+    def test_un_solo_valor_se_comporta_igual(self):
+        self.assertEqual(self._ids("tipo_id=3"), {self.por_tipo[3].pk})
+
+    def test_param_repetido_devuelve_exactamente_esos_tipos(self):
+        self.assertEqual(
+            self._ids("tipo_id=1&tipo_id=3"), {self.por_tipo[1].pk, self.por_tipo[3].pk},
+        )
+
+    def test_valor_separado_por_comas(self):
+        self.assertEqual(self._ids("tipo_id=1,3"), {self.por_tipo[1].pk, self.por_tipo[3].pk})
+        self.assertEqual(self._ids("tipo_id=1,%203"), {self.por_tipo[1].pk, self.por_tipo[3].pk})
+
+    def test_valor_invalido_mezclado_da_400_con_el_mensaje_existente(self):
+        for query in ("tipo_id=1&tipo_id=x", "tipo_id=1,x", "tipo_id=1,", "tipo_id="):
+            resp = self._get(query)
+            self.assertEqual(resp.status_code, 400, query)
+            self.assertEqual(resp.json(), {"tipo_id": "Must be an integer."}, query)
+
+    def test_varios_tipos_no_amplian_el_alcance_de_empresa(self):
+        ids = self._ids("tipo_id=1&tipo_id=3")
+        self.assertTrue(ids.isdisjoint({p.pk for p in self.ajenos}))

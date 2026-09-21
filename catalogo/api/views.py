@@ -77,13 +77,15 @@ class ProductoViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = _alcance_empresa(super().get_queryset(), self.request.user)
-        tipo_id = self.request.query_params.get('tipo_id')
-        if tipo_id is not None:
+        # ``tipo_id`` acepta uno o varios: repetido (``?tipo_id=1&tipo_id=3``) o
+        # separado por comas (``?tipo_id=1,3``). Un solo valor filtra igual que antes.
+        tipo_ids = self.request.query_params.getlist('tipo_id')
+        if tipo_ids:
             try:
-                tipo_id = int(tipo_id)
+                tipo_ids = [int(valor) for crudo in tipo_ids for valor in crudo.split(',')]
             except (TypeError, ValueError):
                 raise ValidationError({"tipo_id": "Must be an integer."})
-            qs = qs.filter(tipo_id=tipo_id)
+            qs = qs.filter(tipo_id__in=tipo_ids)
         q = (self.request.query_params.get('q') or '').strip()
         if q:
             qs = qs.filter(
