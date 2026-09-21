@@ -419,20 +419,11 @@ class PedidoSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Pedido
-        # Programación de mesa de control: solo se escribe vía
-        # ``editar-mesa-control`` (``PedidoMesaControlHeaderSerializer``, que no
-        # las excluye). Aquí de solo lectura para que un PATCH genérico no se
-        # salte ese flujo — mismo motivo que ``empresa``.
         read_only_fields = [
             'empresa',
-            'fecha_surtir_bordado',
-            'cantidad_surtir_bordado',
-            'fecha_surtir_apartados',
-            'cantidad_surtir_apartados',
-            'fecha_embarque',
-            'cantidad_embarque',
             # Sólo se escribe vía ``PATCH /pedidos/{id}/programar/``, que valida
-            # destino/cantidades y sella fecha/usuario en el servidor.
+            # destino/cantidades y sella fecha/usuario en el servidor. Aquí de
+            # solo lectura para que un PATCH genérico no se salte ese flujo.
             'programacion_conf',
         ]
         fields = '__all__'
@@ -516,22 +507,11 @@ class PedidoOnboardingTallaInputSerializer(serializers.Serializer):
     lleva_serigrafia = serializers.BooleanField(required=False, default=False)
     serigrafia_config = serializers.JSONField(required=False, allow_null=True)
 
-class PedidoOnboardingDetalleInputSerializer(serializers.Serializer):
-    producto = serializers.IntegerField()
-    precio_unitario = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
-    costo_unitario = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
-    tallas = PedidoOnboardingTallaInputSerializer(many=True)
-
 class ServicioExtraInputSerializer(serializers.Serializer):
     nombre = serializers.CharField(max_length=150)
     monto = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, default=0)
     cantidad = serializers.IntegerField(min_value=1, required=False, default=1)
     visible_en_factura = serializers.BooleanField(required=False, default=True)
-
-class PedidoOnboardingCreateSerializer(serializers.Serializer):
-    pedido = PedidoSerializer()
-    detalle = PedidoOnboardingDetalleInputSerializer(many=True)
-    servicios_extras = ServicioExtraInputSerializer(many=True, required=False)
 
 
 class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
