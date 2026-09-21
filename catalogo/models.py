@@ -20,6 +20,9 @@ class CategoriaProducto(models.Model):
     nombre = models.CharField(max_length=100)
     codigo = models.CharField(max_length=3)
     descripcion = models.CharField(max_length=150)
+    unidad_medida = models.ForeignKey(
+        UnidadMedida, on_delete=models.SET_NULL, related_name="categorias_producto", null=True, blank=True,
+    )
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

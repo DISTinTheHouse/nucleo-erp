@@ -15,16 +15,19 @@ from catalogo.models import Producto
 CODIGO_PRODUCTO_MAX_LENGTH = 5
 
 
-def siguiente_codigo_producto(categoria):
+def siguiente_codigo_producto(categoria, lock=True):
+    """``lock=True`` (default) para altas reales, dentro de una transaccion
+    atomica que tambien haga el INSERT. ``lock=False`` para previsualizar en
+    un GET de solo lectura -- el valor mostrado es orientativo, el real se
+    recalcula con lock al momento de crear."""
     prefijo = (categoria.codigo or "").strip().upper()
     ancho = max(CODIGO_PRODUCTO_MAX_LENGTH - len(prefijo), 1)
     tope = 10 ** ancho
 
-    existentes = (
-        Producto.objects.select_for_update()
-        .filter(categoria_producto=categoria, codigo__startswith=prefijo)
-        .values_list("codigo", flat=True)
-    )
+    qs = Producto.objects.filter(categoria_producto=categoria, codigo__startswith=prefijo)
+    if lock:
+        qs = qs.select_for_update()
+    existentes = qs.values_list("codigo", flat=True)
     maximo = -1
     for codigo in existentes:
         sufijo = codigo[len(prefijo):]
