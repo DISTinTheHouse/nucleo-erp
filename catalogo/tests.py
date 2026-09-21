@@ -3,11 +3,12 @@ import random
 from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIClient
 
-from catalogo.models import Talla
+from catalogo.models import Color, Talla
 from catalogo.tallas import talla_sort_key
 from usuarios.models import Usuario
 
 TALLAS_URL = "/api/v1/catalogo/talla/"
+COLORES_URL = "/api/v1/catalogo/color/"
 
 # Las 43 tallas activas reales de producción (tabla ``tallas``, 2026-09-14, ya
 # con ``2XC`` fusionada en ``2XCH`` por catalogo/0020), en el orden canónico
@@ -105,3 +106,22 @@ class TallaViewSetOrdenTests(TestCase):
     def test_retrieve_sigue_funcionando(self):
         talla = Talla.objects.get(nombre="UNI")
         self.assertEqual(self._get(f"{TALLAS_URL}{talla.pk}/")["nombre"], "UNI")
+
+
+class ColorViewSetOrdenTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        for nombre in ["Zafiro", "Rojo", "azul", "Verde", "amarillo", "Negro"]:
+            Color.objects.create(nombre=nombre, codigo=nombre[:3].upper(), codigo_hex="#000000")
+        Color.objects.create(nombre="Aaa inactivo", codigo="INA", codigo_hex="#000000", activo=False)
+        cls.usuario = Usuario.objects.create(username="c@x.test", email="c@x.test")
+
+    def test_list_ordena_alfabeticamente_sin_distinguir_mayusculas(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        resp = client.get(COLORES_URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            [c["nombre"] for c in resp.json()],
+            ["amarillo", "azul", "Negro", "Rojo", "Verde", "Zafiro"],
+        )

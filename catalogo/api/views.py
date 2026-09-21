@@ -1,5 +1,6 @@
 from django.db import transaction
 from django.db.models import Exists, OuterRef, Q
+from django.db.models.functions import Lower
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -24,7 +25,7 @@ class ColorViewSet(viewsets.ModelViewSet):
     serializer_class = ColorSerializer
 
     def get_queryset(self):
-        return Color.objects.filter(activo=True)
+        return Color.objects.filter(activo=True).order_by(Lower("nombre"), "id")
 
 class TallaViewSet(viewsets.ModelViewSet):
     serializer_class = TallaSerializer
