@@ -19,7 +19,14 @@ from rest_framework.test import APIClient, APIRequestFactory
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Color, Producto, ProductoVariante
 from inventarios.api.serializers import ExistenciaSerializer
-from inventarios.models import Almacen, Existencia, Ubicacion
+from inventarios.models import (
+    AjusteInventario,
+    Almacen,
+    Existencia,
+    MovimientoInventario,
+    MovimientoInventarioDetalle,
+    Ubicacion,
+)
 from nucleo.models import Empresa, Sucursal
 from usuarios.models import Usuario
 
@@ -383,3 +390,130 @@ class ExistenciaViewSetScopeTenantTests(TestCase):
             ubicacion=self.a["ubicacion"].pk,
         )
         self.assertEqual(resp.status_code, 201, resp.content)
+
+
+OPERACIONES_URL = "/api/v1/inventarios/operaciones/"
+
+
+class OperacionInventarioScopeTenantTests(TestCase):
+    """``OperacionInventarioViewSet`` (entrada/salida/ajuste): aislamiento.
+
+    Mismo alcance que ``ExistenciaViewSet`` (``almacenes_en_alcance``). El
+    almacén fuera de alcance se trata como no encontrado (400 con el mensaje
+    existente, igual que un pedido de otra empresa en ``_get_pedido``).
+    """
+
+    @classmethod
+    def _tenant(cls, codigo):
+        empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+        sucursal = Sucursal.objects.create(empresa=empresa, codigo=codigo[:3].upper(), nombre=codigo)
+        almacen = Almacen.objects.create(
+            empresa=empresa, sucursal=sucursal, codigo=f"{codigo}-1", nombre=f"{codigo} 1",
+        )
+        ubicacion = Ubicacion.objects.create(almacen=almacen, pasillo="1")
+        producto = Producto.objects.create(empresa=empresa, nombre=f"Producto {codigo}")
+        variante = ProductoVariante.objects.create(
+            producto=producto, empresa=empresa, color=cls.color, sku=f"{codigo}-SKU", precio_base="1",
+        )
+        existencia = Existencia.objects.create(producto=producto, almacen=almacen, cantidad="10")
+        admin = Usuario.objects.create(
+            username=f"a@{codigo}.test", email=f"a@{codigo}.test", empresa=empresa, is_admin_empresa=True,
+        )
+        admin.sucursales.add(sucursal)
+        return {
+            "empresa": empresa, "sucursal": sucursal, "almacen": almacen, "ubicacion": ubicacion,
+            "producto": producto, "variante": variante, "existencia": existencia, "admin": admin,
+        }
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        cls.a = cls._tenant("acme-op")
+        cls.b = cls._tenant("globex-op")
+        cls.superuser = Usuario.objects.create(
+            username="root-op", email="root@nowhere-op.test", is_superuser=True,
+        )
+
+    def _post(self, user, tipo, almacen, items, **extra):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.post(
+            f"{OPERACIONES_URL}{tipo}/", {"almacen": almacen.pk, "items": items, **extra}, format="json",
+        )
+
+    def _huella(self):
+        """Todo lo que una operación escribe: debe quedar intacto si se rechaza."""
+        return (
+            sorted(Existencia.objects.values_list("id", "cantidad")),
+            MovimientoInventario.objects.count(),
+            MovimientoInventarioDetalle.objects.count(),
+            AjusteInventario.objects.count(),
+            AuditoriaEvento.objects.filter(modulo="inventarios").count(),
+        )
+
+    def _assert_rechazo_sin_escrituras(self, resp, campo, status=400):
+        self.assertEqual(resp.status_code, status, resp.content)
+        self.assertIn(campo, resp.json())
+
+    # --- alcance del almacén ----------------------------------------------------
+
+    def test_almacen_de_otra_empresa_es_rechazado_en_las_tres_operaciones(self):
+        antes = self._huella()
+        for tipo, cantidad in (("entrada", "1"), ("salida", "1"), ("ajuste", "0")):
+            resp = self._post(
+                self.a["admin"], tipo, self.b["almacen"],
+                [{"producto": self.b["producto"].pk, "cantidad": cantidad}],
+            )
+            self._assert_rechazo_sin_escrituras(resp, "almacen")
+            self.assertEqual(resp.json(), {"almacen": "Almacén no encontrado."})
+        self.assertEqual(self._huella(), antes)
+
+    def test_usuario_sin_alcance_es_rechazado(self):
+        sin_empresa = Usuario.objects.create(
+            username="huerfano-op", email="huerfano@nowhere-op.test", is_admin_empresa=True,
+        )
+        sin_empresa.sucursales.add(self.b["sucursal"])  # la sucursal sola no abre el alcance
+        sin_sucursal = Usuario.objects.create(
+            username="sinsuc-op", email="sinsuc@acme-op.test",
+            empresa=self.a["empresa"], is_admin_empresa=True,
+        )
+        antes = self._huella()
+        for user, almacen, producto in (
+            (sin_empresa, self.b["almacen"], self.b["producto"]),
+            (sin_sucursal, self.a["almacen"], self.a["producto"]),
+        ):
+            resp = self._post(user, "entrada", almacen, [{"producto": producto.pk, "cantidad": "1"}])
+            self._assert_rechazo_sin_escrituras(resp, "almacen")
+        self.assertEqual(self._huella(), antes)
+
+    def test_superusuario_opera_en_cualquier_almacen(self):
+        resp = self._post(
+            self.superuser, "entrada", self.b["almacen"], [{"producto": self.b["producto"].pk, "cantidad": "4"}],
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.b["existencia"].refresh_from_db()
+        self.assertEqual(str(self.b["existencia"].cantidad), "14.0000")
+
+    def test_entrada_salida_y_ajuste_legitimos_actualizan_el_stock(self):
+        ex = self.a["existencia"]
+        pasos = (("entrada", "5", "15.0000"), ("salida", "3", "12.0000"), ("ajuste", "7", "7.0000"))
+        for tipo, cantidad, esperado in pasos:
+            resp = self._post(
+                self.a["admin"], tipo, self.a["almacen"], [{"producto": self.a["producto"].pk, "cantidad": cantidad}],
+            )
+            self.assertEqual(resp.status_code, 200, (tipo, resp.content))
+            self.assertEqual(resp.json()["result"][0]["id"], ex.pk)
+            ex.refresh_from_db()
+            self.assertEqual(str(ex.cantidad), esperado, tipo)
+        self.assertEqual(MovimientoInventario.objects.filter(empresa=self.a["empresa"]).count(), 3)
+        self.assertEqual(AjusteInventario.objects.filter(almacen=self.a["almacen"]).count(), 1)
+        # Variante + ubicación del mismo almacén: crea su propia existencia.
+        resp = self._post(
+            self.a["admin"], "entrada", self.a["almacen"],
+            [{"producto_variante": self.a["variante"].pk, "ubicacion": self.a["ubicacion"].pk, "cantidad": "2"}],
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            str(Existencia.objects.get(producto_variante=self.a["variante"], ubicacion=self.a["ubicacion"]).cantidad),
+            "2.0000",
+        )

@@ -675,11 +675,13 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         almacen_id = self._to_int(request.data.get("almacen") or request.data.get("almacen_id"))
         if not almacen_id:
             raise ValidationError({"almacen": "Almacén es requerido."})
-        almacen = (
-            Almacen.objects.select_related("empresa", "sucursal")
-            .filter(pk=almacen_id)
-            .first()
-        )
+        qs = Almacen.objects.select_related("empresa", "sucursal")
+        # Aislamiento multi-tenant: mismo alcance que existencias. Un almacén
+        # fuera de alcance se trata como no encontrado (igual que un pedido de
+        # otra empresa en ``_get_pedido``), sin revelar que existe.
+        if not request.user.is_superuser:
+            qs = qs.filter(pk__in=almacenes_en_alcance(request.user))
+        almacen = qs.filter(pk=almacen_id).first()
         if not almacen:
             raise ValidationError({"almacen": "Almacén no encontrado."})
         return almacen
