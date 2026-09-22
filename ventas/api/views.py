@@ -2910,6 +2910,104 @@ class PedidoViewSet(viewsets.ModelViewSet):
             }
         )
 
+    @action(detail=True, methods=["post"], url_path="recomprar")
+    def recomprar(self, request, pk=None):
+        """Clona este pedido en una ``Cotizacion`` nueva (BORRADOR) para que el
+        vendedor la ajuste (cantidades, tallas, etc.) antes de mandarla a
+        revisión — es el espejo inverso de ``_copiar_cotizacion_a_pedido``
+        (que corre al autorizar una cotización), reusando el mismo
+        ``PEDIDO_COTIZACION_MIRROR_FIELDS`` para la cabecera.
+
+        No modifica el pedido original ni requiere que tenga una cotización
+        de origen (a diferencia de ``editar-mesa-control``, que sí).
+        """
+        user = request.user
+        pedido = self.get_object()
+
+        with transaction.atomic():
+            cotizacion = Cotizacion.objects.create(
+                empresa=pedido.empresa,
+                vendedor=user,
+                estatus=1,  # BORRADOR: el vendedor edita libremente antes de enviarla a revisión
+                **{
+                    field: getattr(pedido, field)
+                    for field in PEDIDO_COTIZACION_MIRROR_FIELDS
+                },
+            )
+            # ``recompra`` viene en el mirror (copia el valor del pedido origen,
+            # que normalmente es False); esta acción SIEMPRE es una recompra.
+            cotizacion.recompra = True
+            cotizacion.save(update_fields=["recompra"])
+
+            detalles = (
+                PedidoDetalle.objects.filter(pedido=pedido)
+                .prefetch_related("tallas")
+                .order_by("id")
+            )
+            for det in detalles:
+                cot_det = CotizacionDetalle.objects.create(
+                    cotizacion=cotizacion,
+                    producto=det.producto,
+                    producto_nombre_externo=det.producto_nombre_externo,
+                    color=det.color,
+                    direccion_envio_cliente=det.direccion_envio_cliente,
+                    precio_lista=det.precio_lista,
+                    precio_unitario=det.precio_unitario,
+                    costo_unitario=det.costo_unitario,
+                    subtotal_linea=det.subtotal_linea,
+                )
+                for t in det.tallas.all():
+                    CotizacionDetalleTalla.objects.create(
+                        cotizacion_detalle=cot_det,
+                        talla=t.talla,
+                        cantidad=t.cantidad,
+                        precio_unitario=t.precio_unitario,
+                        subtotal_talla=t.subtotal_talla,
+                        lleva_bordado=t.lleva_bordado,
+                        bordado_config=t.bordado_config,
+                        lleva_reflejante=t.lleva_reflejante,
+                        reflejante_config=t.reflejante_config,
+                        lleva_corte_manga=t.lleva_corte_manga,
+                        corte_manga_config=t.corte_manga_config,
+                        lleva_cambio_talla=t.lleva_cambio_talla,
+                        cambio_talla_config=t.cambio_talla_config,
+                        requiere_produccion=t.requiere_produccion,
+                        variante=t.variante,
+                        sku=getattr(t.variante, "sku", None),
+                    )
+
+            for s in PedidoServicioExtra.objects.filter(pedido=pedido).order_by("id"):
+                CotizacionServicioExtra.objects.create(
+                    cotizacion=cotizacion,
+                    nombre=s.nombre,
+                    monto=s.monto,
+                    cantidad=s.cantidad,
+                    visible_en_factura=s.visible_en_factura,
+                )
+
+        cotizacion = Cotizacion.objects.filter(pk=cotizacion.pk).first()
+        detalles_qs = CotizacionDetalle.objects.filter(
+            cotizacion=cotizacion
+        ).prefetch_related("tallas")
+        servicios_extras_qs = CotizacionServicioExtra.objects.filter(
+            cotizacion=cotizacion
+        ).order_by("id")
+        return Response(
+            {
+                "cotizacion": CotizacionSerializer(cotizacion).data,
+                "detalles": CotizacionDetalleWithTallasSerializer(
+                    detalles_qs, many=True
+                ).data,
+                "servicios_extras": list(
+                    servicios_extras_qs.values(
+                        "id", "nombre", "monto", "cantidad", "visible_en_factura"
+                    )
+                ),
+                "pedido_origen": pedido.pk,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
 
 class PedidoDetalleViewSet(viewsets.ModelViewSet):
     queryset = PedidoDetalle.objects.all()

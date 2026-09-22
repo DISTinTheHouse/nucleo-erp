@@ -1462,6 +1462,41 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
     - No asumas que existen los keys $$; usa `pedido?.campo ?? fallback` para no romper en WMS/Compras.
     - Para abrir en pestaña nueva desde "Ver detalles": `window.open(\`/pedidos/\${id}\`, "\_blank")`(o`next/navigation`+`<Link target="_blank">`).
 
+### Recompra de pedido
+
+Botón "Recompra" en el detalle del pedido: crea una **Cotización nueva** (no un pedido nuevo) con el mismo cliente/productos/tallas/precios del pedido, para que el vendedor la ajuste (cantidades, tallas, servicios extra, etc.) antes de mandarla a revisión/autorización — es el flujo normal de cotización, solo que pre-llenada.
+
+- **Endpoint**: `POST /api/v1/ventas/pedidos/{id}/recomprar/`
+- No requiere body.
+- Efecto:
+  - Crea una `Cotizacion` en estatus `BORRADOR (1)`, con `recompra: true` y `vendedor` = el usuario que hizo la petición.
+  - Copia la cabecera del pedido (cliente, sucursal, moneda, forma/método de pago, uso CFDI, condiciones de pago, datos de envío, subtotal/iva/gran_total, etc.).
+  - Clona cada renglón (`PedidoDetalle` + tallas, incluyendo `bordado_config`/`reflejante_config`/`corte_manga_config`) y cada servicio extra a sus equivalentes de Cotización.
+  - **No modifica el pedido original** — es solo lectura sobre él.
+- **Respuesta** (`201`): mismo shape que `POST /api/v1/ventas/cotizaciones/onboarding/`, para reusar la misma pantalla de edición de cotización:
+  ```json
+  {
+    "cotizacion": { "id": 55, "estatus": 1, "recompra": true, "cliente": 12, "gran_total": "580.00", "...": "resto de campos de Cotizacion" },
+    "detalles": [
+      {
+        "id": 1,
+        "producto": 7,
+        "precio_unitario": "100.00",
+        "subtotal_linea": "500.00",
+        "tallas": [
+          { "id": 1, "talla": 3, "talla_nombre": "CH", "cantidad": 5, "subtotal_talla": "500.00" }
+        ]
+      }
+    ],
+    "servicios_extras": [
+      { "id": 1, "nombre": "Flete", "monto": "80.00", "cantidad": 1, "visible_en_factura": true }
+    ],
+    "pedido_origen": 45
+  }
+  ```
+- Uso recomendado en Next.js: al recibir la respuesta, navegar a la pantalla de edición de cotización con `cotizacion_id = cotizacion.id` (la misma pantalla que usa `POST /cotizaciones/onboarding/` con `cotizacion_id` para editar) — el vendedor ajusta lo que necesite y de ahí sigue el flujo normal (enviar a revisión → autorizar → se genera un `Pedido` nuevo).
+- Alcance: mismo aislamiento multi-tenant que el resto de `PedidoViewSet` (`get_object()` ya está acotado por `pedidos_visibles`); no hay restricción adicional de rol — cualquier usuario que pueda ver el pedido puede recomprarlo.
+
 ---
 
 ## 🧮 Mesa de Control
