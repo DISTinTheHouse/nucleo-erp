@@ -441,7 +441,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         user = request.user
         empresa = getattr(user, "empresa", None)
         oc = self.get_object()
-        if empresa and oc.empresa_id != empresa.pk:
+        # ``get_object`` ya acota por ``user.empresa`` (sin empresa: 404), así que
+        # esta guarda no cambia nada; se cierra para que no dependa de ello.
+        if empresa is None or oc.empresa_id != empresa.pk:
             raise ValidationError({"orden_compra_id": "No tienes acceso a esta orden de compra."})
         if oc.estatus not in {
             OrdenCompra.EstatusOrdenCompra.BORRADOR,
@@ -453,6 +455,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             body_proveedor_id = int(body_proveedor_id) if body_proveedor_id not in (None, "") else None
         except Exception:
             body_proveedor_id = None
+        # Antes de la primera escritura (folio y ``oc.save()``).
+        self._validar_encabezado_empresa(oc.empresa, proveedor_id=body_proveedor_id)
 
         if OrdenCompraDetalle.objects.filter(orden_compra=oc).count() <= 0:
             raise ValidationError({"detalle": "Agrega al menos un producto antes de aceptar."})

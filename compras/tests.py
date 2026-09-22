@@ -462,6 +462,23 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
             put = client.put(f"{ORDENES_URL}{self.oc.pk}/", {"detalle": lineas}, format="json")
             self._assert_rechazo(put, "detalle", mensaje, antes)
 
+    # --- aceptar -----------------------------------------------------------------
+
+    def test_aceptar_rechaza_proveedor_de_otra_empresa(self):
+        antes = self._huella()
+        for user in (self.usuario, self.superuser):
+            resp = self._client(user).post(
+                f"{ORDENES_URL}{self.oc.pk}/aceptar/", {"proveedor": self.b["proveedor"].pk}, format="json",
+            )
+            self._assert_rechazo(resp, "proveedor", "El proveedor no pertenece a la empresa de la orden.", antes)
+
+    def test_aceptar_superusuario_sin_empresa_sigue_siendo_404(self):
+        # ``get_object`` ya acota por ``user.empresa``: sin empresa, 404 antes de
+        # la guarda; cerrarla no cambia nada.
+        root = Usuario.objects.create(username="root2@acme-oc.test", email="root2@acme-oc.test", is_superuser=True)
+        resp = self._client(root).post(f"{ORDENES_URL}{self.oc.pk}/aceptar/", {}, format="json")
+        self.assertEqual(resp.status_code, 404)
+
     # --- flujos legítimos --------------------------------------------------------
 
     def test_moneda_global_o_propia_se_acepta(self):
