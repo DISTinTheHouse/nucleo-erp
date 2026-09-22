@@ -13,6 +13,7 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test inventarios --settings=sqlite_settings
 """
 
+from decimal import Decimal
 from unittest import mock
 
 from django.db import DatabaseError
@@ -559,6 +560,44 @@ class OperacionInventarioScopeTenantTests(TestCase):
                     [{"producto": self.a["producto"].pk, "cantidad": "3"}],
                 )
         self.assertEqual(self._huella(), antes)
+
+    # --- movimiento formal: la variante de cada línea se conserva --------------
+
+    def test_movimiento_formal_guarda_la_variante_de_cada_linea(self):
+        variante, ubicacion = self.a["variante"], self.a["ubicacion"]
+        # (tipo, cantidad enviada, cantidad del detalle, stock final, origen, destino)
+        pasos = (
+            ("entrada", "5", "5", "5.0000", None, ubicacion.pk),
+            ("salida", "2", "2", "3.0000", ubicacion.pk, None),
+            ("ajuste", "7", "7", "7.0000", ubicacion.pk, ubicacion.pk),
+        )
+        for tipo, enviada, en_detalle, stock, origen, destino in pasos:
+            resp = self._post(
+                self.a["admin"], tipo, self.a["almacen"],
+                [{"producto_variante": variante.pk, "ubicacion": ubicacion.pk, "cantidad": enviada}],
+            )
+            self.assertEqual(resp.status_code, 200, (tipo, resp.content))
+            detalle = MovimientoInventarioDetalle.objects.get(
+                movimiento_inventario_id=resp.json()["movimiento_inventario_id"],
+            )
+            self.assertEqual(detalle.producto_variante_id, variante.pk, tipo)
+            # Lo que ya se guardaba no cambia.
+            self.assertEqual(detalle.producto_id, variante.producto_id, tipo)
+            self.assertEqual(detalle.cantidad, Decimal(en_detalle), tipo)
+            self.assertEqual((detalle.ubicacion_origen_id, detalle.ubicacion_destino_id), (origen, destino), tipo)
+            existencia = Existencia.objects.get(producto_variante=variante, ubicacion=ubicacion)
+            self.assertEqual(str(existencia.cantidad), stock, tipo)
+            self.assertEqual(existencia.almacen_id, self.a["almacen"].pk, tipo)
+
+    def test_linea_sin_variante_sigue_sin_variante_en_el_movimiento(self):
+        resp = self._post(
+            self.a["admin"], "entrada", self.a["almacen"], [{"producto": self.a["producto"].pk, "cantidad": "1"}],
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        detalle = MovimientoInventarioDetalle.objects.get(
+            movimiento_inventario_id=resp.json()["movimiento_inventario_id"],
+        )
+        self.assertEqual((detalle.producto_id, detalle.producto_variante_id), (self.a["producto"].pk, None))
 
     def test_superusuario_opera_en_cualquier_almacen(self):
         resp = self._post(

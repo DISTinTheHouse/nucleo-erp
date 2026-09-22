@@ -868,6 +868,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             MovimientoInventarioDetalle.objects.create(
                 movimiento_inventario=movimiento,
                 producto_id=item["producto_id"],
+                producto_variante_id=item["producto_variante_id"],
                 ubicacion_origen_id=item["ubicacion_origen_id"],
                 ubicacion_destino_id=item["ubicacion_destino_id"],
                 lote_id=item["lote_id"],
@@ -989,6 +990,9 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 detalle_movimientos.append(
                     {
                         "producto_id": ex.producto_id,
+                        # ``ex`` se buscó por la variante de la línea (o sin
+                        # variante si la línea no trae): es la misma.
+                        "producto_variante_id": ex.producto_variante_id,
                         "ubicacion_origen_id": ubicacion_origen_id,
                         "ubicacion_destino_id": ubicacion_destino_id,
                         "lote_id": it["lote_id"],
