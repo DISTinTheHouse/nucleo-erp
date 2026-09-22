@@ -1138,9 +1138,11 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 empresa_origen = oc.empresa if oc else op.empresa
                 sucursal_origen = oc.sucursal if oc else op.sucursal
                 proveedor_origen = oc.proveedor if oc else None
-                if empresa_origen.pk and almacen.empresa_id and empresa_origen.pk != almacen.empresa_id:
+                # Un almacén sin empresa se rechaza: antes la guarda era
+                # ``... and almacen.empresa_id and ...`` y sin empresa se saltaba.
+                if almacen.empresa_id is None or almacen.empresa_id != empresa_origen.pk:
                     raise ValidationError({"almacen": "El almacén no pertenece a la empresa de la orden."})
-                if sucursal_origen.pk and almacen.sucursal_id and sucursal_origen.pk != almacen.sucursal_id:
+                if almacen.sucursal_id is None or almacen.sucursal_id != sucursal_origen.pk:
                     raise ValidationError({"almacen": "El almacén no pertenece a la sucursal de la orden."})
                 transportista_id = header.get("transportista")
                 if transportista_id and not Transportista.objects.filter(pk=transportista_id).exists():
