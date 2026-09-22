@@ -1,6 +1,8 @@
 asgiref==3.11.1
 attrs==25.4.0
+certifi==2026.7.22
 cffi==2.0.0
+charset-normalizer==3.5.1
 cryptography==50.0.0
 dj-database-url==2.1.0
 Django==6.0.7
@@ -16,6 +18,7 @@ drf-auth-kit==1.1.4
 drf-spectacular==0.28.0
 et_xmlfile==2.0.0
 gunicorn==22.0.0
+idna==3.20
 inflection==0.5.1
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
@@ -31,10 +34,12 @@ pyotp==2.9.0
 python-decouple==3.8
 PyYAML==6.0.1
 referencing==0.37.0
+requests==2.34.2
 rpds-py==0.30.0
 sqlparse==0.6.0
 structlog==25.5.0
 typing_extensions==4.15.0
 tzdata==2025.3
 uritemplate==4.1.1
+urllib3==2.8.0
 whitenoise==6.6.0

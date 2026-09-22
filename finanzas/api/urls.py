@@ -18,6 +18,8 @@ from .views import (
     NotaCreditoViewSet,
     PagoViewSet,
     PolizaViewSet,
+    FacturamaProductsViewSet,
+    FacturamaCfdiEmisionViewSet
 )
 
 router = DefaultRouter()
@@ -38,6 +40,9 @@ router.register(r'conciliaciones-bancarias', ConciliacionBancariaViewSet, basena
 router.register(r'notas-credito', NotaCreditoViewSet, basename='nota-credito')
 router.register(r'alertas-mora', AlertaMoraViewSet, basename='alerta-mora')
 router.register(r'dashboard', DashboardFinancieroViewSet, basename='finanzas-dashboard')
+router.register(r'facturama/productos', FacturamaProductsViewSet, basename='facturama-productos')
+router.register(r'facturama/cfdi', FacturamaCfdiEmisionViewSet, basename='facturama-cfdi')
+
 
 urlpatterns = [
     path('', include(router.urls)),

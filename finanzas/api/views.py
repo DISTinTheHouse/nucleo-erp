@@ -1,5 +1,4 @@
 from decimal import Decimal
-
 from django.db import OperationalError, transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
@@ -8,7 +7,8 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.fields import get_error_detail
 from rest_framework.response import Response
-
+from finanzas.services.facturama.service import FacturamaService
+from finanzas.services.facturama.exceptions import FacturamaAPIException
 from finanzas.exceptions import (
     CONCURRENCY_SQLSTATES,
     CONCURRENT_OPERATION_MESSAGE,
@@ -61,6 +61,10 @@ from finanzas.api.serializers import (
     NotaCreditoSerializer,
     PagoSerializer,
     PolizaSerializer,
+    FacturamaProductSerializer,
+    FacturamaCfdiCreateSerializer,
+    FacturamaCfdiFileSerializer,
+    FacturamaAcuseSerializer
 )
 
 from finanzas.services.alerta_mora_service import AlertaMoraService
@@ -2240,3 +2244,173 @@ class DashboardFinancieroViewSet(FinanzasBaseSimpleViewSet):
                 moneda_id=moneda,
             )
         )
+
+class FacturamaProductsViewSet(viewsets.ViewSet):
+    service_class = FacturamaService
+
+    def get_service(self):
+        return self.service_class()
+
+    def handle_facturama_error(self, exc):
+        return Response(
+            {
+                "error": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            },
+            status=(
+                exc.status_code
+                if exc.status_code and exc.status_code < 500
+                else status.HTTP_502_BAD_GATEWAY
+            )
+        )
+    
+    def list(self, request):
+        try:
+            service = self.get_service()
+            res = service.get_products(**request.query_params.dict())
+            return Response(res)
+        except FacturamaAPIException as exc:
+            return self.handle_facturama_error(exc)
+
+    def retrieve(self, request, pk=None):
+        try:
+            service = self.get_service()
+            res = service.get_product(pk)
+            return Response(res)
+        except FacturamaAPIException as exc:
+            return self.handle_facturama_error(exc)
+
+    def create(self, request):
+        serializer = FacturamaProductSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            service = self.get_service()
+            response = service.create_product(serializer.validated_data)
+            return Response(response, status=status.HTTP_201_CREATED)
+
+        except FacturamaAPIException as exc:
+            return self.handle_facturama_error(exc)
+
+    def update(self, request, pk=None):
+        serializer = FacturamaProductSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            service = self.get_service()
+            response = service.update_product(
+                pk,
+                serializer.validated_data
+            )
+            return Response(response)
+
+        except FacturamaAPIException as exc:
+            return self.handle_facturama_error(exc)
+
+    def destroy(self, request, pk=None):
+        try:
+            service = self.get_service()
+            response = service.delete_product(pk)
+            return Response(response, status=status.HTTP_200_OK)
+
+        except FacturamaAPIException as exc:
+            return self.handle_facturama_error(exc)
+
+class FacturamaCfdiEmisionViewSet(viewsets.ViewSet):
+    service_class = FacturamaService
+
+    def get_service(self):
+        return self.service_class()
+
+    def handle_facturama_error(self, exc):
+        return Response(
+            {
+                "error": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            },
+            status=(
+                exc.status_code
+                if exc.status_code and exc.status_code < 500
+                else status.HTTP_502_BAD_GATEWAY
+            )
+        )
+
+    def create(self, request):
+        serializer = FacturamaCfdiCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            service = self.get_service()
+            response = service.create_cfdi_emision(serializer.validated_data)
+            return Response(response, status=status.HTTP_201_CREATED)
+
+        except FacturamaAPIException as exc:
+            return self.handle_facturama_error(exc)
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path=r"(?P<file_format>[^/.]+)/(?P<cfdi_type>[^/.]+)/(?P<cfdi_id>[^/.]+)"
+    )
+    def cfdi_file(
+        self,
+        request,
+        file_format=None,
+        cfdi_type=None,
+        cfdi_id=None
+    ):
+        serializer = FacturamaCfdiFileSerializer(
+            data={
+                "format": file_format,
+                "type": cfdi_type,
+                "id": cfdi_id,
+            }
+        )
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            service = self.get_service()
+            response = service.get_cfdi_file(
+                file_format=file_format,
+                cfdi_type=cfdi_type,
+                cfdi_id=cfdi_id
+            )
+
+            return Response(response)
+
+        except FacturamaAPIException as exc:
+            return self.handle_facturama_error(exc)
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path=r"acuse/(?P<file_format>[^/.]+)/(?P<cfdi_type>[^/.]+)/(?P<cfdi_id>[^/.]+)"
+    )
+    def acuse(
+        self,
+        request,
+        file_format=None,
+        cfdi_type=None,
+        cfdi_id=None
+    ):
+        serializer = FacturamaAcuseSerializer(
+            data={
+                "format": file_format,
+                "type": cfdi_type,
+                "id": cfdi_id,
+            }
+        )
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            service = self.get_service()
+            response = service.get_cfdi_acknowledgement(
+                file_format=file_format,
+                cfdi_type=cfdi_type,
+                cfdi_id=cfdi_id
+            )
+            return Response(response)
+        except FacturamaAPIException as exc:
+            return self.handle_facturama_error(exc)

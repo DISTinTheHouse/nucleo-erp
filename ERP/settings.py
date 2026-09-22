@@ -195,6 +195,7 @@ USE_REMOTE_DB = config('USE_REMOTE_DB', default=(IS_VERCEL or ENVIRONMENT.lower(
 FACTURAMA_BASE_URL = config('FACTURAMA_BASE_URL', default='https://apisandbox.facturama.mx')
 FACTURAMA_USERNAME = config('FACTURAMA_USERNAME', default=config('FACTURAMA_USER', default=''))
 FACTURAMA_PASSWORD = config('FACTURAMA_PASSWORD', default='')
+FACTURAMA_TIMEOUT = config('FACTURAMA_TIMEOUT', default=30)
 
 LOCAL_POSTGRES_DB_HOST = config('LOCAL_POSTGRES_DB_HOST', default='127.0.0.1')
 LOCAL_POSTGRES_DB_USER = config('LOCAL_POSTGRES_DB_USER', default='postgres')
