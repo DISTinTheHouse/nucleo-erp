@@ -966,6 +966,65 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
 
 ## 👤 Terceros
 
+### Detalle de Cliente (con resumen comercial)
+
+- **Endpoint**: `GET /api/v1/terceros/clientes/{id}/`
+- Trae todos los campos del cliente (los mismos de siempre) **más** un bloque `resumen_comercial` con el historial de pedidos/cotizaciones del cliente — pensado para que el vendedor vea de un vistazo "qué tanto me ha comprado este cliente" al abrir su ficha.
+- **Solo aparece en el detalle** (`retrieve`), no en el listado (`GET /clientes/`) ni en `GET /clientes-mesa-control/{id}/` — evita disparar una consulta de agregación por cada fila de una lista.
+- El resumen se calcula sobre los pedidos/cotizaciones del cliente ya visibles para el usuario (el cliente en sí ya pasó por el aislamiento multi-tenant de `get_queryset`); no requiere parámetros adicionales.
+- **Respuesta**:
+  ```json
+  {
+    "id": 1,
+    "empresa": 73,
+    "vendedores": [4, 9],
+    "razon_social": "COMERCIALIZADORA EJEMPLO SA DE CV",
+    "nombre": "Comercializadora Ejemplo",
+    "rfc": "CEJ850101AAA",
+    "correo": "compras@ejemplo.mx",
+    "telefono": "5512345678",
+    "...": "resto de campos del cliente, sin cambios",
+    "resumen_comercial": {
+      "total_pedidos": 12,
+      "total_cotizaciones": 15,
+      "pedidos_por_estatus": {
+        "BORRADOR": 1,
+        "EN PROCESO": 3,
+        "AUTORIZADA": 2,
+        "CANCELADO": 1
+      },
+      "montos_por_moneda": [
+        { "moneda": "MXN", "total": "125340.50" }
+      ],
+      "ultimo_pedido": {
+        "id": 88,
+        "folio": "PED-000088",
+        "fecha": "2026-08-01T10:00:00Z",
+        "estatus": 4,
+        "estatus_display": "EN PROCESO",
+        "gran_total": "10500.00",
+        "moneda": "MXN"
+      },
+      "pedidos_recientes": [
+        {
+          "id": 88,
+          "folio": "PED-000088",
+          "fecha": "2026-08-01T10:00:00Z",
+          "estatus": 4,
+          "estatus_display": "EN PROCESO",
+          "gran_total": "10500.00",
+          "moneda": "MXN"
+        }
+      ]
+    }
+  }
+  ```
+- Notas para el front:
+  - `total_pedidos` cuenta todos los pedidos no borrados del cliente (incluye cancelados); `pedidos_por_estatus` desglosa cuántos hay en cada estatus (usa las mismas etiquetas de `Pedido.CHOICES_ESTATUS`: BORRADOR, POR AUTORIZAR, AUTORIZADA, EN PROCESO, CANCELADO) — útil para mostrar chips/badges.
+  - `montos_por_moneda` **excluye pedidos CANCELADO** (no se sumaron a la venta real) y viene separado por moneda por si el cliente compra en más de una — no asumas que solo hay un elemento en el arreglo.
+  - `ultimo_pedido` es `null` si el cliente no tiene pedidos todavía; si existe, es el mismo objeto que aparece primero en `pedidos_recientes`.
+  - `pedidos_recientes` trae como máximo los 5 pedidos más nuevos (por fecha de creación), pensado para una mini-tabla o timeline en la ficha del cliente — no es un listado paginado; si se necesita el historial completo, usar `GET /api/v1/ventas/pedidos/?cliente={id}`.
+
 ### Direcciones Cliente
 
 Listado de direcciones registradas de los clientes, incluyendo información de ubicación y configuración.
