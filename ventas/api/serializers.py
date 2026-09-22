@@ -340,6 +340,20 @@ class PedidoSerializer(serializers.ModelSerializer):
     # Solo lectura: no cambia el contrato de escritura de ningún endpoint de
     # Pedido (POST/PATCH ignoran ``detalles``).
     detalles = serializers.SerializerMethodField()
+    # Derivadas de ``clasificacion`` + ``created_at`` (ver
+    # ``ventas.services.clasificacion_service``); no son columnas, se
+    # recalculan en cada lectura. ``None`` si el pedido no tiene clasificación
+    # o es ``X`` (solo para facturar, sin compromiso de entrega).
+    fecha_entrega_min = serializers.SerializerMethodField()
+    fecha_entrega_max = serializers.SerializerMethodField()
+
+    def get_fecha_entrega_min(self, obj):
+        from ventas.services.clasificacion_service import rango_fecha_entrega
+        return rango_fecha_entrega(obj)[0]
+
+    def get_fecha_entrega_max(self, obj):
+        from ventas.services.clasificacion_service import rango_fecha_entrega
+        return rango_fecha_entrega(obj)[1]
 
     def get_servicios_extras(self, obj):
         # Sin ``.order_by("id")``: el orden lo impone el ``Prefetch`` del
