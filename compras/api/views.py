@@ -788,6 +788,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             MovimientoInventarioDetalle.objects.create(
                 movimiento_inventario=movimiento,
                 producto_id=item["producto_id"],
+                # Renglón de OP: siempre trae variante; de OC: nunca.
+                producto_variante_id=item["producto_variante_id"],
                 ubicacion_origen_id=None,
                 ubicacion_destino_id=item["ubicacion_id"],
                 lote_id=item.get("lote_id"),

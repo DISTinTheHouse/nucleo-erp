@@ -210,6 +210,8 @@ class OrdenProduccionService:
                 MovimientoInventarioDetalle(
                     movimiento_inventario=movimiento,
                     producto_id=item["producto_id"],
+                    # Un consumo = una existencia: su variante (o ninguna).
+                    producto_variante_id=item["producto_variante_id"],
                     ubicacion_origen_id=item["ubicacion_id"],
                     ubicacion_destino_id=None,
                     lote_id=None,
