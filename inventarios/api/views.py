@@ -21,7 +21,7 @@ from inventarios.models import (
 )
 from catalogo.models import Producto, ProductoVariante
 from auditoria.models import AuditoriaEvento
-from nucleo.models import Empresa, Sucursal
+from nucleo.models import Sucursal
 from ventas.models import Pedido
 from .serializers import (
     AlmacenSerializer,
@@ -812,23 +812,21 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                     raise ValidationError({"ubicacion": "Ubicación inválida para el almacén."})
         return normalized
 
+    def _validar_empresa_sucursal_del_body(self, request, almacen):
+        # ``empresa``/``sucursal`` salen SIEMPRE del almacén. Si el body manda
+        # alguna, debe coincidir: una que la contradiga se rechaza en vez de
+        # ignorarse en silencio.
+        for campo, actual in (("empresa", almacen.empresa_id), ("sucursal", almacen.sucursal_id)):
+            raw = request.data.get(campo) or request.data.get(f"{campo}_id")
+            if raw in (None, ""):
+                continue
+            if self._to_int(raw) != actual:
+                raise ValidationError({campo: f"No corresponde a la {campo} del almacén."})
+
     def _resolve_empresa_sucursal(self, request, almacen):
-        user = request.user
-        empresa = (
-            getattr(almacen, "empresa", None)
-            or getattr(user, "empresa", None)
-            or Empresa.objects.filter(
-                pk=self._to_int(request.data.get("empresa") or request.data.get("empresa_id"))
-            ).first()
-        )
-        sucursal = (
-            getattr(almacen, "sucursal", None)
-            or getattr(user, "sucursal_default", None)
-            or Sucursal.objects.filter(
-                pk=self._to_int(request.data.get("sucursal") or request.data.get("sucursal_id"))
-            ).first()
-        )
-        return empresa, sucursal
+        # Derivadas del almacén (ya validado contra el alcance del usuario); ni
+        # el usuario ni el body son fuente del tenant.
+        return almacen.empresa, almacen.sucursal
 
     def _crear_movimiento_formal(self, request, tipo, almacen, ajuste_id, detalle_movimientos, pedido=None):
         empresa, sucursal = self._resolve_empresa_sucursal(request, almacen)
@@ -869,6 +867,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             raise ValidationError({"tipo": "Tipo inválido."})
 
         almacen = self._get_almacen(request)
+        self._validar_empresa_sucursal_del_body(request, almacen)
         items = self._get_items(request, almacen)
         # Pedido OPCIONAL: validado (y aislado por empresa) antes de tocar la BD.
         pedido = self._get_pedido(request, almacen)
@@ -884,17 +883,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
 
         ajuste_id = None
         if tipo == "AJUSTE":
-            empresa_obj = almacen.empresa
-            sucursal_obj = almacen.sucursal
-
-            if not empresa_obj:
-                empresa_id = self._to_int(request.data.get("empresa") or request.data.get("empresa_id"))
-                if empresa_id:
-                    empresa_obj = Empresa.objects.filter(pk=empresa_id).first()
-            if not sucursal_obj:
-                sucursal_id = self._to_int(request.data.get("sucursal") or request.data.get("sucursal_id"))
-                if sucursal_id:
-                    sucursal_obj = Sucursal.objects.filter(pk=sucursal_id).first()
+            empresa_obj, sucursal_obj = self._resolve_empresa_sucursal(request, almacen)
 
             if empresa_obj and sucursal_obj:
                 motivo = (request.data.get("motivo") or "Ajuste").strip()[:100]
@@ -1016,13 +1005,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                     }
                 )
 
-            empresa_evt = (
-                getattr(almacen, "empresa", None)
-                or getattr(user, "empresa", None)
-                or Empresa.objects.filter(
-                    pk=self._to_int(request.data.get("empresa") or request.data.get("empresa_id"))
-                ).first()
-            )
+            empresa_evt, _sucursal = self._resolve_empresa_sucursal(request, almacen)
             if empresa_evt:
                 ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
                 ua = request.META.get("HTTP_USER_AGENT")

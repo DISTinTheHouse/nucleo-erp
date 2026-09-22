@@ -514,6 +514,32 @@ class OperacionInventarioScopeTenantTests(TestCase):
         self.assertIn("Item #2", resp.json()["items"])
         self.assertEqual(self._huella(), antes)
 
+    # --- empresa/sucursal salen del almacén; el body no las puede contradecir ----
+
+    def test_empresa_o_sucursal_del_body_en_conflicto_se_rechaza(self):
+        antes = self._huella()
+        item = [{"producto": self.a["producto"].pk, "cantidad": "1"}]
+        for extra, campo in (
+            ({"empresa": self.b["empresa"].pk}, "empresa"),
+            ({"empresa_id": self.b["empresa"].pk}, "empresa"),
+            ({"sucursal": self.b["sucursal"].pk}, "sucursal"),
+            ({"sucursal_id": self.b["sucursal"].pk}, "sucursal"),
+        ):
+            for user in (self.a["admin"], self.superuser):
+                resp = self._post(user, "ajuste", self.a["almacen"], item, **extra)
+                self._assert_rechazo_sin_escrituras(resp, campo)
+        self.assertEqual(self._huella(), antes)
+
+    def test_empresa_y_sucursal_del_body_coincidentes_se_aceptan(self):
+        resp = self._post(
+            self.a["admin"], "entrada", self.a["almacen"],
+            [{"producto": self.a["producto"].pk, "cantidad": "1"}],
+            empresa=self.a["empresa"].pk, sucursal=self.a["sucursal"].pk,
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        movimiento = MovimientoInventario.objects.get(pk=resp.json()["movimiento_inventario_id"])
+        self.assertEqual((movimiento.empresa_id, movimiento.sucursal_id), (self.a["empresa"].pk, self.a["sucursal"].pk))
+
     def test_superusuario_opera_en_cualquier_almacen(self):
         resp = self._post(
             self.superuser, "entrada", self.b["almacen"], [{"producto": self.b["producto"].pk, "cantidad": "4"}],
