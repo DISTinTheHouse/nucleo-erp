@@ -71,6 +71,32 @@ class ProductoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerial
             'empresa': {'required': False},
         }
 
+    def _empresa_id_resuelta(self, attrs):
+        # Misma resolución que el ViewSet: en update ``empresa`` es de sólo
+        # lectura (sale de la instancia); en create la manda el superusuario o
+        # ``perform_create`` inyecta ``user.empresa`` para el resto.
+        if 'empresa' in attrs:
+            return attrs['empresa'].pk
+        if self.instance is not None:
+            return self.instance.empresa_id
+        user = getattr(self.context.get("request"), "user", None)
+        if getattr(user, "is_superuser", False):
+            return None
+        return getattr(getattr(user, "empresa", None), "pk", None)
+
+    def validate(self, attrs):
+        # Aislamiento multi-tenant: la categoria debe ser de la empresa del
+        # producto, para TODOS (superusuario incluido).
+        categoria = (
+            attrs['categoria_producto'] if 'categoria_producto' in attrs
+            else getattr(self.instance, 'categoria_producto', None)
+        )
+        if categoria is not None and categoria.empresa_id != self._empresa_id_resuelta(attrs):
+            raise serializers.ValidationError(
+                {"categoria_producto": "La categoria no pertenece a la empresa del producto."}
+            )
+        return attrs
+
 class ProductoOnboardingSerializer(serializers.ModelSerializer):
     """Alta simplificada de Producto para producción: nombre + tipo + categoria + precio, sin descripcion."""
     tipo = serializers.PrimaryKeyRelatedField(queryset=TipoProducto.objects.all())
