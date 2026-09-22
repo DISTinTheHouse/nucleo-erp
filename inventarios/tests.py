@@ -312,3 +312,27 @@ class ExistenciaViewSetScopeTenantTests(TestCase):
                 self.assertEqual(client.delete(url).status_code, 404)
         ajena.refresh_from_db()
         self.assertEqual(str(ajena.cantidad), "10.0000")
+
+    # --- acceso al almacén en create (antes del save) ---------------------------
+
+    def _crear(self, user, **payload):
+        return self._client(user).post(EXISTENCIAS_URL, {"cantidad": "1", **payload}, format="json")
+
+    def test_admin_no_crea_en_almacen_de_otra_empresa_ni_deja_la_fila(self):
+        resp = self._crear(self.a["admin"], almacen=self.b["almacen"].pk, producto=self.b["producto"].pk)
+        self.assertEqual(resp.status_code, 403, resp.content)
+        # Antes el save() corría primero y la fila se quedaba pese al 403.
+        self.assertEqual(Existencia.objects.filter(almacen=self.b["almacen"]).count(), 1)
+
+    def test_admin_sin_empresa_no_crea_aunque_tenga_la_sucursal(self):
+        # Antes la guarda era ``user.empresa_id and ...``: sin empresa se saltaba.
+        resp = self._crear(self.sin_empresa, almacen=self.b["almacen"].pk, producto=self.b["producto"].pk)
+        self.assertEqual(resp.status_code, 403, resp.content)
+        self.assertEqual(Existencia.objects.filter(almacen=self.b["almacen"]).count(), 1)
+
+    def test_create_legitimo_y_superusuario_siguen_funcionando(self):
+        propia = self._crear(self.a["admin"], almacen=self.a["almacen"].pk, producto=self.a["producto"].pk)
+        self.assertEqual(propia.status_code, 201, propia.content)
+        self.assertEqual(propia.json()["almacen"], self.a["almacen"].pk)
+        root = self._crear(self.superuser, almacen=self.b["almacen"].pk, producto=self.b["producto"].pk)
+        self.assertEqual(root.status_code, 201, root.content)

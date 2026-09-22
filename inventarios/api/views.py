@@ -226,18 +226,26 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         limit = max(1, min(limit, 2000))
         return qs[:limit]
 
-    def perform_create(self, serializer):
+    def _validar_acceso_almacen(self, almacen):
+        # Antes del save(): el almacén destino debe estar en el alcance del
+        # usuario (el mismo de ``get_queryset``). Superusuario sin restricción.
         user = self.request.user
-        instance = serializer.save()
-        if not user.is_superuser:
-            # Validar acceso al almacén asociado
-            almacen = instance.almacen
-            if almacen:
-                if almacen.sucursal_id and not user.sucursales.filter(pk=almacen.sucursal_id).exists():
-                    raise PermissionDenied("No tiene acceso a la sucursal de este almacén")
-                if almacen.empresa_id:
-                    if user.empresa_id and almacen.empresa_id != user.empresa_id and not user.empresas.filter(pk=almacen.empresa_id).exists():
-                        raise PermissionDenied("No tiene acceso a la empresa de este almacén")
+        if user.is_superuser or almacen is None:
+            return
+        if not self._almacenes_en_alcance().filter(pk=almacen.pk).exists():
+            if not user.sucursales.filter(pk=almacen.sucursal_id).exists():
+                raise PermissionDenied("No tiene acceso a la sucursal de este almacén")
+            raise PermissionDenied("No tiene acceso a la empresa de este almacén")
+
+    def perform_create(self, serializer):
+        self._validar_acceso_almacen(serializer.validated_data.get("almacen"))
+        serializer.save()
+
+    def perform_update(self, serializer):
+        self._validar_acceso_almacen(
+            serializer.validated_data.get("almacen", serializer.instance.almacen)
+        )
+        serializer.save()
 
     def _report_to_int(self, value):
         if value in (None, ""):
