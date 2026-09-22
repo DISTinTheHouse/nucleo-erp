@@ -13,13 +13,16 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test produccion --settings=sqlite_settings
 """
 
+from decimal import Decimal
+
 from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
-from catalogo.models import Producto, Talla
+from catalogo.models import Color, Producto, ProductoVariante, Talla
+from inventarios.models import Almacen, Existencia, MovimientoInventarioDetalle, Ubicacion
 from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal
 from produccion.models import (
     BordadoAvances,
@@ -29,11 +32,13 @@ from produccion.models import (
     OrdenCorteMangaDetalle,
     OrdenesCorteManga,
     OrdenesReflejante,
+    OrdenProduccion,
     OrdenReflejanteDetalle,
     ReflejanteAvances,
     ReflejanteIncidencias,
 )
 from produccion.services.common import config_como_dict
+from produccion.services.orden_produccion_service import OrdenProduccionService
 from produccion.services.orden_bordado_service import (
     OrdenBordadoDuplicada409,
     OrdenBordadoService,
@@ -3473,3 +3478,65 @@ class OnboardingReflejanteConfigCrudoTests(TestCase):
             set(lineas[0].keys()),
             CLAVES_LINEA_ONBOARDING_BASE | {"reflejante_config"},
         )
+
+
+class ConsumoOPMovimientoVarianteTests(TestCase):
+    """El movimiento formal del consumo de OP conserva la variante consumida.
+
+    El plan consolida por producto componente y ``_discount_existencias`` toma
+    existencias del producto o de cualquiera de sus variantes, pero el detalle
+    del movimiento es UNO POR EXISTENCIA consumida: cada uno debe llevar la
+    variante (o ninguna) de la existencia que realmente se descontó.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-cv", razon_social="acme-cv SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ACV", nombre="acme-cv")
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM", nombre="Almacen",
+        )
+        cls.ubicacion = Ubicacion.objects.create(almacen=cls.almacen, pasillo="1")
+        cls.usuario = Usuario.objects.create(
+            username="u@acme-cv.test", email="u@acme-cv.test", empresa=cls.empresa,
+        )
+        cls.op = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-CV-1",
+        )
+        color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        cls.componente = Producto.objects.create(empresa=cls.empresa, nombre="Hilo")
+        cls.variante = ProductoVariante.objects.create(
+            producto=cls.componente, empresa=cls.empresa, color=color, sku="HIL-NEG", precio_base="1",
+        )
+
+    def test_detalle_guarda_la_variante_de_cada_existencia_consumida(self):
+        ex_sin_var = Existencia.objects.create(
+            producto=self.componente, almacen=self.almacen, cantidad=Decimal("5"),
+        )
+        ex_var = Existencia.objects.create(
+            producto=self.componente, producto_variante=self.variante, almacen=self.almacen,
+            ubicacion=self.ubicacion, cantidad=Decimal("3"),
+        )
+        consumos = OrdenProduccionService._discount_existencias(
+            [{"producto": self.componente, "cantidad": Decimal("6")}], self.empresa, self.sucursal,
+        )
+        movimiento = OrdenProduccionService._registrar_movimiento_inventario(self.op, self.usuario, consumos)
+
+        detalles = {
+            d.ubicacion_origen_id: d
+            for d in MovimientoInventarioDetalle.objects.filter(movimiento_inventario=movimiento)
+        }
+        self.assertEqual(len(detalles), 2)  # granularidad: uno por existencia
+        sin_var = detalles[None]
+        self.assertIsNone(sin_var.producto_variante_id)
+        self.assertEqual(sin_var.cantidad, Decimal("5"))
+        con_var = detalles[self.ubicacion.pk]
+        self.assertEqual(con_var.producto_variante_id, self.variante.pk)
+        self.assertEqual(con_var.cantidad, Decimal("1"))
+        for d in detalles.values():
+            self.assertEqual(d.producto_id, self.componente.pk)
+            self.assertIsNone(d.ubicacion_destino_id)
+
+        ex_sin_var.refresh_from_db()
+        ex_var.refresh_from_db()
+        self.assertEqual((ex_sin_var.cantidad, ex_var.cantidad), (Decimal("0"), Decimal("2")))
