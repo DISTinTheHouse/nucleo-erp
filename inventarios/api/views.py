@@ -713,7 +713,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             raise ValidationError({"pedido": "Pedido no encontrado."})
         return pedido
 
-    def _get_items(self, request):
+    def _get_items(self, request, almacen):
         items = request.data.get("items") or request.data.get("detalle") or []
         if not isinstance(items, list) or not items:
             raise ValidationError({"items": "items debe ser una lista no vacía."})
@@ -752,14 +752,25 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
 
         variantes = {
             variante.pk: variante
-            for variante in ProductoVariante.objects.filter(pk__in=producto_variante_ids).only("id", "producto_id")
+            for variante in ProductoVariante.objects.filter(pk__in=producto_variante_ids).only(
+                "id", "producto_id", "empresa_id"
+            )
         }
         producto_ids.update(
             variante.producto_id for variante in variantes.values() if getattr(variante, "producto_id", None)
         )
         productos = {
             producto.pk: producto
-            for producto in Producto.objects.filter(pk__in=producto_ids).only("id")
+            for producto in Producto.objects.filter(pk__in=producto_ids).only("id", "empresa_id")
+        }
+        # La ubicación debe ser del almacén de la operación (regla que ya existía;
+        # implica la misma empresa). Se resuelve aquí, antes de cualquier escritura.
+        ubicaciones = {
+            ubicacion.pk: ubicacion
+            for ubicacion in Ubicacion.objects.filter(
+                pk__in={it["ubicacion_id"] for it in normalized if it["ubicacion_id"]},
+                almacen_id=almacen.pk,
+            )
         }
 
         for idx, item in enumerate(normalized):
@@ -780,10 +791,25 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                             )
                         }
                     )
+                # Aislamiento multi-tenant, para TODOS (superusuario incluido).
+                if variante.empresa_id != almacen.empresa_id:
+                    raise ValidationError(
+                        {"items": f"Item #{idx+1}: producto_variante no pertenece a la empresa del almacén."}
+                    )
                 item["producto_id"] = variante.producto_id
 
             if not item["producto_id"] or item["producto_id"] not in productos:
                 raise ValidationError({"items": f"Item #{idx+1}: producto no encontrado."})
+            if productos[item["producto_id"]].empresa_id != almacen.empresa_id:
+                raise ValidationError(
+                    {"items": f"Item #{idx+1}: producto no pertenece a la empresa del almacén."}
+                )
+
+            item["ubicacion"] = None
+            if item["ubicacion_id"]:
+                item["ubicacion"] = ubicaciones.get(item["ubicacion_id"])
+                if not item["ubicacion"]:
+                    raise ValidationError({"ubicacion": "Ubicación inválida para el almacén."})
         return normalized
 
     def _resolve_empresa_sucursal(self, request, almacen):
@@ -843,7 +869,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             raise ValidationError({"tipo": "Tipo inválido."})
 
         almacen = self._get_almacen(request)
-        items = self._get_items(request)
+        items = self._get_items(request, almacen)
         # Pedido OPCIONAL: validado (y aislado por empresa) antes de tocar la BD.
         pedido = self._get_pedido(request, almacen)
 
@@ -889,13 +915,8 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         detalle_movimientos = []
         with transaction.atomic():
             for it in items:
-                ubicacion = None
-                if it["ubicacion_id"]:
-                    ubicacion = Ubicacion.objects.filter(
-                        pk=it["ubicacion_id"], almacen_id=almacen.pk
-                    ).first()
-                    if not ubicacion:
-                        raise ValidationError({"ubicacion": "Ubicación inválida para el almacén."})
+                # Ya validada en ``_get_items`` (antes de cualquier escritura).
+                ubicacion = it["ubicacion"]
 
                 ex = (
                     Existencia.objects.select_for_update()

@@ -486,6 +486,34 @@ class OperacionInventarioScopeTenantTests(TestCase):
             self._assert_rechazo_sin_escrituras(resp, "almacen")
         self.assertEqual(self._huella(), antes)
 
+    # --- producto / variante / ubicación == empresa del almacén (todos) ----------
+
+    def test_relacionados_de_otra_empresa_son_rechazados_incluso_al_superusuario(self):
+        antes = self._huella()
+        for user in (self.a["admin"], self.superuser):
+            for item, campo in (
+                ({"producto": self.b["producto"].pk}, "items"),
+                ({"producto_variante": self.b["variante"].pk}, "items"),
+                ({"producto": self.a["producto"].pk, "ubicacion": self.b["ubicacion"].pk}, "ubicacion"),
+            ):
+                for tipo in ("entrada", "ajuste"):
+                    resp = self._post(user, tipo, self.a["almacen"], [{**item, "cantidad": "1"}])
+                    self._assert_rechazo_sin_escrituras(resp, campo)
+        self.assertEqual(self._huella(), antes)
+
+    def test_linea_ajena_despues_de_una_valida_no_deja_escrituras(self):
+        antes = self._huella()
+        resp = self._post(
+            self.a["admin"], "entrada", self.a["almacen"],
+            [
+                {"producto": self.a["producto"].pk, "cantidad": "5"},
+                {"producto": self.b["producto"].pk, "cantidad": "5"},
+            ],
+        )
+        self._assert_rechazo_sin_escrituras(resp, "items")
+        self.assertIn("Item #2", resp.json()["items"])
+        self.assertEqual(self._huella(), antes)
+
     def test_superusuario_opera_en_cualquier_almacen(self):
         resp = self._post(
             self.superuser, "entrada", self.b["almacen"], [{"producto": self.b["producto"].pk, "cantidad": "4"}],
