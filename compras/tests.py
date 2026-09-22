@@ -286,6 +286,12 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
             self.usuario, self.almacen_sin_empresa, "almacen", "El almacén no pertenece a la empresa de la orden.",
         )
 
+    def test_almacen_sin_sucursal_es_rechazado(self):
+        # Misma guarda gemela: ``... and almacen.sucursal_id and ...`` se saltaba.
+        self._assert_rechazo_sin_escrituras(
+            self.usuario, self.almacen_sin_sucursal, "almacen", "El almacén no pertenece a la sucursal de la orden.",
+        )
+
     # --- quién puede recibir ---------------------------------------------------
 
     def test_usuario_sin_empresa_es_rechazado(self):
