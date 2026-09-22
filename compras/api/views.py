@@ -189,6 +189,24 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         ).exists():
             raise ValidationError({"moneda": "La moneda no está disponible para la empresa de la orden."})
 
+    def _validar_renglones_empresa(self, empresa, detalle):
+        # Mismo invariante para el producto de cada renglón. Se valida el lote
+        # completo antes de escribir: el reemplazo de renglones borra los
+        # existentes, así que un renglón ajeno no puede llegar a esa escritura.
+        if not detalle:
+            return
+        empresa_id = getattr(empresa, "pk", None)
+        propios = set(
+            Producto.objects.filter(
+                pk__in=[it.get("producto") for it in detalle], empresa_id=empresa_id,
+            ).values_list("pk", flat=True)
+        ) if empresa_id is not None else set()
+        for idx, it in enumerate(detalle):
+            if it.get("producto") not in propios:
+                raise ValidationError(
+                    {"detalle": f"El producto del renglón #{idx + 1} no pertenece a la empresa de la orden."}
+                )
+
     def _recalcular_totales(self, oc: OrdenCompra):
         detalles_qs = OrdenCompraDetalle.objects.filter(orden_compra=oc).only(
             "cantidad", "importe"
@@ -359,6 +377,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             self._validar_encabezado_empresa(
                 empresa, sucursal_id=sucursal_id, proveedor_id=proveedor_id, moneda_id=moneda_id,
             )
+            self._validar_renglones_empresa(empresa, detalle)
 
             oc.empresa = empresa
             oc.usuario = user
@@ -505,6 +524,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 proveedor_id=proveedor_id if has_proveedor else None,
                 moneda_id=moneda_id if has_moneda else None,
             )
+            self._validar_renglones_empresa(oc.empresa, detalle)
 
             oc.usuario = user
             if has_sucursal and sucursal_id:

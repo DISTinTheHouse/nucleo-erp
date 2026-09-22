@@ -444,6 +444,24 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
                 )
                 self._assert_rechazo(resp, campo, mensaje, antes)
 
+    # --- renglones ---------------------------------------------------------------
+
+    def test_renglon_con_producto_de_otra_empresa_es_rechazado(self):
+        antes = self._huella()
+        lineas = [self._linea(self.a["producto"]), self._linea(self.b["producto"])]
+        mensaje = "El producto del renglón #2 no pertenece a la empresa de la orden."
+        base = {"sucursal": self.a["sucursal"].pk, "proveedor": self.a["proveedor"].pk}
+        for user in (self.usuario, self.superuser):
+            client = self._client(user)
+            crea = client.post(f"{ORDENES_URL}onboarding/", {"orden_compra": base, "detalle": lineas}, format="json")
+            self._assert_rechazo(crea, "detalle", mensaje, antes)
+            edita = client.post(
+                f"{ORDENES_URL}onboarding/", {"orden_compra_id": self.oc.pk, "detalle": lineas}, format="json",
+            )
+            self._assert_rechazo(edita, "detalle", mensaje, antes)
+            put = client.put(f"{ORDENES_URL}{self.oc.pk}/", {"detalle": lineas}, format="json")
+            self._assert_rechazo(put, "detalle", mensaje, antes)
+
     # --- flujos legítimos --------------------------------------------------------
 
     def test_moneda_global_o_propia_se_acepta(self):
