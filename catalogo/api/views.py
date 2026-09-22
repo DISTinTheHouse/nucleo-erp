@@ -210,7 +210,9 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
         color = serializer.validated_data['color']
         talla = serializer.validated_data.get('talla')
 
-        if not is_superuser and empresa and producto.empresa_id != empresa.pk:
+        # Sin empresa (y sin ser superusuario) se rechaza: antes la guarda
+        # ``empresa and ...`` se saltaba y la variante caía en la empresa ajena.
+        if not is_superuser and (empresa is None or producto.empresa_id != empresa.pk):
             raise ValidationError({"producto": "No pertenece a tu empresa."})
 
         if not producto.codigo:
