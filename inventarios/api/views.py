@@ -149,6 +149,21 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
     serializer_class = ExistenciaSerializer
     permission_classes = [IsAuthenticatedAndScoped]
 
+    def _almacenes_en_alcance(self):
+        # ``Existencia`` no tiene ``empresa`` propia: la hereda del almacén. Mismo
+        # alcance que almacenes/ubicaciones y los reportes de esta clase: empresas
+        # del usuario (``empresa`` + M2M ``empresas``) Y sus sucursales. Sin
+        # empresas o sin sucursales el alcance queda vacío.
+        user = self.request.user
+        empresa_ids = []
+        if getattr(user, "empresa_id", None):
+            empresa_ids.append(user.empresa_id)
+        empresa_ids += list(user.empresas.values_list("pk", flat=True))
+        sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+        return Almacen.objects.filter(
+            models.Q(empresa_id__in=empresa_ids) & models.Q(sucursal_id__in=sucursal_ids)
+        )
+
     def get_queryset(self):
         def to_int(v):
             if v in (None, ""): return None
@@ -156,8 +171,13 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 return int(v)
             except Exception:
                 return None
-            
+
         qs = self.queryset
+        # Aislamiento multi-tenant ANTES de los filtros del cliente y del recorte
+        # por ``limit``: ningún query param (``empresa_id``, ``almacen_id``...)
+        # abre el alcance. Superusuario ve todo.
+        if not self.request.user.is_superuser:
+            qs = qs.filter(almacen__in=self._almacenes_en_alcance())
         qp = self.request.query_params
 
         empresa_id = to_int(qp.get("empresa_id") or qp.get("empresa"))
