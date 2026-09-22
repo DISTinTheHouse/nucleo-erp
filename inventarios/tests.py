@@ -14,10 +14,11 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
 """
 
 from django.test import TestCase
-from rest_framework.test import APIClient
+from rest_framework.test import APIClient, APIRequestFactory
 
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Color, Producto, ProductoVariante
+from inventarios.api.serializers import ExistenciaSerializer
 from inventarios.models import Almacen, Existencia, Ubicacion
 from nucleo.models import Empresa, Sucursal
 from usuarios.models import Usuario
@@ -336,3 +337,49 @@ class ExistenciaViewSetScopeTenantTests(TestCase):
         self.assertEqual(propia.json()["almacen"], self.a["almacen"].pk)
         root = self._crear(self.superuser, almacen=self.b["almacen"].pk, producto=self.b["producto"].pk)
         self.assertEqual(root.status_code, 201, root.content)
+
+    # --- relacionados == empresa del almacén (todos, superusuario incluido) -----
+
+    def test_create_con_relacionados_de_otra_empresa_es_rechazado(self):
+        propio = {"almacen": self.a["almacen"].pk}
+        for user in (self.a["admin"], self.superuser):
+            for campo, ajeno in (
+                ("producto", self.b["producto"]),
+                ("producto_variante", self.b["variante"]),
+                ("ubicacion", self.b["ubicacion"]),
+            ):
+                resp = self._crear(user, **propio, **{campo: ajeno.pk})
+                self.assertEqual(resp.status_code, 400, (user.email, campo, resp.content))
+                self.assertIn(campo, resp.json())
+        self.assertEqual(Existencia.objects.filter(almacen=self.a["almacen"]).count(), 1)
+
+    def test_update_con_relacionados_de_otra_empresa_es_rechazado(self):
+        # Las rutas de detalle hoy son 404 para todos (ver docstring), así que
+        # la regla del serializer se fija directo sobre él, en PATCH y PUT.
+        propia = self.a["existencia"]
+        request = APIRequestFactory().patch("/")
+        request.user = self.superuser
+        for data, partial in (
+            ({"producto": self.b["producto"].pk}, True),
+            ({"producto_variante": self.b["variante"].pk}, True),
+            ({"almacen": self.b["almacen"].pk}, True),  # la otra mitad: el almacén cambia
+            ({"almacen": self.a["almacen"].pk, "producto": self.b["producto"].pk, "cantidad": "1"}, False),
+        ):
+            serializer = ExistenciaSerializer(
+                propia, data=data, partial=partial, context={"request": request},
+            )
+            self.assertFalse(serializer.is_valid(), data)
+        ok = ExistenciaSerializer(
+            propia, data={"producto_variante": self.a["variante"].pk}, partial=True,
+            context={"request": request},
+        )
+        self.assertTrue(ok.is_valid(), ok.errors)
+
+    def test_create_con_relacionados_de_la_misma_empresa_sigue_funcionando(self):
+        resp = self._crear(
+            self.a["admin"],
+            almacen=self.a["almacen"].pk,
+            producto_variante=self.a["variante"].pk,
+            ubicacion=self.a["ubicacion"].pk,
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
