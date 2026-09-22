@@ -395,6 +395,93 @@ class AislamientoEmpresaCatalogoTests(TestCase):
         self.assertEqual(ajena.status_code, 400)
         self.assertEqual(ajena.json(), {"producto": "No pertenece a tu empresa."})
 
+    def test_onboarding_variante_usuario_sin_empresa_es_rechazado(self):
+        # Antes la guarda era ``empresa and ...``: sin empresa se saltaba y la
+        # variante quedaba en la empresa del producto ajeno.
+        color = Color.objects.create(nombre="Blanco", codigo="BLA", codigo_hex="#FFFFFF")
+        resp = self._client(self.sin_empresa).post(
+            f"{VARIANTES_URL}onboarding/",
+            {"producto": self.prod_b.pk, "color": color.pk, "talla": self.talla.pk, "precio_base": "100.00"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"producto": "No pertenece a tu empresa."})
+        self.assertFalse(ProductoVariante.objects.filter(sku="PLB00-BLA-M").exists())
+
+    # --- producto de la variante == empresa de la variante ----------------------
+
+    def _payload_variante(self, producto, empresa, sku):
+        return {
+            "producto": producto.pk, "empresa": empresa.pk, "color": self.color.pk,
+            "talla": self.talla.pk, "sku": sku, "precio_base": "100.00",
+        }
+
+    def test_create_variante_con_producto_de_otra_empresa_es_rechazado(self):
+        resp = self._client(self.user_a).post(
+            VARIANTES_URL, self._payload_variante(self.prod_b, self.empresa_a, "X-1"), format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("producto", resp.json())
+        self.assertFalse(ProductoVariante.objects.filter(sku="X-1").exists())
+
+    def test_create_variante_superusuario_cruzando_empresas_es_rechazado(self):
+        client = self._client(self.superuser)
+        resp = client.post(
+            VARIANTES_URL, self._payload_variante(self.prod_b, self.empresa_a, "X-2"), format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("producto", resp.json())
+        self.assertFalse(ProductoVariante.objects.filter(sku="X-2").exists())
+        # Sin cruzar sigue pudiendo crear en cualquier empresa.
+        ok = client.post(
+            VARIANTES_URL, self._payload_variante(self.prod_b, self.empresa_b, "X-3"), format="json",
+        )
+        self.assertEqual(ok.status_code, 201, ok.content)
+        self.assertEqual(ok.json()["empresa"], self.empresa_b.pk)
+
+    def test_patch_y_put_variante_a_producto_de_otra_empresa_son_rechazados(self):
+        for user in (self.user_a, self.superuser):
+            client = self._client(user)
+            patch = client.patch(
+                f"{VARIANTES_URL}{self.var_a.pk}/", {"producto": self.prod_b.pk}, format="json",
+            )
+            self.assertEqual(patch.status_code, 400, (user.email, patch.content))
+            self.assertIn("producto", patch.json())
+            put = client.put(
+                f"{VARIANTES_URL}{self.var_a.pk}/",
+                self._payload_variante(self.prod_b, self.empresa_b, self.var_a.sku),
+                format="json",
+            )
+            self.assertEqual(put.status_code, 400, (user.email, put.content))
+            self.assertIn("producto", put.json())
+            self.var_a.refresh_from_db()
+            self.assertEqual(self.var_a.producto_id, self.prod_a.pk)
+            self.assertEqual(self.var_a.empresa_id, self.empresa_a.pk)
+
+    def test_create_y_update_variante_misma_empresa_siguen_funcionando(self):
+        client = self._client(self.user_a)
+        creada = client.post(
+            VARIANTES_URL, self._payload_variante(self.prod_a, self.empresa_a, "X-4"), format="json",
+        )
+        self.assertEqual(creada.status_code, 201, creada.content)
+        # PATCH sólo con ``producto`` (la empresa se resuelve de la instancia).
+        patch = client.patch(
+            f"{VARIANTES_URL}{self.var_a.pk}/", {"producto": self.prod_a_otro_tipo.pk}, format="json",
+        )
+        self.assertEqual(patch.status_code, 200, patch.content)
+        self.assertEqual(patch.json()["producto"], self.prod_a_otro_tipo.pk)
+        # PATCH sin ``producto`` (se resuelve de la instancia).
+        precio = client.patch(
+            f"{VARIANTES_URL}{self.var_a.pk}/", {"precio_base": "120.00"}, format="json",
+        )
+        self.assertEqual(precio.status_code, 200, precio.content)
+        put = client.put(
+            f"{VARIANTES_URL}{self.var_a.pk}/",
+            self._payload_variante(self.prod_a, self.empresa_a, self.var_a.sku),
+            format="json",
+        )
+        self.assertEqual(put.status_code, 200, put.content)
+
 
 class ProductoFiltroTipoMultipleTests(TestCase):
     """``?tipo_id`` acepta varios valores (repetido o separado por comas)."""

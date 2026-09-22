@@ -106,6 +106,14 @@ class ProductoVarianteSerializer(EmpresaValidadaEnCreateMixin, serializers.Model
 
     def validate(self, attrs):
         producto = attrs.get('producto') or getattr(self.instance, 'producto', None)
+        # Aislamiento multi-tenant: el producto debe ser de la empresa de la
+        # variante, para TODOS (superusuario incluido). En update ``empresa`` es
+        # de sólo lectura, así que se resuelve de la instancia.
+        empresa_id = attrs['empresa'].pk if 'empresa' in attrs else getattr(self.instance, 'empresa_id', None)
+        if producto is not None and producto.empresa_id != empresa_id:
+            raise serializers.ValidationError(
+                {"producto": "El producto no pertenece a la empresa de la variante."}
+            )
         talla = attrs['talla'] if 'talla' in attrs else getattr(self.instance, 'talla', None)
         if producto and talla is not None and not talla_permitida_para_producto(producto, talla):
             raise serializers.ValidationError(
