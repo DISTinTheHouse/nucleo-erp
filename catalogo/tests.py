@@ -379,6 +379,29 @@ class AislamientoEmpresaCatalogoTests(TestCase):
         self.assertEqual(ajena.status_code, 400)
         self.assertEqual(ajena.json(), {"categoria_producto": "No pertenece a tu empresa."})
 
+    def test_onboarding_producto_usuario_sin_empresa_es_rechazado(self):
+        # Antes la guarda era ``empresa and ...``: sin empresa se saltaba y el
+        # producto quedaba en la empresa de la categoria ajena.
+        resp = self._client(self.sin_empresa).post(
+            f"{PRODUCTOS_URL}onboarding/",
+            {"nombre": "Sin empresa", "tipo": self.tipo.pk, "categoria_producto": self.cat_b.pk,
+             "precio_base": "50.00"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"categoria_producto": "No pertenece a tu empresa."})
+        self.assertFalse(Producto.objects.filter(nombre="Sin empresa").exists())
+
+    def test_siguiente_codigo_valida_la_empresa(self):
+        url = f"{PRODUCTOS_URL}siguiente-codigo/"
+        ok = self._client(self.user_a).get(url, {"categoria_producto": self.cat_a.pk})
+        self.assertEqual(ok.status_code, 200, ok.content)
+        self.assertEqual(ok.json(), {"codigo": "PLA02"})
+        for user in (self.user_a, self.sin_empresa):
+            ajena = self._client(user).get(url, {"categoria_producto": self.cat_b.pk})
+            self.assertEqual(ajena.status_code, 400, (user.email, ajena.content))
+            self.assertEqual(ajena.json(), {"categoria_producto": "No pertenece a tu empresa."})
+
     def test_onboarding_variante(self):
         client = self._client(self.user_a)
         color = Color.objects.create(nombre="Blanco", codigo="BLA", codigo_hex="#FFFFFF")
