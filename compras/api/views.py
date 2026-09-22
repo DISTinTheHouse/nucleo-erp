@@ -167,6 +167,28 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             return m
         return Moneda.objects.filter(empresa__isnull=True, activo=True).order_by("codigo_iso").first()
 
+    def _validar_encabezado_empresa(self, empresa, sucursal_id=None, proveedor_id=None, moneda_id=None):
+        # Aislamiento multi-tenant, para TODOS (superusuario incluido): lo que
+        # escribe la OC debe ser de la empresa de la orden. Solo se validan los
+        # valores que se van a escribir. ``moneda`` es un catálogo híbrido: vale
+        # una global (sin empresa) o una privada de la misma empresa, igual que
+        # el catálogo que ofrece ``handle_get_onboarding``.
+        empresa_id = getattr(empresa, "pk", None)
+        if sucursal_id and (
+            empresa_id is None
+            or not Sucursal.objects.filter(pk=sucursal_id, empresa_id=empresa_id).exists()
+        ):
+            raise ValidationError({"sucursal": "La sucursal no pertenece a la empresa de la orden."})
+        if proveedor_id and (
+            empresa_id is None
+            or not Proveedor.objects.filter(pk=proveedor_id, empresa_id=empresa_id).exists()
+        ):
+            raise ValidationError({"proveedor": "El proveedor no pertenece a la empresa de la orden."})
+        if moneda_id and not Moneda.objects.filter(
+            Q(empresa__isnull=True) | Q(empresa_id=empresa_id), pk=moneda_id
+        ).exists():
+            raise ValidationError({"moneda": "La moneda no está disponible para la empresa de la orden."})
+
     def _recalcular_totales(self, oc: OrdenCompra):
         detalles_qs = OrdenCompraDetalle.objects.filter(orden_compra=oc).only(
             "cantidad", "importe"
@@ -333,6 +355,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                     raise ValidationError({"moneda": "Moneda es requerida."})
                 moneda_id = m.pk
 
+            # Antes de la primera escritura (``oc.save()``).
+            self._validar_encabezado_empresa(
+                empresa, sucursal_id=sucursal_id, proveedor_id=proveedor_id, moneda_id=moneda_id,
+            )
+
             oc.empresa = empresa
             oc.usuario = user
             if not oc.pk or has_sucursal:
@@ -469,6 +496,15 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             moneda_id = header.get("moneda")
             fecha_oc = header.get("fecha_oc")
             porcentaje_iva = header.get("porcentaje_iva")
+
+            # Antes de la primera escritura (``oc.save()``). La empresa sale de la
+            # instancia; lo que no viene en el body no se toca.
+            self._validar_encabezado_empresa(
+                oc.empresa,
+                sucursal_id=sucursal_id if has_sucursal else None,
+                proveedor_id=proveedor_id if has_proveedor else None,
+                moneda_id=moneda_id if has_moneda else None,
+            )
 
             oc.usuario = user
             if has_sucursal and sucursal_id:

@@ -324,3 +324,171 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
         self.assertEqual(Existencia.objects.get(almacen=self.almacen, producto=self.producto).cantidad, Decimal("5"))
         detalle = MovimientoInventarioDetalle.objects.get(movimiento_inventario__recepcion=recepcion)
         self.assertEqual((detalle.producto_id, detalle.cantidad), (self.producto.pk, Decimal("5")))
+
+
+ORDENES_URL = "/api/v1/compras/ordenes/"
+
+
+class OrdenCompraAislamientoEmpresaTests(TestCase):
+    """OC (onboarding / PUT / aceptar): las FKs escritas son de la empresa de la orden.
+
+    Compras acota por empresa (no por sucursales del usuario). La regla aplica a
+    todos, superusuario incluido; toda la validación corre antes de la primera
+    escritura. ``moneda`` es un catálogo híbrido: vale una global
+    (``empresa`` nula) o una privada de la misma empresa.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
+        cls.moneda_global = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+
+        def tenant(codigo):
+            empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+            sucursal = Sucursal.objects.create(empresa=empresa, codigo=codigo[:3].upper(), nombre=codigo)
+            moneda = Moneda.objects.create(codigo_iso=codigo[:3].upper(), nombre=codigo, empresa=empresa)
+            empresa.moneda_base = moneda
+            empresa.save(update_fields=["moneda_base"])
+            proveedor = Proveedor.objects.create(
+                empresa=empresa, nombre=f"Proveedor {codigo}", moneda=moneda, sat_regimen_fiscal=regimen,
+                sat_forma_pago=forma, sat_metodo_pago=metodo, codigo=f"PROV-{codigo}", razon_social="Prov SA",
+                telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000", email=f"p@{codigo}.test",
+            )
+            producto = Producto.objects.create(empresa=empresa, nombre=f"Insumo {codigo}")
+            return {"empresa": empresa, "sucursal": sucursal, "moneda": moneda, "proveedor": proveedor, "producto": producto}
+
+        cls.a = tenant("acme-oc")
+        cls.b = tenant("globex-oc")
+        cls.usuario = Usuario.objects.create(
+            username="u@acme-oc.test", email="u@acme-oc.test", empresa=cls.a["empresa"],
+            sucursal_default=cls.a["sucursal"],
+        )
+        cls.superuser = Usuario.objects.create(
+            username="root@acme-oc.test", email="root@acme-oc.test", empresa=cls.a["empresa"],
+            sucursal_default=cls.a["sucursal"], is_superuser=True,
+        )
+
+    def setUp(self):
+        self.oc = OrdenCompra.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.a["proveedor"],
+            moneda=self.a["moneda"], usuario=self.usuario, fecha_oc=timezone.now().date(),
+            estatus=OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+        )
+        OrdenCompraDetalle.objects.create(
+            orden_compra=self.oc, producto=self.a["producto"], sucursal=self.a["sucursal"], cantidad=3,
+        )
+
+    # --- helpers ---------------------------------------------------------------
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _linea(self, producto, cantidad=2):
+        return {"producto": producto.pk, "cantidad": cantidad, "precio": "10.00"}
+
+    def _huella(self):
+        oc = OrdenCompra.objects.get(pk=self.oc.pk)
+        return (
+            OrdenCompra.objects.count(),
+            (oc.sucursal_id, oc.proveedor_id, oc.moneda_id, oc.estatus, oc.folio),
+            sorted(OrdenCompraDetalle.objects.values_list("orden_compra_id", "producto_id", "cantidad")),
+        )
+
+    def _campos_ajenos(self):
+        return (
+            ("sucursal", self.b["sucursal"].pk, "La sucursal no pertenece a la empresa de la orden."),
+            ("proveedor", self.b["proveedor"].pk, "El proveedor no pertenece a la empresa de la orden."),
+            ("moneda", self.b["moneda"].pk, "La moneda no está disponible para la empresa de la orden."),
+        )
+
+    def _assert_rechazo(self, resp, campo, mensaje, antes):
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {campo: mensaje})
+        self.assertEqual(self._huella(), antes)
+
+    # --- encabezado: create / edit / PUT ------------------------------------------
+
+    def test_onboarding_crea_rechaza_fk_de_otra_empresa_incluso_al_superusuario(self):
+        antes = self._huella()
+        base = {"sucursal": self.a["sucursal"].pk, "proveedor": self.a["proveedor"].pk, "moneda": self.a["moneda"].pk}
+        for user in (self.usuario, self.superuser):
+            for campo, valor, mensaje in self._campos_ajenos():
+                resp = self._client(user).post(
+                    f"{ORDENES_URL}onboarding/",
+                    {"orden_compra": {**base, campo: valor}, "detalle": [self._linea(self.a["producto"])]},
+                    format="json",
+                )
+                self._assert_rechazo(resp, campo, mensaje, antes)
+
+    def test_onboarding_edita_rechaza_fk_de_otra_empresa(self):
+        antes = self._huella()
+        for user in (self.usuario, self.superuser):
+            for campo, valor, mensaje in self._campos_ajenos():
+                resp = self._client(user).post(
+                    f"{ORDENES_URL}onboarding/",
+                    {"orden_compra_id": self.oc.pk, "orden_compra": {campo: valor}},
+                    format="json",
+                )
+                self._assert_rechazo(resp, campo, mensaje, antes)
+
+    def test_put_rechaza_fk_de_otra_empresa(self):
+        antes = self._huella()
+        for user in (self.usuario, self.superuser):
+            for campo, valor, mensaje in self._campos_ajenos():
+                resp = self._client(user).put(
+                    f"{ORDENES_URL}{self.oc.pk}/", {"orden_compra": {campo: valor}}, format="json",
+                )
+                self._assert_rechazo(resp, campo, mensaje, antes)
+
+    # --- flujos legítimos --------------------------------------------------------
+
+    def test_moneda_global_o_propia_se_acepta(self):
+        client = self._client(self.usuario)
+        for moneda in (self.moneda_global, self.a["moneda"]):
+            resp = client.put(f"{ORDENES_URL}{self.oc.pk}/", {"orden_compra": {"moneda": moneda.pk}}, format="json")
+            self.assertEqual(resp.status_code, 200, resp.content)
+            self.oc.refresh_from_db()
+            self.assertEqual(self.oc.moneda_id, moneda.pk)
+
+    def test_crear_editar_y_aceptar_legitimos_siguen_funcionando(self):
+        client = self._client(self.usuario)
+        crea = client.post(
+            f"{ORDENES_URL}onboarding/",
+            {"orden_compra": {"proveedor": self.a["proveedor"].pk}, "detalle": [self._linea(self.a["producto"], 4)]},
+            format="json",
+        )
+        self.assertEqual(crea.status_code, 200, crea.content)
+        oc = OrdenCompra.objects.get(pk=crea.json()["orden_compra"]["id"])
+        self.assertEqual(
+            (oc.empresa_id, oc.sucursal_id, oc.proveedor_id, oc.moneda_id),
+            (self.a["empresa"].pk, self.a["sucursal"].pk, self.a["proveedor"].pk, self.a["moneda"].pk),
+        )
+
+        edita = client.post(
+            f"{ORDENES_URL}onboarding/",
+            {"orden_compra_id": oc.pk, "orden_compra": {"referencia": "R-1"},
+             "detalle": [self._linea(self.a["producto"], 6)]},
+            format="json",
+        )
+        self.assertEqual(edita.status_code, 200, edita.content)
+        put = client.put(
+            f"{ORDENES_URL}{oc.pk}/",
+            {"orden_compra": {"sucursal": self.a["sucursal"].pk, "proveedor": self.a["proveedor"].pk},
+             "detalle": [self._linea(self.a["producto"], 7)]},
+            format="json",
+        )
+        self.assertEqual(put.status_code, 200, put.content)
+        self.assertEqual(
+            list(OrdenCompraDetalle.objects.filter(orden_compra=oc).values_list("producto_id", "cantidad")),
+            [(self.a["producto"].pk, 7)],
+        )
+
+        acepta = client.post(f"{ORDENES_URL}{oc.pk}/aceptar/", {"proveedor": self.a["proveedor"].pk}, format="json")
+        self.assertEqual(acepta.status_code, 200, acepta.content)
+        oc.refresh_from_db()
+        self.assertEqual(oc.estatus, OrdenCompra.EstatusOrdenCompra.AUTORIZADA)
+        self.assertIsNotNone(oc.folio)
