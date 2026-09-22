@@ -21,7 +21,7 @@ from inventarios.models import (
 )
 from catalogo.models import Producto, ProductoVariante
 from auditoria.models import AuditoriaEvento
-from nucleo.models import Empresa, Sucursal
+from nucleo.models import Sucursal
 from ventas.models import Pedido
 from .serializers import (
     AlmacenSerializer,
@@ -127,6 +127,23 @@ class UbicacionViewSet(viewsets.ModelViewSet):
                     raise PermissionDenied("No tiene acceso a esta empresa")
         serializer.save()
 
+def almacenes_en_alcance(user):
+    """Almacenes sobre los que opera un usuario NO superusuario.
+
+    Mismo alcance que almacenes/ubicaciones y los reportes: empresas del usuario
+    (``empresa`` + M2M ``empresas``) Y sus sucursales. Sin empresas o sin
+    sucursales el alcance queda vacío. El superusuario se trata aparte.
+    """
+    empresa_ids = []
+    if getattr(user, "empresa_id", None):
+        empresa_ids.append(user.empresa_id)
+    empresa_ids += list(user.empresas.values_list("pk", flat=True))
+    sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+    return Almacen.objects.filter(
+        models.Q(empresa_id__in=empresa_ids) & models.Q(sucursal_id__in=sucursal_ids)
+    )
+
+
 class ReporteExistenciasPeriodoPagination(PageNumberPagination):
     # Instantiated explicitly inside the action, not set as pagination_class
     # on the ViewSet, so list()/other actions are unaffected.
@@ -149,6 +166,10 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
     serializer_class = ExistenciaSerializer
     permission_classes = [IsAuthenticatedAndScoped]
 
+    def _almacenes_en_alcance(self):
+        # ``Existencia`` no tiene ``empresa`` propia: la hereda del almacén.
+        return almacenes_en_alcance(self.request.user)
+
     def get_queryset(self):
         def to_int(v):
             if v in (None, ""): return None
@@ -156,8 +177,13 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 return int(v)
             except Exception:
                 return None
-            
+
         qs = self.queryset
+        # Aislamiento multi-tenant ANTES de los filtros del cliente y del recorte
+        # por ``limit``: ningún query param (``empresa_id``, ``almacen_id``...)
+        # abre el alcance. Superusuario ve todo.
+        if not self.request.user.is_superuser:
+            qs = qs.filter(almacen__in=self._almacenes_en_alcance())
         qp = self.request.query_params
 
         empresa_id = to_int(qp.get("empresa_id") or qp.get("empresa"))
@@ -206,18 +232,26 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         limit = max(1, min(limit, 2000))
         return qs[:limit]
 
-    def perform_create(self, serializer):
+    def _validar_acceso_almacen(self, almacen):
+        # Antes del save(): el almacén destino debe estar en el alcance del
+        # usuario (el mismo de ``get_queryset``). Superusuario sin restricción.
         user = self.request.user
-        instance = serializer.save()
-        if not user.is_superuser:
-            # Validar acceso al almacén asociado
-            almacen = instance.almacen
-            if almacen:
-                if almacen.sucursal_id and not user.sucursales.filter(pk=almacen.sucursal_id).exists():
-                    raise PermissionDenied("No tiene acceso a la sucursal de este almacén")
-                if almacen.empresa_id:
-                    if user.empresa_id and almacen.empresa_id != user.empresa_id and not user.empresas.filter(pk=almacen.empresa_id).exists():
-                        raise PermissionDenied("No tiene acceso a la empresa de este almacén")
+        if user.is_superuser or almacen is None:
+            return
+        if not self._almacenes_en_alcance().filter(pk=almacen.pk).exists():
+            if not user.sucursales.filter(pk=almacen.sucursal_id).exists():
+                raise PermissionDenied("No tiene acceso a la sucursal de este almacén")
+            raise PermissionDenied("No tiene acceso a la empresa de este almacén")
+
+    def perform_create(self, serializer):
+        self._validar_acceso_almacen(serializer.validated_data.get("almacen"))
+        serializer.save()
+
+    def perform_update(self, serializer):
+        self._validar_acceso_almacen(
+            serializer.validated_data.get("almacen", serializer.instance.almacen)
+        )
+        serializer.save()
 
     def _report_to_int(self, value):
         if value in (None, ""):
@@ -641,11 +675,13 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         almacen_id = self._to_int(request.data.get("almacen") or request.data.get("almacen_id"))
         if not almacen_id:
             raise ValidationError({"almacen": "Almacén es requerido."})
-        almacen = (
-            Almacen.objects.select_related("empresa", "sucursal")
-            .filter(pk=almacen_id)
-            .first()
-        )
+        qs = Almacen.objects.select_related("empresa", "sucursal")
+        # Aislamiento multi-tenant: mismo alcance que existencias. Un almacén
+        # fuera de alcance se trata como no encontrado (igual que un pedido de
+        # otra empresa en ``_get_pedido``), sin revelar que existe.
+        if not request.user.is_superuser:
+            qs = qs.filter(pk__in=almacenes_en_alcance(request.user))
+        almacen = qs.filter(pk=almacen_id).first()
         if not almacen:
             raise ValidationError({"almacen": "Almacén no encontrado."})
         return almacen
@@ -677,7 +713,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             raise ValidationError({"pedido": "Pedido no encontrado."})
         return pedido
 
-    def _get_items(self, request):
+    def _get_items(self, request, almacen):
         items = request.data.get("items") or request.data.get("detalle") or []
         if not isinstance(items, list) or not items:
             raise ValidationError({"items": "items debe ser una lista no vacía."})
@@ -716,14 +752,25 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
 
         variantes = {
             variante.pk: variante
-            for variante in ProductoVariante.objects.filter(pk__in=producto_variante_ids).only("id", "producto_id")
+            for variante in ProductoVariante.objects.filter(pk__in=producto_variante_ids).only(
+                "id", "producto_id", "empresa_id"
+            )
         }
         producto_ids.update(
             variante.producto_id for variante in variantes.values() if getattr(variante, "producto_id", None)
         )
         productos = {
             producto.pk: producto
-            for producto in Producto.objects.filter(pk__in=producto_ids).only("id")
+            for producto in Producto.objects.filter(pk__in=producto_ids).only("id", "empresa_id")
+        }
+        # La ubicación debe ser del almacén de la operación (regla que ya existía;
+        # implica la misma empresa). Se resuelve aquí, antes de cualquier escritura.
+        ubicaciones = {
+            ubicacion.pk: ubicacion
+            for ubicacion in Ubicacion.objects.filter(
+                pk__in={it["ubicacion_id"] for it in normalized if it["ubicacion_id"]},
+                almacen_id=almacen.pk,
+            )
         }
 
         for idx, item in enumerate(normalized):
@@ -744,29 +791,58 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                             )
                         }
                     )
+                # Aislamiento multi-tenant, para TODOS (superusuario incluido).
+                if variante.empresa_id != almacen.empresa_id:
+                    raise ValidationError(
+                        {"items": f"Item #{idx+1}: producto_variante no pertenece a la empresa del almacén."}
+                    )
                 item["producto_id"] = variante.producto_id
 
             if not item["producto_id"] or item["producto_id"] not in productos:
                 raise ValidationError({"items": f"Item #{idx+1}: producto no encontrado."})
+            if productos[item["producto_id"]].empresa_id != almacen.empresa_id:
+                raise ValidationError(
+                    {"items": f"Item #{idx+1}: producto no pertenece a la empresa del almacén."}
+                )
+
+            item["ubicacion"] = None
+            if item["ubicacion_id"]:
+                item["ubicacion"] = ubicaciones.get(item["ubicacion_id"])
+                if not item["ubicacion"]:
+                    raise ValidationError({"ubicacion": "Ubicación inválida para el almacén."})
         return normalized
 
+    def _validar_empresa_sucursal_del_body(self, request, almacen):
+        # ``empresa``/``sucursal`` salen SIEMPRE del almacén. Si el body manda
+        # alguna, debe coincidir: una que la contradiga se rechaza en vez de
+        # ignorarse en silencio.
+        for campo, actual in (("empresa", almacen.empresa_id), ("sucursal", almacen.sucursal_id)):
+            raw = request.data.get(campo) or request.data.get(f"{campo}_id")
+            if raw in (None, ""):
+                continue
+            if self._to_int(raw) != actual:
+                raise ValidationError({campo: f"No corresponde a la {campo} del almacén."})
+
     def _resolve_empresa_sucursal(self, request, almacen):
-        user = request.user
-        empresa = (
-            getattr(almacen, "empresa", None)
-            or getattr(user, "empresa", None)
-            or Empresa.objects.filter(
-                pk=self._to_int(request.data.get("empresa") or request.data.get("empresa_id"))
-            ).first()
+        # Derivadas del almacén (ya validado contra el alcance del usuario); ni
+        # el usuario ni el body son fuente del tenant.
+        return almacen.empresa, almacen.sucursal
+
+    def _crear_ajuste(self, request, almacen):
+        empresa_obj, sucursal_obj = self._resolve_empresa_sucursal(request, almacen)
+        if not (empresa_obj and sucursal_obj):
+            return None
+        motivo = (request.data.get("motivo") or "Ajuste").strip()[:100]
+        observaciones = (request.data.get("observaciones") or "").strip()[:150] or None
+        ajuste = AjusteInventario.objects.create(
+            empresa=empresa_obj,
+            sucursal=sucursal_obj,
+            almacen=almacen,
+            usuario=request.user,
+            motivo=motivo,
+            observaciones=observaciones,
         )
-        sucursal = (
-            getattr(almacen, "sucursal", None)
-            or getattr(user, "sucursal_default", None)
-            or Sucursal.objects.filter(
-                pk=self._to_int(request.data.get("sucursal") or request.data.get("sucursal_id"))
-            ).first()
-        )
-        return empresa, sucursal
+        return ajuste.pk
 
     def _crear_movimiento_formal(self, request, tipo, almacen, ajuste_id, detalle_movimientos, pedido=None):
         empresa, sucursal = self._resolve_empresa_sucursal(request, almacen)
@@ -807,7 +883,8 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             raise ValidationError({"tipo": "Tipo inválido."})
 
         almacen = self._get_almacen(request)
-        items = self._get_items(request)
+        self._validar_empresa_sucursal_del_body(request, almacen)
+        items = self._get_items(request, almacen)
         # Pedido OPCIONAL: validado (y aislado por empresa) antes de tocar la BD.
         pedido = self._get_pedido(request, almacen)
 
@@ -820,46 +897,18 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 if it["cantidad"] < 0:
                     raise ValidationError({"items": "En ajuste, cantidad debe ser >= 0 (cantidad final)."})
 
-        ajuste_id = None
-        if tipo == "AJUSTE":
-            empresa_obj = almacen.empresa
-            sucursal_obj = almacen.sucursal
-
-            if not empresa_obj:
-                empresa_id = self._to_int(request.data.get("empresa") or request.data.get("empresa_id"))
-                if empresa_id:
-                    empresa_obj = Empresa.objects.filter(pk=empresa_id).first()
-            if not sucursal_obj:
-                sucursal_id = self._to_int(request.data.get("sucursal") or request.data.get("sucursal_id"))
-                if sucursal_id:
-                    sucursal_obj = Sucursal.objects.filter(pk=sucursal_id).first()
-
-            if empresa_obj and sucursal_obj:
-                motivo = (request.data.get("motivo") or "Ajuste").strip()[:100]
-                observaciones = (request.data.get("observaciones") or "").strip()[:150] or None
-                ajuste = AjusteInventario.objects.create(
-                    empresa=empresa_obj,
-                    sucursal=sucursal_obj,
-                    almacen=almacen,
-                    usuario=request.user,
-                    motivo=motivo,
-                    observaciones=observaciones,
-                )
-                ajuste_id = ajuste.pk
-
         user = request.user
         results = []
         before_after = []
         detalle_movimientos = []
+        # Toda la validación de alcance y pertenencia ya corrió arriba. Desde la
+        # primera escritura (el AjusteInventario incluido) todo va en un solo
+        # atomic: si algo falla, no queda nada a medias.
         with transaction.atomic():
+            ajuste_id = self._crear_ajuste(request, almacen) if tipo == "AJUSTE" else None
             for it in items:
-                ubicacion = None
-                if it["ubicacion_id"]:
-                    ubicacion = Ubicacion.objects.filter(
-                        pk=it["ubicacion_id"], almacen_id=almacen.pk
-                    ).first()
-                    if not ubicacion:
-                        raise ValidationError({"ubicacion": "Ubicación inválida para el almacén."})
+                # Ya validada en ``_get_items`` (antes de cualquier escritura).
+                ubicacion = it["ubicacion"]
 
                 ex = (
                     Existencia.objects.select_for_update()
@@ -959,13 +1008,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                     }
                 )
 
-            empresa_evt = (
-                getattr(almacen, "empresa", None)
-                or getattr(user, "empresa", None)
-                or Empresa.objects.filter(
-                    pk=self._to_int(request.data.get("empresa") or request.data.get("empresa_id"))
-                ).first()
-            )
+            empresa_evt, _sucursal = self._resolve_empresa_sucursal(request, almacen)
             if empresa_evt:
                 ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
                 ua = request.META.get("HTTP_USER_AGENT")

@@ -98,6 +98,29 @@ class ExistenciaSerializer(serializers.ModelSerializer):
         model = Existencia
         fields = '__all__'
 
+    def validate(self, attrs):
+        # Aislamiento multi-tenant: la existencia hereda la empresa de su
+        # almacén, y producto/variante/ubicación deben ser de esa misma empresa,
+        # para TODOS (superusuario incluido). En un update parcial, lo que no
+        # venga en el body se resuelve de la instancia.
+        def resuelto(campo):
+            return attrs[campo] if campo in attrs else getattr(self.instance, campo, None)
+
+        empresa_id = getattr(resuelto('almacen'), 'empresa_id', None)
+        errores = {}
+        producto = resuelto('producto')
+        if producto is not None and producto.empresa_id != empresa_id:
+            errores['producto'] = 'El producto no pertenece a la empresa del almacén.'
+        variante = resuelto('producto_variante')
+        if variante is not None and variante.empresa_id != empresa_id:
+            errores['producto_variante'] = 'La variante no pertenece a la empresa del almacén.'
+        ubicacion = resuelto('ubicacion')
+        if ubicacion is not None and getattr(ubicacion.almacen, 'empresa_id', None) != empresa_id:
+            errores['ubicacion'] = 'La ubicación no pertenece a la empresa del almacén.'
+        if errores:
+            raise serializers.ValidationError(errores)
+        return attrs
+
     def get_producto_info(self, obj):
         variante = getattr(obj, "producto_variante", None)
         producto = getattr(obj, "producto", None) or (getattr(variante, "producto", None) if variante else None)
