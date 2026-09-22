@@ -13,6 +13,9 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test inventarios --settings=sqlite_settings
 """
 
+from unittest import mock
+
+from django.db import DatabaseError
 from django.test import TestCase
 from rest_framework.test import APIClient, APIRequestFactory
 
@@ -539,6 +542,23 @@ class OperacionInventarioScopeTenantTests(TestCase):
         self.assertEqual(resp.status_code, 200, resp.content)
         movimiento = MovimientoInventario.objects.get(pk=resp.json()["movimiento_inventario_id"])
         self.assertEqual((movimiento.empresa_id, movimiento.sucursal_id), (self.a["empresa"].pk, self.a["sucursal"].pk))
+
+    # --- atomicidad -----------------------------------------------------------
+
+    def test_ajuste_que_falla_a_mitad_no_deja_el_ajuste_huerfano(self):
+        # Cualquier fallo dentro de la escritura (p. ej. un desbordamiento
+        # numérico en Postgres) debe revertir TODO, incluido el AjusteInventario
+        # que antes se creaba fuera del ``transaction.atomic``.
+        antes = self._huella()
+        with mock.patch(
+            "inventarios.api.views.AuditoriaEvento.objects.create", side_effect=DatabaseError("falla simulada"),
+        ):
+            with self.assertRaises(DatabaseError):
+                self._post(
+                    self.a["admin"], "ajuste", self.a["almacen"],
+                    [{"producto": self.a["producto"].pk, "cantidad": "3"}],
+                )
+        self.assertEqual(self._huella(), antes)
 
     def test_superusuario_opera_en_cualquier_almacen(self):
         resp = self._post(

@@ -828,6 +828,22 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         # el usuario ni el body son fuente del tenant.
         return almacen.empresa, almacen.sucursal
 
+    def _crear_ajuste(self, request, almacen):
+        empresa_obj, sucursal_obj = self._resolve_empresa_sucursal(request, almacen)
+        if not (empresa_obj and sucursal_obj):
+            return None
+        motivo = (request.data.get("motivo") or "Ajuste").strip()[:100]
+        observaciones = (request.data.get("observaciones") or "").strip()[:150] or None
+        ajuste = AjusteInventario.objects.create(
+            empresa=empresa_obj,
+            sucursal=sucursal_obj,
+            almacen=almacen,
+            usuario=request.user,
+            motivo=motivo,
+            observaciones=observaciones,
+        )
+        return ajuste.pk
+
     def _crear_movimiento_formal(self, request, tipo, almacen, ajuste_id, detalle_movimientos, pedido=None):
         empresa, sucursal = self._resolve_empresa_sucursal(request, almacen)
         if not empresa or not sucursal:
@@ -881,28 +897,15 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 if it["cantidad"] < 0:
                     raise ValidationError({"items": "En ajuste, cantidad debe ser >= 0 (cantidad final)."})
 
-        ajuste_id = None
-        if tipo == "AJUSTE":
-            empresa_obj, sucursal_obj = self._resolve_empresa_sucursal(request, almacen)
-
-            if empresa_obj and sucursal_obj:
-                motivo = (request.data.get("motivo") or "Ajuste").strip()[:100]
-                observaciones = (request.data.get("observaciones") or "").strip()[:150] or None
-                ajuste = AjusteInventario.objects.create(
-                    empresa=empresa_obj,
-                    sucursal=sucursal_obj,
-                    almacen=almacen,
-                    usuario=request.user,
-                    motivo=motivo,
-                    observaciones=observaciones,
-                )
-                ajuste_id = ajuste.pk
-
         user = request.user
         results = []
         before_after = []
         detalle_movimientos = []
+        # Toda la validación de alcance y pertenencia ya corrió arriba. Desde la
+        # primera escritura (el AjusteInventario incluido) todo va en un solo
+        # atomic: si algo falla, no queda nada a medias.
         with transaction.atomic():
+            ajuste_id = self._crear_ajuste(request, almacen) if tipo == "AJUSTE" else None
             for it in items:
                 # Ya validada en ``_get_items`` (antes de cualquier escritura).
                 ubicacion = it["ubicacion"]
