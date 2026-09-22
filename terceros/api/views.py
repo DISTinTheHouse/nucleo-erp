@@ -1,5 +1,7 @@
 from rest_framework import viewsets
+from rest_framework.response import Response
 from django.conf import settings
+from django.db.models import Count, Sum
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import ProveedorSerializer, ClienteSerializer, DireccionClienteSerializer
 from terceros.scope import clientes_base, clientes_visibles
@@ -30,6 +32,64 @@ class ClienteViewSet(viewsets.ModelViewSet):
         # buscador global (``/api/v1/search/``) reutilice EXACTAMENTE éste y no
         # una copia que pueda separarse de él.
         return clientes_visibles(super().get_queryset(), self.request.user)
+
+    def retrieve(self, request, *args, **kwargs):
+        # Sólo el detalle (no el listado) lleva ``resumen_comercial``: es la
+        # vista "como vendedor" de un cliente puntual, y calcularla por fila en
+        # el listado dispararía una consulta de agregación por cada cliente.
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        data = dict(serializer.data)
+        data["resumen_comercial"] = self._resumen_comercial(instance)
+        return Response(data)
+
+    def _resumen_comercial(self, cliente):
+        # Import local: ``ventas`` ya importa ``terceros.models`` a nivel de
+        # módulo (FK ``Cliente``), así que importar ``ventas.models`` aquí
+        # arriba crearía un ciclo al cargar las apps.
+        from ventas.models import Pedido, Cotizacion
+
+        estatus_pedido = dict(Pedido.CHOICES_ESTATUS)
+        pedidos_qs = Pedido.objects.filter(cliente=cliente, activo=True)
+
+        pedidos_por_estatus = {
+            estatus_pedido.get(fila["estatus"], fila["estatus"]): fila["total"]
+            for fila in pedidos_qs.values("estatus").annotate(total=Count("id"))
+        }
+        # Excluye CANCELADO (5) para no inflar el monto histórico con pedidos
+        # que nunca se concretaron; se separa por moneda porque un cliente
+        # puede tener pedidos en más de una.
+        montos_por_moneda = [
+            {"moneda": fila["moneda__codigo_iso"], "total": fila["total"]}
+            for fila in pedidos_qs.exclude(estatus=5)
+            .values("moneda__codigo_iso")
+            .annotate(total=Sum("gran_total"))
+        ]
+
+        recientes = pedidos_qs.select_related("moneda").order_by("-created_at")[:5].values(
+            "id", "folio", "created_at", "estatus", "gran_total", "moneda__codigo_iso"
+        )
+        pedidos_recientes = [
+            {
+                "id": fila["id"],
+                "folio": fila["folio"],
+                "fecha": fila["created_at"],
+                "estatus": fila["estatus"],
+                "estatus_display": estatus_pedido.get(fila["estatus"], fila["estatus"]),
+                "gran_total": fila["gran_total"],
+                "moneda": fila["moneda__codigo_iso"],
+            }
+            for fila in recientes
+        ]
+
+        return {
+            "total_pedidos": pedidos_qs.count(),
+            "total_cotizaciones": Cotizacion.objects.filter(cliente=cliente).count(),
+            "pedidos_por_estatus": pedidos_por_estatus,
+            "montos_por_moneda": montos_por_moneda,
+            "ultimo_pedido": pedidos_recientes[0] if pedidos_recientes else None,
+            "pedidos_recientes": pedidos_recientes,
+        }
 
     def perform_create(self, serializer):
         user = self.request.user
