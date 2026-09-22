@@ -2747,6 +2747,18 @@ class PedidoViewSet(viewsets.ModelViewSet):
             self._asignar_folio(pedido, empresa)
             self._snapshot_facturacion(pedido)
 
+    def perform_update(self, serializer):
+        # ``clasificacion``/``fecha_confirmacion`` viajan en el PATCH normal del
+        # pedido (mismo endpoint que ya consume el frontend, sin URL nueva),
+        # pero solo mesa de control puede tocarlos — igual que
+        # ``editar-mesa-control``/``programar``, sólo que aquí el gate aplica
+        # nada más si esos dos campos vienen en el body; el resto del pedido
+        # sigue editable normal por cualquiera con acceso al pedido.
+        campos_mesa_control = {"clasificacion", "fecha_confirmacion"}
+        if campos_mesa_control & set(serializer.validated_data.keys()):
+            self._require_mesa_control(self.request.user)
+        serializer.save()
+
     def perform_destroy(self, instance):
         instance.soft_delete()
 

@@ -1666,6 +1666,42 @@ Botón "Recompra" en el detalle del pedido: crea una **Cotización nueva** (no u
   - Nota de integración:
     - el `GET /api/v1/ventas/pedidos/{id}/` ya devuelve `detalles[].id` y `tallas[]`, así que el frontend puede reutilizar ese payload para construir el body de edición sin tener que inventar IDs o hacer mapeos especiales
 
+### Clasificar pedido (widget liviano en el detalle)
+
+Los **dos únicos campos manuales** que llena mesa de control directamente sobre el documento maestro del pedido: `clasificacion` y `fecha_confirmacion` (compromiso de entrega). **No es un endpoint nuevo** — viajan en el mismo `PATCH /api/v1/ventas/pedidos/{id}/` que ya usa el resto de la edición del pedido; el backend solo exige mesa de control cuando el body incluye alguno de esos dos campos.
+
+- **Endpoint**: `PATCH /api/v1/ventas/pedidos/{id}/` (el de siempre).
+- Body — solo agrega estas claves a lo que ya mandas:
+  ```json
+  { "clasificacion": "B", "fecha_confirmacion": "2026-01-05T10:00:00Z" }
+  ```
+  - `clasificacion`: uno de `A`, `B`, `C`, `D`, `E`, `F`, `X` (`Pedido.Clasificacion`). Se puede mandar solo.
+  - `fecha_confirmacion`: datetime ISO, 100% manual — el backend no la calcula ni la infiere. También se puede mandar solo, sin tocar `clasificacion`.
+- **Permiso**: si el body incluye `clasificacion` y/o `fecha_confirmacion`, el usuario debe ser `is_superuser`, `is_admin_empresa` o tener rol activo de Mesa de Control — si no, **todo el PATCH se rechaza** (`400 {"permiso": "Acción disponible solo para mesa de control."}`), incluido cualquier otro campo que hayas mandado junto en el mismo body. El resto de campos del pedido (sin estos dos) sigue editable normal por cualquiera con acceso al pedido — el gate solo mira estas dos claves.
+- **Respuesta** (`200`): el detalle completo del pedido de siempre, que ya incluye:
+  ```json
+  {
+    "id": 45,
+    "clasificacion": "B",
+    "fecha_confirmacion": "2026-01-05T10:00:00Z",
+    "fecha_entrega_min": "2026-01-06",
+    "fecha_entrega_max": "2026-01-09",
+    "...": "resto de campos del pedido, sin cambios"
+  }
+  ```
+- **`fecha_entrega_min` / `fecha_entrega_max`**: se calculan en el servidor a partir de `clasificacion` + `created_at` del pedido (fecha de alta, no la de confirmación) — **no son campos editables ni columnas en BD**, se recalculan en cada lectura (`ventas/services/clasificacion_service.py`) y **ya vienen incluidas en cualquier `GET`/`PATCH` de `/pedidos/{id}/`**, no solo cuando cambias la clasificación. Rangos usados:
+  | Clasificación | Rango |
+  |---|---|
+  | A | 2 a 5 días |
+  | B | 5 a 8 días |
+  | C | 5 a 15 días |
+  | D | 4 a 6 semanas |
+  | E | 6 a 8 semanas |
+  | F | 8 a 10 semanas |
+  | X | Sin fecha de entrega (solo para facturar) — ambos campos vienen `null` |
+  - Si el pedido todavía no tiene `clasificacion`, ambos campos vienen `null`.
+- Uso recomendado en Next.js: el widget de mesa de control en el detalle del pedido (un `<select>` de clasificación + un date picker de confirmación) hace un `PATCH` normal al mismo pedido que ya está cargado en pantalla; al llegar la respuesta, lee `fecha_entrega_min`/`fecha_entrega_max` para mostrar el rango sin ninguna llamada adicional.
+
 ---
 
 ## 🔐 Seguridad y Reglas
