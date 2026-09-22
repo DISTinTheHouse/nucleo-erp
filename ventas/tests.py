@@ -7,6 +7,7 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import TestCase
@@ -18,7 +19,15 @@ from auditoria.models import AuditoriaEvento
 from catalogo.models import Color, Producto, ProductoVariante, Talla
 from inventarios.models import MovimientoInventario
 from finanzas.models import Factura, FacturaDetalle
-from inventarios.models import Almacen, TipoAlmacen
+from inventarios.models import (
+    Almacen,
+    Existencia,
+    MovimientoInventarioDetalle,
+    TipoAlmacen,
+    TipoMovimiento,
+    Ubicacion,
+)
+from ventas.api.views import CotizacionViewSet
 from nucleo.models import Empresa, Moneda, Sucursal
 from produccion.models import OrdenesBordado
 from seguridad.models import Rol, UsuarioRol
@@ -1892,3 +1901,109 @@ class PedidoProgramarTests(TestCase):
             ),
             tallas_antes,
         )
+
+
+class PedidoMovimientoInventarioVarianteTests(TestCase):
+    """El movimiento formal del pedido conserva la variante de cada existencia.
+
+    Se recorre la misma cadena que ``autorizar`` (descuento) y
+    ``aceptar-cambios`` (reintegro): ``_discount_existencias_pedido`` /
+    ``_restore_existencias_pedido`` mueven el stock, y
+    ``_registrar_movimiento_inventario_pedido`` crea el detalle.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme-pv", razon_social="acme-pv SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="APV", nombre="acme-pv")
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM", nombre="Almacen",
+        )
+        cls.ub1 = Ubicacion.objects.create(almacen=cls.almacen, pasillo="1")
+        cls.ub2 = Ubicacion.objects.create(almacen=cls.almacen, pasillo="2")
+        cls.usuario = Usuario.objects.create(
+            username="u@acme-pv.test", email="u@acme-pv.test", empresa=cls.empresa,
+        )
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=cls.moneda,
+            folio="PED-PV", persona_pagos="Pagos", correo_facturas="u@acme-pv.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.variante = ProductoVariante.objects.create(
+            producto=cls.producto, empresa=cls.empresa, color=color, sku="PLA-NEG", precio_base="1",
+        )
+        cls.producto_sin_tallas = Producto.objects.create(empresa=cls.empresa, nombre="Gorra")
+
+    def setUp(self):
+        # Dos existencias de la misma variante: un renglón del plan consume de
+        # ambas y debe generar un detalle POR existencia, cada uno con su variante.
+        self.ex_var_1 = Existencia.objects.create(
+            producto=self.producto, producto_variante=self.variante, almacen=self.almacen,
+            ubicacion=self.ub1, cantidad=Decimal("3"),
+        )
+        self.ex_var_2 = Existencia.objects.create(
+            producto=self.producto, producto_variante=self.variante, almacen=self.almacen,
+            ubicacion=self.ub2, cantidad=Decimal("2"),
+        )
+        self.ex_sin_var = Existencia.objects.create(
+            producto=self.producto_sin_tallas, almacen=self.almacen, cantidad=Decimal("10"),
+        )
+
+    def _detalles(self, movimiento):
+        return {
+            (d.producto_id, d.ubicacion_origen_id): d
+            for d in MovimientoInventarioDetalle.objects.filter(movimiento_inventario=movimiento)
+        }
+
+    def test_descuento_y_reintegro_guardan_la_variante_de_cada_existencia(self):
+        view = CotizacionViewSet()
+        plan = [
+            {"producto": self.producto, "producto_id": self.producto.pk,
+             "producto_variante_id": self.variante.pk, "cantidad": Decimal("4")},
+            {"producto": self.producto_sin_tallas, "producto_id": self.producto_sin_tallas.pk,
+             "producto_variante_id": None, "cantidad": Decimal("6")},
+        ]
+
+        # --- descuento (autorizar) ---
+        consumos = view._discount_existencias_pedido(plan=plan, empresa=self.empresa, sucursal=self.sucursal)
+        salida = view._registrar_movimiento_inventario_pedido(
+            pedido=self.pedido, user=self.usuario, items=consumos,
+            tipo_movimiento=TipoMovimiento.SALIDA, observaciones="descuento",
+        )
+        view._registrar_auditoria_inventario_pedido(
+            pedido=self.pedido, user=self.usuario, items=consumos, accion="SALIDA",
+        )
+        detalles = self._detalles(salida)
+        self.assertEqual(len(detalles), 3)  # granularidad: uno por existencia
+        for ubicacion_id, cantidad in ((self.ub1.pk, "3"), (self.ub2.pk, "1")):
+            d = detalles[(self.producto.pk, ubicacion_id)]
+            self.assertEqual(d.producto_variante_id, self.variante.pk)
+            self.assertEqual(d.cantidad, Decimal(cantidad))
+            self.assertIsNone(d.ubicacion_destino_id)
+        d_sin = detalles[(self.producto_sin_tallas.pk, None)]
+        self.assertIsNone(d_sin.producto_variante_id)
+        self.assertEqual(d_sin.cantidad, Decimal("6"))
+        for ex, esperado in ((self.ex_var_1, "0"), (self.ex_var_2, "1"), (self.ex_sin_var, "4")):
+            ex.refresh_from_db()
+            self.assertEqual(ex.cantidad, Decimal(esperado))
+
+        # --- reintegro (aceptar-cambios) ---
+        entradas = view._restore_existencias_pedido(
+            pedido=self.pedido,
+            plan=[{"producto": self.producto, "producto_id": self.producto.pk,
+                   "producto_variante_id": self.variante.pk, "cantidad": Decimal("2")}],
+        )
+        entrada = view._registrar_movimiento_inventario_pedido(
+            pedido=self.pedido, user=self.usuario, items=entradas,
+            tipo_movimiento=TipoMovimiento.ENTRADA, observaciones="reintegro",
+        )
+        detalle_entrada = MovimientoInventarioDetalle.objects.get(movimiento_inventario=entrada)
+        self.assertEqual(detalle_entrada.producto_variante_id, self.variante.pk)
+        self.assertEqual(detalle_entrada.cantidad, Decimal("2"))
+        self.assertEqual(detalle_entrada.ubicacion_origen_id, self.ub1.pk)  # comportamiento actual
+        self.ex_var_1.refresh_from_db()
+        self.assertEqual(self.ex_var_1.cantidad, Decimal("2"))
