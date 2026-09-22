@@ -127,6 +127,23 @@ class UbicacionViewSet(viewsets.ModelViewSet):
                     raise PermissionDenied("No tiene acceso a esta empresa")
         serializer.save()
 
+def almacenes_en_alcance(user):
+    """Almacenes sobre los que opera un usuario NO superusuario.
+
+    Mismo alcance que almacenes/ubicaciones y los reportes: empresas del usuario
+    (``empresa`` + M2M ``empresas``) Y sus sucursales. Sin empresas o sin
+    sucursales el alcance queda vacío. El superusuario se trata aparte.
+    """
+    empresa_ids = []
+    if getattr(user, "empresa_id", None):
+        empresa_ids.append(user.empresa_id)
+    empresa_ids += list(user.empresas.values_list("pk", flat=True))
+    sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+    return Almacen.objects.filter(
+        models.Q(empresa_id__in=empresa_ids) & models.Q(sucursal_id__in=sucursal_ids)
+    )
+
+
 class ReporteExistenciasPeriodoPagination(PageNumberPagination):
     # Instantiated explicitly inside the action, not set as pagination_class
     # on the ViewSet, so list()/other actions are unaffected.
@@ -150,19 +167,8 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticatedAndScoped]
 
     def _almacenes_en_alcance(self):
-        # ``Existencia`` no tiene ``empresa`` propia: la hereda del almacén. Mismo
-        # alcance que almacenes/ubicaciones y los reportes de esta clase: empresas
-        # del usuario (``empresa`` + M2M ``empresas``) Y sus sucursales. Sin
-        # empresas o sin sucursales el alcance queda vacío.
-        user = self.request.user
-        empresa_ids = []
-        if getattr(user, "empresa_id", None):
-            empresa_ids.append(user.empresa_id)
-        empresa_ids += list(user.empresas.values_list("pk", flat=True))
-        sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
-        return Almacen.objects.filter(
-            models.Q(empresa_id__in=empresa_ids) & models.Q(sucursal_id__in=sucursal_ids)
-        )
+        # ``Existencia`` no tiene ``empresa`` propia: la hereda del almacén.
+        return almacenes_en_alcance(self.request.user)
 
     def get_queryset(self):
         def to_int(v):
