@@ -482,6 +482,79 @@ class AislamientoEmpresaCatalogoTests(TestCase):
         )
         self.assertEqual(put.status_code, 200, put.content)
 
+    # --- categoria del producto == empresa del producto --------------------------
+
+    def test_create_producto_con_categoria_de_otra_empresa_es_rechazado(self):
+        resp = self._client(self.user_a).post(
+            PRODUCTOS_URL, {"nombre": "Cruzado", "categoria_producto": self.cat_b.pk}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("categoria_producto", resp.json())
+        self.assertFalse(Producto.objects.filter(nombre="Cruzado").exists())
+
+    def test_create_producto_superusuario_cruzando_empresas_es_rechazado(self):
+        client = self._client(self.superuser)
+        resp = client.post(
+            PRODUCTOS_URL,
+            {"nombre": "Cruzado", "empresa": self.empresa_a.pk, "categoria_producto": self.cat_b.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("categoria_producto", resp.json())
+        self.assertFalse(Producto.objects.filter(nombre="Cruzado").exists())
+        # Sin cruzar sigue pudiendo crear en cualquier empresa.
+        ok = client.post(
+            PRODUCTOS_URL,
+            {"nombre": "Gorra B", "empresa": self.empresa_b.pk, "categoria_producto": self.cat_b.pk},
+            format="json",
+        )
+        self.assertEqual(ok.status_code, 201, ok.content)
+        self.assertEqual(ok.json()["empresa"], self.empresa_b.pk)
+
+    def test_patch_y_put_producto_a_categoria_de_otra_empresa_son_rechazados(self):
+        for user in (self.user_a, self.superuser):
+            client = self._client(user)
+            patch = client.patch(
+                f"{PRODUCTOS_URL}{self.prod_a.pk}/", {"categoria_producto": self.cat_b.pk}, format="json",
+            )
+            self.assertEqual(patch.status_code, 400, (user.email, patch.content))
+            self.assertIn("categoria_producto", patch.json())
+            put = client.put(
+                f"{PRODUCTOS_URL}{self.prod_a.pk}/",
+                {"nombre": self.prod_a.nombre, "categoria_producto": self.cat_b.pk},
+                format="json",
+            )
+            self.assertEqual(put.status_code, 400, (user.email, put.content))
+            self.assertIn("categoria_producto", put.json())
+            self.prod_a.refresh_from_db()
+            self.assertEqual(self.prod_a.categoria_producto_id, self.cat_a.pk)
+
+    def test_create_y_update_producto_misma_empresa_siguen_funcionando(self):
+        client = self._client(self.user_a)
+        cat_a2 = CategoriaProducto.objects.create(
+            empresa=self.empresa_a, nombre="Gorras A", codigo="GOA", descripcion="A",
+        )
+        creado = client.post(
+            PRODUCTOS_URL, {"nombre": "Gorra", "categoria_producto": self.cat_a.pk}, format="json",
+        )
+        self.assertEqual(creado.status_code, 201, creado.content)
+        self.assertEqual(creado.json()["empresa"], self.empresa_a.pk)
+        # PATCH sólo con ``categoria_producto`` (la empresa se resuelve de la instancia).
+        patch = client.patch(
+            f"{PRODUCTOS_URL}{self.prod_a.pk}/", {"categoria_producto": cat_a2.pk}, format="json",
+        )
+        self.assertEqual(patch.status_code, 200, patch.content)
+        self.assertEqual(patch.json()["categoria_producto"], cat_a2.pk)
+        # PATCH sin ``categoria_producto`` (se resuelve de la instancia).
+        nombre = client.patch(f"{PRODUCTOS_URL}{self.prod_a.pk}/", {"nombre": "Polo"}, format="json")
+        self.assertEqual(nombre.status_code, 200, nombre.content)
+        put = client.put(
+            f"{PRODUCTOS_URL}{self.prod_a.pk}/",
+            {"nombre": "Polo", "categoria_producto": self.cat_a.pk},
+            format="json",
+        )
+        self.assertEqual(put.status_code, 200, put.content)
+
 
 class ProductoFiltroTipoMultipleTests(TestCase):
     """``?tipo_id`` acepta varios valores (repetido o separado por comas)."""
