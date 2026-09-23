@@ -309,7 +309,28 @@ class PedidoListSerializer(serializers.ModelSerializer):
     (y sus prefetch) sólo se necesitan en el detalle (``retrieve``), no en la
     lista — evitar serializarlos en cada renglón del listado es lo que baja el
     tiempo de respuesta de ~15s a <1s. Campos explícitos, no ``__all__``.
+
+    ``estatus_display``/``clasificacion``/``clasificacion_display``/
+    ``fecha_entrega_min``/``fecha_entrega_max``/``programacion_conf`` se
+    agregaron para la pestaña de "Programación de pedidos" de mesa de
+    control: le basta este mismo listado para armar su tabla, sin pedir el
+    detalle completo de cada pedido uno por uno.
     """
+
+    estatus_display = serializers.CharField(source="get_estatus_display", read_only=True)
+    clasificacion_display = serializers.CharField(
+        source="get_clasificacion_display", read_only=True
+    )
+    fecha_entrega_min = serializers.SerializerMethodField()
+    fecha_entrega_max = serializers.SerializerMethodField()
+
+    def get_fecha_entrega_min(self, obj):
+        from ventas.services.clasificacion_service import rango_fecha_entrega
+        return rango_fecha_entrega(obj)[0]
+
+    def get_fecha_entrega_max(self, obj):
+        from ventas.services.clasificacion_service import rango_fecha_entrega
+        return rango_fecha_entrega(obj)[1]
 
     class Meta:
         model = Pedido
@@ -325,6 +346,12 @@ class PedidoListSerializer(serializers.ModelSerializer):
             "created_at",
             "fecha_confirmacion",
             "estatus",
+            "estatus_display",
+            "clasificacion",
+            "clasificacion_display",
+            "fecha_entrega_min",
+            "fecha_entrega_max",
+            "programacion_conf",
             "activo",
             "cliente",
             "moneda",

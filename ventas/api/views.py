@@ -2726,6 +2726,36 @@ class PedidoViewSet(viewsets.ModelViewSet):
         q = self.request.query_params.get("q") or self.request.query_params.get("folio")
         if q:
             qs = qs.filter(folio__icontains=q)
+        # ``estatus``/``sin_clasificar`` sólo en el listado — mismo motivo que
+        # ``CotizacionViewSet._apply_filters``: un filtro suelto que se cuele a
+        # una acción de detalle (``get_object()`` también pasa por aquí) puede
+        # devolver 404 sobre un pedido que existe y es visible. Pensados para
+        # la pestaña "Programación de pedidos" de mesa de control.
+        if getattr(self, "action", None) == "list":
+            estatus = self.request.query_params.get("estatus")
+            if estatus:
+                try:
+                    estatus_list = [
+                        int(x) for x in str(estatus).split(",") if str(x).strip()
+                    ]
+                    qs = qs.filter(estatus__in=estatus_list)
+                except Exception:
+                    raise ValidationError(
+                        {"estatus": "Filtro inválido. Usa números separados por coma."}
+                    )
+            sin_clasificar = self.request.query_params.get("sin_clasificar", "")
+            if sin_clasificar.lower() in ("true", "1"):
+                qs = qs.filter(clasificacion__isnull=True)
+            # ``programado``: pedidos con al menos una entrada en
+            # ``programacion_conf.programaciones`` (lo que deja
+            # ``PATCH /pedidos/{id}/programar/``). El índice ``0`` extrae el
+            # primer elemento del arreglo JSON; si la llave no existe o el
+            # arreglo está vacío, la extracción da NULL y ``isnull=False`` lo
+            # descarta — no hace falta comprobar la existencia de la llave por
+            # separado. Funciona igual en Postgres y SQLite (settings de test).
+            programado = self.request.query_params.get("programado", "")
+            if programado.lower() in ("true", "1"):
+                qs = qs.filter(programacion_conf__programaciones__0__isnull=False)
         # El shape de detalle (retrieve/create/update) serializa ``detalles`` +
         # ``tallas`` vía ``PedidoSerializer``: se prefetchean para evitar el N+1.
         # El listado usa ``PedidoListSerializer`` (9 campos escalares) y NO los
@@ -3022,6 +3052,136 @@ class PedidoViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    def _to_decimal_inventory(self, value):
+        return Decimal(str(value or 0)).quantize(QTY_PRECISION, rounding=ROUND_HALF_UP)
+
+    def _serialize_inventory_quantity(self, value):
+        value = self._to_decimal_inventory(value)
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+
+    def _stock_disponible_en_batch(self, pedido, detalles):
+        """Stock disponible de todas las líneas del pedido, en UNA query.
+
+        Movido de ``MesaControlViewSet.stock_detalle`` (cotizaciones): ahí
+        nunca bloqueaba nada — una cotización jamás se rechaza por falta de
+        stock. Tiene sentido real aquí, con el pedido ya aceptado, para saber
+        si hace falta reponer/solicitar producción. Misma lógica exacta,
+        adaptada a ``PedidoDetalle``/``PedidoDetalleTalla``.
+
+        Devuelve ``(stock_por_variante, stock_por_producto)``: con variante se
+        filtra SOLO por ``producto_variante_id`` (``Existencia.producto`` es
+        nullable, así que agrupar por el par dejaría fuera filas legítimas);
+        sin variante, por ``producto_id`` entre las filas sin variante. Los
+        totales se ACUMULAN, no se asignan, por la misma razón que en la
+        versión original.
+        """
+        variante_ids = set()
+        producto_ids = set()
+        for det in detalles:
+            for dt in det.tallas.all():
+                if dt.variante_id:
+                    variante_ids.add(dt.variante_id)
+                elif det.producto_id:
+                    producto_ids.add(det.producto_id)
+
+        stock_por_variante = {}
+        stock_por_producto = {}
+        if not variante_ids and not producto_ids:
+            return stock_por_variante, stock_por_producto
+
+        condiciones = []
+        if variante_ids:
+            condiciones.append(Q(producto_variante_id__in=list(variante_ids)))
+        if producto_ids:
+            condiciones.append(
+                Q(producto_id__in=list(producto_ids), producto_variante__isnull=True)
+            )
+        q_cond = condiciones[0]
+        for condicion in condiciones[1:]:
+            q_cond = q_cond | condicion
+
+        filas = (
+            Existencia.objects.filter(
+                almacen__empresa_id=pedido.empresa_id,
+                almacen__sucursal_id=pedido.sucursal_id,
+            )
+            .filter(q_cond)
+            .values("producto_id", "producto_variante_id")
+            .annotate(total=Sum("cantidad"))
+        )
+        for fila in filas:
+            total = fila["total"] or Decimal("0.0000")
+            variante_id = fila["producto_variante_id"]
+            if variante_id is not None:
+                stock_por_variante[variante_id] = (
+                    stock_por_variante.get(variante_id, Decimal("0.0000")) + total
+                )
+            else:
+                producto_id = fila["producto_id"]
+                stock_por_producto[producto_id] = (
+                    stock_por_producto.get(producto_id, Decimal("0.0000")) + total
+                )
+        return stock_por_variante, stock_por_producto
+
+    @action(detail=True, methods=["get"], url_path="stock-detalle")
+    def stock_detalle(self, request, pk=None):
+        """
+        Consulta el stock actual de cada producto/talla del pedido —
+        "revisar inventario". Ver nota de ``_stock_disponible_en_batch``: es
+        el mismo endpoint que antes vivía en cotizaciones, movido aquí.
+        """
+        pedido = self.get_object()
+
+        detalles = list(
+            PedidoDetalle.objects.filter(pedido=pedido)
+            .select_related("producto", "color")
+            .prefetch_related(
+                Prefetch(
+                    "tallas",
+                    queryset=PedidoDetalleTalla.objects.select_related(
+                        "talla"
+                    ).order_by("id"),
+                )
+            )
+        )
+
+        stock_por_variante, stock_por_producto = self._stock_disponible_en_batch(
+            pedido, detalles
+        )
+
+        resultados = []
+        for det in detalles:
+            item = {
+                "producto": det.producto.nombre if det.producto else (det.producto_nombre_externo or "Muestra sin producto"),
+                "color": det.color.nombre if det.color else "N/A",
+                "tallas": [],
+            }
+            for dt in det.tallas.all():
+                # Con variante se resuelve por variante (sin mirar el
+                # producto), y sin ella por producto entre las filas que no
+                # tienen variante.
+                if dt.variante_id:
+                    stock_total = stock_por_variante.get(dt.variante_id)
+                else:
+                    stock_total = stock_por_producto.get(det.producto_id)
+                stock_total = self._to_decimal_inventory(stock_total)
+                cantidad_pedida = self._to_decimal_inventory(dt.cantidad)
+                diferencia = stock_total - cantidad_pedida
+
+                item["tallas"].append(
+                    {
+                        "talla": dt.talla.nombre,
+                        "cantidad_pedida": dt.cantidad,
+                        "stock_actual": self._serialize_inventory_quantity(stock_total),
+                        "diferencia": self._serialize_inventory_quantity(diferencia),
+                    }
+                )
+            resultados.append(item)
+
+        return Response(resultados)
+
 
 class PedidoDetalleViewSet(viewsets.ModelViewSet):
     queryset = PedidoDetalle.objects.all()
@@ -3125,136 +3285,3 @@ class MesaControlViewSet(CotizacionViewSet):
         # ``list``, así que no se declara aquí un prefetch propio: duplicar el
         # mismo lookup con otro queryset hace que Django reviente al ejecutar.
         return self._apply_filters(qs.select_related("cliente", "sucursal", "moneda", "vendedor"))
-
-    def _stock_disponible_en_batch(self, cotizacion, detalles):
-        """Stock disponible de todas las líneas de la cotización, en UNA query.
-
-        Devuelve ``(stock_por_variante, stock_por_producto)``, los dos mapas que
-        el bucle consulta según la línea tenga variante o no. Replica exactamente
-        el criterio de ``_get_existencias_queryset`` —que se conserva intacto
-        para el resto de llamadores—:
-
-        - **Con variante**: filtra SOLO por ``producto_variante_id``, sin mirar
-          el producto. Por eso el mapa se indexa por ``variante_id`` y no por el
-          par ``(producto_id, variante_id)``: ``Existencia.producto`` es
-          nullable, así que agrupar por el par dejaría fuera filas legítimas.
-        - **Sin variante**: filtra por ``producto_id`` entre las filas con
-          ``producto_variante`` NULL.
-
-        Los totales se ACUMULAN, no se asignan: al agrupar por las dos columnas
-        a la vez, una misma variante puede venir repartida en varias filas con
-        distinto ``producto_id`` (incluido NULL). Mismo criterio que
-        ``ExistenciaService._sum_existencia_por_clave``.
-
-        ``empresa_id``/``sucursal_id`` en vez de los objetos: evita cargar la FK
-        ``cotizacion.empresa``, que no está en el ``select_related`` del
-        queryset (compartido con ``list``, donde no se usa).
-        """
-        variante_ids = set()
-        producto_ids = set()
-        for det in detalles:
-            for ct in det.tallas.all():
-                if ct.variante_id:
-                    variante_ids.add(ct.variante_id)
-                elif det.producto_id:
-                    producto_ids.add(det.producto_id)
-
-        stock_por_variante = {}
-        stock_por_producto = {}
-        if not variante_ids and not producto_ids:
-            return stock_por_variante, stock_por_producto
-
-        condiciones = []
-        if variante_ids:
-            condiciones.append(Q(producto_variante_id__in=list(variante_ids)))
-        if producto_ids:
-            condiciones.append(
-                Q(producto_id__in=list(producto_ids), producto_variante__isnull=True)
-            )
-        q_cond = condiciones[0]
-        for condicion in condiciones[1:]:
-            q_cond = q_cond | condicion
-
-        filas = (
-            Existencia.objects.filter(
-                almacen__empresa_id=cotizacion.empresa_id,
-                almacen__sucursal_id=cotizacion.sucursal_id,
-            )
-            .filter(q_cond)
-            .values("producto_id", "producto_variante_id")
-            .annotate(total=Sum("cantidad"))
-        )
-        for fila in filas:
-            total = fila["total"] or Decimal("0.0000")
-            variante_id = fila["producto_variante_id"]
-            if variante_id is not None:
-                stock_por_variante[variante_id] = (
-                    stock_por_variante.get(variante_id, Decimal("0.0000")) + total
-                )
-            else:
-                producto_id = fila["producto_id"]
-                stock_por_producto[producto_id] = (
-                    stock_por_producto.get(producto_id, Decimal("0.0000")) + total
-                )
-        return stock_por_variante, stock_por_producto
-
-    @action(detail=True, methods=["get"], url_path="stock-detalle")
-    def stock_detalle(self, request, pk=None):
-        """
-        Consulta el stock actual de cada producto/talla de la cotización.
-        """
-        cotizacion = self.get_object()
-
-        resultados = []
-        # ``tallas`` prefetcheado y con ``talla`` en el ``select_related``: el
-        # bucle leía ambos por fila (una consulta por renglón para las tallas y
-        # otra por talla para su nombre). ``order_by("id")`` va DENTRO del
-        # ``Prefetch``, no encadenado en el bucle: encadenarlo clonaría el
-        # queryset y descartaría la caché. ``CotizacionDetalleTalla`` no declara
-        # ``Meta.ordering``, así que sin esto el orden lo decidía la BD.
-        detalles = list(
-            CotizacionDetalle.objects.filter(cotizacion=cotizacion)
-            .select_related("producto", "color")
-            .prefetch_related(
-                Prefetch(
-                    "tallas",
-                    queryset=CotizacionDetalleTalla.objects.select_related(
-                        "talla"
-                    ).order_by("id"),
-                )
-            )
-        )
-
-        stock_por_variante, stock_por_producto = self._stock_disponible_en_batch(
-            cotizacion, detalles
-        )
-
-        for det in detalles:
-            item = {
-                "producto": det.producto.nombre if det.producto else (det.producto_nombre_externo or "Muestra sin producto"),
-                "color": det.color.nombre if det.color else "N/A",
-                "tallas": [],
-            }
-            for ct in det.tallas.all():
-                # Mismo criterio que ``_get_total_disponible``: con variante se
-                # resuelve por variante (sin mirar el producto), y sin ella por
-                # producto entre las filas que no tienen variante.
-                if ct.variante_id:
-                    stock_total = stock_por_variante.get(ct.variante_id)
-                else:
-                    stock_total = stock_por_producto.get(det.producto_id)
-                stock_total = self._to_decimal_inventory(stock_total)
-                cantidad_pedida = self._to_decimal_inventory(ct.cantidad)
-                diferencia = stock_total - cantidad_pedida
-
-                item["tallas"].append(
-                    {
-                        "talla": ct.talla.nombre,
-                        "cantidad_pedida": ct.cantidad,
-                        "stock_actual": self._serialize_inventory_quantity(stock_total),
-                        "diferencia": self._serialize_inventory_quantity(diferencia),
-                    }
-                )
-            resultados.append(item)
-
-        return Response(resultados)

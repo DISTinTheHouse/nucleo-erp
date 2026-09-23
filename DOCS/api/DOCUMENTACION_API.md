@@ -1497,6 +1497,36 @@ Botón "Recompra" en el detalle del pedido: crea una **Cotización nueva** (no u
 - Uso recomendado en Next.js: al recibir la respuesta, navegar a la pantalla de edición de cotización con `cotizacion_id = cotizacion.id` (la misma pantalla que usa `POST /cotizaciones/onboarding/` con `cotizacion_id` para editar) — el vendedor ajusta lo que necesite y de ahí sigue el flujo normal (enviar a revisión → autorizar → se genera un `Pedido` nuevo).
 - Alcance: mismo aislamiento multi-tenant que el resto de `PedidoViewSet` (`get_object()` ya está acotado por `pedidos_visibles`); no hay restricción adicional de rol — cualquier usuario que pueda ver el pedido puede recomprarlo.
 
+### Revisar inventario (disponibilidad del pedido)
+
+Botón "Revisar inventario" en el detalle del pedido: por cada producto/talla del pedido, compara cuánto se pidió contra cuánto hay en existencia. **Se movió aquí desde Cotizaciones/Mesa de Control** — ahí vivía como `GET /mesa-control/{id}/stock-detalle/`, pero una cotización nunca se rechaza por falta de stock, así que el dato no tenía a dónde ir. Ese endpoint **ya no existe** (`404`); en el pedido sí tiene uso real, para decidir si hace falta reponer existencia o solicitar producción especial (ver más abajo).
+
+- **Endpoint**: `GET /api/v1/ventas/pedidos/{id}/stock-detalle/`
+- Solo lectura, sin efectos secundarios — no reserva ni descuenta nada.
+- **Respuesta** (`200`):
+  ```json
+  [
+    {
+      "producto": "Playera Polo",
+      "color": "Rojo",
+      "tallas": [
+        { "talla": "CH", "cantidad_pedida": 20, "stock_actual": 8, "diferencia": -12 }
+      ]
+    }
+  ]
+  ```
+  - `diferencia = stock_actual - cantidad_pedida`. Negativa = falta stock para cubrir el pedido.
+  - El stock se resuelve por `producto_variante` cuando la talla tiene variante asignada; si no, por `producto` a secas, sumando existencias de todos los almacenes de la sucursal del pedido.
+  - Una línea con `producto_nombre_externo` (muestra sin catálogo) sale como `"producto": "Muestra sin producto"` si tampoco tiene `producto`.
+- Alcance: mismo que el resto de `PedidoViewSet` — cualquier usuario con acceso al pedido puede consultarlo, sin gate adicional de mesa de control (es solo informativo).
+
+### Solicitar producción (líneas sin SKU / muestras)
+
+**No es un botón que dispare nada en el backend** — es un indicador automático. Cuando una línea del pedido (o de la cotización que le dio origen) se captura con `producto_nombre_externo` (texto libre, sin escoger un producto real del catálogo — típicamente una muestra), el backend marca esa talla con `requiere_produccion=True` **solo**; no hay checkbox que lo pueda forzar manualmente — cualquier valor que mande el frontend para ese campo se ignora y se recalcula siempre como `bool(producto_nombre_externo)` (`ventas/utils/helpers.py`).
+
+- **Canal hacia producción**: `GET /api/v1/produccion/pedidos-especiales/` (`PedidoEspecialViewSet`, solo lectura) — lista los pedidos con al menos una línea `requiere_produccion=True`; el detalle trae solo esas líneas/tallas especiales.
+- **No se genera ninguna Orden de Producción automáticamente**: `OrdenProduccion` exige un `ListaMaterialBom` activo por `producto_variante`, y una muestra sin SKU no tiene variante ni BOM — intentarlo fallaría por diseño. El flujo real es manual: producción da de alta el SKU/variante (proceso aparte, catálogo) y **después** crea la OP a mano desde `POST /api/v1/produccion/orden-produccion/`, mandando `pedido: <id>` en el body para ligarla al documento maestro (folio P) — `OrdenProduccion.pedido` ya es un campo normal, no hace falta nada nuevo para esto.
+
 ---
 
 ## 🧮 Mesa de Control
@@ -1665,6 +1695,53 @@ Botón "Recompra" en el detalle del pedido: crea una **Cotización nueva** (no u
     - preservar integridad contable y trazabilidad operativa del folio `P`
   - Nota de integración:
     - el `GET /api/v1/ventas/pedidos/{id}/` ya devuelve `detalles[].id` y `tallas[]`, así que el frontend puede reutilizar ese payload para construir el body de edición sin tener que inventar IDs o hacer mapeos especiales
+### Programar pedido (parcialidades de entrega, una vez aceptado)
+
+Una vez que el pedido ya fue aceptado/autorizado, mesa de control reparte sus piezas en una o más entregas parciales por destino (bordado, embarque, etc.) — **no** reescribe renglones ni cantidades del pedido, solo registra el plan de entrega. Vive **separado** de `editar-mesa-control`: no valida los bloqueos de documentos ligados (facturas, órdenes, picking) porque no toca ningún renglón, y no sincroniza la cotización relacionada (la programación es propia del pedido).
+
+- **Endpoint**: `PATCH /api/v1/ventas/pedidos/{id}/programar/`
+- Permiso: mesa de control (`is_superuser`, `is_admin_empresa`, o rol activo de Mesa de Control) — mismo criterio que el resto de esta sección.
+- Body — **reemplaza completo** el plan de programación anterior (no hace merge/append):
+  ```json
+  {
+    "programaciones": [
+      { "destino": "BORDADO", "cantidad": 150 },
+      { "destino": "EMBARQUE", "cantidad": 100 }
+    ]
+  }
+  ```
+  - `destino`: uno de `BORDADO`, `REFLEJANTE`, `CORTE_MANGA`, `EMBARQUE`, `APARTADO`. Otro valor responde `400` con el detalle de valores permitidos.
+  - `cantidad`: entero, mínimo 1.
+  - `programaciones` puede ir vacío (`[]`) para **limpiar** la programación existente.
+  - Validación dura: la suma de todas las `cantidad` no puede exceder el total de piezas del pedido (`SUM(PedidoDetalleTalla.cantidad)`) — si se excede, `400` con el detalle de cuánto se mandó vs. cuánto hay.
+  - `fecha`, `usuario_id` y `usuario_nombre` **no se envían** — el servidor los sella solos por cada renglón de programación (igual que el resto de la auditoría de la API); si el body los incluye, se ignoran en silencio.
+- **Respuesta** (`200`):
+  ```json
+  {
+    "pedido_id": 45,
+    "total_piezas": 250,
+    "programacion_conf": {
+      "programaciones": [
+        {
+          "destino": "BORDADO",
+          "cantidad": 150,
+          "fecha": "2026-01-10T16:32:00.000000+00:00",
+          "usuario_id": 12,
+          "usuario_nombre": "Ana Torres"
+        },
+        {
+          "destino": "EMBARQUE",
+          "cantidad": 100,
+          "fecha": "2026-01-10T16:32:00.000000+00:00",
+          "usuario_id": 12,
+          "usuario_nombre": "Ana Torres"
+        }
+      ]
+    }
+  }
+  ```
+- `programacion_conf` también viaja tal cual en `GET /api/v1/ventas/pedidos/{id}/` (es de solo lectura ahí — ver nota en el `Meta` de `PedidoSerializer` — así que un `PATCH` genérico al pedido no puede pisarlo; solo este endpoint lo escribe).
+- Uso recomendado en Next.js: pantalla de "programar entregas" con filas dinámicas `destino` + `cantidad`; mostrar el total de piezas del pedido (de `GET /pedidos/{id}/` o de la respuesta de este mismo endpoint) para validar en el cliente antes de enviar, aunque el backend igual lo revalida.
 
 ### Clasificar pedido (widget liviano en el detalle)
 
@@ -1701,6 +1778,42 @@ Los **dos únicos campos manuales** que llena mesa de control directamente sobre
   | X | Sin fecha de entrega (solo para facturar) — ambos campos vienen `null` |
   - Si el pedido todavía no tiene `clasificacion`, ambos campos vienen `null`.
 - Uso recomendado en Next.js: el widget de mesa de control en el detalle del pedido (un `<select>` de clasificación + un date picker de confirmación) hace un `PATCH` normal al mismo pedido que ya está cargado en pantalla; al llegar la respuesta, lee `fecha_entrega_min`/`fecha_entrega_max` para mostrar el rango sin ninguna llamada adicional.
+
+### Programación de pedidos (tab de mesa de control)
+
+Pantalla de cola para mesa de control: una tabla con todos los pedidos y su estado de clasificación/programación, para saber de un vistazo cuáles faltan por atender. **No es un endpoint nuevo** — es el mismo `GET /api/v1/ventas/pedidos/` de siempre (el listado que ya usa Ventas), con columnas y filtros agregados. Ventas sigue viendo su tabla igual; esto es la misma llamada, otra pestaña en el frontend con otras columnas/filtros.
+
+- **Endpoint**: `GET /api/v1/ventas/pedidos/` (el de siempre).
+- **Columnas nuevas en cada renglón** (además de las que ya existían — `folio`, `cliente_nombre`, `gran_total`, etc.):
+  ```json
+  {
+    "id": 45,
+    "oc": "OC-123",
+    "estatus": 4,
+    "estatus_display": "EN PROCESO",
+    "clasificacion": "B",
+    "clasificacion_display": "B - 5 a 8 días",
+    "fecha_confirmacion": "2026-01-05T10:00:00Z",
+    "fecha_entrega_min": "2026-01-06",
+    "fecha_entrega_max": "2026-01-09",
+    "programacion_conf": {
+      "programaciones": [
+        { "destino": "BORDADO", "cantidad": 150, "fecha": "...", "usuario_id": 12, "usuario_nombre": "Ana Torres" }
+      ]
+    }
+  }
+  ```
+  - `clasificacion`/`clasificacion_display`/`fecha_confirmacion`/`fecha_entrega_min`/`fecha_entrega_max`: mismo significado y mismo cálculo que en el detalle del pedido (ver "Clasificar pedido" arriba) — `null` si el pedido aún no tiene clasificación.
+  - `programacion_conf`: el JSON crudo de `PATCH /pedidos/{id}/programar/`, tal cual — `{"programaciones": []}` si no se ha programado nada.
+- **Filtros nuevos** (solo aplican en este listado, `?query_param` de siempre — no rompen el detalle del pedido):
+  - `?estatus=3` o `?estatus=3,4` — uno o varios estatus separados por coma (mismos códigos de `Pedido.CHOICES_ESTATUS`: 1 BORRADOR, 2 POR AUTORIZAR, 3 AUTORIZADA, 4 EN PROCESO, 5 CANCELADO). Valor inválido responde `400 {"estatus": "Filtro inválido. Usa números separados por coma."}`.
+  - `?sin_clasificar=true` — solo pedidos con `clasificacion` vacía (la cola de "pendientes por clasificar").
+  - `?programado=true` — solo pedidos con al menos una entrada en `programacion_conf.programaciones` (ya se les corrió `PATCH /pedidos/{id}/programar/` con al menos un destino/cantidad). Un pedido programado y luego "limpiado" (`programaciones: []`) **no** cuenta como programado — vuelve a quedar fuera de este filtro.
+  - Se pueden combinar entre sí y con los filtros que ya existían (`?q=`/`?folio=`, `?mis_pedidos=true`).
+- **Dos vistas típicas para el frontend, misma llamada**:
+  - **Cola de pendientes** (todo lo que falta atender): `GET /pedidos/?estatus=3,4` — clasificación y programación pueden venir vacías, esa es la tabla de "qué falta".
+  - **Tabla separada de ya programados**: `GET /pedidos/?estatus=3,4&programado=true` — solo los que ya tienen algo en `programacion_conf`, con su info completa (destino, cantidad, quién y cuándo lo programó).
+- Cada renglón es de solo lectura en estas tablas; para editar (clasificar, confirmar fecha, programar), se abre el detalle del pedido y se usa el `PATCH`/`programar` normal descritos arriba.
 
 ---
 
@@ -2678,6 +2791,11 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
       "cliente_nombre": "Cliente Demo",
       "sucursal": 1,
       "sucursal_nombre": "Matriz",
+      "programado": {
+        "cantidad": 25.0,
+        "fecha": "2026-01-10T16:32:00.000000+00:00",
+        "usuario_nombre": "Ana Torres"
+      },
       "detalles": [
         {
           "pedido_detalle_talla_id": 8821,
@@ -2717,7 +2835,8 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 | Campo                                      | Regla                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pedidos`                                  | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_bordado=True` **y con saldo pendiente**: si todas sus líneas están cubiertas al 100% por OBs activas, el pedido **no aparece** (no hay nada que bordar). Scope por `empresa` + `sucursales_permitidas()` del usuario.                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pedidos`                                  | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_bordado=True` **y con saldo pendiente**: si todas sus líneas están cubiertas al 100% por OBs activas, el pedido **no aparece** (no hay nada que bordar). Scope por `empresa` + `sucursales_permitidas()` del usuario. **No filtra** por si mesa de control ya lo programó o no — eso solo lo informa `programado` (ver abajo), no oculta ni prioriza pedidos.                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pedidos[].programado`                     | **Nuevo.** `null` si mesa de control no ha programado este pedido hacia `BORDADO` (`PATCH /api/v1/ventas/pedidos/{id}/programar/`); si sí, trae `{cantidad, fecha, usuario_nombre}` leído tal cual de `Pedido.programacion_conf` (sumando si hubiera más de una fila programada al mismo destino). Es **puramente informativo** — una cantidad agregada, sin desglose por producto/talla — para que el operador de bordado vea de un vistazo qué pedidos ya le tocan sin que mesa de control tenga que capturar nada más. La OB se sigue armando igual que siempre, a partir de `detalles[]` (que sale de `PedidoDetalleTalla.lleva_bordado=True`), no de este campo.                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `pedidos[].detalles[]`                     | Líneas del pedido que llevan servicio de bordado (una por cada combinación `producto + talla + color`) y con `cantidad > 0` —mismo criterio que aplica el POST, para no ofrecer renglones que luego rechaza—. Incluye `cantidad_pedido` y el preview de ubicaciones/foto/notas extraído desde `bordado_config`. Un pedido que sí aparece viaja con **todas** sus líneas, incluidas las ya agotadas (`cantidad_pendiente = 0`), para que el frontend pueda marcarlas.                                                                                                                                                                                                                                          |
 | `cantidad_asignada` / `cantidad_pendiente` | Por línea. `cantidad_asignada` es la suma de `OrdenBordadoDetalle.cantidad` de **todas las OBs activas** de ese pedido para esa línea; `cantidad_pendiente = max(0, cantidad_pedido - cantidad_asignada)`. Es el valor con el que el frontend debe pre-llenar el selector de cantidades: usar `cantidad_pedido` ofrece piezas ya programadas y el POST las rechaza con 400. Los renglones de OB cuya `talla` quedó en `NULL` (los genera el pipeline de picking cuando la talla no trae `variante`) no se pueden atribuir a una talla concreta y se descuentan del pendiente de las líneas del mismo `pedido_detalle`, así que el **total por renglón** es exacto aunque el reparto por talla sea aproximado. |
 | `operadores`                               | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -3222,6 +3341,7 @@ Lo que controla el cupo ahora:
       "cliente_nombre": "Cliente Demo",
       "sucursal": 1,
       "sucursal_nombre": "Matriz",
+      "programado": null,
       "detalles": [
         {
           "pedido_detalle_talla_id": 8821,
@@ -3260,6 +3380,7 @@ Lo que controla el cupo ahora:
 | Campo                                  | Regla                                                                                                                                                              |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_reflejante=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                       |
+| `pedidos[].programado`                 | Igual que en el onboarding de Bordado (ver esa sección): `null` o `{cantidad, fecha, usuario_nombre}` según si mesa de control programó el pedido hacia `REFLEJANTE` (`PATCH /api/v1/ventas/pedidos/{id}/programar/`). Puramente informativo, no filtra ni cambia cómo se arma la OR. |
 | `pedidos[].detalles`                   | Una fila por combinación `producto + talla + color` del pedido con `lleva_reflejante=True`. `pedido_detalle_talla_id` es el PK que usará el body de POST.          |
 | `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                       |
 | `preview.folio_or_sugerido`            | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`). |
@@ -3397,6 +3518,7 @@ Cuando la solicitud de OR parcial sí excede el cupo restante (validación de su
       "cliente_nombre": "Cliente Demo",
       "sucursal": 1,
       "sucursal_nombre": "Matriz",
+      "programado": null,
       "detalles": [
         {
           "pedido_detalle_talla_id": 9005,
@@ -3434,6 +3556,7 @@ Cuando la solicitud de OR parcial sí excede el cupo restante (validación de su
 | Campo                                  | Regla                                                                                                                                                              |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `pedidos`                              | Solo pedidos con al menos una `PedidoDetalleTalla` con `lleva_corte_manga=True`. Scope por `empresa` + `sucursales_permitidas()` del usuario.                      |
+| `pedidos[].programado`                 | Igual que en el onboarding de Bordado (ver esa sección): `null` o `{cantidad, fecha, usuario_nombre}` según si mesa de control programó el pedido hacia `CORTE_MANGA` (`PATCH /api/v1/ventas/pedidos/{id}/programar/`). Puramente informativo, no filtra ni cambia cómo se arma la OCM. |
 | `pedidos[].detalles`                   | Una fila por combinación `producto + talla + color` del pedido con `lleva_corte_manga=True`. `pedido_detalle_talla_id` es el PK que usará el body de POST.         |
 | `operadores`                           | `Usuarios` activos de la empresa ordenados por nombre/email.                                                                                                       |
 | `preview.folio_ocm_sugerido`           | Usa SSoT `SerieFolio.preview_siguiente_folio()` (mismo modelo `nucleo.models.SerieFolio`). **Preview SIN consumo** (no gasta folio, no incrementa `folio_actual`). |
