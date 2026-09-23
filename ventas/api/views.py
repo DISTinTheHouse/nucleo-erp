@@ -1594,6 +1594,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 pedido=pedido,
                 nombre=s.nombre,
                 monto=s.monto,
+                cantidad=s.cantidad,
                 visible_en_factura=s.visible_en_factura,
             )
 
@@ -1944,6 +1945,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 pedido=pedido,
                 nombre=s.nombre,
                 monto=s.monto,
+                cantidad=s.cantidad,
                 visible_en_factura=s.visible_en_factura,
             )
 

@@ -28,7 +28,7 @@ from inventarios.models import (
     Ubicacion,
 )
 from ventas.api.views import CotizacionViewSet
-from nucleo.models import Empresa, Moneda, Sucursal
+from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal
 from produccion.models import OrdenesBordado
 from seguridad.models import Rol, UsuarioRol
 from terceros.models import Cliente
@@ -2007,3 +2007,92 @@ class PedidoMovimientoInventarioVarianteTests(TestCase):
         self.assertEqual(detalle_entrada.ubicacion_origen_id, self.ub1.pk)  # comportamiento actual
         self.ex_var_1.refresh_from_db()
         self.assertEqual(self.ex_var_1.cantidad, Decimal("2"))
+
+
+class ServicioExtraCantidadCopiaTests(TestCase):
+    """``cantidad`` de los servicios extra sobrevive a cada copia cotización <-> pedido.
+
+    Caso real: cotización 108 -> pedido 237 perdió ``cantidad`` (4/15/15 -> 1)
+    en ``autorizar`` mientras ``gran_total`` se copiaba íntegro, así que el
+    pedido ya no cuadraba con sus propios renglones.
+    """
+
+    SERVICIOS = (("Flete", "350.00", 1), ("Bordado", "500.00", 4), ("Etiqueta", "20.00", 15), ("Bolsa", "60.00", 15))
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme-se", razon_social="acme-se SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ASE", nombre="acme-se")
+        SerieFolio.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="PEDIDO", serie="P")
+        cls.admin = Usuario.objects.create(
+            username="admin@acme-se.test", email="admin@acme-se.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+        # 350*1 + 500*4 + 20*15 + 60*15 = 3,550; sin renglones -> gran_total = 3,550 * 1.16
+        self.cotizacion = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.admin, sucursal=self.sucursal,
+            cliente=self.cliente, moneda=self.moneda, estatus=2,
+            persona_pagos="Pagos", correo_facturas="pagos@acme-se.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            subtotal="0.00", gran_total="4118.00",
+        )
+        for nombre, monto, cantidad in self.SERVICIOS:
+            CotizacionServicioExtra.objects.create(
+                cotizacion=self.cotizacion, nombre=nombre, monto=monto, cantidad=cantidad,
+            )
+
+    def _cantidades(self, qs):
+        return [(s.nombre, s.cantidad) for s in qs.order_by("id")]
+
+    def _esperadas(self):
+        return [(nombre, cantidad) for nombre, _, cantidad in self.SERVICIOS]
+
+    def _autorizar(self):
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        return Pedido.objects.get(pk=resp.data["pedido"]["id"])
+
+    def test_autorizar_conserva_cantidad_y_cuadra_con_gran_total(self):
+        pedido = self._autorizar()
+        servicios = PedidoServicioExtra.objects.filter(pedido=pedido)
+        self.assertEqual(self._cantidades(servicios), self._esperadas())
+        suma = sum(s.monto * s.cantidad for s in servicios)
+        self.assertEqual(suma, Decimal("3550.00"))
+        self.assertEqual((pedido.subtotal + suma) * Decimal("1.16"), pedido.gran_total)
+
+    def test_aceptar_cambios_conserva_cantidad(self):
+        pedido = self._autorizar()
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=5)
+        CotizacionServicioExtra.objects.filter(cotizacion=self.cotizacion, nombre="Bordado").update(cantidad=7)
+
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/aceptar-cambios/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        esperadas = [(n, 7 if n == "Bordado" else c) for n, c in self._esperadas()]
+        self.assertEqual(self._cantidades(PedidoServicioExtra.objects.filter(pedido=pedido)), esperadas)
+
+    def test_snapshot_aprobado_guarda_cantidad(self):
+        # ``rechazar-cambios`` reconstruye los servicios desde este snapshot.
+        self._autorizar()
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(
+            [(s["nombre"], s["cantidad"]) for s in self.cotizacion.aprobado_snapshot["servicios_extras"]],
+            self._esperadas(),
+        )
+
+    def test_recomprar_conserva_cantidad(self):
+        pedido = self._autorizar()
+        resp = self.client.post(f"{PEDIDOS_URL}{pedido.pk}/recomprar/")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(
+            [(s["nombre"], s["cantidad"]) for s in resp.data["servicios_extras"]], self._esperadas()
+        )
+        nueva = Cotizacion.objects.get(pk=resp.data["cotizacion"]["id"])
+        self.assertEqual(
+            self._cantidades(CotizacionServicioExtra.objects.filter(cotizacion=nueva)), self._esperadas()
+        )
