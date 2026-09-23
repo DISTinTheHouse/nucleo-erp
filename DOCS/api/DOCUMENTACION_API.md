@@ -1497,6 +1497,36 @@ Botón "Recompra" en el detalle del pedido: crea una **Cotización nueva** (no u
 - Uso recomendado en Next.js: al recibir la respuesta, navegar a la pantalla de edición de cotización con `cotizacion_id = cotizacion.id` (la misma pantalla que usa `POST /cotizaciones/onboarding/` con `cotizacion_id` para editar) — el vendedor ajusta lo que necesite y de ahí sigue el flujo normal (enviar a revisión → autorizar → se genera un `Pedido` nuevo).
 - Alcance: mismo aislamiento multi-tenant que el resto de `PedidoViewSet` (`get_object()` ya está acotado por `pedidos_visibles`); no hay restricción adicional de rol — cualquier usuario que pueda ver el pedido puede recomprarlo.
 
+### Revisar inventario (disponibilidad del pedido)
+
+Botón "Revisar inventario" en el detalle del pedido: por cada producto/talla del pedido, compara cuánto se pidió contra cuánto hay en existencia. **Se movió aquí desde Cotizaciones/Mesa de Control** — ahí vivía como `GET /mesa-control/{id}/stock-detalle/`, pero una cotización nunca se rechaza por falta de stock, así que el dato no tenía a dónde ir. Ese endpoint **ya no existe** (`404`); en el pedido sí tiene uso real, para decidir si hace falta reponer existencia o solicitar producción especial (ver más abajo).
+
+- **Endpoint**: `GET /api/v1/ventas/pedidos/{id}/stock-detalle/`
+- Solo lectura, sin efectos secundarios — no reserva ni descuenta nada.
+- **Respuesta** (`200`):
+  ```json
+  [
+    {
+      "producto": "Playera Polo",
+      "color": "Rojo",
+      "tallas": [
+        { "talla": "CH", "cantidad_pedida": 20, "stock_actual": 8, "diferencia": -12 }
+      ]
+    }
+  ]
+  ```
+  - `diferencia = stock_actual - cantidad_pedida`. Negativa = falta stock para cubrir el pedido.
+  - El stock se resuelve por `producto_variante` cuando la talla tiene variante asignada; si no, por `producto` a secas, sumando existencias de todos los almacenes de la sucursal del pedido.
+  - Una línea con `producto_nombre_externo` (muestra sin catálogo) sale como `"producto": "Muestra sin producto"` si tampoco tiene `producto`.
+- Alcance: mismo que el resto de `PedidoViewSet` — cualquier usuario con acceso al pedido puede consultarlo, sin gate adicional de mesa de control (es solo informativo).
+
+### Solicitar producción (líneas sin SKU / muestras)
+
+**No es un botón que dispare nada en el backend** — es un indicador automático. Cuando una línea del pedido (o de la cotización que le dio origen) se captura con `producto_nombre_externo` (texto libre, sin escoger un producto real del catálogo — típicamente una muestra), el backend marca esa talla con `requiere_produccion=True` **solo**; no hay checkbox que lo pueda forzar manualmente — cualquier valor que mande el frontend para ese campo se ignora y se recalcula siempre como `bool(producto_nombre_externo)` (`ventas/utils/helpers.py`).
+
+- **Canal hacia producción**: `GET /api/v1/produccion/pedidos-especiales/` (`PedidoEspecialViewSet`, solo lectura) — lista los pedidos con al menos una línea `requiere_produccion=True`; el detalle trae solo esas líneas/tallas especiales.
+- **No se genera ninguna Orden de Producción automáticamente**: `OrdenProduccion` exige un `ListaMaterialBom` activo por `producto_variante`, y una muestra sin SKU no tiene variante ni BOM — intentarlo fallaría por diseño. El flujo real es manual: producción da de alta el SKU/variante (proceso aparte, catálogo) y **después** crea la OP a mano desde `POST /api/v1/produccion/orden-produccion/`, mandando `pedido: <id>` en el body para ligarla al documento maestro (folio P) — `OrdenProduccion.pedido` ya es un campo normal, no hace falta nada nuevo para esto.
+
 ---
 
 ## 🧮 Mesa de Control
