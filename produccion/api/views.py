@@ -83,8 +83,32 @@ def _tallas_ot_prefetch(flag):
     )
 
 
+def _programado_para_destino(pedido, destino):
+    """Lo que mesa de control programó para este pedido hacia ``destino``
+    (``ventas.Pedido.programacion_conf``), o ``None`` si no hay nada.
+
+    Es solo informativo (cantidad agregada, sin desglose por producto/talla —
+    ver ``ventas.api.views.PedidoViewSet.programar``): bordado/reflejante/corte
+    de manga siguen resolviendo sus líneas reales desde
+    ``PedidoDetalleTalla.lleva_*=True``, esto sólo les dice de un vistazo qué
+    pedidos ya fueron programados y cuántas piezas les tocan.
+    """
+    filas = [
+        fila
+        for fila in ((pedido.programacion_conf or {}).get("programaciones") or [])
+        if isinstance(fila, dict) and fila.get("destino") == destino
+    ]
+    if not filas:
+        return None
+    return {
+        "cantidad": sum(float(fila.get("cantidad") or 0) for fila in filas),
+        "fecha": filas[-1].get("fecha"),
+        "usuario_nombre": filas[-1].get("usuario_nombre"),
+    }
+
+
 def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn,
-                                incluir_config_crudo=False):
+                                incluir_config_crudo=False, destino_programacion=None):
     """Arma la lista ``pedidos`` del GET de onboarding de órdenes de trabajo.
 
     Compartido por Bordado / Reflejante / Corte de Manga: los tres emitían el
@@ -199,6 +223,11 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
             "sucursal": p.sucursal_id,
             "sucursal_nombre": getattr(p.sucursal, "nombre", None),
             "detalles": lineas,
+            "programado": (
+                _programado_para_destino(p, destino_programacion)
+                if destino_programacion
+                else None
+            ),
         })
     return pedidos_payload
 
@@ -750,6 +779,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 pedidos_qs,
                 "bordado_config",
                 OrdenBordadoService.cantidades_asignadas_por_pedidos,
+                destino_programacion="BORDADO",
             )
 
             return Response({
@@ -1087,6 +1117,7 @@ class OrdenReflejanteViewSet(
                 # tienen config con forma de objeto y ya lo publican por esa
                 # vía, así que no se activa ahí y su respuesta no cambia.
                 incluir_config_crudo=True,
+                destino_programacion="REFLEJANTE",
             )
 
             return Response({
@@ -1297,6 +1328,7 @@ class OrdenesCorteMangaViewSet(
                 pedidos_qs,
                 "corte_manga_config",
                 OrdenCorteMangaService.cantidades_asignadas_por_pedidos,
+                destino_programacion="CORTE_MANGA",
             )
 
             return Response({
