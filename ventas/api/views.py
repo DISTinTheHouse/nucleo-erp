@@ -2726,6 +2726,26 @@ class PedidoViewSet(viewsets.ModelViewSet):
         q = self.request.query_params.get("q") or self.request.query_params.get("folio")
         if q:
             qs = qs.filter(folio__icontains=q)
+        # ``estatus``/``sin_clasificar`` sólo en el listado — mismo motivo que
+        # ``CotizacionViewSet._apply_filters``: un filtro suelto que se cuele a
+        # una acción de detalle (``get_object()`` también pasa por aquí) puede
+        # devolver 404 sobre un pedido que existe y es visible. Pensados para
+        # la pestaña "Programación de pedidos" de mesa de control.
+        if getattr(self, "action", None) == "list":
+            estatus = self.request.query_params.get("estatus")
+            if estatus:
+                try:
+                    estatus_list = [
+                        int(x) for x in str(estatus).split(",") if str(x).strip()
+                    ]
+                    qs = qs.filter(estatus__in=estatus_list)
+                except Exception:
+                    raise ValidationError(
+                        {"estatus": "Filtro inválido. Usa números separados por coma."}
+                    )
+            sin_clasificar = self.request.query_params.get("sin_clasificar", "")
+            if sin_clasificar.lower() in ("true", "1"):
+                qs = qs.filter(clasificacion__isnull=True)
         # El shape de detalle (retrieve/create/update) serializa ``detalles`` +
         # ``tallas`` vía ``PedidoSerializer``: se prefetchean para evitar el N+1.
         # El listado usa ``PedidoListSerializer`` (9 campos escalares) y NO los

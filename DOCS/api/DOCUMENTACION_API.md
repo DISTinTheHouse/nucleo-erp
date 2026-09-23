@@ -1749,6 +1749,38 @@ Los **dos únicos campos manuales** que llena mesa de control directamente sobre
   - Si el pedido todavía no tiene `clasificacion`, ambos campos vienen `null`.
 - Uso recomendado en Next.js: el widget de mesa de control en el detalle del pedido (un `<select>` de clasificación + un date picker de confirmación) hace un `PATCH` normal al mismo pedido que ya está cargado en pantalla; al llegar la respuesta, lee `fecha_entrega_min`/`fecha_entrega_max` para mostrar el rango sin ninguna llamada adicional.
 
+### Programación de pedidos (tab de mesa de control)
+
+Pantalla de cola para mesa de control: una tabla con todos los pedidos y su estado de clasificación/programación, para saber de un vistazo cuáles faltan por atender. **No es un endpoint nuevo** — es el mismo `GET /api/v1/ventas/pedidos/` de siempre (el listado que ya usa Ventas), con columnas y filtros agregados. Ventas sigue viendo su tabla igual; esto es la misma llamada, otra pestaña en el frontend con otras columnas/filtros.
+
+- **Endpoint**: `GET /api/v1/ventas/pedidos/` (el de siempre).
+- **Columnas nuevas en cada renglón** (además de las que ya existían — `folio`, `cliente_nombre`, `gran_total`, etc.):
+  ```json
+  {
+    "id": 45,
+    "oc": "OC-123",
+    "estatus": 4,
+    "estatus_display": "EN PROCESO",
+    "clasificacion": "B",
+    "clasificacion_display": "B - 5 a 8 días",
+    "fecha_confirmacion": "2026-01-05T10:00:00Z",
+    "fecha_entrega_min": "2026-01-06",
+    "fecha_entrega_max": "2026-01-09",
+    "programacion_conf": {
+      "programaciones": [
+        { "destino": "BORDADO", "cantidad": 150, "fecha": "...", "usuario_id": 12, "usuario_nombre": "Ana Torres" }
+      ]
+    }
+  }
+  ```
+  - `clasificacion`/`clasificacion_display`/`fecha_confirmacion`/`fecha_entrega_min`/`fecha_entrega_max`: mismo significado y mismo cálculo que en el detalle del pedido (ver "Clasificar pedido" arriba) — `null` si el pedido aún no tiene clasificación.
+  - `programacion_conf`: el JSON crudo de `PATCH /pedidos/{id}/programar/`, tal cual — `{"programaciones": []}` si no se ha programado nada.
+- **Filtros nuevos** (solo aplican en este listado, `?query_param` de siempre — no rompen el detalle del pedido):
+  - `?estatus=3` o `?estatus=3,4` — uno o varios estatus separados por coma (mismos códigos de `Pedido.CHOICES_ESTATUS`: 1 BORRADOR, 2 POR AUTORIZAR, 3 AUTORIZADA, 4 EN PROCESO, 5 CANCELADO). Valor inválido responde `400 {"estatus": "Filtro inválido. Usa números separados por coma."}`.
+  - `?sin_clasificar=true` — solo pedidos con `clasificacion` vacía (la cola de "pendientes por clasificar").
+  - Se pueden combinar entre sí y con los filtros que ya existían (`?q=`/`?folio=`, `?mis_pedidos=true`).
+- Uso recomendado en Next.js: la pestaña de mesa de control carga `GET /pedidos/?estatus=3,4` por defecto (solo pedidos ya aceptados — no tiene sentido programar un borrador), con un toggle para `sin_clasificar=true` que muestre solo lo pendiente. Cada renglón es de solo lectura en esta tabla; para editar, se abre el detalle del pedido y se usa el `PATCH` normal descrito arriba.
+
 ---
 
 ## 🔐 Seguridad y Reglas
