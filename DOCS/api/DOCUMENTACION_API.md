@@ -1778,8 +1778,12 @@ Pantalla de cola para mesa de control: una tabla con todos los pedidos y su esta
 - **Filtros nuevos** (solo aplican en este listado, `?query_param` de siempre — no rompen el detalle del pedido):
   - `?estatus=3` o `?estatus=3,4` — uno o varios estatus separados por coma (mismos códigos de `Pedido.CHOICES_ESTATUS`: 1 BORRADOR, 2 POR AUTORIZAR, 3 AUTORIZADA, 4 EN PROCESO, 5 CANCELADO). Valor inválido responde `400 {"estatus": "Filtro inválido. Usa números separados por coma."}`.
   - `?sin_clasificar=true` — solo pedidos con `clasificacion` vacía (la cola de "pendientes por clasificar").
+  - `?programado=true` — solo pedidos con al menos una entrada en `programacion_conf.programaciones` (ya se les corrió `PATCH /pedidos/{id}/programar/` con al menos un destino/cantidad). Un pedido programado y luego "limpiado" (`programaciones: []`) **no** cuenta como programado — vuelve a quedar fuera de este filtro.
   - Se pueden combinar entre sí y con los filtros que ya existían (`?q=`/`?folio=`, `?mis_pedidos=true`).
-- Uso recomendado en Next.js: la pestaña de mesa de control carga `GET /pedidos/?estatus=3,4` por defecto (solo pedidos ya aceptados — no tiene sentido programar un borrador), con un toggle para `sin_clasificar=true` que muestre solo lo pendiente. Cada renglón es de solo lectura en esta tabla; para editar, se abre el detalle del pedido y se usa el `PATCH` normal descrito arriba.
+- **Dos vistas típicas para el frontend, misma llamada**:
+  - **Cola de pendientes** (todo lo que falta atender): `GET /pedidos/?estatus=3,4` — clasificación y programación pueden venir vacías, esa es la tabla de "qué falta".
+  - **Tabla separada de ya programados**: `GET /pedidos/?estatus=3,4&programado=true` — solo los que ya tienen algo en `programacion_conf`, con su info completa (destino, cantidad, quién y cuándo lo programó).
+- Cada renglón es de solo lectura en estas tablas; para editar (clasificar, confirmar fecha, programar), se abre el detalle del pedido y se usa el `PATCH`/`programar` normal descritos arriba.
 
 ---
 

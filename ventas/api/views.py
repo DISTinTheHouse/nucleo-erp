@@ -2746,6 +2746,16 @@ class PedidoViewSet(viewsets.ModelViewSet):
             sin_clasificar = self.request.query_params.get("sin_clasificar", "")
             if sin_clasificar.lower() in ("true", "1"):
                 qs = qs.filter(clasificacion__isnull=True)
+            # ``programado``: pedidos con al menos una entrada en
+            # ``programacion_conf.programaciones`` (lo que deja
+            # ``PATCH /pedidos/{id}/programar/``). El índice ``0`` extrae el
+            # primer elemento del arreglo JSON; si la llave no existe o el
+            # arreglo está vacío, la extracción da NULL y ``isnull=False`` lo
+            # descarta — no hace falta comprobar la existencia de la llave por
+            # separado. Funciona igual en Postgres y SQLite (settings de test).
+            programado = self.request.query_params.get("programado", "")
+            if programado.lower() in ("true", "1"):
+                qs = qs.filter(programacion_conf__programaciones__0__isnull=False)
         # El shape de detalle (retrieve/create/update) serializa ``detalles`` +
         # ``tallas`` vía ``PedidoSerializer``: se prefetchean para evitar el N+1.
         # El listado usa ``PedidoListSerializer`` (9 campos escalares) y NO los
