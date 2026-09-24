@@ -8,13 +8,14 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Producto
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+from finanzas.models import FacturaProveedor
 from compras.api.serializers import (
     OrdenCompraOnboardingSerializer,
     OrdenCompraRetrieveSerializer,
@@ -63,7 +64,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(empresa=empresa)
         else:
             return qs.none()
-        if self.action == 'retrieve':
+        # ``cancelar`` responde con la misma forma que el retrieve, así que
+        # necesita los mismos prefetch (el de ``recepcion_set`` acota a activas).
+        if self.action in ('retrieve', 'cancelar'):
             recepciones_qs = (
                 Recepcion.objects.filter(
                     activo=True,
@@ -117,7 +120,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         return qs.order_by("-fecha_oc", "-id")
 
     def get_serializer_class(self):
-        if self.action == 'retrieve':
+        if self.action in ('retrieve', 'cancelar'):
             return OrdenCompraRetrieveSerializer
         return OrdenCompraSerializer
 
@@ -127,6 +130,88 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = self.get_serializer(instance)
         data = filtrar_campos_contabilidad_orden_compra(serializer.data, request.user)
         return Response(data)
+
+    def _auditar_orden_compra(self, request, oc, accion, antes, despues):
+        # Mismo registro que deja la recepción (``RecepcionViewSet.onboarding``);
+        # el quién y el cuándo de una cancelación/baja viven aquí, no en la OC.
+        user = request.user
+        return AuditoriaEvento.objects.create(
+            empresa_id=oc.empresa_id,
+            usuario=user if getattr(user, "pk", None) else None,
+            modulo="compras",
+            accion=accion,
+            tabla=OrdenCompra._meta.db_table,
+            id_registro=str(oc.pk),
+            antes_json=antes,
+            despues_json=despues,
+            ip=request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR"),
+            user_agent=request.META.get("HTTP_USER_AGENT"),
+        )
+
+    @action(detail=True, methods=["post"], url_path="cancelar")
+    def cancelar(self, request, pk=None):
+        """Anula ante el proveedor una OC que aún no tiene nada recibido ni facturado.
+
+        A diferencia del DELETE (baja por error de captura), la OC cancelada se
+        queda visible (``activo`` sigue en True) y CANCELADA es terminal.
+        """
+        from compras.services.orden_compra_view_service import filtrar_campos_contabilidad_orden_compra
+
+        # ``get_object`` acota por ``user.empresa``: la OC de otra empresa es 404.
+        oc = self.get_object()
+        motivo = request.data.get("motivo_cancelacion")
+        if not isinstance(motivo, str) or not motivo.strip():
+            raise ValidationError({"motivo_cancelacion": "El motivo de cancelación es requerido."})
+        motivo = motivo.strip()
+
+        with transaction.atomic():
+            # Todo se decide con la fila bloqueada: una recepción concurrente
+            # toma este mismo lock (``RecepcionViewSet.onboarding``), así que o
+            # la recepción ya existe al leerla aquí, o espera y ve CANCELADA.
+            oc = OrdenCompra.objects.select_for_update().filter(pk=oc.pk, activo=True).first()
+            if oc is None:
+                raise NotFound("Orden de compra no encontrada.")
+            if oc.estatus not in {
+                OrdenCompra.EstatusOrdenCompra.BORRADOR,
+                OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+                OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+            }:
+                raise ValidationError({"estatus": "La orden ya no puede cancelarse."})
+            # Se revisan los registros reales, no solo el estatus: una recepción o
+            # factura viva bloquea aunque el estatus diga que no hay nada recibido.
+            # "Activa" es el mismo criterio que ``_cantidad_recibida_oc``.
+            recepciones_activas = Recepcion.objects.filter(orden_compra=oc, activo=True).exclude(
+                estatus=Recepcion.EstatusRecepcion.CANCELADA
+            )
+            if recepciones_activas.exists():
+                raise ValidationError(
+                    {"recepciones": "La orden tiene recepciones registradas y no puede cancelarse."}
+                )
+            # Cuenta cualquier factura no cancelada, dada de baja (``activo``) o
+            # no: la baja no cancela la CxP que genera una factura Registrada.
+            facturas_vivas = FacturaProveedor.objects.filter(oc=oc).exclude(
+                estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA
+            )
+            if facturas_vivas.exists():
+                raise ValidationError(
+                    {"facturas_proveedores": "La orden tiene facturas de proveedor sin cancelar y no puede cancelarse."}
+                )
+
+            antes = {"estatus": oc.estatus, "motivo_cancelacion": oc.motivo_cancelacion}
+            oc.estatus = OrdenCompra.EstatusOrdenCompra.CANCELADA
+            oc.motivo_cancelacion = motivo
+            oc.save(update_fields=["estatus", "motivo_cancelacion", "updated_at"])
+            self._auditar_orden_compra(
+                request,
+                oc,
+                "CANCELAR",
+                antes,
+                {"estatus": oc.estatus, "motivo_cancelacion": oc.motivo_cancelacion},
+            )
+
+        instance = self.get_queryset().get(pk=oc.pk)
+        data = filtrar_campos_contabilidad_orden_compra(self.get_serializer(instance).data, request.user)
+        return Response(data, status=status.HTTP_200_OK)
 
     def _asignar_folio_oc(self, instance, empresa):
         serie_folio = SerieFolio.objects.filter(
