@@ -2935,6 +2935,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
                     {
                         "destino": p["destino"],
                         "cantidad": p["cantidad"],
+                        "comentarios": p.get("comentarios") or "",
                         "fecha": fecha,
                         "usuario_id": user.pk,
                         "usuario_nombre": usuario_nombre,
@@ -2950,6 +2951,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             {
                 "pedido_id": pedido.pk,
                 "total_piezas": total_piezas,
+                "total_parcialidades": len(pedido.programacion_conf["programaciones"]),
                 "programacion_conf": pedido.programacion_conf,
             }
         )

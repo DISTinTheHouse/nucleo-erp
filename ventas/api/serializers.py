@@ -311,10 +311,10 @@ class PedidoListSerializer(serializers.ModelSerializer):
     tiempo de respuesta de ~15s a <1s. Campos explícitos, no ``__all__``.
 
     ``estatus_display``/``clasificacion``/``clasificacion_display``/
-    ``fecha_entrega_min``/``fecha_entrega_max``/``programacion_conf`` se
-    agregaron para la pestaña de "Programación de pedidos" de mesa de
-    control: le basta este mismo listado para armar su tabla, sin pedir el
-    detalle completo de cada pedido uno por uno.
+    ``fecha_entrega_min``/``fecha_entrega_max``/``programacion_conf``/
+    ``total_parcialidades`` se agregaron para la pestaña de "Programación de
+    pedidos" de mesa de control: le basta este mismo listado para armar su
+    tabla, sin pedir el detalle completo de cada pedido uno por uno.
     """
 
     estatus_display = serializers.CharField(source="get_estatus_display", read_only=True)
@@ -323,6 +323,7 @@ class PedidoListSerializer(serializers.ModelSerializer):
     )
     fecha_entrega_min = serializers.SerializerMethodField()
     fecha_entrega_max = serializers.SerializerMethodField()
+    total_parcialidades = serializers.SerializerMethodField()
 
     def get_fecha_entrega_min(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
@@ -331,6 +332,9 @@ class PedidoListSerializer(serializers.ModelSerializer):
     def get_fecha_entrega_max(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
         return rango_fecha_entrega(obj)[1]
+
+    def get_total_parcialidades(self, obj):
+        return len((obj.programacion_conf or {}).get("programaciones") or [])
 
     class Meta:
         model = Pedido
@@ -352,6 +356,7 @@ class PedidoListSerializer(serializers.ModelSerializer):
             "fecha_entrega_min",
             "fecha_entrega_max",
             "programacion_conf",
+            "total_parcialidades",
             "activo",
             "cliente",
             "moneda",
@@ -373,6 +378,10 @@ class PedidoSerializer(serializers.ModelSerializer):
     # o es ``X`` (solo para facturar, sin compromiso de entrega).
     fecha_entrega_min = serializers.SerializerMethodField()
     fecha_entrega_max = serializers.SerializerMethodField()
+    # Cuántas parcialidades tiene programadas (len de
+    # ``programacion_conf.programaciones``) — mismo cálculo que devuelve
+    # PATCH /pedidos/{id}/programar/ como "total_parcialidades".
+    total_parcialidades = serializers.SerializerMethodField()
 
     def get_fecha_entrega_min(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
@@ -381,6 +390,9 @@ class PedidoSerializer(serializers.ModelSerializer):
     def get_fecha_entrega_max(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
         return rango_fecha_entrega(obj)[1]
+
+    def get_total_parcialidades(self, obj):
+        return len((obj.programacion_conf or {}).get("programaciones") or [])
 
     def get_servicios_extras(self, obj):
         # Sin ``.order_by("id")``: el orden lo impone el ``Prefetch`` del
@@ -642,7 +654,7 @@ DESTINOS_PROGRAMACION = ("BORDADO", "REFLEJANTE", "CORTE_MANGA", "EMBARQUE", "AP
 
 
 class PedidoProgramacionInputSerializer(serializers.Serializer):
-    # Sólo ``destino`` y ``cantidad`` vienen del cliente. ``fecha``,
+    # ``destino``/``cantidad``/``comentarios`` vienen del cliente. ``fecha``,
     # ``usuario_id`` y ``usuario_nombre`` los sella el servidor; como no están
     # declarados aquí, ``to_internal_value`` los descarta si el cliente los manda.
     destino = serializers.ChoiceField(
@@ -656,6 +668,11 @@ class PedidoProgramacionInputSerializer(serializers.Serializer):
         },
     )
     cantidad = serializers.IntegerField(min_value=1)
+    # Nota de mesa de control sobre ESTA parcialidad puntual (ej. "urgente",
+    # "cliente pidió cambio de color"). Opcional, libre, sin validar contenido.
+    comentarios = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True, max_length=500
+    )
 
 
 class PedidoProgramarSerializer(serializers.Serializer):
