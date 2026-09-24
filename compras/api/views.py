@@ -61,6 +61,32 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = OrdenCompra.objects.filter(activo=True)
     serializer_class = OrdenCompraSerializer
 
+    # Máquina de estados de la OC, en un solo lugar (mismo estilo que
+    # ``ComprasDashboardView.ESTATUS_*_OC``). La recepción usa
+    # ``RecepcionViewSet.ESTATUS_OC_RECIBIBLES``.
+    ESTATUS_EDITABLES_ONBOARDING = {
+        OrdenCompra.EstatusOrdenCompra.BORRADOR,
+        OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+    }
+    ESTATUS_ACEPTABLES = {
+        OrdenCompra.EstatusOrdenCompra.BORRADOR,
+        OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+    }
+    # ``update`` (PUT) edita cualquier estatus salvo estos y CANCELADA.
+    ESTATUS_CON_RECEPCIONES = {
+        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+        OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+    }
+    ESTATUS_CANCELABLES = {
+        OrdenCompra.EstatusOrdenCompra.BORRADOR,
+        OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+    }
+    ESTATUS_ELIMINABLES = {
+        OrdenCompra.EstatusOrdenCompra.BORRADOR,
+        OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+    }
+
     def get_queryset(self):
         user = self.request.user
         # ``select_related`` cubre todas las FKs cuyo nombre legible resuelve
@@ -191,11 +217,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             oc = OrdenCompra.objects.select_for_update().filter(pk=oc.pk, activo=True).first()
             if oc is None:
                 raise NotFound("Orden de compra no encontrada.")
-            if oc.estatus not in {
-                OrdenCompra.EstatusOrdenCompra.BORRADOR,
-                OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
-                OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
-            }:
+            if oc.estatus not in self.ESTATUS_CANCELABLES:
                 raise ValidationError({"estatus": "La orden ya no puede cancelarse."})
             # Se revisan los registros reales, no solo el estatus: una recepción o
             # factura viva bloquea aunque el estatus diga que no hay nada recibido.
@@ -451,10 +473,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                     raise ValidationError({"orden_compra_id": "Orden de compra no encontrada."})
                 if empresa and oc.empresa_id != empresa.pk:
                     raise ValidationError({"orden_compra_id": "No tienes acceso a esta orden de compra."})
-                if oc.estatus not in {
-                    OrdenCompra.EstatusOrdenCompra.BORRADOR,
-                    OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
-                }:
+                if oc.estatus not in self.ESTATUS_EDITABLES_ONBOARDING:
                     raise ValidationError({"estatus": "La orden ya no puede editarse."})
             else:
                 oc = OrdenCompra()
@@ -568,10 +587,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             oc = OrdenCompra.objects.select_for_update().filter(pk=oc.pk, activo=True).first()
             if oc is None:
                 raise NotFound("Orden de compra no encontrada.")
-            if oc.estatus not in {
-                OrdenCompra.EstatusOrdenCompra.BORRADOR,
-                OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
-            }:
+            if oc.estatus not in self.ESTATUS_ACEPTABLES:
                 raise ValidationError({"estatus": "La orden ya no puede aceptarse."})
             # Antes de la primera escritura (folio y ``oc.save()``).
             self._validar_encabezado_empresa(oc.empresa, proveedor_id=body_proveedor_id)
@@ -624,10 +640,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 raise ValidationError(
                     {"estatus": "La orden está cancelada y no puede modificarse."}
                 )
-            if oc.estatus in {
-                OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
-                OrdenCompra.EstatusOrdenCompra.RECIBIDA,
-            }:
+            if oc.estatus in self.ESTATUS_CON_RECEPCIONES:
                 raise ValidationError(
                     {"estatus": "La orden ya tiene recepciones registradas y no puede modificarse."}
                 )
@@ -741,10 +754,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                     {"detail": "Orden de compra no encontrada."},
                     status=status.HTTP_404_NOT_FOUND,
                 )
-            if oc.estatus not in {
-                OrdenCompra.EstatusOrdenCompra.BORRADOR,
-                OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
-            }:
+            if oc.estatus not in self.ESTATUS_ELIMINABLES:
                 raise ValidationError(
                     {"estatus": "Solo se puede eliminar una orden en borrador o pendiente de confirmar."}
                 )
@@ -780,6 +790,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     )
     serializer_class = RecepcionSerializer
     http_method_names = ["get", "post"]
+
+    # Estatus de OC contra los que se puede recibir (onboarding GET y POST).
+    ESTATUS_OC_RECIBIBLES = {
+        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+    }
 
     def get_queryset(self):
         user = self.request.user
@@ -1057,10 +1073,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         ordenes_qs = (
             OrdenCompra.objects.filter(
                 activo=True,
-                estatus__in=[
-                    OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
-                    OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
-                ],
+                estatus__in=self.ESTATUS_OC_RECIBIBLES,
             )
             .select_related("proveedor", "sucursal")
             .order_by("-updated_at", "-id")
@@ -1328,10 +1341,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         raise ValidationError({"orden_compra": "Orden de compra no encontrada."})
                     if empresa and oc.empresa_id != empresa.pk:
                         raise ValidationError({"orden_compra": "No tienes acceso a esta orden de compra."})
-                    if oc.estatus not in {
-                        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
-                        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
-                    }:
+                    if oc.estatus not in self.ESTATUS_OC_RECIBIBLES:
                         raise ValidationError({"estatus": "La orden de compra no está disponible para recepción."})
                     if not oc.proveedor_id:
                         raise ValidationError({"proveedor": "La orden de compra no tiene proveedor asignado."})
