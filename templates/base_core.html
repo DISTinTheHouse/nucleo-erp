@@ -209,6 +209,23 @@
 
             <!-- Divider Label -->
             <div class="px-3 py-2 mt-4 opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200">
+                <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Ventas</span>
+            </div>
+
+            <!-- Pedidos -->
+            <a href="{% url 'qa_pedidos_workspace' %}"
+                class="flex items-center gap-4 px-3 py-3 rounded-xl {% if request.resolver_match.url_name == 'qa_pedidos_workspace' %}bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-300{% else %}hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-500 dark:text-white hover:text-sky-600 dark:hover:text-sky-300{% endif %} transition-colors group relative">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z">
+                    </path>
+                </svg>
+                <span
+                    class="font-medium text-sm whitespace-nowrap opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200 absolute left-14">Pedidos</span>
+            </a>
+
+            <!-- Divider Label -->
+            <div class="px-3 py-2 mt-4 opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-200">
                 <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Sistemas</span>
             </div>
 
@@ -514,6 +531,19 @@
                         </path>
                     </svg>
                     <span class="font-medium">Departamentos</span>
+                </a>
+
+                <div class="px-4 py-2 mt-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Ventas</div>
+
+                <!-- Pedidos -->
+                <a href="{% url 'qa_pedidos_workspace' %}"
+                    class="flex items-center gap-4 px-4 py-3 rounded-xl hover:bg-sky-50 dark:hover:bg-sky-500/10 text-slate-600 dark:text-white hover:text-sky-600 dark:hover:text-sky-300 transition-colors">
+                    <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z">
+                        </path>
+                    </svg>
+                    <span class="font-medium">Pedidos</span>
                 </a>
 
                 <div class="px-4 py-2 mt-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Sistemas</div>

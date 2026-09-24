@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Pedidos · Núcleo</title>
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Poppins:wght@500;600;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: { extend: { fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'], brand: ['Poppins', 'system-ui', 'sans-serif'] } } }
+        }
+    </script>
+    <style>
+        body { font-family: 'Inter', system-ui, sans-serif; }
+        .brand-font { font-family: 'Poppins', system-ui, sans-serif; }
+
+        .tab-btn {
+            padding: .6rem 1rem; font-size: .8125rem; font-weight: 600; color: #64748b;
+            border-bottom: 2px solid transparent; transition: color .15s, border-color .15s;
+        }
+        .tab-btn:hover { color: #0f172a; }
+        .tab-btn-active { color: #0369a1; border-bottom-color: #0284c7; }
+
+        .field-label { font-size: .6875rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: .04em; }
+
+        .editable-text [data-view] {
+            display: block; cursor: text; border-radius: .5rem; padding: .3rem .5rem; margin: 0 -.5rem;
+            border: 1px solid transparent; transition: background-color .15s, box-shadow .3s;
+        }
+        .editable-text [data-view]:hover { background: #f1f5f9; border-color: #e2e8f0; }
+        .editable-text [data-view] i.fa-pen { opacity: 0; transition: opacity .15s; }
+        .editable-text [data-view]:hover i.fa-pen { opacity: 1; }
+
+        @keyframes flashOk { 0% { box-shadow: 0 0 0 2px rgba(16,185,129,.55); } 100% { box-shadow: 0 0 0 2px rgba(16,185,129,0); } }
+        @keyframes flashErr { 0% { box-shadow: 0 0 0 2px rgba(239,68,68,.6); } 100% { box-shadow: 0 0 0 2px rgba(239,68,68,0); } }
+        .flash-ok { animation: flashOk .9s ease-out; }
+        .flash-err { animation: flashErr .9s ease-out; }
+
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+
+<body class="bg-slate-50 text-slate-900 min-h-screen">
+    <header class="border-b border-slate-200 bg-white/90 backdrop-blur sticky top-0 z-20">
+        <div class="mx-auto max-w-[1500px] px-6 py-4 flex items-center justify-between">
+            <div>
+                <a href="{% url 'nucleo:dashboard' %}"
+                    class="text-xs font-medium text-slate-400 hover:text-sky-600 transition-colors">
+                    <i class="fas fa-arrow-left mr-1"></i> Panel
+                </a>
+                <h1 class="brand-font text-2xl font-bold tracking-tight text-slate-900 mt-0.5">Pedidos</h1>
+            </div>
+            <div class="hidden sm:flex items-center gap-2 text-xs text-slate-400">
+                <i class="fas fa-magnifying-glass"></i>
+                <span>Encuentra un pedido para verlo y editarlo — no hay listas sueltas ni alta por separado.</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="mx-auto max-w-[1500px] px-6 py-8">
+        {% if messages %}
+        <div class="mb-6 space-y-2">
+            {% for message in messages %}
+            <div
+                class="rounded-xl border px-4 py-3 text-sm {% if message.tags == 'error' %}border-red-200 bg-red-50 text-red-700{% elif message.tags == 'warning' %}border-amber-200 bg-amber-50 text-amber-700{% else %}border-emerald-200 bg-emerald-50 text-emerald-700{% endif %}">
+                {{ message }}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <div class="grid gap-6 lg:grid-cols-[380px,1fr] items-start">
+            <!-- BUSCADOR -->
+            <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:sticky lg:top-24">
+                <h2 class="text-sm font-bold text-slate-800">Buscar pedido</h2>
+                <p class="mt-1 text-xs text-slate-500">Folio, cliente, RFC u OC del cliente.</p>
+
+                <form method="get" id="form-buscar-pedido" class="mt-4">
+                    <div class="relative">
+                        <i class="fas fa-magnifying-glass absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-sm"></i>
+                        <input type="text" name="q" id="buscador-pedido" value="{{ q }}" autocomplete="off"
+                            placeholder="Ej. PED-2024-118, Comercial XYZ, XAXX010101000..."
+                            class="w-full rounded-xl border border-slate-300 pl-10 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-sky-500">
+                    </div>
+                    <button type="submit"
+                        class="mt-3 w-full rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-sky-700 transition-colors">
+                        Buscar
+                    </button>
+                </form>
+
+                <div class="mt-5">
+                    <h3 class="text-xs font-bold uppercase tracking-wide text-slate-400">
+                        {% if q %}Resultados{% else %}Recientes{% endif %}
+                    </h3>
+                    <div class="mt-3 space-y-2 max-h-[62vh] overflow-y-auto no-scrollbar pr-0.5">
+                        {% if pedido %}
+                        <a href="?id={{ pedido.id }}"
+                            class="block rounded-xl border border-sky-200 bg-sky-50 px-4 py-3">
+                            <div class="flex items-start justify-between gap-2">
+                                <div class="min-w-0">
+                                    <div class="text-sm font-bold text-sky-900 truncate">
+                                        {% if pedido.folio %}{{ pedido.folio }}{% else %}PED-{{ pedido.id }}{% endif %}
+                                    </div>
+                                    <div class="mt-0.5 text-xs text-sky-800 truncate">
+                                        {{ pedido.cliente_nombre|default:pedido.cliente.nombre }}
+                                    </div>
+                                </div>
+                                <span class="shrink-0 rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-sky-700 border border-sky-200">
+                                    {{ pedido.get_estatus_display }}
+                                </span>
+                            </div>
+                        </a>
+                        {% endif %}
+
+                        {% for p in resultados %}
+                        {% if not pedido or pedido.id != p.id %}
+                        <a href="?id={{ p.id }}"
+                            class="block rounded-xl border border-slate-200 bg-white px-4 py-3 hover:bg-slate-50 hover:border-slate-300 transition-colors">
+                            <div class="flex items-start justify-between gap-2">
+                                <div class="min-w-0">
+                                    <div class="text-sm font-semibold text-slate-800 truncate">
+                                        {% if p.folio %}{{ p.folio }}{% else %}PED-{{ p.id }}{% endif %}
+                                    </div>
+                                    <div class="mt-0.5 text-xs text-slate-500 truncate">
+                                        {{ p.cliente_nombre|default:p.cliente.nombre }}
+                                    </div>
+                                    <div class="mt-1 text-xs font-medium text-slate-600">
+                                        {{ p.moneda.simbolo|default:"$" }}{{ p.gran_total|floatformat:2 }}
+                                    </div>
+                                </div>
+                                <span class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold border
+                                    {% if p.estatus == 1 %}bg-slate-100 text-slate-600 border-slate-200
+                                    {% elif p.estatus == 2 %}bg-amber-100 text-amber-700 border-amber-200
+                                    {% elif p.estatus == 3 %}bg-emerald-100 text-emerald-700 border-emerald-200
+                                    {% elif p.estatus == 4 %}bg-sky-100 text-sky-700 border-sky-200
+                                    {% elif p.estatus == 5 %}bg-red-100 text-red-700 border-red-200
+                                    {% endif %}">
+                                    {{ p.get_estatus_display }}
+                                </span>
+                            </div>
+                        </a>
+                        {% endif %}
+                        {% endfor %}
+
+                        {% if not resultados and not pedido %}
+                        <div class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+                            {% if q %}Sin resultados para <span class="font-medium text-slate-700">{{ q }}</span>.
+                            {% else %}Escribe para buscar.{% endif %}
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </section>
+
+            <!-- DETALLE -->
+            <section class="rounded-2xl border border-slate-200 bg-white shadow-sm min-h-[70vh]">
+                {% if pedido %}
+                <div class="p-6 lg:p-8">
+                    <!-- Header del pedido -->
+                    <div class="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between pb-6 border-b border-slate-100">
+                        <div class="min-w-0">
+                            <div class="field-label">Pedido</div>
+                            <div class="mt-1 flex flex-wrap items-center gap-3">
+                                <h2 class="brand-font text-3xl font-bold text-slate-900">
+                                    {% if pedido.folio %}{{ pedido.folio }}{% else %}PED-{{ pedido.id }}{% endif %}
+                                </h2>
+                                <select data-campo-select="estatus"
+                                    class="rounded-full border px-3 py-1 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-sky-300 cursor-pointer">
+                                    {% for val, label in estatus_choices %}
+                                    <option value="{{ val }}" {% if pedido.estatus == val %}selected{% endif %}>{{ label }}</option>
+                                    {% endfor %}
+                                </select>
+                                {% if pedido.clasificacion %}
+                                <select data-campo-select="clasificacion"
+                                    class="rounded-full border border-violet-200 bg-violet-50 text-violet-700 px-3 py-1 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-violet-300 cursor-pointer">
+                                    {% for val, label in clasificacion_choices %}
+                                    <option value="{{ val }}" {% if pedido.clasificacion == val %}selected{% endif %}>{{ label }}</option>
+                                    {% endfor %}
+                                </select>
+                                {% endif %}
+                            </div>
+                            <div class="mt-3 text-sm text-slate-600">
+                                <i class="fas fa-building text-slate-400 mr-1"></i>
+                                <span class="font-medium text-slate-800">{{ pedido.cliente_nombre|default:pedido.cliente.nombre }}</span>
+                                {% if pedido.cliente_rfc %}<span class="ml-1 text-slate-400">· RFC {{ pedido.cliente_rfc }}</span>{% endif %}
+                            </div>
+                            <div class="mt-1 text-xs text-slate-400">
+                                {{ pedido.empresa.nombre }} · {{ pedido.sucursal.nombre }}
+                                · Creado {{ pedido.created_at|date:"d M Y, H:i" }}
+                                {% if pedido.fecha_confirmacion %} · Confirmado {{ pedido.fecha_confirmacion|date:"d M Y" }}{% endif %}
+                            </div>
+                        </div>
+                        <div class="shrink-0 text-right">
+                            <div class="field-label">Gran total</div>
+                            <div class="mt-1 brand-font text-3xl font-extrabold text-slate-900" data-currency
+                                data-raw="{{ pedido.gran_total }}" data-iso="{{ pedido.moneda.codigo_iso }}"
+                                data-simbolo="{{ pedido.moneda.simbolo|default:'$' }}">
+                                {{ pedido.moneda.simbolo|default:"$" }}{{ pedido.gran_total|floatformat:2 }}
+                            </div>
+                            <div class="text-xs text-slate-400">{{ pedido.moneda.codigo_iso }}</div>
+                        </div>
+                    </div>
+
+                    <!-- Tabs -->
+                    <div class="flex gap-1 border-b border-slate-200 mt-2" role="tablist">
+                        <button type="button" data-tab-btn="general" class="tab-btn tab-btn-active">General</button>
+                        <button type="button" data-tab-btn="productos" class="tab-btn">Productos ({{ detalles|length }})</button>
+                        <button type="button" data-tab-btn="envio" class="tab-btn">Envío &amp; Pago</button>
+                    </div>
+
+                    <!-- Panel: General -->
+                    <div data-tab-panel="general" class="pt-6 grid gap-x-8 gap-y-5 sm:grid-cols-2">
+                        <div>
+                            <div class="field-label">OC del cliente</div>
+                            <div class="editable-text mt-0.5" data-campo="oc" data-multiline="false" data-raw="{{ pedido.oc|default_if_none:'' }}">
+                                <span data-view>{{ pedido.oc|default:"—" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+                        <div>
+                            <div class="field-label">Moneda</div>
+                            <div class="mt-0.5 text-sm text-slate-800">{{ pedido.moneda.nombre }} ({{ pedido.moneda.codigo_iso }})</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Forma de pago</div>
+                            <select data-campo-select="forma_pago"
+                                class="mt-0.5 w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm hover:border-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-300 cursor-pointer">
+                                {% for val, label in forma_pago_choices %}
+                                <option value="{{ val }}" {% if pedido.forma_pago == val %}selected{% endif %}>{{ label }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div>
+                            <div class="field-label">Método de pago</div>
+                            <select data-campo-select="metodo_pago"
+                                class="mt-0.5 w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm hover:border-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-300 cursor-pointer">
+                                {% for val, label in metodo_pago_choices %}
+                                <option value="{{ val }}" {% if pedido.metodo_pago == val %}selected{% endif %}>{{ label }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div>
+                            <div class="field-label">Uso CFDI</div>
+                            <div class="mt-0.5 text-sm text-slate-800">{{ pedido.get_uso_cfdi_display|default:"—" }}</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Régimen fiscal del cliente</div>
+                            <div class="mt-0.5 text-sm text-slate-800">{{ pedido.cliente_regimen_fiscal|default:"—" }}</div>
+                        </div>
+
+                        <div class="sm:col-span-2">
+                            <div class="field-label">Observaciones</div>
+                            <div class="editable-text mt-0.5" data-campo="observaciones" data-multiline="true" data-raw="{{ pedido.observaciones|default_if_none:'' }}">
+                                <span data-view class="whitespace-pre-wrap">{{ pedido.observaciones|default:"— sin observaciones, clic para agregar —" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-2 mt-2 pt-5 border-t border-slate-100">
+                            <div class="field-label mb-2">Datos fiscales (snapshot)</div>
+                            <div class="grid sm:grid-cols-2 gap-x-8 gap-y-3 text-sm">
+                                <div><span class="text-slate-400">Razón social:</span> <span class="text-slate-800">{{ pedido.cliente_razon_social|default:"—" }}</span></div>
+                                <div><span class="text-slate-400">Giro:</span> <span class="text-slate-800">{{ pedido.cliente_giro_empresarial|default:"—" }}</span></div>
+                                <div class="sm:col-span-2"><span class="text-slate-400">Dirección fiscal:</span> <span class="text-slate-800">{{ pedido.cliente_direccion_fiscal|default:"—" }}{% if pedido.cliente_colonia %}, {{ pedido.cliente_colonia }}{% endif %}</span></div>
+                                <div><span class="text-slate-400">Ciudad / Estado:</span> <span class="text-slate-800">{{ pedido.cliente_ciudad|default:"—" }}{% if pedido.cliente_estado %}, {{ pedido.cliente_estado }}{% endif %}</span></div>
+                                <div><span class="text-slate-400">C.P.:</span> <span class="text-slate-800">{{ pedido.cliente_codigo_postal|default:"—" }}</span></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Panel: Productos -->
+                    <div data-tab-panel="productos" class="hidden pt-6 space-y-3">
+                        {% for d in detalles %}
+                        <div class="rounded-xl border border-slate-200 p-4">
+                            <div class="flex items-start justify-between gap-3">
+                                <div class="flex items-start gap-3 min-w-0">
+                                    {% if d.color_hex %}
+                                    <span class="mt-1 h-3.5 w-3.5 rounded-full border border-black/10 shrink-0" style="background-color: {{ d.color_hex }}"></span>
+                                    {% endif %}
+                                    <div class="min-w-0">
+                                        <div class="text-sm font-semibold text-slate-800">{{ d.nombre }}</div>
+                                        {% if d.color %}<div class="text-xs text-slate-500">Color: {{ d.color }}</div>{% endif %}
+                                    </div>
+                                </div>
+                                <div class="text-right shrink-0">
+                                    <div class="text-sm font-bold text-slate-900">{{ pedido.moneda.simbolo|default:"$" }}{{ d.subtotal_linea|floatformat:2 }}</div>
+                                    <div class="text-xs text-slate-400">{{ d.piezas }} pza{{ d.piezas|pluralize }} · {{ pedido.moneda.simbolo|default:"$" }}{{ d.precio_unitario|floatformat:2 }} c/u</div>
+                                </div>
+                            </div>
+                            {% if d.tallas %}
+                            <div class="mt-3 flex flex-wrap gap-1.5">
+                                {% for t in d.tallas %}
+                                <span class="inline-flex items-center gap-1 rounded-lg bg-slate-50 border border-slate-200 px-2 py-1 text-xs text-slate-600">
+                                    <span class="font-semibold text-slate-700">{{ t.talla }}</span> × {{ t.cantidad }}
+                                    <span class="text-slate-400">— {{ pedido.moneda.simbolo|default:"$" }}{{ t.subtotal|floatformat:2 }}</span>
+                                </span>
+                                {% endfor %}
+                            </div>
+                            {% endif %}
+                        </div>
+                        {% empty %}
+                        <div class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+                            Este pedido no tiene productos registrados.
+                        </div>
+                        {% endfor %}
+
+                        {% if servicios_extras %}
+                        <div class="pt-2">
+                            <div class="field-label mb-2">Servicios extra</div>
+                            <div class="flex flex-wrap gap-1.5">
+                                {% for se in servicios_extras %}
+                                <span class="inline-flex items-center gap-1 rounded-lg bg-indigo-50 border border-indigo-200 px-2 py-1 text-xs text-indigo-700">
+                                    {{ se.nombre }} × {{ se.cantidad }} — {{ pedido.moneda.simbolo|default:"$" }}{{ se.monto|floatformat:2 }}
+                                </span>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+
+                        <!-- Totales -->
+                        <div class="mt-5 rounded-xl bg-slate-50 border border-slate-200 p-4 space-y-1.5 text-sm">
+                            <div class="flex justify-between text-slate-600"><span>Subtotal</span><span>{{ pedido.moneda.simbolo|default:"$" }}{{ pedido.subtotal|floatformat:2 }}</span></div>
+                            {% if pedido.descuento_global %}<div class="flex justify-between text-slate-600"><span>Descuento</span><span>− {{ pedido.moneda.simbolo|default:"$" }}{{ pedido.descuento_global|floatformat:2 }}</span></div>{% endif %}
+                            {% if pedido.envio %}<div class="flex justify-between text-slate-600"><span>Envío</span><span>{{ pedido.moneda.simbolo|default:"$" }}{{ pedido.envio|floatformat:2 }}</span></div>{% endif %}
+                            {% if pedido.flete %}<div class="flex justify-between text-slate-600"><span>Flete</span><span>{{ pedido.moneda.simbolo|default:"$" }}{{ pedido.flete|floatformat:2 }}</span></div>{% endif %}
+                            {% if pedido.seguros %}<div class="flex justify-between text-slate-600"><span>Seguros</span><span>{{ pedido.moneda.simbolo|default:"$" }}{{ pedido.seguros|floatformat:2 }}</span></div>{% endif %}
+                            {% if pedido.serigrafia %}<div class="flex justify-between text-slate-600"><span>Serigrafía</span><span>{{ pedido.moneda.simbolo|default:"$" }}{{ pedido.serigrafia|floatformat:2 }}</span></div>{% endif %}
+                            {% if pedido.reflejante %}<div class="flex justify-between text-slate-600"><span>Reflejante</span><span>{{ pedido.moneda.simbolo|default:"$" }}{{ pedido.reflejante|floatformat:2 }}</span></div>{% endif %}
+                            {% if pedido.programa_bordados %}<div class="flex justify-between text-slate-600"><span>Programa bordados</span><span>{{ pedido.moneda.simbolo|default:"$" }}{{ pedido.programa_bordados|floatformat:2 }}</span></div>{% endif %}
+                            {% if pedido.ieps %}<div class="flex justify-between text-slate-600"><span>IEPS</span><span>{{ pedido.moneda.simbolo|default:"$" }}{{ pedido.ieps|floatformat:2 }}</span></div>{% endif %}
+                            <div class="flex justify-between text-slate-600"><span>IVA</span><span>{{ pedido.iva }}%</span></div>
+                            {% if pedido.anticipo %}<div class="flex justify-between text-slate-600"><span>Anticipo</span><span>{{ pedido.moneda.simbolo|default:"$" }}{{ pedido.anticipo|floatformat:2 }}</span></div>{% endif %}
+                            <div class="flex justify-between pt-2 mt-1 border-t border-slate-300 text-base font-extrabold text-slate-900">
+                                <span>Gran total</span><span>{{ pedido.moneda.simbolo|default:"$" }}{{ pedido.gran_total|floatformat:2 }}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Panel: Envío & Pago -->
+                    <div data-tab-panel="envio" class="hidden pt-6 grid gap-x-8 gap-y-5 sm:grid-cols-2">
+                        <div>
+                            <div class="field-label">Destinatario</div>
+                            <div class="editable-text mt-0.5" data-campo="destinatario" data-multiline="false" data-raw="{{ pedido.destinatario|default_if_none:'' }}">
+                                <span data-view>{{ pedido.destinatario|default:"—" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+                        <div>
+                            <div class="field-label">Teléfono de envío</div>
+                            <div class="editable-text mt-0.5" data-campo="telefono_envio" data-multiline="false" data-raw="{{ pedido.telefono_envio|default_if_none:'' }}">
+                                <span data-view>{{ pedido.telefono_envio|default:"—" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-2">
+                            <div class="field-label">Dirección de envío</div>
+                            <div class="editable-text mt-0.5" data-campo="direccion_envio" data-multiline="false" data-raw="{{ pedido.direccion_envio|default_if_none:'' }}">
+                                <span data-view>{{ pedido.direccion_envio|default:"—" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+                        <div>
+                            <div class="field-label">Colonia</div>
+                            <div class="editable-text mt-0.5" data-campo="colonia_envio" data-multiline="false" data-raw="{{ pedido.colonia_envio|default_if_none:'' }}">
+                                <span data-view>{{ pedido.colonia_envio|default:"—" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+                        <div>
+                            <div class="field-label">C.P.</div>
+                            <div class="editable-text mt-0.5" data-campo="codigo_postal" data-multiline="false" data-raw="{{ pedido.codigo_postal|default_if_none:'' }}">
+                                <span data-view>{{ pedido.codigo_postal|default:"—" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+                        <div>
+                            <div class="field-label">Ciudad</div>
+                            <div class="editable-text mt-0.5" data-campo="ciudad_envio" data-multiline="false" data-raw="{{ pedido.ciudad_envio|default_if_none:'' }}">
+                                <span data-view>{{ pedido.ciudad_envio|default:"—" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+                        <div>
+                            <div class="field-label">Estado</div>
+                            <div class="editable-text mt-0.5" data-campo="estado_envio" data-multiline="false" data-raw="{{ pedido.estado_envio|default_if_none:'' }}">
+                                <span data-view>{{ pedido.estado_envio|default:"—" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-2 pt-5 mt-1 border-t border-slate-100">
+                            <div class="field-label mb-3">Contacto de pagos</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Persona de pagos</div>
+                            <div class="editable-text mt-0.5" data-campo="persona_pagos" data-multiline="false" data-raw="{{ pedido.persona_pagos|default_if_none:'' }}">
+                                <span data-view>{{ pedido.persona_pagos|default:"—" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+                        <div>
+                            <div class="field-label">Teléfono de pagos</div>
+                            <div class="editable-text mt-0.5" data-campo="telefono_pagos" data-multiline="false" data-raw="{{ pedido.telefono_pagos|default_if_none:'' }}">
+                                <span data-view>{{ pedido.telefono_pagos|default:"—" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+                        <div class="sm:col-span-2">
+                            <div class="field-label">Correo de facturas</div>
+                            <div class="editable-text mt-0.5" data-campo="correo_facturas" data-multiline="false" data-raw="{{ pedido.correo_facturas|default_if_none:'' }}">
+                                <span data-view>{{ pedido.correo_facturas|default:"—" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+
+                        {% if pedido.anticipo_total or pedido.anticipo_parcial or pedido.pago_antes_embarque or pedido.por_confirmar or pedido.embarque_parcial or pedido.empaque_ecologico %}
+                        <div class="sm:col-span-2 flex flex-wrap gap-1.5 pt-2">
+                            {% if pedido.anticipo_total %}<span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">Anticipo total</span>{% endif %}
+                            {% if pedido.anticipo_parcial %}<span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">Anticipo parcial</span>{% endif %}
+                            {% if pedido.pago_antes_embarque %}<span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">Pago antes de embarque</span>{% endif %}
+                            {% if pedido.por_confirmar %}<span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">Por confirmar</span>{% endif %}
+                            {% if pedido.embarque_parcial %}<span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">Embarque parcial</span>{% endif %}
+                            {% if pedido.empaque_ecologico %}<span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">Empaque ecológico</span>{% endif %}
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <script>
+                    (function () {
+                        const PEDIDO_ID = {{ pedido.id }};
+                        const UPDATE_URL = "{% url 'qa_pedido_actualizar_campo' pedido_id=pedido.id %}";
+
+                        function csrfToken() {
+                            const m = (document.cookie || '').match(/csrftoken=([^;]+)/);
+                            return m ? decodeURIComponent(m[1]) : '';
+                        }
+
+                        function guardarCampo(campo, valor) {
+                            return fetch(UPDATE_URL, {
+                                method: 'POST',
+                                credentials: 'same-origin',
+                                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken() },
+                                body: JSON.stringify({ campo: campo, valor: valor }),
+                            }).then(async function (resp) {
+                                let data = {};
+                                try { data = await resp.json(); } catch (e) {}
+                                if (!resp.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + resp.status));
+                                return data;
+                            });
+                        }
+
+                        function flash(el, ok) {
+                            el.classList.remove('flash-ok', 'flash-err');
+                            void el.offsetWidth;
+                            el.classList.add(ok ? 'flash-ok' : 'flash-err');
+                            setTimeout(function () { el.classList.remove('flash-ok', 'flash-err'); }, 900);
+                        }
+
+                        function startEdit(wrap) {
+                            if (wrap.querySelector('[data-edit]')) return;
+                            const view = wrap.querySelector('[data-view]');
+                            const campo = wrap.dataset.campo;
+                            const multiline = wrap.dataset.multiline === 'true';
+                            const raw = wrap.dataset.raw || '';
+                            view.classList.add('hidden');
+                            const el = document.createElement(multiline ? 'textarea' : 'input');
+                            el.setAttribute('data-edit', '');
+                            el.value = raw;
+                            el.className = 'w-full rounded-lg border border-sky-400 ring-2 ring-sky-100 px-2.5 py-1.5 text-sm text-slate-800 focus:outline-none bg-white' + (multiline ? ' min-h-[90px] resize-y' : '');
+                            wrap.appendChild(el);
+                            el.focus();
+                            if (el.setSelectionRange) { try { el.setSelectionRange(el.value.length, el.value.length); } catch (e) {} }
+
+                            let cancelled = false;
+                            el.addEventListener('keydown', function (ev) {
+                                if (ev.key === 'Enter' && !multiline) { ev.preventDefault(); el.blur(); }
+                                else if (ev.key === 'Escape') { cancelled = true; el.blur(); }
+                            });
+                            el.addEventListener('blur', function () {
+                                const nuevo = el.value.trim();
+                                if (cancelled || nuevo === raw) {
+                                    el.remove();
+                                    view.classList.remove('hidden');
+                                    return;
+                                }
+                                guardarCampo(campo, nuevo).then(function (data) {
+                                    wrap.dataset.raw = data.valor || '';
+                                    const safe = (data.valor_mostrado || '—').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                                    view.innerHTML = safe + ' <i class="fas fa-pen text-[10px] text-slate-300"></i>';
+                                    el.remove();
+                                    view.classList.remove('hidden');
+                                    flash(view, true);
+                                }).catch(function (err) {
+                                    el.remove();
+                                    view.classList.remove('hidden');
+                                    flash(view, false);
+                                    console.error(err);
+                                });
+                            });
+                        }
+
+                        document.querySelectorAll('.editable-text [data-view]').forEach(function (view) {
+                            view.addEventListener('click', function () { startEdit(view.closest('.editable-text')); });
+                        });
+
+                        document.querySelectorAll('[data-campo-select]').forEach(function (sel) {
+                            sel.setAttribute('data-original', sel.value);
+                            sel.addEventListener('change', function () {
+                                const campo = sel.dataset.campoSelect;
+                                const original = sel.getAttribute('data-original');
+                                guardarCampo(campo, sel.value).then(function () {
+                                    sel.setAttribute('data-original', sel.value);
+                                    flash(sel, true);
+                                }).catch(function (err) {
+                                    sel.value = original;
+                                    flash(sel, false);
+                                    console.error(err);
+                                });
+                            });
+                        });
+
+                        document.querySelectorAll('[data-tab-btn]').forEach(function (btn) {
+                            btn.addEventListener('click', function () {
+                                const key = btn.dataset.tabBtn;
+                                document.querySelectorAll('[data-tab-btn]').forEach(function (b) { b.classList.toggle('tab-btn-active', b === btn); });
+                                document.querySelectorAll('[data-tab-panel]').forEach(function (p) { p.classList.toggle('hidden', p.dataset.tabPanel !== key); });
+                            });
+                        });
+                    })();
+                </script>
+                {% else %}
+                <div class="flex h-[65vh] items-center justify-center text-center px-6">
+                    <div>
+                        <div class="inline-flex h-16 w-16 items-center justify-center rounded-full bg-sky-50 text-3xl text-sky-600 border border-sky-100">
+                            <i class="fas fa-file-invoice"></i>
+                        </div>
+                        <h2 class="mt-6 text-xl font-semibold text-slate-800">Sin pedido seleccionado</h2>
+                        <p class="mt-2 mx-auto max-w-md text-sm text-slate-500">
+                            Usa el buscador para localizar un pedido por folio, cliente, RFC u OC.
+                            En cuanto aparezca un único resultado se abre aquí mismo, listo para revisar y editar.
+                        </p>
+                    </div>
+                </div>
+                {% endif %}
+            </section>
+        </div>
+    </main>
+
+    <script>
+        (function () {
+            const input = document.getElementById('buscador-pedido');
+            const form = document.getElementById('form-buscar-pedido');
+            if (!input || !form) return;
+            let t = null;
+            input.addEventListener('input', function () {
+                clearTimeout(t);
+                t = setTimeout(function () { form.submit(); }, 450);
+            });
+        })();
+
+        function formatMoney(raw, iso, simbolo) {
+            const n = parseFloat(raw);
+            if (isNaN(n)) return (simbolo || '$') + '0.00';
+            try {
+                return new Intl.NumberFormat('es-MX', { style: 'currency', currency: (iso || 'MXN').toUpperCase(), minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+            } catch (e) {
+                return (simbolo || '$') + n.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            }
+        }
+        document.addEventListener('DOMContentLoaded', function () {
+            document.querySelectorAll('[data-currency]').forEach(function (el) {
+                el.textContent = formatMoney(el.getAttribute('data-raw'), el.getAttribute('data-iso'), el.getAttribute('data-simbolo'));
+            });
+        });
+    </script>
+</body>
+
+</html>
