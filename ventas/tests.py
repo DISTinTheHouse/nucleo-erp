@@ -1660,7 +1660,8 @@ class PedidoProgramarTests(TestCase):
         )
         for p in programaciones:
             self.assertEqual(
-                set(p), {"destino", "cantidad", "fecha", "usuario_id", "usuario_nombre"}
+                set(p),
+                {"destino", "cantidad", "comentarios", "fecha", "usuario_id", "usuario_nombre"},
             )
             self.assertEqual(p["usuario_id"], self.admin_mesa.pk)
             # Sin nombre capturado: cae al email (precedente de inventarios).
@@ -1792,7 +1793,8 @@ class PedidoProgramarTests(TestCase):
         self.assertEqual(response.status_code, 200, response.json())
         p = self._programacion_db()["programaciones"][0]
         self.assertEqual(
-            set(p), {"destino", "cantidad", "fecha", "usuario_id", "usuario_nombre"}
+            set(p),
+            {"destino", "cantidad", "comentarios", "fecha", "usuario_id", "usuario_nombre"},
         )
         self.assertEqual(p["usuario_id"], self.admin_mesa.pk)
         self.assertEqual(p["usuario_nombre"], "mesa_admin@acme.test")

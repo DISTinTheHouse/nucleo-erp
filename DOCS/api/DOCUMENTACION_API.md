@@ -1705,13 +1705,14 @@ Una vez que el pedido ya fue aceptado/autorizado, mesa de control reparte sus pi
   ```json
   {
     "programaciones": [
-      { "destino": "BORDADO", "cantidad": 150 },
+      { "destino": "BORDADO", "cantidad": 150, "comentarios": "urgente, cliente pidió cambio de color" },
       { "destino": "EMBARQUE", "cantidad": 100 }
     ]
   }
   ```
   - `destino`: uno de `BORDADO`, `REFLEJANTE`, `CORTE_MANGA`, `EMBARQUE`, `APARTADO`. Otro valor responde `400` con el detalle de valores permitidos.
   - `cantidad`: entero, mínimo 1.
+  - `comentarios`: texto libre, **opcional**, hasta 500 caracteres. Es por parcialidad (por renglón), no uno solo para todo el PATCH — cada destino/cantidad lleva su propia nota. Si no se manda, se guarda como `""`.
   - `programaciones` puede ir vacío (`[]`) para **limpiar** la programación existente.
   - Validación dura: la suma de todas las `cantidad` no puede exceder el total de piezas del pedido (`SUM(PedidoDetalleTalla.cantidad)`) — si se excede, `400` con el detalle de cuánto se mandó vs. cuánto hay.
   - `fecha`, `usuario_id` y `usuario_nombre` **no se envían** — el servidor los sella solos por cada renglón de programación (igual que el resto de la auditoría de la API); si el body los incluye, se ignoran en silencio.
@@ -1720,11 +1721,13 @@ Una vez que el pedido ya fue aceptado/autorizado, mesa de control reparte sus pi
   {
     "pedido_id": 45,
     "total_piezas": 250,
+    "total_parcialidades": 2,
     "programacion_conf": {
       "programaciones": [
         {
           "destino": "BORDADO",
           "cantidad": 150,
+          "comentarios": "urgente, cliente pidió cambio de color",
           "fecha": "2026-01-10T16:32:00.000000+00:00",
           "usuario_id": 12,
           "usuario_nombre": "Ana Torres"
@@ -1732,6 +1735,7 @@ Una vez que el pedido ya fue aceptado/autorizado, mesa de control reparte sus pi
         {
           "destino": "EMBARQUE",
           "cantidad": 100,
+          "comentarios": "",
           "fecha": "2026-01-10T16:32:00.000000+00:00",
           "usuario_id": 12,
           "usuario_nombre": "Ana Torres"
@@ -1741,7 +1745,8 @@ Una vez que el pedido ya fue aceptado/autorizado, mesa de control reparte sus pi
   }
   ```
 - `programacion_conf` también viaja tal cual en `GET /api/v1/ventas/pedidos/{id}/` (es de solo lectura ahí — ver nota en el `Meta` de `PedidoSerializer` — así que un `PATCH` genérico al pedido no puede pisarlo; solo este endpoint lo escribe).
-- Uso recomendado en Next.js: pantalla de "programar entregas" con filas dinámicas `destino` + `cantidad`; mostrar el total de piezas del pedido (de `GET /pedidos/{id}/` o de la respuesta de este mismo endpoint) para validar en el cliente antes de enviar, aunque el backend igual lo revalida.
+- **`total_parcialidades`**: cuántos renglones tiene `programacion_conf.programaciones` (`0` si no se ha programado nada). No es un campo nuevo en BD, se cuenta al vuelo. **Ya viene incluido** en `GET`/`PATCH` de `/pedidos/{id}/` y en el listado `GET /pedidos/` (la pestaña de "Programación de pedidos") — no hace falta llamar a `/programar/` para verlo.
+- Uso recomendado en Next.js: pantalla de "programar entregas" con filas dinámicas `destino` + `cantidad` + `comentarios` (opcional); mostrar el total de piezas del pedido (de `GET /pedidos/{id}/` o de la respuesta de este mismo endpoint) para validar en el cliente antes de enviar, aunque el backend igual lo revalida.
 
 ### Clasificar pedido (widget liviano en el detalle)
 
@@ -1796,15 +1801,17 @@ Pantalla de cola para mesa de control: una tabla con todos los pedidos y su esta
     "fecha_confirmacion": "2026-01-05T10:00:00Z",
     "fecha_entrega_min": "2026-01-06",
     "fecha_entrega_max": "2026-01-09",
+    "total_parcialidades": 1,
     "programacion_conf": {
       "programaciones": [
-        { "destino": "BORDADO", "cantidad": 150, "fecha": "...", "usuario_id": 12, "usuario_nombre": "Ana Torres" }
+        { "destino": "BORDADO", "cantidad": 150, "comentarios": "urgente", "fecha": "...", "usuario_id": 12, "usuario_nombre": "Ana Torres" }
       ]
     }
   }
   ```
   - `clasificacion`/`clasificacion_display`/`fecha_confirmacion`/`fecha_entrega_min`/`fecha_entrega_max`: mismo significado y mismo cálculo que en el detalle del pedido (ver "Clasificar pedido" arriba) — `null` si el pedido aún no tiene clasificación.
-  - `programacion_conf`: el JSON crudo de `PATCH /pedidos/{id}/programar/`, tal cual — `{"programaciones": []}` si no se ha programado nada.
+  - `programacion_conf`: el JSON crudo de `PATCH /pedidos/{id}/programar/`, tal cual (cada renglón incluye `comentarios`) — `{"programaciones": []}` si no se ha programado nada.
+  - `total_parcialidades`: cuántos renglones tiene `programacion_conf.programaciones` — para no obligar al frontend a contar el arreglo él mismo.
 - **Filtros nuevos** (solo aplican en este listado, `?query_param` de siempre — no rompen el detalle del pedido):
   - `?estatus=3` o `?estatus=3,4` — uno o varios estatus separados por coma (mismos códigos de `Pedido.CHOICES_ESTATUS`: 1 BORRADOR, 2 POR AUTORIZAR, 3 AUTORIZADA, 4 EN PROCESO, 5 CANCELADO). Valor inválido responde `400 {"estatus": "Filtro inválido. Usa números separados por coma."}`.
   - `?sin_clasificar=true` — solo pedidos con `clasificacion` vacía (la cola de "pendientes por clasificar").
