@@ -144,6 +144,9 @@ class OrdenCompra(StatusLifecycleModel):
     a_cuenta = models.DecimalField(max_digits=14, decimal_places=2, default=0.00)
 
     observaciones = models.TextField(blank=True, null=True)
+    # Solo lo escribe ``POST ordenes/{id}/cancelar/``. Nulo en las OC que ya
+    # estaban en CANCELADA (puestas desde el admin) antes de existir la acción.
+    motivo_cancelacion = models.TextField(blank=True, null=True)
 
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
