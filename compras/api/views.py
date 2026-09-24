@@ -533,24 +533,30 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         # esta guarda no cambia nada; se cierra para que no dependa de ello.
         if empresa is None or oc.empresa_id != empresa.pk:
             raise ValidationError({"orden_compra_id": "No tienes acceso a esta orden de compra."})
-        if oc.estatus not in {
-            OrdenCompra.EstatusOrdenCompra.BORRADOR,
-            OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
-        }:
-            raise ValidationError({"estatus": "La orden ya no puede aceptarse."})
         body_proveedor_id = request.data.get("proveedor") or request.data.get("proveedor_id")
         try:
             body_proveedor_id = int(body_proveedor_id) if body_proveedor_id not in (None, "") else None
         except Exception:
             body_proveedor_id = None
-        # Antes de la primera escritura (folio y ``oc.save()``).
-        self._validar_encabezado_empresa(oc.empresa, proveedor_id=body_proveedor_id)
-
-        if OrdenCompraDetalle.objects.filter(orden_compra=oc).count() <= 0:
-            raise ValidationError({"detalle": "Agrega al menos un producto antes de aceptar."})
 
         with transaction.atomic():
-            oc = OrdenCompra.objects.select_for_update().filter(pk=oc.pk).first()
+            # Estatus y renglones se validan con la fila bloqueada y releída: leídos
+            # antes del lock, una cancelación o edición concurrente pasaba el guard
+            # y la aceptación la sobrescribía (p. ej. revivía una OC CANCELADA).
+            oc = OrdenCompra.objects.select_for_update().filter(pk=oc.pk, activo=True).first()
+            if oc is None:
+                raise NotFound("Orden de compra no encontrada.")
+            if oc.estatus not in {
+                OrdenCompra.EstatusOrdenCompra.BORRADOR,
+                OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+            }:
+                raise ValidationError({"estatus": "La orden ya no puede aceptarse."})
+            # Antes de la primera escritura (folio y ``oc.save()``).
+            self._validar_encabezado_empresa(oc.empresa, proveedor_id=body_proveedor_id)
+
+            if not OrdenCompraDetalle.objects.filter(orden_compra=oc).exists():
+                raise ValidationError({"detalle": "Agrega al menos un producto antes de aceptar."})
+
             if body_proveedor_id:
                 oc.proveedor_id = body_proveedor_id
             if not oc.proveedor_id:
@@ -590,7 +596,12 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             # Una OC autorizada SÍ puede editarse: el único corte real es que ya
             # tenga recepciones (folio de recepción) contra ella, no el que esté
             # autorizada. Editarla la regresa a POR_AUTORIZAR (abajo) para que se
-            # vuelva a aceptar.
+            # vuelva a aceptar. CANCELADA es terminal: editarla la revivía como
+            # POR_AUTORIZAR.
+            if oc.estatus == OrdenCompra.EstatusOrdenCompra.CANCELADA:
+                raise ValidationError(
+                    {"estatus": "La orden está cancelada y no puede modificarse."}
+                )
             if oc.estatus in {
                 OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
                 OrdenCompra.EstatusOrdenCompra.RECIBIDA,
