@@ -1,3 +1,4 @@
+import ipaddress
 import logging
 from datetime import timedelta
 from decimal import Decimal
@@ -34,11 +35,27 @@ from inventarios.models import (
     MovimientoInventarioDetalle,
     Ubicacion,
 )
+from nucleo.middleware import get_client_ip
 from nucleo.models import Moneda, SerieFolio, Sucursal
 from produccion.models import OrdenProduccion, OrdenProduccionDetalle
 from terceros.models import Proveedor, Transportista
 
 logger = logging.getLogger(__name__)
+
+
+def _ip_auditoria(request):
+    """IP del cliente válida para ``AuditoriaEvento.ip``, o ``None``.
+
+    La columna es ``inet`` en Postgres: guardar el ``X-Forwarded-For`` crudo
+    (una cadena de proxies, un valor inventado por el cliente o un
+    ``REMOTE_ADDR`` vacío) hacía fallar el INSERT y, con él, toda la
+    transacción que auditaba. ``get_client_ip`` ya toma el primer salto, pero
+    no valida que sea una IP.
+    """
+    try:
+        return str(ipaddress.ip_address(get_client_ip(request)))
+    except ValueError:
+        return None
 
 class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = OrdenCompra.objects.filter(activo=True)
@@ -144,7 +161,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             id_registro=str(oc.pk),
             antes_json=antes,
             despues_json=despues,
-            ip=request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR"),
+            ip=_ip_auditoria(request),
             user_agent=request.META.get("HTTP_USER_AGENT"),
         )
 
@@ -1528,7 +1545,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     op.fecha_fin = op.fecha_fin or timezone.now()
                     op.save(update_fields=["estatus_op", "fecha_fin"])
 
-                ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
+                ip = _ip_auditoria(request)
                 ua = request.META.get("HTTP_USER_AGENT")
                 ev = AuditoriaEvento.objects.create(
                     empresa=empresa_origen,

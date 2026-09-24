@@ -15,7 +15,7 @@ import copy
 from decimal import Decimal
 from unittest import mock
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -616,9 +616,9 @@ class OrdenCompraCancelacionTests(TestCase):
             oc=oc, recepcion=recepcion, moneda=self.moneda, estatus=estatus, activo=activo,
         )
 
-    def _cancelar(self, oc, motivo="Proveedor sin stock", user=None):
+    def _cancelar(self, oc, motivo="Proveedor sin stock", user=None, **extra):
         body = {} if motivo is None else {"motivo_cancelacion": motivo}
-        return self._client(user).post(f"{ORDENES_URL}{oc.pk}/cancelar/", body, format="json")
+        return self._client(user).post(f"{ORDENES_URL}{oc.pk}/cancelar/", body, format="json", **extra)
 
     def _estado(self, oc):
         oc = OrdenCompra.objects.get(pk=oc.pk)
@@ -663,6 +663,42 @@ class OrdenCompraCancelacionTests(TestCase):
         self.assertEqual(
             evento.despues_json, {"estatus": Estatus.CANCELADA, "motivo_cancelacion": "Proveedor sin stock"},
         )
+
+    # ``AuditoriaEvento.ip`` es ``inet`` en Postgres; SQLite no reproduce el
+    # fallo del cast, así que se afirma el valor guardado. ``IS_VERCEL`` hace que
+    # ``get_client_ip`` lea el ``X-Forwarded-For``, como en producción.
+    @override_settings(IS_VERCEL=True)
+    def test_auditoria_guarda_solo_ips_validas(self):
+        casos = (
+            ({"HTTP_X_FORWARDED_FOR": "1.2.3.4, 10.0.0.1"}, "1.2.3.4"),
+            ({"HTTP_X_FORWARDED_FOR": "foo"}, None),
+            ({"REMOTE_ADDR": ""}, None),
+        )
+        for extra, esperado in casos:
+            with self.subTest(extra=extra):
+                oc = self._oc(Estatus.AUTORIZADA)
+                self.assertEqual(self._cancelar(oc, **extra).status_code, 200)
+                self.assertEqual(self._eventos(oc, "CANCELAR").get().ip, esperado)
+
+                oc = self._oc(Estatus.BORRADOR)
+                self.assertEqual(self._client().delete(f"{ORDENES_URL}{oc.pk}/", **extra).status_code, 204)
+                self.assertEqual(self._eventos(oc, "DELETE").get().ip, esperado)
+
+    @override_settings(IS_VERCEL=True)
+    def test_auditoria_de_la_recepcion_guarda_solo_ips_validas(self):
+        oc = self._oc(Estatus.AUTORIZADA)
+        detalle = OrdenCompraDetalle.objects.get(orden_compra=oc)
+        resp = self._client().post(
+            RECEPCION_ONBOARDING_URL,
+            {
+                "recepcion": {"orden_compra": oc.pk, "almacen": self.a["almacen"].pk, "serie_codigo": "RC"},
+                "detalle": [{"orden_compra_detalle": detalle.pk, "cantidad_recibida": "1"}],
+            },
+            format="json",
+            HTTP_X_FORWARDED_FOR="foo",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertIsNone(AuditoriaEvento.objects.get(pk=resp.json()["movimiento_id"]).ip)
 
     def test_oc_cancelada_sigue_visible_en_list_y_detail(self):
         oc = self._oc(Estatus.AUTORIZADA)
