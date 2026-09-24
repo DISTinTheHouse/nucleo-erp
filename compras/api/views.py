@@ -691,16 +691,45 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         user = request.user
         empresa = getattr(user, "empresa", None)
 
-        oc = (
-            OrdenCompra.objects.filter(pk=pk, empresa=empresa, activo=True).first()
-        )
-        if not oc:
-            return Response(
-                {"detail": "Orden de compra no encontrada."},
-                status=status.HTTP_404_NOT_FOUND,
+        # Baja por error de captura, no cancelación (esa es ``cancelar``): solo
+        # procede sobre una OC que nunca llegó a comprometer nada con el
+        # proveedor. Cualquier recepción o factura, aun cancelada, prueba que la
+        # orden sí existió y debe quedar visible.
+        with transaction.atomic():
+            oc = (
+                OrdenCompra.objects.select_for_update()
+                .filter(pk=pk, empresa=empresa, activo=True)
+                .first()
             )
+            if not oc:
+                return Response(
+                    {"detail": "Orden de compra no encontrada."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            if oc.estatus not in {
+                OrdenCompra.EstatusOrdenCompra.BORRADOR,
+                OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+            }:
+                raise ValidationError(
+                    {"estatus": "Solo se puede eliminar una orden en borrador o pendiente de confirmar."}
+                )
+            if Recepcion.objects.filter(orden_compra=oc).exists():
+                raise ValidationError(
+                    {"recepciones": "La orden tiene recepciones registradas y no puede eliminarse."}
+                )
+            if FacturaProveedor.objects.filter(oc=oc).exists():
+                raise ValidationError(
+                    {"facturas_proveedores": "La orden tiene facturas de proveedor y no puede eliminarse."}
+                )
 
-        oc.soft_delete()
+            oc.soft_delete()
+            self._auditar_orden_compra(
+                request,
+                oc,
+                "DELETE",
+                {"estatus": oc.estatus, "activo": True},
+                {"estatus": oc.estatus, "activo": False},
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
