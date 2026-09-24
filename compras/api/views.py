@@ -1,13 +1,16 @@
 import logging
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Prefetch, Q, Sum
+from django.db.models import Count, Prefetch, Q, Sum
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Producto
@@ -499,13 +502,16 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
+            # Una OC autorizada SÍ puede editarse: el único corte real es que ya
+            # tenga recepciones (folio de recepción) contra ella, no el que esté
+            # autorizada. Editarla la regresa a POR_AUTORIZAR (abajo) para que se
+            # vuelva a aceptar.
             if oc.estatus in {
-                OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
                 OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
                 OrdenCompra.EstatusOrdenCompra.RECIBIDA,
             }:
                 raise ValidationError(
-                    {"estatus": "Una orden autorizada o recibida no puede ser modificada."}
+                    {"estatus": "La orden ya tiene recepciones registradas y no puede modificarse."}
                 )
 
             has_sucursal = "sucursal" in header
@@ -1447,3 +1453,172 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 getattr(exc, "detail", exc),
             )
             raise
+
+
+class ComprasDashboardView(APIView):
+    # KPIs para agente de compras / mesa directiva. Todo por agregación en DB
+    # (values().annotate() / aggregate()) — nunca se itera OrdenCompra/Recepcion
+    # fila por fila. Ver DOCS/api/DOCUMENTACION_API.md, sección Dashboard.
+    ESTATUS_GASTO_OC = [
+        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+        OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+    ]
+    ESTATUS_CERRADOS_OC = {
+        OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+        OrdenCompra.EstatusOrdenCompra.CANCELADA,
+    }
+
+    def get(self, request):
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        if not empresa and not getattr(user, "is_superuser", False):
+            return Response(self._vacio())
+
+        dias = request.query_params.get("dias", "7")
+        try:
+            dias = max(1, min(int(dias), 90))
+        except (TypeError, ValueError):
+            raise ValidationError({"dias": "Debe ser un entero."})
+
+        desde = self._parse_fecha(request.query_params.get("desde"), "desde")
+        hasta = self._parse_fecha(request.query_params.get("hasta"), "hasta")
+
+        oc_base = OrdenCompra.objects.filter(activo=True)
+        rec_base = Recepcion.objects.filter(activo=True)
+        if not getattr(user, "is_superuser", False):
+            oc_base = oc_base.filter(empresa=empresa)
+            rec_base = rec_base.filter(empresa=empresa)
+
+        data = {
+            "generado_en": timezone.now(),
+            "filtros": {"dias_por_vencer": dias, "desde": desde, "hasta": hasta},
+        }
+        data.update(self._ordenes_por_estatus(oc_base))
+        data.update(self._vencimientos(oc_base, dias))
+        data.update(self._recepciones(rec_base))
+        data.update(self._gasto(oc_base, desde, hasta))
+        return Response(data)
+
+    def _vacio(self):
+        return {
+            "generado_en": timezone.now(),
+            "filtros": None,
+            "ordenes_por_estatus": [],
+            "ordenes_vencidas": 0,
+            "ordenes_por_vencer": 0,
+            "recepciones_por_estatus": [],
+            "recepciones_por_origen": [],
+            "gasto_por_moneda": [],
+            "top_proveedores": [],
+        }
+
+    def _parse_fecha(self, raw, campo):
+        if not raw:
+            return None
+        fecha = parse_date(raw)
+        if not fecha:
+            raise ValidationError({campo: "Formato inválido, usa YYYY-MM-DD."})
+        return fecha
+
+    def _ordenes_por_estatus(self, oc_base):
+        labels = dict(OrdenCompra.EstatusOrdenCompra.choices)
+        rows = oc_base.values("estatus").annotate(total=Count("id")).order_by("estatus")
+        return {
+            "ordenes_por_estatus": [
+                {
+                    "estatus": r["estatus"],
+                    "estatus_label": labels.get(r["estatus"], str(r["estatus"])),
+                    "total": r["total"],
+                }
+                for r in rows
+            ]
+        }
+
+    def _vencimientos(self, oc_base, dias):
+        hoy = timezone.now().date()
+        limite = hoy + timedelta(days=dias)
+        agg = oc_base.exclude(estatus__in=self.ESTATUS_CERRADOS_OC).aggregate(
+            vencidas=Count("id", filter=Q(fecha_vencimiento__lt=hoy)),
+            por_vencer=Count(
+                "id", filter=Q(fecha_vencimiento__gte=hoy, fecha_vencimiento__lte=limite)
+            ),
+        )
+        return {
+            "ordenes_vencidas": agg["vencidas"] or 0,
+            "ordenes_por_vencer": agg["por_vencer"] or 0,
+        }
+
+    def _recepciones(self, rec_base):
+        rows = list(rec_base.values("estatus", "tipo_origen").annotate(total=Count("id")))
+        estatus_labels = dict(Recepcion.EstatusRecepcion.choices)
+        origen_labels = dict(Recepcion.TipoOrigen.choices)
+
+        por_estatus = {}
+        por_origen = {}
+        for r in rows:
+            e = r["estatus"]
+            fila = por_estatus.setdefault(
+                e, {"estatus": e, "estatus_label": estatus_labels.get(e, str(e)), "total": 0}
+            )
+            fila["total"] += r["total"]
+
+            o = r["tipo_origen"]
+            fila_o = por_origen.setdefault(
+                o, {"tipo_origen": o, "tipo_origen_label": origen_labels.get(o, o), "total": 0}
+            )
+            fila_o["total"] += r["total"]
+
+        return {
+            "recepciones_por_estatus": sorted(por_estatus.values(), key=lambda x: x["estatus"]),
+            "recepciones_por_origen": list(por_origen.values()),
+        }
+
+    def _gasto(self, oc_base, desde, hasta):
+        # Se agrupa por (moneda, proveedor) en UNA sola query y se reduce en
+        # Python a dos vistas (por moneda / por proveedor): sumar gran_total
+        # de OCs en distintas monedas sin separar por moneda mezclaría
+        # importes que no son comparables.
+        qs = oc_base.filter(estatus__in=self.ESTATUS_GASTO_OC)
+        if desde:
+            qs = qs.filter(fecha_oc__gte=desde)
+        if hasta:
+            qs = qs.filter(fecha_oc__lte=hasta)
+
+        rows = list(
+            qs.values("moneda__codigo_iso", "proveedor_id", "proveedor__nombre").annotate(
+                total=Sum("gran_total"), ocs=Count("id")
+            )
+        )
+
+        por_moneda = {}
+        por_proveedor = {}
+        for r in rows:
+            moneda = r["moneda__codigo_iso"] or "N/A"
+            total = r["total"] or Decimal("0")
+
+            fila = por_moneda.setdefault(
+                moneda, {"moneda_codigo": moneda, "total": Decimal("0"), "ordenes": 0}
+            )
+            fila["total"] += total
+            fila["ordenes"] += r["ocs"]
+
+            pid = r["proveedor_id"]
+            if pid is not None:
+                fila_p = por_proveedor.setdefault(
+                    pid,
+                    {
+                        "proveedor_id": pid,
+                        "proveedor_nombre": r["proveedor__nombre"],
+                        "total": Decimal("0"),
+                        "ordenes": 0,
+                    },
+                )
+                fila_p["total"] += total
+                fila_p["ordenes"] += r["ocs"]
+
+        top_proveedores = sorted(por_proveedor.values(), key=lambda x: x["total"], reverse=True)[:5]
+        return {
+            "gasto_por_moneda": [{**m, "total": str(m["total"])} for m in por_moneda.values()],
+            "top_proveedores": [{**p, "total": str(p["total"])} for p in top_proveedores],
+        }
