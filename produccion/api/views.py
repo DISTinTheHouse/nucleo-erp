@@ -148,6 +148,14 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
         if not any(pendiente > 0 for _asignada, pendiente in pendientes):
             continue
 
+        # Filtro fijo: bordado/reflejante/corte de manga sólo arman OT sobre
+        # pedidos que mesa de control ya programó explícitamente hacia este
+        # destino (``PATCH /pedidos/{id}/programar/``). Sin programación, el
+        # pedido no aparece aquí aunque tenga saldo pendiente por bordar/etc.
+        programado = _programado_para_destino(p, destino_programacion) if destino_programacion else None
+        if destino_programacion and programado is None:
+            continue
+
         lineas = []
         for (det, dt), (cantidad_asignada, cantidad_pendiente) in zip(pares, pendientes):
             # ``config_como_dict``, no ``or {}``: ``reflejante_config`` es un
@@ -223,11 +231,7 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
             "sucursal": p.sucursal_id,
             "sucursal_nombre": getattr(p.sucursal, "nombre", None),
             "detalles": lineas,
-            "programado": (
-                _programado_para_destino(p, destino_programacion)
-                if destino_programacion
-                else None
-            ),
+            "programado": programado,
         })
     return pedidos_payload
 

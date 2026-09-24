@@ -1596,13 +1596,26 @@ class PedidoProgramarTests(TestCase):
             moneda=cls.moneda,
             estatus=3,
         )
-        # 120 piezas: 2 renglones x tallas (50 + 30) y (40).
+        # 120 piezas: 2 renglones x tallas (50 + 30) y (40). Lleva los tres
+        # servicios (bordado/reflejante/corte de manga) para que las pruebas
+        # de ``programar`` puedan programar cualquier destino de la lista
+        # blanca sin chocar con la validación de "destinos_aplicables"
+        # (ver ``PedidoDestinosAplicablesTests`` para esa validación en sí).
         cls.pedido = cls._pedido("P-000001", cotizacion=cls.cotizacion)
         det_a = PedidoDetalle.objects.create(pedido=cls.pedido, producto=cls.producto)
-        PedidoDetalleTalla.objects.create(pedido_detalle=det_a, talla=cls.talla_m, cantidad=50)
-        PedidoDetalleTalla.objects.create(pedido_detalle=det_a, talla=cls.talla_l, cantidad=30)
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=det_a, talla=cls.talla_m, cantidad=50,
+            lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
+        )
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=det_a, talla=cls.talla_l, cantidad=30,
+            lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
+        )
         det_b = PedidoDetalle.objects.create(pedido=cls.pedido, producto=cls.producto)
-        PedidoDetalleTalla.objects.create(pedido_detalle=det_b, talla=cls.talla_m, cantidad=40)
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=det_b, talla=cls.talla_m, cantidad=40,
+            lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
+        )
 
         cls.pedido_sin_tallas = cls._pedido("P-000002")
 
@@ -1903,6 +1916,114 @@ class PedidoProgramarTests(TestCase):
             ),
             tallas_antes,
         )
+
+
+class PedidoDestinosAplicablesTests(TestCase):
+    """``destinos_aplicables`` (detalle) + su validación en ``programar``.
+
+    Un pedido sólo debería poder programarse hacia un servicio que
+    realmente lleva (BORDADO/REFLEJANTE/CORTE_MANGA); EMBARQUE/APARTADO son
+    logística genérica y siempre aplican.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-da", razon_social="ACME DA SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Matriz"
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente ACME")
+        cls.talla = Talla.objects.create(nombre="M")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.admin_mesa = Usuario.objects.create(
+            username="mesa_admin_da",
+            email="mesa_admin_da@acme.test",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
+        )
+
+        def _pedido(folio):
+            return Pedido.objects.create(
+                empresa=cls.empresa,
+                sucursal=cls.sucursal,
+                cliente=cls.cliente,
+                moneda=cls.moneda,
+                estatus=3,
+                folio=folio,
+                persona_pagos="Pagos",
+                correo_facturas="pagos@acme.test",
+                telefono_pagos="8112345678",
+                forma_pago="03",
+                metodo_pago="PUE",
+                uso_cfdi="G03",
+            )
+
+        # Sólo lleva corte de manga.
+        cls.pedido_corte = _pedido("P-CM-001")
+        det = PedidoDetalle.objects.create(pedido=cls.pedido_corte, producto=cls.producto)
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=det, talla=cls.talla, cantidad=10, lleva_corte_manga=True
+        )
+
+        # No lleva ningún servicio especial.
+        cls.pedido_generico = _pedido("P-GEN-001")
+        det_gen = PedidoDetalle.objects.create(pedido=cls.pedido_generico, producto=cls.producto)
+        PedidoDetalleTalla.objects.create(pedido_detalle=det_gen, talla=cls.talla, cantidad=10)
+
+    def _patch(self, pedido, payload):
+        client = APIClient()
+        client.force_authenticate(user=self.admin_mesa)
+        return client.patch(pedido_programar_url(pedido.pk), payload, format="json")
+
+    def _detalle(self, pedido):
+        client = APIClient()
+        client.force_authenticate(user=self.admin_mesa)
+        return client.get(f"{PEDIDOS_URL}{pedido.pk}/")
+
+    def test_detalle_expone_solo_los_destinos_que_lleva_mas_logistica(self):
+        body = self._detalle(self.pedido_corte).json()
+        self.assertEqual(set(body["destinos_aplicables"]), {"CORTE_MANGA", "EMBARQUE", "APARTADO"})
+
+    def test_pedido_sin_servicios_especiales_solo_ofrece_logistica(self):
+        body = self._detalle(self.pedido_generico).json()
+        self.assertEqual(set(body["destinos_aplicables"]), {"EMBARQUE", "APARTADO"})
+
+    def test_programar_el_servicio_que_si_lleva_funciona(self):
+        response = self._patch(
+            self.pedido_corte, {"programaciones": [{"destino": "CORTE_MANGA", "cantidad": 5}]}
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+
+    def test_programar_logistica_siempre_funciona_aunque_no_tenga_ese_servicio(self):
+        response = self._patch(
+            self.pedido_generico, {"programaciones": [{"destino": "EMBARQUE", "cantidad": 10}]}
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+
+    def test_programar_un_servicio_que_no_lleva_se_rechaza(self):
+        response = self._patch(
+            self.pedido_corte, {"programaciones": [{"destino": "BORDADO", "cantidad": 5}]}
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("BORDADO", response.json()["programaciones"])
+        self.pedido_corte.refresh_from_db()
+        self.assertEqual(self.pedido_corte.programacion_conf, {})
+
+    def test_mezcla_de_aplicable_y_no_aplicable_rechaza_todo(self):
+        response = self._patch(
+            self.pedido_corte,
+            {
+                "programaciones": [
+                    {"destino": "CORTE_MANGA", "cantidad": 5},
+                    {"destino": "REFLEJANTE", "cantidad": 5},
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.pedido_corte.refresh_from_db()
+        self.assertEqual(self.pedido_corte.programacion_conf, {})
 
 
 class PedidoMovimientoInventarioVarianteTests(TestCase):

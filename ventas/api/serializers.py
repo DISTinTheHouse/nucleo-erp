@@ -382,6 +382,12 @@ class PedidoSerializer(serializers.ModelSerializer):
     # ``programacion_conf.programaciones``) — mismo cálculo que devuelve
     # PATCH /pedidos/{id}/programar/ como "total_parcialidades".
     total_parcialidades = serializers.SerializerMethodField()
+    # Qué destinos de PATCH /pedidos/{id}/programar/ tienen sentido para ESTE
+    # pedido según lo que realmente lleva (ver
+    # ``ventas.services.programacion_service``) — para que el formulario de
+    # programación no ofrezca, p. ej., CORTE_MANGA en un pedido sin ninguna
+    # talla de corte de manga.
+    destinos_aplicables = serializers.SerializerMethodField()
 
     def get_fecha_entrega_min(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
@@ -390,6 +396,10 @@ class PedidoSerializer(serializers.ModelSerializer):
     def get_fecha_entrega_max(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
         return rango_fecha_entrega(obj)[1]
+
+    def get_destinos_aplicables(self, obj):
+        from ventas.services.programacion_service import destinos_aplicables
+        return destinos_aplicables(obj)
 
     def get_total_parcialidades(self, obj):
         return len((obj.programacion_conf or {}).get("programaciones") or [])

@@ -1572,6 +1572,15 @@ class OrdenBordadoParcialidadesTests(TestCase):
             pedido_detalle=self.detalle, talla=self.talla_m,
             cantidad=self.CANTIDAD_M, lleva_bordado=True,
         )
+        # El onboarding de OB sólo ofrece pedidos que mesa de control ya
+        # programó hacia BORDADO (ver ``_payload_pedidos_onboarding``); sin
+        # esto el pedido de este fixture no aparecería en ningún GET.
+        self.pedido.programacion_conf = {
+            "programaciones": [
+                {"destino": "BORDADO", "cantidad": self.CANTIDAD_CH + self.CANTIDAD_M}
+            ]
+        }
+        self.pedido.save(update_fields=["programacion_conf"])
 
     def _client(self):
         client = APIClient()
@@ -1944,6 +1953,12 @@ class OrdenReflejanteOnboardingGetTests(TestCase):
             pedido_detalle=self.detalle, talla=self.talla_ch,
             cantidad=10, lleva_reflejante=True,
         )
+        # El onboarding de OR sólo ofrece pedidos programados hacia
+        # REFLEJANTE (ver ``_payload_pedidos_onboarding``).
+        self.pedido.programacion_conf = {
+            "programaciones": [{"destino": "REFLEJANTE", "cantidad": 10}]
+        }
+        self.pedido.save(update_fields=["programacion_conf"])
 
     def test_get_expone_asignada_y_pendiente(self):
         orden = OrdenesReflejante.objects.create(
@@ -2035,6 +2050,14 @@ class OrdenReflejanteParcialidadesTests(TestCase):
             pedido_detalle=self.detalle, talla=self.talla_m,
             cantidad=self.CANTIDAD_M, lleva_reflejante=True,
         )
+        # El onboarding de OR sólo ofrece pedidos programados hacia
+        # REFLEJANTE (ver ``_payload_pedidos_onboarding``).
+        self.pedido.programacion_conf = {
+            "programaciones": [
+                {"destino": "REFLEJANTE", "cantidad": self.CANTIDAD_CH + self.CANTIDAD_M}
+            ]
+        }
+        self.pedido.save(update_fields=["programacion_conf"])
 
     def _client(self):
         client = APIClient()
@@ -2851,6 +2874,15 @@ class OnboardingGetConfigFormaRealTests(TestCase):
         client.force_authenticate(user=self.usuario)
         return client
 
+    # Destino de ``programar`` correspondiente a cada flag de servicio, para
+    # que el pedido del fixture aparezca en su onboarding (ver
+    # ``_payload_pedidos_onboarding``: sólo ofrece pedidos ya programados).
+    _DESTINO_POR_FLAG = {
+        "lleva_bordado": "BORDADO",
+        "lleva_reflejante": "REFLEJANTE",
+        "lleva_corte_manga": "CORTE_MANGA",
+    }
+
     def _pedido_con_config(self, flag, campo_config, valor):
         pedido = Pedido.objects.create(
             empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
@@ -2863,6 +2895,10 @@ class OnboardingGetConfigFormaRealTests(TestCase):
             pedido_detalle=detalle, talla=self.talla_ch, cantidad=10,
             **{flag: True, campo_config: valor},
         )
+        pedido.programacion_conf = {
+            "programaciones": [{"destino": self._DESTINO_POR_FLAG[flag], "cantidad": 10}]
+        }
+        pedido.save(update_fields=["programacion_conf"])
         return pedido
 
     def _lineas(self, url, pedido):
@@ -3038,6 +3074,12 @@ class BordadoSinUbicacionesTests(TestCase):
             pedido_detalle=self.detalle, talla=self.talla_ch, cantidad=6,
             lleva_bordado=True, bordado_config=BORDADO_CONFIG_SIN_UBICACIONES,
         )
+        # El onboarding de OB sólo ofrece pedidos ya programados hacia
+        # BORDADO (ver ``_payload_pedidos_onboarding``).
+        self.pedido.programacion_conf = {
+            "programaciones": [{"destino": "BORDADO", "cantidad": 6}]
+        }
+        self.pedido.save(update_fields=["programacion_conf"])
 
     def _client(self):
         client = APIClient()
@@ -3328,6 +3370,12 @@ class OnboardingReflejanteConfigCrudoTests(TestCase):
         client.force_authenticate(user=self.usuario)
         return client
 
+    _DESTINO_POR_FLAG = {
+        "lleva_bordado": "BORDADO",
+        "lleva_reflejante": "REFLEJANTE",
+        "lleva_corte_manga": "CORTE_MANGA",
+    }
+
     def _pedido(self, flag, campo_config, valor):
         pedido = Pedido.objects.create(
             empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
@@ -3340,6 +3388,12 @@ class OnboardingReflejanteConfigCrudoTests(TestCase):
             pedido_detalle=detalle, talla=self.talla_ch, cantidad=5,
             **{flag: True, campo_config: valor},
         )
+        # El onboarding sólo ofrece pedidos ya programados hacia ese destino
+        # (ver ``_payload_pedidos_onboarding``).
+        pedido.programacion_conf = {
+            "programaciones": [{"destino": self._DESTINO_POR_FLAG[flag], "cantidad": 5}]
+        }
+        pedido.save(update_fields=["programacion_conf"])
         return pedido
 
     def _lineas(self, url, pedido):

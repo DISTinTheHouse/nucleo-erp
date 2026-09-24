@@ -2926,6 +2926,26 @@ class PedidoViewSet(viewsets.ModelViewSet):
             )
             serializer.is_valid(raise_exception=True)
 
+            # No dejar programar un servicio que el pedido no lleva (ej.
+            # CORTE_MANGA en un pedido sin ninguna talla de corte de manga) —
+            # mismo criterio que expone ``destinos_aplicables`` en el detalle
+            # del pedido, aquí como validación dura del lado servidor.
+            from ventas.services.programacion_service import destinos_aplicables
+            aplicables = set(destinos_aplicables(pedido))
+            invalidos = sorted(
+                {p["destino"] for p in serializer.validated_data["programaciones"]}
+                - aplicables
+            )
+            if invalidos:
+                raise ValidationError(
+                    {
+                        "programaciones": (
+                            "Este pedido no lleva estos servicios, no se puede "
+                            f"programar: {', '.join(invalidos)}."
+                        )
+                    }
+                )
+
             # Sello del servidor, mismo criterio que el reporte de movimientos
             # de inventarios (``usuario_id`` / ``usuario_nombre``).
             fecha = timezone.now().isoformat()

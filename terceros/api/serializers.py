@@ -39,13 +39,13 @@ class ClienteSerializer(serializers.ModelSerializer):
                 attrs["sat_uso_cfdi"] = SatUsoCfdi.objects.get(codigo=str(codigo_uso).strip())
             except SatUsoCfdi.DoesNotExist:
                 raise serializers.ValidationError({"sat_uso_cfdi_codigo": "Uso CFDI no encontrado"})
-        if not attrs.get("telefono"):
+        if "telefono" in attrs and not attrs["telefono"]:
             attrs["telefono"] = ""
-        if not attrs.get("correo"):
+        if "correo" in attrs and not attrs["correo"]:
             attrs["correo"] = ""
-        if not attrs.get("giro_empresarial"):
+        if "giro_empresarial" in attrs and not attrs["giro_empresarial"]:
             attrs["giro_empresarial"] = ""
-        if not attrs.get("razon_social"):
+        if "razon_social" in attrs and not attrs["razon_social"]:
             attrs["razon_social"] = ""
         return attrs
 
