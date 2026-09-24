@@ -770,6 +770,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             # Baja lógica a mano en vez de ``soft_delete()``: ese guarda solo
             # ``activo`` y ``auto_now`` no toca ``updated_at`` si no va en
             # ``update_fields``, como sí en las demás escrituras del viewset.
+            # Replica a propósito ``StatusLifecycleModel.soft_delete()`` solo para
+            # sumar ``updated_at``: si ``soft_delete()`` cambia, mantener esto igual.
             oc.activo = False
             oc.save(update_fields=["activo", "updated_at"])
             self._auditar_orden_compra(
