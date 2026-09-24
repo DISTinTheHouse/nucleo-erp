@@ -11,15 +11,19 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test compras --settings=sqlite_settings
 """
 
+import copy
 from decimal import Decimal
+from unittest import mock
 
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from auditoria.models import AuditoriaEvento
 from catalogo.models import Color, Producto, ProductoVariante
-from compras.api.views import RecepcionViewSet
+from compras.api.views import OrdenCompraViewSet, RecepcionViewSet
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion
+from finanzas.models import FacturaProveedor
 from inventarios.models import Almacen, Existencia, MovimientoInventario, MovimientoInventarioDetalle, Ubicacion
 from nucleo.models import Empresa, Moneda, SatFormaPago, SatMetodoPago, SatRegimenFiscal, SerieFolio, Sucursal
 from terceros.models import Proveedor
@@ -527,3 +531,385 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
         oc.refresh_from_db()
         self.assertEqual(oc.estatus, OrdenCompra.EstatusOrdenCompra.AUTORIZADA)
         self.assertIsNotNone(oc.folio)
+
+
+Estatus = OrdenCompra.EstatusOrdenCompra
+
+
+class OrdenCompraCancelacionTests(TestCase):
+    """``POST ordenes/{id}/cancelar/``, la terminalidad de CANCELADA y el DELETE.
+
+    Cancelar anula la OC ante el proveedor y la deja visible; el DELETE es la
+    baja de una OC capturada por error. SQLite ignora ``select_for_update``: la
+    relectura bajo el lock se ejerce con un ``get_object`` obsoleto simulado, no
+    con dos transacciones reales.
+    """
+
+    MOTIVO_REQUERIDO = {"motivo_cancelacion": "El motivo de cancelación es requerido."}
+    NO_CANCELABLE = {"estatus": "La orden ya no puede cancelarse."}
+
+    @classmethod
+    def setUpTestData(cls):
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+
+        def tenant(codigo):
+            empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+            sucursal = Sucursal.objects.create(empresa=empresa, codigo=codigo[:3].upper(), nombre=codigo)
+            proveedor = Proveedor.objects.create(
+                empresa=empresa, nombre=f"Proveedor {codigo}", moneda=cls.moneda, sat_regimen_fiscal=regimen,
+                sat_forma_pago=forma, sat_metodo_pago=metodo, codigo=f"PROV-{codigo}", razon_social="Prov SA",
+                telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000", email=f"p@{codigo}.test",
+            )
+            almacen = Almacen.objects.create(empresa=empresa, sucursal=sucursal, codigo="ALM", nombre="Almacen")
+            producto = Producto.objects.create(empresa=empresa, nombre=f"Insumo {codigo}")
+            usuario = Usuario.objects.create(
+                username=f"u@{codigo}.test", email=f"u@{codigo}.test", empresa=empresa, sucursal_default=sucursal,
+            )
+            return {
+                "empresa": empresa, "sucursal": sucursal, "proveedor": proveedor,
+                "almacen": almacen, "producto": producto, "usuario": usuario,
+            }
+
+        cls.a = tenant("acme-cx")
+        cls.b = tenant("globex-cx")
+        SerieFolio.objects.create(
+            empresa=cls.a["empresa"], sucursal=cls.a["sucursal"], tipo_documento="RECEPCION", serie="RC",
+        )
+        cls.sin_empresa = Usuario.objects.create(username="n@nowhere-cx.test", email="n@nowhere-cx.test")
+
+    # --- helpers ---------------------------------------------------------------
+
+    def _client(self, user=None):
+        client = APIClient()
+        client.force_authenticate(user=user or self.a["usuario"])
+        return client
+
+    def _oc(self, estatus, motivo=None):
+        oc = OrdenCompra.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.a["proveedor"],
+            moneda=self.moneda, usuario=self.a["usuario"], fecha_oc=timezone.now().date(),
+            estatus=estatus, motivo_cancelacion=motivo,
+        )
+        OrdenCompraDetalle.objects.create(
+            orden_compra=oc, producto=self.a["producto"], sucursal=self.a["sucursal"], cantidad=10,
+        )
+        return oc
+
+    def _recepcion(self, oc, estatus=Recepcion.EstatusRecepcion.RECIBIDA, activo=True):
+        return Recepcion.objects.create(
+            orden_compra=oc, empresa=self.a["empresa"], sucursal=self.a["sucursal"],
+            proveedor=self.a["proveedor"], almacen=self.a["almacen"], usuario=self.a["usuario"],
+            folio=f"RC-CX-{Recepcion.objects.count() + 1}", fecha_recepcion=timezone.now(),
+            estatus=estatus, activo=activo,
+        )
+
+    def _factura(self, oc, estatus, activo=True, recepcion=None):
+        # ``FacturaProveedor.recepcion`` es NOT NULL; por omisión se cuelga de
+        # una recepción cancelada para que solo la factura pueda bloquear.
+        if recepcion is None:
+            recepcion = self._recepcion(oc, estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        return FacturaProveedor.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.a["proveedor"],
+            oc=oc, recepcion=recepcion, moneda=self.moneda, estatus=estatus, activo=activo,
+        )
+
+    def _cancelar(self, oc, motivo="Proveedor sin stock", user=None):
+        body = {} if motivo is None else {"motivo_cancelacion": motivo}
+        return self._client(user).post(f"{ORDENES_URL}{oc.pk}/cancelar/", body, format="json")
+
+    def _estado(self, oc):
+        oc = OrdenCompra.objects.get(pk=oc.pk)
+        return (oc.estatus, oc.motivo_cancelacion, oc.activo)
+
+    def _eventos(self, oc, accion):
+        return AuditoriaEvento.objects.filter(
+            modulo="compras", accion=accion, tabla="ordenes_compra", id_registro=str(oc.pk),
+        )
+
+    def _assert_rechazo(self, resp, esperado, oc, antes, status_code=400):
+        self.assertEqual(resp.status_code, status_code, resp.content)
+        if esperado is not None:
+            self.assertEqual(resp.json(), esperado)
+        self.assertEqual(self._estado(oc), antes)
+        self.assertFalse(AuditoriaEvento.objects.filter(modulo="compras").exists())
+
+    # --- cancelar: caminos permitidos ------------------------------------------
+
+    def test_cancela_desde_cada_estatus_permitido(self):
+        for estatus in (Estatus.BORRADOR, Estatus.POR_AUTORIZAR, Estatus.AUTORIZADA):
+            with self.subTest(estatus=estatus):
+                oc = self._oc(estatus)
+                resp = self._cancelar(oc, "  Proveedor sin stock  ")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.assertEqual(self._estado(oc), (Estatus.CANCELADA, "Proveedor sin stock", True))
+                body = resp.json()
+                self.assertEqual((body["id"], body["estatus"]), (oc.pk, Estatus.CANCELADA))
+                self.assertEqual(body["estatus_label"], "Cancelada")
+                self.assertEqual(body["motivo_cancelacion"], "Proveedor sin stock")
+                # Misma forma que el retrieve.
+                for campo in ("detalles", "recepciones", "pedido_vinculado", "documentos"):
+                    self.assertIn(campo, body)
+
+    def test_cancelar_escribe_evento_de_auditoria(self):
+        oc = self._oc(Estatus.AUTORIZADA)
+        resp = self._cancelar(oc)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        evento = self._eventos(oc, "CANCELAR").get()
+        self.assertEqual((evento.empresa_id, evento.usuario_id), (self.a["empresa"].pk, self.a["usuario"].pk))
+        self.assertEqual(evento.antes_json, {"estatus": Estatus.AUTORIZADA, "motivo_cancelacion": None})
+        self.assertEqual(
+            evento.despues_json, {"estatus": Estatus.CANCELADA, "motivo_cancelacion": "Proveedor sin stock"},
+        )
+
+    def test_oc_cancelada_sigue_visible_en_list_y_detail(self):
+        oc = self._oc(Estatus.AUTORIZADA)
+        self.assertEqual(self._cancelar(oc).status_code, 200)
+        client = self._client()
+
+        listado = client.get(ORDENES_URL)
+        self.assertEqual(listado.status_code, 200)
+        fila = next(row for row in listado.json() if row["id"] == oc.pk)
+        self.assertEqual((fila["estatus"], fila["motivo_cancelacion"], fila["activo"]),
+                         (Estatus.CANCELADA, "Proveedor sin stock", True))
+
+        detalle = client.get(f"{ORDENES_URL}{oc.pk}/")
+        self.assertEqual(detalle.status_code, 200)
+        self.assertEqual(detalle.json()["motivo_cancelacion"], "Proveedor sin stock")
+
+    def test_recepcion_cancelada_o_dada_de_baja_no_bloquea(self):
+        oc = self._oc(Estatus.AUTORIZADA)
+        self._recepcion(oc, estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        self._recepcion(oc, activo=False)
+        self.assertEqual(self._cancelar(oc).status_code, 200)
+
+    def test_factura_cancelada_no_bloquea(self):
+        oc = self._oc(Estatus.AUTORIZADA)
+        self._factura(oc, FacturaProveedor.FacturaProveedorStatus.CANCELADA)
+        self.assertEqual(self._cancelar(oc).status_code, 200)
+
+    # --- cancelar: rechazos ------------------------------------------------------
+
+    def test_rechaza_estatus_4_5_y_6(self):
+        for estatus in (Estatus.PARCIALMENTE_RECIBIDA, Estatus.RECIBIDA, Estatus.CANCELADA):
+            with self.subTest(estatus=estatus):
+                # Re-cancelar no pisa el motivo original.
+                oc = self._oc(estatus, motivo="original" if estatus == Estatus.CANCELADA else None)
+                antes = self._estado(oc)
+                self._assert_rechazo(self._cancelar(oc), self.NO_CANCELABLE, oc, antes)
+
+    def test_rechaza_con_recepcion_activa_aunque_el_estatus_lo_permita(self):
+        for estatus in (Estatus.AUTORIZADA, Estatus.POR_AUTORIZAR):
+            with self.subTest(estatus=estatus):
+                oc = self._oc(estatus)
+                self._recepcion(oc, estatus=Recepcion.EstatusRecepcion.BORRADOR)
+                antes = self._estado(oc)
+                resp = self._cancelar(oc)
+                self._assert_rechazo(
+                    resp, {"recepciones": "La orden tiene recepciones registradas y no puede cancelarse."}, oc, antes,
+                )
+
+    def test_rechaza_con_factura_viva_aunque_el_estatus_lo_permita(self):
+        casos = (
+            (FacturaProveedor.FacturaProveedorStatus.BORRADOR, True),
+            (FacturaProveedor.FacturaProveedorStatus.REGISTRADA, True),
+            # Dar de baja la factura no cancela la CxP que generó al registrarse.
+            (FacturaProveedor.FacturaProveedorStatus.REGISTRADA, False),
+        )
+        for estatus_factura, activo in casos:
+            with self.subTest(estatus_factura=estatus_factura, activo=activo):
+                oc = self._oc(Estatus.AUTORIZADA)
+                self._factura(oc, estatus_factura, activo=activo)
+                antes = self._estado(oc)
+                resp = self._cancelar(oc)
+                self._assert_rechazo(
+                    resp,
+                    {"facturas_proveedores": "La orden tiene facturas de proveedor sin cancelar y no puede cancelarse."},
+                    oc,
+                    antes,
+                )
+
+    def test_motivo_faltante_o_vacio_es_400(self):
+        oc = self._oc(Estatus.AUTORIZADA)
+        antes = self._estado(oc)
+        for motivo in (None, "", "   ", 123):
+            with self.subTest(motivo=motivo):
+                self._assert_rechazo(self._cancelar(oc, motivo), self.MOTIVO_REQUERIDO, oc, antes)
+
+    def test_oc_de_otra_empresa_o_usuario_sin_empresa_es_404(self):
+        oc = self._oc(Estatus.AUTORIZADA)
+        antes = self._estado(oc)
+        for user in (self.b["usuario"], self.sin_empresa):
+            with self.subTest(user=user.email):
+                self._assert_rechazo(self._cancelar(oc, user=user), None, oc, antes, status_code=404)
+
+    def test_oc_dada_de_baja_es_404(self):
+        oc = self._oc(Estatus.POR_AUTORIZAR)
+        OrdenCompra.objects.filter(pk=oc.pk).update(activo=False)
+        self._assert_rechazo(self._cancelar(oc), None, oc, self._estado(oc), status_code=404)
+
+    def test_cancelar_relee_el_estatus_bajo_el_lock(self):
+        # ``get_object`` devuelve la OC como estaba antes de que una recepción
+        # concurrente la pasara a RECIBIDA; la decisión debe usar la fila actual.
+        oc = self._oc(Estatus.AUTORIZADA)
+        obsoleta = copy.copy(OrdenCompra.objects.get(pk=oc.pk))
+        OrdenCompra.objects.filter(pk=oc.pk).update(estatus=Estatus.RECIBIDA)
+        antes = self._estado(oc)
+        with mock.patch.object(OrdenCompraViewSet, "get_object", return_value=obsoleta):
+            resp = self._cancelar(oc)
+        self._assert_rechazo(resp, self.NO_CANCELABLE, oc, antes)
+
+    # --- CANCELADA es terminal ---------------------------------------------------
+
+    def test_put_rechaza_oc_cancelada(self):
+        oc = self._oc(Estatus.CANCELADA, motivo="original")
+        antes = self._estado(oc)
+        resp = self._client().put(f"{ORDENES_URL}{oc.pk}/", {"orden_compra": {"referencia": "R-1"}}, format="json")
+        self._assert_rechazo(resp, {"estatus": "La orden está cancelada y no puede modificarse."}, oc, antes)
+
+    def test_onboarding_edicion_rechaza_oc_cancelada(self):
+        oc = self._oc(Estatus.CANCELADA, motivo="original")
+        antes = self._estado(oc)
+        resp = self._client().post(
+            f"{ORDENES_URL}onboarding/", {"orden_compra_id": oc.pk, "orden_compra": {"referencia": "R-1"}},
+            format="json",
+        )
+        self._assert_rechazo(resp, {"estatus": "La orden ya no puede editarse."}, oc, antes)
+
+    def test_aceptar_rechaza_oc_cancelada(self):
+        oc = self._oc(Estatus.CANCELADA, motivo="original")
+        antes = self._estado(oc)
+        resp = self._client().post(f"{ORDENES_URL}{oc.pk}/aceptar/", {}, format="json")
+        self._assert_rechazo(resp, {"estatus": "La orden ya no puede aceptarse."}, oc, antes)
+
+    def test_aceptar_relee_el_estatus_bajo_el_lock(self):
+        # Antes el estatus se leía de ``get_object`` fuera del lock: una OC
+        # cancelada entre esa lectura y el ``select_for_update`` se aceptaba.
+        oc = self._oc(Estatus.POR_AUTORIZAR)
+        obsoleta = copy.copy(OrdenCompra.objects.get(pk=oc.pk))
+        OrdenCompra.objects.filter(pk=oc.pk).update(estatus=Estatus.CANCELADA, motivo_cancelacion="concurrente")
+        antes = self._estado(oc)
+        with mock.patch.object(OrdenCompraViewSet, "get_object", return_value=obsoleta):
+            resp = self._client().post(f"{ORDENES_URL}{oc.pk}/aceptar/", {}, format="json")
+        self._assert_rechazo(resp, {"estatus": "La orden ya no puede aceptarse."}, oc, antes)
+
+    def test_aceptar_sin_renglones_sigue_rechazandose(self):
+        oc = self._oc(Estatus.POR_AUTORIZAR)
+        OrdenCompraDetalle.objects.filter(orden_compra=oc).delete()
+        antes = self._estado(oc)
+        resp = self._client().post(f"{ORDENES_URL}{oc.pk}/aceptar/", {}, format="json")
+        self._assert_rechazo(resp, {"detalle": "Agrega al menos un producto antes de aceptar."}, oc, antes)
+
+    def test_recepcion_rechaza_oc_cancelada_y_no_la_ofrece(self):
+        oc = self._oc(Estatus.CANCELADA, motivo="original")
+        detalle = OrdenCompraDetalle.objects.get(orden_compra=oc)
+        antes = self._estado(oc)
+        client = self._client()
+        resp = client.post(
+            RECEPCION_ONBOARDING_URL,
+            {
+                "recepcion": {"orden_compra": oc.pk, "almacen": self.a["almacen"].pk, "serie_codigo": "RC"},
+                "detalle": [{"orden_compra_detalle": detalle.pk, "cantidad_recibida": "1"}],
+            },
+            format="json",
+        )
+        self._assert_rechazo(resp, {"estatus": "La orden de compra no está disponible para recepción."}, oc, antes)
+        self.assertFalse(Recepcion.objects.filter(orden_compra=oc).exists())
+
+        ofrecidas = client.get(RECEPCION_ONBOARDING_URL).json()["busqueda"]["ordenes_compra"]
+        self.assertNotIn(oc.pk, [row["id"] for row in ofrecidas])
+
+    # --- motivo_cancelacion no es escribible ---------------------------------------
+
+    def test_motivo_no_se_escribe_por_put_ni_onboarding(self):
+        client = self._client()
+        oc = self._oc(Estatus.POR_AUTORIZAR)
+
+        put = client.put(
+            f"{ORDENES_URL}{oc.pk}/",
+            {"orden_compra": {"referencia": "R-1", "motivo_cancelacion": "x"}, "motivo_cancelacion": "y"},
+            format="json",
+        )
+        self.assertEqual(put.status_code, 200, put.content)
+        edita = client.post(
+            f"{ORDENES_URL}onboarding/",
+            {"orden_compra_id": oc.pk, "orden_compra": {"referencia": "R-2", "motivo_cancelacion": "x"},
+             "motivo_cancelacion": "y"},
+            format="json",
+        )
+        self.assertEqual(edita.status_code, 200, edita.content)
+        oc.refresh_from_db()
+        self.assertEqual((oc.referencia, oc.motivo_cancelacion), ("R-2", None))
+
+        crea = client.post(
+            f"{ORDENES_URL}onboarding/",
+            {"orden_compra": {"proveedor": self.a["proveedor"].pk, "motivo_cancelacion": "x"},
+             "motivo_cancelacion": "y",
+             "detalle": [{"producto": self.a["producto"].pk, "cantidad": 1, "precio": "1.00"}]},
+            format="json",
+        )
+        self.assertEqual(crea.status_code, 200, crea.content)
+        nueva = OrdenCompra.objects.get(pk=crea.json()["orden_compra"]["id"])
+        self.assertIsNone(nueva.motivo_cancelacion)
+        self.assertEqual(nueva.estatus, Estatus.POR_AUTORIZAR)
+
+    # --- DELETE (baja por error de captura) ------------------------------------------
+
+    def _eliminar(self, oc, user=None):
+        return self._client(user).delete(f"{ORDENES_URL}{oc.pk}/")
+
+    def test_delete_permitido_en_borrador_y_por_autorizar(self):
+        for estatus in (Estatus.BORRADOR, Estatus.POR_AUTORIZAR):
+            with self.subTest(estatus=estatus):
+                oc = self._oc(estatus)
+                resp = self._eliminar(oc)
+                self.assertEqual(resp.status_code, 204, resp.content)
+                self.assertEqual(self._estado(oc), (estatus, None, False))
+                evento = self._eventos(oc, "DELETE").get()
+                self.assertEqual(evento.usuario_id, self.a["usuario"].pk)
+                self.assertEqual(evento.despues_json, {"estatus": estatus, "activo": False})
+
+    def test_delete_rechaza_otros_estatus(self):
+        mensaje = {"estatus": "Solo se puede eliminar una orden en borrador o pendiente de confirmar."}
+        for estatus in (Estatus.AUTORIZADA, Estatus.PARCIALMENTE_RECIBIDA, Estatus.RECIBIDA, Estatus.CANCELADA):
+            with self.subTest(estatus=estatus):
+                oc = self._oc(estatus)
+                self._assert_rechazo(self._eliminar(oc), mensaje, oc, self._estado(oc))
+
+    def test_delete_rechaza_con_cualquier_recepcion(self):
+        # A diferencia de cancelar, aun una recepción cancelada o dada de baja
+        # prueba que la OC existió.
+        for kwargs in ({}, {"estatus": Recepcion.EstatusRecepcion.CANCELADA}, {"activo": False}):
+            with self.subTest(**kwargs):
+                oc = self._oc(Estatus.POR_AUTORIZAR)
+                self._recepcion(oc, **kwargs)
+                self._assert_rechazo(
+                    self._eliminar(oc),
+                    {"recepciones": "La orden tiene recepciones registradas y no puede eliminarse."},
+                    oc,
+                    self._estado(oc),
+                )
+
+    def test_delete_rechaza_con_cualquier_factura(self):
+        # La factura exige una recepción (NOT NULL), que ya bloquearía por sí
+        # sola; para ejercer esta guarda se cuelga de la recepción de otra OC.
+        otra = self._oc(Estatus.AUTORIZADA)
+        for estatus_factura in FacturaProveedor.FacturaProveedorStatus.values:
+            with self.subTest(estatus_factura=estatus_factura):
+                oc = self._oc(Estatus.POR_AUTORIZAR)
+                self._factura(oc, estatus_factura, recepcion=self._recepcion(otra))
+                self._assert_rechazo(
+                    self._eliminar(oc),
+                    {"facturas_proveedores": "La orden tiene facturas de proveedor y no puede eliminarse."},
+                    oc,
+                    self._estado(oc),
+                )
+
+    def test_delete_de_otra_empresa_es_404(self):
+        oc = self._oc(Estatus.BORRADOR)
+        self._assert_rechazo(
+            self._eliminar(oc, user=self.b["usuario"]), {"detail": "Orden de compra no encontrada."},
+            oc, self._estado(oc), status_code=404,
+        )
