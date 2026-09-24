@@ -1351,14 +1351,31 @@ class OrdenesCorteMangaViewSet(
         )
 
 
+def _detalles_especiales_qs():
+    """``PedidoDetalle`` de muestra: los que traen ``producto_nombre_externo``.
+
+    Unica definicion de "especial" para el listado y el detalle de
+    ``PedidoEspecialViewSet``. Replica exactamente el ``bool(...)`` con el que
+    ventas/utils/helpers.py deriva ``requiere_produccion``: null y ``""`` no
+    cuentan, un nombre con solo espacios si.
+
+    Se lee el nombre y no el flag guardado porque el flag se desincroniza:
+    autorizar, aceptar-cambios y recomprar lo copian tal cual desde la
+    cotizacion, y los PATCH genericos/admin no lo recalculan.
+    """
+    return PedidoDetalle.objects.exclude(producto_nombre_externo__isnull=True).exclude(
+        producto_nombre_externo=""
+    )
+
+
 class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
     """Solo lectura: pedidos con produccion especial (muestras sin SKU de catalogo).
 
-    ``requiere_produccion=True`` en PedidoDetalleTalla es el flag que ya pone
-    ventas/utils/helpers.py cuando la linea trae producto_nombre_externo. El
-    listado usa ``Exists`` (no join) para no aparecer pesado, y el detalle
-    solo trae las lineas/tallas especiales -- nada de precios ni del resto
-    del pedido, que no le interesa a produccion.
+    Especial = al menos una linea con ``producto_nombre_externo`` (ver
+    ``_detalles_especiales_qs``). El listado usa ``Exists`` (no join) para no
+    aparecer pesado, y el detalle solo trae las lineas especiales con todas
+    sus tallas -- nada de precios ni del resto del pedido, que no le interesa
+    a produccion.
     """
 
     def get_serializer_class(self):
@@ -1369,12 +1386,9 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         empresa = getattr(user, "empresa", None)
         if empresa is None:
             return Pedido.objects.none()
-        tallas_especiales = PedidoDetalleTalla.objects.filter(
-            pedido_detalle__pedido=OuterRef("pk"), requiere_produccion=True,
-        )
         return (
             Pedido.objects.filter(empresa=empresa)
-            .filter(Exists(tallas_especiales))
+            .filter(Exists(_detalles_especiales_qs().filter(pedido=OuterRef("pk"))))
             .only("id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "empresa")
             .order_by("-fecha_confirmacion", "-id")
         )
@@ -1382,15 +1396,13 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
     def retrieve(self, request, *args, **kwargs):
         pedido = self.get_object()
         detalles = list(
-            PedidoDetalle.objects.filter(pedido=pedido, tallas__requiere_produccion=True)
-            .distinct()
+            _detalles_especiales_qs()
+            .filter(pedido=pedido)
             .select_related("color")
             .prefetch_related(
                 Prefetch(
                     "tallas",
-                    queryset=PedidoDetalleTalla.objects.filter(
-                        requiere_produccion=True
-                    ).select_related("talla").order_by("id"),
+                    queryset=PedidoDetalleTalla.objects.select_related("talla").order_by("id"),
                     to_attr="tallas_especiales",
                 )
             )
