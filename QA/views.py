@@ -6,6 +6,7 @@ from pathlib import Path
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Q
 from django.http import FileResponse, Http404, JsonResponse
@@ -21,11 +22,17 @@ from inventarios.models import Almacen
 from nucleo.models import Empresa, Sucursal, UnidadMedida
 from produccion.models import (
     BomDetalle,
+    ConsumoProduccion,
     ListaMaterialBom,
     OrdenProduccion,
     OrdenProduccionDetalle,
 )
+from produccion.services.orden_bordado_service import OrdenBordadoService
+from produccion.services.orden_corte_manga_service import OrdenCorteMangaService
+from produccion.services.orden_reflejante_service import OrdenReflejanteService
+from rest_framework.exceptions import APIException as DRFAPIException
 from rest_framework.exceptions import ValidationError as DRFValidationError
+from usuarios.models import Usuario
 from ventas.models import Pedido
 from ventas.scope import pedidos_base, pedidos_visibles
 from wms.api.serializers import (
@@ -457,6 +464,286 @@ def qa_pedido_actualizar_campo(request, pedido_id):
         valor_respuesta = valor
 
     pedido.save(update_fields=[campo, "updated_at"])
+
+    return JsonResponse({
+        "ok": True,
+        "campo": campo,
+        "valor": valor_respuesta,
+        "valor_mostrado": valor_mostrado,
+    })
+
+
+# ORDENES DE TRABAJO (produccion.OrdenProduccion) — mismo patrón que Pedidos:
+# buscar -> ver -> editar en un solo lienzo, encontrar antes de editar.
+
+ORDEN_TRABAJO_CAMPOS_EDITABLES = {
+    "estatus_op": {"tipo": "choice", "choices": dict(OrdenProduccion.EstatusOrdenProduccion.choices)},
+    "prioridad": {"tipo": "numero"},
+    "observaciones": {"tipo": "texto"},
+}
+
+
+def _ordenes_produccion_qs_qa(user):
+    if getattr(user, "is_superuser", False):
+        qs = OrdenProduccion.objects.all()
+    else:
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return OrdenProduccion.objects.none()
+        qs = OrdenProduccion.objects.filter(empresa=empresa)
+    return qs.select_related("empresa", "sucursal", "pedido", "pedido__cliente", "usuario_asignado", "ruta_produccion")
+
+
+@login_required
+def ordenes_trabajo_workspace(request):
+    base_qs = _ordenes_produccion_qs_qa(request.user)
+
+    if request.method == "POST" and request.POST.get("action") == "crear":
+        tipo = request.POST.get("tipo") or "produccion"
+        pedido = get_object_or_404(
+            pedidos_visibles(pedidos_base(), request.user),
+            pk=request.POST.get("pedido_id"),
+        )
+        prioridad_raw = request.POST.get("prioridad")
+        try:
+            prioridad = max(1, int(prioridad_raw))
+        except (TypeError, ValueError):
+            prioridad = 1
+        observaciones = (request.POST.get("observaciones") or "").strip()
+
+        if tipo == "produccion":
+            nueva_op = OrdenProduccion.objects.create(
+                empresa=pedido.empresa,
+                sucursal=pedido.sucursal,
+                pedido=pedido,
+                folio_op=f"OP-{uuid.uuid4().hex[:8].upper()}",
+                prioridad=prioridad,
+                observaciones=observaciones,
+            )
+            messages.success(request, f"Orden {nueva_op.folio_op} creada.")
+            return redirect(f"{reverse('qa_ordenes_trabajo_workspace')}?id={nueva_op.op_id}")
+
+        servicio = {
+            "bordado": OrdenBordadoService,
+            "reflejante": OrdenReflejanteService,
+            "corte_manga": OrdenCorteMangaService,
+        }.get(tipo)
+        if servicio is None:
+            messages.error(request, "Tipo de orden no reconocido.")
+            return redirect(f"{reverse('qa_ordenes_trabajo_workspace')}?crear=1")
+
+        # Servicios reales de produccion.services.* — misma validación de
+        # empresa/sucursal, mismo candado antiduplicado (409) y mismo cupo por
+        # línea que usa la API real. Las líneas se auto-generan aquí adentro
+        # desde las tallas del pedido con lleva_bordado/reflejante/corte_manga;
+        # no se reinventa esa lógica en QA.
+        try:
+            orden_creada = servicio.save(
+                {"pedido": pedido, "prioridad": prioridad, "observaciones": observaciones},
+                request.user,
+            )
+        except DRFAPIException as exc:
+            detail = getattr(exc, "detail", None)
+            if isinstance(detail, dict):
+                mensaje = detail.get("err") or "; ".join(str(v) for v in detail.values())
+            else:
+                mensaje = str(detail) if detail is not None else str(exc)
+            messages.error(request, f"No se pudo crear la orden: {mensaje}")
+            return redirect(f"{reverse('qa_ordenes_trabajo_workspace')}?crear=1")
+        except DjangoValidationError as exc:
+            mensaje = "; ".join(str(m) for m in exc.messages) if hasattr(exc, "messages") else str(exc)
+            messages.error(request, f"No se pudo crear la orden: {mensaje}")
+            return redirect(f"{reverse('qa_ordenes_trabajo_workspace')}?crear=1")
+
+        piezas = sum(float(d.cantidad) for d in orden_creada.detalles.all())
+        messages.success(
+            request,
+            f"Orden {orden_creada} creada con {orden_creada.detalles.count()} "
+            f"renglón(es), {piezas:g} piezas tomadas del pedido.",
+        )
+        return redirect(f"{reverse('qa_ordenes_trabajo_workspace')}?crear=1")
+
+    q = (request.GET.get("q") or "").strip()
+    op_id = request.GET.get("id")
+    seleccionada = None
+    resultados = []
+
+    if op_id and str(op_id).isdigit():
+        seleccionada = base_qs.filter(pk=int(op_id)).first()
+        if seleccionada is None:
+            messages.warning(request, f"No se encontró la orden de trabajo #{op_id}.")
+
+    if seleccionada is None and q:
+        busqueda = base_qs.filter(
+            Q(folio_op__icontains=q)
+            | Q(op_id__icontains=q)
+            | Q(pedido__folio__icontains=q)
+            | Q(pedido__cliente_nombre__icontains=q)
+            | Q(pedido__cliente_razon_social__icontains=q)
+        ).order_by("-fecha_inicio", "-op_id")[:30]
+        if len(busqueda) == 1:
+            seleccionada = busqueda[0]
+        else:
+            resultados = list(busqueda)
+
+    if seleccionada is None and not q:
+        resultados = list(base_qs.order_by("-fecha_inicio", "-op_id")[:30])
+
+    detalles = []
+    consumos = []
+    historial = []
+    usuarios_empresa = []
+    if seleccionada is not None:
+        seleccionada = base_qs.prefetch_related(
+            "orden_produccion_detalle__producto_variante__producto",
+            "orden_produccion_detalle__producto_variante__color",
+            "orden_produccion_detalle__producto_variante__talla",
+            "orden_produccion_detalle__bom__materia_prima_detalle__componente",
+            "orden_produccion_detalle__bom__materia_prima_detalle__unidad",
+            "orden_produccion_detalle__unidad",
+        ).get(pk=seleccionada.pk)
+
+        for d in seleccionada.orden_produccion_detalle.all():
+            componentes = [
+                {
+                    "nombre": bd.componente.nombre if bd.componente else "Insumo sin nombre",
+                    "cantidad": bd.cantidad,
+                    "unidad": bd.unidad.nombre if bd.unidad else "",
+                }
+                for bd in d.bom.materia_prima_detalle.all()
+            ] if d.bom_id else []
+            variante = d.producto_variante
+            detalles.append({
+                "id": d.op_detalle_id,
+                "producto": variante.producto.nombre if variante and variante.producto else "—",
+                "color": variante.color.nombre if variante and variante.color else None,
+                "talla": variante.talla.nombre if variante and variante.talla else None,
+                "cantidad": d.cantidad,
+                "unidad": d.unidad.nombre if d.unidad else "",
+                "observaciones": d.observaciones,
+                "componentes": componentes,
+            })
+
+        for c in ConsumoProduccion.objects.filter(op=seleccionada).prefetch_related("detalles__producto"):
+            for det in c.detalles.all():
+                consumos.append({
+                    "producto": det.producto.nombre if det.producto else "—",
+                    "cantidad": det.cantidad,
+                })
+
+        history_qs = list(seleccionada.history.all().order_by("-history_date")[:40])
+        tipo_labels = {"+": "Creada", "~": "Modificada", "-": "Eliminada"}
+        for i, record in enumerate(history_qs):
+            campos = []
+            if record.history_type == "~" and i + 1 < len(history_qs):
+                try:
+                    campos = [c.field for c in record.diff_against(history_qs[i + 1]).changes]
+                except Exception:
+                    campos = []
+            historial.append({
+                "fecha": record.history_date,
+                "usuario": getattr(record.history_user, "username", None) or "Sistema",
+                "tipo": tipo_labels.get(record.history_type, record.history_type),
+                "campos": campos,
+            })
+
+        usuarios_empresa = list(
+            Usuario.objects.filter(empresa=seleccionada.empresa, is_active=True).order_by("username")
+        )
+
+    mostrar_form_crear = seleccionada is None and request.GET.get("crear") == "1"
+    pedidos_disponibles = []
+    if mostrar_form_crear:
+        pedidos_disponibles = list(
+            pedidos_visibles(pedidos_base(), request.user)
+            .select_related("cliente")
+            .order_by("-created_at")[:100]
+        )
+
+    context = {
+        "q": q,
+        "resultados": resultados,
+        "orden": seleccionada,
+        "detalles": detalles,
+        "consumos": consumos,
+        "historial": historial,
+        "usuarios_empresa": usuarios_empresa,
+        "estatus_choices": OrdenProduccion.EstatusOrdenProduccion.choices,
+        "mostrar_form_crear": mostrar_form_crear,
+        "pedidos_disponibles": pedidos_disponibles,
+    }
+    return render(request, "QA/produccion/orden_trabajo_workspace.html", context)
+
+
+@login_required
+def qa_orden_trabajo_actualizar_campo(request, op_id):
+    """PATCH-por-POST de un único campo de OrdenProduccion, para edición inline.
+
+    Mismo patrón que ``qa_pedido_actualizar_campo``: whitelist explícita,
+    nunca setattr con un nombre de campo crudo del cliente. ``usuario_asignado``
+    se resuelve aparte porque sus opciones son dinámicas (usuarios de la
+    empresa), no un choices estático del modelo.
+    """
+    if request.method != "POST":
+        return JsonResponse({"ok": False, "error": "Método no permitido."}, status=405)
+
+    orden = get_object_or_404(_ordenes_produccion_qs_qa(request.user), pk=op_id)
+
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception:
+        return JsonResponse({"ok": False, "error": "JSON inválido."}, status=400)
+
+    campo = body.get("campo")
+    valor = body.get("valor", "")
+
+    if campo == "usuario_asignado":
+        if not valor:
+            orden.usuario_asignado = None
+            valor_respuesta = None
+            valor_mostrado = "Sin asignar"
+        else:
+            usuario = Usuario.objects.filter(pk=valor, empresa=orden.empresa).first()
+            if usuario is None:
+                return JsonResponse({"ok": False, "error": "Usuario no válido para esta empresa."}, status=400)
+            orden.usuario_asignado = usuario
+            valor_respuesta = usuario.pk
+            valor_mostrado = usuario.username
+        orden.save(update_fields=["usuario_asignado"])
+        return JsonResponse({"ok": True, "campo": campo, "valor": valor_respuesta, "valor_mostrado": valor_mostrado})
+
+    config = ORDEN_TRABAJO_CAMPOS_EDITABLES.get(campo)
+    if not config:
+        return JsonResponse({"ok": False, "error": f"Campo '{campo}' no es editable."}, status=400)
+
+    if config["tipo"] == "choice":
+        choices_dict = config["choices"]
+        try:
+            valor_normalizado = int(valor)
+        except (TypeError, ValueError):
+            return JsonResponse({"ok": False, "error": "Valor inválido."}, status=400)
+        if valor_normalizado not in choices_dict:
+            return JsonResponse({"ok": False, "error": "Opción no válida."}, status=400)
+        setattr(orden, campo, valor_normalizado)
+        valor_mostrado = choices_dict[valor_normalizado]
+        valor_respuesta = valor_normalizado
+    elif config["tipo"] == "numero":
+        try:
+            valor_normalizado = int(valor)
+        except (TypeError, ValueError):
+            return JsonResponse({"ok": False, "error": "Debe ser un número entero."}, status=400)
+        if valor_normalizado < 1:
+            return JsonResponse({"ok": False, "error": "La prioridad debe ser mayor a 0."}, status=400)
+        setattr(orden, campo, valor_normalizado)
+        valor_mostrado = str(valor_normalizado)
+        valor_respuesta = valor_normalizado
+    else:
+        valor = (valor or "").strip()
+        setattr(orden, campo, valor)
+        valor_mostrado = valor or "—"
+        valor_respuesta = valor
+
+    orden.save(update_fields=[campo])
 
     return JsonResponse({
         "ok": True,
