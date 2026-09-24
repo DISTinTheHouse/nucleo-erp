@@ -3,6 +3,9 @@ from . import views
 
 urlpatterns = [
     path('', views.index, name='index_QA'),
+    # VENTAS
+    path('pedidos/', views.pedidos_workspace, name='qa_pedidos_workspace'),
+    path('pedidos/<int:pedido_id>/campo/', views.qa_pedido_actualizar_campo, name='qa_pedido_actualizar_campo'),
     # PRODUCCION
     path('produccion_workspace/', views.produccion_workspace, name='produccion_workspace'),
     path('generar_orden_produccion/', views.generar_orden_produccion, name='generar_orden_produccion'),

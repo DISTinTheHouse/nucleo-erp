@@ -26,6 +26,8 @@ from produccion.models import (
     OrdenProduccionDetalle,
 )
 from rest_framework.exceptions import ValidationError as DRFValidationError
+from ventas.models import Pedido
+from ventas.scope import pedidos_base, pedidos_visibles
 from wms.api.serializers import (
     EtiquetaRFIDCreateSerializer,
     EtiquetaRFIDSerializer,
@@ -298,6 +300,170 @@ def _build_recepcion_summary(encuadre):
 @login_required
 def index(request):
     return render(request, "QA/index_QA.html")
+
+
+# VENTAS — workspace unificado de Pedido: buscar -> ver -> editar en un solo
+# lienzo. Nunca hay una lista de "pedidos" ni un "crear pedido" aparte; se
+# encuentra el pedido primero (por folio/cliente/RFC/OC) y se trabaja sobre
+# ese único registro. Ver DOCS o pedir contexto antes de tocar esto.
+
+PEDIDO_CAMPOS_EDITABLES = {
+    "estatus": {"tipo": "choice", "choices": dict(Pedido.CHOICES_ESTATUS)},
+    "clasificacion": {"tipo": "choice", "choices": dict(Pedido.Clasificacion.choices)},
+    "forma_pago": {"tipo": "choice", "choices": dict(Pedido.FormaPago.choices)},
+    "metodo_pago": {"tipo": "choice", "choices": dict(Pedido.MetodoPago.choices)},
+    "oc": {"tipo": "texto"},
+    "observaciones": {"tipo": "texto"},
+    "persona_pagos": {"tipo": "texto"},
+    "correo_facturas": {"tipo": "texto"},
+    "telefono_pagos": {"tipo": "texto"},
+    "destinatario": {"tipo": "texto"},
+    "telefono_envio": {"tipo": "texto"},
+    "direccion_envio": {"tipo": "texto"},
+    "colonia_envio": {"tipo": "texto"},
+    "ciudad_envio": {"tipo": "texto"},
+    "estado_envio": {"tipo": "texto"},
+    "codigo_postal": {"tipo": "texto"},
+}
+
+
+def _pedidos_qs_qa(user):
+    return pedidos_visibles(
+        pedidos_base().select_related(
+            "cliente", "moneda", "sucursal", "empresa", "cliente_regimen_fiscal",
+        ),
+        user,
+    )
+
+
+@login_required
+def pedidos_workspace(request):
+    q = (request.GET.get("q") or "").strip()
+    pedido_id = request.GET.get("id")
+    seleccionado = None
+    resultados = []
+
+    base_qs = _pedidos_qs_qa(request.user)
+
+    if pedido_id and str(pedido_id).isdigit():
+        seleccionado = base_qs.filter(pk=int(pedido_id)).first()
+        if seleccionado is None:
+            messages.warning(request, f"No se encontró el pedido #{pedido_id}.")
+
+    if seleccionado is None and q:
+        busqueda = base_qs.filter(
+            Q(folio__icontains=q)
+            | Q(id__icontains=q)
+            | Q(oc__icontains=q)
+            | Q(cliente_nombre__icontains=q)
+            | Q(cliente_razon_social__icontains=q)
+            | Q(cliente_rfc__icontains=q)
+            | Q(cliente__nombre__icontains=q)
+        ).order_by("-created_at")[:30]
+        if len(busqueda) == 1:
+            seleccionado = busqueda[0]
+        else:
+            resultados = list(busqueda)
+
+    if seleccionado is None and not q:
+        resultados = list(base_qs.order_by("-created_at")[:30])
+
+    detalles = []
+    if seleccionado is not None:
+        seleccionado = (
+            base_qs.prefetch_related(
+                "detalles__producto",
+                "detalles__color",
+                "detalles__tallas__talla",
+                "servicios_extras",
+            ).get(pk=seleccionado.pk)
+        )
+        for d in seleccionado.detalles.all():
+            tallas = [
+                {
+                    "talla": t.talla.nombre if t.talla else "—",
+                    "cantidad": t.cantidad,
+                    "precio_unitario": t.precio_unitario if t.precio_unitario is not None else d.precio_unitario,
+                    "subtotal": t.subtotal_talla,
+                }
+                for t in d.tallas.all()
+            ]
+            detalles.append({
+                "id": d.id,
+                "nombre": d.producto.nombre if d.producto else (d.producto_nombre_externo or "Producto sin nombre"),
+                "color": d.color.nombre if d.color else None,
+                "color_hex": d.color.codigo_hex if d.color else None,
+                "precio_unitario": d.precio_unitario,
+                "subtotal_linea": d.subtotal_linea,
+                "tallas": tallas,
+                "piezas": sum(t["cantidad"] for t in tallas),
+            })
+
+    context = {
+        "q": q,
+        "resultados": resultados,
+        "pedido": seleccionado,
+        "detalles": detalles,
+        "servicios_extras": seleccionado.servicios_extras.all() if seleccionado else [],
+        "estatus_choices": Pedido.CHOICES_ESTATUS,
+        "clasificacion_choices": Pedido.Clasificacion.choices,
+        "forma_pago_choices": Pedido.FormaPago.choices,
+        "metodo_pago_choices": Pedido.MetodoPago.choices,
+    }
+    return render(request, "QA/ventas/pedido_workspace.html", context)
+
+
+@login_required
+def qa_pedido_actualizar_campo(request, pedido_id):
+    """PATCH-por-POST de un único campo de Pedido, para edición inline.
+
+    Whitelist ``PEDIDO_CAMPOS_EDITABLES`` — nunca setattr con un nombre de
+    campo que venga crudo del cliente.
+    """
+    if request.method != "POST":
+        return JsonResponse({"ok": False, "error": "Método no permitido."}, status=405)
+
+    pedido = get_object_or_404(_pedidos_qs_qa(request.user), pk=pedido_id)
+
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception:
+        return JsonResponse({"ok": False, "error": "JSON inválido."}, status=400)
+
+    campo = body.get("campo")
+    valor = body.get("valor", "")
+    config = PEDIDO_CAMPOS_EDITABLES.get(campo)
+    if not config:
+        return JsonResponse({"ok": False, "error": f"Campo '{campo}' no es editable."}, status=400)
+
+    if config["tipo"] == "choice":
+        choices_dict = config["choices"]
+        valor_normalizado = valor
+        claves = list(choices_dict.keys())
+        if claves and isinstance(claves[0], int):
+            try:
+                valor_normalizado = int(valor)
+            except (TypeError, ValueError):
+                return JsonResponse({"ok": False, "error": "Valor inválido."}, status=400)
+        if valor_normalizado not in choices_dict:
+            return JsonResponse({"ok": False, "error": "Opción no válida."}, status=400)
+        setattr(pedido, campo, valor_normalizado)
+        valor_mostrado = choices_dict[valor_normalizado]
+        valor_respuesta = valor_normalizado
+    else:
+        valor = (valor or "").strip()
+        setattr(pedido, campo, valor)
+        valor_mostrado = valor or "—"
+        valor_respuesta = valor
+
+    pedido.save(update_fields=[campo, "updated_at"])
+
+    return JsonResponse({
+        "ok": True,
+        "campo": campo,
+        "valor": valor_respuesta,
+        "valor_mostrado": valor_mostrado,
+    })
 
 
 # PRODUCCION
