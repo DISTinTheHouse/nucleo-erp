@@ -7,6 +7,8 @@ urlpatterns = [
     path('pedidos/', views.pedidos_workspace, name='qa_pedidos_workspace'),
     path('pedidos/<int:pedido_id>/campo/', views.qa_pedido_actualizar_campo, name='qa_pedido_actualizar_campo'),
     # PRODUCCION
+    path('ordenes-trabajo/', views.ordenes_trabajo_workspace, name='qa_ordenes_trabajo_workspace'),
+    path('ordenes-trabajo/<int:op_id>/campo/', views.qa_orden_trabajo_actualizar_campo, name='qa_orden_trabajo_actualizar_campo'),
     path('produccion_workspace/', views.produccion_workspace, name='produccion_workspace'),
     path('generar_orden_produccion/', views.generar_orden_produccion, name='generar_orden_produccion'),
     path('rfid/recepciones/', views.recepcion_rfid_workspace, name='qa_recepcion_rfid_workspace'),

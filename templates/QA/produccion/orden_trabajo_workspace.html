@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Órdenes de Trabajo · Núcleo</title>
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Poppins:wght@500;600;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: { extend: { fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'], brand: ['Poppins', 'system-ui', 'sans-serif'] } } }
+        }
+    </script>
+    <style>
+        body { font-family: 'Inter', system-ui, sans-serif; }
+        .brand-font { font-family: 'Poppins', system-ui, sans-serif; }
+
+        .tab-btn {
+            padding: .6rem 1rem; font-size: .8125rem; font-weight: 600; color: #64748b;
+            border-bottom: 2px solid transparent; transition: color .15s, border-color .15s;
+        }
+        .tab-btn:hover { color: #0f172a; }
+        .tab-btn-active { color: #0369a1; border-bottom-color: #0284c7; }
+
+        .field-label { font-size: .6875rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: .04em; }
+
+        .editable-text [data-view] {
+            display: block; cursor: text; border-radius: .5rem; padding: .3rem .5rem; margin: 0 -.5rem;
+            border: 1px solid transparent; transition: background-color .15s, box-shadow .3s;
+        }
+        .editable-text [data-view]:hover { background: #f1f5f9; border-color: #e2e8f0; }
+        .editable-text [data-view] i.fa-pen { opacity: 0; transition: opacity .15s; }
+        .editable-text [data-view]:hover i.fa-pen { opacity: 1; }
+
+        @keyframes flashOk { 0% { box-shadow: 0 0 0 2px rgba(16,185,129,.55); } 100% { box-shadow: 0 0 0 2px rgba(16,185,129,0); } }
+        @keyframes flashErr { 0% { box-shadow: 0 0 0 2px rgba(239,68,68,.6); } 100% { box-shadow: 0 0 0 2px rgba(239,68,68,0); } }
+        .flash-ok { animation: flashOk .9s ease-out; }
+        .flash-err { animation: flashErr .9s ease-out; }
+
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+        .tipo-orden-opcion:has(input:checked) {
+            border-color: #0284c7; background: #e0f2fe; color: #0369a1; font-weight: 600;
+        }
+
+        .timeline-item { position: relative; padding-left: 22px; }
+        .timeline-item::before {
+            content: ""; position: absolute; left: 4px; top: 6px; width: 8px; height: 8px;
+            border-radius: 999px; background: #0284c7;
+        }
+        .timeline-item::after {
+            content: ""; position: absolute; left: 7.5px; top: 16px; bottom: -20px; width: 1px; background: #e2e8f0;
+        }
+        .timeline-item:last-child::after { display: none; }
+    </style>
+</head>
+
+<body class="bg-slate-50 text-slate-900 min-h-screen">
+    <header class="border-b border-slate-200 bg-white/90 backdrop-blur sticky top-0 z-20">
+        <div class="mx-auto max-w-[1500px] px-6 py-4 flex items-center justify-between">
+            <div>
+                <a href="{% url 'nucleo:dashboard' %}"
+                    class="text-xs font-medium text-slate-400 hover:text-sky-600 transition-colors">
+                    <i class="fas fa-arrow-left mr-1"></i> Panel
+                </a>
+                <h1 class="brand-font text-2xl font-bold tracking-tight text-slate-900 mt-0.5">Órdenes de Trabajo</h1>
+            </div>
+            <div class="hidden sm:flex items-center gap-2 text-xs text-slate-400">
+                <i class="fas fa-magnifying-glass"></i>
+                <span>Encuentra una orden de producción para verla y trabajarla — piso de producción, no un listado.</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="mx-auto max-w-[1500px] px-6 py-8">
+        {% if messages %}
+        <div class="mb-6 space-y-2">
+            {% for message in messages %}
+            <div
+                class="rounded-xl border px-4 py-3 text-sm {% if message.tags == 'error' %}border-red-200 bg-red-50 text-red-700{% elif message.tags == 'warning' %}border-amber-200 bg-amber-50 text-amber-700{% else %}border-emerald-200 bg-emerald-50 text-emerald-700{% endif %}">
+                {{ message }}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <div class="grid gap-6 lg:grid-cols-[380px,1fr] items-start">
+            <!-- BUSCADOR -->
+            <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:sticky lg:top-24">
+                <h2 class="text-sm font-bold text-slate-800">Buscar orden de trabajo</h2>
+                <p class="mt-1 text-xs text-slate-500">Folio OP, folio de pedido o cliente.</p>
+
+                <form method="get" id="form-buscar-op" class="mt-4">
+                    <div class="relative">
+                        <i class="fas fa-magnifying-glass absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-sm"></i>
+                        <input type="text" name="q" id="buscador-op" value="{{ q }}" autocomplete="off"
+                            placeholder="Ej. OP-4F21A9C0, PED-2024-118, Bordados Prisma..."
+                            class="w-full rounded-xl border border-slate-300 pl-10 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-sky-500">
+                    </div>
+                    <button type="submit"
+                        class="mt-3 w-full rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-sky-700 transition-colors">
+                        Buscar
+                    </button>
+                </form>
+
+                <a href="?crear=1"
+                    class="mt-3 flex items-center justify-center gap-2 w-full rounded-xl border border-dashed px-4 py-2.5 text-sm font-semibold transition-colors {% if mostrar_form_crear %}border-sky-400 bg-sky-50 text-sky-700{% else %}border-slate-300 text-slate-500 hover:border-sky-400 hover:text-sky-600{% endif %}">
+                    <i class="fas fa-plus"></i> Nueva orden de trabajo
+                </a>
+
+                <div class="mt-5">
+                    <h3 class="text-xs font-bold uppercase tracking-wide text-slate-400">
+                        {% if q %}Resultados{% else %}Recientes{% endif %}
+                    </h3>
+                    <div class="mt-3 space-y-2 max-h-[62vh] overflow-y-auto no-scrollbar pr-0.5">
+                        {% if orden %}
+                        <a href="?id={{ orden.op_id }}"
+                            class="block rounded-xl border border-sky-200 bg-sky-50 px-4 py-3">
+                            <div class="flex items-start justify-between gap-2">
+                                <div class="min-w-0">
+                                    <div class="text-sm font-bold text-sky-900 truncate">{{ orden.folio_op }}</div>
+                                    <div class="mt-0.5 text-xs text-sky-800 truncate">
+                                        {% if orden.pedido %}{{ orden.pedido.folio|default:orden.pedido_id }} · {{ orden.pedido.cliente_nombre|default:orden.pedido.cliente.nombre }}{% else %}Sin pedido{% endif %}
+                                    </div>
+                                </div>
+                                <span class="shrink-0 rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-sky-700 border border-sky-200">
+                                    {{ orden.get_estatus_op_display }}
+                                </span>
+                            </div>
+                        </a>
+                        {% endif %}
+
+                        {% for o in resultados %}
+                        {% if not orden or orden.op_id != o.op_id %}
+                        <a href="?id={{ o.op_id }}"
+                            class="block rounded-xl border border-slate-200 bg-white px-4 py-3 hover:bg-slate-50 hover:border-slate-300 transition-colors">
+                            <div class="flex items-start justify-between gap-2">
+                                <div class="min-w-0">
+                                    <div class="text-sm font-semibold text-slate-800 truncate">{{ o.folio_op }}</div>
+                                    <div class="mt-0.5 text-xs text-slate-500 truncate">
+                                        {% if o.pedido %}{{ o.pedido.folio|default:o.pedido_id }} · {{ o.pedido.cliente_nombre|default:o.pedido.cliente.nombre }}{% else %}Sin pedido{% endif %}
+                                    </div>
+                                    <div class="mt-1 text-xs font-medium text-slate-600">
+                                        Prioridad {{ o.prioridad }} · {{ o.fecha_inicio|date:"d M Y" }}
+                                    </div>
+                                </div>
+                                <span class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold border
+                                    {% if o.estatus_op == 1 %}bg-slate-100 text-slate-600 border-slate-200
+                                    {% elif o.estatus_op == 2 %}bg-amber-100 text-amber-700 border-amber-200
+                                    {% elif o.estatus_op == 3 %}bg-sky-100 text-sky-700 border-sky-200
+                                    {% elif o.estatus_op == 4 %}bg-violet-100 text-violet-700 border-violet-200
+                                    {% elif o.estatus_op == 5 %}bg-emerald-100 text-emerald-700 border-emerald-200
+                                    {% elif o.estatus_op == 6 %}bg-orange-100 text-orange-700 border-orange-200
+                                    {% elif o.estatus_op == 7 %}bg-red-100 text-red-700 border-red-200
+                                    {% endif %}">
+                                    {{ o.get_estatus_op_display }}
+                                </span>
+                            </div>
+                        </a>
+                        {% endif %}
+                        {% endfor %}
+
+                        {% if not resultados and not orden %}
+                        <div class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+                            {% if q %}Sin resultados para <span class="font-medium text-slate-700">{{ q }}</span>.
+                            {% else %}Escribe para buscar.{% endif %}
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </section>
+
+            <!-- DETALLE -->
+            <section class="rounded-2xl border border-slate-200 bg-white shadow-sm min-h-[70vh]">
+                {% if orden %}
+                <div class="p-6 lg:p-8">
+                    <!-- Header de la orden -->
+                    <div class="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between pb-6 border-b border-slate-100">
+                        <div class="min-w-0">
+                            <div class="field-label">Orden de trabajo</div>
+                            <div class="mt-1 flex flex-wrap items-center gap-3">
+                                <h2 class="brand-font text-3xl font-bold text-slate-900">{{ orden.folio_op }}</h2>
+                                <select data-campo-select="estatus_op"
+                                    class="rounded-full border px-3 py-1 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-sky-300 cursor-pointer">
+                                    {% for val, label in estatus_choices %}
+                                    <option value="{{ val }}" {% if orden.estatus_op == val %}selected{% endif %}>{{ label }}</option>
+                                    {% endfor %}
+                                </select>
+                                <div class="editable-text" data-campo="prioridad" data-multiline="false" data-raw="{{ orden.prioridad }}">
+                                    <span data-view
+                                        class="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-bold text-slate-600">
+                                        Prioridad {{ orden.prioridad }} <i class="fas fa-pen text-[10px] text-slate-300 ml-1.5"></i>
+                                    </span>
+                                </div>
+                            </div>
+                            <div class="mt-3 text-sm text-slate-600">
+                                {% if orden.pedido %}
+                                <i class="fas fa-file-invoice text-slate-400 mr-1"></i>
+                                Pedido de origen:
+                                <a href="{% url 'qa_pedidos_workspace' %}?id={{ orden.pedido_id }}"
+                                    class="font-medium text-sky-700 hover:underline">
+                                    {{ orden.pedido.folio|default:orden.pedido_id }}
+                                </a>
+                                <span class="text-slate-400">· {{ orden.pedido.cliente_nombre|default:orden.pedido.cliente.nombre }}</span>
+                                {% else %}
+                                <span class="text-slate-400">Sin pedido de origen</span>
+                                {% endif %}
+                            </div>
+                            <div class="mt-1 text-xs text-slate-400">
+                                {{ orden.empresa.nombre_comercial|default:orden.empresa.razon_social }} · {{ orden.sucursal.nombre }}
+                                · Iniciada {{ orden.fecha_inicio|date:"d M Y, H:i" }}
+                                {% if orden.fecha_fin %} · Cerrada {{ orden.fecha_fin|date:"d M Y" }}{% endif %}
+                            </div>
+                        </div>
+                        <div class="shrink-0 text-right">
+                            <div class="field-label">Asignada a</div>
+                            <select data-campo-select="usuario_asignado"
+                                class="mt-1 rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-800 hover:border-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-300 cursor-pointer">
+                                <option value="">Sin asignar</option>
+                                {% for u in usuarios_empresa %}
+                                <option value="{{ u.pk }}" {% if orden.usuario_asignado_id == u.pk %}selected{% endif %}>{{ u.username }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Tabs -->
+                    <div class="flex gap-1 border-b border-slate-200 mt-2" role="tablist">
+                        <button type="button" data-tab-btn="general" class="tab-btn tab-btn-active">General</button>
+                        <button type="button" data-tab-btn="materiales" class="tab-btn">Materiales ({{ detalles|length }})</button>
+                        <button type="button" data-tab-btn="bitacora" class="tab-btn">Bitácora ({{ historial|length }})</button>
+                    </div>
+
+                    <!-- Panel: General -->
+                    <div data-tab-panel="general" class="pt-6 grid gap-x-8 gap-y-5 sm:grid-cols-2">
+                        <div>
+                            <div class="field-label">Ruta de producción</div>
+                            <div class="mt-0.5 text-sm text-slate-800">{{ orden.ruta_produccion|default:"—" }}</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Cierre de orden</div>
+                            <div class="mt-0.5">
+                                {% if orden.cerrar_orden %}
+                                <span class="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-1 text-xs font-semibold text-emerald-700">
+                                    <i class="fas fa-check"></i> Marcada para cierre
+                                </span>
+                                {% else %}
+                                <span class="text-sm text-slate-500">Abierta</span>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="sm:col-span-2">
+                            <div class="field-label">Observaciones</div>
+                            <div class="editable-text mt-0.5" data-campo="observaciones" data-multiline="true" data-raw="{{ orden.observaciones|default_if_none:'' }}">
+                                <span data-view class="whitespace-pre-wrap">{{ orden.observaciones|default:"— sin observaciones, clic para agregar —" }} <i class="fas fa-pen text-[10px] text-slate-300"></i></span>
+                            </div>
+                        </div>
+
+                        {% if orden.pedido %}
+                        <div class="sm:col-span-2 mt-2 pt-5 border-t border-slate-100">
+                            <div class="field-label mb-2">Pedido de origen</div>
+                            <a href="{% url 'qa_pedidos_workspace' %}?id={{ orden.pedido_id }}"
+                                class="block rounded-xl border border-slate-200 hover:border-sky-300 hover:bg-sky-50/50 px-4 py-3 transition-colors">
+                                <div class="flex items-center justify-between gap-3">
+                                    <div>
+                                        <div class="text-sm font-semibold text-slate-800">{{ orden.pedido.folio|default:orden.pedido_id }}</div>
+                                        <div class="text-xs text-slate-500">{{ orden.pedido.cliente_nombre|default:orden.pedido.cliente.nombre }}</div>
+                                    </div>
+                                    <i class="fas fa-arrow-up-right-from-square text-slate-400 text-xs"></i>
+                                </div>
+                            </a>
+                        </div>
+                        {% endif %}
+                    </div>
+
+                    <!-- Panel: Materiales -->
+                    <div data-tab-panel="materiales" class="hidden pt-6 space-y-3">
+                        {% for d in detalles %}
+                        <div class="rounded-xl border border-slate-200 p-4">
+                            <div class="flex items-start justify-between gap-3">
+                                <div class="min-w-0">
+                                    <div class="text-sm font-semibold text-slate-800">{{ d.producto }}</div>
+                                    <div class="text-xs text-slate-500">
+                                        {% if d.color %}Color: {{ d.color }}{% endif %}{% if d.talla %} · Talla: {{ d.talla }}{% endif %}
+                                    </div>
+                                </div>
+                                <div class="text-right shrink-0">
+                                    <div class="text-sm font-bold text-slate-900">{{ d.cantidad }} {{ d.unidad }}</div>
+                                </div>
+                            </div>
+                            {% if d.observaciones %}
+                            <div class="mt-2 text-xs text-slate-500">{{ d.observaciones }}</div>
+                            {% endif %}
+                            {% if d.componentes %}
+                            <div class="mt-3 flex flex-wrap gap-1.5">
+                                {% for c in d.componentes %}
+                                <span class="inline-flex items-center gap-1 rounded-lg bg-slate-50 border border-slate-200 px-2 py-1 text-xs text-slate-600">
+                                    <span class="font-semibold text-slate-700">{{ c.nombre }}</span> — {{ c.cantidad }} {{ c.unidad }}
+                                </span>
+                                {% endfor %}
+                            </div>
+                            {% endif %}
+                        </div>
+                        {% empty %}
+                        <div class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+                            Esta orden no tiene renglones de producción registrados.
+                        </div>
+                        {% endfor %}
+
+                        {% if consumos %}
+                        <div class="pt-2">
+                            <div class="field-label mb-2">Consumo registrado</div>
+                            <div class="flex flex-wrap gap-1.5">
+                                {% for c in consumos %}
+                                <span class="inline-flex items-center gap-1 rounded-lg bg-indigo-50 border border-indigo-200 px-2 py-1 text-xs text-indigo-700">
+                                    {{ c.producto }} — {{ c.cantidad }}
+                                </span>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+
+                    <!-- Panel: Bitácora -->
+                    <div data-tab-panel="bitacora" class="hidden pt-6">
+                        {% if historial %}
+                        <div class="space-y-5">
+                            {% for h in historial %}
+                            <div class="timeline-item">
+                                <div class="flex items-baseline gap-2 flex-wrap">
+                                    <span class="text-sm font-semibold text-slate-800">{{ h.tipo }}</span>
+                                    <span class="text-xs text-slate-400">{{ h.fecha|date:"d M Y, H:i" }} · {{ h.usuario }}</span>
+                                </div>
+                                {% if h.campos %}
+                                <div class="mt-1 text-xs text-slate-500">Campos: {{ h.campos|join:", " }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+                            Sin historial registrado.
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <script>
+                    (function () {
+                        const UPDATE_URL = "{% url 'qa_orden_trabajo_actualizar_campo' op_id=orden.op_id %}";
+
+                        function csrfToken() {
+                            const m = (document.cookie || '').match(/csrftoken=([^;]+)/);
+                            return m ? decodeURIComponent(m[1]) : '';
+                        }
+
+                        function guardarCampo(campo, valor) {
+                            return fetch(UPDATE_URL, {
+                                method: 'POST',
+                                credentials: 'same-origin',
+                                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken() },
+                                body: JSON.stringify({ campo: campo, valor: valor }),
+                            }).then(async function (resp) {
+                                let data = {};
+                                try { data = await resp.json(); } catch (e) {}
+                                if (!resp.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + resp.status));
+                                return data;
+                            });
+                        }
+
+                        function flash(el, ok) {
+                            el.classList.remove('flash-ok', 'flash-err');
+                            void el.offsetWidth;
+                            el.classList.add(ok ? 'flash-ok' : 'flash-err');
+                            setTimeout(function () { el.classList.remove('flash-ok', 'flash-err'); }, 900);
+                        }
+
+                        function startEdit(wrap) {
+                            if (wrap.querySelector('[data-edit]')) return;
+                            const view = wrap.querySelector('[data-view]');
+                            const campo = wrap.dataset.campo;
+                            const multiline = wrap.dataset.multiline === 'true';
+                            const raw = wrap.dataset.raw || '';
+                            view.classList.add('hidden');
+                            const el = document.createElement(multiline ? 'textarea' : 'input');
+                            el.setAttribute('data-edit', '');
+                            el.value = raw;
+                            el.className = 'w-full rounded-lg border border-sky-400 ring-2 ring-sky-100 px-2.5 py-1.5 text-sm text-slate-800 focus:outline-none bg-white' + (multiline ? ' min-h-[90px] resize-y' : '');
+                            wrap.appendChild(el);
+                            el.focus();
+                            if (el.setSelectionRange) { try { el.setSelectionRange(el.value.length, el.value.length); } catch (e) {} }
+
+                            let cancelled = false;
+                            el.addEventListener('keydown', function (ev) {
+                                if (ev.key === 'Enter' && !multiline) { ev.preventDefault(); el.blur(); }
+                                else if (ev.key === 'Escape') { cancelled = true; el.blur(); }
+                            });
+                            el.addEventListener('blur', function () {
+                                const nuevo = el.value.trim();
+                                if (cancelled || nuevo === raw) {
+                                    el.remove();
+                                    view.classList.remove('hidden');
+                                    return;
+                                }
+                                guardarCampo(campo, nuevo).then(function (data) {
+                                    wrap.dataset.raw = data.valor !== null && data.valor !== undefined ? String(data.valor) : '';
+                                    const safe = (data.valor_mostrado || '—').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                                    const esPrioridad = campo === 'prioridad';
+                                    view.innerHTML = (esPrioridad ? 'Prioridad ' + safe : safe) + ' <i class="fas fa-pen text-[10px] text-slate-300' + (esPrioridad ? ' ml-1.5' : '') + '"></i>';
+                                    el.remove();
+                                    view.classList.remove('hidden');
+                                    flash(view, true);
+                                }).catch(function (err) {
+                                    el.remove();
+                                    view.classList.remove('hidden');
+                                    flash(view, false);
+                                    console.error(err);
+                                });
+                            });
+                        }
+
+                        document.querySelectorAll('.editable-text [data-view]').forEach(function (view) {
+                            view.addEventListener('click', function () { startEdit(view.closest('.editable-text')); });
+                        });
+
+                        document.querySelectorAll('[data-campo-select]').forEach(function (sel) {
+                            sel.setAttribute('data-original', sel.value);
+                            sel.addEventListener('change', function () {
+                                const campo = sel.dataset.campoSelect;
+                                const original = sel.getAttribute('data-original');
+                                guardarCampo(campo, sel.value).then(function () {
+                                    sel.setAttribute('data-original', sel.value);
+                                    flash(sel, true);
+                                }).catch(function (err) {
+                                    sel.value = original;
+                                    flash(sel, false);
+                                    console.error(err);
+                                });
+                            });
+                        });
+
+                        document.querySelectorAll('[data-tab-btn]').forEach(function (btn) {
+                            btn.addEventListener('click', function () {
+                                const key = btn.dataset.tabBtn;
+                                document.querySelectorAll('[data-tab-btn]').forEach(function (b) { b.classList.toggle('tab-btn-active', b === btn); });
+                                document.querySelectorAll('[data-tab-panel]').forEach(function (p) { p.classList.toggle('hidden', p.dataset.tabPanel !== key); });
+                            });
+                        });
+                    })();
+                </script>
+                {% elif mostrar_form_crear %}
+                <div class="p-6 lg:p-8 max-w-xl">
+                    <div class="field-label">Nueva orden de trabajo</div>
+                    <h2 class="brand-font text-2xl font-bold text-slate-900 mt-1">Crear a partir de un pedido</h2>
+                    <p class="mt-2 text-sm text-slate-500">
+                        El folio se genera solo. Bordado, reflejante y corte de manga toman las líneas del
+                        pedido automáticamente — no se capturan a mano.
+                    </p>
+
+                    <form method="post" class="mt-6 space-y-5">
+                        {% csrf_token %}
+                        <input type="hidden" name="action" value="crear">
+
+                        <div>
+                            <div class="field-label">Tipo de orden</div>
+                            <div class="mt-1.5 grid grid-cols-2 gap-2" id="tipo-orden-selector">
+                                <label class="tipo-orden-opcion flex items-center gap-2 rounded-xl border border-slate-300 px-3 py-2.5 text-sm cursor-pointer transition-colors">
+                                    <input type="radio" name="tipo" value="produccion" checked class="accent-sky-600">
+                                    Producción general
+                                </label>
+                                <label class="tipo-orden-opcion flex items-center gap-2 rounded-xl border border-slate-300 px-3 py-2.5 text-sm cursor-pointer transition-colors">
+                                    <input type="radio" name="tipo" value="bordado" class="accent-sky-600">
+                                    Bordado
+                                </label>
+                                <label class="tipo-orden-opcion flex items-center gap-2 rounded-xl border border-slate-300 px-3 py-2.5 text-sm cursor-pointer transition-colors">
+                                    <input type="radio" name="tipo" value="reflejante" class="accent-sky-600">
+                                    Reflejante
+                                </label>
+                                <label class="tipo-orden-opcion flex items-center gap-2 rounded-xl border border-slate-300 px-3 py-2.5 text-sm cursor-pointer transition-colors">
+                                    <input type="radio" name="tipo" value="corte_manga" class="accent-sky-600">
+                                    Corte de manga
+                                </label>
+                            </div>
+                            <p id="tipo-orden-hint" class="mt-2 text-xs text-slate-500">
+                                Crea solo el encabezado (folio genérico OP-…); agregas materiales después, en este mismo lienzo.
+                            </p>
+                        </div>
+
+                        <div>
+                            <div class="field-label">Pedido de origen</div>
+                            {% if pedidos_disponibles %}
+                            <select name="pedido_id" required
+                                class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-sky-500">
+                                <option value="">Selecciona un pedido…</option>
+                                {% for p in pedidos_disponibles %}
+                                <option value="{{ p.id }}">{% if p.folio %}{{ p.folio }}{% else %}PED-{{ p.id }}{% endif %} — {{ p.cliente_nombre|default:p.cliente.nombre }}</option>
+                                {% endfor %}
+                            </select>
+                            {% else %}
+                            <p class="mt-1 text-sm text-red-600">No hay pedidos disponibles para esta empresa todavía.</p>
+                            {% endif %}
+                        </div>
+
+                        <div class="max-w-[160px]">
+                            <div class="field-label">Prioridad</div>
+                            <input type="number" name="prioridad" min="1" value="1"
+                                class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-sky-500">
+                        </div>
+
+                        <div>
+                            <div class="field-label">Observaciones (opcional)</div>
+                            <textarea name="observaciones" rows="3"
+                                class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-sky-500"></textarea>
+                        </div>
+
+                        <div class="flex items-center gap-4 pt-2">
+                            <button type="submit" {% if not pedidos_disponibles %}disabled{% endif %}
+                                class="rounded-xl bg-sky-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-sky-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                                Crear orden de trabajo
+                            </button>
+                            <a href="{% url 'qa_ordenes_trabajo_workspace' %}" class="text-sm text-slate-500 hover:text-slate-700">Cancelar</a>
+                        </div>
+                    </form>
+                </div>
+                {% else %}
+                <div class="flex h-[65vh] items-center justify-center text-center px-6">
+                    <div>
+                        <div class="inline-flex h-16 w-16 items-center justify-center rounded-full bg-sky-50 text-3xl text-sky-600 border border-sky-100">
+                            <i class="fas fa-industry"></i>
+                        </div>
+                        <h2 class="mt-6 text-xl font-semibold text-slate-800">Sin orden seleccionada</h2>
+                        <p class="mt-2 mx-auto max-w-md text-sm text-slate-500">
+                            Usa el buscador para localizar una orden de trabajo por folio OP, folio de pedido o cliente.
+                            En cuanto aparezca un único resultado se abre aquí mismo.
+                        </p>
+                        <a href="?crear=1"
+                            class="mt-5 inline-flex items-center gap-2 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-sky-700 transition-colors">
+                            <i class="fas fa-plus"></i> Nueva orden de trabajo
+                        </a>
+                    </div>
+                </div>
+                {% endif %}
+            </section>
+        </div>
+    </main>
+
+    <script>
+        (function () {
+            const input = document.getElementById('buscador-op');
+            const form = document.getElementById('form-buscar-op');
+            if (!input || !form) return;
+            let t = null;
+            input.addEventListener('input', function () {
+                clearTimeout(t);
+                t = setTimeout(function () { form.submit(); }, 450);
+            });
+        })();
+
+        (function () {
+            const selector = document.getElementById('tipo-orden-selector');
+            const hint = document.getElementById('tipo-orden-hint');
+            if (!selector || !hint) return;
+            const textos = {
+                produccion: 'Crea solo el encabezado (folio genérico OP-…); agregas materiales después, en este mismo lienzo.',
+                bordado: 'Toma automáticamente las líneas del pedido con bordado y genera el folio OB. Si el pedido ya está cubierto al 100%, avisa en vez de duplicar.',
+                reflejante: 'Toma automáticamente las líneas del pedido con reflejante y genera el folio OR. Si el pedido ya está cubierto al 100%, avisa en vez de duplicar.',
+                corte_manga: 'Toma automáticamente las líneas del pedido con corte de manga y genera el folio OCM. Si el pedido ya está cubierto al 100%, avisa en vez de duplicar.',
+            };
+            selector.addEventListener('change', function (e) {
+                const valor = e.target.value;
+                if (textos[valor]) hint.textContent = textos[valor];
+            });
+        })();
+    </script>
+</body>
+
+</html>
