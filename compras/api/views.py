@@ -767,7 +767,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                     {"facturas_proveedores": "La orden tiene facturas de proveedor y no puede eliminarse."}
                 )
 
-            oc.soft_delete()
+            # Baja lógica a mano en vez de ``soft_delete()``: ese guarda solo
+            # ``activo`` y ``auto_now`` no toca ``updated_at`` si no va en
+            # ``update_fields``, como sí en las demás escrituras del viewset.
+            oc.activo = False
+            oc.save(update_fields=["activo", "updated_at"])
             self._auditar_orden_compra(
                 request,
                 oc,

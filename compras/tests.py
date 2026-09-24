@@ -12,6 +12,7 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
 """
 
 import copy
+from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
@@ -954,6 +955,13 @@ class OrdenCompraCancelacionTests(TestCase):
                 evento = self._eventos(oc, "DELETE").get()
                 self.assertEqual(evento.usuario_id, self.a["usuario"].pk)
                 self.assertEqual(evento.despues_json, {"estatus": estatus, "activo": False})
+
+    def test_delete_actualiza_updated_at(self):
+        oc = self._oc(Estatus.BORRADOR)
+        antes = timezone.now() - timedelta(days=1)
+        OrdenCompra.objects.filter(pk=oc.pk).update(updated_at=antes)
+        self.assertEqual(self._eliminar(oc).status_code, 204)
+        self.assertGreater(OrdenCompra.objects.get(pk=oc.pk).updated_at, antes)
 
     def test_delete_rechaza_otros_estatus(self):
         mensaje = {"estatus": "Solo se puede eliminar una orden en borrador o pendiente de confirmar."}
