@@ -22,8 +22,8 @@ from rest_framework.test import APIClient
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Color, Producto, ProductoVariante
 from compras.api.views import OrdenCompraViewSet, RecepcionViewSet
-from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion
-from finanzas.models import FacturaProveedor
+from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+from finanzas.models import FacturaProveedor, FacturaProveedorDetalle
 from inventarios.models import Almacen, Existencia, MovimientoInventario, MovimientoInventarioDetalle, Ubicacion
 from nucleo.models import Empresa, Moneda, SatFormaPago, SatMetodoPago, SatRegimenFiscal, SerieFolio, Sucursal
 from terceros.models import Proveedor
@@ -856,6 +856,54 @@ class OrdenCompraCancelacionTests(TestCase):
 
         ofrecidas = client.get(RECEPCION_ONBOARDING_URL).json()["busqueda"]["ordenes_compra"]
         self.assertNotIn(oc.pk, [row["id"] for row in ofrecidas])
+
+    # --- PUT con recepciones o facturas reales ------------------------------------
+
+    def _put_reemplaza_renglones(self, oc):
+        return self._client().put(
+            f"{ORDENES_URL}{oc.pk}/",
+            {"detalle": [{"producto": self.a["producto"].pk, "cantidad": 5, "precio": "1.00"}]},
+            format="json",
+        )
+
+    def test_put_rechaza_oc_con_recepcion_aunque_el_estatus_lo_permita(self):
+        # El estatus dice AUTORIZADA (p. ej. regresado desde el admin), pero la
+        # recepción existe: reemplazar renglones borraría su detalle en cascada.
+        oc = self._oc(Estatus.AUTORIZADA)
+        linea = OrdenCompraDetalle.objects.get(orden_compra=oc)
+        recepcion = self._recepcion(oc, estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        rd = RecepcionDetalle.objects.create(
+            recepcion=recepcion, orden_compra_detalle=linea, producto=self.a["producto"], cantidad_recibida=2,
+        )
+        antes = self._estado(oc)
+        resp = self._put_reemplaza_renglones(oc)
+        self._assert_rechazo(
+            resp, {"recepciones": "La orden tiene recepciones registradas y no puede modificarse."}, oc, antes,
+        )
+        self.assertTrue(OrdenCompraDetalle.objects.filter(pk=linea.pk).exists())
+        self.assertTrue(RecepcionDetalle.objects.filter(pk=rd.pk).exists())
+
+    def test_put_rechaza_oc_con_factura_aunque_el_estatus_lo_permita(self):
+        # La factura se cuelga de la recepción de otra OC para que solo ella bloquee.
+        otra = self._oc(Estatus.AUTORIZADA)
+        oc = self._oc(Estatus.AUTORIZADA)
+        linea = OrdenCompraDetalle.objects.get(orden_compra=oc)
+        recepcion_otra = self._recepcion(otra)
+        rd = RecepcionDetalle.objects.create(
+            recepcion=recepcion_otra, orden_compra_detalle=OrdenCompraDetalle.objects.get(orden_compra=otra),
+            producto=self.a["producto"], cantidad_recibida=1,
+        )
+        factura = self._factura(oc, FacturaProveedor.FacturaProveedorStatus.CANCELADA, recepcion=recepcion_otra)
+        fd = FacturaProveedorDetalle.objects.create(
+            factura_proveedor=factura, oc_detalle=linea, recepcion_detalle=rd, producto=self.a["producto"],
+        )
+        antes = self._estado(oc)
+        resp = self._put_reemplaza_renglones(oc)
+        self._assert_rechazo(
+            resp, {"facturas_proveedores": "La orden tiene facturas de proveedor y no puede modificarse."}, oc, antes,
+        )
+        self.assertTrue(OrdenCompraDetalle.objects.filter(pk=linea.pk).exists())
+        self.assertTrue(FacturaProveedorDetalle.objects.filter(pk=fd.pk).exists())
 
     # --- motivo_cancelacion no es escribible ---------------------------------------
 

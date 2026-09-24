@@ -631,6 +631,19 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 raise ValidationError(
                     {"estatus": "La orden ya tiene recepciones registradas y no puede modificarse."}
                 )
+            # Además de lo que diga el estatus (el admin lo puede regresar a <= 3):
+            # reemplazar los renglones borra ``OrdenCompraDetalle`` y en cascada los
+            # ``RecepcionDetalle``/``FacturaProveedorDetalle`` que cuelgan de ellos,
+            # sin importar el estatus de su recepción o factura. Mismo criterio
+            # estricto que ``destroy``.
+            if Recepcion.objects.filter(orden_compra=oc).exists():
+                raise ValidationError(
+                    {"recepciones": "La orden tiene recepciones registradas y no puede modificarse."}
+                )
+            if FacturaProveedor.objects.filter(oc=oc).exists():
+                raise ValidationError(
+                    {"facturas_proveedores": "La orden tiene facturas de proveedor y no puede modificarse."}
+                )
 
             has_sucursal = "sucursal" in header
             has_proveedor = "proveedor" in header
