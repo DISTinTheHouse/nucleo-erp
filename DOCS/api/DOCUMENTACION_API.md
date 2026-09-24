@@ -1928,6 +1928,35 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 
 ---
 
+### Editar una orden de compra
+
+- **Endpoint**: `PUT /api/v1/compras/ordenes/{id}/`. No hay `PATCH`.
+- **Bloqueada SOLO si ya tiene recepciones**: `estatus` = `PARCIALMENTE_RECIBIDA` (4) o `RECIBIDA` (5) → `400`. Cualquier otro estatus, incluido `AUTORIZADA` (3), se puede editar.
+- Editar **siempre regresa la OC a `POR_AUTORIZAR` (2)**, sin importar de qué estatus venía. Se pierde la autorización → hay que volver a `POST /api/v1/compras/ordenes/{id}/aceptar/`. El `folio` no se toca ni se regenera.
+- Body — mismo shape que `POST .../onboarding/`:
+
+  ```json
+  { "orden_compra": { "proveedor": 10, "porcentaje_iva": 16, "observaciones": "..." },
+    "detalle": [ { "producto": 55, "cantidad": 20, "precio": 120.5 } ] }
+  ```
+
+  Si mandas `detalle`, **se borran y recrean todos los renglones** (no es merge parcial). Si lo omites, los renglones existentes no se tocan.
+- Respuesta `200`: `{ "orden_compra": {...}, "detalle": [...] }`.
+- 404 si la OC no existe o no es de tu empresa (no 403).
+
+### Cancelar una orden de compra
+
+- **Endpoint**: `DELETE /api/v1/compras/ordenes/{id}/`.
+- Es soft delete: pone `activo = false`. **No borra el registro.**
+- No valida `estatus` — se puede cancelar en cualquier estatus, incluida `RECIBIDA`.
+- Efecto inmediato: desaparece de `list` y `retrieve` (ambos filtran `activo=true`). No existe endpoint de "restaurar".
+- Respuesta: `204 No Content`, sin body.
+- 404 si la OC no existe o no es de tu empresa.
+
+⚠️ El ViewSet hereda de `ReadOnlyModelViewSet`, pero define su propio `update`/`destroy` → DRF sí enruta `PUT` y `DELETE` igual. No asumas "solo lectura" por el nombre de la clase.
+
+---
+
 ## 🧾 Compras - Recepciones (Onboarding)
 
 **Base URL**: `/api/v1/compras/`
@@ -2084,6 +2113,67 @@ La recepción es el proceso unificado que afecta existencias tanto para órdenes
   "movimiento_inventario_id": 77
 }
 ```
+
+---
+
+## 🧾 Compras - Dashboard
+
+**Endpoint**: `GET /api/v1/compras/dashboard/`
+
+KPIs para agente de compras y mesa directiva. **4 queries fijas, agregadas en DB** (`values().annotate()` / `aggregate()` con `Count`/`Sum`) — nunca itera `OrdenCompra`/`Recepcion` fila por fila. No pagina, no crece con el número de OCs.
+
+### Query params (todos opcionales)
+
+| Param | Formato | Default | Efecto |
+|---|---|---|---|
+| `dias` | int, `1-90` | `7` | Ventana de "por vencer" (`fecha_vencimiento` entre hoy y hoy+`dias`) |
+| `desde` | `YYYY-MM-DD` | ninguno | Filtra `gasto_por_moneda`/`top_proveedores` por `fecha_oc >= desde` |
+| `hasta` | `YYYY-MM-DD` | ninguno | Igual, `fecha_oc <= hasta` |
+
+Sin `desde`/`hasta` el gasto es histórico completo. `desde`/`hasta` inválidos → `400`.
+
+### Respuesta
+
+```json
+{
+  "generado_en": "2026-09-24T18:00:00Z",
+  "filtros": { "dias_por_vencer": 7, "desde": null, "hasta": null },
+  "ordenes_por_estatus": [
+    { "estatus": 3, "estatus_label": "Autorizada", "total": 12 },
+    { "estatus": 5, "estatus_label": "Recibida", "total": 40 }
+  ],
+  "ordenes_vencidas": 2,
+  "ordenes_por_vencer": 5,
+  "recepciones_por_estatus": [
+    { "estatus": 2, "estatus_label": "Recibida", "total": 30 },
+    { "estatus": 3, "estatus_label": "Parcial", "total": 4 }
+  ],
+  "recepciones_por_origen": [
+    { "tipo_origen": "OC", "tipo_origen_label": "Orden de compra", "total": 30 },
+    { "tipo_origen": "OP", "tipo_origen_label": "Orden de produccion", "total": 4 }
+  ],
+  "gasto_por_moneda": [
+    { "moneda_codigo": "MXN", "total": "1250000.00", "ordenes": 45 }
+  ],
+  "top_proveedores": [
+    { "proveedor_id": 7, "proveedor_nombre": "Textiles ACME", "total": "310000.00", "ordenes": 9 }
+  ]
+}
+```
+
+### Reglas de cada campo
+
+- `ordenes_por_estatus` / `recepciones_por_estatus` / `recepciones_por_origen`: conteo de TODO lo activo (`activo=true`), sin filtro de fecha. Es "estado actual", no histórico.
+- `ordenes_vencidas` / `ordenes_por_vencer`: excluyen OC en `RECIBIDA`(5) y `CANCELADA`(6) — ya cerradas, no hay nada que vencer.
+- `gasto_por_moneda` / `top_proveedores`: solo OC con `estatus` en `AUTORIZADA`(3) / `PARCIALMENTE_RECIBIDA`(4) / `RECIBIDA`(5). `BORRADOR`/`POR_AUTORIZAR` no son gasto comprometido todavía.
+- `top_proveedores`: top 5 por `gran_total` sumado, misma ventana de fechas que `gasto_por_moneda`.
+
+### ⚠️ Léelo antes de graficarlo
+
+- **`top_proveedores` NO separa por moneda** — suma `gran_total` tal cual, sin convertir tipo de cambio. Si la empresa opera en más de una moneda, ese top mezcla importes no comparables. Usa `gasto_por_moneda` para desagregar por moneda; no hay tasa de cambio en ningún lado del sistema.
+- Sin `empresa` asignada y sin `is_superuser` → todo en cero (`filtros: null`), mismo patrón multi-tenant que el resto de `/api/v1/`.
+- **No incluye nada de Calidad ni de envíos de proveedor.** `CalidadInspeccion`/`EnvioProveedor` existen como modelo pero no los llena nadie — no hay dato real detrás. Ver `DOCS/arquitectura/flujo-recepcion-calidad-compras.md`.
+- Los números de `Existencia`/inventario que implican estas OCs/recepciones están disponibles en el momento en que se registra la recepción — hoy no hay filtro de calidad entre "recibido" y "disponible en almacén" (mismo doc de arriba).
 
 ---
 
