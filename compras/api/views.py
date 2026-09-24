@@ -81,61 +81,64 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(empresa=empresa)
         else:
             return qs.none()
-        # ``cancelar`` responde con la misma forma que el retrieve, así que
-        # necesita los mismos prefetch (el de ``recepcion_set`` acota a activas).
-        if self.action in ('retrieve', 'cancelar'):
-            recepciones_qs = (
-                Recepcion.objects.filter(
-                    activo=True,
-                    tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
-                )
-                .select_related("sucursal", "proveedor", "almacen", "transportista")
-                .prefetch_related(
-                    Prefetch(
-                        "recepciondetalle_set",
-                        queryset=RecepcionDetalle.objects.select_related(
-                            "producto",
-                            "producto_variante",
-                            "ubicacion",
-                            "ubicacion__almacen",
-                        ).order_by("id"),
-                    ),
-                    Prefetch(
-                        # ``MovimientoInventario.recepcion`` no declara
-                        # ``related_name``: el accessor inverso real es
-                        # ``movimientoinventario_set`` (sin guiones bajos).
-                        "movimientoinventario_set",
-                        # ``recepcion`` es obligatorio en el ``only``: es la
-                        # columna con la que el prefetch agrupa las filas por
-                        # recepción. Diferirla cuesta un SELECT por movimiento.
-                        queryset=MovimientoInventario.objects.filter(activo=True).only(
-                            "pk", "fecha_movimiento", "recepcion"
-                        ),
-                    ),
-                )
-                .order_by("-fecha_recepcion", "-id")
-            )
-            prefetch_list = [
-                # ``select_related("producto")`` evita el N+1 que provocaría
-                # ``producto_nombre`` en cada renglón de ``detalles``.
-                # ``order_by("id")`` (igual que el Prefetch de
-                # ``recepciondetalle_set``) da un orden estable: el modelo no
-                # define ``Meta.ordering`` y ``update``/``onboarding`` borran y
-                # recrean los renglones, así que sin esto dos GET idénticos
-                # pueden devolverlos en distinto orden.
-                Prefetch(
-                    'ordencompradetalle_set',
-                    queryset=OrdenCompraDetalle.objects.select_related('producto').order_by('id'),
-                ),
-                Prefetch("recepcion_set", queryset=recepciones_qs),
-                "facturas_proveedores",
-            ]
-            qs = qs.prefetch_related(*prefetch_list)
+        if self.action == 'retrieve':
+            qs = self._con_prefetch_retrieve(qs)
         # Listado más reciente primero; ``-id`` como desempate estable. Es el
         # orden de las órdenes de compra en sí: el ``order_by`` de arriba es del
         # Prefetch de recepciones anidadas y solo aplica en ``retrieve``.
         return qs.order_by("-fecha_oc", "-id")
 
+    def _con_prefetch_retrieve(self, qs):
+        # Prefetch de la forma del retrieve. Lo usa también la respuesta de
+        # ``cancelar``, que devuelve esa misma forma (el de ``recepcion_set``
+        # acota a activas).
+        recepciones_qs = (
+            Recepcion.objects.filter(
+                activo=True,
+                tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
+            )
+            .select_related("sucursal", "proveedor", "almacen", "transportista")
+            .prefetch_related(
+                Prefetch(
+                    "recepciondetalle_set",
+                    queryset=RecepcionDetalle.objects.select_related(
+                        "producto",
+                        "producto_variante",
+                        "ubicacion",
+                        "ubicacion__almacen",
+                    ).order_by("id"),
+                ),
+                Prefetch(
+                    # ``MovimientoInventario.recepcion`` no declara
+                    # ``related_name``: el accessor inverso real es
+                    # ``movimientoinventario_set`` (sin guiones bajos).
+                    "movimientoinventario_set",
+                    # ``recepcion`` es obligatorio en el ``only``: es la
+                    # columna con la que el prefetch agrupa las filas por
+                    # recepción. Diferirla cuesta un SELECT por movimiento.
+                    queryset=MovimientoInventario.objects.filter(activo=True).only(
+                        "pk", "fecha_movimiento", "recepcion"
+                    ),
+                ),
+            )
+            .order_by("-fecha_recepcion", "-id")
+        )
+        prefetch_list = [
+            # ``select_related("producto")`` evita el N+1 que provocaría
+            # ``producto_nombre`` en cada renglón de ``detalles``.
+            # ``order_by("id")`` (igual que el Prefetch de
+            # ``recepciondetalle_set``) da un orden estable: el modelo no
+            # define ``Meta.ordering`` y ``update``/``onboarding`` borran y
+            # recrean los renglones, así que sin esto dos GET idénticos
+            # pueden devolverlos en distinto orden.
+            Prefetch(
+                'ordencompradetalle_set',
+                queryset=OrdenCompraDetalle.objects.select_related('producto').order_by('id'),
+            ),
+            Prefetch("recepcion_set", queryset=recepciones_qs),
+            "facturas_proveedores",
+        ]
+        return qs.prefetch_related(*prefetch_list)
     def get_serializer_class(self):
         if self.action in ('retrieve', 'cancelar'):
             return OrdenCompraRetrieveSerializer
@@ -226,7 +229,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 {"estatus": oc.estatus, "motivo_cancelacion": oc.motivo_cancelacion},
             )
 
-        instance = self.get_queryset().get(pk=oc.pk)
+        # El ``get_object`` de arriba va sin prefetch (solo acota empresa/404);
+        # la forma del retrieve se carga una sola vez, ya con la OC cancelada.
+        instance = self._con_prefetch_retrieve(self.get_queryset()).get(pk=oc.pk)
         data = filtrar_campos_contabilidad_orden_compra(self.get_serializer(instance).data, request.user)
         return Response(data, status=status.HTTP_200_OK)
 
