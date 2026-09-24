@@ -1938,7 +1938,7 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 ### Editar una orden de compra
 
 - **Endpoint**: `PUT /api/v1/compras/ordenes/{id}/`. No hay `PATCH`.
-- **Bloqueada SOLO si ya tiene recepciones**: `estatus` = `PARCIALMENTE_RECIBIDA` (4) o `RECIBIDA` (5) → `400`. Cualquier otro estatus, incluido `AUTORIZADA` (3), se puede editar.
+- **Bloqueada si ya tiene recepciones o está cancelada**: `estatus` = `PARCIALMENTE_RECIBIDA` (4) o `RECIBIDA` (5) → `400`; `CANCELADA` (6) → `400` (`{"estatus": "La orden está cancelada y no puede modificarse."}`). Cualquier otro estatus, incluido `AUTORIZADA` (3), se puede editar.
 - Editar **siempre regresa la OC a `POR_AUTORIZAR` (2)**, sin importar de qué estatus venía. Se pierde la autorización → hay que volver a `POST /api/v1/compras/ordenes/{id}/aceptar/`. El `folio` no se toca ni se regenera.
 - Body — mismo shape que `POST .../onboarding/`:
 
@@ -1953,10 +1953,27 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 
 ### Cancelar una orden de compra
 
+Cancelar = la orden al proveedor queda anulada **pero se conserva y sigue visible**. Para borrar una OC capturada por error, ver "Eliminar" abajo.
+
+- **Endpoint**: `POST /api/v1/compras/ordenes/{id}/cancelar/`
+- **Body**: `{ "motivo_cancelacion": "El proveedor ya no surte el insumo" }` — requerido; vacío o solo espacios → `400 {"motivo_cancelacion": "El motivo de cancelación es requerido."}`. Se guarda sin espacios al inicio/fin.
+- **Solo desde** `BORRADOR` (1), `POR_AUTORIZAR` (2) o `AUTORIZADA` (3). Con `PARCIALMENTE_RECIBIDA` (4), `RECIBIDA` (5) o `CANCELADA` (6) → `400 {"estatus": "La orden ya no puede cancelarse."}` (re-cancelar **no** es idempotente).
+- Además revisa los registros reales, no solo el estatus:
+  - Recepción activa (`activo = true` y estatus ≠ `CANCELADA`) contra la OC → `400 {"recepciones": ...}`.
+  - Factura de proveedor con estatus ≠ `Cancelada` (esté o no dada de baja con `activo = false`) → `400 {"facturas_proveedores": ...}`.
+- **Efecto**: `estatus = 6 (CANCELADA)`, guarda `motivo_cancelacion`, `activo` sigue en `true` (la OC sigue en `list` y `retrieve`). Deja un evento en `auditoria_eventos` (`modulo = "compras"`, `accion = "CANCELAR"`, `tabla = "ordenes_compra"`) con quién y cuándo.
+- **`CANCELADA` es terminal**: `PUT`, `POST onboarding/` (edición), `POST aceptar/` y la recepción (`POST /recepciones/onboarding/`) la rechazan con `400`, y el onboarding de recepción no la lista.
+- **Respuesta `200`**: la OC actualizada con la misma forma que `GET /ordenes/{id}/` (incluye `motivo_cancelacion` y aplica el mismo filtro de campos $$).
+- 404 si la OC no existe, está dada de baja o no es de tu empresa.
+- `motivo_cancelacion` aparece de solo lectura en `list`/`retrieve` (`null` si nunca se canceló, o si se canceló desde el admin antes de existir esta acción). `PUT` y `onboarding` lo ignoran.
+
+### Eliminar una orden de compra (error de captura)
+
 - **Endpoint**: `DELETE /api/v1/compras/ordenes/{id}/`.
-- Es soft delete: pone `activo = false`. **No borra el registro.**
-- No valida `estatus` — se puede cancelar en cualquier estatus, incluida `RECIBIDA`.
-- Efecto inmediato: desaparece de `list` y `retrieve` (ambos filtran `activo=true`). No existe endpoint de "restaurar".
+- Es soft delete: pone `activo = false`. **No borra el registro.** No es una cancelación: la OC desaparece de `list` y `retrieve` (ambos filtran `activo=true`). No existe endpoint de "restaurar".
+- **Solo desde** `BORRADOR` (1) o `POR_AUTORIZAR` (2) → otro estatus: `400 {"estatus": "Solo se puede eliminar una orden en borrador o pendiente de confirmar."}`. Una OC ya autorizada se anula con `POST .../cancelar/`.
+- Además rechaza con `400` si la OC tiene **cualquier** recepción (`{"recepciones": ...}`) o **cualquier** factura de proveedor (`{"facturas_proveedores": ...}`), aun canceladas.
+- Deja un evento en `auditoria_eventos` (`modulo = "compras"`, `accion = "DELETE"`).
 - Respuesta: `204 No Content`, sin body.
 - 404 si la OC no existe o no es de tu empresa.
 
