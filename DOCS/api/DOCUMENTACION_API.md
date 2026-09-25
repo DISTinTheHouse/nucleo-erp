@@ -1524,7 +1524,7 @@ Botón "Revisar inventario" en el detalle del pedido: por cada producto/talla de
 
 **No es un botón que dispare nada en el backend** — es un indicador automático. Cuando una línea del pedido (o de la cotización que le dio origen) se captura con `producto_nombre_externo` (texto libre, sin escoger un producto real del catálogo — típicamente una muestra), el backend marca esa talla con `requiere_produccion=True` **solo**; no hay checkbox que lo pueda forzar manualmente — cualquier valor que mande el frontend para ese campo se ignora y se recalcula siempre como `bool(producto_nombre_externo)` (`ventas/utils/helpers.py`).
 
-- **Canal hacia producción**: `GET /api/v1/produccion/pedidos-especiales/` (`PedidoEspecialViewSet`, solo lectura) — lista los pedidos con al menos una línea `requiere_produccion=True`; el detalle trae solo esas líneas/tallas especiales.
+- **Canal hacia producción**: `GET /api/v1/produccion/pedidos-especiales/` (`PedidoEspecialViewSet`, solo lectura) — lista los pedidos con al menos una línea `requiere_produccion=True` **y que ya tienen `clasificacion` y `fecha_confirmacion`** (filtro fijo, ver detalle en la sección de Pedidos Especiales más abajo). El detalle trae solo esas líneas/tallas especiales.
 - **No se genera ninguna Orden de Producción automáticamente**: `OrdenProduccion` exige un `ListaMaterialBom` activo por `producto_variante`, y una muestra sin SKU no tiene variante ni BOM — intentarlo fallaría por diseño. El flujo real es manual: producción da de alta el SKU/variante (proceso aparte, catálogo) y **después** crea la OP a mano desde `POST /api/v1/produccion/orden-produccion/`, mandando `pedido: <id>` en el body para ligarla al documento maestro (folio P) — `OrdenProduccion.pedido` ya es un campo normal, no hace falta nada nuevo para esto.
 
 ---
@@ -3790,9 +3790,9 @@ Cuando la solicitud de OCM parcial sí excede el cupo restante (validación de s
 
 Solo lectura, para que producción vea qué pedidos traen muestras/renglones sin SKU de catálogo (`producto_nombre_externo`), sin cargar el resto del pedido.
 
-- **Listar**: `GET /api/v1/produccion/pedidos-especiales/` — solo pedidos con al menos una línea especial (`PedidoDetalleTalla.requiere_produccion=True`). Respuesta ligera: `id`, `folio`, `cliente_nombre`, `clasificacion`, `fecha_confirmacion`.
+- **Listar**: `GET /api/v1/produccion/pedidos-especiales/` — solo pedidos con al menos una línea especial (`PedidoDetalleTalla.requiere_produccion=True`) **Y** con `clasificacion` **Y** `fecha_confirmacion` ya puestos por mesa de control (`PATCH /api/v1/ventas/pedidos/{id}/`, ver "Clasificar pedido"). Filtro fijo, sin excepción: un pedido con muestra pero sin clasificar/confirmar **no aparece**, aunque la línea ya tenga `requiere_produccion=True` — mesa de control debe procesarlo primero para que producción tenga un compromiso de entrega real sobre el que planear. Respuesta ligera: `id`, `folio`, `cliente_nombre`, `clasificacion`, `fecha_confirmacion`.
 - **Detalle**: `GET /api/v1/produccion/pedidos-especiales/{id}/` — igual que el listado, más `detalles[]` con **solo** las líneas/tallas especiales (nunca las líneas de catálogo normales del mismo pedido, ni precios). Cada detalle trae `producto_nombre_externo`, `color_nombre`, y por talla: `cantidad` y los flags/config de bordado, reflejante, corte de manga y cambio de talla.
-- Un pedido sin líneas especiales responde `404` en el detalle (no existe para este endpoint, aunque exista como pedido normal).
+- Un pedido sin líneas especiales, o sin clasificar/confirmar, responde `404` en el detalle (no existe para este endpoint, aunque exista como pedido normal).
 
 ---
 

@@ -1393,6 +1393,12 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         return (
             Pedido.objects.filter(empresa=empresa)
             .filter(Exists(_detalles_especiales_qs().filter(pedido=OuterRef("pk"))))
+            # Filtro fijo: producción sólo ve el pedido especial una vez que
+            # mesa de control ya lo clasificó y confirmó la fecha (mismo
+            # criterio de "gate" que el onboarding de OB/OR/OCM con
+            # programacion_conf) -- antes de eso, no hay compromiso de
+            # entrega real sobre el que producción pueda planear.
+            .filter(clasificacion__isnull=False, fecha_confirmacion__isnull=False)
             .only("id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "empresa")
             .order_by("-fecha_confirmacion", "-id")
         )
