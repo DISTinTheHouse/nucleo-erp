@@ -81,10 +81,13 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'gran_total',
             'a_cuenta',
             'observaciones',
+            'motivo_cancelacion',
             'activo',
             'created_at',
             'updated_at',
         ]
+        # Solo lo escribe la acción ``cancelar``.
+        read_only_fields = ['motivo_cancelacion']
         extra_kwargs = {
             'folio': {'required': False, 'allow_null': True},
             'solicitud_compra': {'required': False, 'allow_null': True},

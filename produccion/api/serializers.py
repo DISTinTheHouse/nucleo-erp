@@ -2013,9 +2013,9 @@ class OrdenesCorteMangaRetrieveSerializer(OrdenesCorteMangaSerializer):
 
 
 # --- Pedidos con produccion especial (muestras) para el modulo de produccion ---
-# ``requiere_produccion`` en PedidoDetalleTalla ya es el flag canonico (lo pone
-# ventas/utils/helpers.py cuando la linea trae producto_nombre_externo, i.e.
-# una muestra sin SKU de catalogo). Aqui solo se lee, no se recalcula.
+# Una linea es especial si trae producto_nombre_externo (muestra sin SKU de
+# catalogo); la seleccion vive en ``produccion.api.views._detalles_especiales_qs``.
+# Aqui solo se serializa lo que la vista ya filtro.
 
 class PedidoEspecialListSerializer(serializers.ModelSerializer):
     """Listado ligero: solo lo necesario para que produccion elija cual abrir."""
@@ -2047,8 +2047,8 @@ class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
 
 class PedidoDetalleEspecialSerializer(serializers.ModelSerializer):
     color_nombre = serializers.SerializerMethodField()
-    # Llenado en la vista via Prefetch(..., to_attr="tallas_especiales"): solo
-    # las tallas con requiere_produccion=True de esta linea, no todas.
+    # Llenado en la vista via Prefetch(..., to_attr="tallas_especiales"): todas
+    # las tallas de la linea especial.
     tallas = PedidoDetalleTallaEspecialSerializer(source="tallas_especiales", many=True, read_only=True)
 
     class Meta:

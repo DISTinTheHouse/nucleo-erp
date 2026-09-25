@@ -3689,3 +3689,116 @@ class PedidoEspecialViewSetTests(TestCase):
         )
         self.assertNotIn(pedido_b.pk, self._ids_listado())
         self.assertEqual(self._client().get(f"{self.URL}{pedido_b.pk}/").status_code, 404)
+
+
+class PedidosEspecialesPorNombreExternoTests(TestCase):
+    """``/produccion/pedidos-especiales/`` se deriva de ``producto_nombre_externo``.
+
+    No del flag guardado ``requiere_produccion``: autorizar/aceptar-cambios/
+    recomprar lo copian tal cual desde la cotizacion y se desincroniza, asi
+    que una muestra con el flag en False desaparecia del endpoint.
+    """
+
+    URL = "/api/v1/produccion/pedidos-especiales/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTY", nombre="Monterrey"
+        )
+        cls.usuario = Usuario.objects.create(
+            username="produccion", email="produccion@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.otra_empresa = Empresa.objects.create(codigo="otra", razon_social="OTRA SA")
+        cls.otra_sucursal = Sucursal.objects.create(
+            empresa=cls.otra_empresa, codigo="GDL", nombre="Guadalajara"
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.otro_cliente = Cliente.objects.create(empresa=cls.otra_empresa, nombre="Cliente 2")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla_ch = Talla.objects.create(nombre="CH")
+        cls.talla_m = Talla.objects.create(nombre="M")
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.usuario)
+
+    def _pedido(self, empresa=None, sucursal=None, cliente=None):
+        # clasificacion/fecha_confirmacion puestos por default: estos tests
+        # ejercitan la derivación por ``producto_nombre_externo``, no el gate
+        # de mesa de control (ver ``PedidoEspecialViewSetTests`` para ese otro
+        # filtro) -- sin esto, ningún pedido de aquí aparecería nunca.
+        return Pedido.objects.create(
+            empresa=empresa or self.empresa, sucursal=sucursal or self.sucursal,
+            cliente=cliente or self.cliente, moneda=self.moneda,
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE",
+            uso_cfdi="G03", clasificacion="B", fecha_confirmacion=timezone.now(),
+        )
+
+    def _linea(self, pedido, nombre, requiere_produccion, tallas=None, producto=None):
+        detalle = PedidoDetalle.objects.create(
+            pedido=pedido, producto=producto, producto_nombre_externo=nombre
+        )
+        for talla in tallas or [self.talla_ch]:
+            PedidoDetalleTalla.objects.create(
+                pedido_detalle=detalle, talla=talla, cantidad=5,
+                requiere_produccion=requiere_produccion,
+            )
+        return detalle
+
+    def _ids_listado(self):
+        resp = self.client.get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        return {p["id"] for p in resp.json()}
+
+    def test_muestra_con_flag_desincronizado_aparece_con_sus_tallas(self):
+        pedido = self._pedido()
+        detalle = self._linea(
+            pedido, "Muestra cliente", requiere_produccion=False,
+            tallas=[self.talla_ch, self.talla_m],
+        )
+
+        self.assertIn(pedido.pk, self._ids_listado())
+
+        resp = self.client.get(f"{self.URL}{pedido.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        detalles = resp.json()["detalles"]
+        self.assertEqual([d["id"] for d in detalles], [detalle.pk])
+        self.assertEqual(detalles[0]["producto_nombre_externo"], "Muestra cliente")
+        self.assertEqual([t["talla_nombre"] for t in detalles[0]["tallas"]], ["CH", "M"])
+
+    def test_flag_en_true_sin_nombre_no_aparece(self):
+        sin_nombre = self._pedido()
+        self._linea(sin_nombre, None, requiere_produccion=True, producto=self.producto)
+        vacio = self._pedido()
+        self._linea(vacio, "", requiere_produccion=True, producto=self.producto)
+
+        ids = self._ids_listado()
+
+        self.assertNotIn(sin_nombre.pk, ids)
+        self.assertNotIn(vacio.pk, ids)
+        self.assertEqual(self.client.get(f"{self.URL}{vacio.pk}/").status_code, 404)
+
+    def test_pedido_mixto_solo_expone_las_lineas_de_muestra(self):
+        pedido = self._pedido()
+        self._linea(pedido, None, requiere_produccion=False, producto=self.producto)
+        self._linea(pedido, "", requiere_produccion=False, producto=self.producto)
+        muestra = self._linea(pedido, "Muestra", requiere_produccion=False)
+
+        resp = self.client.get(f"{self.URL}{pedido.pk}/")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([d["id"] for d in resp.json()["detalles"]], [muestra.pk])
+
+    def test_muestra_de_otra_empresa_no_se_ve(self):
+        ajeno = self._pedido(
+            empresa=self.otra_empresa, sucursal=self.otra_sucursal, cliente=self.otro_cliente
+        )
+        self._linea(ajeno, "Muestra ajena", requiere_produccion=True)
+
+        self.assertNotIn(ajeno.pk, self._ids_listado())
+        self.assertEqual(self.client.get(f"{self.URL}{ajeno.pk}/").status_code, 404)

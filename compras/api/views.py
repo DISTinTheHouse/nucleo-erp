@@ -1,17 +1,22 @@
+import ipaddress
 import logging
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Prefetch, Q, Sum
+from django.db.models import Count, Prefetch, Q, Sum
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Producto
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+from finanzas.models import FacturaProveedor
 from compras.api.serializers import (
     OrdenCompraOnboardingSerializer,
     OrdenCompraRetrieveSerializer,
@@ -30,15 +35,57 @@ from inventarios.models import (
     MovimientoInventarioDetalle,
     Ubicacion,
 )
+from nucleo.middleware import get_client_ip
 from nucleo.models import Moneda, SerieFolio, Sucursal
 from produccion.models import OrdenProduccion, OrdenProduccionDetalle
 from terceros.models import Proveedor, Transportista
 
 logger = logging.getLogger(__name__)
 
+
+def _ip_auditoria(request):
+    """IP del cliente válida para ``AuditoriaEvento.ip``, o ``None``.
+
+    La columna es ``inet`` en Postgres: guardar el ``X-Forwarded-For`` crudo
+    (una cadena de proxies, un valor inventado por el cliente o un
+    ``REMOTE_ADDR`` vacío) hacía fallar el INSERT y, con él, toda la
+    transacción que auditaba. ``get_client_ip`` ya toma el primer salto, pero
+    no valida que sea una IP.
+    """
+    try:
+        return str(ipaddress.ip_address(get_client_ip(request)))
+    except ValueError:
+        return None
+
 class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = OrdenCompra.objects.filter(activo=True)
     serializer_class = OrdenCompraSerializer
+
+    # Máquina de estados de la OC, en un solo lugar (mismo estilo que
+    # ``ComprasDashboardView.ESTATUS_*_OC``). La recepción usa
+    # ``RecepcionViewSet.ESTATUS_OC_RECIBIBLES``.
+    ESTATUS_EDITABLES_ONBOARDING = {
+        OrdenCompra.EstatusOrdenCompra.BORRADOR,
+        OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+    }
+    ESTATUS_ACEPTABLES = {
+        OrdenCompra.EstatusOrdenCompra.BORRADOR,
+        OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+    }
+    # ``update`` (PUT) edita cualquier estatus salvo estos y CANCELADA.
+    ESTATUS_CON_RECEPCIONES = {
+        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+        OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+    }
+    ESTATUS_CANCELABLES = {
+        OrdenCompra.EstatusOrdenCompra.BORRADOR,
+        OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+    }
+    ESTATUS_ELIMINABLES = {
+        OrdenCompra.EstatusOrdenCompra.BORRADOR,
+        OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+    }
 
     def get_queryset(self):
         user = self.request.user
@@ -61,60 +108,65 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         else:
             return qs.none()
         if self.action == 'retrieve':
-            recepciones_qs = (
-                Recepcion.objects.filter(
-                    activo=True,
-                    tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
-                )
-                .select_related("sucursal", "proveedor", "almacen", "transportista")
-                .prefetch_related(
-                    Prefetch(
-                        "recepciondetalle_set",
-                        queryset=RecepcionDetalle.objects.select_related(
-                            "producto",
-                            "producto_variante",
-                            "ubicacion",
-                            "ubicacion__almacen",
-                        ).order_by("id"),
-                    ),
-                    Prefetch(
-                        # ``MovimientoInventario.recepcion`` no declara
-                        # ``related_name``: el accessor inverso real es
-                        # ``movimientoinventario_set`` (sin guiones bajos).
-                        "movimientoinventario_set",
-                        # ``recepcion`` es obligatorio en el ``only``: es la
-                        # columna con la que el prefetch agrupa las filas por
-                        # recepción. Diferirla cuesta un SELECT por movimiento.
-                        queryset=MovimientoInventario.objects.filter(activo=True).only(
-                            "pk", "fecha_movimiento", "recepcion"
-                        ),
-                    ),
-                )
-                .order_by("-fecha_recepcion", "-id")
-            )
-            prefetch_list = [
-                # ``select_related("producto")`` evita el N+1 que provocaría
-                # ``producto_nombre`` en cada renglón de ``detalles``.
-                # ``order_by("id")`` (igual que el Prefetch de
-                # ``recepciondetalle_set``) da un orden estable: el modelo no
-                # define ``Meta.ordering`` y ``update``/``onboarding`` borran y
-                # recrean los renglones, así que sin esto dos GET idénticos
-                # pueden devolverlos en distinto orden.
-                Prefetch(
-                    'ordencompradetalle_set',
-                    queryset=OrdenCompraDetalle.objects.select_related('producto').order_by('id'),
-                ),
-                Prefetch("recepcion_set", queryset=recepciones_qs),
-                "facturas_proveedores",
-            ]
-            qs = qs.prefetch_related(*prefetch_list)
+            qs = self._con_prefetch_retrieve(qs)
         # Listado más reciente primero; ``-id`` como desempate estable. Es el
         # orden de las órdenes de compra en sí: el ``order_by`` de arriba es del
         # Prefetch de recepciones anidadas y solo aplica en ``retrieve``.
         return qs.order_by("-fecha_oc", "-id")
 
+    def _con_prefetch_retrieve(self, qs):
+        # Prefetch de la forma del retrieve. Lo usa también la respuesta de
+        # ``cancelar``, que devuelve esa misma forma (el de ``recepcion_set``
+        # acota a activas).
+        recepciones_qs = (
+            Recepcion.objects.filter(
+                activo=True,
+                tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
+            )
+            .select_related("sucursal", "proveedor", "almacen", "transportista")
+            .prefetch_related(
+                Prefetch(
+                    "recepciondetalle_set",
+                    queryset=RecepcionDetalle.objects.select_related(
+                        "producto",
+                        "producto_variante",
+                        "ubicacion",
+                        "ubicacion__almacen",
+                    ).order_by("id"),
+                ),
+                Prefetch(
+                    # ``MovimientoInventario.recepcion`` no declara
+                    # ``related_name``: el accessor inverso real es
+                    # ``movimientoinventario_set`` (sin guiones bajos).
+                    "movimientoinventario_set",
+                    # ``recepcion`` es obligatorio en el ``only``: es la
+                    # columna con la que el prefetch agrupa las filas por
+                    # recepción. Diferirla cuesta un SELECT por movimiento.
+                    queryset=MovimientoInventario.objects.filter(activo=True).only(
+                        "pk", "fecha_movimiento", "recepcion"
+                    ),
+                ),
+            )
+            .order_by("-fecha_recepcion", "-id")
+        )
+        prefetch_list = [
+            # ``select_related("producto")`` evita el N+1 que provocaría
+            # ``producto_nombre`` en cada renglón de ``detalles``.
+            # ``order_by("id")`` (igual que el Prefetch de
+            # ``recepciondetalle_set``) da un orden estable: el modelo no
+            # define ``Meta.ordering`` y ``update``/``onboarding`` borran y
+            # recrean los renglones, así que sin esto dos GET idénticos
+            # pueden devolverlos en distinto orden.
+            Prefetch(
+                'ordencompradetalle_set',
+                queryset=OrdenCompraDetalle.objects.select_related('producto').order_by('id'),
+            ),
+            Prefetch("recepcion_set", queryset=recepciones_qs),
+            "facturas_proveedores",
+        ]
+        return qs.prefetch_related(*prefetch_list)
     def get_serializer_class(self):
-        if self.action == 'retrieve':
+        if self.action in ('retrieve', 'cancelar'):
             return OrdenCompraRetrieveSerializer
         return OrdenCompraSerializer
 
@@ -124,6 +176,86 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = self.get_serializer(instance)
         data = filtrar_campos_contabilidad_orden_compra(serializer.data, request.user)
         return Response(data)
+
+    def _auditar_orden_compra(self, request, oc, accion, antes, despues):
+        # Mismo registro que deja la recepción (``RecepcionViewSet.onboarding``);
+        # el quién y el cuándo de una cancelación/baja viven aquí, no en la OC.
+        user = request.user
+        return AuditoriaEvento.objects.create(
+            empresa_id=oc.empresa_id,
+            usuario=user if getattr(user, "pk", None) else None,
+            modulo="compras",
+            accion=accion,
+            tabla=OrdenCompra._meta.db_table,
+            id_registro=str(oc.pk),
+            antes_json=antes,
+            despues_json=despues,
+            ip=_ip_auditoria(request),
+            user_agent=request.META.get("HTTP_USER_AGENT"),
+        )
+
+    @action(detail=True, methods=["post"], url_path="cancelar")
+    def cancelar(self, request, pk=None):
+        """Anula ante el proveedor una OC que aún no tiene nada recibido ni facturado.
+
+        A diferencia del DELETE (baja por error de captura), la OC cancelada se
+        queda visible (``activo`` sigue en True) y CANCELADA es terminal.
+        """
+        from compras.services.orden_compra_view_service import filtrar_campos_contabilidad_orden_compra
+
+        # ``get_object`` acota por ``user.empresa``: la OC de otra empresa es 404.
+        oc = self.get_object()
+        motivo = request.data.get("motivo_cancelacion")
+        if not isinstance(motivo, str) or not motivo.strip():
+            raise ValidationError({"motivo_cancelacion": "El motivo de cancelación es requerido."})
+        motivo = motivo.strip()
+
+        with transaction.atomic():
+            # Todo se decide con la fila bloqueada: una recepción concurrente
+            # toma este mismo lock (``RecepcionViewSet.onboarding``), así que o
+            # la recepción ya existe al leerla aquí, o espera y ve CANCELADA.
+            oc = OrdenCompra.objects.select_for_update().filter(pk=oc.pk, activo=True).first()
+            if oc is None:
+                raise NotFound("Orden de compra no encontrada.")
+            if oc.estatus not in self.ESTATUS_CANCELABLES:
+                raise ValidationError({"estatus": "La orden ya no puede cancelarse."})
+            # Se revisan los registros reales, no solo el estatus: una recepción o
+            # factura viva bloquea aunque el estatus diga que no hay nada recibido.
+            # "Activa" es el mismo criterio que ``_cantidad_recibida_oc``.
+            recepciones_activas = Recepcion.objects.filter(orden_compra=oc, activo=True).exclude(
+                estatus=Recepcion.EstatusRecepcion.CANCELADA
+            )
+            if recepciones_activas.exists():
+                raise ValidationError(
+                    {"recepciones": "La orden tiene recepciones registradas y no puede cancelarse."}
+                )
+            # Cuenta cualquier factura no cancelada, dada de baja (``activo``) o
+            # no: la baja no cancela la CxP que genera una factura Registrada.
+            facturas_vivas = FacturaProveedor.objects.filter(oc=oc).exclude(
+                estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA
+            )
+            if facturas_vivas.exists():
+                raise ValidationError(
+                    {"facturas_proveedores": "La orden tiene facturas de proveedor sin cancelar y no puede cancelarse."}
+                )
+
+            antes = {"estatus": oc.estatus, "motivo_cancelacion": oc.motivo_cancelacion}
+            oc.estatus = OrdenCompra.EstatusOrdenCompra.CANCELADA
+            oc.motivo_cancelacion = motivo
+            oc.save(update_fields=["estatus", "motivo_cancelacion", "updated_at"])
+            self._auditar_orden_compra(
+                request,
+                oc,
+                "CANCELAR",
+                antes,
+                {"estatus": oc.estatus, "motivo_cancelacion": oc.motivo_cancelacion},
+            )
+
+        # El ``get_object`` de arriba va sin prefetch (solo acota empresa/404);
+        # la forma del retrieve se carga una sola vez, ya con la OC cancelada.
+        instance = self._con_prefetch_retrieve(self.get_queryset()).get(pk=oc.pk)
+        data = filtrar_campos_contabilidad_orden_compra(self.get_serializer(instance).data, request.user)
+        return Response(data, status=status.HTTP_200_OK)
 
     def _asignar_folio_oc(self, instance, empresa):
         serie_folio = SerieFolio.objects.filter(
@@ -341,10 +473,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                     raise ValidationError({"orden_compra_id": "Orden de compra no encontrada."})
                 if empresa and oc.empresa_id != empresa.pk:
                     raise ValidationError({"orden_compra_id": "No tienes acceso a esta orden de compra."})
-                if oc.estatus not in {
-                    OrdenCompra.EstatusOrdenCompra.BORRADOR,
-                    OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
-                }:
+                if oc.estatus not in self.ESTATUS_EDITABLES_ONBOARDING:
                     raise ValidationError({"estatus": "La orden ya no puede editarse."})
             else:
                 oc = OrdenCompra()
@@ -445,24 +574,27 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         # esta guarda no cambia nada; se cierra para que no dependa de ello.
         if empresa is None or oc.empresa_id != empresa.pk:
             raise ValidationError({"orden_compra_id": "No tienes acceso a esta orden de compra."})
-        if oc.estatus not in {
-            OrdenCompra.EstatusOrdenCompra.BORRADOR,
-            OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
-        }:
-            raise ValidationError({"estatus": "La orden ya no puede aceptarse."})
         body_proveedor_id = request.data.get("proveedor") or request.data.get("proveedor_id")
         try:
             body_proveedor_id = int(body_proveedor_id) if body_proveedor_id not in (None, "") else None
         except Exception:
             body_proveedor_id = None
-        # Antes de la primera escritura (folio y ``oc.save()``).
-        self._validar_encabezado_empresa(oc.empresa, proveedor_id=body_proveedor_id)
-
-        if OrdenCompraDetalle.objects.filter(orden_compra=oc).count() <= 0:
-            raise ValidationError({"detalle": "Agrega al menos un producto antes de aceptar."})
 
         with transaction.atomic():
-            oc = OrdenCompra.objects.select_for_update().filter(pk=oc.pk).first()
+            # Estatus y renglones se validan con la fila bloqueada y releída: leídos
+            # antes del lock, una cancelación o edición concurrente pasaba el guard
+            # y la aceptación la sobrescribía (p. ej. revivía una OC CANCELADA).
+            oc = OrdenCompra.objects.select_for_update().filter(pk=oc.pk, activo=True).first()
+            if oc is None:
+                raise NotFound("Orden de compra no encontrada.")
+            if oc.estatus not in self.ESTATUS_ACEPTABLES:
+                raise ValidationError({"estatus": "La orden ya no puede aceptarse."})
+            # Antes de la primera escritura (folio y ``oc.save()``).
+            self._validar_encabezado_empresa(oc.empresa, proveedor_id=body_proveedor_id)
+
+            if not OrdenCompraDetalle.objects.filter(orden_compra=oc).exists():
+                raise ValidationError({"detalle": "Agrega al menos un producto antes de aceptar."})
+
             if body_proveedor_id:
                 oc.proveedor_id = body_proveedor_id
             if not oc.proveedor_id:
@@ -499,13 +631,31 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            if oc.estatus in {
-                OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
-                OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
-                OrdenCompra.EstatusOrdenCompra.RECIBIDA,
-            }:
+            # Una OC autorizada SÍ puede editarse: el único corte real es que ya
+            # tenga recepciones (folio de recepción) contra ella, no el que esté
+            # autorizada. Editarla la regresa a POR_AUTORIZAR (abajo) para que se
+            # vuelva a aceptar. CANCELADA es terminal: editarla la revivía como
+            # POR_AUTORIZAR.
+            if oc.estatus == OrdenCompra.EstatusOrdenCompra.CANCELADA:
                 raise ValidationError(
-                    {"estatus": "Una orden autorizada o recibida no puede ser modificada."}
+                    {"estatus": "La orden está cancelada y no puede modificarse."}
+                )
+            if oc.estatus in self.ESTATUS_CON_RECEPCIONES:
+                raise ValidationError(
+                    {"estatus": "La orden ya tiene recepciones registradas y no puede modificarse."}
+                )
+            # Además de lo que diga el estatus (el admin lo puede regresar a <= 3):
+            # reemplazar los renglones borra ``OrdenCompraDetalle`` y en cascada los
+            # ``RecepcionDetalle``/``FacturaProveedorDetalle`` que cuelgan de ellos,
+            # sin importar el estatus de su recepción o factura. Mismo criterio
+            # estricto que ``destroy``.
+            if Recepcion.objects.filter(orden_compra=oc).exists():
+                raise ValidationError(
+                    {"recepciones": "La orden tiene recepciones registradas y no puede modificarse."}
+                )
+            if FacturaProveedor.objects.filter(oc=oc).exists():
+                raise ValidationError(
+                    {"facturas_proveedores": "La orden tiene facturas de proveedor y no puede modificarse."}
                 )
 
             has_sucursal = "sucursal" in header
@@ -589,16 +739,48 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         user = request.user
         empresa = getattr(user, "empresa", None)
 
-        oc = (
-            OrdenCompra.objects.filter(pk=pk, empresa=empresa, activo=True).first()
-        )
-        if not oc:
-            return Response(
-                {"detail": "Orden de compra no encontrada."},
-                status=status.HTTP_404_NOT_FOUND,
+        # Baja por error de captura, no cancelación (esa es ``cancelar``): solo
+        # procede sobre una OC que nunca llegó a comprometer nada con el
+        # proveedor. Cualquier recepción o factura, aun cancelada, prueba que la
+        # orden sí existió y debe quedar visible.
+        with transaction.atomic():
+            oc = (
+                OrdenCompra.objects.select_for_update()
+                .filter(pk=pk, empresa=empresa, activo=True)
+                .first()
             )
+            if not oc:
+                return Response(
+                    {"detail": "Orden de compra no encontrada."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            if oc.estatus not in self.ESTATUS_ELIMINABLES:
+                raise ValidationError(
+                    {"estatus": "Solo se puede eliminar una orden en borrador o pendiente de confirmar."}
+                )
+            if Recepcion.objects.filter(orden_compra=oc).exists():
+                raise ValidationError(
+                    {"recepciones": "La orden tiene recepciones registradas y no puede eliminarse."}
+                )
+            if FacturaProveedor.objects.filter(oc=oc).exists():
+                raise ValidationError(
+                    {"facturas_proveedores": "La orden tiene facturas de proveedor y no puede eliminarse."}
+                )
 
-        oc.soft_delete()
+            # Baja lógica a mano en vez de ``soft_delete()``: ese guarda solo
+            # ``activo`` y ``auto_now`` no toca ``updated_at`` si no va en
+            # ``update_fields``, como sí en las demás escrituras del viewset.
+            # Replica a propósito ``StatusLifecycleModel.soft_delete()`` solo para
+            # sumar ``updated_at``: si ``soft_delete()`` cambia, mantener esto igual.
+            oc.activo = False
+            oc.save(update_fields=["activo", "updated_at"])
+            self._auditar_orden_compra(
+                request,
+                oc,
+                "DELETE",
+                {"estatus": oc.estatus, "activo": True},
+                {"estatus": oc.estatus, "activo": False},
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
@@ -614,6 +796,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     )
     serializer_class = RecepcionSerializer
     http_method_names = ["get", "post"]
+
+    # Estatus de OC contra los que se puede recibir (onboarding GET y POST).
+    ESTATUS_OC_RECIBIBLES = {
+        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+    }
 
     def get_queryset(self):
         user = self.request.user
@@ -891,10 +1079,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         ordenes_qs = (
             OrdenCompra.objects.filter(
                 activo=True,
-                estatus__in=[
-                    OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
-                    OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
-                ],
+                estatus__in=self.ESTATUS_OC_RECIBIBLES,
             )
             .select_related("proveedor", "sucursal")
             .order_by("-updated_at", "-id")
@@ -1162,10 +1347,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         raise ValidationError({"orden_compra": "Orden de compra no encontrada."})
                     if empresa and oc.empresa_id != empresa.pk:
                         raise ValidationError({"orden_compra": "No tienes acceso a esta orden de compra."})
-                    if oc.estatus not in {
-                        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
-                        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
-                    }:
+                    if oc.estatus not in self.ESTATUS_OC_RECIBIBLES:
                         raise ValidationError({"estatus": "La orden de compra no está disponible para recepción."})
                     if not oc.proveedor_id:
                         raise ValidationError({"proveedor": "La orden de compra no tiene proveedor asignado."})
@@ -1397,7 +1579,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     op.fecha_fin = op.fecha_fin or timezone.now()
                     op.save(update_fields=["estatus_op", "fecha_fin"])
 
-                ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
+                ip = _ip_auditoria(request)
                 ua = request.META.get("HTTP_USER_AGENT")
                 ev = AuditoriaEvento.objects.create(
                     empresa=empresa_origen,
@@ -1447,3 +1629,172 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 getattr(exc, "detail", exc),
             )
             raise
+
+
+class ComprasDashboardView(APIView):
+    # KPIs para agente de compras / mesa directiva. Todo por agregación en DB
+    # (values().annotate() / aggregate()) — nunca se itera OrdenCompra/Recepcion
+    # fila por fila. Ver DOCS/api/DOCUMENTACION_API.md, sección Dashboard.
+    ESTATUS_GASTO_OC = [
+        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+        OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+    ]
+    ESTATUS_CERRADOS_OC = {
+        OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+        OrdenCompra.EstatusOrdenCompra.CANCELADA,
+    }
+
+    def get(self, request):
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        if not empresa and not getattr(user, "is_superuser", False):
+            return Response(self._vacio())
+
+        dias = request.query_params.get("dias", "7")
+        try:
+            dias = max(1, min(int(dias), 90))
+        except (TypeError, ValueError):
+            raise ValidationError({"dias": "Debe ser un entero."})
+
+        desde = self._parse_fecha(request.query_params.get("desde"), "desde")
+        hasta = self._parse_fecha(request.query_params.get("hasta"), "hasta")
+
+        oc_base = OrdenCompra.objects.filter(activo=True)
+        rec_base = Recepcion.objects.filter(activo=True)
+        if not getattr(user, "is_superuser", False):
+            oc_base = oc_base.filter(empresa=empresa)
+            rec_base = rec_base.filter(empresa=empresa)
+
+        data = {
+            "generado_en": timezone.now(),
+            "filtros": {"dias_por_vencer": dias, "desde": desde, "hasta": hasta},
+        }
+        data.update(self._ordenes_por_estatus(oc_base))
+        data.update(self._vencimientos(oc_base, dias))
+        data.update(self._recepciones(rec_base))
+        data.update(self._gasto(oc_base, desde, hasta))
+        return Response(data)
+
+    def _vacio(self):
+        return {
+            "generado_en": timezone.now(),
+            "filtros": None,
+            "ordenes_por_estatus": [],
+            "ordenes_vencidas": 0,
+            "ordenes_por_vencer": 0,
+            "recepciones_por_estatus": [],
+            "recepciones_por_origen": [],
+            "gasto_por_moneda": [],
+            "top_proveedores": [],
+        }
+
+    def _parse_fecha(self, raw, campo):
+        if not raw:
+            return None
+        fecha = parse_date(raw)
+        if not fecha:
+            raise ValidationError({campo: "Formato inválido, usa YYYY-MM-DD."})
+        return fecha
+
+    def _ordenes_por_estatus(self, oc_base):
+        labels = dict(OrdenCompra.EstatusOrdenCompra.choices)
+        rows = oc_base.values("estatus").annotate(total=Count("id")).order_by("estatus")
+        return {
+            "ordenes_por_estatus": [
+                {
+                    "estatus": r["estatus"],
+                    "estatus_label": labels.get(r["estatus"], str(r["estatus"])),
+                    "total": r["total"],
+                }
+                for r in rows
+            ]
+        }
+
+    def _vencimientos(self, oc_base, dias):
+        hoy = timezone.now().date()
+        limite = hoy + timedelta(days=dias)
+        agg = oc_base.exclude(estatus__in=self.ESTATUS_CERRADOS_OC).aggregate(
+            vencidas=Count("id", filter=Q(fecha_vencimiento__lt=hoy)),
+            por_vencer=Count(
+                "id", filter=Q(fecha_vencimiento__gte=hoy, fecha_vencimiento__lte=limite)
+            ),
+        )
+        return {
+            "ordenes_vencidas": agg["vencidas"] or 0,
+            "ordenes_por_vencer": agg["por_vencer"] or 0,
+        }
+
+    def _recepciones(self, rec_base):
+        rows = list(rec_base.values("estatus", "tipo_origen").annotate(total=Count("id")))
+        estatus_labels = dict(Recepcion.EstatusRecepcion.choices)
+        origen_labels = dict(Recepcion.TipoOrigen.choices)
+
+        por_estatus = {}
+        por_origen = {}
+        for r in rows:
+            e = r["estatus"]
+            fila = por_estatus.setdefault(
+                e, {"estatus": e, "estatus_label": estatus_labels.get(e, str(e)), "total": 0}
+            )
+            fila["total"] += r["total"]
+
+            o = r["tipo_origen"]
+            fila_o = por_origen.setdefault(
+                o, {"tipo_origen": o, "tipo_origen_label": origen_labels.get(o, o), "total": 0}
+            )
+            fila_o["total"] += r["total"]
+
+        return {
+            "recepciones_por_estatus": sorted(por_estatus.values(), key=lambda x: x["estatus"]),
+            "recepciones_por_origen": list(por_origen.values()),
+        }
+
+    def _gasto(self, oc_base, desde, hasta):
+        # Se agrupa por (moneda, proveedor) en UNA sola query y se reduce en
+        # Python a dos vistas (por moneda / por proveedor): sumar gran_total
+        # de OCs en distintas monedas sin separar por moneda mezclaría
+        # importes que no son comparables.
+        qs = oc_base.filter(estatus__in=self.ESTATUS_GASTO_OC)
+        if desde:
+            qs = qs.filter(fecha_oc__gte=desde)
+        if hasta:
+            qs = qs.filter(fecha_oc__lte=hasta)
+
+        rows = list(
+            qs.values("moneda__codigo_iso", "proveedor_id", "proveedor__nombre").annotate(
+                total=Sum("gran_total"), ocs=Count("id")
+            )
+        )
+
+        por_moneda = {}
+        por_proveedor = {}
+        for r in rows:
+            moneda = r["moneda__codigo_iso"] or "N/A"
+            total = r["total"] or Decimal("0")
+
+            fila = por_moneda.setdefault(
+                moneda, {"moneda_codigo": moneda, "total": Decimal("0"), "ordenes": 0}
+            )
+            fila["total"] += total
+            fila["ordenes"] += r["ocs"]
+
+            pid = r["proveedor_id"]
+            if pid is not None:
+                fila_p = por_proveedor.setdefault(
+                    pid,
+                    {
+                        "proveedor_id": pid,
+                        "proveedor_nombre": r["proveedor__nombre"],
+                        "total": Decimal("0"),
+                        "ordenes": 0,
+                    },
+                )
+                fila_p["total"] += total
+                fila_p["ordenes"] += r["ocs"]
+
+        top_proveedores = sorted(por_proveedor.values(), key=lambda x: x["total"], reverse=True)[:5]
+        return {
+            "gasto_por_moneda": [{**m, "total": str(m["total"])} for m in por_moneda.values()],
+            "top_proveedores": [{**p, "total": str(p["total"])} for p in top_proveedores],
+        }
