@@ -18,6 +18,7 @@ from decimal import Decimal
 from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
@@ -3594,3 +3595,97 @@ class ConsumoOPMovimientoVarianteTests(TestCase):
         ex_sin_var.refresh_from_db()
         ex_var.refresh_from_db()
         self.assertEqual((ex_sin_var.cantidad, ex_var.cantidad), (Decimal("0"), Decimal("2")))
+
+
+class PedidoEspecialViewSetTests(TestCase):
+    """``GET /pedidos-especiales/``: sólo pedidos con línea especial YA
+
+    clasificados y con fecha de confirmación -- antes de eso mesa de control
+    todavía no define un compromiso de entrega real sobre el que producción
+    pueda planear el alta del SKU/variante.
+    """
+
+    URL = "/api/v1/produccion/pedidos-especiales/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-pe", razon_social="acme-pe SA")
+        cls.empresa_b = Empresa.objects.create(codigo="globex-pe", razon_social="globex-pe SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Matriz")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.empresa_b, codigo="GDL", nombre="GDL")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.cliente_b = Cliente.objects.create(empresa=cls.empresa_b, nombre="Cliente B")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla = Talla.objects.create(nombre="CH")
+        cls.usuario = Usuario.objects.create(
+            username="prod", email="prod@acme-pe.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client
+
+    def _ids_listado(self):
+        body = self._client().get(self.URL).json()
+        filas = body.get("results", body) if isinstance(body, dict) else body
+        return [p["id"] for p in filas]
+
+    def _pedido_especial(self, empresa, sucursal, cliente, clasificacion=None, fecha_confirmacion=None):
+        pedido = Pedido.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=self.moneda,
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            clasificacion=clasificacion, fecha_confirmacion=fecha_confirmacion,
+        )
+        detalle = PedidoDetalle.objects.create(
+            pedido=pedido, producto_nombre_externo="Muestra especial"
+        )
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=self.talla, cantidad=5, requiere_produccion=True,
+        )
+        return pedido
+
+    def test_clasificado_y_confirmado_aparece(self):
+        pedido = self._pedido_especial(
+            self.empresa, self.sucursal, self.cliente,
+            clasificacion="B", fecha_confirmacion=timezone.now(),
+        )
+        self.assertIn(pedido.pk, self._ids_listado())
+
+    def test_sin_clasificacion_no_aparece(self):
+        pedido = self._pedido_especial(
+            self.empresa, self.sucursal, self.cliente,
+            clasificacion=None, fecha_confirmacion=timezone.now(),
+        )
+        self.assertNotIn(pedido.pk, self._ids_listado())
+        self.assertEqual(self._client().get(f"{self.URL}{pedido.pk}/").status_code, 404)
+
+    def test_sin_fecha_confirmacion_no_aparece(self):
+        pedido = self._pedido_especial(
+            self.empresa, self.sucursal, self.cliente,
+            clasificacion="B", fecha_confirmacion=None,
+        )
+        self.assertNotIn(pedido.pk, self._ids_listado())
+
+    def test_pedido_sin_linea_especial_no_aparece_aunque_este_confirmado(self):
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            clasificacion="B", fecha_confirmacion=timezone.now(),
+        )
+        detalle = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
+        PedidoDetalleTalla.objects.create(pedido_detalle=detalle, talla=self.talla, cantidad=5)
+
+        self.assertNotIn(pedido.pk, self._ids_listado())
+
+    def test_otra_empresa_no_aparece(self):
+        pedido_b = self._pedido_especial(
+            self.empresa_b, self.sucursal_b, self.cliente_b,
+            clasificacion="B", fecha_confirmacion=timezone.now(),
+        )
+        self.assertNotIn(pedido_b.pk, self._ids_listado())
+        self.assertEqual(self._client().get(f"{self.URL}{pedido_b.pk}/").status_code, 404)
