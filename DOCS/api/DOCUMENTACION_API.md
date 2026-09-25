@@ -2858,18 +2858,26 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 {
   "empresa": 1,
   "sucursal": 1,
+  "pedido": 45,
   "prioridad": 1,
   "observaciones": "OP de prueba",
   "orden_produccion_detalle": [
     {
       "producto_variante_id": 15,
-      "cantidad": "3.0000",
+      "cantidad": "3.00",
       "unidad": 1,
       "observaciones": ""
     }
   ]
 }
 ```
+
+- **`pedido`: opcional**, pero si se envía se valida (`400` si falla, no crea nada):
+  - Debe pertenecer a la empresa del usuario.
+  - Debe ser un pedido de **producción especial** (al menos una línea con `producto_nombre_externo` — mismo criterio que filtra `GET /pedidos-especiales/`, de donde el frontend debe sacar el picker en vez de listar todos los pedidos).
+  - Debe tener **`clasificacion` y `fecha_confirmacion`** ya puestos por mesa de control.
+  - Ejemplo de rechazo: `400 {"pedido": "El pedido no tiene ninguna línea de producción especial (muestra)."}` o `400 {"pedido": "El pedido debe estar clasificado y con fecha de confirmación antes de ligarlo a una OP."}`.
+  - Omitir `pedido` por completo sigue funcionando igual que siempre (OP sin ligar a ningún pedido).
 
 **Respuesta (resumen)**
 

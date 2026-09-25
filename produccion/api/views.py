@@ -438,6 +438,24 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        # ``pedido`` es opcional en OP, pero si viene debe ser un pedido de
+        # producción especial (muestra) ya clasificado y confirmado — mismo
+        # criterio que filtra ``GET /pedidos-especiales/`` (de donde el
+        # frontend debe sacar el picker). Sin esto, cualquier pedido_id se
+        # colaba aunque el selector ya lo filtrara.
+        pedido = serializer.validated_data.get('pedido')
+        if pedido is not None:
+            if pedido.empresa_id != empresa.pk:
+                raise ValidationError({'pedido': 'El pedido no pertenece a esta empresa.'})
+            if not _detalles_especiales_qs().filter(pedido=pedido).exists():
+                raise ValidationError({
+                    'pedido': 'El pedido no tiene ninguna línea de producción especial (muestra).'
+                })
+            if not pedido.clasificacion or not pedido.fecha_confirmacion:
+                raise ValidationError({
+                    'pedido': 'El pedido debe estar clasificado y con fecha de confirmación antes de ligarlo a una OP.'
+                })
+
         with transaction.atomic():
             for detalle in serializer.validated_data.get('orden_produccion_detalle', []):
                 producto_variante = detalle.get('producto_variante')

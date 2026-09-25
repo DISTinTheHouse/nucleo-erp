@@ -24,10 +24,12 @@ from rest_framework.test import APIClient
 
 from catalogo.models import Color, Producto, ProductoVariante, Talla
 from inventarios.models import Almacen, Existencia, MovimientoInventarioDetalle, Ubicacion
-from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal
+from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal, UnidadMedida
 from produccion.models import (
+    BomDetalle,
     BordadoAvances,
     BordadoIncidencias,
+    ListaMaterialBom,
     OrdenBordadoDetalle,
     OrdenesBordado,
     OrdenCorteMangaDetalle,
@@ -3802,3 +3804,130 @@ class PedidosEspecialesPorNombreExternoTests(TestCase):
 
         self.assertNotIn(ajeno.pk, self._ids_listado())
         self.assertEqual(self.client.get(f"{self.URL}{ajeno.pk}/").status_code, 404)
+
+
+class OrdenProduccionPedidoOpcionalTests(TestCase):
+    """``POST /orden-produccion/``: ``pedido`` es opcional, pero si viene debe
+
+    ser un pedido de producción especial (muestra) ya clasificado y con fecha
+    de confirmación — mismo criterio que filtra ``GET /pedidos-especiales/``,
+    aquí como validación dura del lado servidor (el picker del frontend no es
+    suficiente: sin esto, cualquier pedido_id se colaba).
+    """
+
+    URL = "/api/v1/produccion/orden-produccion/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-op", razon_social="acme-op SA")
+        cls.otra_empresa = Empresa.objects.create(codigo="otra-op", razon_social="otra-op SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Matriz")
+        cls.otra_sucursal = Sucursal.objects.create(
+            empresa=cls.otra_empresa, codigo="GDL", nombre="GDL"
+        )
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal,
+            tipo_documento="ORDEN_PRODUCCION", serie="OP",
+        )
+        cls.usuario = Usuario.objects.create(
+            username="op-user", email="op-user@acme-op.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.otro_cliente = Cliente.objects.create(empresa=cls.otra_empresa, nombre="Cliente 2")
+
+        # Producto terminado + BOM + insumo con existencia suficiente, para
+        # que la creación de la OP (sin pedido) llegue hasta el final.
+        color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.variante = ProductoVariante.objects.create(
+            producto=cls.producto, empresa=cls.empresa, color=color, sku="PLA-NEG", precio_base="100",
+        )
+        cls.unidad = UnidadMedida.objects.create(clave="PZA", nombre="Pieza")
+        cls.componente = Producto.objects.create(empresa=cls.empresa, nombre="Tela")
+        cls.bom = ListaMaterialBom.objects.create(
+            empresa=cls.empresa, producto_variante=cls.variante, activo=True,
+        )
+        BomDetalle.objects.create(
+            bom=cls.bom, componente=cls.componente, cantidad=1, unidad=cls.unidad,
+        )
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM1", nombre="Principal",
+        )
+        Existencia.objects.create(almacen=cls.almacen, producto=cls.componente, cantidad=100)
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client
+
+    def _body(self, pedido=None):
+        body = {
+            "empresa": self.empresa.pk,
+            "sucursal": self.sucursal.pk,
+            "orden_produccion_detalle": [
+                {"producto_variante_id": self.variante.pk, "cantidad": "3.00", "unidad": self.unidad.pk}
+            ],
+        }
+        if pedido is not None:
+            body["pedido"] = pedido.pk
+        return body
+
+    def _pedido_muestra(self, empresa=None, sucursal=None, cliente=None, clasificacion="B", fecha_confirmacion="__default__"):
+        if fecha_confirmacion == "__default__":
+            fecha_confirmacion = timezone.now()
+        pedido = Pedido.objects.create(
+            empresa=empresa or self.empresa, sucursal=sucursal or self.sucursal,
+            cliente=cliente or self.cliente, moneda=self.moneda,
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            clasificacion=clasificacion, fecha_confirmacion=fecha_confirmacion,
+        )
+        PedidoDetalle.objects.create(pedido=pedido, producto_nombre_externo="Muestra especial")
+        return pedido
+
+    def test_sin_pedido_sigue_funcionando(self):
+        resp = self._client().post(self.URL, self._body(), format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_pedido_de_produccion_especial_confirmado_permite_crear(self):
+        pedido = self._pedido_muestra()
+        resp = self._client().post(self.URL, self._body(pedido), format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        op = OrdenProduccion.objects.get(pk=resp.data["op_id"])
+        self.assertEqual(op.pedido_id, pedido.pk)
+
+    def test_pedido_sin_muestra_rechaza(self):
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            clasificacion="B", fecha_confirmacion=timezone.now(),
+        )
+        PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
+
+        resp = self._client().post(self.URL, self._body(pedido), format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("pedido", resp.data)
+        self.assertFalse(OrdenProduccion.objects.filter(pedido=pedido).exists())
+
+    def test_pedido_sin_clasificar_rechaza(self):
+        pedido = self._pedido_muestra(clasificacion=None, fecha_confirmacion=timezone.now())
+        resp = self._client().post(self.URL, self._body(pedido), format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("pedido", resp.data)
+
+    def test_pedido_sin_fecha_confirmacion_rechaza(self):
+        pedido = self._pedido_muestra(clasificacion="B", fecha_confirmacion=None)
+        resp = self._client().post(self.URL, self._body(pedido), format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("pedido", resp.data)
+
+    def test_pedido_de_otra_empresa_rechaza(self):
+        pedido = self._pedido_muestra(
+            empresa=self.otra_empresa, sucursal=self.otra_sucursal, cliente=self.otro_cliente,
+        )
+        resp = self._client().post(self.URL, self._body(pedido), format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("pedido", resp.data)
