@@ -1,13 +1,13 @@
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import ProtectedError, Sum, Count, Q, F, Value, DecimalField
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from rest_framework import mixins, status, filters
+from rest_framework import filters, mixins, serializers as drf_serializers, status
 from rest_framework.decorators import action
-from rest_framework.exceptions import APIException, ValidationError
+from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -16,6 +16,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from hr.models import (
     CONTRATO_VIGENTE,
+    fecha_local,
     Puesto,
     Empleado,
     Area,
@@ -63,6 +64,32 @@ class RegistroConDependenciasError(APIException):
         "que dependen de él."
     )
     default_code = "registro_con_dependencias"
+
+
+class ChecadaYaRegistradaError(APIException):
+    """La entrada o la salida del día ya está registrada; se corrige editando el registro."""
+    status_code = status.HTTP_409_CONFLICT
+    default_code = "checada_ya_registrada"
+
+
+class ChecadaInvalidaError(APIException):
+    """400 de una checada con cuerpo ``{"detail": "<texto>"}``.
+
+    Un ``ValidationError`` de DRF envolvería el texto en una lista; las acciones
+    del checador responden ``detail`` como texto.
+    """
+    status_code = status.HTTP_400_BAD_REQUEST
+    default_code = "checada_invalida"
+
+
+MENSAJE_ENTRADA_YA_REGISTRADA = (
+    "La entrada de este empleado para esta fecha ya está registrada. "
+    "Para corregirla, edita el registro de asistencia."
+)
+MENSAJE_SALIDA_YA_REGISTRADA = (
+    "La salida de este empleado para esta fecha ya está registrada. "
+    "Para corregirla, edita el registro de asistencia."
+)
 
 
 class SoftDeleteDestroyMixin:
@@ -320,31 +347,41 @@ class AsistenciaViewSet(
             return qs.none()
         return qs.filter(empleado__empresa=empresa)
 
-    @action(detail=False, methods=['POST'])
-    def registrar_entrada(self, request):
+    def _resolver_checada(self, request):
+        """Empleado, fecha y hora de una checada; los errores se lanzan como excepciones DRF.
+
+        Común a ``registrar_entrada`` y ``registrar_salida``. El empleado se busca
+        dentro de la empresa del usuario, y la fecha local de ``hora`` tiene que
+        ser ``fecha``: una hora de otro día desfasaba el retardo y las horas.
+        """
         empleado_id = request.data.get('empleado_id')
-        if not empleado_id:
-            return Response({'empleado_id': ['Este campo es requerido.']}, status=status.HTTP_400_BAD_REQUEST)
+        if empleado_id in (None, ''):
+            raise ValidationError({'empleado_id': ['Este campo es requerido.']})
+        try:
+            # ``IntegerField`` rechaza 'abc', '3.5' y booleanos con su mensaje
+            # estándar; un ``get(pk='abc')`` lanzaba ``ValueError`` (500).
+            empleado_id = drf_serializers.IntegerField().run_validation(empleado_id)
+        except ValidationError as exc:
+            raise ValidationError({'empleado_id': exc.detail})
+
         user = request.user
         empleados_qs = Empleado.objects.all()
-        if getattr(user, "is_superuser", False):
-            pass
-        else:
+        if not getattr(user, "is_superuser", False):
             empresa = getattr(user, "empresa", None)
             if not empresa:
-                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+                raise PermissionDenied('No autorizado.')
             empleados_qs = empleados_qs.filter(empresa=empresa)
         try:
             empleado = empleados_qs.get(pk=empleado_id)
         except Empleado.DoesNotExist:
-            return Response({'detail': 'Empleado no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+            raise NotFound('Empleado no encontrado.')
 
         fecha_str = request.data.get('fecha')
         if fecha_str:
             try:
                 fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
             except ValueError:
-                return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
+                raise ChecadaInvalidaError('Formato de fecha inválido (YYYY-MM-DD).')
         else:
             fecha = timezone.localdate()
 
@@ -353,75 +390,106 @@ class AsistenciaViewSet(
             try:
                 ahora = datetime.strptime(hora_str, '%Y-%m-%d %H:%M:%S')
             except ValueError:
-                return Response({'detail': 'Formato de hora inválido (YYYY-MM-DD HH:MM:SS).'}, status=status.HTTP_400_BAD_REQUEST)
+                raise ChecadaInvalidaError('Formato de hora inválido (YYYY-MM-DD HH:MM:SS).')
+            ahora = timezone.make_aware(ahora, timezone.get_current_timezone())
         else:
             ahora = timezone.now()
+
+        fecha_de_la_hora = fecha_local(ahora)
+        if fecha_de_la_hora != fecha:
+            raise ChecadaInvalidaError(
+                f'La fecha de la hora ({fecha_de_la_hora.isoformat()}) no coincide '
+                f'con la fecha del registro ({fecha.isoformat()}).'
+            )
+        return empleado, fecha, ahora
+
+    def _asistencia_del_dia(self, empleado, fecha):
+        """Registro del empleado en ``fecha``, bloqueado hasta el fin de la transacción.
+
+        ``select_for_update`` serializa dos checadas simultáneas en Postgres
+        (SQLite lo ignora).
+        """
+        return Asistencia.objects.select_for_update().filter(empleado=empleado, fecha=fecha).first()
+
+    @action(detail=False, methods=['POST'])
+    def registrar_entrada(self, request):
+        empleado, fecha, ahora = self._resolver_checada(request)
 
         turno = empleado.turno
         if not turno:
             return Response({'detail': 'El empleado no tiene turno asignado.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        asistencia, created = Asistencia.objects.get_or_create(
-            empleado=empleado,
-            fecha=fecha,
-            defaults={'turno': turno, 'hora_entrada': ahora, 'estado': 'puntual'}
-        )
-        if not created:
-            asistencia.hora_entrada = ahora
-            asistencia.turno = turno
-        asistencia.save()
+        with transaction.atomic():
+            asistencia = self._asistencia_del_dia(empleado, fecha)
+            if asistencia is None:
+                try:
+                    # Savepoint propio: si otra petición creó el registro entre la
+                    # consulta y el INSERT, la constraint ``(empleado, fecha)``
+                    # lanza ``IntegrityError`` y la transacción sigue usable.
+                    with transaction.atomic():
+                        asistencia = Asistencia.objects.create(
+                            empleado=empleado, fecha=fecha, turno=turno, hora_entrada=ahora,
+                        )
+                except IntegrityError:
+                    # Se relee la fila rival, bloqueada, y se trata como un
+                    # registro existente: si no tiene entrada se le pone, en vez
+                    # de responder que ya estaba registrada. Consulta directa y no
+                    # ``_asistencia_del_dia``: es una segunda lectura, tras la
+                    # colisión, de una fila que ya se sabe que existe.
+                    asistencia = (
+                        Asistencia.objects.select_for_update()
+                        .filter(empleado=empleado, fecha=fecha).first()
+                    )
+                    if asistencia is None:
+                        raise
+                    self._poner_entrada(asistencia, turno, ahora)
+            else:
+                self._poner_entrada(asistencia, turno, ahora)
         serializer = self.get_serializer(asistencia)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+    def _poner_entrada(self, asistencia, turno, ahora):
+        """Pone la entrada en un registro existente del día, ya bloqueado.
+
+        Solo si aún no tiene entrada (p. ej. una falta capturada a mano); si la
+        tiene, 409. Si ya guarda una salida, la entrada debe ser anterior.
+        """
+        if asistencia.hora_entrada is not None:
+            raise ChecadaYaRegistradaError(MENSAJE_ENTRADA_YA_REGISTRADA)
+        if asistencia.hora_salida is not None and ahora >= asistencia.hora_salida:
+            raise ChecadaInvalidaError('La hora de entrada debe ser anterior a la hora de salida registrada.')
+        asistencia.hora_entrada = ahora
+        asistencia.turno = turno
+        if asistencia.estado == 'justificada':
+            # La checada libera la justificación: el estado se vuelve a derivar
+            # (``puntual`` o ``retardo``). Cualquier valor distinto de
+            # ``justificada`` lo reemplaza ``_calcular_estado_y_horas``; RH puede
+            # volver a justificar por PATCH.
+            asistencia.estado = 'falta'
+        asistencia.save()
+
     @action(detail=False, methods=['POST'])
     def registrar_salida(self, request):
-        empleado_id = request.data.get('empleado_id')
-        if not empleado_id:
-            return Response({'empleado_id': ['Este campo es requerido.']}, status=status.HTTP_400_BAD_REQUEST)
-        user = request.user
-        empleados_qs = Empleado.objects.all()
-        if getattr(user, "is_superuser", False):
-            pass
-        else:
-            empresa = getattr(user, "empresa", None)
-            if not empresa:
-                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
-            empleados_qs = empleados_qs.filter(empresa=empresa)
-        try:
-            empleado = empleados_qs.get(pk=empleado_id)
-        except Empleado.DoesNotExist:
-            return Response({'detail': 'Empleado no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        empleado, fecha, ahora = self._resolver_checada(request)
 
-        fecha_str = request.data.get('fecha')
-        if fecha_str:
-            try:
-                fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
-            except ValueError:
-                return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
-        else:
-            fecha = timezone.localdate()
-
-        hora_str = request.data.get('hora')
-        if hora_str:
-            try:
-                ahora = datetime.strptime(hora_str, '%Y-%m-%d %H:%M:%S')
-            except ValueError:
-                return Response({'detail': 'Formato de hora inválido (YYYY-MM-DD HH:MM:SS).'}, status=status.HTTP_400_BAD_REQUEST)
-        else:
-            ahora = timezone.now()
-
-        asistencias_qs = Asistencia.objects.filter(empleado=empleado, fecha=fecha)
-        if not getattr(user, "is_superuser", False):
-            empresa = getattr(user, "empresa", None)
-            if empresa:
-                asistencias_qs = asistencias_qs.filter(empleado__empresa=empresa)
-        try:
-            asistencia = asistencias_qs.get()
-        except Asistencia.DoesNotExist:
-            return Response({'detail': 'No se encontró registro de entrada para esta fecha.'}, status=status.HTTP_404_NOT_FOUND)
-
-        asistencia.hora_salida = ahora
-        asistencia.save()
+        with transaction.atomic():
+            asistencia = self._asistencia_del_dia(empleado, fecha)
+            if asistencia is None:
+                return Response({'detail': 'No se encontró registro de entrada para esta fecha.'}, status=status.HTTP_404_NOT_FOUND)
+            if asistencia.hora_entrada is None:
+                return Response(
+                    {'detail': 'No se puede registrar la salida: el registro no tiene hora de entrada.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if asistencia.hora_salida is not None:
+                raise ChecadaYaRegistradaError(MENSAJE_SALIDA_YA_REGISTRADA)
+            if ahora <= asistencia.hora_entrada:
+                return Response(
+                    {'detail': 'La hora de salida debe ser posterior a la hora de entrada.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            asistencia.hora_salida = ahora
+            asistencia.save()
         serializer = self.get_serializer(asistencia)
         return Response(serializer.data, status=status.HTTP_200_OK)
 

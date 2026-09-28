@@ -7,17 +7,20 @@ apunte ``DATABASES`` a ``django.db.backends.sqlite3`` / ``:memory:``.
     python manage.py test hr --settings=<ese_modulo>
 """
 
-from datetime import date
+from datetime import date, datetime, time
 from decimal import Decimal
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
-from hr.api.serializers import ContratoSerializer
-from hr.models import Contrato, Empleado, Nomina, PermisoAusencia, Puesto, Vacaciones
+from hr.api.serializers import AsistenciaSerializer, ContratoSerializer
+from hr.models import (
+    Asistencia, Contrato, Empleado, Nomina, PermisoAusencia, Puesto, Turno, Vacaciones,
+)
 from nucleo.models import Departamento, Empresa, Sucursal
 from usuarios.models import Usuario
 
@@ -549,6 +552,577 @@ class ContratoEmpleadoInactivoModeloTests(HrBase):
 
         with self.subTest("empleado activo"):
             Contrato(**{**base, "empleado": self.empleado}).full_clean()
+
+
+ASISTENCIAS_URL = "/api/v1/hr/asistencias/"
+ENTRADA_URL = f"{ASISTENCIAS_URL}registrar_entrada/"
+SALIDA_URL = f"{ASISTENCIAS_URL}registrar_salida/"
+DIA = date(2026, 9, 28)
+MENSAJE_ENTRADA_DUPLICADA = (
+    "La entrada de este empleado para esta fecha ya está registrada. "
+    "Para corregirla, edita el registro de asistencia."
+)
+MENSAJE_SALIDA_DUPLICADA = (
+    "La salida de este empleado para esta fecha ya está registrada. "
+    "Para corregirla, edita el registro de asistencia."
+)
+
+
+def _mx(dia, hora, minuto=0):
+    """Datetime aware en la zona del proyecto (``America/Mexico_City``)."""
+    return timezone.make_aware(datetime.combine(dia, time(hora, minuto)))
+
+
+class AsistenciaBase(HrBase):
+    """Turno de 08:00 a 17:00, 5 minutos de tolerancia y 8 horas base."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.turno = Turno.objects.create(
+            empresa=cls.a["empresa"], nombre="Matutino",
+            hora_entrada=time(8, 0), hora_salida=time(17, 0),
+            tolerancia_retardo_minutos=5, horas_base_diarias=Decimal("8.00"),
+        )
+        Empleado.objects.filter(pk=cls.empleado.pk).update(turno=cls.turno)
+        cls.empleado.refresh_from_db()
+
+    def _asistencia(self, **kwargs):
+        datos = {"empleado": self.empleado, "turno": self.turno, "fecha": DIA}
+        datos.update(kwargs)
+        return Asistencia.objects.create(**datos)
+
+    def _post(self, data):
+        return self._client().post(ASISTENCIAS_URL, data, format="json")
+
+    def _patch(self, asistencia, data, user=None):
+        return self._client(user).patch(f"{ASISTENCIAS_URL}{asistencia.pk}/", data, format="json")
+
+    def _payload(self, **kwargs):
+        datos = {"empleado": self.empleado.pk, "turno": self.turno.pk, "fecha": DIA.isoformat()}
+        datos.update(kwargs)
+        return datos
+
+
+class AsistenciaEstadoDerivadoTests(AsistenciaBase):
+    """El servidor deriva ``estado``: sin entrada es ``falta``; con entrada,
+    ``retardo`` si pasa la tolerancia y ``puntual`` si no. Solo ``justificada``
+    se fija a mano."""
+
+    def test_entrada_dentro_de_la_tolerancia_es_puntual(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 5))
+
+        self.assertEqual((asistencia.estado, asistencia.minutos_retardo), ("puntual", 0))
+
+    def test_entrada_fuera_de_la_tolerancia_es_retardo(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 12))
+
+        # 12 minutos tarde menos 5 de tolerancia.
+        self.assertEqual((asistencia.estado, asistencia.minutos_retardo), ("retardo", 7))
+
+    def test_corregir_la_entrada_revierte_el_retardo(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 30))
+        self.assertEqual(asistencia.estado, "retardo")
+
+        resp = self._patch(asistencia, {"hora_entrada": _mx(DIA, 7, 58).isoformat()})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual((resp.json()["estado"], resp.json()["minutos_retardo"]), ("puntual", 0))
+
+    def test_sin_entrada_es_falta(self):
+        resp = self._post(self._payload())
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        body = resp.json()
+        self.assertEqual(body["estado"], "falta")
+        self.assertEqual(body["minutos_retardo"], 0)
+        self.assertIsNone(body["horas_normales"])
+        self.assertIsNone(body["horas_extra"])
+
+    def test_quitar_la_entrada_la_vuelve_falta(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 30))
+
+        resp = self._patch(asistencia, {"hora_entrada": None})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual((resp.json()["estado"], resp.json()["minutos_retardo"]), ("falta", 0))
+
+    def test_un_estado_distinto_de_justificada_se_reemplaza_por_el_derivado(self):
+        for enviado in ("falta", "puntual"):
+            with self.subTest(enviado=enviado):
+                resp = self._post(self._payload(
+                    empleado=self._empleado(self.a, f"E-{enviado}").pk,
+                    estado=enviado, hora_entrada=_mx(DIA, 8, 30).isoformat(),
+                ))
+
+                self.assertEqual(resp.status_code, 201, resp.content)
+                self.assertEqual(resp.json()["estado"], "retardo")
+
+    def test_justificada_se_conserva_y_se_quita_al_mandar_otro_estado(self):
+        asistencia = self._asistencia()
+        self.assertEqual(asistencia.estado, "falta")
+
+        with self.subTest("se fija"):
+            resp = self._patch(asistencia, {"estado": "justificada"})
+            self.assertEqual(resp.json()["estado"], "justificada")
+
+        with self.subTest("sobrevive a un cambio de horas"):
+            resp = self._patch(asistencia, {"hora_entrada": _mx(DIA, 8, 20).isoformat()})
+            self.assertEqual(resp.status_code, 200, resp.content)
+            self.assertEqual(resp.json()["estado"], "justificada")
+            # Los campos calculados se siguen calculando.
+            self.assertEqual(resp.json()["minutos_retardo"], 15)
+
+        with self.subTest("se quita"):
+            resp = self._patch(asistencia, {"estado": "puntual"})
+            self.assertEqual(resp.json()["estado"], "retardo")
+
+    def test_horas_con_y_sin_salida(self):
+        con_salida = self._asistencia(hora_entrada=_mx(DIA, 8, 0), hora_salida=_mx(DIA, 18, 0))
+        sin_salida = self._asistencia(
+            empleado=self._empleado(self.a, "E-002"), hora_entrada=_mx(DIA, 8, 0),
+        )
+
+        self.assertEqual((con_salida.horas_normales, con_salida.horas_extra), (Decimal("8.00"), Decimal("2.00")))
+        self.assertEqual((sin_salida.horas_normales, sin_salida.horas_extra), (None, None))
+
+    def test_los_campos_calculados_se_ignoran_en_la_entrada(self):
+        resp = self._post(self._payload(
+            hora_entrada=_mx(DIA, 8, 0).isoformat(), hora_salida=_mx(DIA, 17, 0).isoformat(),
+            minutos_retardo=99, minutos_tolerancia=60, horas_normales="1.00", horas_extra="50.00",
+        ))
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        body = resp.json()
+        self.assertEqual(body["minutos_retardo"], 0)
+        self.assertEqual(body["minutos_tolerancia"], 5)
+        self.assertEqual((body["horas_normales"], body["horas_extra"]), ("8.00", "1.00"))
+
+
+class AsistenciaValidacionTests(AsistenciaBase):
+    def test_patch_de_la_entrada_se_compara_con_la_salida_guardada(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 0), hora_salida=_mx(DIA, 12, 0))
+
+        resp = self._patch(asistencia, {"hora_entrada": _mx(DIA, 13, 0).isoformat()})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(
+            resp.json(), {"hora_salida": ["La hora de salida debe ser posterior a la de entrada."]},
+        )
+        asistencia.refresh_from_db()
+        self.assertEqual(asistencia.hora_entrada, _mx(DIA, 8, 0))
+
+    def test_una_salida_sin_entrada_se_rechaza(self):
+        with self.subTest("alta"):
+            resp = self._post(self._payload(hora_salida=_mx(DIA, 17, 0).isoformat()))
+            self.assertEqual(resp.status_code, 400, resp.content)
+            self.assertEqual(
+                resp.json(), {"hora_salida": ["No se puede registrar la salida sin una hora de entrada."]},
+            )
+
+        with self.subTest("patch sobre un registro sin entrada"):
+            asistencia = self._asistencia()
+            resp = self._patch(asistencia, {"hora_salida": _mx(DIA, 17, 0).isoformat()})
+            self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_una_hora_de_otro_dia_se_rechaza(self):
+        with self.subTest("entrada"):
+            resp = self._post(self._payload(hora_entrada=_mx(date(2026, 9, 27), 8, 0).isoformat()))
+            self.assertEqual(resp.status_code, 400, resp.content)
+            self.assertEqual(
+                resp.json(),
+                {"hora_entrada": ["La hora de entrada debe corresponder a la fecha de la asistencia."]},
+            )
+
+        with self.subTest("salida"):
+            # Es también lo que causaba el desbordamiento de Decimal(4,2) en
+            # Postgres: una salida días después de la entrada.
+            resp = self._post(self._payload(
+                hora_entrada=_mx(DIA, 8, 0).isoformat(),
+                hora_salida=_mx(date(2026, 10, 3), 17, 0).isoformat(),
+            ))
+            self.assertEqual(resp.status_code, 400, resp.content)
+            self.assertEqual(
+                resp.json(),
+                {"hora_salida": ["La hora de salida debe corresponder a la fecha de la asistencia."]},
+            )
+
+        with self.subTest("patch que solo cambia la fecha"):
+            asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 0))
+            resp = self._patch(asistencia, {"fecha": "2026-09-29"})
+            self.assertEqual(resp.status_code, 400, resp.content)
+            self.assertIn("hora_entrada", resp.json())
+
+    def test_la_fecha_local_es_la_de_mexico_no_la_de_utc(self):
+        # 23:30 del 28 en México es 05:30 del 29 en UTC: sigue siendo el 28.
+        resp = self._post(self._payload(
+            hora_entrada=_mx(DIA, 8, 0).isoformat(),
+            hora_salida="2026-09-29T05:30:00Z",
+        ))
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+
+class AsistenciaChecadorTests(AsistenciaBase):
+    def _entrada(self, **data):
+        cuerpo = {"empleado_id": self.empleado.pk, "fecha": DIA.isoformat(), "hora": "2026-09-28 08:12:00"}
+        cuerpo.update(data)
+        return self._client().post(ENTRADA_URL, cuerpo, format="json")
+
+    def _salida(self, **data):
+        cuerpo = {"empleado_id": self.empleado.pk, "fecha": DIA.isoformat(), "hora": "2026-09-28 17:30:00"}
+        cuerpo.update(data)
+        return self._client().post(SALIDA_URL, cuerpo, format="json")
+
+    # -- registrar_entrada -----------------------------------------------------------
+
+    def test_registrar_entrada_crea_el_registro(self):
+        resp = self._entrada()
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        body = resp.json()
+        self.assertEqual((body["estado"], body["minutos_retardo"], body["turno"]), ("retardo", 7, self.turno.pk))
+
+    def test_una_segunda_entrada_responde_409_sin_tocar_el_registro(self):
+        self.assertEqual(self._entrada().status_code, 200)
+
+        resp = self._entrada(hora="2026-09-28 07:55:00")
+
+        self.assertEqual(resp.status_code, 409, resp.content)
+        self.assertEqual(resp.json(), {"detail": MENSAJE_ENTRADA_DUPLICADA})
+        asistencia = Asistencia.objects.get(empleado=self.empleado, fecha=DIA)
+        self.assertEqual(asistencia.hora_entrada, _mx(DIA, 8, 12))
+
+    def test_la_entrada_se_pone_en_un_registro_existente_sin_entrada(self):
+        falta = self._asistencia()
+        self.assertEqual(falta.estado, "falta")
+
+        resp = self._entrada(hora="2026-09-28 08:00:00")
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["id"], falta.pk)
+        self.assertEqual(resp.json()["estado"], "puntual")
+        self.assertEqual(Asistencia.objects.filter(empleado=self.empleado).count(), 1)
+
+    def test_una_creacion_concurrente_responde_409_y_no_500(self):
+        # Simula la carrera: la revisión previa no ve el registro que otra
+        # petición ya creó, y el INSERT choca con la constraint. SQLite sí
+        # aplica la constraint única, así que se prueba la traducción; el
+        # bloqueo con select_for_update solo se puede comprobar en Postgres.
+        self._asistencia(hora_entrada=_mx(DIA, 8, 0))
+
+        with patch("hr.api.views.AsistenciaViewSet._asistencia_del_dia", return_value=None):
+            resp = self._entrada()
+
+        self.assertEqual(resp.status_code, 409, resp.content)
+        self.assertEqual(resp.json(), {"detail": MENSAJE_ENTRADA_DUPLICADA})
+
+    # -- registrar_salida ------------------------------------------------------------
+
+    def test_registrar_salida_calcula_las_horas(self):
+        self._entrada(hora="2026-09-28 08:00:00")
+
+        resp = self._salida(hora="2026-09-28 18:00:00")
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual((resp.json()["horas_normales"], resp.json()["horas_extra"]), ("8.00", "2.00"))
+
+    def test_una_segunda_salida_responde_409_sin_tocar_el_registro(self):
+        self._entrada()
+        self.assertEqual(self._salida().status_code, 200)
+
+        resp = self._salida(hora="2026-09-28 19:00:00")
+
+        self.assertEqual(resp.status_code, 409, resp.content)
+        self.assertEqual(resp.json(), {"detail": MENSAJE_SALIDA_DUPLICADA})
+        asistencia = Asistencia.objects.get(empleado=self.empleado, fecha=DIA)
+        self.assertEqual(asistencia.hora_salida, _mx(DIA, 17, 30))
+
+    def test_salida_sin_registro_sigue_respondiendo_404(self):
+        resp = self._salida()
+
+        self.assertEqual(resp.status_code, 404, resp.content)
+        self.assertEqual(resp.json(), {"detail": "No se encontró registro de entrada para esta fecha."})
+
+    def test_salida_sobre_un_registro_sin_entrada_responde_400(self):
+        self._asistencia()
+
+        resp = self._salida()
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(
+            resp.json(), {"detail": "No se puede registrar la salida: el registro no tiene hora de entrada."},
+        )
+
+    def test_salida_que_no_es_posterior_a_la_entrada_responde_400(self):
+        self._entrada()
+
+        for hora in ("2026-09-28 08:12:00", "2026-09-28 08:00:00"):
+            with self.subTest(hora=hora):
+                resp = self._salida(hora=hora)
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(
+                    resp.json(), {"detail": "La hora de salida debe ser posterior a la hora de entrada."},
+                )
+        self.assertIsNone(Asistencia.objects.get(empleado=self.empleado, fecha=DIA).hora_salida)
+
+    # -- Validación común de las dos acciones ----------------------------------------
+
+    def test_empleado_id_no_numerico_responde_400(self):
+        for accion in (self._entrada, self._salida):
+            for valor in ("abc", "3.5", True):
+                with self.subTest(accion=accion.__name__, valor=valor):
+                    resp = accion(empleado_id=valor)
+                    self.assertEqual(resp.status_code, 400, resp.content)
+                    self.assertIn("empleado_id", resp.json())
+
+    def test_una_hora_de_otro_dia_responde_400_en_las_dos_acciones(self):
+        esperado = {"detail": "La fecha de la hora (2026-09-27) no coincide con la fecha del registro (2026-09-28)."}
+
+        resp = self._entrada(hora="2026-09-27 08:00:00")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), esperado)
+
+        self._entrada()
+        resp = self._salida(hora="2026-09-27 18:00:00")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), esperado)
+
+    def test_despues_de_un_409_el_patch_corrige_entrada_y_salida(self):
+        self._entrada()
+        self._salida()
+        self.assertEqual(self._entrada(hora="2026-09-28 07:59:00").status_code, 409)
+        self.assertEqual(self._salida(hora="2026-09-28 17:00:00").status_code, 409)
+        asistencia = Asistencia.objects.get(empleado=self.empleado, fecha=DIA)
+
+        resp = self._patch(asistencia, {
+            "hora_entrada": _mx(DIA, 7, 59).isoformat(), "hora_salida": _mx(DIA, 17, 0).isoformat(),
+        })
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        body = resp.json()
+        self.assertEqual((body["estado"], body["minutos_retardo"]), ("puntual", 0))
+        self.assertEqual((body["horas_normales"], body["horas_extra"]), ("8.00", "1.02"))
+
+    # -- Aislamiento por empresa -----------------------------------------------------
+
+    def test_otra_empresa_sigue_viendo_404(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 0))
+        ajeno = self.b["usuario"]
+
+        with self.subTest("detalle"):
+            self.assertEqual(self._client(ajeno).get(f"{ASISTENCIAS_URL}{asistencia.pk}/").status_code, 404)
+        with self.subTest("patch"):
+            self.assertEqual(self._patch(asistencia, {"observaciones": "x"}, user=ajeno).status_code, 404)
+        for url in (ENTRADA_URL, SALIDA_URL):
+            with self.subTest(url=url):
+                resp = self._client(ajeno).post(
+                    url, {"empleado_id": self.empleado.pk, "fecha": DIA.isoformat(), "hora": "2026-09-28 08:00:00"},
+                    format="json",
+                )
+                self.assertEqual(resp.status_code, 404, resp.content)
+                self.assertEqual(resp.json(), {"detail": "Empleado no encontrado."})
+
+
+MENSAJE_ENTRADA_TRAS_SALIDA = "La hora de entrada debe ser anterior a la hora de salida registrada."
+MENSAJE_SALIDA_NO_POSTERIOR = "La hora de salida debe ser posterior a la de entrada."
+
+
+class AsistenciaRevisionTests(AsistenciaBase):
+    """Correcciones de la revisión de código del paquete de asistencias."""
+
+    def _entrada(self, empleado=None, **data):
+        cuerpo = {
+            "empleado_id": (empleado or self.empleado).pk,
+            "fecha": DIA.isoformat(),
+            "hora": "2026-09-28 08:12:00",
+        }
+        cuerpo.update(data)
+        return self._client().post(ENTRADA_URL, cuerpo, format="json")
+
+    # -- 1. Registro existente con salida y sin entrada ------------------------------
+
+    def test_entrada_en_o_despues_de_la_salida_guardada_responde_400(self):
+        # Una fila así solo se crea por el ORM o datos previos: el serializer ya
+        # rechaza una salida sin entrada.
+        asistencia = self._asistencia(hora_salida=_mx(DIA, 13, 0))
+
+        for hora in ("2026-09-28 13:00:00", "2026-09-28 14:00:00"):
+            with self.subTest(hora=hora):
+                resp = self._entrada(hora=hora)
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {"detail": MENSAJE_ENTRADA_TRAS_SALIDA})
+        asistencia.refresh_from_db()
+        self.assertIsNone(asistencia.hora_entrada)
+
+        resp = self._entrada(hora="2026-09-28 08:00:00")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual((resp.json()["horas_normales"], resp.json()["horas_extra"]), ("5.00", "0.00"))
+
+    # -- 2. Invariantes del modelo (ruta del admin) -----------------------------------
+
+    def test_clean_aplica_las_reglas_de_fecha_y_orden(self):
+        base = {"empleado": self.empleado, "turno": self.turno, "fecha": DIA}
+        casos = {
+            "entrada de otro día": (
+                {"hora_entrada": _mx(date(2026, 9, 27), 8, 0)},
+                {"hora_entrada": ["La hora de entrada debe corresponder a la fecha de la asistencia."]},
+            ),
+            "salida de otro día": (
+                {"hora_entrada": _mx(DIA, 8, 0), "hora_salida": _mx(date(2026, 10, 3), 17, 0)},
+                {"hora_salida": ["La hora de salida debe corresponder a la fecha de la asistencia."]},
+            ),
+            "salida sin entrada": (
+                {"hora_salida": _mx(DIA, 17, 0)},
+                {"hora_salida": ["No se puede registrar la salida sin una hora de entrada."]},
+            ),
+            "turno de duración cero": (
+                {"hora_entrada": _mx(DIA, 8, 0), "hora_salida": _mx(DIA, 8, 0)},
+                {"hora_salida": [MENSAJE_SALIDA_NO_POSTERIOR]},
+            ),
+            "salida anterior": (
+                {"hora_entrada": _mx(DIA, 8, 0), "hora_salida": _mx(DIA, 7, 0)},
+                {"hora_salida": [MENSAJE_SALIDA_NO_POSTERIOR]},
+            ),
+        }
+        for nombre, (horas, esperado) in casos.items():
+            with self.subTest(nombre):
+                with self.assertRaises(DjangoValidationError) as ctx:
+                    Asistencia(**base, **horas).full_clean()
+                self.assertEqual(ctx.exception.message_dict, esperado)
+
+        with self.subTest("registro válido"):
+            Asistencia(**base, hora_entrada=_mx(DIA, 8, 0), hora_salida=_mx(DIA, 17, 0)).full_clean()
+
+    # -- 3. La checada libera la justificación ---------------------------------------
+
+    def test_registrar_entrada_libera_una_justificacion_sin_entrada(self):
+        for hora, esperado in (("2026-09-28 08:30:00", "retardo"), ("2026-09-28 08:00:00", "puntual")):
+            with self.subTest(esperado=esperado):
+                empleado = self._empleado(self.a, f"E-J-{esperado}")
+                Empleado.objects.filter(pk=empleado.pk).update(turno=self.turno)
+                justificada = self._asistencia(empleado=empleado, estado="justificada")
+                self.assertEqual(justificada.estado, "justificada")
+
+                resp = self._entrada(empleado=empleado, hora=hora)
+
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.assertEqual((resp.json()["id"], resp.json()["estado"]), (justificada.pk, esperado))
+
+    def test_una_justificacion_por_patch_sigue_fija(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 30))
+
+        resp = self._patch(asistencia, {"estado": "justificada", "hora_entrada": _mx(DIA, 8, 40).isoformat()})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual((resp.json()["estado"], resp.json()["minutos_retardo"]), ("justificada", 35))
+
+    # -- 4. Creación concurrente contra una fila sin entrada -------------------------
+
+    def test_creacion_concurrente_contra_una_fila_sin_entrada_la_completa(self):
+        # La fila rival no tiene entrada (una falta capturada a mano): el INSERT
+        # choca, se relee y se le pone la entrada en vez de responder 409.
+        rival = self._asistencia()
+
+        with patch("hr.api.views.AsistenciaViewSet._asistencia_del_dia", return_value=None):
+            resp = self._entrada()
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual((resp.json()["id"], resp.json()["estado"]), (rival.pk, "retardo"))
+        self.assertEqual(Asistencia.objects.filter(empleado=self.empleado, fecha=DIA).count(), 1)
+
+    # -- 5. Turno de duración cero en el serializer ----------------------------------
+
+    def test_patch_con_salida_igual_a_la_entrada_responde_400(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 0))
+
+        resp = self._patch(asistencia, {"hora_salida": _mx(DIA, 8, 0).isoformat()})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"hora_salida": [MENSAJE_SALIDA_NO_POSTERIOR]})
+
+    # -- 6. Llave del error al quitar la entrada -------------------------------------
+
+    def test_quitar_solo_la_entrada_con_salida_guardada_reporta_en_hora_entrada(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 0), hora_salida=_mx(DIA, 17, 0))
+
+        resp = self._patch(asistencia, {"hora_entrada": None})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(
+            resp.json(),
+            {"hora_entrada": ["No se puede quitar la hora de entrada mientras haya una hora de salida."]},
+        )
+
+    def test_quitar_entrada_y_salida_juntas_deja_falta(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 0), hora_salida=_mx(DIA, 17, 0))
+
+        resp = self._patch(asistencia, {"hora_entrada": None, "hora_salida": None})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        body = resp.json()
+        self.assertEqual(body["estado"], "falta")
+        self.assertIsNone(body["horas_normales"])
+        self.assertIsNone(body["horas_extra"])
+
+
+CUERPO_UNICIDAD = {"non_field_errors": ["Los campos empleado, fecha deben formar un conjunto único."]}
+
+
+class AsistenciaCarreraDeUnicidadTests(AsistenciaBase):
+    """La carrera entre el alta/edición normal y otra escritura del mismo día.
+
+    El validador de unicidad de DRF pasa, pero antes del INSERT/UPDATE otra
+    petición (p. ej. ``registrar_entrada``) crea la fila de ``(empleado, fecha)``.
+    La constraint lo detiene y el cliente recibe el mismo 400 del validador, no
+    un 500.
+    """
+
+    def _perder_la_carrera(self, fecha):
+        validate_original = AsistenciaSerializer.validate
+
+        def validate_y_pierde_la_carrera(serializer, data):
+            data = validate_original(serializer, data)
+            self._asistencia(fecha=fecha, hora_entrada=_mx(fecha, 8, 0))
+            return data
+
+        return patch.object(AsistenciaSerializer, "validate", validate_y_pierde_la_carrera)
+
+    def test_el_cuerpo_de_la_ruta_normal_es_el_esperado(self):
+        # Ancla: la carrera debe devolver exactamente este cuerpo.
+        self._asistencia()
+
+        resp = self._post(self._payload())
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), CUERPO_UNICIDAD)
+
+    def test_alta_que_pierde_la_carrera_responde_400_y_no_500(self):
+        with self._perder_la_carrera(DIA):
+            resp = self._post(self._payload())
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), CUERPO_UNICIDAD)
+        self.assertEqual(Asistencia.objects.filter(empleado=self.empleado, fecha=DIA).count(), 1)
+
+    def test_edicion_que_pierde_la_carrera_responde_400_y_no_500(self):
+        otro_dia = date(2026, 9, 27)
+        asistencia = self._asistencia(fecha=otro_dia)
+
+        with self._perder_la_carrera(DIA):
+            resp = self._patch(asistencia, {"fecha": DIA.isoformat()})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), CUERPO_UNICIDAD)
+        asistencia.refresh_from_db()
+        self.assertEqual(asistencia.fecha, otro_dia)
+
+    def test_otro_integrity_error_se_propaga(self):
+        # Sin fila rival, un IntegrityError no es la colisión de unicidad: no se
+        # disfraza de 400.
+        with patch.object(Asistencia, "save", side_effect=IntegrityError("otra constraint")):
+            with self.assertRaises(IntegrityError):
+                self._post(self._payload())
 
 
 class VacacionesEstadoApiTests(HrBase):

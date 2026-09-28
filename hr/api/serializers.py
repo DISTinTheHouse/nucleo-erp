@@ -2,7 +2,10 @@ from contextlib import contextmanager
 
 from django.db import IntegrityError, transaction
 from rest_framework import serializers
+from rest_framework.settings import api_settings
+from rest_framework.validators import UniqueTogetherValidator
 from hr.models import (
+    fecha_local,
     MENSAJE_CONTRATO_VIGENTE_DUPLICADO,
     MENSAJE_CONTRATO_VIGENTE_EMPLEADO_INACTIVO,
     Puesto,
@@ -287,12 +290,87 @@ class AsistenciaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerial
     class Meta:
         model = Asistencia
         fields = '__all__'
+        # Los calcula ``Asistencia._calcular_estado_y_horas`` en cada guardado.
+        # ``estado`` sigue escribible: solo ``justificada`` se conserva, cualquier
+        # otro valor se reemplaza por el derivado.
+        read_only_fields = ('minutos_retardo', 'minutos_tolerancia', 'horas_normales', 'horas_extra')
+
+    def _final(self, data, campo):
+        """Valor con el que quedará ``campo``: el recibido o, en una edición, el guardado."""
+        if campo in data:
+            return data[campo]
+        return getattr(self.instance, campo, None)
+
+    def create(self, validated_data):
+        with self._choque_de_unicidad_como_400(validated_data):
+            return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        with self._choque_de_unicidad_como_400(validated_data):
+            return super().update(instance, validated_data)
+
+    @contextmanager
+    def _choque_de_unicidad_como_400(self, validated_data):
+        """Traduce la violación de ``unique_asistencia_empleado_fecha`` al 400 del validador.
+
+        Pasa si otra petición (p. ej. ``registrar_entrada``) escribe la fila de
+        ``(empleado, fecha)`` entre el validador de unicidad de DRF y el
+        INSERT/UPDATE. Misma técnica que ``ContratoSerializer``: savepoint propio,
+        re-consulta en vez de leer el texto del ``IntegrityError`` (PostgreSQL
+        nombra la constraint, SQLite no) y cualquier otro ``IntegrityError`` se
+        re-lanza.
+        """
+        empleado = self._final(validated_data, 'empleado')
+        fecha = self._final(validated_data, 'fecha')
+        try:
+            with transaction.atomic():
+                yield
+        except IntegrityError as exc:
+            rivales = Asistencia.objects.filter(empleado=empleado, fecha=fecha)
+            if self.instance is not None:
+                rivales = rivales.exclude(pk=self.instance.pk)
+            if not rivales.exists():
+                raise
+            raise serializers.ValidationError(
+                {api_settings.NON_FIELD_ERRORS_KEY: [self._mensaje_de_unicidad()]}, code='unique',
+            ) from exc
+
+    def _mensaje_de_unicidad(self):
+        """El mismo texto que el ``UniqueTogetherValidator`` de ``(empleado, fecha)``."""
+        for validador in self.validators:
+            if isinstance(validador, UniqueTogetherValidator) and set(validador.fields) == {'empleado', 'fecha'}:
+                return validador.message.format(field_names=', '.join(validador.fields))
+        raise RuntimeError('AsistenciaSerializer perdió el validador de unicidad de (empleado, fecha).')
 
     def validate(self, data):
-        hora_salida = data.get('hora_salida')
-        hora_entrada = data.get('hora_entrada') or (self.instance.hora_entrada if self.instance else None)
-        if hora_salida and hora_entrada and hora_salida < hora_entrada:
-            raise serializers.ValidationError({'hora_salida': 'La hora de salida no puede ser anterior a la de entrada.'})
+        fecha = self._final(data, 'fecha')
+        hora_entrada = self._final(data, 'hora_entrada')
+        hora_salida = self._final(data, 'hora_salida')
+
+        # Una hora de otro día desfasaba el retardo y las horas; una salida días
+        # después de la entrada desbordaba ``Decimal(4,2)`` (500 en Postgres).
+        for campo, valor, nombre in (
+            ('hora_entrada', hora_entrada, 'entrada'),
+            ('hora_salida', hora_salida, 'salida'),
+        ):
+            if valor and fecha and fecha_local(valor) != fecha:
+                raise serializers.ValidationError(
+                    {campo: f'La hora de {nombre} debe corresponder a la fecha de la asistencia.'}
+                )
+        if hora_salida and not hora_entrada:
+            # El error va en el campo que mandó el cliente: un PATCH que solo
+            # quita la entrada sobre una salida guardada no tocó ``hora_salida``.
+            if 'hora_entrada' in data and 'hora_salida' not in data:
+                raise serializers.ValidationError(
+                    {'hora_entrada': 'No se puede quitar la hora de entrada mientras haya una hora de salida.'}
+                )
+            raise serializers.ValidationError(
+                {'hora_salida': 'No se puede registrar la salida sin una hora de entrada.'}
+            )
+        # ``<=``: un turno de duración cero tampoco es válido, igual que en
+        # ``registrar_salida`` y en ``Asistencia.clean``.
+        if hora_salida and hora_entrada and hora_salida <= hora_entrada:
+            raise serializers.ValidationError({'hora_salida': 'La hora de salida debe ser posterior a la de entrada.'})
         return data
 
 
