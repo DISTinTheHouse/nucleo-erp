@@ -315,10 +315,18 @@ class AsistenciaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerial
                     {campo: f'La hora de {nombre} debe corresponder a la fecha de la asistencia.'}
                 )
         if hora_salida and not hora_entrada:
+            # El error va en el campo que mandó el cliente: un PATCH que solo
+            # quita la entrada sobre una salida guardada no tocó ``hora_salida``.
+            if 'hora_entrada' in data and 'hora_salida' not in data:
+                raise serializers.ValidationError(
+                    {'hora_entrada': 'No se puede quitar la hora de entrada mientras haya una hora de salida.'}
+                )
             raise serializers.ValidationError(
                 {'hora_salida': 'No se puede registrar la salida sin una hora de entrada.'}
             )
-        if hora_salida and hora_entrada and hora_salida < hora_entrada:
+        # ``<=``: un turno de duración cero tampoco es válido, igual que en
+        # ``registrar_salida`` y en ``Asistencia.clean``.
+        if hora_salida and hora_entrada and hora_salida <= hora_entrada:
             raise serializers.ValidationError({'hora_salida': 'La hora de salida no puede ser anterior a la de entrada.'})
         return data
 
