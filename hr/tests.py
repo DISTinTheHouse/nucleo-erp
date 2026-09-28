@@ -17,7 +17,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from hr.api.serializers import ContratoSerializer
+from hr.api.serializers import AsistenciaSerializer, ContratoSerializer
 from hr.models import Asistencia, Contrato, Empleado, Nomina, Puesto, Turno
 from nucleo.models import Departamento, Empresa, Sucursal
 from usuarios.models import Usuario
@@ -1060,3 +1060,62 @@ class AsistenciaRevisionTests(AsistenciaBase):
         self.assertEqual(body["estado"], "falta")
         self.assertIsNone(body["horas_normales"])
         self.assertIsNone(body["horas_extra"])
+
+
+CUERPO_UNICIDAD = {"non_field_errors": ["Los campos empleado, fecha deben formar un conjunto único."]}
+
+
+class AsistenciaCarreraDeUnicidadTests(AsistenciaBase):
+    """La carrera entre el alta/edición normal y otra escritura del mismo día.
+
+    El validador de unicidad de DRF pasa, pero antes del INSERT/UPDATE otra
+    petición (p. ej. ``registrar_entrada``) crea la fila de ``(empleado, fecha)``.
+    La constraint lo detiene y el cliente recibe el mismo 400 del validador, no
+    un 500.
+    """
+
+    def _perder_la_carrera(self, fecha):
+        validate_original = AsistenciaSerializer.validate
+
+        def validate_y_pierde_la_carrera(serializer, data):
+            data = validate_original(serializer, data)
+            self._asistencia(fecha=fecha, hora_entrada=_mx(fecha, 8, 0))
+            return data
+
+        return patch.object(AsistenciaSerializer, "validate", validate_y_pierde_la_carrera)
+
+    def test_el_cuerpo_de_la_ruta_normal_es_el_esperado(self):
+        # Ancla: la carrera debe devolver exactamente este cuerpo.
+        self._asistencia()
+
+        resp = self._post(self._payload())
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), CUERPO_UNICIDAD)
+
+    def test_alta_que_pierde_la_carrera_responde_400_y_no_500(self):
+        with self._perder_la_carrera(DIA):
+            resp = self._post(self._payload())
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), CUERPO_UNICIDAD)
+        self.assertEqual(Asistencia.objects.filter(empleado=self.empleado, fecha=DIA).count(), 1)
+
+    def test_edicion_que_pierde_la_carrera_responde_400_y_no_500(self):
+        otro_dia = date(2026, 9, 27)
+        asistencia = self._asistencia(fecha=otro_dia)
+
+        with self._perder_la_carrera(DIA):
+            resp = self._patch(asistencia, {"fecha": DIA.isoformat()})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), CUERPO_UNICIDAD)
+        asistencia.refresh_from_db()
+        self.assertEqual(asistencia.fecha, otro_dia)
+
+    def test_otro_integrity_error_se_propaga(self):
+        # Sin fila rival, un IntegrityError no es la colisión de unicidad: no se
+        # disfraza de 400.
+        with patch.object(Asistencia, "save", side_effect=IntegrityError("otra constraint")):
+            with self.assertRaises(IntegrityError):
+                self._post(self._payload())

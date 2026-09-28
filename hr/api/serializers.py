@@ -2,6 +2,8 @@ from contextlib import contextmanager
 
 from django.db import IntegrityError, transaction
 from rest_framework import serializers
+from rest_framework.settings import api_settings
+from rest_framework.validators import UniqueTogetherValidator
 from hr.models import (
     fecha_local,
     MENSAJE_CONTRATO_VIGENTE_DUPLICADO,
@@ -298,6 +300,47 @@ class AsistenciaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerial
         if campo in data:
             return data[campo]
         return getattr(self.instance, campo, None)
+
+    def create(self, validated_data):
+        with self._choque_de_unicidad_como_400(validated_data):
+            return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        with self._choque_de_unicidad_como_400(validated_data):
+            return super().update(instance, validated_data)
+
+    @contextmanager
+    def _choque_de_unicidad_como_400(self, validated_data):
+        """Traduce la violación de ``unique_asistencia_empleado_fecha`` al 400 del validador.
+
+        Pasa si otra petición (p. ej. ``registrar_entrada``) escribe la fila de
+        ``(empleado, fecha)`` entre el validador de unicidad de DRF y el
+        INSERT/UPDATE. Misma técnica que ``ContratoSerializer``: savepoint propio,
+        re-consulta en vez de leer el texto del ``IntegrityError`` (PostgreSQL
+        nombra la constraint, SQLite no) y cualquier otro ``IntegrityError`` se
+        re-lanza.
+        """
+        empleado = self._final(validated_data, 'empleado')
+        fecha = self._final(validated_data, 'fecha')
+        try:
+            with transaction.atomic():
+                yield
+        except IntegrityError as exc:
+            rivales = Asistencia.objects.filter(empleado=empleado, fecha=fecha)
+            if self.instance is not None:
+                rivales = rivales.exclude(pk=self.instance.pk)
+            if not rivales.exists():
+                raise
+            raise serializers.ValidationError(
+                {api_settings.NON_FIELD_ERRORS_KEY: [self._mensaje_de_unicidad()]}, code='unique',
+            ) from exc
+
+    def _mensaje_de_unicidad(self):
+        """El mismo texto que el ``UniqueTogetherValidator`` de ``(empleado, fecha)``."""
+        for validador in self.validators:
+            if isinstance(validador, UniqueTogetherValidator) and set(validador.fields) == {'empleado', 'fecha'}:
+                return validador.message.format(field_names=', '.join(validador.fields))
+        raise RuntimeError('AsistenciaSerializer perdió el validador de unicidad de (empleado, fecha).')
 
     def validate(self, data):
         fecha = self._final(data, 'fecha')
