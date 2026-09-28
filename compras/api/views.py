@@ -15,9 +15,18 @@ from rest_framework.views import APIView
 
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Producto
-from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+from compras.models import (
+    CalidadInspeccion,
+    CalidadInspeccionDetalle,
+    OrdenCompra,
+    OrdenCompraDetalle,
+    Recepcion,
+    RecepcionDetalle,
+)
 from finanzas.models import FacturaProveedor
 from compras.api.serializers import (
+    CalidadInspeccionInputSerializer,
+    CalidadInspeccionSerializer,
     OrdenCompraOnboardingSerializer,
     OrdenCompraRetrieveSerializer,
     OrdenCompraSerializer,
@@ -28,6 +37,7 @@ from compras.api.serializers import (
     RecepcionRetrieveSerializer,
     RecepcionSerializer,
 )
+from hr.models import Empleado
 from inventarios.models import (
     Almacen,
     Existencia,
@@ -933,8 +943,13 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return Decimal(str(total or 0))
 
-    def _actualizar_existencias(self, recepcion, detalle_payload):
-        movimientos = []
+    def _crear_renglones_recepcion(self, recepcion, detalle_payload):
+        # Solo registra el conteo físico (``RecepcionDetalle``). NO toca
+        # ``Existencia`` ni crea ``MovimientoInventario`` — eso ahora es
+        # exclusivo de ``CalidadInspeccionViewSet``, una vez que Calidad
+        # aprueba (total o parcialmente) cada renglón. Ver
+        # DOCS/arquitectura/flujo-recepcion-calidad-compras.md.
+        renglones = []
         for item in detalle_payload:
             ubicacion = None
             ubicacion_id = item.get("ubicacion")
@@ -952,101 +967,19 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         {"ubicacion": "La ubicación no pertenece al almacén seleccionado."}
                     )
 
-            cantidad = item["cantidad_recibida"]
-            producto = item["producto"]
-            producto_variante = item.get("producto_variante")
-            producto_id = producto.pk
-
-            existencia = (
-                Existencia.objects.select_for_update()
-                .filter(
-                    producto_id=producto_id,
-                    producto_variante_id=getattr(producto_variante, "pk", None),
-                    almacen_id=recepcion.almacen_id,
-                    ubicacion_id=(ubicacion.pk if ubicacion else None),
-                )
-                .order_by("id")
-                .first()
-            )
-            if not existencia:
-                existencia = Existencia.objects.create(
-                    producto=producto,
-                    producto_variante=producto_variante,
-                    almacen=recepcion.almacen,
-                    ubicacion=ubicacion,
-                    stock=0,
-                    cantidad=Decimal("0"),
-                )
-
-            cantidad_antes = existencia.cantidad or Decimal("0")
-            cantidad_despues = cantidad_antes + cantidad
-            existencia.cantidad = cantidad_despues
-            try:
-                existencia.stock = int(cantidad_despues)
-            except Exception:
-                existencia.stock = existencia.stock or 0
-            existencia.save(update_fields=["cantidad", "stock", "fecha_actualizacion"])
-
             detalle = RecepcionDetalle.objects.create(
                 recepcion=recepcion,
                 orden_compra_detalle=item.get("orden_compra_detalle"),
                 orden_produccion_detalle=item.get("orden_produccion_detalle"),
-                producto=producto,
-                producto_variante=producto_variante,
+                producto=item["producto"],
+                producto_variante=item.get("producto_variante"),
                 ubicacion=ubicacion,
                 lote_id=item.get("lote"),
                 serie_id=item.get("serie"),
-                cantidad_recibida=cantidad,
+                cantidad_recibida=item["cantidad_recibida"],
             )
-
-            movimientos.append(
-                {
-                    "recepcion_detalle_id": detalle.pk,
-                    "orden_compra_detalle_id": item.get("orden_compra_detalle").pk if item.get("orden_compra_detalle") else None,
-                    "orden_produccion_detalle_id": item.get("orden_produccion_detalle").pk if item.get("orden_produccion_detalle") else None,
-                    "producto_id": producto.pk,
-                    "producto_variante_id": getattr(producto_variante, "pk", None),
-                    "ubicacion_id": existencia.ubicacion_id,
-                    "lote_id": detalle.lote_id,
-                    "serie_id": detalle.serie_id,
-                    "cantidad_before": str(cantidad_antes),
-                    "cantidad_after": str(cantidad_despues),
-                    "delta": str(cantidad),
-                }
-            )
-        return movimientos
-
-    def _crear_movimiento_formal_recepcion(self, recepcion, movimientos):
-        movimiento = MovimientoInventario.objects.create(
-            empresa=recepcion.empresa,
-            sucursal=recepcion.sucursal,
-            pedido_id=None,
-            entrega_id=None,
-            devolucion_id=None,
-            ajuste_inventario_id=None,
-            tipo_movimiento="ENTRADA",
-            usuario=recepcion.usuario,
-            observaciones=recepcion.observaciones,
-            recepcion=recepcion,
-            transferencia_id=None,
-            op_id=recepcion.op_id,
-        )
-
-        for item in movimientos:
-            MovimientoInventarioDetalle.objects.create(
-                movimiento_inventario=movimiento,
-                producto_id=item["producto_id"],
-                # Renglón de OP: siempre trae variante; de OC: nunca.
-                producto_variante_id=item["producto_variante_id"],
-                ubicacion_origen_id=None,
-                ubicacion_destino_id=item["ubicacion_id"],
-                lote_id=item.get("lote_id"),
-                serie_id=item.get("serie_id"),
-                cantidad=Decimal(str(item["delta"] or 0)),
-                costo_unitario=Decimal("0"),
-            )
-
-        return movimiento
+            renglones.append(detalle)
+        return renglones
 
     def _actualizar_estatus_oc(self, oc):
         detalles = OrdenCompraDetalle.objects.filter(orden_compra=oc).only("id", "cantidad")
@@ -1550,9 +1483,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 self._asignar_folio_recepcion(recepcion, serie_codigo)
                 recepcion.save()
 
-                movimientos = self._actualizar_existencias(recepcion, detalle_payload)
-                movimiento_formal = self._crear_movimiento_formal_recepcion(recepcion, movimientos)
+                self._crear_renglones_recepcion(recepcion, detalle_payload)
 
+                # ``_actualizar_estatus_oc``/cierre de OP siguen basados en
+                # conteo físico (lo que ya se registró arriba), sin esperar a
+                # Calidad: reflejan si a la OC/OP le falta algo por RECIBIR,
+                # no si ya es stock disponible.
                 orden_completa = True
                 detalles_origen = detalles_oc.values() if oc else detalles_op.values()
                 for detalle in detalles_origen:
@@ -1566,11 +1502,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         orden_completa = False
                         break
 
-                recepcion.estatus = (
-                    Recepcion.EstatusRecepcion.RECIBIDA
-                    if orden_completa
-                    else Recepcion.EstatusRecepcion.PARCIAL
-                )
+                # Toda recepción nueva pasa a Calidad — nunca entra a
+                # Existencia aquí. Solo CalidadInspeccionViewSet abona
+                # inventario, y únicamente por lo aprobado.
+                recepcion.estatus = Recepcion.EstatusRecepcion.EN_CALIDAD
                 recepcion.save(update_fields=["estatus", "updated_at"])
                 if oc:
                     self._actualizar_estatus_oc(oc)
@@ -1579,43 +1514,11 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     op.fecha_fin = op.fecha_fin or timezone.now()
                     op.save(update_fields=["estatus_op", "fecha_fin"])
 
-                ip = _ip_auditoria(request)
-                ua = request.META.get("HTTP_USER_AGENT")
-                ev = AuditoriaEvento.objects.create(
-                    empresa=empresa_origen,
-                    usuario=user if getattr(user, "pk", None) else None,
-                    modulo="inventarios",
-                    accion="ENTRADA",
-                    tabla="existencias",
-                    id_registro=str(almacen.pk),
-                    antes_json={
-                        "items": movimientos,
-                        "recepcion_id": recepcion.pk,
-                        "tipo_origen": recepcion.tipo_origen,
-                        "orden_compra_id": recepcion.orden_compra_id,
-                        "op_id": recepcion.op_id,
-                    },
-                    despues_json={
-                        "almacen_id": almacen.pk,
-                        "sucursal_id": almacen.sucursal_id,
-                        "empresa_id": almacen.empresa_id,
-                        "recepcion_id": recepcion.pk,
-                        "tipo_origen": recepcion.tipo_origen,
-                        "orden_compra_id": recepcion.orden_compra_id,
-                        "op_id": recepcion.op_id,
-                        "items": movimientos,
-                    },
-                    ip=ip,
-                    user_agent=ua,
-                )
-
             detalles_recepcion = RecepcionDetalle.objects.filter(recepcion=recepcion).order_by("id")
             return Response(
                 {
                     "recepcion": RecepcionSerializer(recepcion).data,
                     "detalle": RecepcionDetalleSerializer(detalles_recepcion, many=True).data,
-                    "movimiento_id": ev.id_evento,
-                    "movimiento_inventario_id": movimiento_formal.pk,
                 },
                 status=status.HTTP_200_OK,
             )
@@ -1629,6 +1532,313 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 getattr(exc, "detail", exc),
             )
             raise
+
+
+class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
+    """Filtro de calidad entre Recepción y Existencia.
+
+    Una ``Recepcion`` sale de ``onboarding()`` en ``EN_CALIDAD`` sin haber
+    tocado inventario. Aquí se inspecciona TODO su detalle en un solo envío
+    (no hay inspección parcial/por rondas en esta primera versión) y solo lo
+    aprobado —``cantidad_aprobada`` por renglón, sea el resultado
+    ``liberado``, ``concesion_cc`` o ``concesion lazzar``— abona
+    ``Existencia`` y genera ``MovimientoInventario``. Lo marcado ``rechazo``
+    o ``cuarentena`` no entra a almacén; qué pasa después con esa cantidad no
+    está definido todavía (ver DOCS/arquitectura/flujo-recepcion-calidad-compras.md).
+    """
+
+    queryset = CalidadInspeccion.objects.all().select_related("recepcion", "inspector")
+    serializer_class = CalidadInspeccionSerializer
+    http_method_names = ["get", "post"]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = self.queryset.prefetch_related("detalles")
+        if getattr(user, "is_superuser", False):
+            return qs.order_by("-fecha", "-id")
+        empresa = getattr(user, "empresa", None)
+        if empresa:
+            return qs.filter(recepcion__empresa=empresa).order_by("-fecha", "-id")
+        return qs.none()
+
+    def _abonar_renglon(self, recepcion, renglon, cantidad_aprobada):
+        existencia = (
+            Existencia.objects.select_for_update()
+            .filter(
+                producto_id=renglon.producto_id,
+                producto_variante_id=renglon.producto_variante_id,
+                almacen_id=recepcion.almacen_id,
+                ubicacion_id=renglon.ubicacion_id,
+            )
+            .order_by("id")
+            .first()
+        )
+        if not existencia:
+            existencia = Existencia.objects.create(
+                producto_id=renglon.producto_id,
+                producto_variante_id=renglon.producto_variante_id,
+                almacen=recepcion.almacen,
+                ubicacion_id=renglon.ubicacion_id,
+                stock=0,
+                cantidad=Decimal("0"),
+            )
+
+        cantidad_antes = existencia.cantidad or Decimal("0")
+        cantidad_despues = cantidad_antes + cantidad_aprobada
+        existencia.cantidad = cantidad_despues
+        try:
+            existencia.stock = int(cantidad_despues)
+        except Exception:
+            existencia.stock = existencia.stock or 0
+        existencia.save(update_fields=["cantidad", "stock", "fecha_actualizacion"])
+
+        return {
+            "recepcion_detalle_id": renglon.pk,
+            "orden_compra_detalle_id": renglon.orden_compra_detalle_id,
+            "orden_produccion_detalle_id": renglon.orden_produccion_detalle_id,
+            "producto_id": renglon.producto_id,
+            "producto_variante_id": renglon.producto_variante_id,
+            "ubicacion_id": renglon.ubicacion_id,
+            "lote_id": renglon.lote_id,
+            "serie_id": renglon.serie_id,
+            "cantidad_before": str(cantidad_antes),
+            "cantidad_after": str(cantidad_despues),
+            "delta": str(cantidad_aprobada),
+        }
+
+    def _crear_movimiento_formal(self, recepcion, movimientos):
+        movimiento = MovimientoInventario.objects.create(
+            empresa=recepcion.empresa,
+            sucursal=recepcion.sucursal,
+            pedido_id=None,
+            entrega_id=None,
+            devolucion_id=None,
+            ajuste_inventario_id=None,
+            tipo_movimiento="ENTRADA",
+            usuario=recepcion.usuario,
+            observaciones=recepcion.observaciones,
+            recepcion=recepcion,
+            transferencia_id=None,
+            op_id=recepcion.op_id,
+        )
+        for item in movimientos:
+            MovimientoInventarioDetalle.objects.create(
+                movimiento_inventario=movimiento,
+                producto_id=item["producto_id"],
+                producto_variante_id=item["producto_variante_id"],
+                ubicacion_origen_id=None,
+                ubicacion_destino_id=item["ubicacion_id"],
+                lote_id=item.get("lote_id"),
+                serie_id=item.get("serie_id"),
+                cantidad=Decimal(str(item["delta"] or 0)),
+                costo_unitario=Decimal("0"),
+            )
+        return movimiento
+
+    def _derivar_estado(self, resultados):
+        aprobados = {"liberado", "concesion_cc", "concesion lazzar"}
+        if all(r in aprobados for r in resultados):
+            return "aprobada"
+        if all(r not in aprobados for r in resultados):
+            return "rechazada"
+        return "aprobada_condicion"
+
+    def handle_get_onboarding(self, request):
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        if not empresa and not getattr(user, "is_superuser", False):
+            raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
+
+        recepciones_qs = (
+            Recepcion.objects.filter(activo=True, estatus=Recepcion.EstatusRecepcion.EN_CALIDAD)
+            .select_related("proveedor", "almacen", "orden_compra", "op")
+            .order_by("-fecha_recepcion", "-id")
+        )
+        if empresa:
+            recepciones_qs = recepciones_qs.filter(empresa=empresa)
+
+        recepciones = []
+        for r in recepciones_qs[:50]:
+            detalles = (
+                RecepcionDetalle.objects.filter(recepcion=r)
+                .select_related("producto")
+                .order_by("id")
+            )
+            recepciones.append(
+                {
+                    "id": r.pk,
+                    "folio": r.folio,
+                    "tipo_origen": r.tipo_origen,
+                    "proveedor_nombre": getattr(r.proveedor, "nombre", None),
+                    "almacen_id": r.almacen_id,
+                    "fecha_recepcion": r.fecha_recepcion,
+                    "detalle": [
+                        {
+                            "id": d.pk,
+                            "producto_id": d.producto_id,
+                            "producto_nombre": d.producto.nombre,
+                            "cantidad_recibida": str(d.cantidad_recibida),
+                        }
+                        for d in detalles
+                    ],
+                }
+            )
+
+        empleados_qs = Empleado.objects.filter(activo=True)
+        if empresa:
+            empleados_qs = empleados_qs.filter(empresa=empresa)
+        inspectores = list(
+            empleados_qs.order_by("nombre").values(
+                "id", "numero_empleado", "nombre", "apellido_paterno"
+            )[:200]
+        )
+
+        return {
+            "empresa_id": getattr(empresa, "pk", None),
+            "recepciones_pendientes": recepciones,
+            "inspectores": inspectores,
+        }
+
+    @action(detail=False, methods=["get", "post"], url_path="onboarding")
+    def onboarding(self, request):
+        if request.method.lower() == "get":
+            return Response(self.handle_get_onboarding(request))
+
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        if not empresa and not getattr(user, "is_superuser", False):
+            raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
+
+        serializer = CalidadInspeccionInputSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        with transaction.atomic():
+            recepcion = (
+                Recepcion.objects.select_for_update()
+                .select_related("empresa", "sucursal", "almacen", "usuario")
+                .filter(pk=data["recepcion"], activo=True)
+                .first()
+            )
+            if not recepcion:
+                raise ValidationError({"recepcion": "Recepción no encontrada."})
+            if empresa and recepcion.empresa_id != empresa.pk:
+                raise ValidationError({"recepcion": "No tienes acceso a esta recepción."})
+            if recepcion.estatus != Recepcion.EstatusRecepcion.EN_CALIDAD:
+                raise ValidationError({"estatus": "La recepción no está en espera de calidad."})
+
+            inspector = Empleado.objects.filter(pk=data["inspector"], activo=True).first()
+            if not inspector:
+                raise ValidationError({"inspector": "Empleado no encontrado."})
+            if empresa and inspector.empresa_id != empresa.pk:
+                raise ValidationError({"inspector": "El inspector no pertenece a esta empresa."})
+
+            renglones = {
+                r.pk: r
+                for r in RecepcionDetalle.objects.filter(recepcion=recepcion).select_related(
+                    "producto", "producto_variante"
+                )
+            }
+            if not renglones:
+                raise ValidationError({"detalle": "La recepción no tiene renglones que inspeccionar."})
+
+            ya_inspeccionados = CalidadInspeccionDetalle.objects.filter(
+                recepcion_detalle_id__in=renglones.keys()
+            ).exists()
+            if ya_inspeccionados:
+                raise ValidationError({"detalle": "Esta recepción ya tiene renglones inspeccionados."})
+
+            detalle_in = data["detalle"]
+            ids_enviados = {it["recepcion_detalle"] for it in detalle_in}
+            if ids_enviados != set(renglones.keys()):
+                raise ValidationError(
+                    {"detalle": "Debes inspeccionar todos los renglones de la recepción en un solo envío."}
+                )
+
+            for it in detalle_in:
+                renglon = renglones[it["recepcion_detalle"]]
+                total = it["cantidad_aprobada"] + it["cantidad_rechazada"]
+                if total <= 0:
+                    raise ValidationError(
+                        {"detalle": f"El renglón {renglon.pk} necesita cantidad_aprobada o cantidad_rechazada mayor a 0."}
+                    )
+                if total > renglon.cantidad_recibida:
+                    raise ValidationError(
+                        {"detalle": f"El renglón {renglon.pk} inspecciona más de lo recibido."}
+                    )
+
+            inspeccion = CalidadInspeccion.objects.create(
+                recepcion=recepcion,
+                inspector=inspector,
+                fecha=data.get("fecha") or timezone.now().date(),
+                estado="pendiente",
+                observaciones=data.get("observaciones") or None,
+            )
+
+            movimientos = []
+            resultados = []
+            for it in detalle_in:
+                renglon = renglones[it["recepcion_detalle"]]
+                CalidadInspeccionDetalle.objects.create(
+                    calidad_inspeccion=inspeccion,
+                    recepcion_detalle=renglon,
+                    cantidad_inspeccionada=it["cantidad_aprobada"] + it["cantidad_rechazada"],
+                    cantidad_aprobada=it["cantidad_aprobada"],
+                    cantidad_rechazada=it["cantidad_rechazada"],
+                    resultado=it["resultado"],
+                    motivo_rechazo=it.get("motivo_rechazo") or None,
+                )
+                resultados.append(it["resultado"])
+                if it["cantidad_aprobada"] > 0:
+                    movimientos.append(
+                        self._abonar_renglon(recepcion, renglon, it["cantidad_aprobada"])
+                    )
+
+            inspeccion.estado = self._derivar_estado(resultados)
+            inspeccion.save(update_fields=["estado"])
+
+            movimiento_formal = None
+            if movimientos:
+                movimiento_formal = self._crear_movimiento_formal(recepcion, movimientos)
+
+            recepcion.estatus = Recepcion.EstatusRecepcion.CERRADA
+            recepcion.save(update_fields=["estatus", "updated_at"])
+
+            ev = None
+            if movimientos:
+                ev = AuditoriaEvento.objects.create(
+                    empresa=recepcion.empresa,
+                    usuario=user if getattr(user, "pk", None) else None,
+                    modulo="inventarios",
+                    accion="ENTRADA",
+                    tabla="existencias",
+                    id_registro=str(recepcion.almacen_id),
+                    antes_json={
+                        "items": movimientos,
+                        "recepcion_id": recepcion.pk,
+                        "calidad_inspeccion_id": inspeccion.pk,
+                    },
+                    despues_json={
+                        "almacen_id": recepcion.almacen_id,
+                        "sucursal_id": recepcion.sucursal_id,
+                        "empresa_id": recepcion.empresa_id,
+                        "recepcion_id": recepcion.pk,
+                        "calidad_inspeccion_id": inspeccion.pk,
+                        "items": movimientos,
+                    },
+                    ip=_ip_auditoria(request),
+                    user_agent=request.META.get("HTTP_USER_AGENT"),
+                )
+
+        detalles_out = inspeccion.detalles.select_related("recepcion_detalle__producto").order_by("id")
+        return Response(
+            {
+                "calidad_inspeccion": CalidadInspeccionSerializer(inspeccion).data,
+                "movimiento_id": ev.id_evento if ev else None,
+                "movimiento_inventario_id": movimiento_formal.pk if movimiento_formal else None,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class ComprasDashboardView(APIView):

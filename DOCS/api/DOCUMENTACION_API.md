@@ -1995,7 +1995,7 @@ Cancelar = la orden al proveedor queda anulada **pero se conserva y sigue visibl
 
 **Base URL**: `/api/v1/compras/`
 
-La recepción es el proceso unificado que afecta existencias tanto para órdenes de compra (`OC`) como para órdenes de producción (`OP`).
+⚠️ **La recepción YA NO afecta `Existencia`.** Solo registra el conteo físico y pasa a Calidad. El inventario lo abona `POST /api/v1/compras/calidad-inspecciones/onboarding/` (sección siguiente), únicamente por lo que Calidad aprueba. Si tu frontend asumía que "recepción = ya está en almacén", hay que cambiarlo — ver flujo completo en `DOCS/arquitectura/flujo-recepcion-calidad-compras.md`.
 
 ### 1) Obtener datos para el formulario
 
@@ -2062,16 +2062,14 @@ La recepción es el proceso unificado que afecta existencias tanto para órdenes
 
 **Reglas del flujo**
 
-- La recepción puede ser total o parcial.
+- La recepción puede ser total o parcial (respecto a lo ordenado en la OC/OP).
 - Debe enviarse exactamente un origen: `orden_compra` o `orden_produccion`.
 - Para `OC`, el backend toma el `producto` desde `OrdenCompraDetalle`.
 - Para `OP`, el backend toma `producto` y `producto_variante` desde `OrdenProduccionDetalle`.
 - Si el almacén requiere ubicación, `ubicacion` es obligatoria.
-- Ni la orden de compra ni la orden de producción mueven inventario por sí mismas; la recepción sí.
 - La recepción genera folio con series como `RC`, `RT` o `RZ`.
-- Además de afectar `Existencia`, el backend genera auditoría y movimientos formales de inventario.
-- Si la recepción viene de producción, `MovimientoInventario.op` queda ligado a la `OP`.
-- El flujo de recepción centraliza la entrada de inventario; `ProductoTerminadoEntradas` queda redundante para este caso de uso.
+- Nace en `estatus = 4 (EN_CALIDAD)` siempre — ya no en `RECIBIDA`/`PARCIAL`. No toca `Existencia`, no genera `MovimientoInventario`, no genera auditoría de inventario (eso se movió a Calidad).
+- `OrdenCompra.estatus`/cierre de `OrdenProduccion` (`cerrar_orden`) SÍ se actualizan aquí, basados en el conteo físico — son independientes de que Calidad ya haya liberado o no.
 
 **Body (ejemplo)**
 
@@ -2127,7 +2125,7 @@ La recepción es el proceso unificado que afecta existencias tanto para órdenes
   "recepcion": {
     "id": 33,
     "folio": "RC-000033",
-    "estatus": 2
+    "estatus": 4
   },
   "detalle": [
     {
@@ -2142,11 +2140,107 @@ La recepción es el proceso unificado que afecta existencias tanto para órdenes
       "serie": null,
       "cantidad_recibida": "1.0000"
     }
-  ],
-  "movimiento_id": 450,
-  "movimiento_inventario_id": 77
+  ]
 }
 ```
+
+Ya NO trae `movimiento_id`/`movimiento_inventario_id` — no hubo movimiento de inventario en este paso.
+
+---
+
+## 🧾 Compras - Calidad (Onboarding)
+
+**Base URL**: `/api/v1/compras/`
+
+Único punto donde una recepción abona `Existencia`. Filtra entre "ya se contó físicamente" y "ya es stock disponible".
+
+### 1) Obtener recepciones pendientes de inspección
+
+- **Endpoint**: `GET /api/v1/compras/calidad-inspecciones/onboarding/`
+- **Respuesta (resumen)**:
+  ```json
+  {
+    "empresa_id": 1,
+    "recepciones_pendientes": [
+      {
+        "id": 33,
+        "folio": "RC-000033",
+        "tipo_origen": "OC",
+        "proveedor_nombre": "Textiles ACME",
+        "almacen_id": 8,
+        "fecha_recepcion": "2026-09-28T12:00:00Z",
+        "detalle": [
+          { "id": 101, "producto_id": 1, "producto_nombre": "Tela gabardina", "cantidad_recibida": "1.0000" }
+        ]
+      }
+    ],
+    "inspectores": [
+      { "id": 5, "numero_empleado": "E-005", "nombre": "Ana", "apellido_paterno": "Ruiz" }
+    ]
+  }
+  ```
+  `inspectores` son filas de `hr.Empleado`, **no** usuarios del sistema — ver nota abajo.
+
+### 2) Registrar la inspección
+
+- **Endpoint**: `POST /api/v1/compras/calidad-inspecciones/onboarding/`
+
+**Reglas del flujo**
+
+- `recepcion` debe existir, ser de tu empresa y estar en `estatus = EN_CALIDAD` (4). Cualquier otro estatus → 400.
+- **Se inspecciona TODO el detalle de la recepción en un solo POST.** No hay inspección parcial por rondas — si faltó un `recepcion_detalle` o mandaste uno de otra recepción, 400. Una recepción ya inspeccionada no admite un segundo POST.
+- Por renglón: `cantidad_aprobada + cantidad_rechazada` debe ser > 0 y no exceder `cantidad_recibida` de ese renglón.
+- `resultado` es una etiqueta descriptiva (`cuarentena`, `liberado`, `concesion_cc`, `concesion lazzar` **— así, con espacio, no es typo tuyo**, `rechazo`); no fuerza nada sobre el split de cantidades, ese lo controlas tú con `cantidad_aprobada`/`cantidad_rechazada`.
+- Solo `cantidad_aprobada` (la que sea, en cualquier renglón) abona `Existencia` y genera `MovimientoInventario`. `cantidad_rechazada` no entra a almacén — **qué pasa después con esa cantidad no está definido todavía** (no hay flujo de devolución a proveedor ni de scrap).
+- Al terminar, la `Recepcion` pasa a `estatus = CERRADA` (5) siempre — sea que se aprobó todo, nada, o mixto.
+- `inspector` es un `id` de `hr.Empleado`, **no** el usuario autenticado — `Usuario` y `Empleado` no están ligados en este sistema. El frontend debe traer el selector de inspectores del catálogo de arriba, no asumir el usuario en sesión.
+
+**Body (ejemplo)**
+
+```json
+{
+  "recepcion": 33,
+  "inspector": 5,
+  "observaciones": "Lote con 1 pieza manchada",
+  "detalle": [
+    { "recepcion_detalle": 101, "cantidad_aprobada": "0.0000", "cantidad_rechazada": "1.0000", "resultado": "rechazo", "motivo_rechazo": "mancha de aceite" }
+  ]
+}
+```
+
+**Respuesta (resumen)**
+
+```json
+{
+  "calidad_inspeccion": {
+    "id": 9,
+    "recepcion": 33,
+    "recepcion_folio": "RC-000033",
+    "inspector": 5,
+    "inspector_nombre": "Ana Ruiz",
+    "fecha": "2026-09-28",
+    "estado": "rechazada",
+    "estado_label": "Rechazada",
+    "observaciones": "Lote con 1 pieza manchada",
+    "detalles": [
+      {
+        "id": 14,
+        "recepcion_detalle": 101,
+        "producto_nombre": "Tela gabardina",
+        "cantidad_inspeccionada": "1.00",
+        "cantidad_aprobada": "0.00",
+        "cantidad_rechazada": "1.00",
+        "resultado": "rechazo",
+        "motivo_rechazo": "mancha de aceite"
+      }
+    ]
+  },
+  "movimiento_id": null,
+  "movimiento_inventario_id": null
+}
+```
+
+`movimiento_id`/`movimiento_inventario_id` salen `null` cuando nada se aprobó (como en este ejemplo); si algo se aprueba, traen los ids reales igual que antes traía `recepciones/onboarding/`.
 
 ---
 
@@ -2206,8 +2300,8 @@ Sin `desde`/`hasta` el gasto es histórico completo. `desde`/`hasta` inválidos 
 
 - **`top_proveedores` NO separa por moneda** — suma `gran_total` tal cual, sin convertir tipo de cambio. Si la empresa opera en más de una moneda, ese top mezcla importes no comparables. Usa `gasto_por_moneda` para desagregar por moneda; no hay tasa de cambio en ningún lado del sistema.
 - Sin `empresa` asignada y sin `is_superuser` → todo en cero (`filtros: null`), mismo patrón multi-tenant que el resto de `/api/v1/`.
-- **No incluye nada de Calidad ni de envíos de proveedor.** `CalidadInspeccion`/`EnvioProveedor` existen como modelo pero no los llena nadie — no hay dato real detrás. Ver `DOCS/arquitectura/flujo-recepcion-calidad-compras.md`.
-- Los números de `Existencia`/inventario que implican estas OCs/recepciones están disponibles en el momento en que se registra la recepción — hoy no hay filtro de calidad entre "recibido" y "disponible en almacén" (mismo doc de arriba).
+- **No incluye nada de Calidad todavía** (`recepciones_por_estatus` ya puede traer `EN_CALIDAD`/`CERRADA`, pero no hay un desglose de aprobado/rechazado/cuarentena en este dashboard — pendiente si lo necesitan). `EnvioProveedor` sigue sin usarse en ningún lado, ese sí es puro modelo sin dato real.
+- Desde este cambio, `Existencia` se abona en `POST /api/v1/compras/calidad-inspecciones/onboarding/`, no en `recepciones/onboarding/` — ver `DOCS/arquitectura/flujo-recepcion-calidad-compras.md`.
 
 ---
 

@@ -10,6 +10,8 @@ from compras.models import (
     OrdenCompraDetalle,
     Recepcion,
     RecepcionDetalle,
+    CalidadInspeccion,
+    CalidadInspeccionDetalle,
 )
 
 
@@ -305,4 +307,39 @@ class RecepcionDetalleAdmin(admin.ModelAdmin):
         "lote",
         "serie",
     )
+
+
+class CalidadInspeccionDetalleInline(admin.TabularInline):
+    model = CalidadInspeccionDetalle
+    extra = 0
+    autocomplete_fields = ("recepcion_detalle",)
+
+
+@admin.register(CalidadInspeccion)
+class CalidadInspeccionAdmin(admin.ModelAdmin):
+    list_display = ("id", "recepcion", "inspector", "fecha", "estado")
+    list_filter = ("estado", "fecha")
+    search_fields = ("id", "recepcion__folio", "inspector__nombre", "inspector__numero_empleado")
+    ordering = ("-fecha", "-id")
+    autocomplete_fields = ("recepcion", "inspector")
+    list_select_related = ("recepcion", "inspector")
+    inlines = (CalidadInspeccionDetalleInline,)
+
+
+@admin.register(CalidadInspeccionDetalle)
+class CalidadInspeccionDetalleAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "calidad_inspeccion",
+        "recepcion_detalle",
+        "cantidad_inspeccionada",
+        "cantidad_aprobada",
+        "cantidad_rechazada",
+        "resultado",
+    )
+    list_filter = ("resultado",)
+    search_fields = ("id", "calidad_inspeccion__id", "recepcion_detalle__id")
+    ordering = ("-id",)
+    autocomplete_fields = ("calidad_inspeccion", "recepcion_detalle")
+    list_select_related = ("calidad_inspeccion", "recepcion_detalle")
 

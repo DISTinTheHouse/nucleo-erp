@@ -1,5 +1,14 @@
+from decimal import Decimal
+
 from rest_framework import serializers
-from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+from compras.models import (
+    CalidadInspeccion,
+    CalidadInspeccionDetalle,
+    OrdenCompra,
+    OrdenCompraDetalle,
+    Recepcion,
+    RecepcionDetalle,
+)
 
 
 class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
@@ -410,4 +419,67 @@ class RecepcionOnboardingDetalleInputSerializer(serializers.Serializer):
 class RecepcionOnboardingSerializer(serializers.Serializer):
     recepcion = RecepcionOnboardingHeaderSerializer()
     detalle = RecepcionOnboardingDetalleInputSerializer(many=True)
+
+
+class CalidadInspeccionDetalleSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source="recepcion_detalle.producto.nombre", read_only=True)
+
+    class Meta:
+        model = CalidadInspeccionDetalle
+        fields = [
+            "id",
+            "recepcion_detalle",
+            "producto_nombre",
+            "cantidad_inspeccionada",
+            "cantidad_aprobada",
+            "cantidad_rechazada",
+            "resultado",
+            "motivo_rechazo",
+        ]
+
+
+class CalidadInspeccionSerializer(serializers.ModelSerializer):
+    estado_label = serializers.CharField(source="get_estado_display", read_only=True)
+    inspector_nombre = serializers.SerializerMethodField()
+    recepcion_folio = serializers.CharField(source="recepcion.folio", read_only=True)
+    detalles = CalidadInspeccionDetalleSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = CalidadInspeccion
+        fields = [
+            "id",
+            "recepcion",
+            "recepcion_folio",
+            "inspector",
+            "inspector_nombre",
+            "fecha",
+            "estado",
+            "estado_label",
+            "observaciones",
+            "detalles",
+        ]
+
+    def get_inspector_nombre(self, obj):
+        if not obj.inspector_id:
+            return None
+        return f"{obj.inspector.nombre} {obj.inspector.apellido_paterno}".strip()
+
+
+class CalidadInspeccionDetalleInputSerializer(serializers.Serializer):
+    # ``RESULTADO_CHOICES`` en el modelo trae ``"concesion lazzar"`` con
+    # espacio (no ``concesion_lazzar``) — se respeta tal cual, no se corrige
+    # aquí para no divergir del valor real que acepta la base.
+    recepcion_detalle = serializers.IntegerField()
+    cantidad_aprobada = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0"))
+    cantidad_rechazada = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0"))
+    resultado = serializers.ChoiceField(choices=CalidadInspeccionDetalle.RESULTADO_CHOICES)
+    motivo_rechazo = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+
+
+class CalidadInspeccionInputSerializer(serializers.Serializer):
+    recepcion = serializers.IntegerField()
+    inspector = serializers.IntegerField()
+    fecha = serializers.DateField(required=False, allow_null=True)
+    observaciones = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    detalle = CalidadInspeccionDetalleInputSerializer(many=True)
 
