@@ -2429,9 +2429,12 @@ class PedidoViewSet(viewsets.ModelViewSet):
             return
 
         if pedido.serie_folio_id:
+            # Por ``empresa`` además del pk: una serie de otra empresa no se
+            # encuentra (y no se consume). ``PedidoSerializer.validate_serie_folio``
+            # ya la rechaza antes; esto cubre cualquier otro camino.
             serie_folio = (
                 SerieFolio.objects.select_for_update()
-                .filter(pk=pedido.serie_folio_id)
+                .filter(pk=pedido.serie_folio_id, empresa_id=pedido.empresa_id)
                 .first()
             )
         else:
