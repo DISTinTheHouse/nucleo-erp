@@ -421,29 +421,52 @@ class AsistenciaViewSet(
 
         with transaction.atomic():
             asistencia = self._asistencia_del_dia(empleado, fecha)
-            if asistencia is not None and asistencia.hora_entrada is not None:
-                raise ChecadaYaRegistradaError(MENSAJE_ENTRADA_YA_REGISTRADA)
             if asistencia is None:
                 try:
                     # Savepoint propio: si otra petición creó el registro entre la
                     # consulta y el INSERT, la constraint ``(empleado, fecha)``
-                    # lanza ``IntegrityError`` y la transacción sigue usable para
-                    # confirmar que fue esa colisión.
+                    # lanza ``IntegrityError`` y la transacción sigue usable.
                     with transaction.atomic():
                         asistencia = Asistencia.objects.create(
                             empleado=empleado, fecha=fecha, turno=turno, hora_entrada=ahora,
                         )
                 except IntegrityError:
-                    if not Asistencia.objects.filter(empleado=empleado, fecha=fecha).exists():
+                    # Se relee la fila rival, bloqueada, y se trata como un
+                    # registro existente: si no tiene entrada se le pone, en vez
+                    # de responder que ya estaba registrada. Consulta directa y no
+                    # ``_asistencia_del_dia``: es una segunda lectura, tras la
+                    # colisión, de una fila que ya se sabe que existe.
+                    asistencia = (
+                        Asistencia.objects.select_for_update()
+                        .filter(empleado=empleado, fecha=fecha).first()
+                    )
+                    if asistencia is None:
                         raise
-                    raise ChecadaYaRegistradaError(MENSAJE_ENTRADA_YA_REGISTRADA)
+                    self._poner_entrada(asistencia, turno, ahora)
             else:
-                # Registro creado sin entrada (p. ej. una falta capturada a mano).
-                asistencia.hora_entrada = ahora
-                asistencia.turno = turno
-                asistencia.save()
+                self._poner_entrada(asistencia, turno, ahora)
         serializer = self.get_serializer(asistencia)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def _poner_entrada(self, asistencia, turno, ahora):
+        """Pone la entrada en un registro existente del día, ya bloqueado.
+
+        Solo si aún no tiene entrada (p. ej. una falta capturada a mano); si la
+        tiene, 409. Si ya guarda una salida, la entrada debe ser anterior.
+        """
+        if asistencia.hora_entrada is not None:
+            raise ChecadaYaRegistradaError(MENSAJE_ENTRADA_YA_REGISTRADA)
+        if asistencia.hora_salida is not None and ahora >= asistencia.hora_salida:
+            raise ChecadaInvalidaError('La hora de entrada debe ser anterior a la hora de salida registrada.')
+        asistencia.hora_entrada = ahora
+        asistencia.turno = turno
+        if asistencia.estado == 'justificada':
+            # La checada libera la justificación: el estado se vuelve a derivar
+            # (``puntual`` o ``retardo``). Cualquier valor distinto de
+            # ``justificada`` lo reemplaza ``_calcular_estado_y_horas``; RH puede
+            # volver a justificar por PATCH.
+            asistencia.estado = 'falta'
+        asistencia.save()
 
     @action(detail=False, methods=['POST'])
     def registrar_salida(self, request):
