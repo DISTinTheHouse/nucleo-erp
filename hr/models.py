@@ -373,6 +373,26 @@ class Asistencia(models.Model):
     def __str__(self):
         return str(self.id)
 
+    def clean(self):
+        """Mismas reglas de horas que ``AsistenciaSerializer.validate``.
+
+        DRF no llama a ``clean()``, así que la API valida en el serializer; esto
+        cubre el admin (su ``ModelForm`` llama a ``full_clean()``). Una salida
+        días después de la entrada desbordaba ``Decimal(4,2)`` al guardar.
+        """
+        from django.core.exceptions import ValidationError
+        errores = {}
+        for campo, nombre in (('hora_entrada', 'entrada'), ('hora_salida', 'salida')):
+            valor = getattr(self, campo)
+            if valor and self.fecha and fecha_local(valor) != self.fecha:
+                errores[campo] = f'La hora de {nombre} debe corresponder a la fecha de la asistencia.'
+        if errores:
+            raise ValidationError(errores)
+        if self.hora_salida and not self.hora_entrada:
+            raise ValidationError({'hora_salida': 'No se puede registrar la salida sin una hora de entrada.'})
+        if self.hora_salida and self.hora_entrada and self.hora_salida <= self.hora_entrada:
+            raise ValidationError({'hora_salida': 'La hora de salida no puede ser anterior a la de entrada.'})
+
     def save(self, *args, **kwargs):
         self._calcular_estado_y_horas()
         super().save(*args, **kwargs)
