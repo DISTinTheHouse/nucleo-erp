@@ -154,6 +154,17 @@ class VacacionesAdmin(admin.ModelAdmin):
     list_filter = ("estado", "fecha_inicio", "fecha_fin", "fecha_solicitud")
     search_fields = ("empleado__numero_empleado", "empleado__nombre", "motivo", "motivo_rechazo")
     list_select_related = ("empleado", "solicitado_por", "autorizado_por", "rechazado_por")
+    readonly_fields = ("estado",)
+
+    def has_change_permission(self, request, obj=None):
+        if obj is not None and obj.estado != "pendiente":
+            return False
+        return super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None and obj.estado == "rechazado":
+            return False
+        return super().has_delete_permission(request, obj)
 
 
 class PermisoAusenciaAdmin(admin.ModelAdmin):
@@ -161,6 +172,17 @@ class PermisoAusenciaAdmin(admin.ModelAdmin):
     list_filter = ("estado", "tipo", "con_goce_sueldo", "fecha_inicio", "fecha_solicitud")
     search_fields = ("empleado__numero_empleado", "empleado__nombre", "motivo", "motivo_rechazo")
     list_select_related = ("empleado", "solicitado_por", "autorizado_por", "rechazado_por")
+    readonly_fields = ("estado",)
+
+    def has_change_permission(self, request, obj=None):
+        if obj is not None and obj.estado != "pendiente":
+            return False
+        return super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None and obj.estado == "rechazado":
+            return False
+        return super().has_delete_permission(request, obj)
 
 
 class IncidenciaAdmin(admin.ModelAdmin):
