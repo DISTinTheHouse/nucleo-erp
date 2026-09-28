@@ -22,6 +22,19 @@ def _con_zona_horaria(valor):
     return timezone.make_aware(valor, timezone.get_current_timezone())
 
 
+def fecha_local(valor):
+    """Fecha calendario de un datetime en la zona activa (``America/Mexico_City``).
+
+    Con ``USE_TZ`` un datetime aware puede venir en UTC: las 23:30 del 28 en
+    México son las 05:30 del 29 en UTC. Para comparar contra un ``DateField``
+    hay que convertirlo antes a la zona local.
+    """
+    valor = _con_zona_horaria(valor)
+    if timezone.is_aware(valor):
+        valor = timezone.localtime(valor)
+    return valor.date()
+
+
 class Puesto(StatusLifecycleModel):
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.PROTECT, related_name='puestos')
     nombre = models.CharField(max_length=100)
@@ -365,41 +378,56 @@ class Asistencia(models.Model):
         super().save(*args, **kwargs)
 
     def _calcular_estado_y_horas(self):
+        """Deriva ``estado`` y los campos calculados en cada guardado.
+
+        - Sin ``hora_entrada``: ``falta``, sin retardo y sin horas.
+        - Con entrada: ``retardo`` si ``minutos_retardo > 0`` (lo que pasa de la
+          tolerancia del turno), si no ``puntual``.
+        - Con entrada y salida: horas normales hasta ``horas_base_diarias`` del
+          turno y el resto como extra; sin salida, horas en ``null``.
+
+        ``justificada`` es el único estado que se fija a mano y se conserva; los
+        campos calculados se siguen calculando. Cualquier otro valor recibido se
+        reemplaza por el derivado.
+        """
         hora_entrada = _con_zona_horaria(self.hora_entrada)
         hora_salida = _con_zona_horaria(self.hora_salida)
 
-        if self.turno:
+        if self.turno_id:
             self.minutos_tolerancia = self.turno.tolerancia_retardo_minutos
             base_diarias = self.turno.horas_base_diarias
         else:
             base_diarias = Decimal('8.00')
 
-        if hora_entrada and self.turno:
-            turno_entrada = _con_zona_horaria(datetime.combine(self.fecha, self.turno.hora_entrada))
-            diff = (hora_entrada - turno_entrada).total_seconds() / 60
-            if diff > self.minutos_tolerancia:
-                self.minutos_retardo = int(diff - self.minutos_tolerancia)
-                if self.estado in ('puntual',):
-                    self.estado = 'retardo'
-            elif diff < -30:
-                self.minutos_retardo = 0
-            else:
-                self.minutos_retardo = 0
-                if self.estado in ('retardo',):
-                    pass
+        if hora_entrada is None:
+            self.minutos_retardo = 0
+            self.horas_normales = None
+            self.horas_extra = None
+            derivado = 'falta'
+        else:
+            self.minutos_retardo = 0
+            if self.turno_id:
+                turno_entrada = _con_zona_horaria(datetime.combine(self.fecha, self.turno.hora_entrada))
+                diff = (hora_entrada - turno_entrada).total_seconds() / 60
+                if diff > self.minutos_tolerancia:
+                    self.minutos_retardo = int(diff - self.minutos_tolerancia)
+            derivado = 'retardo' if self.minutos_retardo > 0 else 'puntual'
 
-        if hora_salida and hora_entrada:
-            total_segundos = (hora_salida - hora_entrada).total_seconds()
-            total_horas = Decimal(str(total_segundos / 3600)).quantize(Decimal('0.01'))
-            if total_horas > base_diarias:
-                self.horas_normales = base_diarias
-                self.horas_extra = (total_horas - base_diarias).quantize(Decimal('0.01'))
+            if hora_salida is None:
+                self.horas_normales = None
+                self.horas_extra = None
             else:
-                self.horas_normales = total_horas
-                self.horas_extra = Decimal('0.00')
+                total_segundos = (hora_salida - hora_entrada).total_seconds()
+                total_horas = Decimal(str(total_segundos / 3600)).quantize(Decimal('0.01'))
+                if total_horas > base_diarias:
+                    self.horas_normales = base_diarias
+                    self.horas_extra = (total_horas - base_diarias).quantize(Decimal('0.01'))
+                else:
+                    self.horas_normales = total_horas
+                    self.horas_extra = Decimal('0.00')
 
-            if not self.hora_entrada and self.estado in ('puntual', 'retardo'):
-                self.estado = 'falta'
+        if self.estado != 'justificada':
+            self.estado = derivado
 
 
 class ControlHoras(models.Model):
