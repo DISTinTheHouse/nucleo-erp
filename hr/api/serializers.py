@@ -327,7 +327,7 @@ class AsistenciaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerial
         # ``<=``: un turno de duración cero tampoco es válido, igual que en
         # ``registrar_salida`` y en ``Asistencia.clean``.
         if hora_salida and hora_entrada and hora_salida <= hora_entrada:
-            raise serializers.ValidationError({'hora_salida': 'La hora de salida no puede ser anterior a la de entrada.'})
+            raise serializers.ValidationError({'hora_salida': 'La hora de salida debe ser posterior a la de entrada.'})
         return data
 
 

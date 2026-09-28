@@ -703,7 +703,7 @@ class AsistenciaValidacionTests(AsistenciaBase):
 
         self.assertEqual(resp.status_code, 400, resp.content)
         self.assertEqual(
-            resp.json(), {"hora_salida": ["La hora de salida no puede ser anterior a la de entrada."]},
+            resp.json(), {"hora_salida": ["La hora de salida debe ser posterior a la de entrada."]},
         )
         asistencia.refresh_from_db()
         self.assertEqual(asistencia.hora_entrada, _mx(DIA, 8, 0))
@@ -921,7 +921,7 @@ class AsistenciaChecadorTests(AsistenciaBase):
 
 
 MENSAJE_ENTRADA_TRAS_SALIDA = "La hora de entrada debe ser anterior a la hora de salida registrada."
-MENSAJE_SALIDA_NO_POSTERIOR = "La hora de salida no puede ser anterior a la de entrada."
+MENSAJE_SALIDA_NO_POSTERIOR = "La hora de salida debe ser posterior a la de entrada."
 
 
 class AsistenciaRevisionTests(AsistenciaBase):

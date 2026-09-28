@@ -391,7 +391,7 @@ class Asistencia(models.Model):
         if self.hora_salida and not self.hora_entrada:
             raise ValidationError({'hora_salida': 'No se puede registrar la salida sin una hora de entrada.'})
         if self.hora_salida and self.hora_entrada and self.hora_salida <= self.hora_entrada:
-            raise ValidationError({'hora_salida': 'La hora de salida no puede ser anterior a la de entrada.'})
+            raise ValidationError({'hora_salida': 'La hora de salida debe ser posterior a la de entrada.'})
 
     def save(self, *args, **kwargs):
         self._calcular_estado_y_horas()
