@@ -27,21 +27,24 @@ from inventarios.models import (
     TipoMovimiento,
     Ubicacion,
 )
-from ventas.api.views import CotizacionViewSet
+from ventas.api.views import CotizacionViewSet, PedidoViewSet
 from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal
 from produccion.models import OrdenesBordado
 from seguridad.models import Rol, UsuarioRol
-from terceros.models import Cliente
+from terceros.models import Cliente, DireccionCliente
 from usuarios.models import Usuario
 from wms.models import Picking, PickingDetalle
 from ventas.models import (
     Cotizacion,
+    CotizacionDetalle,
     CotizacionServicioExtra,
     CotizacionDetalleTalla,
+    Oportunidad,
     Pedido,
     PedidoDetalle,
     PedidoDetalleTalla,
     PedidoServicioExtra,
+    Prospecto,
 )
 from ventas.servicios_bordado import TipoServicioBordado, validar_tipos_servicio_array
 from ventas.utils.helpers import _save_cotizacion_detalle
@@ -49,7 +52,10 @@ from ventas.utils.helpers import _save_cotizacion_detalle
 PEDIDOS_URL = "/api/v1/ventas/pedidos/"
 PEDIDO_DETALLE_URL = "/api/v1/ventas/pedido-detalle/"
 PEDIDO_DETALLE_TALLA_URL = "/api/v1/ventas/pedido-detalle-talla/"
+COTIZACIONES_URL = "/api/v1/ventas/cotizaciones/"
+COTIZACION_DETALLE_URL = "/api/v1/ventas/cotizacion-detalle/"
 COTIZACION_ONBOARDING_URL = "/api/v1/ventas/cotizaciones/onboarding/"
+CLIENTES_URL = "/api/v1/terceros/clientes/"
 MESA_CONTROL_URL = "/api/v1/ventas/mesa-control/"
 
 
@@ -2218,4 +2224,680 @@ class ServicioExtraCantidadCopiaTests(TestCase):
         nueva = Cotizacion.objects.get(pk=resp.data["cotizacion"]["id"])
         self.assertEqual(
             self._cantidades(CotizacionServicioExtra.objects.filter(cotizacion=nueva)), self._esperadas()
+        )
+
+
+# Pk que no existe en ninguna tabla del test: el rechazo de una FK de OTRA empresa
+# debe ser byte a byte el mismo que DRF da para este pk (salvo el número).
+PK_INEXISTENTE = 999999
+
+
+class FkCrossTenantEscrituraTests(TestCase):
+    """#249: las FKs laterales de Pedido/Cotización y sus renglones, en ESCRITURA.
+
+    ``get_queryset`` sólo aísla LECTURAS; con ``fields='__all__'`` cada FK es un
+    ``PrimaryKeyRelatedField`` sobre ``Model.objects.all()`` y aceptaba el pk de
+    cualquier empresa. Cada FK se compara contra la empresa del DOCUMENTO dueño
+    (no sólo contra la del usuario), también para superusuarios, y el rechazo es
+    indistinguible del de un pk inexistente para no revelar que existe en otra
+    empresa.
+    """
+
+    @classmethod
+    def _tenant(cls, codigo, codigo_sucursal, email):
+        empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+        sucursal = Sucursal.objects.create(
+            empresa=empresa, codigo=codigo_sucursal, nombre=codigo_sucursal
+        )
+        cliente = Cliente.objects.create(empresa=empresa, nombre=f"Cliente {codigo}")
+        direccion = DireccionCliente.objects.create(
+            empresa=empresa,
+            cliente=cliente,
+            destinatario="Almacen",
+            empresa_envio=codigo,
+            telefono_envio="8100000000",
+            celular_envio="8100000000",
+            direccion_envio="Calle 1",
+            colonia_envio="Centro",
+            codigo_postal="64000",
+            ciudad_envio="Monterrey",
+            estado_envio="NL",
+        )
+        usuario = Usuario.objects.create(
+            username=email, email=email, empresa=empresa, sucursal_default=sucursal
+        )
+        admin = Usuario.objects.create(
+            username=f"admin.{email}",
+            email=f"admin.{email}",
+            empresa=empresa,
+            is_admin_empresa=True,
+        )
+        serie = SerieFolio.objects.create(
+            empresa=empresa,
+            sucursal=sucursal,
+            tipo_documento="PEDIDO",
+            serie=codigo.upper()[:3],
+            folio_actual=100,
+        )
+        moneda_privada = Moneda.objects.create(
+            empresa=empresa, codigo_iso="USD", nombre=f"Dolar {codigo}"
+        )
+        oportunidad = Oportunidad.objects.create(
+            prospecto=Prospecto.objects.create(empresa=empresa)
+        )
+        producto = Producto.objects.create(empresa=empresa, nombre=f"Prod {codigo}")
+        variante = ProductoVariante.objects.create(
+            producto=producto,
+            empresa=empresa,
+            color=cls.color,
+            talla=cls.talla,
+            sku=f"SKU-{codigo}",
+            precio_base=Decimal("10.00"),
+        )
+        cotizacion = Cotizacion.objects.create(
+            empresa=empresa,
+            vendedor=usuario,
+            sucursal=sucursal,
+            cliente=cliente,
+            moneda=cls.moneda,
+        )
+        cotizacion_detalle = CotizacionDetalle.objects.create(
+            cotizacion=cotizacion, producto=producto
+        )
+        pedido = Pedido.objects.create(
+            empresa=empresa,
+            sucursal=sucursal,
+            cliente=cliente,
+            cotizacion=cotizacion,
+            moneda=cls.moneda,
+            serie_folio=serie,
+            folio=f"PED-{codigo}",
+            persona_pagos="Pagos",
+            correo_facturas=email,
+            telefono_pagos="8100000000",
+            forma_pago="03",
+            metodo_pago="PUE",
+            uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=pedido, producto=producto)
+        talla_row = PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=cls.talla, cantidad=5, variante=variante
+        )
+        return {
+            "empresa": empresa,
+            "sucursal": sucursal,
+            "cliente": cliente,
+            "direccion": direccion,
+            "usuario": usuario,
+            "admin": admin,
+            "serie": serie,
+            "moneda_privada": moneda_privada,
+            "oportunidad": oportunidad,
+            "producto": producto,
+            "variante": variante,
+            "cotizacion": cotizacion,
+            "cotizacion_detalle": cotizacion_detalle,
+            "pedido": pedido,
+            "detalle": detalle,
+            "talla_row": talla_row,
+        }
+
+    @classmethod
+    def setUpTestData(cls):
+        # ``moneda`` global (``empresa=NULL``): la comparten todas las empresas.
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.talla = Talla.objects.create(nombre="M")
+        cls.color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        cls.a = cls._tenant("acme", "MTY", "a@acme.test")
+        cls.b = cls._tenant("globex", "GDL", "b@globex.test")
+        cls.superuser = Usuario.objects.create(
+            username="root", email="root@nowhere.test", is_superuser=True
+        )
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _assert_rechazo_como_inexistente(self, enviar, pk_ajeno):
+        """``enviar(pk)`` hace la petición; el pk ajeno debe rechazarse igual que uno inexistente.
+
+        Compara los BYTES de la respuesta: si el ajeno diera un mensaje propio
+        ("no pertenece a tu empresa"), confirmaría que el pk existe en otra.
+        """
+        inexistente = enviar(PK_INEXISTENTE)
+        self.assertEqual(inexistente.status_code, 400, inexistente.content)
+        ajeno = enviar(pk_ajeno)
+        self.assertEqual(ajeno.status_code, 400, ajeno.content)
+        self.assertEqual(
+            ajeno.content,
+            inexistente.content.replace(
+                str(PK_INEXISTENTE).encode(), str(pk_ajeno).encode()
+            ),
+        )
+
+    # --- payloads mínimos ------------------------------------------------------
+
+    def _pedido_payload(self, t, **extra):
+        data = {
+            "sucursal": t["sucursal"].pk,
+            "cliente": t["cliente"].pk,
+            "moneda": self.moneda.pk,
+            "persona_pagos": "Pagos",
+            "correo_facturas": "pagos@test.test",
+            "telefono_pagos": "8100000000",
+            "forma_pago": "03",
+            "metodo_pago": "PUE",
+            "uso_cfdi": "G03",
+        }
+        data.update(extra)
+        return data
+
+    def _cotizacion_payload(self, t, **extra):
+        # ``oportunidad`` explícito: ``null=True`` sin ``blank=True`` la vuelve
+        # requerida (aunque acepte ``None``) en el ModelSerializer.
+        data = {
+            "sucursal": t["sucursal"].pk,
+            "cliente": t["cliente"].pk,
+            "moneda": self.moneda.pk,
+            "oportunidad": None,
+            "tipo_pedido": 1,
+        }
+        data.update(extra)
+        return data
+
+    # --- Pedido: PATCH/PUT con FKs de otra empresa -----------------------------
+
+    def test_pedido_patch_fk_de_otra_empresa_es_400_y_no_persiste(self):
+        pedido = self.a["pedido"]
+        url = f"{PEDIDOS_URL}{pedido.pk}/"
+        client = self._client(self.a["usuario"])
+        for campo, clave in (
+            ("sucursal", "sucursal"),
+            ("cliente", "cliente"),
+            ("cotizacion", "cotizacion"),
+            ("serie_folio", "serie"),
+            ("moneda", "moneda_privada"),
+        ):
+            with self.subTest(campo=campo):
+                self._assert_rechazo_como_inexistente(
+                    lambda pk: client.patch(url, {campo: pk}, format="json"),
+                    self.b[clave].pk,
+                )
+                original = getattr(self.a["pedido"], f"{campo}_id")
+                pedido.refresh_from_db()
+                self.assertEqual(getattr(pedido, f"{campo}_id"), original)
+
+    def test_pedido_put_con_cliente_de_otra_empresa_es_400(self):
+        client = self._client(self.a["usuario"])
+        url = f"{PEDIDOS_URL}{self.a['pedido'].pk}/"
+        self._assert_rechazo_como_inexistente(
+            lambda pk: client.put(
+                url, self._pedido_payload(self.a, cliente=pk), format="json"
+            ),
+            self.b["cliente"].pk,
+        )
+
+    def test_pedido_patch_con_fks_propias_y_moneda_global_sigue_200(self):
+        resp = self._client(self.a["usuario"]).patch(
+            f"{PEDIDOS_URL}{self.a['pedido'].pk}/",
+            {
+                "sucursal": self.a["sucursal"].pk,
+                "cliente": self.a["cliente"].pk,
+                "cotizacion": self.a["cotizacion"].pk,
+                "serie_folio": self.a["serie"].pk,
+                "moneda": self.moneda.pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_pedido_moneda_privada_propia_se_acepta(self):
+        resp = self._client(self.a["usuario"]).patch(
+            f"{PEDIDOS_URL}{self.a['pedido'].pk}/",
+            {"moneda": self.a["moneda_privada"].pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_pedido_errores_de_varias_fks_se_reportan_juntos(self):
+        """Una FK ajena no 'pasa' mientras otra falla: ambos errores salen juntos.
+
+        Si la ajena se validara en ``validate()`` (que no corre cuando ya hay
+        errores de campo), su ausencia junto a un pk inexistente delataría que
+        existe.
+        """
+        resp = self._client(self.a["usuario"]).patch(
+            f"{PEDIDOS_URL}{self.a['pedido'].pk}/",
+            {"cliente": self.b["cliente"].pk, "sucursal": PK_INEXISTENTE},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(set(resp.json()), {"cliente", "sucursal"})
+
+    # --- Pedido: POST y consumo de folios ---------------------------------------
+
+    def test_pedido_post_serie_propia_con_sucursal_ajena_es_400_sin_consumir_folio(self):
+        serie = self.a["serie"]
+        client = self._client(self.a["usuario"])
+        self._assert_rechazo_como_inexistente(
+            lambda pk: client.post(
+                PEDIDOS_URL,
+                self._pedido_payload(self.a, sucursal=pk, serie_folio=serie.pk),
+                format="json",
+            ),
+            self.b["sucursal"].pk,
+        )
+        serie.refresh_from_db()
+        self.assertEqual(serie.folio_actual, 100)
+        self.assertEqual(Pedido.objects.filter(empresa=self.a["empresa"]).count(), 1)
+
+    def test_pedido_post_serie_ajena_es_400_sin_consumir_su_folio(self):
+        serie_b = self.b["serie"]
+        client = self._client(self.a["usuario"])
+        self._assert_rechazo_como_inexistente(
+            lambda pk: client.post(
+                PEDIDOS_URL, self._pedido_payload(self.a, serie_folio=pk), format="json"
+            ),
+            serie_b.pk,
+        )
+        serie_b.refresh_from_db()
+        self.assertEqual(serie_b.folio_actual, 100)
+
+    def test_pedido_post_cliente_o_cotizacion_ajenos_es_400(self):
+        client = self._client(self.a["usuario"])
+        for campo in ("cliente", "cotizacion"):
+            with self.subTest(campo=campo):
+                self._assert_rechazo_como_inexistente(
+                    lambda pk: client.post(
+                        PEDIDOS_URL,
+                        self._pedido_payload(self.a, **{campo: pk}),
+                        format="json",
+                    ),
+                    self.b[campo].pk,
+                )
+        self.assertEqual(SerieFolio.objects.get(pk=self.a["serie"].pk).folio_actual, 100)
+
+    def test_pedido_post_mismo_tenant_sigue_201_y_consume_su_folio(self):
+        resp = self._client(self.a["usuario"]).post(
+            PEDIDOS_URL,
+            self._pedido_payload(
+                self.a, serie_folio=self.a["serie"].pk, cotizacion=self.a["cotizacion"].pk
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        serie = SerieFolio.objects.get(pk=self.a["serie"].pk)
+        self.assertEqual(serie.folio_actual, 101)
+        self.assertEqual(resp.json()["serie_folio"], serie.pk)
+
+    def test_asignar_folio_no_usa_una_serie_de_otra_empresa(self):
+        """Defensa en profundidad: aunque llegue un pedido con serie ajena, no la consume."""
+        a = self.a
+        pedido = Pedido.objects.create(
+            empresa=a["empresa"],
+            sucursal=a["sucursal"],
+            cliente=a["cliente"],
+            moneda=self.moneda,
+            serie_folio=self.b["serie"],
+            persona_pagos="Pagos",
+            correo_facturas="pagos@test.test",
+            telefono_pagos="8100000000",
+            forma_pago="03",
+            metodo_pago="PUE",
+            uso_cfdi="G03",
+        )
+        with self.assertRaises(DRFValidationError):
+            PedidoViewSet()._asignar_folio(pedido, a["empresa"])
+        self.assertEqual(SerieFolio.objects.get(pk=self.b["serie"].pk).folio_actual, 100)
+
+    # --- Pedido: superusuario ---------------------------------------------------
+
+    def test_superuser_no_mezcla_empresas_en_un_pedido(self):
+        client = self._client(self.superuser)
+        url = f"{PEDIDOS_URL}{self.a['pedido'].pk}/"
+        self._assert_rechazo_como_inexistente(
+            lambda pk: client.patch(url, {"cliente": pk}, format="json"),
+            self.b["cliente"].pk,
+        )
+
+    def test_superuser_edita_pedido_ajeno_con_fks_de_esa_empresa(self):
+        """La referencia es la empresa del pedido, no la del superusuario (que no tiene)."""
+        resp = self._client(self.superuser).patch(
+            f"{PEDIDOS_URL}{self.a['pedido'].pk}/",
+            {"cliente": self.a["cliente"].pk, "sucursal": self.a["sucursal"].pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    # --- PedidoDetalle / PedidoDetalleTalla ---------------------------------------
+
+    def test_detalle_post_con_producto_o_direccion_ajenos_es_400(self):
+        client = self._client(self.a["usuario"])
+        for campo, clave in (("producto", "producto"), ("direccion_envio_cliente", "direccion")):
+            with self.subTest(campo=campo):
+                self._assert_rechazo_como_inexistente(
+                    lambda pk: client.post(
+                        PEDIDO_DETALLE_URL,
+                        {"pedido": self.a["pedido"].pk, campo: pk},
+                        format="json",
+                    ),
+                    self.b[clave].pk,
+                )
+        self.assertEqual(PedidoDetalle.objects.filter(pedido=self.a["pedido"]).count(), 1)
+
+    def test_detalle_patch_con_producto_o_direccion_ajenos_es_400(self):
+        detalle = self.a["detalle"]
+        url = f"{PEDIDO_DETALLE_URL}{detalle.pk}/"
+        client = self._client(self.a["usuario"])
+        for campo, clave in (("producto", "producto"), ("direccion_envio_cliente", "direccion")):
+            with self.subTest(campo=campo):
+                self._assert_rechazo_como_inexistente(
+                    lambda pk: client.patch(url, {campo: pk}, format="json"),
+                    self.b[clave].pk,
+                )
+        detalle.refresh_from_db()
+        self.assertEqual(detalle.producto_id, self.a["producto"].pk)
+        self.assertIsNone(detalle.direccion_envio_cliente_id)
+
+    def test_detalle_mismo_tenant_sigue_funcionando(self):
+        client = self._client(self.a["usuario"])
+        resp = client.post(
+            PEDIDO_DETALLE_URL,
+            {
+                "pedido": self.a["pedido"].pk,
+                "producto": self.a["producto"].pk,
+                "direccion_envio_cliente": self.a["direccion"].pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        resp = client.patch(
+            f"{PEDIDO_DETALLE_URL}{self.a['detalle'].pk}/",
+            {"direccion_envio_cliente": self.a["direccion"].pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_talla_post_y_patch_con_variante_ajena_es_400(self):
+        client = self._client(self.a["usuario"])
+        self._assert_rechazo_como_inexistente(
+            lambda pk: client.post(
+                PEDIDO_DETALLE_TALLA_URL,
+                {
+                    "pedido_detalle": self.a["detalle"].pk,
+                    "talla": self.talla.pk,
+                    "cantidad": 1,
+                    "variante": pk,
+                },
+                format="json",
+            ),
+            self.b["variante"].pk,
+        )
+        talla_row = self.a["talla_row"]
+        self._assert_rechazo_como_inexistente(
+            lambda pk: client.patch(
+                f"{PEDIDO_DETALLE_TALLA_URL}{talla_row.pk}/", {"variante": pk}, format="json"
+            ),
+            self.b["variante"].pk,
+        )
+        talla_row.refresh_from_db()
+        self.assertEqual(talla_row.variante_id, self.a["variante"].pk)
+
+    def test_talla_mismo_tenant_sigue_funcionando(self):
+        resp = self._client(self.a["usuario"]).post(
+            PEDIDO_DETALLE_TALLA_URL,
+            {
+                "pedido_detalle": self.a["detalle"].pk,
+                "talla": self.talla.pk,
+                "cantidad": 1,
+                "variante": self.a["variante"].pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_superuser_detalle_se_valida_contra_la_empresa_del_pedido(self):
+        client = self._client(self.superuser)
+        # Legítimo: renglón en el pedido de B con producto de B.
+        resp = client.post(
+            PEDIDO_DETALLE_URL,
+            {"pedido": self.b["pedido"].pk, "producto": self.b["producto"].pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        # Mezcla: pedido de B con producto de A.
+        resp = client.post(
+            PEDIDO_DETALLE_URL,
+            {"pedido": self.b["pedido"].pk, "producto": self.a["producto"].pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(set(resp.json()), {"producto"})
+
+    def test_superuser_no_mueve_un_renglon_a_otra_empresa_con_su_producto(self):
+        """PATCH que sólo cambia el padre: el producto que ya tenía queda ajeno al nuevo pedido."""
+        detalle = self.a["detalle"]
+        resp = self._client(self.superuser).patch(
+            f"{PEDIDO_DETALLE_URL}{detalle.pk}/",
+            {"pedido": self.b["pedido"].pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        detalle.refresh_from_db()
+        self.assertEqual(detalle.pedido_id, self.a["pedido"].pk)
+
+    def test_superuser_no_mueve_una_talla_a_otra_empresa_con_su_variante(self):
+        talla_row = self.a["talla_row"]
+        resp = self._client(self.superuser).patch(
+            f"{PEDIDO_DETALLE_TALLA_URL}{talla_row.pk}/",
+            {"pedido_detalle": self.b["detalle"].pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        talla_row.refresh_from_db()
+        self.assertEqual(talla_row.pedido_detalle_id, self.a["detalle"].pk)
+
+    # --- Cotización -------------------------------------------------------------
+
+    FKS_COTIZACION = (
+        ("sucursal", "sucursal"),
+        ("cliente", "cliente"),
+        ("oportunidad", "oportunidad"),
+        ("moneda", "moneda_privada"),
+        ("vendedor", "usuario"),
+    )
+
+    def test_cotizacion_post_con_fks_ajenas_es_400(self):
+        client = self._client(self.a["usuario"])
+        for campo, clave in self.FKS_COTIZACION:
+            with self.subTest(campo=campo):
+                self._assert_rechazo_como_inexistente(
+                    lambda pk: client.post(
+                        COTIZACIONES_URL,
+                        self._cotizacion_payload(self.a, **{campo: pk}),
+                        format="json",
+                    ),
+                    self.b[clave].pk,
+                )
+        self.assertEqual(Cotizacion.objects.filter(empresa=self.a["empresa"]).count(), 1)
+
+    def test_cotizacion_patch_con_fks_ajenas_es_400_y_no_persiste(self):
+        cotizacion = self.a["cotizacion"]
+        url = f"{COTIZACIONES_URL}{cotizacion.pk}/"
+        client = self._client(self.a["usuario"])
+        for campo, clave in self.FKS_COTIZACION:
+            with self.subTest(campo=campo):
+                self._assert_rechazo_como_inexistente(
+                    lambda pk: client.patch(url, {campo: pk}, format="json"),
+                    self.b[clave].pk,
+                )
+        cotizacion.refresh_from_db()
+        self.assertEqual(cotizacion.cliente_id, self.a["cliente"].pk)
+        self.assertEqual(cotizacion.sucursal_id, self.a["sucursal"].pk)
+        self.assertEqual(cotizacion.vendedor_id, self.a["usuario"].pk)
+        self.assertEqual(cotizacion.moneda_id, self.moneda.pk)
+        self.assertIsNone(cotizacion.oportunidad_id)
+
+    def test_cotizacion_mismo_tenant_sigue_funcionando(self):
+        client = self._client(self.a["usuario"])
+        resp = client.post(
+            COTIZACIONES_URL,
+            self._cotizacion_payload(
+                self.a,
+                oportunidad=self.a["oportunidad"].pk,
+                moneda=self.a["moneda_privada"].pk,
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        resp = client.patch(
+            f"{COTIZACIONES_URL}{self.a['cotizacion'].pk}/",
+            {"moneda": self.moneda.pk, "vendedor": self.a["usuario"].pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_admin_reasigna_vendedor_de_su_empresa(self):
+        resp = self._client(self.a["admin"]).patch(
+            f"{COTIZACIONES_URL}{self.a['cotizacion'].pk}/",
+            {"vendedor": self.a["admin"].pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    # --- CotizacionDetalle ------------------------------------------------------
+
+    def test_cotizacion_detalle_post_hacia_cotizacion_ajena_es_400(self):
+        client = self._client(self.a["usuario"])
+        self._assert_rechazo_como_inexistente(
+            lambda pk: client.post(
+                COTIZACION_DETALLE_URL,
+                {"cotizacion": pk, "producto": self.a["producto"].pk},
+                format="json",
+            ),
+            self.b["cotizacion"].pk,
+        )
+        self.assertEqual(
+            CotizacionDetalle.objects.filter(cotizacion=self.b["cotizacion"]).count(), 1
+        )
+
+    def test_cotizacion_detalle_patch_mover_a_cotizacion_ajena_es_400(self):
+        detalle = self.a["cotizacion_detalle"]
+        client = self._client(self.a["usuario"])
+        self._assert_rechazo_como_inexistente(
+            lambda pk: client.patch(
+                f"{COTIZACION_DETALLE_URL}{detalle.pk}/", {"cotizacion": pk}, format="json"
+            ),
+            self.b["cotizacion"].pk,
+        )
+        detalle.refresh_from_db()
+        self.assertEqual(detalle.cotizacion_id, self.a["cotizacion"].pk)
+
+    def test_cotizacion_detalle_producto_o_direccion_ajenos_es_400(self):
+        client = self._client(self.a["usuario"])
+        url = f"{COTIZACION_DETALLE_URL}{self.a['cotizacion_detalle'].pk}/"
+        for campo, clave in (("producto", "producto"), ("direccion_envio_cliente", "direccion")):
+            with self.subTest(campo=campo, metodo="post"):
+                self._assert_rechazo_como_inexistente(
+                    lambda pk: client.post(
+                        COTIZACION_DETALLE_URL,
+                        {"cotizacion": self.a["cotizacion"].pk, campo: pk},
+                        format="json",
+                    ),
+                    self.b[clave].pk,
+                )
+            with self.subTest(campo=campo, metodo="patch"):
+                self._assert_rechazo_como_inexistente(
+                    lambda pk: client.patch(url, {campo: pk}, format="json"),
+                    self.b[clave].pk,
+                )
+
+    def test_cotizacion_detalle_mismo_tenant_sigue_funcionando(self):
+        resp = self._client(self.a["usuario"]).post(
+            COTIZACION_DETALLE_URL,
+            {
+                "cotizacion": self.a["cotizacion"].pk,
+                "producto": self.a["producto"].pk,
+                "direccion_envio_cliente": self.a["direccion"].pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_superuser_cotizacion_detalle_se_valida_contra_la_cotizacion(self):
+        client = self._client(self.superuser)
+        resp = client.post(
+            COTIZACION_DETALLE_URL,
+            {"cotizacion": self.b["cotizacion"].pk, "producto": self.b["producto"].pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        resp = client.post(
+            COTIZACION_DETALLE_URL,
+            {"cotizacion": self.b["cotizacion"].pk, "producto": self.a["producto"].pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    # --- Onboarding de cotización (anida ``CotizacionSerializer``) ---------------
+
+    def _onboarding_payload(self, t, **cotizacion):
+        return {
+            "cotizacion": self._cotizacion_payload(t, **cotizacion),
+            "detalle": [
+                {
+                    "producto": t["producto"].pk,
+                    "precio_unitario": "10.00",
+                    "tallas": [{"talla": self.talla.pk, "cantidad": 2}],
+                }
+            ],
+        }
+
+    def test_onboarding_con_cliente_ajeno_es_400(self):
+        client = self._client(self.a["usuario"])
+        self._assert_rechazo_como_inexistente(
+            lambda pk: client.post(
+                COTIZACION_ONBOARDING_URL,
+                self._onboarding_payload(self.a, cliente=pk),
+                format="json",
+            ),
+            self.b["cliente"].pk,
+        )
+
+    def test_onboarding_mismo_tenant_sigue_201(self):
+        resp = self._client(self.a["usuario"]).post(
+            COTIZACION_ONBOARDING_URL, self._onboarding_payload(self.a), format="json"
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_onboarding_superuser_edita_cotizacion_con_fks_de_su_empresa(self):
+        """Con ``cotizacion_id`` la referencia es la empresa de ESA cotización."""
+        client = self._client(self.superuser)
+        payload = self._onboarding_payload(self.b)
+        payload["cotizacion_id"] = self.b["cotizacion"].pk
+        resp = client.post(COTIZACION_ONBOARDING_URL, payload, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        payload = self._onboarding_payload(self.b, cliente=self.a["cliente"].pk)
+        payload["cotizacion_id"] = self.b["cotizacion"].pk
+        resp = client.post(COTIZACION_ONBOARDING_URL, payload, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(set(resp.json()["cotizacion"]), {"cliente"})
+
+    # --- terceros: resumen comercial del cliente ------------------------------
+
+    def test_resumen_comercial_no_incluye_documentos_de_otra_empresa(self):
+        """Datos ya contaminados: un pedido/cotización de A apuntando al cliente de B."""
+        cliente_b = self.b["cliente"]
+        Pedido.objects.filter(pk=self.a["pedido"].pk).update(cliente=cliente_b)
+        Cotizacion.objects.filter(pk=self.a["cotizacion"].pk).update(cliente=cliente_b)
+
+        resp = self._client(self.b["admin"]).get(f"{CLIENTES_URL}{cliente_b.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        resumen = resp.json()["resumen_comercial"]
+        self.assertEqual(resumen["total_pedidos"], 1)
+        self.assertEqual(resumen["total_cotizaciones"], 1)
+        self.assertEqual(
+            [p["id"] for p in resumen["pedidos_recientes"]], [self.b["pedido"].pk]
         )

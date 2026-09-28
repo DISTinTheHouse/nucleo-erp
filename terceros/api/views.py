@@ -50,7 +50,12 @@ class ClienteViewSet(viewsets.ModelViewSet):
         from ventas.models import Pedido, Cotizacion
 
         estatus_pedido = dict(Pedido.CHOICES_ESTATUS)
-        pedidos_qs = Pedido.objects.filter(cliente=cliente, activo=True)
+        # Sólo documentos de la empresa del cliente: sin este filtro, un pedido o
+        # cotización de otra empresa que apunte a este cliente (#249) aparecía
+        # aquí con su folio y montos.
+        pedidos_qs = Pedido.objects.filter(
+            cliente=cliente, empresa_id=cliente.empresa_id, activo=True
+        )
 
         pedidos_por_estatus = {
             estatus_pedido.get(fila["estatus"], fila["estatus"]): fila["total"]
@@ -84,7 +89,9 @@ class ClienteViewSet(viewsets.ModelViewSet):
 
         return {
             "total_pedidos": pedidos_qs.count(),
-            "total_cotizaciones": Cotizacion.objects.filter(cliente=cliente).count(),
+            "total_cotizaciones": Cotizacion.objects.filter(
+                cliente=cliente, empresa_id=cliente.empresa_id
+            ).count(),
             "pedidos_por_estatus": pedidos_por_estatus,
             "montos_por_moneda": montos_por_moneda,
             "ultimo_pedido": pedidos_recientes[0] if pedidos_recientes else None,
