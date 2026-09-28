@@ -22,7 +22,7 @@ from rest_framework.test import APIClient
 
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Color, Producto, ProductoVariante
-from compras.api.views import OrdenCompraViewSet, RecepcionViewSet
+from compras.api.views import CalidadInspeccionViewSet, OrdenCompraViewSet, RecepcionViewSet
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 from finanzas.models import FacturaProveedor, FacturaProveedorDetalle
 from inventarios.models import Almacen, Existencia, MovimientoInventario, MovimientoInventarioDetalle, Ubicacion
@@ -122,11 +122,14 @@ class RecepcionViewSetScopeTenantTests(TestCase):
 
 
 class RecepcionMovimientoFormalVarianteTests(TestCase):
-    """El movimiento formal de la recepción conserva la variante de cada renglón.
+    """El movimiento formal de Calidad conserva la variante de cada renglón.
 
-    Se prueba sobre los dos pasos que ``onboarding`` encadena dentro de su
-    ``atomic``: ``_actualizar_existencias`` (el stock) y
-    ``_crear_movimiento_formal_recepcion`` (el detalle).
+    Antes se probaba sobre ``RecepcionViewSet._actualizar_existencias``/
+    ``_crear_movimiento_formal_recepcion``. Esos métodos ya no existen: el
+    abono a Existencia y el ``MovimientoInventario`` se movieron a
+    ``CalidadInspeccionViewSet._abonar_renglon``/``_crear_movimiento_formal``
+    (ver DOCS/arquitectura/flujo-recepcion-calidad-compras.md). Se prueba
+    directo sobre esos métodos, igual que antes.
     """
 
     @classmethod
@@ -147,27 +150,25 @@ class RecepcionMovimientoFormalVarianteTests(TestCase):
             folio="RC-RV-1", fecha_recepcion=timezone.now(),
         )
 
-    def _renglon(self, producto, variante, cantidad, ubicacion=None):
-        # Misma forma que ``onboarding`` arma en ``detalle_payload``.
-        return {
-            "orden_compra_detalle": None, "orden_produccion_detalle": None,
-            "producto": producto, "producto_variante": variante,
-            "cantidad_recibida": Decimal(cantidad), "ubicacion": ubicacion,
-            "lote": None, "serie": None,
-        }
-
     def test_detalle_guarda_la_variante_y_conserva_lo_demas(self):
-        view = RecepcionViewSet()
-        movimientos = view._actualizar_existencias(
-            self.recepcion,
-            [
-                # Renglón de OP: siempre trae variante.
-                self._renglon(self.producto_pt, self.variante, "5", self.ubicacion.pk),
-                # Renglón de OC: ``OrdenCompraDetalle`` no tiene variante.
-                self._renglon(self.producto_mp, None, "3"),
-            ],
+        # Renglón de OP: siempre trae variante. Renglón de OC: nunca (mismo
+        # caso que antes, ahora como ``RecepcionDetalle`` ya existente en vez
+        # de un ``detalle_payload`` crudo).
+        detalle_pt = RecepcionDetalle.objects.create(
+            recepcion=self.recepcion, producto=self.producto_pt, producto_variante=self.variante,
+            ubicacion=self.ubicacion, cantidad_recibida=Decimal("5"),
         )
-        movimiento = view._crear_movimiento_formal_recepcion(self.recepcion, movimientos)
+        detalle_mp = RecepcionDetalle.objects.create(
+            recepcion=self.recepcion, producto=self.producto_mp, producto_variante=None,
+            cantidad_recibida=Decimal("3"),
+        )
+
+        view = CalidadInspeccionViewSet()
+        movimientos = [
+            view._abonar_renglon(self.recepcion, detalle_pt, Decimal("5")),
+            view._abonar_renglon(self.recepcion, detalle_mp, Decimal("3")),
+        ]
+        movimiento = view._crear_movimiento_formal(self.recepcion, movimientos)
 
         detalles = {
             d.producto_id: d
@@ -310,7 +311,9 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
         root = Usuario.objects.create(username="r@acme-ra.test", email="r@acme-ra.test", is_superuser=True)
         resp = self._recibir(root, self.almacen, "2")
         self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(Existencia.objects.get(almacen=self.almacen).cantidad, Decimal("2"))
+        recepcion = Recepcion.objects.get(pk=resp.json()["recepcion"]["id"])
+        self.assertEqual(recepcion.estatus, Recepcion.EstatusRecepcion.EN_CALIDAD)
+        self.assertEqual(RecepcionDetalle.objects.get(recepcion=recepcion).cantidad_recibida, Decimal("2"))
 
     def test_convencion_de_compras_no_exige_sucursal_asignada_al_usuario(self):
         # Compras acota por empresa; el almacén queda atado a la sucursal de la
@@ -320,15 +323,19 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
         resp = self._recibir(solo_suc_2, self.almacen)
         self.assertEqual(resp.status_code, 200, resp.content)
 
-    def test_recepcion_legitima_actualiza_stock_y_movimiento(self):
+    def test_recepcion_legitima_registra_el_conteo_y_pasa_a_calidad(self):
+        # Recepción ya no toca Existencia/MovimientoInventario: solo cuenta.
+        # Ver DOCS/arquitectura/flujo-recepcion-calidad-compras.md.
         resp = self._recibir(self.usuario, self.almacen, "5")
         self.assertEqual(resp.status_code, 200, resp.content)
         recepcion = Recepcion.objects.get(pk=resp.json()["recepcion"]["id"])
         self.assertEqual((recepcion.almacen_id, recepcion.empresa_id, recepcion.sucursal_id),
                          (self.almacen.pk, self.empresa.pk, self.suc_1.pk))
-        self.assertEqual(Existencia.objects.get(almacen=self.almacen, producto=self.producto).cantidad, Decimal("5"))
-        detalle = MovimientoInventarioDetalle.objects.get(movimiento_inventario__recepcion=recepcion)
-        self.assertEqual((detalle.producto_id, detalle.cantidad), (self.producto.pk, Decimal("5")))
+        self.assertEqual(recepcion.estatus, Recepcion.EstatusRecepcion.EN_CALIDAD)
+        detalle = RecepcionDetalle.objects.get(recepcion=recepcion)
+        self.assertEqual((detalle.producto_id, detalle.cantidad_recibida), (self.producto.pk, Decimal("5")))
+        self.assertFalse(Existencia.objects.filter(almacen=self.almacen, producto=self.producto).exists())
+        self.assertFalse(MovimientoInventario.objects.filter(recepcion=recepcion).exists())
 
 
 ORDENES_URL = "/api/v1/compras/ordenes/"
@@ -685,21 +692,12 @@ class OrdenCompraCancelacionTests(TestCase):
                 self.assertEqual(self._client().delete(f"{ORDENES_URL}{oc.pk}/", **extra).status_code, 204)
                 self.assertEqual(self._eventos(oc, "DELETE").get().ip, esperado)
 
-    @override_settings(IS_VERCEL=True)
-    def test_auditoria_de_la_recepcion_guarda_solo_ips_validas(self):
-        oc = self._oc(Estatus.AUTORIZADA)
-        detalle = OrdenCompraDetalle.objects.get(orden_compra=oc)
-        resp = self._client().post(
-            RECEPCION_ONBOARDING_URL,
-            {
-                "recepcion": {"orden_compra": oc.pk, "almacen": self.a["almacen"].pk, "serie_codigo": "RC"},
-                "detalle": [{"orden_compra_detalle": detalle.pk, "cantidad_recibida": "1"}],
-            },
-            format="json",
-            HTTP_X_FORWARDED_FOR="foo",
-        )
-        self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertIsNone(AuditoriaEvento.objects.get(pk=resp.json()["movimiento_id"]).ip)
+    # ``test_auditoria_de_la_recepcion_guarda_solo_ips_validas`` se quitó de
+    # aquí: recepciones/onboarding/ ya no crea AuditoriaEvento (ni toca
+    # Existencia) — eso vive ahora en CalidadInspeccionViewSet, que reusa la
+    # misma validación de IP (``_ip_auditoria``) pero no tiene cobertura
+    # propia todavía. Gap conocido, no se inventó un fixture de Empleado sin
+    # poder correrlo.
 
     def test_oc_cancelada_sigue_visible_en_list_y_detail(self):
         oc = self._oc(Estatus.AUTORIZADA)
