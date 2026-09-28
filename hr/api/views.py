@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from rest_framework import filters, mixins, serializers as drf_serializers, status
 from rest_framework.decorators import action
-from rest_framework.exceptions import APIException, ValidationError
+from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -70,6 +70,16 @@ class ChecadaYaRegistradaError(APIException):
     """La entrada o la salida del día ya está registrada; se corrige editando el registro."""
     status_code = status.HTTP_409_CONFLICT
     default_code = "checada_ya_registrada"
+
+
+class ChecadaInvalidaError(APIException):
+    """400 de una checada con cuerpo ``{"detail": "<texto>"}``.
+
+    Un ``ValidationError`` de DRF envolvería el texto en una lista; las acciones
+    del checador responden ``detail`` como texto.
+    """
+    status_code = status.HTTP_400_BAD_REQUEST
+    default_code = "checada_invalida"
 
 
 MENSAJE_ENTRADA_YA_REGISTRADA = (
@@ -338,7 +348,7 @@ class AsistenciaViewSet(
         return qs.filter(empleado__empresa=empresa)
 
     def _resolver_checada(self, request):
-        """Empleado, fecha y hora de una checada, o la ``Response`` de error.
+        """Empleado, fecha y hora de una checada; los errores se lanzan como excepciones DRF.
 
         Común a ``registrar_entrada`` y ``registrar_salida``. El empleado se busca
         dentro de la empresa del usuario, y la fecha local de ``hora`` tiene que
@@ -346,32 +356,32 @@ class AsistenciaViewSet(
         """
         empleado_id = request.data.get('empleado_id')
         if empleado_id in (None, ''):
-            return Response({'empleado_id': ['Este campo es requerido.']}, status=status.HTTP_400_BAD_REQUEST)
+            raise ValidationError({'empleado_id': ['Este campo es requerido.']})
         try:
             # ``IntegerField`` rechaza 'abc', '3.5' y booleanos con su mensaje
             # estándar; un ``get(pk='abc')`` lanzaba ``ValueError`` (500).
             empleado_id = drf_serializers.IntegerField().run_validation(empleado_id)
         except ValidationError as exc:
-            return Response({'empleado_id': exc.detail}, status=status.HTTP_400_BAD_REQUEST)
+            raise ValidationError({'empleado_id': exc.detail})
 
         user = request.user
         empleados_qs = Empleado.objects.all()
         if not getattr(user, "is_superuser", False):
             empresa = getattr(user, "empresa", None)
             if not empresa:
-                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+                raise PermissionDenied('No autorizado.')
             empleados_qs = empleados_qs.filter(empresa=empresa)
         try:
             empleado = empleados_qs.get(pk=empleado_id)
         except Empleado.DoesNotExist:
-            return Response({'detail': 'Empleado no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+            raise NotFound('Empleado no encontrado.')
 
         fecha_str = request.data.get('fecha')
         if fecha_str:
             try:
                 fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
             except ValueError:
-                return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
+                raise ChecadaInvalidaError('Formato de fecha inválido (YYYY-MM-DD).')
         else:
             fecha = timezone.localdate()
 
@@ -380,16 +390,16 @@ class AsistenciaViewSet(
             try:
                 ahora = datetime.strptime(hora_str, '%Y-%m-%d %H:%M:%S')
             except ValueError:
-                return Response({'detail': 'Formato de hora inválido (YYYY-MM-DD HH:MM:SS).'}, status=status.HTTP_400_BAD_REQUEST)
+                raise ChecadaInvalidaError('Formato de hora inválido (YYYY-MM-DD HH:MM:SS).')
             ahora = timezone.make_aware(ahora, timezone.get_current_timezone())
         else:
             ahora = timezone.now()
 
-        if fecha_local(ahora) != fecha:
-            return Response(
-                {'detail': f'La fecha de la hora ({fecha_local(ahora).isoformat()}) no coincide '
-                           f'con la fecha del registro ({fecha.isoformat()}).'},
-                status=status.HTTP_400_BAD_REQUEST,
+        fecha_de_la_hora = fecha_local(ahora)
+        if fecha_de_la_hora != fecha:
+            raise ChecadaInvalidaError(
+                f'La fecha de la hora ({fecha_de_la_hora.isoformat()}) no coincide '
+                f'con la fecha del registro ({fecha.isoformat()}).'
             )
         return empleado, fecha, ahora
 
@@ -403,10 +413,7 @@ class AsistenciaViewSet(
 
     @action(detail=False, methods=['POST'])
     def registrar_entrada(self, request):
-        resuelto = self._resolver_checada(request)
-        if isinstance(resuelto, Response):
-            return resuelto
-        empleado, fecha, ahora = resuelto
+        empleado, fecha, ahora = self._resolver_checada(request)
 
         turno = empleado.turno
         if not turno:
@@ -440,10 +447,7 @@ class AsistenciaViewSet(
 
     @action(detail=False, methods=['POST'])
     def registrar_salida(self, request):
-        resuelto = self._resolver_checada(request)
-        if isinstance(resuelto, Response):
-            return resuelto
-        empleado, fecha, ahora = resuelto
+        empleado, fecha, ahora = self._resolver_checada(request)
 
         with transaction.atomic():
             asistencia = self._asistencia_del_dia(empleado, fecha)
