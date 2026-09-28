@@ -1342,7 +1342,31 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 normalized = dict(normalized)
                 normalized.pop("cotizacion_id", None)
 
-        serializer = CotizacionOnboardingCreateSerializer(data=normalized)
+        # ``CotizacionSerializer`` (anidado) valida sus FKs contra la empresa de
+        # la cotización: la del usuario, salvo un superuser editando una
+        # cotización existente, que se valida contra la de ESA cotización. Para
+        # los demás, que la cotización sea de su empresa lo exige más abajo.
+        empresa_documento_id = getattr(empresa, "pk", None)
+        cotizacion_raw = normalized.get("cotizacion")
+        cotizacion_id_raw = normalized.get("cotizacion_id") or (
+            cotizacion_raw.get("id") if isinstance(cotizacion_raw, dict) else None
+        )
+        if getattr(user, "is_superuser", False) and cotizacion_id_raw not in (None, ""):
+            try:
+                empresa_documento_id = (
+                    Cotizacion.objects.filter(pk=int(cotizacion_id_raw))
+                    .values_list("empresa_id", flat=True)
+                    .first()
+                ) or empresa_documento_id
+            except (TypeError, ValueError):
+                pass
+        serializer = CotizacionOnboardingCreateSerializer(
+            data=normalized,
+            context={
+                **self.get_serializer_context(),
+                "empresa_documento_id": empresa_documento_id,
+            },
+        )
         serializer.is_valid(raise_exception=True)
         cotizacion_id = serializer.validated_data.get("cotizacion_id") or (
             request.data.get("cotizacion") or {}

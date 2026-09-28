@@ -11,7 +11,132 @@ from ventas.models import (
     PedidoServicioExtra,
 )
 
+
+# --- Aislamiento multi-tenant de las FKs en ESCRITURA (#249) -------------------
+#
+# Con ``fields='__all__'`` cada FK es un ``PrimaryKeyRelatedField`` sobre
+# ``Model.objects.all()``: sin esto aceptaba el pk de cualquier empresa. Cada FK
+# se compara contra la empresa del DOCUMENTO dueño (el pedido/cotización, o el
+# padre de un renglón), también para superusuarios: por esta vía nadie mezcla
+# empresas. El rechazo es exactamente el error de DRF para un pk inexistente, para
+# no revelar que el pk existe en otra empresa.
+
+
+def _usuario(serializer):
+    return getattr(serializer.context.get("request"), "user", None)
+
+
+def _es_superuser(serializer):
+    return bool(getattr(_usuario(serializer), "is_superuser", False))
+
+
+def _de_la_empresa(obj, empresa_id):
+    # ``empresa_id`` None (usuario sin empresa) o un registro con empresa NULL
+    # nunca coinciden: se rechaza.
+    return empresa_id is not None and obj.empresa_id == empresa_id
+
+
+def _moneda_de_la_empresa(moneda, empresa_id):
+    # ``Moneda`` con ``empresa=NULL`` es global (del sistema); si no, privada.
+    return moneda.empresa_id is None or _de_la_empresa(moneda, empresa_id)
+
+
+def _oportunidad_de_la_empresa(oportunidad, empresa_id):
+    # ``Oportunidad`` no tiene empresa propia: cuelga de ``Prospecto.empresa``.
+    return empresa_id is not None and oportunidad.prospecto.empresa_id == empresa_id
+
+
+def _error_pk_inexistente(serializer, campo, obj):
+    # Mismo texto y código que ``PrimaryKeyRelatedField`` para un pk que no existe.
+    mensaje = serializer.fields[campo].error_messages["does_not_exist"]
+    return mensaje.format(pk_value=obj.pk)
+
+
+def _exigir_empresa(serializer, campo, obj, pertenece, empresa_id):
+    if obj is not None and not pertenece(obj, empresa_id):
+        raise serializers.ValidationError(
+            _error_pk_inexistente(serializer, campo, obj), code="does_not_exist"
+        )
+    return obj
+
+
+def _empresa_id_documento(serializer):
+    """Empresa de referencia para las FKs de un Pedido/Cotización.
+
+    En update, la del documento (``empresa`` es de solo lectura). En alta, la
+    que el caller fije en ``context["empresa_documento_id"]`` (onboarding, que
+    anida este serializer y puede editar una cotización existente) o, si no, la
+    del usuario: es la que ``perform_create`` le asigna al documento.
+    """
+    if serializer.instance is not None:
+        return serializer.instance.empresa_id
+    if "empresa_documento_id" in serializer.context:
+        return serializer.context["empresa_documento_id"]
+    return getattr(_usuario(serializer), "empresa_id", None)
+
+
+def _exigir_empresa_documento(serializer, campo, obj, pertenece=_de_la_empresa):
+    """FK de un Pedido/Cotización contra la empresa del documento."""
+    return _exigir_empresa(serializer, campo, obj, pertenece, _empresa_id_documento(serializer))
+
+
+def _exigir_empresa_del_usuario(serializer, campo, obj):
+    """FK de un renglón, validada A NIVEL DE CAMPO contra la empresa del usuario.
+
+    Para quien no es superuser equivale a la empresa del padre: su padre sólo
+    puede ser de su empresa (``validate_<padre>`` en alta, ``get_queryset`` en
+    update). Se hace a nivel de campo y no en ``validate()`` porque éste no corre
+    si otro campo ya falló: una FK ajena que "pasara" junto a un pk inexistente
+    delataría que existe. El superuser (sin esa garantía) se valida en
+    ``_exigir_empresa_del_padre``.
+    """
+    if _es_superuser(serializer):
+        return obj
+    empresa_id = getattr(_usuario(serializer), "empresa_id", None)
+    return _exigir_empresa(serializer, campo, obj, _de_la_empresa, empresa_id)
+
+
+def _exigir_empresa_del_padre(serializer, attrs, campo_padre, empresa_id, campos):
+    """FKs de un renglón contra la empresa de su padre efectivo (el nuevo o el actual).
+
+    Si el PATCH cambia el padre, también se revisan las FKs que el renglón ya
+    tenía: moverlo a otra empresa dejaría su producto/variante como ajenos.
+    """
+    cambia_padre = serializer.instance is not None and campo_padre in attrs
+    errores = {}
+    for campo in campos:
+        if campo in attrs:
+            obj = attrs[campo]
+        elif cambia_padre:
+            obj = getattr(serializer.instance, campo)
+        else:
+            continue
+        if obj is not None and not _de_la_empresa(obj, empresa_id):
+            errores[campo] = [_error_pk_inexistente(serializer, campo, obj)]
+    if errores:
+        raise serializers.ValidationError(errores, code="does_not_exist")
+
+
 class CotizacionSerializer(serializers.ModelSerializer):
+    def validate_sucursal(self, sucursal):
+        return _exigir_empresa_documento(self, "sucursal", sucursal)
+
+    def validate_cliente(self, cliente):
+        return _exigir_empresa_documento(self, "cliente", cliente)
+
+    def validate_oportunidad(self, oportunidad):
+        return _exigir_empresa_documento(
+            self, "oportunidad", oportunidad, _oportunidad_de_la_empresa
+        )
+
+    def validate_moneda(self, moneda):
+        return _exigir_empresa_documento(self, "moneda", moneda, _moneda_de_la_empresa)
+
+    def validate_vendedor(self, vendedor):
+        # Pertenencia por la empresa ACTIVA del usuario (``Usuario.empresa``), la
+        # misma que usa ``UsuarioViewSet.get_queryset``; el M2M ``empresas`` no cuenta.
+        return _exigir_empresa_documento(self, "vendedor", vendedor)
+
     class Meta:
         model = Cotizacion
         read_only_fields = ['empresa']
@@ -113,6 +238,32 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
     color_nombre = serializers.CharField(source="color.nombre", read_only=True, default=None)
     color_codigo_hex = serializers.CharField(source="color.codigo_hex", read_only=True, default=None)
+
+    def validate_cotizacion(self, cotizacion):
+        # Misma convención que ``PedidoDetalleSerializer.validate_pedido``
+        # (superuser puede todo; sin empresa no; el resto sólo la suya), pero con
+        # el error de pk inexistente para no confirmar que la cotización existe.
+        if _es_superuser(self):
+            return cotizacion
+        return _exigir_empresa(
+            self, "cotizacion", cotizacion, _de_la_empresa,
+            getattr(_usuario(self), "empresa_id", None),
+        )
+
+    # ``color`` no se valida: ``Color`` es catálogo global.
+    def validate_producto(self, producto):
+        return _exigir_empresa_del_usuario(self, "producto", producto)
+
+    def validate_direccion_envio_cliente(self, direccion):
+        return _exigir_empresa_del_usuario(self, "direccion_envio_cliente", direccion)
+
+    def validate(self, attrs):
+        cotizacion = attrs.get("cotizacion") or self.instance.cotizacion
+        _exigir_empresa_del_padre(
+            self, attrs, "cotizacion", cotizacion.empresa_id,
+            ("producto", "direccion_envio_cliente"),
+        )
+        return attrs
 
     class Meta:
         model = CotizacionDetalle
@@ -404,6 +555,24 @@ class PedidoSerializer(serializers.ModelSerializer):
     def get_total_parcialidades(self, obj):
         return len((obj.programacion_conf or {}).get("programaciones") or [])
 
+    # ``cliente_regimen_fiscal`` no se valida: ``SatRegimenFiscal`` es catálogo global.
+    def validate_sucursal(self, sucursal):
+        return _exigir_empresa_documento(self, "sucursal", sucursal)
+
+    def validate_cliente(self, cliente):
+        return _exigir_empresa_documento(self, "cliente", cliente)
+
+    def validate_cotizacion(self, cotizacion):
+        return _exigir_empresa_documento(self, "cotizacion", cotizacion)
+
+    def validate_serie_folio(self, serie_folio):
+        # Rechazada aquí, antes de ``perform_create``: una serie ajena nunca llega
+        # a ``_asignar_folio`` ni consume su consecutivo.
+        return _exigir_empresa_documento(self, "serie_folio", serie_folio)
+
+    def validate_moneda(self, moneda):
+        return _exigir_empresa_documento(self, "moneda", moneda, _moneda_de_la_empresa)
+
     def get_servicios_extras(self, obj):
         # Sin ``.order_by("id")``: el orden lo impone el ``Prefetch`` del
         # viewset (``_pedido_servicios_extras_prefetch()``); encadenarlo aquí
@@ -522,6 +691,21 @@ class PedidoDetalleSerializer(serializers.ModelSerializer):
             )
         return pedido
 
+    # ``color`` no se valida: ``Color`` es catálogo global.
+    def validate_producto(self, producto):
+        return _exigir_empresa_del_usuario(self, "producto", producto)
+
+    def validate_direccion_envio_cliente(self, direccion):
+        return _exigir_empresa_del_usuario(self, "direccion_envio_cliente", direccion)
+
+    def validate(self, attrs):
+        pedido = attrs.get("pedido") or self.instance.pedido
+        _exigir_empresa_del_padre(
+            self, attrs, "pedido", pedido.empresa_id,
+            ("producto", "direccion_envio_cliente"),
+        )
+        return attrs
+
     class Meta:
         model = PedidoDetalle
         fields = '__all__'
@@ -544,6 +728,17 @@ class PedidoDetalleTallaSerializer(serializers.ModelSerializer):
                 "El renglón de pedido no pertenece a la empresa del usuario."
             )
         return pedido_detalle
+
+    # ``talla`` no se valida: ``Talla`` es catálogo global.
+    def validate_variante(self, variante):
+        return _exigir_empresa_del_usuario(self, "variante", variante)
+
+    def validate(self, attrs):
+        pedido_detalle = attrs.get("pedido_detalle") or self.instance.pedido_detalle
+        _exigir_empresa_del_padre(
+            self, attrs, "pedido_detalle", pedido_detalle.pedido.empresa_id, ("variante",)
+        )
+        return attrs
 
     class Meta:
         model = PedidoDetalleTalla
