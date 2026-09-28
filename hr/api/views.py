@@ -567,6 +567,23 @@ class VacacionesViewSet(
     def perform_create(self, serializer):
         serializer.save(solicitado_por=self.request.user)
 
+    def perform_update(self, serializer):
+        # select_for_update cierra la ventana entre leer el estatus y guardar:
+        # dos PATCH concurrentes sobre la misma solicitud no pueden colarse
+        # ambos como "pendiente". SQLite (tests) ignora el lock; Postgres no.
+        with transaction.atomic():
+            actual = Vacaciones.objects.select_for_update().get(pk=serializer.instance.pk)
+            if actual.estado != 'pendiente':
+                raise ValidationError({'detail': 'Solo se pueden editar solicitudes pendientes.'})
+            serializer.save()
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            actual = Vacaciones.objects.select_for_update().get(pk=instance.pk)
+            if actual.estado == 'rechazado':
+                raise ValidationError({'detail': 'No se puede eliminar una solicitud rechazada.'})
+            super().perform_destroy(instance)
+
     @action(detail=True, methods=['POST'])
     def aprobar(self, request, pk=None):
         obj = self.get_object()
@@ -643,6 +660,20 @@ class PermisoAusenciaViewSet(
 
     def perform_create(self, serializer):
         serializer.save(solicitado_por=self.request.user)
+
+    def perform_update(self, serializer):
+        with transaction.atomic():
+            actual = PermisoAusencia.objects.select_for_update().get(pk=serializer.instance.pk)
+            if actual.estado != 'pendiente':
+                raise ValidationError({'detail': 'Solo se pueden editar solicitudes pendientes.'})
+            serializer.save()
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            actual = PermisoAusencia.objects.select_for_update().get(pk=instance.pk)
+            if actual.estado == 'rechazado':
+                raise ValidationError({'detail': 'No se puede eliminar una solicitud rechazada.'})
+            super().perform_destroy(instance)
 
     @action(detail=True, methods=['POST'])
     def aprobar(self, request, pk=None):

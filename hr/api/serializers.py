@@ -409,7 +409,9 @@ class VacacionesSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerial
     class Meta:
         model = Vacaciones
         fields = '__all__'
-        read_only_fields = ('fecha_solicitud', 'autorizado_por', 'rechazado_por', 'fecha_aprobacion', 'fecha_rechazo', 'solicitado_por')
+        # ``estado`` solo cambia via las acciones aprobar/rechazar (que escriben
+        # directo sobre el modelo, no por este serializer) — nunca por PUT/PATCH.
+        read_only_fields = ('estado', 'fecha_solicitud', 'autorizado_por', 'rechazado_por', 'fecha_aprobacion', 'fecha_rechazo', 'solicitado_por')
 
     def validate(self, data):
         fecha_inicio = data.get('fecha_inicio')
@@ -423,7 +425,9 @@ class PermisoAusenciaSerializer(EmpresaScopedSerializerMixin, serializers.ModelS
     class Meta:
         model = PermisoAusencia
         fields = '__all__'
-        read_only_fields = ('fecha_solicitud', 'autorizado_por', 'rechazado_por', 'fecha_aprobacion', 'fecha_rechazo', 'solicitado_por')
+        # Mismo motivo que en VacacionesSerializer: ``estado`` solo cambia via
+        # aprobar/rechazar.
+        read_only_fields = ('estado', 'fecha_solicitud', 'autorizado_por', 'rechazado_por', 'fecha_aprobacion', 'fecha_rechazo', 'solicitado_por')
 
     def validate(self, data):
         fecha_inicio = data.get('fecha_inicio')

@@ -18,11 +18,15 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from hr.api.serializers import AsistenciaSerializer, ContratoSerializer
-from hr.models import Asistencia, Contrato, Empleado, Nomina, Puesto, Turno
+from hr.models import (
+    Asistencia, Contrato, Empleado, Nomina, PermisoAusencia, Puesto, Turno, Vacaciones,
+)
 from nucleo.models import Departamento, Empresa, Sucursal
 from usuarios.models import Usuario
 
 CONTRATOS_URL = "/api/v1/hr/contratos/"
+VACACIONES_URL = "/api/v1/hr/vacaciones/"
+PERMISOS_URL = "/api/v1/hr/permisos-ausencias/"
 MENSAJE_VIGENTE = "Este empleado ya tiene un contrato activo."
 
 
@@ -1119,3 +1123,130 @@ class AsistenciaCarreraDeUnicidadTests(AsistenciaBase):
         with patch.object(Asistencia, "save", side_effect=IntegrityError("otra constraint")):
             with self.assertRaises(IntegrityError):
                 self._post(self._payload())
+
+
+class VacacionesEstadoApiTests(HrBase):
+    """``estado`` es de solo lectura por API; editar/borrar respeta el estado.
+
+    pendiente: edita y borra. aprobado: no edita, sí borra (única vía de
+    anulación mientras no exista un estado ``cancelado``). rechazado: de solo
+    lectura, tampoco se borra. Issue #264.
+    """
+
+    def _vacaciones(self, **kwargs):
+        datos = {
+            "empleado": self.empleado,
+            "fecha_inicio": date(2026, 1, 1),
+            "fecha_fin": date(2026, 1, 5),
+            "dias_solicitados": 5,
+        }
+        datos.update(kwargs)
+        return Vacaciones.objects.create(**datos)
+
+    def _patch(self, obj, data, user=None):
+        return self._client(user).patch(f"{VACACIONES_URL}{obj.pk}/", data, format="json")
+
+    def _delete(self, obj, user=None):
+        return self._client(user).delete(f"{VACACIONES_URL}{obj.pk}/")
+
+    def test_patch_con_estado_lo_ignora(self):
+        v = self._vacaciones()
+        resp = self._patch(v, {"estado": "aprobado"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        v.refresh_from_db()
+        self.assertEqual(v.estado, "pendiente")
+        self.assertIsNone(v.autorizado_por_id)
+        self.assertIsNone(v.fecha_aprobacion)
+
+    def test_editar_pendiente_se_permite(self):
+        v = self._vacaciones()
+        resp = self._patch(v, {"dias_solicitados": 3})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        v.refresh_from_db()
+        self.assertEqual(v.dias_solicitados, 3)
+
+    def test_editar_aprobado_devuelve_400_y_no_cambia(self):
+        v = self._vacaciones(estado="aprobado")
+        resp = self._patch(v, {"dias_solicitados": 1})
+        self.assertEqual(resp.status_code, 400, resp.content)
+        v.refresh_from_db()
+        self.assertEqual(v.dias_solicitados, 5)
+
+    def test_editar_rechazado_devuelve_400(self):
+        v = self._vacaciones(estado="rechazado")
+        resp = self._patch(v, {"dias_solicitados": 1})
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_borrar_pendiente_204(self):
+        resp = self._delete(self._vacaciones())
+        self.assertEqual(resp.status_code, 204, resp.content)
+
+    def test_borrar_aprobado_204(self):
+        resp = self._delete(self._vacaciones(estado="aprobado"))
+        self.assertEqual(resp.status_code, 204, resp.content)
+
+    def test_borrar_rechazado_400_y_sigue_existiendo(self):
+        v = self._vacaciones(estado="rechazado")
+        resp = self._delete(v)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertTrue(Vacaciones.objects.filter(pk=v.pk).exists())
+
+    def test_aprobar_y_rechazar_siguen_igual(self):
+        v = self._vacaciones()
+        resp = self._client().post(f"{VACACIONES_URL}{v.pk}/aprobar/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        v.refresh_from_db()
+        self.assertEqual(v.estado, "aprobado")
+        self.assertIsNotNone(v.autorizado_por_id)
+        self.assertIsNotNone(v.fecha_aprobacion)
+
+        v2 = self._vacaciones()
+        resp = self._client().post(f"{VACACIONES_URL}{v2.pk}/rechazar/", {"motivo_rechazo": "no hay cobertura"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        v2.refresh_from_db()
+        self.assertEqual(v2.estado, "rechazado")
+        self.assertEqual(v2.motivo_rechazo, "no hay cobertura")
+
+
+class PermisoAusenciaEstadoApiTests(HrBase):
+    """Mismas reglas que ``VacacionesEstadoApiTests`` (Issue #264), aquí solo
+    lo que no está ya cubierto por ser código idéntico entre ambos recursos."""
+
+    def _permiso(self, **kwargs):
+        datos = {
+            "empleado": self.empleado,
+            "fecha_inicio": date(2026, 1, 1),
+            "fecha_fin": date(2026, 1, 2),
+        }
+        datos.update(kwargs)
+        return PermisoAusencia.objects.create(**datos)
+
+    def _patch(self, obj, data, user=None):
+        return self._client(user).patch(f"{PERMISOS_URL}{obj.pk}/", data, format="json")
+
+    def _delete(self, obj, user=None):
+        return self._client(user).delete(f"{PERMISOS_URL}{obj.pk}/")
+
+    def test_patch_con_estado_lo_ignora(self):
+        p = self._permiso()
+        resp = self._patch(p, {"estado": "aprobado"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        p.refresh_from_db()
+        self.assertEqual(p.estado, "pendiente")
+
+    def test_editar_aprobado_devuelve_400_y_no_cambia(self):
+        p = self._permiso(estado="aprobado")
+        resp = self._patch(p, {"motivo": "cambio"})
+        self.assertEqual(resp.status_code, 400, resp.content)
+        p.refresh_from_db()
+        self.assertEqual(p.motivo, "")
+
+    def test_borrar_pendiente_204(self):
+        resp = self._delete(self._permiso())
+        self.assertEqual(resp.status_code, 204, resp.content)
+
+    def test_borrar_rechazado_400_y_sigue_existiendo(self):
+        p = self._permiso(estado="rechazado")
+        resp = self._delete(p)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertTrue(PermisoAusencia.objects.filter(pk=p.pk).exists())
