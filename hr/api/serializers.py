@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from django.db import IntegrityError, transaction
 from rest_framework import serializers
 from hr.models import (
+    fecha_local,
     MENSAJE_CONTRATO_VIGENTE_DUPLICADO,
     MENSAJE_CONTRATO_VIGENTE_EMPLEADO_INACTIVO,
     Puesto,
@@ -287,10 +288,36 @@ class AsistenciaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerial
     class Meta:
         model = Asistencia
         fields = '__all__'
+        # Los calcula ``Asistencia._calcular_estado_y_horas`` en cada guardado.
+        # ``estado`` sigue escribible: solo ``justificada`` se conserva, cualquier
+        # otro valor se reemplaza por el derivado.
+        read_only_fields = ('minutos_retardo', 'minutos_tolerancia', 'horas_normales', 'horas_extra')
+
+    def _final(self, data, campo):
+        """Valor con el que quedará ``campo``: el recibido o, en una edición, el guardado."""
+        if campo in data:
+            return data[campo]
+        return getattr(self.instance, campo, None)
 
     def validate(self, data):
-        hora_salida = data.get('hora_salida')
-        hora_entrada = data.get('hora_entrada') or (self.instance.hora_entrada if self.instance else None)
+        fecha = self._final(data, 'fecha')
+        hora_entrada = self._final(data, 'hora_entrada')
+        hora_salida = self._final(data, 'hora_salida')
+
+        # Una hora de otro día desfasaba el retardo y las horas; una salida días
+        # después de la entrada desbordaba ``Decimal(4,2)`` (500 en Postgres).
+        for campo, valor, nombre in (
+            ('hora_entrada', hora_entrada, 'entrada'),
+            ('hora_salida', hora_salida, 'salida'),
+        ):
+            if valor and fecha and fecha_local(valor) != fecha:
+                raise serializers.ValidationError(
+                    {campo: f'La hora de {nombre} debe corresponder a la fecha de la asistencia.'}
+                )
+        if hora_salida and not hora_entrada:
+            raise serializers.ValidationError(
+                {'hora_salida': 'No se puede registrar la salida sin una hora de entrada.'}
+            )
         if hora_salida and hora_entrada and hora_salida < hora_entrada:
             raise serializers.ValidationError({'hora_salida': 'La hora de salida no puede ser anterior a la de entrada.'})
         return data
