@@ -918,3 +918,145 @@ class AsistenciaChecadorTests(AsistenciaBase):
                 )
                 self.assertEqual(resp.status_code, 404, resp.content)
                 self.assertEqual(resp.json(), {"detail": "Empleado no encontrado."})
+
+
+MENSAJE_ENTRADA_TRAS_SALIDA = "La hora de entrada debe ser anterior a la hora de salida registrada."
+MENSAJE_SALIDA_NO_POSTERIOR = "La hora de salida no puede ser anterior a la de entrada."
+
+
+class AsistenciaRevisionTests(AsistenciaBase):
+    """Correcciones de la revisión de código del paquete de asistencias."""
+
+    def _entrada(self, empleado=None, **data):
+        cuerpo = {
+            "empleado_id": (empleado or self.empleado).pk,
+            "fecha": DIA.isoformat(),
+            "hora": "2026-09-28 08:12:00",
+        }
+        cuerpo.update(data)
+        return self._client().post(ENTRADA_URL, cuerpo, format="json")
+
+    # -- 1. Registro existente con salida y sin entrada ------------------------------
+
+    def test_entrada_en_o_despues_de_la_salida_guardada_responde_400(self):
+        # Una fila así solo se crea por el ORM o datos previos: el serializer ya
+        # rechaza una salida sin entrada.
+        asistencia = self._asistencia(hora_salida=_mx(DIA, 13, 0))
+
+        for hora in ("2026-09-28 13:00:00", "2026-09-28 14:00:00"):
+            with self.subTest(hora=hora):
+                resp = self._entrada(hora=hora)
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {"detail": MENSAJE_ENTRADA_TRAS_SALIDA})
+        asistencia.refresh_from_db()
+        self.assertIsNone(asistencia.hora_entrada)
+
+        resp = self._entrada(hora="2026-09-28 08:00:00")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual((resp.json()["horas_normales"], resp.json()["horas_extra"]), ("5.00", "0.00"))
+
+    # -- 2. Invariantes del modelo (ruta del admin) -----------------------------------
+
+    def test_clean_aplica_las_reglas_de_fecha_y_orden(self):
+        base = {"empleado": self.empleado, "turno": self.turno, "fecha": DIA}
+        casos = {
+            "entrada de otro día": (
+                {"hora_entrada": _mx(date(2026, 9, 27), 8, 0)},
+                {"hora_entrada": ["La hora de entrada debe corresponder a la fecha de la asistencia."]},
+            ),
+            "salida de otro día": (
+                {"hora_entrada": _mx(DIA, 8, 0), "hora_salida": _mx(date(2026, 10, 3), 17, 0)},
+                {"hora_salida": ["La hora de salida debe corresponder a la fecha de la asistencia."]},
+            ),
+            "salida sin entrada": (
+                {"hora_salida": _mx(DIA, 17, 0)},
+                {"hora_salida": ["No se puede registrar la salida sin una hora de entrada."]},
+            ),
+            "turno de duración cero": (
+                {"hora_entrada": _mx(DIA, 8, 0), "hora_salida": _mx(DIA, 8, 0)},
+                {"hora_salida": [MENSAJE_SALIDA_NO_POSTERIOR]},
+            ),
+            "salida anterior": (
+                {"hora_entrada": _mx(DIA, 8, 0), "hora_salida": _mx(DIA, 7, 0)},
+                {"hora_salida": [MENSAJE_SALIDA_NO_POSTERIOR]},
+            ),
+        }
+        for nombre, (horas, esperado) in casos.items():
+            with self.subTest(nombre):
+                with self.assertRaises(DjangoValidationError) as ctx:
+                    Asistencia(**base, **horas).full_clean()
+                self.assertEqual(ctx.exception.message_dict, esperado)
+
+        with self.subTest("registro válido"):
+            Asistencia(**base, hora_entrada=_mx(DIA, 8, 0), hora_salida=_mx(DIA, 17, 0)).full_clean()
+
+    # -- 3. La checada libera la justificación ---------------------------------------
+
+    def test_registrar_entrada_libera_una_justificacion_sin_entrada(self):
+        for hora, esperado in (("2026-09-28 08:30:00", "retardo"), ("2026-09-28 08:00:00", "puntual")):
+            with self.subTest(esperado=esperado):
+                empleado = self._empleado(self.a, f"E-J-{esperado}")
+                Empleado.objects.filter(pk=empleado.pk).update(turno=self.turno)
+                justificada = self._asistencia(empleado=empleado, estado="justificada")
+                self.assertEqual(justificada.estado, "justificada")
+
+                resp = self._entrada(empleado=empleado, hora=hora)
+
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.assertEqual((resp.json()["id"], resp.json()["estado"]), (justificada.pk, esperado))
+
+    def test_una_justificacion_por_patch_sigue_fija(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 30))
+
+        resp = self._patch(asistencia, {"estado": "justificada", "hora_entrada": _mx(DIA, 8, 40).isoformat()})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual((resp.json()["estado"], resp.json()["minutos_retardo"]), ("justificada", 35))
+
+    # -- 4. Creación concurrente contra una fila sin entrada -------------------------
+
+    def test_creacion_concurrente_contra_una_fila_sin_entrada_la_completa(self):
+        # La fila rival no tiene entrada (una falta capturada a mano): el INSERT
+        # choca, se relee y se le pone la entrada en vez de responder 409.
+        rival = self._asistencia()
+
+        with patch("hr.api.views.AsistenciaViewSet._asistencia_del_dia", return_value=None):
+            resp = self._entrada()
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual((resp.json()["id"], resp.json()["estado"]), (rival.pk, "retardo"))
+        self.assertEqual(Asistencia.objects.filter(empleado=self.empleado, fecha=DIA).count(), 1)
+
+    # -- 5. Turno de duración cero en el serializer ----------------------------------
+
+    def test_patch_con_salida_igual_a_la_entrada_responde_400(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 0))
+
+        resp = self._patch(asistencia, {"hora_salida": _mx(DIA, 8, 0).isoformat()})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"hora_salida": [MENSAJE_SALIDA_NO_POSTERIOR]})
+
+    # -- 6. Llave del error al quitar la entrada -------------------------------------
+
+    def test_quitar_solo_la_entrada_con_salida_guardada_reporta_en_hora_entrada(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 0), hora_salida=_mx(DIA, 17, 0))
+
+        resp = self._patch(asistencia, {"hora_entrada": None})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(
+            resp.json(),
+            {"hora_entrada": ["No se puede quitar la hora de entrada mientras haya una hora de salida."]},
+        )
+
+    def test_quitar_entrada_y_salida_juntas_deja_falta(self):
+        asistencia = self._asistencia(hora_entrada=_mx(DIA, 8, 0), hora_salida=_mx(DIA, 17, 0))
+
+        resp = self._patch(asistencia, {"hora_entrada": None, "hora_salida": None})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        body = resp.json()
+        self.assertEqual(body["estado"], "falta")
+        self.assertIsNone(body["horas_normales"])
+        self.assertIsNone(body["horas_extra"])
