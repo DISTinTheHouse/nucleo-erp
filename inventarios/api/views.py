@@ -656,8 +656,9 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
     def reporte_resurtido(self, request):
         """Disponible (almacenes Producto Terminado) + lo que viene en camino
         (OP activas y OC pendientes), agrupado por producto con desglose por
-        talla en disponible/producción — para que mesa de control decida si
-        hace falta resurtido sin cruzar pantallas de producción y compras.
+        talla en disponible/producción — para que mesa de control vea cuándo
+        van a llegar las órdenes de producción y las compras pendientes de un
+        SKU, sin cruzar pantallas de producción y compras.
 
         Compras se muestra a nivel producto, sin desglose por talla:
         ``compras.OrdenCompraDetalle`` no captura ``producto_variante`` (no

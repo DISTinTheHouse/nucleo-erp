@@ -650,7 +650,7 @@ Permite consultar el inventario actual.
   - `fecha_inicio`, `fecha_final`, `filtros`, `resumen` y `resumen_por_almacen` se mantienen igual que antes de paginar: reflejan todo el resultado filtrado, no cambian entre páginas.
 
 - **Reporte de resurtido (mesa de control)**: `GET /api/v1/inventarios/existencias/reporte-resurtido/`
-- **Para qué sirve**: reemplaza el Excel manual que mesa de control usaba para decidir qué SKUs necesitan resurtido. Por producto muestra, con desglose por talla, lo disponible en almacenes de Producto Terminado y lo que ya está en producción; y a nivel producto (sin talla, ver nota) lo que viene pendiente de compra — junto con folio/fecha de entrega/comentarios de cada OP u OC que lo respalda.
+- **Para qué sirve**: reemplaza el Excel manual que mesa de control usaba para dar seguimiento a cuándo van a llegar las órdenes de producción y las compras pendientes de un SKU. Por producto muestra, con desglose por talla, lo disponible en almacenes de Producto Terminado y lo que ya está en producción; y a nivel producto (sin talla, ver nota) lo que viene pendiente de compra — cada uno con su folio, fecha de entrega estimada y comentarios, para saber cuándo llega sin cruzar pantallas de producción y compras.
 - **Query params** (todos opcionales):
   - `producto` / `producto_id`: filtra a un producto específico.
   - `sku` / `q`: coincidencia parcial contra `sku` de la variante, o `nombre`/`codigo` del producto.
