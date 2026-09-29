@@ -649,6 +649,56 @@ Permite consultar el inventario actual.
   - `count`/`next`/`previous`/`results` son la paginación estándar de DRF sobre el arreglo de detalle (antes expuesto como `detalle`).
   - `fecha_inicio`, `fecha_final`, `filtros`, `resumen` y `resumen_por_almacen` se mantienen igual que antes de paginar: reflejan todo el resultado filtrado, no cambian entre páginas.
 
+- **Reporte de resurtido (mesa de control)**: `GET /api/v1/inventarios/existencias/reporte-resurtido/`
+- **Para qué sirve**: reemplaza el Excel manual que mesa de control usaba para decidir qué SKUs necesitan resurtido. Por producto muestra, con desglose por talla, lo disponible en almacenes de Producto Terminado y lo que ya está en producción; y a nivel producto (sin talla, ver nota) lo que viene pendiente de compra — junto con folio/fecha de entrega/comentarios de cada OP u OC que lo respalda.
+- **Query params** (todos opcionales):
+  - `producto` / `producto_id`: filtra a un producto específico.
+  - `sku` / `q`: coincidencia parcial contra `sku` de la variante, o `nombre`/`codigo` del producto.
+  - `empresa`/`empresa_id`, `sucursal`/`sucursal_id`, `almacen`/`almacen_id`: mismo alcance de almacenes que `reporte-existencias-periodo` (`_build_report_almacenes_queryset`); no abren el scope del usuario, solo lo acotan dentro de lo ya visible.
+- **Alcance**: solo considera almacenes con `tipo_almacen = PRODUCTO_TERMINADO` dentro del alcance del usuario (empresas + sucursales). Si el usuario no tiene ningún almacén PT visible, responde `{"resultados": []}`.
+- **Sin paginar**: `resultados` es la lista completa (agrupada por producto, no por variante), ordenada por `codigo`.
+- **Qué cuenta como "en producción"**: detalle de `OrdenProduccion` con `activo=True` y `estatus_op` distinto de `COMPLETADO`/`CANCELADO`. Una OP completada o cancelada no debe seguir "reservando" resurtido, así que se excluye aunque siga activa en el sistema.
+- **Qué cuenta como "pendiente de compra"**: detalle de `OrdenCompra` con `activo=True` y `estatus` distinto de `RECIBIDA`/`CANCELADA`/`BORRADOR`, y solo la parte aún no recibida (`cantidad - Σ RecepcionDetalle.cantidad_recibida`); si ya no queda pendiente, la línea no aparece aunque la OC siga "abierta".
+- **Nota de diseño — compras sin desglose por talla**: `compras.OrdenCompraDetalle` no captura `producto_variante` (no todo lo que se compra lleva talla), así que `compras_pendiente_cantidad` y `ordenes_compra` van a nivel producto, no por talla — a diferencia de producción, que sí resuelve por variante porque `OrdenProduccionDetalle` sí tiene `producto_variante`.
+- **`fecha_entrega_estimada` en `OrdenProduccion`**: campo nuevo (antes no existía), mismo criterio que `OrdenCompra.fecha_entrega_estimada` — capturado por producción, nullable.
+- **`comentarios`**: en `ordenes_produccion` es `OrdenProduccion.observaciones`; en `ordenes_compra` es `OrdenCompra.observaciones`.
+- **Ejemplo**: `GET /api/v1/inventarios/existencias/reporte-resurtido/?sku=2125CIE`
+- **Respuesta**:
+
+  ```json
+  {
+    "resultados": [
+      {
+        "producto_id": 145,
+        "codigo": "2125CIE",
+        "descripcion": "Camisa Oxford Cielo",
+        "disponible_por_talla": { "CH": "487.0000", "M": "761.0000" },
+        "produccion_por_talla": { "CH": "175.0000", "M": "300.0000" },
+        "total_por_talla": { "CH": "662.0000", "M": "1061.0000" },
+        "disponible_total": "1248.0000",
+        "produccion_total": "475.0000",
+        "compras_pendiente_cantidad": "70.0000",
+        "ordenes_produccion": [
+          {
+            "folio": "OP-000123",
+            "estatus_display": "Pendiente",
+            "fecha_entrega_estimada": "2026-10-02",
+            "comentarios": "Resurtido urgente"
+          }
+        ],
+        "ordenes_compra": [
+          {
+            "folio": "OC-2026-0088",
+            "estatus_display": "Parcialmente recibida",
+            "fecha_entrega_estimada": "2026-10-10",
+            "comentarios": "Insumo tela oxford"
+          }
+        ]
+      }
+    ]
+  }
+  ```
+
 ### Movimientos de Inventario
 
 Historial operativo de entradas, salidas y ajustes.

@@ -13,6 +13,7 @@ from rest_framework.response import Response
 
 from inventarios.models import (
     Almacen,
+    TipoAlmacen,
     Ubicacion,
     Existencia,
     MovimientoInventario,
@@ -650,6 +651,189 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         }
         response.data["resumen_por_almacen"] = resumen_almacenes_payload
         return response
+
+    @action(detail=False, methods=["get"], url_path="reporte-resurtido")
+    def reporte_resurtido(self, request):
+        """Disponible (almacenes Producto Terminado) + lo que viene en camino
+        (OP activas y OC pendientes), agrupado por producto con desglose por
+        talla en disponible/producción — para que mesa de control decida si
+        hace falta resurtido sin cruzar pantallas de producción y compras.
+
+        Compras se muestra a nivel producto, sin desglose por talla:
+        ``compras.OrdenCompraDetalle`` no captura ``producto_variante`` (no
+        todo lo que se compra lleva talla), así que no hay de dónde sacar el
+        reparto por talla de lo que viene de una OC — a diferencia de
+        producción, que sí resuelve por variante.
+        """
+        from produccion.models import OrdenProduccion, OrdenProduccionDetalle
+        from compras.models import OrdenCompra, OrdenCompraDetalle, RecepcionDetalle
+
+        user = request.user
+        qp = request.query_params
+        producto_id = self._report_to_int(qp.get("producto") or qp.get("producto_id"))
+        sku_q = (qp.get("sku") or qp.get("q") or "").strip()
+
+        almacenes_pt = self._build_report_almacenes_queryset().filter(
+            tipo_almacen=TipoAlmacen.PRODUCTO_TERMINADO
+        )
+        almacen_ids = set(almacenes_pt.values_list("id_almacen", flat=True))
+        if not almacen_ids:
+            return Response({"resultados": []})
+
+        # --- 1) Disponible: Existencia en almacenes PT, por producto+talla ---
+        existencias = (
+            Existencia.objects.filter(almacen_id__in=almacen_ids)
+            .select_related("producto", "producto_variante__producto", "producto_variante__talla")
+        )
+        if producto_id:
+            existencias = existencias.filter(
+                models.Q(producto_id=producto_id) | models.Q(producto_variante__producto_id=producto_id)
+            )
+        if sku_q:
+            existencias = existencias.filter(
+                models.Q(producto_variante__sku__icontains=sku_q)
+                | models.Q(producto__nombre__icontains=sku_q)
+                | models.Q(producto__codigo__icontains=sku_q)
+            )
+
+        productos = {}
+
+        def _producto_bucket(producto):
+            if producto.pk not in productos:
+                productos[producto.pk] = {
+                    "producto_id": producto.pk,
+                    "codigo": producto.codigo,
+                    "descripcion": producto.nombre,
+                    "disponible_por_talla": defaultdict(lambda: Decimal("0")),
+                    "produccion_por_talla": defaultdict(lambda: Decimal("0")),
+                    "ordenes_produccion": {},
+                    "compras_pendiente_cantidad": Decimal("0"),
+                    "ordenes_compra": {},
+                }
+            return productos[producto.pk]
+
+        for ex in existencias.iterator():
+            producto = ex.producto or getattr(ex.producto_variante, "producto", None)
+            if producto is None:
+                continue
+            talla = getattr(ex.producto_variante, "talla", None)
+            talla_nombre = talla.nombre if talla else "N/A"
+            _producto_bucket(producto)["disponible_por_talla"][talla_nombre] += self._report_to_decimal(ex.cantidad)
+
+        # --- 2) En producción: OrdenProduccionDetalle de OP activas, no completadas/canceladas ---
+        op_detalles = (
+            OrdenProduccionDetalle.objects.filter(
+                op__activo=True,
+                op__empresa_id__in={a["empresa_id"] for a in almacenes_pt.values("empresa_id")},
+            )
+            .exclude(op__estatus_op__in=[
+                OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+                OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
+            ])
+            .select_related("producto_variante__producto", "producto_variante__talla", "op")
+        )
+        if producto_id:
+            op_detalles = op_detalles.filter(producto_variante__producto_id=producto_id)
+        if sku_q:
+            op_detalles = op_detalles.filter(
+                models.Q(producto_variante__sku__icontains=sku_q)
+                | models.Q(producto_variante__producto__nombre__icontains=sku_q)
+                | models.Q(producto_variante__producto__codigo__icontains=sku_q)
+            )
+
+        for det in op_detalles.iterator():
+            variante = det.producto_variante
+            if variante is None or variante.producto_id is None:
+                continue
+            bucket = _producto_bucket(variante.producto)
+            talla_nombre = variante.talla.nombre if variante.talla else "N/A"
+            bucket["produccion_por_talla"][talla_nombre] += self._report_to_decimal(det.cantidad)
+            op = det.op
+            bucket["ordenes_produccion"][op.pk] = {
+                "folio": op.folio_op,
+                "estatus_display": op.get_estatus_op_display(),
+                "fecha_entrega_estimada": (
+                    str(op.fecha_entrega_estimada) if op.fecha_entrega_estimada else None
+                ),
+                "comentarios": op.observaciones,
+            }
+
+        # --- 3) Por llegar de compras: OC no recibidas del todo, a nivel producto ---
+        empresa_ids = {a["empresa_id"] for a in almacenes_pt.values("empresa_id")}
+        oc_detalles = (
+            OrdenCompraDetalle.objects.filter(
+                orden_compra__empresa_id__in=empresa_ids,
+                orden_compra__activo=True,
+            )
+            .exclude(orden_compra__estatus__in=[
+                OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+                OrdenCompra.EstatusOrdenCompra.CANCELADA,
+                OrdenCompra.EstatusOrdenCompra.BORRADOR,
+            ])
+            .select_related("producto", "orden_compra")
+        )
+        if producto_id:
+            oc_detalles = oc_detalles.filter(producto_id=producto_id)
+        if sku_q:
+            oc_detalles = oc_detalles.filter(
+                models.Q(producto__nombre__icontains=sku_q) | models.Q(producto__codigo__icontains=sku_q)
+            )
+
+        recibido_por_detalle = defaultdict(lambda: Decimal("0"))
+        oc_detalle_ids = list(oc_detalles.values_list("pk", flat=True))
+        for row in (
+            RecepcionDetalle.objects.filter(orden_compra_detalle_id__in=oc_detalle_ids)
+            .values("orden_compra_detalle_id")
+            .annotate(total=models.Sum("cantidad_recibida"))
+        ):
+            recibido_por_detalle[row["orden_compra_detalle_id"]] = self._report_to_decimal(row["total"])
+
+        for det in oc_detalles.iterator():
+            if det.producto_id is None:
+                continue
+            pendiente = self._report_to_decimal(det.cantidad) - recibido_por_detalle[det.pk]
+            if pendiente <= 0:
+                continue
+            bucket = _producto_bucket(det.producto)
+            bucket["compras_pendiente_cantidad"] += pendiente
+            oc = det.orden_compra
+            bucket["ordenes_compra"][oc.pk] = {
+                "folio": oc.folio,
+                "estatus_display": oc.get_estatus_display(),
+                "fecha_entrega_estimada": (
+                    str(oc.fecha_entrega_estimada) if oc.fecha_entrega_estimada else None
+                ),
+                "comentarios": oc.observaciones,
+            }
+
+        resultados = []
+        for bucket in productos.values():
+            disponible = bucket["disponible_por_talla"]
+            produccion = bucket["produccion_por_talla"]
+            tallas = sorted(set(disponible) | set(produccion))
+            resultados.append({
+                "producto_id": bucket["producto_id"],
+                "codigo": bucket["codigo"],
+                "descripcion": bucket["descripcion"],
+                "disponible_por_talla": {
+                    t: str(self._quantize_qty(disponible.get(t, Decimal("0")))) for t in tallas
+                },
+                "produccion_por_talla": {
+                    t: str(self._quantize_qty(produccion.get(t, Decimal("0")))) for t in tallas
+                },
+                "total_por_talla": {
+                    t: str(self._quantize_qty(disponible.get(t, Decimal("0")) + produccion.get(t, Decimal("0"))))
+                    for t in tallas
+                },
+                "disponible_total": str(self._quantize_qty(sum(disponible.values(), Decimal("0")))),
+                "produccion_total": str(self._quantize_qty(sum(produccion.values(), Decimal("0")))),
+                "compras_pendiente_cantidad": str(self._quantize_qty(bucket["compras_pendiente_cantidad"])),
+                "ordenes_produccion": list(bucket["ordenes_produccion"].values()),
+                "ordenes_compra": list(bucket["ordenes_compra"].values()),
+            })
+
+        resultados.sort(key=lambda r: r["codigo"] or "")
+        return Response({"resultados": resultados})
 
 
 class OperacionInventarioViewSet(viewsets.ViewSet):
