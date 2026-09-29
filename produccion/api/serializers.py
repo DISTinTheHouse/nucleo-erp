@@ -10,7 +10,8 @@ from produccion.models import (
     BomDetalle,
     OrdenProduccion,
     OrdenProduccionDetalle,
-    ConsumoProduccion, 
+    OrdenProduccionRutaCritica,
+    ConsumoProduccion,
     ConsumoProduccionDetalle,
     ProductoTerminadoEntradas, 
     OrdenesBordado,
@@ -201,6 +202,47 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         model = OrdenProduccion
         fields = '__all__'
         read_only_fields = ['folio_op', 'activo', 'usuario_asignado', 'empresa', 'sucursal']
+
+
+class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
+    """Serializer del endpoint dedicado de ruta crítica (``/ruta-critica/``).
+
+    Deliberadamente separado de ``OrdenProduccionSerializer``: éste no lo
+    declara, así que list/retrieve de la OP no cargan ni serializan esta
+    tabla. Los cuatro campos ``fecha_*`` de existencia son ``read_only``
+    porque los sella el servidor en ``update()`` cuando su boolean asociado
+    cambia de valor -- el cliente solo manda el checkbox.
+    """
+
+    estatus_paquete_tecnico_display = serializers.CharField(
+        source="get_estatus_paquete_tecnico_display", read_only=True, allow_null=True
+    )
+
+    CAMPOS_ESTADO_CON_FECHA = {
+        "existencia_tela": "fecha_existencia_tela",
+        "sin_existencia_tela": "fecha_sin_existencia_tela",
+        "existencia_avios": "fecha_existencia_avios",
+        "sin_existencia_avios": "fecha_sin_existencia_avios",
+    }
+
+    class Meta:
+        model = OrdenProduccionRutaCritica
+        exclude = ['op']
+        read_only_fields = [
+            'fecha_existencia_tela',
+            'fecha_sin_existencia_tela',
+            'fecha_existencia_avios',
+            'fecha_sin_existencia_avios',
+            'updated_at',
+        ]
+
+    def update(self, instance, validated_data):
+        from django.utils import timezone
+
+        for campo_bool, campo_fecha in self.CAMPOS_ESTADO_CON_FECHA.items():
+            if campo_bool in validated_data and validated_data[campo_bool] != getattr(instance, campo_bool):
+                validated_data[campo_fecha] = timezone.now()
+        return super().update(instance, validated_data)
 
 class ConsumoProduccionSerializer(serializers.ModelSerializer):
     detalles = serializers.SerializerMethodField()
