@@ -435,7 +435,10 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        serializer = self.get_serializer(data=request.data)
+        data = request.data.copy()
+        data['empresa'] = empresa.id
+
+        serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
 
         # ``pedido`` es opcional en OP, pero si viene debe ser un pedido de

@@ -183,10 +183,26 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         if not usuario: return None
         return usuario.get_full_name().strip() or usuario.email
 
+    def validate(self, attrs):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        user_empresa = getattr(user, 'empresa', None)
+
+        if not user_empresa:
+            raise serializers.ValidationError('Usuario sin empresa asignada')
+
+        sucursal = attrs.get('sucursal')
+        if sucursal and sucursal.empresa_id != user_empresa.id:
+            raise serializers.ValidationError(
+                {'sucursal': 'Sucursal no pertenece a tu empresa'}
+            )
+
+        return attrs
+
     class Meta:
         model = OrdenProduccion
         fields = '__all__'
-        read_only_fields = ['folio_op', 'activo', 'usuario_asignado']
+        read_only_fields = ['folio_op', 'activo', 'usuario_asignado', 'empresa', 'sucursal']
 
 class ConsumoProduccionSerializer(serializers.ModelSerializer):
     detalles = serializers.SerializerMethodField()
