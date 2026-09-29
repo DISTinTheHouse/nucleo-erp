@@ -259,11 +259,10 @@ class ReadyzAPIView(APIView):
                 "ok": True,
                 "latency_ms": round((time.monotonic() - start) * 1000, 1),
             }
-        except Exception as exc:
+        except Exception:
             healthy = False
-            # Mensaje acotado: no se quiere filtrar credenciales de conexión
-            # en un endpoint sin autenticación si la excepción las incluyera.
-            checks["database"] = {"ok": False, "error": str(exc)[:200]}
+            # No exponer detalles internos de excepciones en un endpoint público.
+            checks["database"] = {"ok": False, "error": "database check failed"}
 
         return Response(
             {"ok": healthy, "checks": checks},
