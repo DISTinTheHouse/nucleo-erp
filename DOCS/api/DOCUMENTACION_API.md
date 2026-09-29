@@ -3037,6 +3037,74 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 }
 ```
 
+### 6.1) Ruta Crítica de Orden de Producción
+
+Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos, trazo, corte, producción). Compras queda pendiente hasta nuevo aviso. Es un renglón por OP (no por línea/variante), en tabla separada de `OrdenProduccion` para que el `GET`/`PATCH` sea barato — no toca el serializer pesado con BOM/detalles anidados.
+
+- **Endpoint**: `GET|PATCH /api/v1/produccion/orden-produccion/{op_id}/ruta-critica/`
+- **GET**: cualquier usuario con acceso a la OP (mismo scope multi-tenant). Si la OP no tiene ruta crítica creada aún, se crea vacía automáticamente.
+- **PATCH**: solo usuarios del departamento **Producción** (o superuser/admin_empresa). `400 {"permiso": "..."}` para el resto.
+- Acepta `PATCH` parcial — solo manda los campos que cambian.
+- Los 4 campos `fecha_existencia_*` son de solo lectura: el backend los sella con la fecha/hora actual cuando su checkbox asociado cambia de valor (el cliente nunca los manda).
+
+**Campos**
+
+| Campo | Tipo | Subproceso |
+|---|---|---|
+| `fecha_liberacion_paquete_tecnico` | date | Desarrollo de producto |
+| `estatus_paquete_tecnico` | choice: `actualizada`\|`nueva`\|`espera_muestra` | Desarrollo de producto |
+| `existencia_tela` / `sin_existencia_tela` | bool (independientes) | Telas & avíos |
+| `existencia_avios` / `sin_existencia_avios` | bool (independientes) | Telas & avíos |
+| `fecha_existencia_tela` / `fecha_sin_existencia_tela` / `fecha_existencia_avios` / `fecha_sin_existencia_avios` | datetime, **read-only** | Telas & avíos |
+| `fecha_real_surtido_telas` / `fecha_real_surtido_avios` | date | Telas & avíos |
+| `corte_externo` | bool | Telas & avíos |
+| `comentarios_telas_avios` | text | Telas & avíos |
+| `kit_completo` | bool | Telas & avíos |
+| `fecha_embarque_materia_prima` | date | Telas & avíos |
+| `fecha_trazo` | date | Trazo |
+| `fecha_real_corte` | date | Corte |
+| `cantidad_real_corte` | decimal | Corte |
+| `corte_recibido` | bool | Producción |
+
+**Ejemplo PATCH**
+
+```json
+{
+  "existencia_tela": true,
+  "fecha_real_surtido_telas": "2026-09-29",
+  "kit_completo": false
+}
+```
+
+**Respuesta** (mismo shape en `GET` y `PATCH`)
+
+```json
+{
+  "fecha_liberacion_paquete_tecnico": null,
+  "estatus_paquete_tecnico": null,
+  "estatus_paquete_tecnico_display": null,
+  "existencia_tela": true,
+  "fecha_existencia_tela": "2026-09-29T22:41:00Z",
+  "sin_existencia_tela": false,
+  "fecha_sin_existencia_tela": null,
+  "existencia_avios": false,
+  "fecha_existencia_avios": null,
+  "sin_existencia_avios": false,
+  "fecha_sin_existencia_avios": null,
+  "fecha_real_surtido_telas": "2026-09-29",
+  "fecha_real_surtido_avios": null,
+  "corte_externo": false,
+  "comentarios_telas_avios": null,
+  "kit_completo": false,
+  "fecha_embarque_materia_prima": null,
+  "fecha_trazo": null,
+  "fecha_real_corte": null,
+  "cantidad_real_corte": null,
+  "corte_recibido": false,
+  "updated_at": "2026-09-29T22:41:00Z"
+}
+```
+
 ### 7) Orden de Bordado Onboarding (patrón sencillo / manual)
 
 - **Endpoints CRUD**:

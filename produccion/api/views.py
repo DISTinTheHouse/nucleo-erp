@@ -8,6 +8,10 @@ from rest_framework.exceptions import ValidationError
 
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
 from usuarios.models import Usuario
+from seguridad.role_identity import (
+    CLAVE_DEPARTAMENTO_PRODUCCION,
+    usuario_tiene_clave_departamento,
+)
 
 from produccion.services.common import config_como_dict, pendientes_por_linea
 
@@ -16,6 +20,7 @@ from produccion.models import (
     BomDetalle,
     OrdenProduccion,
     OrdenProduccionDetalle,
+    OrdenProduccionRutaCritica,
     ConsumoProduccion,
     ProductoTerminadoEntradas,
     OrdenesBordado,
@@ -36,6 +41,7 @@ from produccion.api.serializers import (
     BomBulkItemSerializer,
     OrdenProduccionSerializer,
     OrdenProduccionListSerializer,
+    OrdenProduccionRutaCriticaSerializer,
     ConsumoProduccionSerializer,
     ProductoTerminadoEntradasSerializer,
     OrdenBordadoSerializer,
@@ -507,12 +513,52 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         return self._crear_op_desde_request(request)
-    
+
     @action(detail=False, methods=['get', 'post'], url_path='onboarding')
     def onboarding(self, request):
         if request.method == 'GET':
             return self.get_op_detalle(request)
         return self._crear_op_desde_request(request)
+
+    def _require_produccion(self, user):
+        if getattr(user, "is_superuser", False):
+            return
+        if getattr(user, "is_admin_empresa", False):
+            return
+        empresa = getattr(user, "empresa", None)
+        if usuario_tiene_clave_departamento(user, CLAVE_DEPARTAMENTO_PRODUCCION, empresa=empresa):
+            return
+        raise ValidationError({"permiso": "Acción disponible solo para producción."})
+
+    @action(detail=True, methods=['get', 'patch'], url_path='ruta-critica')
+    def ruta_critica(self, request, pk=None):
+        # Deliberadamente NO pasa por ``get_queryset()``: ese queryset trae el
+        # prefetch pesado de detalles/BOM que este endpoint no necesita —el
+        # objetivo es que actualizar un checkbox de ruta crítica sea barato.
+        # Aun así se valida pertenencia a la empresa antes de tocar nada
+        # (mismo criterio IDOR que ``get_op_detalle``): 404, no 403, para no
+        # revelar la existencia de la OP a otra empresa.
+        empresa = getattr(request.user, 'empresa', None)
+        op = (
+            OrdenProduccion.objects.filter(pk=pk, empresa=empresa).first()
+            if empresa is not None else None
+        )
+        if op is None:
+            return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+
+        instance, _created = OrdenProduccionRutaCritica.objects.get_or_create(op=op)
+
+        if request.method == 'GET':
+            return Response(OrdenProduccionRutaCriticaSerializer(instance).data)
+
+        # PATCH: solo produccion (o superuser/admin_empresa) puede escribir
+        # ruta crítica -- mismo patrón que ``_require_mesa_control`` en
+        # ``ventas.api.views`` para ``Pedido.clasificacion``/``fecha_confirmacion``.
+        self._require_produccion(request.user)
+        serializer = OrdenProduccionRutaCriticaSerializer(instance, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
 
 class ConsumoProduccionViewSet(viewsets.ModelViewSet):
     queryset = ConsumoProduccion.objects.all().select_related('op').prefetch_related('detalles__producto')

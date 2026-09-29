@@ -116,6 +116,70 @@ class OrdenProduccionDetalle(models.Model):
     def __str__(self):
         return str(self.op_detalle_id)
 
+class OrdenProduccionRutaCritica(models.Model):
+    """Seguimiento de ruta crítica de la OP: un renglón por orden (no por
+    línea/variante), pensado para que mesa de control/producción actualice
+    estatus con PATCH parciales y rápidos sin tocar el serializer pesado de
+    ``OrdenProduccion`` (que arrastra BOM/detalles anidados).
+
+    Cubre los subprocesos: desarrollo de producto, telas & avíos, trazo,
+    corte y producción. El subproceso de compras queda pendiente hasta
+    nuevo aviso (sin campos por ahora).
+    """
+
+    class EstatusPaqueteTecnico(models.TextChoices):
+        ACTUALIZADA = "actualizada", "Actualizada"
+        NUEVA = "nueva", "Nueva"
+        ESPERA_MUESTRA = "espera_muestra", "En espera de muestra"
+
+    op = models.OneToOneField(
+        OrdenProduccion, on_delete=models.CASCADE, primary_key=True, related_name="ruta_critica"
+    )
+
+    # 1. Desarrollo de producto
+    fecha_liberacion_paquete_tecnico = models.DateField(null=True, blank=True)
+    estatus_paquete_tecnico = models.CharField(
+        max_length=20, choices=EstatusPaqueteTecnico.choices, null=True, blank=True
+    )
+
+    # 2. Telas & avíos. ``existencia_*``/``sin_existencia_*`` son dos booleans
+    # independientes (no un tri-estado): cada uno lleva su propia fecha,
+    # sellada por el servidor (nunca por el cliente) cuando su valor cambia.
+    existencia_tela = models.BooleanField(default=False)
+    fecha_existencia_tela = models.DateTimeField(null=True, blank=True)
+    sin_existencia_tela = models.BooleanField(default=False)
+    fecha_sin_existencia_tela = models.DateTimeField(null=True, blank=True)
+    existencia_avios = models.BooleanField(default=False)
+    fecha_existencia_avios = models.DateTimeField(null=True, blank=True)
+    sin_existencia_avios = models.BooleanField(default=False)
+    fecha_sin_existencia_avios = models.DateTimeField(null=True, blank=True)
+    fecha_real_surtido_telas = models.DateField(null=True, blank=True)
+    fecha_real_surtido_avios = models.DateField(null=True, blank=True)
+    corte_externo = models.BooleanField(default=False)
+    comentarios_telas_avios = models.TextField(blank=True, null=True)
+    kit_completo = models.BooleanField(default=False)
+    fecha_embarque_materia_prima = models.DateField(null=True, blank=True)
+
+    # 4. Trazo
+    fecha_trazo = models.DateField(null=True, blank=True)
+
+    # 5. Corte
+    fecha_real_corte = models.DateField(null=True, blank=True)
+    cantidad_real_corte = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+
+    # 6. Producción
+    corte_recibido = models.BooleanField(default=False)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ordenes_produccion_ruta_critica'
+        verbose_name = 'Ruta Crítica de Orden de Producción'
+        verbose_name_plural = 'Rutas Críticas de Órdenes de Producción'
+
+    def __str__(self):
+        return f"Ruta crítica OP {self.op_id}"
+
 class ConsumoProduccion(models.Model):
     consumo_produccion_id = models.AutoField(primary_key=True)
     op = models.ForeignKey(OrdenProduccion, on_delete=models.CASCADE)
