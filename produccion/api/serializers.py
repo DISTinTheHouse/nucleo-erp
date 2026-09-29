@@ -184,18 +184,16 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         return usuario.get_full_name().strip() or usuario.email
 
     def validate(self, attrs):
+        # ``empresa``/``sucursal`` son read-only (ver ``Meta``): nunca llegan
+        # aquí desde el body, así que no hay nada que validar contra ellos en
+        # ``attrs``. La vista es quien las resuelve del usuario autenticado
+        # después de ``is_valid()`` (mismo patrón que OB/OR).
         request = self.context.get('request')
         user = getattr(request, 'user', None) if request else None
         user_empresa = getattr(user, 'empresa', None)
 
         if not user_empresa:
             raise serializers.ValidationError('Usuario sin empresa asignada')
-
-        sucursal = attrs.get('sucursal')
-        if sucursal and sucursal.empresa_id != user_empresa.id:
-            raise serializers.ValidationError(
-                {'sucursal': 'Sucursal no pertenece a tu empresa'}
-            )
 
         return attrs
 

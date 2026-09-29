@@ -434,12 +434,20 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                 {'msg': 'El usuario no tiene una empresa asignada'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        sucursal = getattr(request.user, 'sucursal_default', None)
+        if sucursal is None:
+            return Response(
+                {'msg': 'El usuario no tiene una sucursal asignada'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        data = request.data.copy()
-        data['empresa'] = empresa.id
-
-        serializer = self.get_serializer(data=data)
+        serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        # ``empresa``/``sucursal`` son read-only en el serializer (no se
+        # confía en el body): se inyectan ya resueltas del usuario
+        # autenticado, mismo patrón que ``OrdenBordadoService.save``.
+        serializer.validated_data['empresa'] = empresa
+        serializer.validated_data['sucursal'] = sucursal
 
         # ``pedido`` es opcional en OP, pero si viene debe ser un pedido de
         # producción especial (muestra) ya clasificado y confirmado — mismo
