@@ -2233,17 +2233,33 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 "updated_at",
                 "aprobado_snapshot",
             }
-            model_fields = {f.name for f in Cotizacion._meta.fields}
+            model_fields_by_name = {f.name: f for f in Cotizacion._meta.fields}
+            campos_restaurados = []
             for k, v in snap_cot.items():
                 if k in skip:
                     continue
-                if k in model_fields:
+                field = model_fields_by_name.get(k)
+                if field is None:
+                    continue
+                if field.is_relation:
+                    # El snapshot guarda las FK como id crudo (así las
+                    # serializa CotizacionSerializer). setattr(cotizacion,
+                    # "moneda", 7) lo rechaza el descriptor de Django con
+                    # ValueError ("must be a Moneda instance"): hay que
+                    # asignar por attname (moneda_id), que es un entero
+                    # plano sin esa validación.
+                    setattr(cotizacion, field.attname, v)
+                else:
                     setattr(cotizacion, k, v)
+                # save(update_fields=...) exige el NOMBRE del campo (p. ej.
+                # "moneda"), no el attname ("moneda_id"), aunque se haya
+                # asignado por attname arriba.
+                campos_restaurados.append(k)
             cotizacion.estatus = 3
             cotizacion.cambios_solicitados_at = None
             cotizacion.save(
                 update_fields=["estatus", "cambios_solicitados_at", "updated_at"]
-                + [k for k in snap_cot.keys() if k in model_fields and k not in skip]
+                + campos_restaurados
             )
 
             CotizacionDetalle.objects.filter(cotizacion=cotizacion).delete()
@@ -2261,6 +2277,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 cot_det = CotizacionDetalle.objects.create(
                     cotizacion=cotizacion,
                     producto_id=prod_id,
+                    # Renglón de muestra (sin producto de catálogo): el
+                    # snapshot sí trae este campo (fields='__all__'), pero
+                    # antes no se pasaba aquí y la línea quedaba sin nombre.
+                    producto_nombre_externo=det.get("producto_nombre_externo"),
                     color_id=color_id or None,
                     direccion_envio_cliente_id=direccion_id or None,
                     precio_lista=det.get("precio_lista"),
@@ -2290,6 +2310,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
                         cambio_talla_config=t.get("cambio_talla_config"),
                         sku=t.get("sku"),
+                        # Mismo hueco que producto_nombre_externo: el snapshot
+                        # los trae (fields='__all__') pero no se restauraban.
+                        variante_id=t.get("variante"),
+                        requiere_produccion=bool(t.get("requiere_produccion")),
                     )
             for s in snap_servicios:
                 CotizacionServicioExtra.objects.create(

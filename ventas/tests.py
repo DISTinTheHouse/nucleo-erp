@@ -2227,6 +2227,106 @@ class ServicioExtraCantidadCopiaTests(TestCase):
         )
 
 
+class RechazarCambiosCotizacionTests(TestCase):
+    """#267: ``rechazar-cambios`` tronaba 500 al restaurar el snapshot.
+
+    ``setattr(cotizacion, "moneda", 7)`` (el id crudo que guarda el snapshot)
+    lo rechaza el descriptor de FK de Django con ``ValueError`` en cuanto una
+    sola FK del encabezado no es nula — o sea, casi siempre. Además se perdía
+    ``producto_nombre_externo`` en los renglones de muestra al recrearlos.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.moneda_otra = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        cls.empresa = Empresa.objects.create(codigo="acme-rc", razon_social="acme-rc SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ARC", nombre="acme-rc")
+        cls.admin = Usuario.objects.create(
+            username="admin@acme-rc.test", email="admin@acme-rc.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+        # Encabezado con TODAS las FK que rechazar-cambios restaura no nulas
+        # (vendedor, sucursal, cliente, moneda): es justo la condición que
+        # hacía tronar el setattr original.
+        self.cotizacion = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.admin, sucursal=self.sucursal,
+            cliente=self.cliente, moneda=self.moneda, estatus=2,
+            persona_pagos="Pagos", correo_facturas="pagos@acme-rc.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            subtotal="50.00", gran_total="58.00",
+        )
+        CotizacionDetalle.objects.create(
+            cotizacion=self.cotizacion, producto=self.producto,
+            precio_unitario="50.00", subtotal_linea="50.00",
+        )
+        # Renglón de muestra: sin producto de catálogo, solo el nombre libre.
+        self.muestra = CotizacionDetalle.objects.create(
+            cotizacion=self.cotizacion, producto=None,
+            producto_nombre_externo="Playera muestra cliente",
+            precio_unitario="0.00", subtotal_linea="0.00",
+        )
+
+    def _autorizar(self):
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+    def _forzar_cambios_solicitados(self, **cambios):
+        # Simula que mesa de control editó la cotización ya autorizada
+        # (estatus -> 5), sin pasar por la ventana real de edición — mismo
+        # atajo que ``ServicioExtraCantidadCopiaTests``.
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=5, **cambios)
+
+    def test_rechazar_cambios_no_truena_y_restaura_fks_no_nulas(self):
+        self._autorizar()
+        self.cotizacion.refresh_from_db()
+        aprobado = {
+            "moneda_id": self.cotizacion.moneda_id,
+            "vendedor_id": self.cotizacion.vendedor_id,
+            "sucursal_id": self.cotizacion.sucursal_id,
+            "cliente_id": self.cotizacion.cliente_id,
+        }
+        # Precondición del bug: sin esto, el snapshot no tiene FK no nula que
+        # dispare el ValueError original.
+        self.assertTrue(all(v is not None for v in aprobado.values()))
+
+        self._forzar_cambios_solicitados(moneda=self.moneda_otra)
+
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/rechazar-cambios/")
+        self.assertEqual(resp.status_code, 200, resp.content)  # antes: 500
+
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 3)
+        self.assertEqual(
+            {
+                "moneda_id": self.cotizacion.moneda_id,
+                "vendedor_id": self.cotizacion.vendedor_id,
+                "sucursal_id": self.cotizacion.sucursal_id,
+                "cliente_id": self.cotizacion.cliente_id,
+            },
+            aprobado,
+        )
+
+    def test_rechazar_cambios_conserva_producto_nombre_externo_en_muestras(self):
+        self._autorizar()
+        self._forzar_cambios_solicitados()
+
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/rechazar-cambios/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+        # Los renglones viejos se borran y se recrean: el pk cambia, el
+        # contenido no debería perderse.
+        muestra = CotizacionDetalle.objects.get(cotizacion=self.cotizacion, producto__isnull=True)
+        self.assertNotEqual(muestra.pk, self.muestra.pk)
+        self.assertEqual(muestra.producto_nombre_externo, "Playera muestra cliente")
+
+
 # Pk que no existe en ninguna tabla del test: el rechazo de una FK de OTRA empresa
 # debe ser byte a byte el mismo que DRF da para este pk (salvo el número).
 PK_INEXISTENTE = 999999
