@@ -645,15 +645,16 @@ class OperacionInventarioScopeTenantTests(TestCase):
         )
 
 
-REPORTE_RESURTIDO_URL = "/api/v1/inventarios/existencias/reporte-resurtido/"
+REPORTE_EXISTENCIAS_PRODUCCION_COMPRAS_URL = "/api/v1/inventarios/existencias/reporte-existencias-produccion-compras/"
 
 
-class ReporteResurtidoTests(TestCase):
-    """``GET .../existencias/reporte-resurtido/``: disponible (almacenes de
-    Producto Terminado) + en producción (detalle de OP activas) + pendiente
-    de compra (OC no recibidas), agrupado por producto con desglose por
-    talla en disponible/producción — mesa de control lo usa para decidir
-    resurtido sin cruzar pantallas de producción y compras.
+class ReporteExistenciasProduccionComprasTests(TestCase):
+    """``GET .../existencias/reporte-existencias-produccion-compras/``:
+    disponible (almacenes de Producto Terminado) + en producción (detalle de
+    OP activas) + pendiente de compra (OC no recibidas), agrupado por
+    producto con desglose por talla en disponible/producción — mesa de
+    control lo usa para decidir resurtido sin cruzar pantallas de producción
+    y compras.
 
     Mismo alcance de almacenes que ``reporte-existencias-periodo``
     (``_build_report_almacenes_queryset``): empresas del usuario Y sus
@@ -779,7 +780,7 @@ class ReporteResurtidoTests(TestCase):
         return client
 
     def _get(self, user, params=None):
-        resp = self._client(user).get(REPORTE_RESURTIDO_URL, params or {})
+        resp = self._client(user).get(REPORTE_EXISTENCIAS_PRODUCCION_COMPRAS_URL, params or {})
         self.assertEqual(resp.status_code, 200, resp.content)
         return resp.json()["resultados"]
 
