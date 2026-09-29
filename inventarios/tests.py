@@ -18,10 +18,12 @@ from unittest import mock
 
 from django.db import DatabaseError
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import Color, Producto, ProductoVariante
+from catalogo.models import Color, Producto, ProductoVariante, Talla
+from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 from inventarios.api.serializers import ExistenciaSerializer
 from inventarios.models import (
     AjusteInventario,
@@ -29,9 +31,20 @@ from inventarios.models import (
     Existencia,
     MovimientoInventario,
     MovimientoInventarioDetalle,
+    TipoAlmacen,
     Ubicacion,
 )
-from nucleo.models import Empresa, Sucursal
+from nucleo.models import (
+    Empresa,
+    Moneda,
+    SatFormaPago,
+    SatMetodoPago,
+    SatRegimenFiscal,
+    Sucursal,
+    UnidadMedida,
+)
+from produccion.models import ListaMaterialBom, OrdenProduccion, OrdenProduccionDetalle
+from terceros.models import Proveedor
 from usuarios.models import Usuario
 
 MOVIMIENTOS_URL = "/api/v1/inventarios/movimientos/"
@@ -630,3 +643,223 @@ class OperacionInventarioScopeTenantTests(TestCase):
             str(Existencia.objects.get(producto_variante=self.a["variante"], ubicacion=self.a["ubicacion"]).cantidad),
             "2.0000",
         )
+
+
+REPORTE_RESURTIDO_URL = "/api/v1/inventarios/existencias/reporte-resurtido/"
+
+
+class ReporteResurtidoTests(TestCase):
+    """``GET .../existencias/reporte-resurtido/``: disponible (almacenes de
+    Producto Terminado) + en producción (detalle de OP activas) + pendiente
+    de compra (OC no recibidas), agrupado por producto con desglose por
+    talla en disponible/producción — mesa de control lo usa para decidir
+    resurtido sin cruzar pantallas de producción y compras.
+
+    Mismo alcance de almacenes que ``reporte-existencias-periodo``
+    (``_build_report_almacenes_queryset``): empresas del usuario Y sus
+    sucursales.
+    """
+
+    @classmethod
+    def _catalogos_compartidos(cls):
+        # Catálogos SAT y moneda no son propios de un tenant: se comparten
+        # entre A y B para no duplicar setup irrelevante a lo que se prueba.
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        sat_regimen = SatRegimenFiscal.objects.create(codigo="601-RS", descripcion="General de Ley")
+        sat_forma_pago = SatFormaPago.objects.create(codigo="99-RS", descripcion="Por definir")
+        sat_metodo_pago = SatMetodoPago.objects.create(codigo="PUE-RS", descripcion="Pago en una exhibición")
+        cls.proveedor = Proveedor.objects.create(
+            nombre="Proveedor Tela", codigo="PROV-RS", razon_social="Proveedor Tela SA",
+            telefono="8180000000", contacto_principal="Juan Perez", rfc="XAXX010101000",
+            email="proveedor@resurtido.test", moneda=cls.moneda, sat_regimen_fiscal=sat_regimen,
+            sat_forma_pago=sat_forma_pago, sat_metodo_pago=sat_metodo_pago,
+        )
+
+    @classmethod
+    def _tenant(cls, codigo):
+        empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+        sucursal = Sucursal.objects.create(empresa=empresa, codigo=codigo[:3].upper(), nombre=codigo)
+        almacen_pt = Almacen.objects.create(
+            empresa=empresa, sucursal=sucursal, codigo=f"{codigo}-00", nombre="Producto Terminado",
+            tipo_almacen=TipoAlmacen.PRODUCTO_TERMINADO,
+        )
+        almacen_mp = Almacen.objects.create(
+            empresa=empresa, sucursal=sucursal, codigo=f"{codigo}-MP", nombre="Materia Prima",
+            tipo_almacen=TipoAlmacen.MATERIA_PRIMA,
+        )
+        regular = Usuario.objects.create(
+            username=f"mesa@{codigo}.test", email=f"mesa@{codigo}.test", empresa=empresa,
+        )
+        regular.sucursales.add(sucursal)
+
+        producto = Producto.objects.create(empresa=empresa, nombre=f"Playera {codigo}", codigo=f"{codigo}-SKU")
+        var_ch = ProductoVariante.objects.create(
+            producto=producto, empresa=empresa, color=cls.color, talla=cls.talla_ch,
+            sku=f"{codigo}-CH", precio_base="100",
+        )
+        var_m = ProductoVariante.objects.create(
+            producto=producto, empresa=empresa, color=cls.color, talla=cls.talla_m,
+            sku=f"{codigo}-M", precio_base="100",
+        )
+        Existencia.objects.create(almacen=almacen_pt, producto_variante=var_ch, cantidad="100")
+        Existencia.objects.create(almacen=almacen_pt, producto_variante=var_m, cantidad="50")
+        # No debe contar: existencia en almacén de MATERIA_PRIMA, no de PT.
+        Existencia.objects.create(almacen=almacen_mp, producto_variante=var_ch, cantidad="999")
+
+        bom = ListaMaterialBom.objects.create(empresa=empresa, producto_variante=var_ch, activo=True)
+
+        op_activa = OrdenProduccion.objects.create(
+            empresa=empresa, sucursal=sucursal, folio_op=f"OP-{codigo}-PEND",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.PENDIENTE,
+            fecha_entrega_estimada="2026-11-01", observaciones="Resurtido",
+        )
+        OrdenProduccionDetalle.objects.create(op=op_activa, bom=bom, cantidad="20", unidad=cls.unidad, producto_variante=var_ch)
+        OrdenProduccionDetalle.objects.create(op=op_activa, bom=bom, cantidad="10", unidad=cls.unidad, producto_variante=var_m)
+
+        # No deben contar como "en producción": completada y cancelada.
+        op_completa = OrdenProduccion.objects.create(
+            empresa=empresa, sucursal=sucursal, folio_op=f"OP-{codigo}-COMP",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+        )
+        OrdenProduccionDetalle.objects.create(op=op_completa, bom=bom, cantidad="500", unidad=cls.unidad, producto_variante=var_ch)
+
+        op_cancelada = OrdenProduccion.objects.create(
+            empresa=empresa, sucursal=sucursal, folio_op=f"OP-{codigo}-CANC",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
+        )
+        OrdenProduccionDetalle.objects.create(op=op_cancelada, bom=bom, cantidad="700", unidad=cls.unidad, producto_variante=var_ch)
+
+        def _oc(sufijo, estatus, cantidad, recibido=None):
+            oc = OrdenCompra.objects.create(
+                empresa=empresa, sucursal=sucursal, proveedor=cls.proveedor, moneda=cls.moneda, usuario=regular,
+                folio=f"OC-{codigo}-{sufijo}", fecha_oc="2026-09-01", fecha_entrega_estimada="2026-11-15",
+                estatus=estatus, observaciones=f"Insumo {sufijo}",
+            )
+            det = OrdenCompraDetalle.objects.create(
+                orden_compra=oc, producto=producto, sucursal=sucursal, cantidad=cantidad, piezas=cantidad,
+            )
+            if recibido:
+                recepcion = Recepcion.objects.create(
+                    tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA, orden_compra=oc, empresa=empresa,
+                    sucursal=sucursal, proveedor=cls.proveedor, almacen=almacen_pt, usuario=regular,
+                    fecha_recepcion=timezone.now(), folio=f"REC-{codigo}-{sufijo}",
+                )
+                RecepcionDetalle.objects.create(
+                    recepcion=recepcion, orden_compra_detalle=det, producto=producto, cantidad_recibida=recibido,
+                )
+            return oc
+
+        # Única que debe contar como "pendiente": 40 - 15 = 25.
+        oc_parcial = _oc("PARCIAL", OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA, 40, 15)
+        _oc("RECIBIDA", OrdenCompra.EstatusOrdenCompra.RECIBIDA, 40, 40)
+        _oc("BORRADOR", OrdenCompra.EstatusOrdenCompra.BORRADOR, 999)
+        _oc("CANCELADA", OrdenCompra.EstatusOrdenCompra.CANCELADA, 999)
+
+        return {
+            "empresa": empresa, "sucursal": sucursal, "almacen_pt": almacen_pt, "almacen_mp": almacen_mp,
+            "producto": producto, "var_ch": var_ch, "var_m": var_m,
+            "op_activa": op_activa, "op_completa": op_completa, "op_cancelada": op_cancelada,
+            "oc_parcial": oc_parcial, "regular": regular,
+        }
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.color = Color.objects.create(nombre="Negro", codigo="NRS", codigo_hex="#000000")
+        cls.talla_ch = Talla.objects.create(nombre="CH-RS")
+        cls.talla_m = Talla.objects.create(nombre="M-RS")
+        cls.unidad = UnidadMedida.objects.create(clave="PZA-RS", nombre="Pieza")
+        cls._catalogos_compartidos()
+        cls.a = cls._tenant("acme-rs")
+        cls.b = cls._tenant("globex-rs")
+        cls.superuser = Usuario.objects.create(username="root-rs", email="root@nowhere-rs.test", is_superuser=True)
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _get(self, user, params=None):
+        resp = self._client(user).get(REPORTE_RESURTIDO_URL, params or {})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()["resultados"]
+
+    def _resultado(self, user, producto, params=None):
+        for r in self._get(user, params):
+            if r["producto_id"] == producto.pk:
+                return r
+        return None
+
+    # --- disponible / producción --------------------------------------------
+
+    def test_disponible_agrega_solo_almacenes_de_producto_terminado_por_talla(self):
+        r = self._resultado(self.a["regular"], self.a["producto"])
+        self.assertIsNotNone(r)
+        self.assertEqual(r["disponible_por_talla"], {"CH-RS": "100.0000", "M-RS": "50.0000"})
+        self.assertEqual(r["disponible_total"], "150.0000")
+
+    def test_produccion_excluye_ordenes_completadas_y_canceladas(self):
+        r = self._resultado(self.a["regular"], self.a["producto"])
+        self.assertEqual(r["produccion_por_talla"], {"CH-RS": "20.0000", "M-RS": "10.0000"})
+        self.assertEqual(r["produccion_total"], "30.0000")
+        folios = {o["folio"] for o in r["ordenes_produccion"]}
+        self.assertEqual(folios, {f"OP-acme-rs-PEND"})
+
+    def test_total_por_talla_suma_disponible_mas_produccion(self):
+        r = self._resultado(self.a["regular"], self.a["producto"])
+        self.assertEqual(r["total_por_talla"], {"CH-RS": "120.0000", "M-RS": "60.0000"})
+
+    def test_ordenes_produccion_incluyen_fecha_entrega_y_comentarios(self):
+        r = self._resultado(self.a["regular"], self.a["producto"])
+        entry = next(o for o in r["ordenes_produccion"] if o["folio"] == "OP-acme-rs-PEND")
+        self.assertEqual(entry["estatus_display"], "Pendiente")
+        self.assertEqual(entry["fecha_entrega_estimada"], "2026-11-01")
+        self.assertEqual(entry["comentarios"], "Resurtido")
+
+    # --- compras --------------------------------------------------------------
+
+    def test_compras_pendiente_solo_cuenta_lo_no_recibido_de_ordenes_activas(self):
+        r = self._resultado(self.a["regular"], self.a["producto"])
+        self.assertEqual(r["compras_pendiente_cantidad"], "25.0000")
+        folios = {o["folio"] for o in r["ordenes_compra"]}
+        self.assertEqual(folios, {"OC-acme-rs-PARCIAL"})
+
+    def test_orden_compra_incluye_fecha_entrega_y_comentarios(self):
+        r = self._resultado(self.a["regular"], self.a["producto"])
+        entry = next(o for o in r["ordenes_compra"] if o["folio"] == "OC-acme-rs-PARCIAL")
+        self.assertEqual(entry["estatus_display"], "Parcialmente recibida")
+        self.assertEqual(entry["fecha_entrega_estimada"], "2026-11-15")
+        self.assertEqual(entry["comentarios"], "Insumo PARCIAL")
+
+    # --- alcance / filtros ------------------------------------------------
+
+    def test_sin_almacenes_en_alcance_devuelve_vacio(self):
+        sin_sucursal = Usuario.objects.create(
+            username="sinsuc-rs", email="sinsuc@acme-rs.test", empresa=self.a["empresa"],
+        )
+        self.assertEqual(self._get(sin_sucursal), [])
+
+    def test_filtro_por_producto_id_y_por_sku(self):
+        otro_producto = Producto.objects.create(empresa=self.a["empresa"], nombre="Otro", codigo="OTRO-RS")
+        otra_var = ProductoVariante.objects.create(
+            producto=otro_producto, empresa=self.a["empresa"], color=self.color, talla=self.talla_ch,
+            sku="OTRO-RS-CH", precio_base="50",
+        )
+        Existencia.objects.create(almacen=self.a["almacen_pt"], producto_variante=otra_var, cantidad="5")
+
+        resultados = self._get(self.a["regular"], {"producto_id": self.a["producto"].pk})
+        self.assertEqual([r["producto_id"] for r in resultados], [self.a["producto"].pk])
+
+        resultados = self._get(self.a["regular"], {"sku": "OTRO-RS"})
+        self.assertEqual([r["producto_id"] for r in resultados], [otro_producto.pk])
+
+    def test_aislamiento_multi_tenant_entre_empresas(self):
+        self.assertEqual(
+            [r["producto_id"] for r in self._get(self.a["regular"])], [self.a["producto"].pk],
+        )
+        self.assertEqual(
+            [r["producto_id"] for r in self._get(self.b["regular"])], [self.b["producto"].pk],
+        )
+
+    def test_superusuario_ve_ambas_empresas(self):
+        ids = {r["producto_id"] for r in self._get(self.superuser)}
+        self.assertEqual(ids, {self.a["producto"].pk, self.b["producto"].pk})

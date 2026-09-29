@@ -77,6 +77,10 @@ class OrdenProduccion(models.Model):
     prioridad = models.IntegerField(default=1)
     fecha_inicio = models.DateTimeField(auto_now_add=True)
     fecha_fin = models.DateTimeField(null=True, blank=True)
+    fecha_entrega_estimada = models.DateField(
+        null=True, blank=True,
+        help_text="Fecha estimada de entrega/resurtido, capturada por producción (mismo criterio que OrdenCompra.fecha_entrega_estimada)."
+    )
     usuario_asignado = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE, null=True, blank=True)
     observaciones = models.TextField(blank=True, null=True)
     cerrar_orden = models.BooleanField(default=False)
