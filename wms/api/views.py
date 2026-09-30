@@ -777,6 +777,17 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             for v in _epc_variants(d.epc):
                 detalle_by_epc_variant.setdefault(v, d)
 
+        # ``RfidScan`` no tiene FK a empresa: la unica forma de saber de quien es
+        # un renglon es que su EPC haga match contra una etiqueta YA acotada por
+        # empresa (detalle_by_epc_variant, arriba). Sin esto, un no-superusuario
+        # veia el EPC/antena/RSSI/IP crudos de lecturas de otras empresas como
+        # "no match" en vez de no verlas.
+        if not getattr(user, "is_superuser", False):
+            scans = [
+                scan for scan in scans
+                if any(v in detalle_by_epc_variant for v in _epc_variants((scan.epc or "").lower()))
+            ]
+
         data = []
         for scan in scans:
             epc = scan.epc or ""
@@ -885,6 +896,10 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
     def scanner_stats(self, request):
         """Endpoint 1-clic para saber si el lector FX esta vivo SIN entrar a Vercel.
 
+        Solo superusuario o administrador de empresa: expone conteos y muestras
+        crudas de ``RfidScan``, que no tiene FK a empresa (mismo criterio que
+        ``scans_clear``).
+
         Query params:
             epc (opcional): buscar si un EPC (ej recién impreso) existe en RfidScan.
 
@@ -896,6 +911,10 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
               receive_endpoint_info: {fx_post_url_required, example_POST_test_1_tag}
             }
         """
+        user = request.user
+        if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
+            raise PermissionDenied("No tiene permisos para realizar esta acción.")
+
         total = RfidScan.objects.count()
         last_5 = list(
             RfidScan.objects.order_by("-created_at", "-id")[:5].values(

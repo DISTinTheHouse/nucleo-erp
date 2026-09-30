@@ -1239,6 +1239,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         ubicaciones_qs = Ubicacion.objects.filter(estatus="ACTIVO")
         if almacen_id:
             ubicaciones_qs = ubicaciones_qs.filter(almacen_id=almacen_id)
+            if empresa:
+                ubicaciones_qs = ubicaciones_qs.filter(almacen__empresa=empresa)
         else:
             ubicaciones_qs = ubicaciones_qs.none()
         ubicaciones = list(
