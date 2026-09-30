@@ -46,10 +46,7 @@ rfid_scanner_logger = logging.getLogger(__name__)
 
 
 def _empresa_qa(request):
-    empresa = getattr(request.user, "empresa", None)
-    if empresa:
-        return empresa
-    return Empresa.objects.first()
+    return getattr(request.user, "empresa", None)
 
 
 def _redirect_rfid(encuadre_id):
@@ -774,10 +771,14 @@ def generar_orden_produccion(request):
             messages.error(request, "Debes ingresar la cantidad de al menos un producto.")
             return redirect("generar_orden_produccion")
 
+        empresa_default = getattr(request.user, "empresa", None)
+        if empresa_default is None:
+            messages.error(request, "Tu usuario no tiene empresa asignada.")
+            return redirect("generar_orden_produccion")
+
         try:
             with transaction.atomic():
-                empresa_default = Empresa.objects.first()
-                sucursal = Sucursal.objects.get(pk=sucursal_id)
+                sucursal = Sucursal.objects.get(pk=sucursal_id, empresa=empresa_default)
                 unidad_default = UnidadMedida.objects.first()
 
                 nueva_op = OrdenProduccion.objects.create(
@@ -1995,6 +1996,7 @@ def scanner_rfid_receive(request):
         )
 
 
+@login_required
 def scanner_rfid_get(request):
     scans = list(
         RfidScan.objects.select_related()
@@ -2214,11 +2216,16 @@ def scanner_rfid_get(request):
     return JsonResponse({"scans": data, "debug_get": debug_get})
 
 
+@login_required
 def scanner_rfid_clear(request):
+    user = request.user
+    if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
+        return JsonResponse({"status": "error", "message": "No tiene permisos para realizar esta acción."}, status=403)
     RfidScan.objects.all().delete()
     return JsonResponse({"status": "success"})
 
 
+@login_required
 def scanner_rfid_stats(request):
     """Endpoint rápido 1-clic para ver: ¿FX está mandando POSTs a receive?
     NO REQUIERE Vercel Dashboard ni FX web UI.
