@@ -919,6 +919,20 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         serie_folio.save(update_fields=["folio_actual", "ultimo_anio", "updated_at"])
         recepcion.folio = folio_formateado
 
+    def _cantidad_rechazada_calidad(self, **filtro_recepcion_detalle):
+        # Lo que calidad rechaza deja de contar como "recibido": vuelve a ser
+        # pendiente para la OC/OP de origen (ver DOCS/arquitectura/flujo-recepcion-calidad-compras.md).
+        total = (
+            CalidadInspeccionDetalle.objects.filter(
+                recepcion_detalle__recepcion__activo=True,
+                **filtro_recepcion_detalle,
+            )
+            .exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            .aggregate(total=Sum("cantidad_rechazada"))
+            .get("total")
+        )
+        return Decimal(str(total or 0))
+
     def _cantidad_recibida_oc(self, orden_compra_detalle_id):
         total = (
             RecepcionDetalle.objects.filter(
@@ -929,7 +943,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             .aggregate(total=Sum("cantidad_recibida"))
             .get("total")
         )
-        return Decimal(str(total or 0))
+        rechazado = self._cantidad_rechazada_calidad(
+            recepcion_detalle__orden_compra_detalle_id=orden_compra_detalle_id
+        )
+        return Decimal(str(total or 0)) - rechazado
 
     def _cantidad_recibida_op(self, orden_produccion_detalle_id):
         total = (
@@ -941,7 +958,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             .aggregate(total=Sum("cantidad_recibida"))
             .get("total")
         )
-        return Decimal(str(total or 0))
+        rechazado = self._cantidad_rechazada_calidad(
+            recepcion_detalle__orden_produccion_detalle_id=orden_produccion_detalle_id
+        )
+        return Decimal(str(total or 0)) - rechazado
 
     def _crear_renglones_recepcion(self, recepcion, detalle_payload):
         # Solo registra el conteo físico (``RecepcionDetalle``). NO toca
@@ -999,6 +1019,30 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         else:
             oc.estatus = OrdenCompra.EstatusOrdenCompra.RECIBIDA
         oc.save(update_fields=["estatus", "updated_at"])
+
+    def _actualizar_estatus_op(self, op):
+        # Solo reabre: un rechazo de Calidad puede volver a dejar pendiente una
+        # OP que ya se había marcado COMPLETADO. Cerrarla sigue siendo
+        # decisión explícita de ``cerrar_orden`` en el onboarding de recepción,
+        # esta función nunca la completa.
+        if op.estatus_op != OrdenProduccion.EstatusOrdenProduccion.COMPLETADO:
+            return
+
+        detalles = OrdenProduccionDetalle.objects.filter(op=op).only("op_detalle_id", "cantidad")
+        if not detalles.exists():
+            return
+
+        total_pendiente = Decimal("0")
+        for detalle in detalles:
+            ordered = Decimal(str(detalle.cantidad or 0))
+            recibido = self._cantidad_recibida_op(detalle.pk)
+            pendiente = ordered - recibido
+            if pendiente > 0:
+                total_pendiente += pendiente
+
+        if total_pendiente > 0:
+            op.estatus_op = OrdenProduccion.EstatusOrdenProduccion.REVISION
+            op.save(update_fields=["estatus_op"])
 
     def handle_get_onboarding(self, request):
         user = request.user
@@ -1803,6 +1847,15 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
 
             recepcion.estatus = Recepcion.EstatusRecepcion.CERRADA
             recepcion.save(update_fields=["estatus", "updated_at"])
+
+            # Un rechazo puede reabrir pendiente en una OC/OP que ya se había
+            # marcado recibida/completa por otra Recepcion previa (ver
+            # DOCS/arquitectura/flujo-recepcion-calidad-compras.md).
+            recepcion_vs = RecepcionViewSet()
+            if recepcion.tipo_origen == Recepcion.TipoOrigen.ORDEN_COMPRA and recepcion.orden_compra_id:
+                recepcion_vs._actualizar_estatus_oc(recepcion.orden_compra)
+            elif recepcion.tipo_origen == Recepcion.TipoOrigen.ORDEN_PRODUCCION and recepcion.op_id:
+                recepcion_vs._actualizar_estatus_op(recepcion.op)
 
             ev = None
             if movimientos:
