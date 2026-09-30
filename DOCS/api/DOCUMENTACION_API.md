@@ -1802,6 +1802,7 @@ Una vez que el pedido ya fue aceptado/autorizado, mesa de control reparte sus pi
   ```
 - `programacion_conf` también viaja tal cual en `GET /api/v1/ventas/pedidos/{id}/` (es de solo lectura ahí — ver nota en el `Meta` de `PedidoSerializer` — así que un `PATCH` genérico al pedido no puede pisarlo; solo este endpoint lo escribe).
 - **`total_parcialidades`**: cuántos renglones tiene `programacion_conf.programaciones` (`0` si no se ha programado nada). No es un campo nuevo en BD, se cuenta al vuelo. **Ya viene incluido** en `GET`/`PATCH` de `/pedidos/{id}/` y en el listado `GET /pedidos/` (la pestaña de "Programación de pedidos") — no hace falta llamar a `/programar/` para verlo.
+- **`parcialidades`**: el mismo arreglo `programacion_conf.programaciones`, expuesto también como campo de nivel superior (`[]` si no se ha programado nada) — para que el frontend pinte "una línea por parcialidad" sin tener que leer el JSON anidado de `programacion_conf`. Cada item: `{ "destino", "cantidad", "comentarios", "fecha", "usuario_id", "usuario_nombre" }`. Disponible en `GET`/`PATCH` de `/pedidos/{id}/` y en el listado `GET /pedidos/` — **no** en la respuesta de `PATCH /pedidos/{id}/programar/` (esa solo devuelve `programacion_conf`, no el serializer completo del pedido).
 - **`destinos_aplicables`** (solo en `GET /api/v1/ventas/pedidos/{id}/`, detalle — no en el listado): arreglo con los destinos que tiene sentido ofrecer para ESE pedido, según lo que realmente lleva. `EMBARQUE`/`APARTADO` siempre están; `BORDADO`/`REFLEJANTE`/`CORTE_MANGA` solo si el pedido tiene al menos una talla con ese servicio marcado. Ejemplo, un pedido que solo lleva corte de manga:
   ```json
   { "destinos_aplicables": ["CORTE_MANGA", "EMBARQUE", "APARTADO"] }
@@ -1863,6 +1864,9 @@ Pantalla de cola para mesa de control: una tabla con todos los pedidos y su esta
     "fecha_entrega_min": "2026-01-06",
     "fecha_entrega_max": "2026-01-09",
     "total_parcialidades": 1,
+    "parcialidades": [
+      { "destino": "BORDADO", "cantidad": 150, "comentarios": "urgente", "fecha": "...", "usuario_id": 12, "usuario_nombre": "Ana Torres" }
+    ],
     "programacion_conf": {
       "programaciones": [
         { "destino": "BORDADO", "cantidad": 150, "comentarios": "urgente", "fecha": "...", "usuario_id": 12, "usuario_nombre": "Ana Torres" }
@@ -1873,6 +1877,7 @@ Pantalla de cola para mesa de control: una tabla con todos los pedidos y su esta
   - `clasificacion`/`clasificacion_display`/`fecha_confirmacion`/`fecha_entrega_min`/`fecha_entrega_max`: mismo significado y mismo cálculo que en el detalle del pedido (ver "Clasificar pedido" arriba) — `null` si el pedido aún no tiene clasificación.
   - `programacion_conf`: el JSON crudo de `PATCH /pedidos/{id}/programar/`, tal cual (cada renglón incluye `comentarios`) — `{"programaciones": []}` si no se ha programado nada.
   - `total_parcialidades`: cuántos renglones tiene `programacion_conf.programaciones` — para no obligar al frontend a contar el arreglo él mismo.
+  - **`parcialidades`**: el mismo arreglo que `programacion_conf.programaciones` pero en top-level (`[]` si no se ha programado nada) — **para armar la tabla de "Programación de pedidos" con una línea por parcialidad**: por cada pedido con `total_parcialidades > 1`, itera `parcialidades` y pinta un renglón por cada una (repitiendo `folio`/`cliente_nombre`/etc. del pedido padre), en vez de una sola línea por pedido. `programacion_conf` se mantiene por compatibilidad, pero para este caso de uso es más directo consumir `parcialidades`.
 - **Filtros nuevos** (solo aplican en este listado, `?query_param` de siempre — no rompen el detalle del pedido):
   - `?estatus=3` o `?estatus=3,4` — uno o varios estatus separados por coma (mismos códigos de `Pedido.CHOICES_ESTATUS`: 1 BORRADOR, 2 POR AUTORIZAR, 3 AUTORIZADA, 4 EN PROCESO, 5 CANCELADO). Valor inválido responde `400 {"estatus": "Filtro inválido. Usa números separados por coma."}`.
   - `?sin_clasificar=true` — solo pedidos con `clasificacion` vacía (la cola de "pendientes por clasificar").

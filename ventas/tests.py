@@ -1707,6 +1707,40 @@ class PedidoProgramarTests(TestCase):
         self.assertEqual(body["programacion_conf"], self._programacion_db())
         self.assertEqual(body["total_piezas"], 120)
 
+    def test_parcialidades_expone_el_mismo_arreglo_en_list_y_retrieve(self):
+        response = self._patch(
+            self.admin_mesa,
+            {
+                "programaciones": [
+                    {"destino": "BORDADO", "cantidad": 50, "comentarios": "urge"},
+                    {"destino": "EMBARQUE", "cantidad": 70},
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        esperado = self._programacion_db()["programaciones"]
+        self.assertEqual(len(esperado), 2)
+
+        client = APIClient()
+        client.force_authenticate(user=self.admin_mesa)
+
+        detalle = client.get(f"{PEDIDOS_URL}{self.pedido.pk}/")
+        self.assertEqual(detalle.status_code, 200, detalle.content)
+        self.assertEqual(detalle.json()["parcialidades"], esperado)
+
+        listado = client.get(PEDIDOS_URL)
+        self.assertEqual(listado.status_code, 200, listado.content)
+        fila = next(p for p in listado.json() if p["id"] == self.pedido.pk)
+        self.assertEqual(fila["parcialidades"], esperado)
+        self.assertEqual(fila["total_parcialidades"], 2)
+
+    def test_parcialidades_vacio_si_no_tiene_programacion(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin_mesa)
+        detalle = client.get(f"{PEDIDOS_URL}{self.pedido_sin_tallas.pk}/")
+        self.assertEqual(detalle.status_code, 200, detalle.content)
+        self.assertEqual(detalle.json()["parcialidades"], [])
+
     def test_acepta_todos_los_destinos_de_la_lista_blanca(self):
         destinos = ["BORDADO", "REFLEJANTE", "CORTE_MANGA", "EMBARQUE", "APARTADO"]
         response = self._patch(
