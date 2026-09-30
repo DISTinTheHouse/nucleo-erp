@@ -475,6 +475,12 @@ class PedidoListSerializer(serializers.ModelSerializer):
     fecha_entrega_min = serializers.SerializerMethodField()
     fecha_entrega_max = serializers.SerializerMethodField()
     total_parcialidades = serializers.SerializerMethodField()
+    # Mismos datos que ``programacion_conf.programaciones``, expuestos aparte
+    # en top-level para que el frontend arme "1 línea por parcialidad" en la
+    # pestaña de Programación de pedidos sin tener que leer el JSON interno
+    # de ``programacion_conf``. Cada item: destino/cantidad/comentarios/
+    # fecha/usuario_id/usuario_nombre (mismo shape que arma ``programar``).
+    parcialidades = serializers.SerializerMethodField()
 
     def get_fecha_entrega_min(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
@@ -486,6 +492,9 @@ class PedidoListSerializer(serializers.ModelSerializer):
 
     def get_total_parcialidades(self, obj):
         return len((obj.programacion_conf or {}).get("programaciones") or [])
+
+    def get_parcialidades(self, obj):
+        return (obj.programacion_conf or {}).get("programaciones") or []
 
     class Meta:
         model = Pedido
@@ -508,6 +517,7 @@ class PedidoListSerializer(serializers.ModelSerializer):
             "fecha_entrega_max",
             "programacion_conf",
             "total_parcialidades",
+            "parcialidades",
             "activo",
             "cliente",
             "moneda",
@@ -539,6 +549,10 @@ class PedidoSerializer(serializers.ModelSerializer):
     # programación no ofrezca, p. ej., CORTE_MANGA en un pedido sin ninguna
     # talla de corte de manga.
     destinos_aplicables = serializers.SerializerMethodField()
+    # Mismos datos que ``programacion_conf.programaciones``, expuestos aparte
+    # en top-level (ver ``PedidoListSerializer.parcialidades`` — mismo campo,
+    # mismo cálculo, para que el detalle y el listado sean consistentes).
+    parcialidades = serializers.SerializerMethodField()
 
     def get_fecha_entrega_min(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
@@ -554,6 +568,9 @@ class PedidoSerializer(serializers.ModelSerializer):
 
     def get_total_parcialidades(self, obj):
         return len((obj.programacion_conf or {}).get("programaciones") or [])
+
+    def get_parcialidades(self, obj):
+        return (obj.programacion_conf or {}).get("programaciones") or []
 
     # ``cliente_regimen_fiscal`` no se valida: ``SatRegimenFiscal`` es catálogo global.
     def validate_sucursal(self, sucursal):
