@@ -357,7 +357,13 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         fila=_fila_orden_bordado,
         # Sólo por su propio folio. El folio del pedido y el cliente aparecen en
         # el subtítulo, pero NO se buscan: el pedido ya tiene su propio grupo.
-        campos_codigo=("folio_bordado",),
+        #
+        # El folio va como NOMBRE (subcadena), no como CÓDIGO (prefijo): el
+        # formato real es ``2026-OB-00017`` —año delante—, así que lo que se
+        # teclea (``OB-00017``, ``00017``) está en medio. Consecuencia: con
+        # menos de ``LONGITUD_MINIMA_NOMBRE`` caracteres el grupo llega vacío,
+        # igual que clientes y cotizaciones.
+        campos_nombre=("folio_bordado",),
         campos_only=(
             "folio_bordado",
             "estatus_bordado",
