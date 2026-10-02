@@ -293,6 +293,17 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
 
 ---
 
+## 🔎 4.1 Buscador Global
+
+- **Endpoint**: `GET /api/v1/search/?q=texto&limit=5`
+- Busca en varias entidades a la vez y devuelve los resultados **agrupados por tipo** (`grupos: [{tipo, etiqueta, resultados[], hay_mas}]`).
+- `q` mínimo 2 caracteres (si no, `grupos` vacíos, no error). Campos de NOMBRE (no código) requieren mínimo 3 caracteres.
+- `grupos` solo incluye las entidades que el usuario puede ver por permiso — puede traer menos de las disponibles. Cada fila: `{tipo, id, codigo, titulo, subtitulo, estatus}`.
+- Entidades disponibles hoy: `pedido`, `orden_bordado` (folio OB), `cliente`, `cotizacion`, `producto` (SKU). Pendientes: OP, orden de reflejante, corte de manga, orden de compra, factura.
+- Cada entidad requiere que el usuario tenga el permiso declarado (ej. `orden_bordado` pide `R-PRODUCCION-OB`); `producto` pide `R-CATALOGO-PRODUCTOS` — **clave nueva, hay que crearla en el catálogo de permisos (BD) y asignarla a los roles que deban ver productos**, no existía antes.
+
+---
+
 ## 👥 5. Gestión de Usuarios
 
 API completa para gestionar el personal de la empresa (cajeros, vendedores, gerentes).
