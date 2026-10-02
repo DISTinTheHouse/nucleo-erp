@@ -4,9 +4,10 @@ Consulta varias entidades a la vez y devuelve los resultados **agrupados por tip
 recortando cada grupo a los primeros ``limit``. Está pensado para el buscador del
 header: filas ligeras para pintar un dropdown, no vistas de detalle.
 
-Vive en ``nucleo`` porque es infraestructura transversal —cruza ventas y terceros—,
-igual que el resto de lo que comparten las apps (middleware, mixins, catálogos). La
-ruta se declara en ``nucleo/urls.py``, junto a las demás APIView de nucleo.
+Vive en ``nucleo`` porque es infraestructura transversal —cruza ventas, terceros,
+producción, catálogo y finanzas—, igual que el resto de lo que comparten las apps
+(middleware, mixins, catálogos). La ruta se declara en ``nucleo/urls.py``, junto a
+las demás APIView de nucleo.
 
 Añadir una entidad
 ------------------
@@ -17,9 +18,10 @@ CÓDIGO y cuáles NOMBRE, qué columnas hacen falta, cómo ordenar y cómo seria
 Aislamiento multi-tenant
 ------------------------
 ``alcance`` NO reimplementa nada: compone el queryset base y el predicado reales que
-ya usa el ViewSet de esa entidad (``ventas.scope`` / ``terceros.scope``). La política
-de superusuario es, por lo tanto, exactamente la que cada entidad ya tenía; este
-endpoint no inventa una.
+ya usa el ViewSet de esa entidad (``ventas.scope`` / ``terceros.scope`` /
+``produccion.scope``, o el helper de aislamiento de la vista en catálogo y
+finanzas). La política de superusuario es, por lo tanto, exactamente la que cada
+entidad ya tenía; este endpoint no inventa una.
 
 Permisos
 --------
@@ -29,7 +31,7 @@ filtro de visibilidad por entidad: éste es el primer endpoint del backend que u
 
 Cada ``EntidadBuscable`` declara sus ``permisos_visibilidad``; basta tener UNO para
 que su grupo aparezca. La entidad que el usuario no puede ver **se omite entera de
-la respuesta**, así que ``grupos`` puede traer menos de tres elementos. El
+la respuesta**, así que ``grupos`` puede traer menos elementos que el ``REGISTRO``. El
 superusuario y el ``is_admin_empresa`` pasan solos, por el cortocircuito que hay
 dentro de ``nucleo.permisos``: aquí no hay ni un ``is_superuser``.
 
@@ -98,7 +100,7 @@ from finanzas.api.views import _aplicar_scope_empresa as _aplicar_scope_empresa_
 from finanzas.models import Factura
 from nucleo.permisos import PermisosEfectivos, permisos_efectivos
 from nucleo.utils import entero_acotado
-from produccion.models import OrdenesBordado
+from produccion.scope import ordenes_bordado_base, ordenes_bordado_visibles
 from terceros.scope import clientes_base, clientes_visibles
 from ventas.scope import (
     cotizaciones_base,
@@ -247,35 +249,6 @@ def _fila_cliente(cliente) -> dict:
     }
 
 
-def _alcance_orden_bordado(user):
-    """Aislamiento empresa+sucursal: mismo bloque que ``OrdenBordadoViewSet.
-    get_queryset()`` (``produccion`` no tiene ``scope.py`` compartido, el
-    bloque vive inline en el ViewSet; se replica aquí literal)."""
-    qs = OrdenesBordado.objects.filter(activo=True)
-    if getattr(user, "is_superuser", False):
-        return qs
-    empresa = getattr(user, "empresa", None)
-    if not empresa:
-        return qs.none()
-    qs = qs.filter(empresa=empresa)
-    if getattr(user, "is_admin_empresa", False):
-        return qs
-    return qs.filter(sucursal_id__in=user.sucursales_permitidas())
-
-
-def _fila_orden_bordado(ob) -> dict:
-    cliente = _texto(ob.pedido.cliente_razon_social) or _texto(ob.pedido.cliente_nombre)
-    codigo = _texto(ob.folio_bordado)
-    return {
-        "tipo": "orden_bordado",
-        "id": ob.pk,
-        "codigo": codigo,
-        "titulo": codigo or cliente,
-        "subtitulo": cliente if codigo else None,
-        "estatus": ob.get_estatus_bordado_display(),
-    }
-
-
 def _fila_producto(variante) -> dict:
     sku = _texto(variante.sku)
     producto_nombre = _texto(variante.producto.nombre)
@@ -320,6 +293,27 @@ def _fila_cotizacion(cotizacion) -> dict:
     }
 
 
+def _fila_orden_bordado(orden) -> dict:
+    # ``folio_bordado`` es NOT NULL y único: siempre hay código y título. El
+    # subtítulo junta el folio del pedido y el cliente —tomado de las columnas
+    # snapshot del propio pedido, el mismo criterio que la fila de pedido— y se
+    # degrada a la parte que exista (``Pedido.folio`` es NULL-able).
+    pedido = orden.pedido
+    cliente = _texto(pedido.cliente_razon_social) or _texto(pedido.cliente_nombre)
+    partes = [p for p in (_texto(pedido.folio), cliente) if p]
+    folio = _texto(orden.folio_bordado)
+    return {
+        "tipo": "orden_bordado",
+        "id": orden.pk,
+        "codigo": folio,
+        "titulo": folio,
+        "subtitulo": " · ".join(partes) or None,
+        # Etiqueta legible, como las demás entidades: el valor crudo es un entero
+        # (1–8) que no significa nada fuera del backend.
+        "estatus": orden.get_estatus_bordado_display(),
+    }
+
+
 #: Orden del registro = orden de los grupos en la respuesta.
 REGISTRO: tuple[EntidadBuscable, ...] = (
     EntidadBuscable(
@@ -353,19 +347,30 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
     ),
     EntidadBuscable(
         tipo="orden_bordado",
-        etiqueta="Órdenes de Bordado",
-        alcance=lambda user: _alcance_orden_bordado(user).select_related("pedido"),
-        fila=_fila_orden_bordado,
-        campos_codigo=("folio_bordado",),
-        # ``pedido`` es NOT NULL en OB: siempre hay cliente de dónde sacar el
-        # nombre (columnas snapshot, igual que en ``pedido``/``cotizacion``).
-        campos_nombre=("pedido__cliente_nombre", "pedido__cliente_razon_social"),
-        campos_only=(
-            "folio_bordado", "estatus_bordado",
-            "pedido__cliente_nombre", "pedido__cliente_razon_social",
+        etiqueta="Órdenes de bordado",
+        # Mismo predicado que ``OrdenBordadoViewSet`` (``produccion.scope``):
+        # empresa, ``activo=True`` y, para quien no es admin, sólo sus sucursales.
+        # ``select_related("pedido")``: la fila lee folio y cliente del pedido.
+        alcance=lambda user: ordenes_bordado_visibles(
+            ordenes_bordado_base().select_related("pedido"), user
         ),
-        permisos_visibilidad=("R-PRODUCCION-OB",),
-        orden=("-fecha_inicio", "-id"),
+        fila=_fila_orden_bordado,
+        # Sólo por su propio folio. El folio del pedido y el cliente aparecen en
+        # el subtítulo, pero NO se buscan: el pedido ya tiene su propio grupo.
+        campos_codigo=("folio_bordado",),
+        campos_only=(
+            "folio_bordado",
+            "estatus_bordado",
+            "pedido__folio",
+            "pedido__cliente_nombre",
+            "pedido__cliente_razon_social",
+        ),
+        # Sección (ver órdenes de bordado) o módulo (entrar a Producción), como
+        # en cotizaciones: cadenas planas, cualquiera de las dos basta.
+        permisos_visibilidad=("R-PRODUCCION-OB", "R-PRODUCCION"),
+        # ``fecha_inicio`` es ``auto_now_add`` y NOT NULL, así que ``nulls_last``
+        # no cambia nada hoy; se deja por coherencia con ``ORDEN_RECIENTE``.
+        orden=(F("fecha_inicio").desc(nulls_last=True), "-id"),
     ),
     EntidadBuscable(
         tipo="cliente",
@@ -475,7 +480,7 @@ class BusquedaGlobalAPIView(APIView):
             "vacíos, no un error. Los campos de nombre requieren `longitud_minima_"
             "nombre` caracteres; por debajo sólo se consultan los de código. "
             "`grupos` sólo incluye las entidades que el usuario tiene permiso de "
-            "ver, así que puede traer menos de tres elementos."
+            "ver, así que puede traer menos grupos que entidades hay."
         ),
         parameters=[
             OpenApiParameter(
@@ -504,7 +509,7 @@ class BusquedaGlobalAPIView(APIView):
         )
         suficiente = len(q) >= LONGITUD_MINIMA_Q
         # Los permisos se resuelven UNA vez por petición y se reutilizan para las
-        # tres entidades: 2 consultas en total, o 0 si es superusuario/admin.
+        # entidades: 2 consultas en total, o 0 si es superusuario/admin.
         permisos = permisos_efectivos(request.user)
 
         grupos = []

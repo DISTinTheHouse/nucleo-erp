@@ -14,6 +14,7 @@ from seguridad.role_identity import (
 )
 
 from produccion.services.common import config_como_dict, pendientes_por_linea
+from produccion.scope import ordenes_bordado_base, ordenes_bordado_visibles
 
 from produccion.models import (
     ListaMaterialBom,
@@ -595,12 +596,11 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
     def get_queryset(self):
         """Aislamiento multi-tenant: empresa + sucursal.
 
-        Mismo criterio que ``PickingViewSet``/``PackingViewSet``/
-        ``DespachoViewSet``/``TransferenciaViewSet``: sin empresa no se ve
-        nada, el superusuario ve todo y el admin de empresa ve todas las
-        sucursales de la suya; el resto queda acotado a
-        ``sucursales_permitidas()``. ``list`` devuelve ``200 []`` fuera de
-        alcance y ``retrieve`` de otra empresa/sucursal devuelve ``404``
+        El predicado vive en ``produccion.scope`` (base + visibles), compartido
+        con el buscador global: sin empresa no se ve nada, el superusuario ve
+        todo y el admin de empresa ve todas las sucursales de la suya; el resto
+        queda acotado a ``sucursales_permitidas()``. ``list`` devuelve ``200 []``
+        fuera de alcance y ``retrieve`` de otra empresa/sucursal devuelve ``404``
         (no ``403``): no se revela la existencia del documento.
 
         ``select_related``/``prefetch_related`` cortan el N+1: el serializer
@@ -610,9 +610,8 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         (``proveedor_nombre``/``proveedor_display``) por orden, y por renglón de
         ``detalles``, ``producto``/``talla``/``color``.
         """
-        user = self.request.user
         qs = (
-            OrdenesBordado.objects.filter(activo=True)
+            ordenes_bordado_base()
             .select_related("pedido", "usuario_asignado", "empresa", "sucursal", "proveedor")
             .prefetch_related(
                 Prefetch(
@@ -630,16 +629,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
             # Listado más reciente primero; ``-id`` como desempate estable.
             .order_by("-fecha_inicio", "-id")
         )
-
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        return ordenes_bordado_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
         # list → renglón ligero, sin los campos que obligan a re-leer
