@@ -35,6 +35,37 @@ class PackingService:
         return packed_map
 
     @classmethod
+    def _pickings_totalmente_empacados(cls, base_qs):
+        """IDs de pickings de ``base_qs`` donde ya no queda nada por empacar.
+
+        Dos agregaciones separadas (no un ``.annotate()`` con ambos ``Sum`` a
+        la vez): ``picking_detalle__cantidad_surtida`` es un JOIN de un nivel
+        y ``picking_detalle__packing_detalle__cantidad_empacada`` es de dos;
+        sumarlos en la misma consulta infla ambos totales por el fan-out del
+        JOIN (cada combinación surtida×empacada se cuenta de más).
+        """
+        surtida_por_picking = dict(
+            PickingDetalle.objects.filter(picking__in=base_qs)
+            .exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
+            .values("picking_id")
+            .annotate(total=Sum("cantidad_surtida"))
+            .values_list("picking_id", "total")
+        )
+        empacado_por_picking = dict(
+            PackingDetalle.objects.filter(picking_detalle__picking__in=base_qs)
+            .exclude(estado="CANCELADO")
+            .exclude(packing__estado="CANCELADO")
+            .values("picking_detalle__picking_id")
+            .annotate(total=Sum("cantidad_empacada"))
+            .values_list("picking_detalle__picking_id", "total")
+        )
+        return {
+            picking_id
+            for picking_id, surtida in surtida_por_picking.items()
+            if surtida and empacado_por_picking.get(picking_id, Decimal("0")) >= surtida
+        }
+
+    @classmethod
     def onboarding_payload(cls, user, picking_id=None):
         empresa = getattr(user, "empresa", None)
         if empresa is None:
@@ -52,6 +83,14 @@ class PackingService:
         pickings_qs = (
             Picking.objects.filter(empresa=empresa)
             .exclude(estado=Picking.Estado.CANCELADO)
+        )
+        if not es_staff:
+            pickings_qs = pickings_qs.filter(sucursal_id__in=sucursal_ids)
+
+        # Un picking ya totalmente empacado no tiene nada más que ofrecer en
+        # este onboarding: fuera de la lista de candidatos.
+        pickings_qs = (
+            pickings_qs.exclude(pk__in=cls._pickings_totalmente_empacados(pickings_qs))
             .select_related(
                 "pedido",
                 "pedido__cliente",
@@ -61,8 +100,6 @@ class PackingService:
             )
             .order_by("-created_at", "-id")
         )
-        if not es_staff:
-            pickings_qs = pickings_qs.filter(sucursal_id__in=sucursal_ids)
 
         payload = {
             "pickings": [

@@ -24,7 +24,7 @@ class LotePicking(models.Model):
     total_pedidos = models.IntegerField(default=0)
     total_lineas = models.IntegerField(default=0)
 
-    #estacion_sorting = models.CharField(max_length=50, blank=True, null=True)  # dónde se clasifica lo recolectado
+    #estacion_sorting = models.CharField(max_length=50, blank=True, null=True)  # dónde se clasifica lo recolectadoj
     #ruta_optimizada = models.JSONField(blank=True, null=True)  # secuencia de ubicaciones calculada, si aplica
     fecha_inicio = models.DateTimeField(blank=True, null=True)
     fecha_fin = models.DateTimeField(blank=True, null=True)
@@ -246,6 +246,7 @@ class PackingDetalle(models.Model):
 class Despacho(models.Model):
     packing = models.ForeignKey(Packing, on_delete=models.CASCADE, related_name="despachos")
     envio = models.ForeignKey("logistica.Envio", on_delete=models.CASCADE, related_name="despachos", null=True, blank=True)
+    guia = models.CharField(max_length=100, blank=True, default="")
 
     class Meta:
         db_table = "despachos"

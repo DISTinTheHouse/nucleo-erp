@@ -630,6 +630,7 @@ class DespachoCreateSerializer(serializers.ModelSerializer):
         fields = [
             "packing",
             "envio",
+            "guia",
             "despacho_detalle",
         ]
 
