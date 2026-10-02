@@ -9,6 +9,8 @@ from rest_framework.fields import get_error_detail
 from rest_framework.response import Response
 from finanzas.services.facturama.service import FacturamaService
 from finanzas.services.facturama.exceptions import FacturamaAPIException
+from finanzas.services.syncfy.client import SyncfyClient
+from finanzas.services.syncfy.exceptions import SyncfyAPIException
 from finanzas.exceptions import (
     CONCURRENCY_SQLSTATES,
     CONCURRENT_OPERATION_MESSAGE,
@@ -38,6 +40,7 @@ from finanzas.models import (
     PagoDetalle,
     Poliza,
     PolizaDetalle,
+    SyncfyUser
 )
 
 from finanzas.api.serializers import (
@@ -64,7 +67,8 @@ from finanzas.api.serializers import (
     FacturamaProductSerializer,
     FacturamaCfdiCreateSerializer,
     FacturamaCfdiFileSerializer,
-    FacturamaAcuseSerializer
+    FacturamaAcuseSerializer,
+    SyncfyCreateUserSerializer
 )
 
 from finanzas.services.alerta_mora_service import AlertaMoraService
@@ -2414,3 +2418,41 @@ class FacturamaCfdiEmisionViewSet(viewsets.ViewSet):
             return Response(response)
         except FacturamaAPIException as exc:
             return self.handle_facturama_error(exc)
+
+class SyncfySessionViewSet(viewsets.ViewSet):
+    client_class = SyncfyClient
+
+    def get_client(self):
+        return self.client_class()
+
+    def handle_syncfy_error(self, exc):
+        return Response(
+            {
+                "error": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            },
+            status=(
+                exc.status_code
+                if exc.status_code and exc.status_code < 500
+                else status.HTTP_502_BAD_GATEWAY
+            )
+        )        
+
+    def create(self, request):
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+
+        if not empresa:
+            return Response(data={'err': 'Usuario sin empresa asignada'})
+        
+        try:
+            client = self.get_client()
+            sync_user, _ = SyncfyUser.objects.get_or_create(
+                empresa=empresa,
+                defaults={"id_user": client.create_user({'name': f"ERP-{empresa.id_empresa}"})['response']['id_user']}
+            )
+            session = client.create_session(sync_user.id_user)
+            return Response({'token': session['response']['token']}, status=status.HTTP_201_CREATED)
+        except SyncfyAPIException as exc:
+            return self.handle_syncfy_error(exc)

@@ -19,7 +19,8 @@ from .views import (
     PagoViewSet,
     PolizaViewSet,
     FacturamaProductsViewSet,
-    FacturamaCfdiEmisionViewSet
+    FacturamaCfdiEmisionViewSet,
+    SyncfySessionViewSet,
 )
 
 router = DefaultRouter()
@@ -42,6 +43,7 @@ router.register(r'alertas-mora', AlertaMoraViewSet, basename='alerta-mora')
 router.register(r'dashboard', DashboardFinancieroViewSet, basename='finanzas-dashboard')
 router.register(r'facturama/productos', FacturamaProductsViewSet, basename='facturama-productos')
 router.register(r'facturama/cfdi', FacturamaCfdiEmisionViewSet, basename='facturama-cfdi')
+router.register(r'syncfy/sessions', SyncfySessionViewSet, basename='syncfy-sessions')
 
 
 urlpatterns = [

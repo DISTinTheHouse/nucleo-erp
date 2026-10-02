@@ -640,3 +640,13 @@ class AlertaMora(models.Model):
     def __str__(self):
         cuenta = self.cuenta_por_cobrar or self.cuenta_por_pagar
         return f"{self.tipo_cuenta} - {self.nivel} ({self.dias_mora})d"
+
+#there will be only one syncfy user by company (multi-tenant)
+class SyncfyUser(models.Model):
+    empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.PROTECT, related_name="syncfy_users")
+    id_user = models.CharField(max_length=64, unique=True)
+
+    class Meta:
+        db_table = "syncfy_users"
+        verbose_name = "Syncfy user"
+        verbose_name_plural = "Syncfy users"
