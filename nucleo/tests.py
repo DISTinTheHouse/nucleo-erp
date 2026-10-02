@@ -432,10 +432,16 @@ class VisibilidadPorPermisosTests(BusquedaGlobalBaseTestCase):
     # --- superuser / admin salen gratis por el cortocircuito ------------------
 
     def test_superuser_ve_las_tres_sin_permiso_alguno(self):
-        self.assertEqual(self._tipos(self.superuser), ["pedido", "cliente", "cotizacion"])
+        self.assertEqual(
+            self._tipos(self.superuser),
+            ["pedido", "orden_bordado", "cliente", "cotizacion", "producto"],
+        )
 
     def test_admin_empresa_ve_las_tres_sin_permiso_alguno(self):
-        self.assertEqual(self._tipos(self.a["admin"]), ["pedido", "cliente", "cotizacion"])
+        self.assertEqual(
+            self._tipos(self.a["admin"]),
+            ["pedido", "orden_bordado", "cliente", "cotizacion", "producto"],
+        )
 
     # --- overrides: DENY gana sobre el rol ------------------------------------
 
@@ -577,7 +583,10 @@ class AlcancePorEntidadTests(BusquedaGlobalBaseTestCase):
 class CoincidenciaYFormaTests(BusquedaGlobalBaseTestCase):
     def test_q_corta_devuelve_grupos_vacios_no_error(self):
         payload = self._buscar(self.a["admin"], "a")
-        self.assertEqual([g["tipo"] for g in payload["grupos"]], ["pedido", "cliente", "cotizacion"])
+        self.assertEqual(
+            [g["tipo"] for g in payload["grupos"]],
+            ["pedido", "orden_bordado", "cliente", "cotizacion", "producto"],
+        )
         for grupo in payload["grupos"]:
             self.assertEqual(grupo["resultados"], [], grupo["tipo"])
             self.assertFalse(grupo["hay_mas"])

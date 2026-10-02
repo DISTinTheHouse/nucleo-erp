@@ -68,8 +68,11 @@ from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from catalogo.api.views import _alcance_empresa as _alcance_empresa_catalogo
+from catalogo.models import ProductoVariante
 from nucleo.permisos import PermisosEfectivos, permisos_efectivos
 from nucleo.utils import entero_acotado
+from produccion.models import OrdenesBordado
 from terceros.scope import clientes_base, clientes_visibles
 from ventas.scope import (
     cotizaciones_base,
@@ -219,6 +222,48 @@ def _fila_cliente(cliente) -> dict:
     }
 
 
+def _alcance_orden_bordado(user):
+    """Aislamiento empresa+sucursal: mismo bloque que ``OrdenBordadoViewSet.
+    get_queryset()`` (``produccion`` no tiene ``scope.py`` compartido, el
+    bloque vive inline en el ViewSet; se replica aquí literal)."""
+    qs = OrdenesBordado.objects.filter(activo=True)
+    if getattr(user, "is_superuser", False):
+        return qs
+    empresa = getattr(user, "empresa", None)
+    if not empresa:
+        return qs.none()
+    qs = qs.filter(empresa=empresa)
+    if getattr(user, "is_admin_empresa", False):
+        return qs
+    return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+
+
+def _fila_orden_bordado(ob) -> dict:
+    cliente = _texto(ob.pedido.cliente_razon_social) or _texto(ob.pedido.cliente_nombre)
+    codigo = _texto(ob.folio_bordado)
+    return {
+        "tipo": "orden_bordado",
+        "id": ob.pk,
+        "codigo": codigo,
+        "titulo": codigo or cliente,
+        "subtitulo": cliente if codigo else None,
+        "estatus": ob.get_estatus_bordado_display(),
+    }
+
+
+def _fila_producto(variante) -> dict:
+    sku = _texto(variante.sku)
+    producto_nombre = _texto(variante.producto.nombre)
+    return {
+        "tipo": "producto",
+        "id": variante.pk,
+        "codigo": sku,
+        "titulo": sku or producto_nombre,
+        "subtitulo": producto_nombre,
+        "estatus": None,
+    }
+
+
 def _fila_cotizacion(cotizacion) -> dict:
     # ``Cotizacion`` no tiene folio (se confirmó contra el modelo): ``codigo`` va en
     # ``None`` a propósito y la identidad viaja en ``id``, que es como la referencia
@@ -268,6 +313,22 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         orden=ORDEN_RECIENTE,
     ),
     EntidadBuscable(
+        tipo="orden_bordado",
+        etiqueta="Órdenes de Bordado",
+        alcance=lambda user: _alcance_orden_bordado(user).select_related("pedido"),
+        fila=_fila_orden_bordado,
+        campos_codigo=("folio_bordado",),
+        # ``pedido`` es NOT NULL en OB: siempre hay cliente de dónde sacar el
+        # nombre (columnas snapshot, igual que en ``pedido``/``cotizacion``).
+        campos_nombre=("pedido__cliente_nombre", "pedido__cliente_razon_social"),
+        campos_only=(
+            "folio_bordado", "estatus_bordado",
+            "pedido__cliente_nombre", "pedido__cliente_razon_social",
+        ),
+        permisos_visibilidad=("R-PRODUCCION-OB",),
+        orden=("-fecha_inicio", "-id"),
+    ),
+    EntidadBuscable(
         tipo="cliente",
         etiqueta="Clientes",
         alcance=lambda user: clientes_visibles(clientes_base(), user),
@@ -309,6 +370,23 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
             "R-MESACONTROL",
         ),
         orden=ORDEN_RECIENTE,
+    ),
+    EntidadBuscable(
+        tipo="producto",
+        etiqueta="Productos",
+        # ``_alcance_empresa`` es el mismo helper que usa ``ProductoVarianteViewSet``
+        # (``catalogo/api/views.py``). El ViewSet real NO filtra ``activo=True`` en
+        # su queryset base; aquí sí se agrega explícito, a propósito: un catálogo
+        # descontinuado no debe aparecer en un buscador de uso diario.
+        alcance=lambda user: _alcance_empresa_catalogo(
+            ProductoVariante.objects.filter(activo=True), user
+        ).select_related("producto"),
+        fila=_fila_producto,
+        campos_codigo=("sku",),
+        campos_nombre=("nombre", "producto__nombre"),
+        campos_only=("sku", "nombre", "producto__nombre"),
+        permisos_visibilidad=("R-CATALOGO-PRODUCTOS",),
+        orden=("producto__nombre", "sku"),
     ),
 )
 
