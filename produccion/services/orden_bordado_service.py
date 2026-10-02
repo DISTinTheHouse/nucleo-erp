@@ -9,6 +9,7 @@ from produccion.services.common import EPS_CANTIDAD, cantidades_asignadas
 from produccion.services.common import (
     config_como_dict,
     crear_orden_con_guardia_duplicado,
+    exigir_producto_en_tallas,
     payload_duplicada,
     pendientes_por_linea,
     revisar_empresa,
@@ -463,6 +464,7 @@ class OrdenBordadoService:
                 "detalles_exceso": errores_lineas,
             })
 
+        exigir_producto_en_tallas(detalle_tallas, "bordado")
         folio_bordado = generate_ob_folio(pedido.empresa_id, pedido.sucursal_id)
 
         orden_bordado = crear_orden_con_guardia_duplicado(

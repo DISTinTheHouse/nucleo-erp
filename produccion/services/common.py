@@ -15,6 +15,7 @@ Centraliza lo que antes estaba triplicado verbatim en cada service:
 
 from django.db import IntegrityError, transaction
 from django.db.models import Sum
+from rest_framework.exceptions import ValidationError
 
 from ventas.models import PedidoDetalleTalla
 
@@ -138,6 +139,24 @@ def revisar_empresa(user, obj):
     if obj.empresa_id != empresa.pk:
         return "otra_empresa"
     return None
+
+
+def exigir_producto_en_tallas(detalle_tallas, tipo_label):
+    """Rechaza con 400 las tallas de líneas de muestra (``producto`` null).
+
+    El detalle de OB/OR/OCM exige ``producto``; sin este corte el
+    ``bulk_create`` reventaba con ``IntegrityError`` (500). Se llama antes de
+    generar el folio para que el rechazo no consuma consecutivo.
+    """
+    sin_producto = [dt.pk for dt in detalle_tallas if dt.pedido_detalle.producto_id is None]
+    if sin_producto:
+        raise ValidationError({
+            "err": (
+                f"No se puede generar la orden de {tipo_label}: el pedido tiene "
+                "líneas de muestra sin producto de catálogo."
+            ),
+            "pedido_detalle_talla_ids": sin_producto,
+        })
 
 
 def tallas_orden_trabajo_qs(pedido_id, lleva_field):

@@ -5,7 +5,7 @@ from django.db.models import Sum
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesReflejante, OrdenReflejanteDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
-from produccion.services.common import EPS_CANTIDAD, cantidades_asignadas, crear_orden_con_guardia_duplicado, payload_duplicada, pendientes_por_linea, revisar_empresa, tallas_orden_trabajo_qs
+from produccion.services.common import EPS_CANTIDAD, cantidades_asignadas, crear_orden_con_guardia_duplicado, exigir_producto_en_tallas, payload_duplicada, pendientes_por_linea, revisar_empresa, tallas_orden_trabajo_qs
 from produccion.utils.folios import generate_or_folio
 
 
@@ -503,6 +503,7 @@ class OrdenReflejanteService:
 
         # El folio se consume DESPUÉS de todas las validaciones, para que un
         # rechazo no gaste consecutivo de la serie.
+        exigir_producto_en_tallas(detalle_tallas, "reflejante")
         folio_reflejante = generate_or_folio(pedido.empresa_id, pedido.sucursal_id)
 
         orden_reflejante = crear_orden_con_guardia_duplicado(
