@@ -44,13 +44,37 @@ son cosas independientes.
 Estrategia de coincidencia
 --------------------------
 - Campos CÓDIGO (``folio``): ``istartswith`` — prefijo. Es lo que se espera al teclear
-  un folio, y el btree de ``Pedido.folio`` (``db_index=True``) cubre el caso.
-- Campos NOMBRE: ``icontains`` — subcadena, acelerada por los índices GIN
-  ``gin_trgm_ops`` creados para esto. Se eligió ``icontains`` sobre
+  un folio.
+- Campos NOMBRE: ``icontains`` — subcadena. Se eligió ``icontains`` sobre
   ``TrigramSimilarity`` porque busca subcadena (lo que quiere un dropdown: "acme"
   debe encontrar "Comercial Acme SA"), porque es la forma que ya usa el filtro
   ``?q=`` de cotizaciones, y porque ordenar por ``similarity()`` obliga a recorrer
   toda la tabla para rankear —el índice GIN acelera el filtro, no el ORDER BY—.
+
+Índices: cómo se ejecutan de verdad estos lookups
+-------------------------------------------------
+En PostgreSQL Django NO emite ``ILIKE``. Compila ambos lookups como::
+
+    UPPER("tabla"."col"::text) LIKE UPPER('P-0%')     -- istartswith
+    UPPER("tabla"."col"::text) LIKE UPPER('%acme%')   -- icontains
+
+Un índice sobre la columna cruda no sirve a ese predicado: ni el btree de
+``Pedido.folio`` (``db_index=True``) ni su ``_like`` (``varchar_pattern_ops``) ni un
+GIN trigram sobre ``col``. La primera versión de este módulo se verificó con
+``ILIKE`` escrito a mano —que sí usa el GIN crudo—, no con el SQL del ORM; con el
+SQL real y ``SET LOCAL enable_seqscan = off`` el planner caía a Seq Scan.
+
+Por eso los índices del buscador son de EXPRESIÓN sobre ``UPPER(col)`` (declarados
+en el ``Meta.indexes`` de cada modelo):
+
+- CÓDIGO: btree ``(UPPER(col)) text_pattern_ops``. ``text_pattern_ops`` es lo que
+  permite al btree resolver ``LIKE 'prefijo%'`` con cualquier collation.
+- NOMBRE: GIN ``(UPPER(col)) gin_trgm_ops`` (``pg_trgm`` ya está habilitada).
+
+PostgreSQL guarda ``UPPER(col)`` de un ``varchar`` como ``upper((col)::text)``, que es
+exactamente la expresión del ORM; el planner los empareja. Sólo existen en
+PostgreSQL: SQLite, donde corren las pruebas, no conoce los opclasses (ver
+``nucleo.migration_operations.AddIndexSoloPostgres``).
 
 Los resultados NO vienen rankeados por relevancia: cada grupo sale en el orden
 natural de su entidad (el más reciente primero, o alfabético en clientes). Rankear
@@ -87,10 +111,9 @@ from ventas.scope import (
 LONGITUD_MINIMA_Q = 2
 
 #: pg_trgm parte el texto en grupos de 3 caracteres: con menos de 3 no hay trigrama
-#: que buscar y el planner cae a Seq Scan (verificado con EXPLAIN contra la BD real:
-#: ``ILIKE '%acme%'`` usa ``Bitmap Index Scan``, ``ILIKE '%a%'`` no). Por eso, por
-#: debajo de este umbral se consultan SÓLO los campos CÓDIGO, que van por btree y sí
-#: funcionan con prefijos cortos. Así el buscador nunca emite una consulta que el
+#: que buscar y el GIN no puede acotar nada. Por eso, por debajo de este umbral se
+#: consultan SÓLO los campos CÓDIGO, que van por btree y sí funcionan con prefijos
+#: cortos. Así el buscador nunca emite una consulta que el
 #: índice no pueda servir. Se expone en la respuesta: sin él, el frontend no puede
 #: distinguir "escribe más" de "no hay resultados".
 LONGITUD_MINIMA_NOMBRE = 3
@@ -308,7 +331,8 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         fila=_fila_pedido,
         campos_codigo=("folio",),
         # ``cliente_nombre``/``cliente_razon_social`` son columnas SNAPSHOT del propio
-        # ``pedidos`` (no FKs), así que no hay JOIN y los índices GIN son suyos.
+        # ``pedidos`` (no FKs), así que no hay JOIN y los índices GIN sobre
+        # ``UPPER(col)`` son suyos.
         campos_nombre=("cliente_nombre", "cliente_razon_social"),
         campos_only=("folio", "cliente_nombre", "cliente_razon_social", "estatus"),
         # Un pedido se ve desde muchos módulos: CRM lo vende, WMS lo surte,
@@ -370,7 +394,7 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         ),
         fila=_fila_cotizacion,
         # No tiene folio: sólo se busca a través del cliente relacionado. Estos dos
-        # campos los sirven los mismos índices GIN de ``clientes``.
+        # campos los sirven los mismos índices GIN ``UPPER(col)`` de ``clientes``.
         campos_nombre=("cliente__nombre", "cliente__razon_social"),
         campos_only=("oc", "estatus", "cliente__nombre", "cliente__razon_social"),
         # Mezcla códigos de SECCIÓN y de MÓDULO a propósito. En este catálogo son
