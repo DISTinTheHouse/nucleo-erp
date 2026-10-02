@@ -184,6 +184,33 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         if not usuario: return None
         return usuario.get_full_name().strip() or usuario.email
 
+    def validate_pedido(self, pedido):
+        # Reglas de ``pedido`` aquí y no en la vista: aplican igual a POST, PUT y
+        # PATCH. ``get_queryset`` del viewset acota la OP a la empresa del
+        # usuario, así que comparar contra ella equivale a comparar contra la OP.
+        if pedido is None:
+            return pedido
+        request = self.context.get('request')
+        empresa_id = getattr(getattr(request, 'user', None), 'empresa_id', None)
+        if pedido.empresa_id != empresa_id:
+            # Mismo mensaje que un pk inexistente: no revela que existe en otra empresa.
+            raise serializers.ValidationError(
+                self.fields['pedido'].error_messages['does_not_exist'].format(pk_value=pedido.pk)
+            )
+        if self.instance is not None and self.instance.pedido_id == pedido.pk:
+            return pedido
+
+        from produccion.api.views import _detalles_especiales_qs
+        if not _detalles_especiales_qs().filter(pedido=pedido).exists():
+            raise serializers.ValidationError(
+                'El pedido no tiene ninguna línea de producción especial (muestra).'
+            )
+        if not pedido.clasificacion or not pedido.fecha_confirmacion:
+            raise serializers.ValidationError(
+                'El pedido debe estar clasificado y con fecha de confirmación antes de ligarlo a una OP.'
+            )
+        return pedido
+
     def validate(self, attrs):
         # ``empresa``/``sucursal`` son read-only (ver ``Meta``): nunca llegan
         # aquí desde el body, así que no hay nada que validar contra ellos en

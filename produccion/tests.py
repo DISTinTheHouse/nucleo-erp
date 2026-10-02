@@ -3931,3 +3931,67 @@ class OrdenProduccionPedidoOpcionalTests(TestCase):
         resp = self._client().post(self.URL, self._body(pedido), format="json")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("pedido", resp.data)
+
+    def test_pedido_ajeno_e_inexistente_responden_igual(self):
+        pedido = self._pedido_muestra(
+            empresa=self.otra_empresa, sucursal=self.otra_sucursal, cliente=self.otro_cliente,
+        )
+        ajeno = self._client().post(self.URL, self._body(pedido), format="json")
+        body = self._body()
+        body["pedido"] = pedido.pk + 999
+        inexistente = self._client().post(self.URL, body, format="json")
+
+        self.assertEqual(ajeno.status_code, 400)
+        self.assertEqual(
+            str(ajeno.data["pedido"][0]).replace(str(pedido.pk), "X"),
+            str(inexistente.data["pedido"][0]).replace(str(pedido.pk + 999), "X"),
+        )
+
+    def _op_creada(self, pedido=None):
+        resp = self._client().post(self.URL, self._body(pedido), format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return OrdenProduccion.objects.get(pk=resp.data["op_id"])
+
+    def test_patch_con_pedido_de_otra_empresa_rechaza(self):
+        op = self._op_creada()
+        pedido = self._pedido_muestra(
+            empresa=self.otra_empresa, sucursal=self.otra_sucursal, cliente=self.otro_cliente,
+        )
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedido": pedido.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("pedido", resp.data)
+        op.refresh_from_db()
+        self.assertIsNone(op.pedido_id)
+
+    def test_patch_con_pedido_sin_muestra_rechaza(self):
+        op = self._op_creada()
+        pedido = self._pedido_muestra()
+        PedidoDetalle.objects.filter(pedido=pedido).update(producto_nombre_externo="")
+
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedido": pedido.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        op.refresh_from_db()
+        self.assertIsNone(op.pedido_id)
+
+    def test_patch_con_pedido_valido_lo_liga(self):
+        op = self._op_creada()
+        pedido = self._pedido_muestra()
+
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedido": pedido.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.pedido_id, pedido.pk)
+
+    def test_patch_sin_cambiar_pedido_no_revalida_su_estado(self):
+        pedido = self._pedido_muestra()
+        op = self._op_creada(pedido)
+        Pedido.objects.filter(pk=pedido.pk).update(clasificacion=None)
+
+        resp = self._client().patch(
+            f"{self.URL}{op.pk}/", {"pedido": pedido.pk, "prioridad": 2}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
