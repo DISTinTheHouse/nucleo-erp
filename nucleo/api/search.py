@@ -450,12 +450,17 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
             Factura.objects.filter(activo=True).select_related("cliente"), user
         ),
         fila=_fila_factura,
+        # El folio real es ``FAC-<consecutivo>``: empieza por lo que se teclea, así
+        # que va por prefijo (CÓDIGO), como el de pedido. Lo sirve el btree
+        # ``UPPER(folio)`` de ``finanzas.Factura``; el cliente, los GIN
+        # ``UPPER(col)`` de ``clientes``.
         campos_codigo=("folio",),
         campos_nombre=("cliente__nombre", "cliente__razon_social"),
         campos_only=("folio", "estatus", "cliente__nombre", "cliente__razon_social"),
-        # Clave NUEVA, no existía antes en el catálogo de permisos (BD): hay que
-        # crearla y asignarla a los roles de contabilidad/finanzas.
-        permisos_visibilidad=("R-CONTABILIDAD-FACTURAS",),
+        # Sección (ver facturación) o módulo (entrar a Contabilidad), como en
+        # cotizaciones y órdenes de bordado. Ambas claves existen en el catálogo y
+        # las tiene el rol Contabilidad.
+        permisos_visibilidad=("R-CONTABILIDAD-FACTURACION", "R-CONTABILIDAD"),
         orden=("-fecha_emision", "-id"),
     ),
 )
