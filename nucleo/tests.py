@@ -19,6 +19,7 @@ from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
+from finanzas.models import Factura
 from nucleo.api.search import REGISTRO
 from nucleo.models import Empresa, Moneda, Sucursal
 from nucleo.permisos import permisos_efectivos
@@ -887,6 +888,189 @@ class OrdenBordadoBusquedaTests(BusquedaGlobalBaseTestCase):
             )
         coste_4, payload = consultas()
         self.assertEqual(len(self._ids(payload, "orden_bordado")), 4)
+        self.assertEqual(coste_4, coste_1)
+
+
+class _GrupoPropioMixin:
+    """Atajos compartidos por las suites de una sola entidad."""
+
+    #: ``tipo`` del grupo que mide la suite.
+    TIPO = None
+
+    def _usuario_con(self, sufijo, claves=(), sucursal=None):
+        user = Usuario.objects.create(
+            username=f"{self.TIPO}-{sufijo}",
+            email=f"{self.TIPO}-{sufijo}@acme-search.test",
+            empresa=self.a["empresa"],
+            sucursal_default=sucursal or self.a["sucursal"],
+        )
+        if claves:
+            rol = self._rol_con(self.a["empresa"], f"rol-{self.TIPO}-{sufijo}", claves)
+            UsuarioRol.objects.create(usuario=user, rol=rol, empresa=self.a["empresa"])
+        return user
+
+    def _tipos(self, user, q):
+        return [g["tipo"] for g in self._buscar(user, q)["grupos"]]
+
+    def _grupo(self, payload):
+        return next(g for g in payload["grupos"] if g["tipo"] == self.TIPO)
+
+    def _deny(self, user, clave):
+        UsuarioPermiso.objects.create(
+            usuario=user,
+            permiso=Permiso.objects.get(clave=clave),
+            tipo=UsuarioPermiso.TIPO_DENY,
+        )
+
+    def _coste(self, user, q):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        with CaptureQueriesContext(connection) as capturadas:
+            resp = client.get(f"{SEARCH_URL}?q={q}")
+        self.assertEqual(resp.status_code, 200)
+        return len(capturadas), resp.json()
+
+
+class FacturaBusquedaTests(_GrupoPropioMixin, BusquedaGlobalBaseTestCase):
+    """Facturas: visibilidad, alcance de fila y forma de la fila.
+
+    El alcance es el de ``FacturaViewSet`` (``_aplicar_scope_empresa``: empresa,
+    sin sub-alcance por sucursal ni vendedor) más ``activo=True``.
+    """
+
+    TIPO = "factura"
+
+    @classmethod
+    def _factura(cls, tenant, folio, **extra):
+        return Factura.objects.create(
+            empresa=tenant["empresa"],
+            sucursal=tenant["sucursal"],
+            cliente=tenant["cliente"],
+            moneda=cls.moneda,
+            folio=folio,
+            **extra,
+        )
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Formato real: ``FAC-<consecutivo>``. ``FAC-000`` es prefijo de las dos
+        # empresas: una fuga de aislamiento se vería al buscarlo.
+        cls.fac_a = cls._factura(cls.a, "FAC-00027")
+        cls.fac_b = cls._factura(cls.b, "FAC-00028")
+
+    # --- visibilidad ----------------------------------------------------------
+
+    def test_codigo_de_seccion_basta(self):
+        user = self._usuario_con("sec", ["R-CONTABILIDAD-FACTURACION"])
+        self.assertIn("factura", self._tipos(user, "FAC"))
+
+    def test_codigo_de_modulo_basta(self):
+        user = self._usuario_con("mod", ["R-CONTABILIDAD"])
+        self.assertIn("factura", self._tipos(user, "FAC"))
+
+    def test_sin_ninguno_de_los_dos_se_omite(self):
+        # Ni la sección de clientes de Contabilidad ni la de CxC conceden facturas.
+        user = self._usuario_con(
+            "otros", ["R-CONTABILIDAD-CLIENTES", "R-CONTABILIDAD-CXC", "R-CRM-PEDIDOS"]
+        )
+        self.assertNotIn("factura", self._tipos(user, "FAC"))
+
+    def test_deny_oculta_la_entidad_si_nada_mas_la_concede(self):
+        user = self._usuario_con("deny", ["R-CONTABILIDAD-FACTURACION"])
+        self.assertIn("factura", self._tipos(user, "FAC"))
+        self._deny(user, "R-CONTABILIDAD-FACTURACION")
+        self.assertNotIn("factura", self._tipos(user, "FAC"))
+
+    # --- alcance de fila ------------------------------------------------------
+
+    def test_factura_de_otra_empresa_no_aparece(self):
+        user = self._usuario_con("emp", ["R-CONTABILIDAD-FACTURACION"])
+        payload = self._buscar(user, "FAC-000")
+        self.assertEqual(self._ids(payload, "factura"), [self.fac_a.pk])
+
+    def test_superuser_ve_las_dos_empresas(self):
+        payload = self._buscar(self.superuser, "FAC-000")
+        self.assertEqual(
+            sorted(self._ids(payload, "factura")), sorted([self.fac_a.pk, self.fac_b.pk])
+        )
+
+    def test_no_hay_sub_alcance_por_sucursal(self):
+        """Igual que ``FacturaViewSet``: el alcance es la empresa, no la sucursal."""
+        otra = Sucursal.objects.create(
+            empresa=self.a["empresa"], codigo="AC3", nombre="acme-search 3"
+        )
+        user = self._usuario_con("suc", ["R-CONTABILIDAD-FACTURACION"], sucursal=otra)
+        payload = self._buscar(user, "FAC-00027")
+        self.assertEqual(self._ids(payload, "factura"), [self.fac_a.pk])
+
+    def test_factura_con_soft_delete_no_aparece(self):
+        self.fac_a.soft_delete()
+        payload = self._buscar(self.a["admin"], "FAC-000")
+        self.assertEqual(self._ids(payload, "factura"), [])
+
+    # --- coincidencia ---------------------------------------------------------
+
+    def test_folio_coincide_por_prefijo_no_por_subcadena(self):
+        for q in ("FAC", "fac-00027", "FAC-00027"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertEqual(self._ids(payload, "factura"), [self.fac_a.pk])
+        payload = self._buscar(self.a["admin"], "00027")
+        self.assertEqual(self._ids(payload, "factura"), [])
+
+    def test_coincide_por_nombre_y_razon_social_del_cliente(self):
+        for q in ("comercial acme norte", "ACME NORTE SA DE CV"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertEqual(self._ids(payload, "factura"), [self.fac_a.pk])
+
+    def test_factura_sin_folio_se_encuentra_por_cliente(self):
+        sin_folio = self._factura(self.a, None)
+        payload = self._buscar(self.a["admin"], "acme norte")
+        self.assertIn(sin_folio.pk, self._ids(payload, "factura"))
+        fila = next(
+            f for f in self._grupo(payload)["resultados"] if f["id"] == sin_folio.pk
+        )
+        self.assertIsNone(fila["codigo"])
+        self.assertEqual(fila["titulo"], self.a["cliente"].razon_social)
+        self.assertIsNone(fila["subtitulo"])
+
+    def test_q_de_2_caracteres_va_solo_por_folio(self):
+        payload = self._buscar(self.a["admin"], "FA")
+        self.assertEqual(self._ids(payload, "factura"), [self.fac_a.pk])
+        payload = self._buscar(self.a["admin"], "Ac")
+        self.assertEqual(self._ids(payload, "factura"), [])
+
+    # --- forma de la fila -----------------------------------------------------
+
+    def test_fila_lleva_folio_cliente_y_estatus_legible(self):
+        payload = self._buscar(self.a["admin"], "FAC-00027")
+        grupo = self._grupo(payload)
+        self.assertEqual(grupo["etiqueta"], "Facturas")
+        self.assertEqual(
+            grupo["resultados"][0],
+            {
+                "tipo": "factura",
+                "id": self.fac_a.pk,
+                "codigo": "FAC-00027",
+                "titulo": "FAC-00027",
+                "subtitulo": self.a["cliente"].razon_social,
+                "estatus": "Borrador",
+            },
+        )
+
+    # --- coste ----------------------------------------------------------------
+
+    def test_coste_no_crece_con_el_numero_de_filas(self):
+        """El cliente sale del ``select_related``: sin N+1 por fila."""
+        user = self._usuario_con("coste", ["R-CONTABILIDAD-FACTURACION"])
+        coste_1, payload = self._coste(user, "FAC")
+        self.assertEqual(len(self._ids(payload, "factura")), 1)
+        for i in range(3):
+            self._factura(self.a, f"FAC-1000{i}")
+        coste_4, payload = self._coste(user, "FAC")
+        self.assertEqual(len(self._ids(payload, "factura")), 4)
         self.assertEqual(coste_4, coste_1)
 
 
