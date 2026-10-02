@@ -19,6 +19,7 @@ from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
+from catalogo.models import Color, Producto, ProductoVariante, Talla
 from finanzas.models import Factura
 from nucleo.api.search import REGISTRO
 from nucleo.models import Empresa, Moneda, Sucursal
@@ -1071,6 +1072,149 @@ class FacturaBusquedaTests(_GrupoPropioMixin, BusquedaGlobalBaseTestCase):
             self._factura(self.a, f"FAC-1000{i}")
         coste_4, payload = self._coste(user, "FAC")
         self.assertEqual(len(self._ids(payload, "factura")), 4)
+        self.assertEqual(coste_4, coste_1)
+
+
+class ProductoBusquedaTests(_GrupoPropioMixin, BusquedaGlobalBaseTestCase):
+    """Productos (``catalogo.ProductoVariante``): visibilidad, alcance y forma.
+
+    El alcance es el de ``ProductoVarianteViewSet`` (``_alcance_empresa``: empresa,
+    sin sub-alcance por sucursal) más ``activo=True`` sobre la variante.
+
+    ``R-CATALOGO-PRODUCTOS`` NO existe todavía en el catálogo real de permisos; aquí
+    se siembra en la BD de pruebas, como cualquier otra clave (``_rol_con``).
+    """
+
+    TIPO = "producto"
+    CLAVE = "R-CATALOGO-PRODUCTOS"
+
+    @classmethod
+    def _variante(cls, tenant, producto, sku, **extra):
+        return ProductoVariante.objects.create(
+            producto=producto,
+            empresa=tenant["empresa"],
+            color=cls.color,
+            talla=cls.talla,
+            sku=sku,
+            precio_base="100.00",
+            **extra,
+        )
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.color = Color.objects.create(nombre="Marino", codigo="MAR", codigo_hex="#000080")
+        cls.talla = Talla.objects.create(nombre="XG")
+        # Mismo nombre de producto y mismo prefijo de SKU en las dos empresas: una
+        # fuga de aislamiento se vería al buscar cualquiera de los dos. Formato de
+        # SKU real: modelo + color + talla concatenados (``10808015XG``).
+        cls.prod_a = Producto.objects.create(empresa=cls.a["empresa"], nombre="Camisola ignifuga")
+        cls.prod_b = Producto.objects.create(empresa=cls.b["empresa"], nombre="Camisola ignifuga")
+        cls.var_a = cls._variante(cls.a, cls.prod_a, "1080801XG")
+        cls.var_b = cls._variante(cls.b, cls.prod_b, "1080802XG")
+
+    # --- visibilidad ----------------------------------------------------------
+
+    def test_la_clave_de_productos_basta(self):
+        self.assertIn("producto", self._tipos(self._usuario_con("sec", [self.CLAVE]), "10808"))
+
+    def test_sin_la_clave_se_omite(self):
+        user = self._usuario_con("otros", ["R-WMS-EXISTENCIAS", "R-WMS", "R-COMPRAS"])
+        self.assertNotIn("producto", self._tipos(user, "10808"))
+
+    def test_deny_oculta_la_entidad(self):
+        user = self._usuario_con("deny", [self.CLAVE])
+        self.assertIn("producto", self._tipos(user, "10808"))
+        self._deny(user, self.CLAVE)
+        self.assertNotIn("producto", self._tipos(user, "10808"))
+
+    # --- alcance de fila ------------------------------------------------------
+
+    def test_producto_de_otra_empresa_no_aparece(self):
+        user = self._usuario_con("emp", [self.CLAVE])
+        for q in ("10808", "camisola"):
+            with self.subTest(q=q):
+                payload = self._buscar(user, q)
+                self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
+
+    def test_superuser_ve_las_dos_empresas(self):
+        payload = self._buscar(self.superuser, "10808")
+        self.assertEqual(
+            sorted(self._ids(payload, "producto")), sorted([self.var_a.pk, self.var_b.pk])
+        )
+
+    def test_no_hay_sub_alcance_por_sucursal(self):
+        """Igual que ``ProductoVarianteViewSet``: el alcance es la empresa."""
+        otra = Sucursal.objects.create(
+            empresa=self.a["empresa"], codigo="AC4", nombre="acme-search 4"
+        )
+        user = self._usuario_con("suc", [self.CLAVE], sucursal=otra)
+        payload = self._buscar(user, "1080801")
+        self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
+
+    def test_variante_inactiva_no_aparece(self):
+        ProductoVariante.objects.filter(pk=self.var_a.pk).update(activo=False)
+        payload = self._buscar(self.a["admin"], "10808")
+        self.assertEqual(self._ids(payload, "producto"), [])
+
+    # --- coincidencia ---------------------------------------------------------
+
+    def test_sku_coincide_por_prefijo_no_por_subcadena(self):
+        for q in ("10808", "1080801xg", "1080801XG"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
+        payload = self._buscar(self.a["admin"], "0801XG")
+        self.assertEqual(self._ids(payload, "producto"), [])
+
+    def test_coincide_por_nombre_de_la_variante(self):
+        # ``ProductoVariante.save()`` arma ``nombre`` como "producto - color - talla":
+        # el color sólo está en el nombre de la variante, no en el del producto.
+        payload = self._buscar(self.a["admin"], "marino")
+        self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
+
+    def test_coincide_por_nombre_del_producto(self):
+        # Se vacía el nombre de la variante (sin pasar por ``save()``) para que sólo
+        # pueda coincidir por ``producto__nombre``.
+        ProductoVariante.objects.filter(pk=self.var_a.pk).update(nombre="")
+        payload = self._buscar(self.a["admin"], "ignifuga")
+        self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
+
+    def test_q_de_2_caracteres_va_solo_por_sku(self):
+        payload = self._buscar(self.a["admin"], "10")
+        self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
+        payload = self._buscar(self.a["admin"], "Ca")
+        self.assertEqual(self._ids(payload, "producto"), [])
+
+    # --- forma de la fila -----------------------------------------------------
+
+    def test_fila_lleva_sku_y_nombre_del_producto(self):
+        payload = self._buscar(self.a["admin"], "1080801XG")
+        grupo = self._grupo(payload)
+        self.assertEqual(grupo["etiqueta"], "Productos")
+        self.assertEqual(
+            grupo["resultados"][0],
+            {
+                "tipo": "producto",
+                "id": self.var_a.pk,
+                "codigo": "1080801XG",
+                "titulo": "1080801XG",
+                "subtitulo": "Camisola ignifuga",
+                "estatus": None,
+            },
+        )
+
+    # --- coste ----------------------------------------------------------------
+
+    def test_coste_no_crece_con_el_numero_de_filas(self):
+        """El producto sale del ``select_related``: sin N+1 por fila."""
+        user = self._usuario_con("coste", [self.CLAVE])
+        coste_1, payload = self._coste(user, "10808")
+        self.assertEqual(len(self._ids(payload, "producto")), 1)
+        for i in range(3):
+            self._variante(self.a, self.prod_a, f"1080810{i}XG")
+        coste_4, payload = self._coste(user, "10808")
+        self.assertEqual(len(self._ids(payload, "producto")), 4)
         self.assertEqual(coste_4, coste_1)
 
 
