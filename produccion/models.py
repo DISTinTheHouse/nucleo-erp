@@ -1,4 +1,4 @@
-from django.contrib.postgres.indexes import OpClass
+from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.db import models
 from django.db.models.functions import Upper
 from nucleo.models import Empresa, Sucursal, StatusLifecycleModel
@@ -264,14 +264,17 @@ class OrdenesBordado(StatusLifecycleModel):
         verbose_name = 'Orden Bordado'
         verbose_name_plural = 'Ordenes Bordado'
         indexes = [
-            # Buscador global (``/api/v1/search/``): ``folio_bordado__istartswith``
-            # se compila como ``UPPER("folio_bordado"::text) LIKE UPPER(%s)``, que
-            # ni el índice único del campo ni su ``_like`` sirven. Mismo patrón
-            # que ``ventas.Pedido`` (ver ``nucleo/api/search.py``). Sólo existe en
-            # PostgreSQL: ver ``nucleo.migration_operations.AddIndexSoloPostgres``.
-            models.Index(
-                OpClass(Upper("folio_bordado"), name="text_pattern_ops"),
-                name="orden_bordado_folio_up_like",
+            # Buscador global (``/api/v1/search/``): el folio se busca por
+            # subcadena (``folio_bordado__icontains``, el año va delante del
+            # consecutivo), que se compila como
+            # ``UPPER("folio_bordado"::text) LIKE UPPER('%...%')``. Ni el índice
+            # único del campo ni su ``_like`` sirven a eso; un GIN trigram sobre
+            # ``UPPER(col)`` sí. Mismo patrón que ``ventas.Pedido`` (ver
+            # ``nucleo/api/search.py``). Sólo existe en PostgreSQL: ver
+            # ``nucleo.migration_operations.AddIndexSoloPostgres``.
+            GinIndex(
+                OpClass(Upper("folio_bordado"), name="gin_trgm_ops"),
+                name="orden_bordado_folio_up_trgm",
             ),
         ]
 

@@ -3,13 +3,13 @@
 import django.contrib.postgres.indexes
 import django.db.models.functions.text
 from django.conf import settings
-from django.db import migrations, models
+from django.db import migrations
 
 from nucleo.migration_operations import AddIndexSoloPostgres
 
 
-# Índice de expresión ``UPPER(folio_bordado)`` para el ``istartswith`` del buscador
-# global. Ver ``AddIndexSoloPostgres`` para el porqué de la operación propia.
+# Índice GIN trigram de expresión ``UPPER(folio_bordado)`` para el ``icontains``
+# del buscador global. Ver ``AddIndexSoloPostgres`` para el porqué de la operación propia.
 
 
 class Migration(migrations.Migration):
@@ -25,6 +25,6 @@ class Migration(migrations.Migration):
     operations = [
         AddIndexSoloPostgres(
             model_name='ordenesbordado',
-            index=models.Index(django.contrib.postgres.indexes.OpClass(django.db.models.functions.text.Upper('folio_bordado'), name='text_pattern_ops'), name='orden_bordado_folio_up_like'),
+            index=django.contrib.postgres.indexes.GinIndex(django.contrib.postgres.indexes.OpClass(django.db.models.functions.text.Upper('folio_bordado'), name='gin_trgm_ops'), name='orden_bordado_folio_up_trgm'),
         ),
     ]

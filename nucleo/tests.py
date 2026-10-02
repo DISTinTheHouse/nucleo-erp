@@ -82,13 +82,14 @@ class BusquedaGlobalBaseTestCase(TestCase):
         cotizacion = Cotizacion.objects.create(
             empresa=empresa, sucursal=sucursal, cliente=cliente, vendedor=admin
         )
-        # Mismo sufijo en ambas empresas por diseño: ``OB-000`` es prefijo de las
-        # dos, así que una fuga de aislamiento se vería al buscarlo.
+        # Formato real de producción (``<año>-OB-<consecutivo>``). ``OB-000`` está
+        # en el folio de ambas empresas por diseño: una fuga de aislamiento se
+        # vería al buscarlo.
         orden_bordado = OrdenesBordado.objects.create(
             empresa=empresa,
             sucursal=sucursal,
             pedido=pedido,
-            folio_bordado=f"OB-{sufijo_folio}",
+            folio_bordado=f"2026-OB-{sufijo_folio}",
         )
         return {
             "empresa": empresa,
@@ -735,7 +736,7 @@ class OrdenBordadoBusquedaTests(BusquedaGlobalBaseTestCase):
             empresa=cls.a["empresa"],
             sucursal=cls.sucursal_a2,
             pedido=cls.a["pedido"],
-            folio_bordado="OB-00029",
+            folio_bordado="2026-OB-00029",
         )
 
     def _usuario_con(self, sufijo, claves=()):
@@ -778,7 +779,7 @@ class OrdenBordadoBusquedaTests(BusquedaGlobalBaseTestCase):
     # --- alcance de fila ------------------------------------------------------
 
     def test_ob_de_otra_empresa_no_aparece(self):
-        """``OB-000`` es prefijo de las OBs de AMBAS empresas."""
+        """``OB-000`` está en el folio de las OBs de AMBAS empresas."""
         payload = self._buscar(self.a["admin"], "OB-000")
         self.assertEqual(
             sorted(self._ids(payload, "orden_bordado")),
@@ -811,14 +812,30 @@ class OrdenBordadoBusquedaTests(BusquedaGlobalBaseTestCase):
 
     # --- coincidencia ---------------------------------------------------------
 
-    def test_solo_coincide_por_su_folio_por_prefijo(self):
+    def test_folio_coincide_por_subcadena(self):
+        """El folio es NOMBRE (``icontains``): el año va delante, así que lo que la
+        gente teclea —``OB-00027``, ``00027``— está en medio del folio."""
+        for q in ("2026-OB", "2026-ob-00027", "OB-00027", "ob-00027", "00027"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertIn(self.a["orden_bordado"].pk, self._ids(payload, "orden_bordado"))
+        payload = self._buscar(self.a["admin"], "00027")
+        self.assertEqual(self._ids(payload, "orden_bordado"), [self.a["orden_bordado"].pk])
+
+    def test_q_de_2_caracteres_no_devuelve_ordenes(self):
+        """Sin campos CÓDIGO, por debajo de 3 caracteres no se consulta nada: el
+        grupo llega vacío, igual que clientes y cotizaciones."""
+        payload = self._buscar(self.a["admin"], "OB")
+        grupo = next(g for g in payload["grupos"] if g["tipo"] == "orden_bordado")
+        self.assertEqual(grupo["resultados"], [])
+        self.assertFalse(grupo["hay_mas"])
+
+    def test_solo_coincide_por_su_folio(self):
         """Ni el folio del pedido ni el nombre del cliente encuentran la OB."""
-        for q in ("P-00027", "acme", "00027"):
+        for q in ("P-00027", "acme"):
             with self.subTest(q=q):
                 payload = self._buscar(self.a["admin"], q)
                 self.assertEqual(self._ids(payload, "orden_bordado"), [])
-        payload = self._buscar(self.a["admin"], "ob-00027")
-        self.assertEqual(self._ids(payload, "orden_bordado"), [self.a["orden_bordado"].pk])
 
     # --- forma de la fila -----------------------------------------------------
 
@@ -831,8 +848,8 @@ class OrdenBordadoBusquedaTests(BusquedaGlobalBaseTestCase):
             {
                 "tipo": "orden_bordado",
                 "id": self.a["orden_bordado"].pk,
-                "codigo": "OB-00027",
-                "titulo": "OB-00027",
+                "codigo": "2026-OB-00027",
+                "titulo": "2026-OB-00027",
                 "subtitulo": f"P-00027 · {self.a['cliente'].razon_social}",
                 "estatus": "Sin trabajar",
             },
@@ -866,7 +883,7 @@ class OrdenBordadoBusquedaTests(BusquedaGlobalBaseTestCase):
                 empresa=self.a["empresa"],
                 sucursal=self.a["sucursal"],
                 pedido=self.a["pedido"],
-                folio_bordado=f"OB-1000{i}",
+                folio_bordado=f"2026-OB-1000{i}",
             )
         coste_4, payload = consultas()
         self.assertEqual(len(self._ids(payload, "orden_bordado")), 4)
