@@ -3995,3 +3995,96 @@ class OrdenProduccionPedidoOpcionalTests(TestCase):
         )
 
         self.assertEqual(resp.status_code, 200, resp.data)
+
+
+class OnboardingPostScopeTenantTests(TestCase):
+    """POST de onboarding de OB/OR/OCM: un pedido o una talla fuera del alcance
+    del usuario se rechaza sin exponer datos del registro ajeno (#275)."""
+
+    URLS = (
+        "/api/v1/produccion/orden-bordado/onboarding/",
+        "/api/v1/produccion/orden-reflejante/onboarding/",
+        "/api/v1/produccion/orden-corte-manga/onboarding/",
+    )
+    CANTIDAD_AJENA = 37
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.talla = Talla.objects.create(nombre="CH")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
+        cls.sucursal_sin_acceso = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="CDMX", nombre="CDMX"
+        )
+        cls.empresa_b = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.empresa_b, codigo="GDL", nombre="GDL")
+        cls.usuario = Usuario.objects.create(
+            username="operador", email="operador@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.pedido, cls.pdt = cls._pedido(cls.empresa, cls.sucursal, 10)
+        cls.pedido_b, cls.pdt_b = cls._pedido(cls.empresa_b, cls.sucursal_b, cls.CANTIDAD_AJENA)
+        cls.pedido_otra_sucursal, cls.pdt_otra_sucursal = cls._pedido(
+            cls.empresa, cls.sucursal_sin_acceso, cls.CANTIDAD_AJENA
+        )
+
+    @classmethod
+    def _pedido(cls, empresa, sucursal, cantidad):
+        cliente = Cliente.objects.create(empresa=empresa, nombre=f"Cliente {empresa.codigo}")
+        producto = Producto.objects.create(empresa=empresa, nombre="Playera")
+        pedido = Pedido.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=cls.moneda,
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=pedido, producto=producto)
+        pdt = PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=cls.talla, cantidad=cantidad,
+            lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
+        )
+        return pedido, pdt
+
+    def _post(self, url, pedido_id, pdt_id):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client.post(
+            url,
+            {"pedido": pedido_id, "detalles_override": [{"pedido_detalle_talla_id": pdt_id, "cantidad": 999999}]},
+            format="json",
+        )
+
+    def test_pedido_de_otra_empresa_responde_como_inexistente(self):
+        for url in self.URLS:
+            with self.subTest(url=url):
+                ajeno = self._post(url, self.pedido_b.pk, self.pdt_b.pk)
+                inexistente = self._post(url, 999999, self.pdt_b.pk)
+
+                self.assertEqual(ajeno.status_code, 400)
+                self.assertNotIn("detalles_override", ajeno.data)
+                self.assertEqual(
+                    str(ajeno.data["pedido"][0]).replace(str(self.pedido_b.pk), "X"),
+                    str(inexistente.data["pedido"][0]).replace("999999", "X"),
+                )
+
+    def test_talla_de_otro_pedido_responde_como_inexistente(self):
+        for url in self.URLS:
+            with self.subTest(url=url):
+                ajena = self._post(url, self.pedido.pk, self.pdt_b.pk)
+                inexistente = self._post(url, self.pedido.pk, 999999)
+
+                self.assertEqual(ajena.status_code, 400)
+                self.assertNotIn(str(self.CANTIDAD_AJENA), str(ajena.data))
+                self.assertEqual(
+                    str(ajena.data).replace(str(self.pdt_b.pk), "X"),
+                    str(inexistente.data).replace("999999", "X"),
+                )
+
+    def test_pedido_de_sucursal_sin_acceso_no_expone_tallas(self):
+        for url in self.URLS:
+            with self.subTest(url=url):
+                resp = self._post(url, self.pedido_otra_sucursal.pk, self.pdt_otra_sucursal.pk)
+
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("sucursal", str(resp.data["pedido"]))
+                self.assertNotIn(str(self.CANTIDAD_AJENA), str(resp.data))
