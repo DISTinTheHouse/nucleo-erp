@@ -70,6 +70,8 @@ from rest_framework.views import APIView
 
 from catalogo.api.views import _alcance_empresa as _alcance_empresa_catalogo
 from catalogo.models import ProductoVariante
+from finanzas.api.views import _aplicar_scope_empresa as _aplicar_scope_empresa_finanzas
+from finanzas.models import Factura
 from nucleo.permisos import PermisosEfectivos, permisos_efectivos
 from nucleo.utils import entero_acotado
 from produccion.models import OrdenesBordado
@@ -264,6 +266,19 @@ def _fila_producto(variante) -> dict:
     }
 
 
+def _fila_factura(factura) -> dict:
+    cliente = _texto(factura.cliente.razon_social) or _texto(factura.cliente.nombre)
+    codigo = _texto(factura.folio)
+    return {
+        "tipo": "factura",
+        "id": factura.pk,
+        "codigo": codigo,
+        "titulo": codigo or cliente,
+        "subtitulo": cliente if codigo else None,
+        "estatus": factura.get_estatus_display(),
+    }
+
+
 def _fila_cotizacion(cotizacion) -> dict:
     # ``Cotizacion`` no tiene folio (se confirmó contra el modelo): ``codigo`` va en
     # ``None`` a propósito y la identidad viaja en ``id``, que es como la referencia
@@ -387,6 +402,26 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         campos_only=("sku", "nombre", "producto__nombre"),
         permisos_visibilidad=("R-CATALOGO-PRODUCTOS",),
         orden=("producto__nombre", "sku"),
+    ),
+    EntidadBuscable(
+        tipo="factura",
+        etiqueta="Facturas",
+        # ``_aplicar_scope_empresa`` es el mismo helper que usa ``FacturaViewSet``
+        # (``finanzas/api/views.py``). Ese ViewSet NO filtra ``activo=True`` en su
+        # queryset base; aquí sí se agrega explícito, a propósito (mismo criterio
+        # que ``producto``): una factura cancelada/soft-deleted no debe aparecer
+        # en un buscador de uso diario.
+        alcance=lambda user: _aplicar_scope_empresa_finanzas(
+            Factura.objects.filter(activo=True).select_related("cliente"), user
+        ),
+        fila=_fila_factura,
+        campos_codigo=("folio",),
+        campos_nombre=("cliente__nombre", "cliente__razon_social"),
+        campos_only=("folio", "estatus", "cliente__nombre", "cliente__razon_social"),
+        # Clave NUEVA, no existía antes en el catálogo de permisos (BD): hay que
+        # crearla y asignarla a los roles de contabilidad/finanzas.
+        permisos_visibilidad=("R-CONTABILIDAD-FACTURAS",),
+        orden=("-fecha_emision", "-id"),
     ),
 )
 
