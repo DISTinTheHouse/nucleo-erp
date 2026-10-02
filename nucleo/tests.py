@@ -22,6 +22,7 @@ from rest_framework.test import APIClient
 from nucleo.api.search import REGISTRO
 from nucleo.models import Empresa, Moneda, Sucursal
 from nucleo.permisos import permisos_efectivos
+from produccion.models import OrdenesBordado
 from seguridad.models import Permiso, Rol, RolPermiso, UsuarioPermiso, UsuarioRol
 from terceros.models import Cliente
 from usuarios.models import Usuario
@@ -29,6 +30,12 @@ from ventas.models import Cotizacion, Pedido
 
 SEARCH_URL = "/api/v1/search/"
 COTIZACIONES_URL = "/api/v1/ventas/cotizaciones/"
+
+#: Grupos que ve quien pasa el cortocircuito de permisos (superuser/admin), en el
+#: orden del ``REGISTRO``.
+TODOS_LOS_TIPOS = [
+    "pedido", "orden_bordado", "cliente", "cotizacion", "producto", "factura",
+]
 
 
 class BusquedaGlobalBaseTestCase(TestCase):
@@ -75,6 +82,14 @@ class BusquedaGlobalBaseTestCase(TestCase):
         cotizacion = Cotizacion.objects.create(
             empresa=empresa, sucursal=sucursal, cliente=cliente, vendedor=admin
         )
+        # Mismo sufijo en ambas empresas por diseño: ``OB-000`` es prefijo de las
+        # dos, así que una fuga de aislamiento se vería al buscarlo.
+        orden_bordado = OrdenesBordado.objects.create(
+            empresa=empresa,
+            sucursal=sucursal,
+            pedido=pedido,
+            folio_bordado=f"OB-{sufijo_folio}",
+        )
         return {
             "empresa": empresa,
             "sucursal": sucursal,
@@ -82,6 +97,7 @@ class BusquedaGlobalBaseTestCase(TestCase):
             "admin": admin,
             "pedido": pedido,
             "cotizacion": cotizacion,
+            "orden_bordado": orden_bordado,
         }
 
     @classmethod
@@ -431,17 +447,11 @@ class VisibilidadPorPermisosTests(BusquedaGlobalBaseTestCase):
 
     # --- superuser / admin salen gratis por el cortocircuito ------------------
 
-    def test_superuser_ve_las_tres_sin_permiso_alguno(self):
-        self.assertEqual(
-            self._tipos(self.superuser),
-            ["pedido", "orden_bordado", "cliente", "cotizacion", "producto", "factura"],
-        )
+    def test_superuser_ve_todas_sin_permiso_alguno(self):
+        self.assertEqual(self._tipos(self.superuser), TODOS_LOS_TIPOS)
 
-    def test_admin_empresa_ve_las_tres_sin_permiso_alguno(self):
-        self.assertEqual(
-            self._tipos(self.a["admin"]),
-            ["pedido", "orden_bordado", "cliente", "cotizacion", "producto", "factura"],
-        )
+    def test_admin_empresa_ve_todas_sin_permiso_alguno(self):
+        self.assertEqual(self._tipos(self.a["admin"]), TODOS_LOS_TIPOS)
 
     # --- overrides: DENY gana sobre el rol ------------------------------------
 
@@ -583,10 +593,7 @@ class AlcancePorEntidadTests(BusquedaGlobalBaseTestCase):
 class CoincidenciaYFormaTests(BusquedaGlobalBaseTestCase):
     def test_q_corta_devuelve_grupos_vacios_no_error(self):
         payload = self._buscar(self.a["admin"], "a")
-        self.assertEqual(
-            [g["tipo"] for g in payload["grupos"]],
-            ["pedido", "orden_bordado", "cliente", "cotizacion", "producto", "factura"],
-        )
+        self.assertEqual([g["tipo"] for g in payload["grupos"]], TODOS_LOS_TIPOS)
         for grupo in payload["grupos"]:
             self.assertEqual(grupo["resultados"], [], grupo["tipo"])
             self.assertFalse(grupo["hay_mas"])
@@ -707,6 +714,163 @@ class LimitTests(BusquedaGlobalBaseTestCase):
     def test_limit_cero_o_negativo_se_sube_a_1(self):
         self.assertEqual(self._buscar(self.a["admin"], "acme", limit=0)["limit"], 1)
         self.assertEqual(self._buscar(self.a["admin"], "acme", limit=-3)["limit"], 1)
+
+
+class OrdenBordadoBusquedaTests(BusquedaGlobalBaseTestCase):
+    """Órdenes de bordado: visibilidad, alcance de fila y forma de la fila.
+
+    El alcance es el de ``OrdenBordadoViewSet`` (``produccion.scope``): empresa,
+    ``activo=True`` y, para quien no es admin, sólo sus ``sucursales_permitidas()``.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Segunda sucursal de la empresa A, con su propia OB. Los usuarios de
+        # producción de abajo tienen como única sucursal la principal de A.
+        cls.sucursal_a2 = Sucursal.objects.create(
+            empresa=cls.a["empresa"], codigo="AC2", nombre="acme-search 2"
+        )
+        cls.ob_otra_sucursal = OrdenesBordado.objects.create(
+            empresa=cls.a["empresa"],
+            sucursal=cls.sucursal_a2,
+            pedido=cls.a["pedido"],
+            folio_bordado="OB-00029",
+        )
+
+    def _usuario_con(self, sufijo, claves=()):
+        user = Usuario.objects.create(
+            username=f"ob-{sufijo}",
+            email=f"ob-{sufijo}@acme-search.test",
+            empresa=self.a["empresa"],
+            sucursal_default=self.a["sucursal"],
+        )
+        if claves:
+            rol = self._rol_con(self.a["empresa"], f"rol-ob-{sufijo}", claves)
+            UsuarioRol.objects.create(usuario=user, rol=rol, empresa=self.a["empresa"])
+        return user
+
+    def _tipos(self, user, q="OB-"):
+        return [g["tipo"] for g in self._buscar(user, q)["grupos"]]
+
+    # --- visibilidad ----------------------------------------------------------
+
+    def test_codigo_de_seccion_basta(self):
+        self.assertIn("orden_bordado", self._tipos(self._usuario_con("sec", ["R-PRODUCCION-OB"])))
+
+    def test_codigo_de_modulo_basta(self):
+        self.assertIn("orden_bordado", self._tipos(self._usuario_con("mod", ["R-PRODUCCION"])))
+
+    def test_sin_ninguno_de_los_dos_se_omite(self):
+        user = self._usuario_con("otros", ["R-PRODUCCION-OR", "R-PRODUCCION-CM", "R-CRM-PEDIDOS"])
+        self.assertNotIn("orden_bordado", self._tipos(user))
+
+    def test_deny_oculta_la_entidad_si_nada_mas_la_concede(self):
+        user = self._usuario_con("deny", ["R-PRODUCCION-OB"])
+        self.assertIn("orden_bordado", self._tipos(user))
+        UsuarioPermiso.objects.create(
+            usuario=user,
+            permiso=Permiso.objects.get(clave="R-PRODUCCION-OB"),
+            tipo=UsuarioPermiso.TIPO_DENY,
+        )
+        self.assertNotIn("orden_bordado", self._tipos(user))
+
+    # --- alcance de fila ------------------------------------------------------
+
+    def test_ob_de_otra_empresa_no_aparece(self):
+        """``OB-000`` es prefijo de las OBs de AMBAS empresas."""
+        payload = self._buscar(self.a["admin"], "OB-000")
+        self.assertEqual(
+            sorted(self._ids(payload, "orden_bordado")),
+            sorted([self.a["orden_bordado"].pk, self.ob_otra_sucursal.pk]),
+        )
+        self.assertNotIn(self.b["orden_bordado"].pk, self._ids(payload, "orden_bordado"))
+
+    def test_superuser_ve_las_dos_empresas(self):
+        payload = self._buscar(self.superuser, "OB-000")
+        self.assertIn(self.b["orden_bordado"].pk, self._ids(payload, "orden_bordado"))
+
+    def test_no_admin_no_ve_ob_fuera_de_sus_sucursales(self):
+        user = self._usuario_con("suc", ["R-PRODUCCION-OB"])
+        payload = self._buscar(user, "OB-000")
+        self.assertEqual(self._ids(payload, "orden_bordado"), [self.a["orden_bordado"].pk])
+
+    def test_no_admin_ve_la_sucursal_que_le_da_el_m2m(self):
+        user = self._usuario_con("m2m", ["R-PRODUCCION-OB"])
+        user.sucursales.add(self.sucursal_a2)
+        payload = self._buscar(user, "OB-000")
+        self.assertEqual(
+            sorted(self._ids(payload, "orden_bordado")),
+            sorted([self.a["orden_bordado"].pk, self.ob_otra_sucursal.pk]),
+        )
+
+    def test_ob_con_soft_delete_no_aparece(self):
+        self.a["orden_bordado"].soft_delete()
+        payload = self._buscar(self.a["admin"], "OB-000")
+        self.assertEqual(self._ids(payload, "orden_bordado"), [self.ob_otra_sucursal.pk])
+
+    # --- coincidencia ---------------------------------------------------------
+
+    def test_solo_coincide_por_su_folio_por_prefijo(self):
+        """Ni el folio del pedido ni el nombre del cliente encuentran la OB."""
+        for q in ("P-00027", "acme", "00027"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertEqual(self._ids(payload, "orden_bordado"), [])
+        payload = self._buscar(self.a["admin"], "ob-00027")
+        self.assertEqual(self._ids(payload, "orden_bordado"), [self.a["orden_bordado"].pk])
+
+    # --- forma de la fila -----------------------------------------------------
+
+    def test_fila_lleva_folio_pedido_cliente_y_estatus_legible(self):
+        payload = self._buscar(self.a["admin"], "OB-00027")
+        grupo = next(g for g in payload["grupos"] if g["tipo"] == "orden_bordado")
+        self.assertEqual(grupo["etiqueta"], "Órdenes de bordado")
+        self.assertEqual(
+            grupo["resultados"][0],
+            {
+                "tipo": "orden_bordado",
+                "id": self.a["orden_bordado"].pk,
+                "codigo": "OB-00027",
+                "titulo": "OB-00027",
+                "subtitulo": f"P-00027 · {self.a['cliente'].razon_social}",
+                "estatus": "Sin trabajar",
+            },
+        )
+
+    def test_subtitulo_degrada_si_el_pedido_no_tiene_folio(self):
+        self.a["pedido"].folio = None
+        self.a["pedido"].save(update_fields=["folio"])
+        payload = self._buscar(self.a["admin"], "OB-00027")
+        fila = next(g for g in payload["grupos"] if g["tipo"] == "orden_bordado")["resultados"][0]
+        self.assertEqual(fila["subtitulo"], self.a["cliente"].razon_social)
+
+    # --- coste ----------------------------------------------------------------
+
+    def test_coste_no_crece_con_el_numero_de_filas(self):
+        """Pedido y cliente salen del ``select_related``: sin N+1 por fila."""
+        user = self._usuario_con("coste", ["R-PRODUCCION-OB"])
+
+        def consultas():
+            client = APIClient()
+            client.force_authenticate(user=user)
+            with CaptureQueriesContext(connection) as capturadas:
+                resp = client.get(f"{SEARCH_URL}?q=OB-")
+            self.assertEqual(resp.status_code, 200)
+            return len(capturadas), resp.json()
+
+        coste_1, payload = consultas()
+        self.assertEqual(len(self._ids(payload, "orden_bordado")), 1)
+        for i in range(3):
+            OrdenesBordado.objects.create(
+                empresa=self.a["empresa"],
+                sucursal=self.a["sucursal"],
+                pedido=self.a["pedido"],
+                folio_bordado=f"OB-1000{i}",
+            )
+        coste_4, payload = consultas()
+        self.assertEqual(len(self._ids(payload, "orden_bordado")), 4)
+        self.assertEqual(coste_4, coste_1)
 
 
 class CotizacionQFiltroNoRegresionTests(BusquedaGlobalBaseTestCase):
