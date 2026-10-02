@@ -5,6 +5,7 @@ from produccion.services.common import (
     EPS_CANTIDAD,
     cantidades_asignadas,
     crear_orden_con_guardia_duplicado,
+    exigir_producto_en_tallas,
     payload_duplicada,
     revisar_empresa,
     tallas_orden_trabajo_qs,
@@ -208,6 +209,7 @@ class OrdenCorteMangaService:
 
         # El folio se consume DESPUÉS de todas las validaciones, para que un
         # rechazo no gaste consecutivo de la serie.
+        exigir_producto_en_tallas(detalle_tallas, "corte de manga")
         folio_ocm = generate_ocm_folio(pedido.empresa_id, pedido.sucursal_id)
 
         orden_corte_manga = crear_orden_con_guardia_duplicado(

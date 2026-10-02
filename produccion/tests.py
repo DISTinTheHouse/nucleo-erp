@@ -4088,3 +4088,60 @@ class OnboardingPostScopeTenantTests(TestCase):
                 self.assertEqual(resp.status_code, 400)
                 self.assertIn("sucursal", str(resp.data["pedido"]))
                 self.assertNotIn(str(self.CANTIDAD_AJENA), str(resp.data))
+
+
+class OnboardingPostLineaMuestraTests(TestCase):
+    """POST de onboarding con tallas de una línea de muestra (``producto`` null):
+    400 accionable en vez del 500 por ``IntegrityError`` (#276)."""
+
+    CASOS = (
+        ("/api/v1/produccion/orden-bordado/onboarding/", OrdenesBordado, "ORDEN_BORDADO"),
+        ("/api/v1/produccion/orden-reflejante/onboarding/", OrdenesReflejante, "ORDEN_REFLEJANTE"),
+        ("/api/v1/produccion/orden-corte-manga/onboarding/", OrdenesCorteManga, "ORDEN_CORTE_MANGA"),
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
+        for tipo_documento, serie in SERIES:
+            SerieFolio.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal,
+                tipo_documento=tipo_documento, serie=serie,
+            )
+        cls.usuario = Usuario.objects.create(
+            username="operador", email="operador@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente,
+            moneda=Moneda.objects.create(codigo_iso="MXN", nombre="Peso"),
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(
+            pedido=cls.pedido, producto=None, producto_nombre_externo="ZXCZX"
+        )
+        cls.pdt = PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=Talla.objects.create(nombre="CH"), cantidad=5,
+            lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
+        )
+
+    def test_linea_de_muestra_responde_400_sin_crear_ni_consumir_folio(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        for url, modelo, tipo_documento in self.CASOS:
+            with self.subTest(url=url):
+                serie = SerieFolio.objects.get(empresa=self.empresa, tipo_documento=tipo_documento)
+                folio_previo = serie.folio_actual
+
+                resp = client.post(url, {"pedido": self.pedido.pk}, format="json")
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertEqual(
+                    [str(i) for i in resp.data["pedido_detalle_talla_ids"]], [str(self.pdt.pk)]
+                )
+                self.assertFalse(modelo.objects.filter(pedido=self.pedido).exists())
+                serie.refresh_from_db()
+                self.assertEqual(serie.folio_actual, folio_previo)
