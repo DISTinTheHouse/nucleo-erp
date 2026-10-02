@@ -432,9 +432,15 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
             ProductoVariante.objects.filter(activo=True), user
         ).select_related("producto"),
         fila=_fila_producto,
+        # ``sku`` real (``10808015XG``: modelo + color + talla) empieza por lo que
+        # se teclea: va por prefijo. Los tres campos tienen índice de expresión
+        # ``UPPER(col)`` en ``catalogo``.
         campos_codigo=("sku",),
         campos_nombre=("nombre", "producto__nombre"),
         campos_only=("sku", "nombre", "producto__nombre"),
+        # OJO: ``R-CATALOGO-PRODUCTOS`` todavía NO existe en el catálogo de
+        # permisos (BD). Hasta que producto decida qué clave(s) gobiernan el
+        # catálogo, sólo superusuario y ``is_admin_empresa`` ven este grupo.
         permisos_visibilidad=("R-CATALOGO-PRODUCTOS",),
         orden=("producto__nombre", "sku"),
     ),
