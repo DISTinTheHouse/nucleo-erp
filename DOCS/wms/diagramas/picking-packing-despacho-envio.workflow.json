@@ -1,0 +1,32 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Picking, Packing, Despacho y Envío",
+    "output": "picking-packing-despacho-envio.html",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "logistica", "label": "Logística (independiente)" },
+    { "id": "almacen", "label": "Almacén (WMS)" },
+    { "id": "despacho", "label": "Despacho" }
+  ],
+  "phases": [
+    { "id": "fase_surtido", "label": "Surtido y embarque", "fromCol": 0, "toCol": 2 },
+    { "id": "fase_salida", "label": "Salida", "fromCol": 3, "toCol": 3, "variant": "emphasis" }
+  ],
+  "mainPath": ["crear_picking", "crear_packing", "crear_despacho"],
+  "nodes": [
+    { "id": "crear_envio", "lane": "logistica", "col": 0, "width": 104, "type": "external", "label": "Crear Envío", "sublabel": "pedido + transportista" },
+    { "id": "crear_picking", "lane": "almacen", "col": 0, "width": 104, "type": "frontend", "label": "Crear Picking", "sublabel": "pedido + almacén" },
+    { "id": "ordenes_trabajo", "lane": "almacen", "col": 1, "width": 118, "type": "messagebus", "label": "Órdenes de Trabajo", "sublabel": "bordado / reflejante / corte" },
+    { "id": "crear_packing", "lane": "almacen", "col": 2, "width": 104, "type": "frontend", "label": "Crear Packing", "sublabel": "cajas + peso" },
+    { "id": "crear_despacho", "lane": "despacho", "col": 3, "width": 112, "type": "backend", "label": "Crear Despacho", "sublabel": "+ guía" }
+  ],
+  "edges": [
+    { "from": "crear_picking", "to": "ordenes_trabajo", "label": "genera, si aplica", "variant": "dashed" },
+    { "from": "crear_picking", "to": "crear_packing", "label": "GET candidatos — ya empacado no sale", "variant": "emphasis" },
+    { "from": "crear_packing", "to": "crear_despacho", "label": "GET candidatos — ya despachado no sale", "variant": "emphasis" },
+    { "from": "crear_envio", "to": "crear_despacho", "label": "opcional, ya existente", "variant": "dashed" }
+  ]
+}

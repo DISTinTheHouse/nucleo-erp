@@ -1,0 +1,38 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Recepción, Calidad y Encuadre RFID",
+    "output": "recepcion-calidad-rfid.html",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "rfid", "label": "Encuadre RFID (opcional)" },
+    { "id": "calidad", "label": "Recepción → Calidad → Inventario" },
+    { "id": "excepcion", "label": "Si se rechaza", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "fase_rfid", "label": "Encuadre RFID", "fromCol": 0, "toCol": 2 },
+    { "id": "fase_recepcion", "label": "Recepción formal", "fromCol": 3, "toCol": 3 },
+    { "id": "fase_calidad", "label": "Calidad e inventario", "fromCol": 4, "toCol": 5, "variant": "emphasis" }
+  ],
+  "mainPath": ["crear_encuadre", "escanear", "aceptar_encuadre", "crear_recepcion", "inspeccion_calidad", "cierre"],
+  "nodes": [
+    { "id": "crear_encuadre", "lane": "rfid", "col": 0, "width": 104, "type": "frontend", "label": "Crear Encuadre", "sublabel": "OC u OP + almacén" },
+    { "id": "escanear", "lane": "rfid", "col": 1, "width": 96, "type": "frontend", "label": "Escanear Tags", "sublabel": "match SKU / código" },
+    { "id": "aceptar_encuadre", "lane": "rfid", "col": 2, "width": 118, "type": "security", "label": "Aceptar Encuadre", "sublabel": "valida conteo" },
+    { "id": "crear_recepcion", "lane": "calidad", "col": 3, "width": 112, "type": "backend", "label": "Crear Recepción", "sublabel": "estatus = EN_CALIDAD" },
+    { "id": "inspeccion_calidad", "lane": "calidad", "col": 4, "width": 152, "type": "backend", "label": "Inspección de Calidad", "sublabel": "aprobado / rechazado", "tag": "1 solo envío" },
+    { "id": "cierre", "lane": "calidad", "col": 5, "width": 118, "type": "database", "label": "Abona Existencia", "sublabel": "Recepción → CERRADA" },
+    { "id": "reabrir", "lane": "excepcion", "col": 5, "width": 112, "type": "messagebus", "label": "Reabre OC / OP", "sublabel": "pendiente otra vez" }
+  ],
+  "edges": [
+    { "from": "crear_encuadre", "to": "escanear" },
+    { "from": "escanear", "to": "aceptar_encuadre", "label": "resumen esperado vs leído" },
+    { "from": "aceptar_encuadre", "to": "crear_recepcion", "label": "conteo validado — aún no automático", "variant": "dashed" },
+    { "from": "crear_recepcion", "to": "inspeccion_calidad", "label": "GET pendientes EN_CALIDAD", "variant": "emphasis" },
+    { "from": "inspeccion_calidad", "to": "cierre", "label": "aprobado > 0", "variant": "emphasis" },
+    { "from": "inspeccion_calidad", "to": "reabrir", "label": "rechazado", "variant": "security", "role": "error" }
+  ],
+  "cards": []
+}
