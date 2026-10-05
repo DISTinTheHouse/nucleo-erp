@@ -1,7 +1,11 @@
 from rest_framework import viewsets
+from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from django.conf import settings
 from django.db.models import Count, Sum
+from django.utils.dateparse import parse_date
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import ProveedorSerializer, ClienteSerializer, DireccionClienteSerializer
 from terceros.scope import clientes_base, clientes_visibles
@@ -149,6 +153,12 @@ class ClienteViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         instance.soft_delete()
 
+class HistorialOrdenesCompraPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
 class ProveedorViewSet(viewsets.ModelViewSet):
     queryset = Proveedor.objects.filter(activo=True)
     serializer_class = ProveedorSerializer
@@ -167,6 +177,60 @@ class ProveedorViewSet(viewsets.ModelViewSet):
 
     def perform_destroy(self, instance):
         instance.soft_delete()
+
+    @action(detail=True, methods=["get"], url_path="historial-ordenes-compra")
+    def historial_ordenes_compra(self, request, pk=None):
+        """OC de este proveedor para su detalle (EC-399). ``get_object`` ya
+        acota por la empresa del usuario, igual que el resto del ViewSet."""
+        from compras.models import OrdenCompra
+        from compras.api.serializers import OrdenCompraSerializer
+
+        proveedor = self.get_object()
+        qs = (
+            OrdenCompra.objects.filter(proveedor=proveedor, activo=True)
+            .select_related("empresa", "sucursal", "moneda", "usuario", "pedido")
+        )
+
+        estatus = (request.query_params.get("estatus") or "").strip()
+        if estatus:
+            try:
+                qs = qs.filter(estatus=int(estatus))
+            except ValueError:
+                raise ValidationError({"estatus": "Debe ser un entero válido."})
+
+        fecha_inicio = parse_date((request.query_params.get("fecha_inicio") or "").strip())
+        fecha_final = parse_date((request.query_params.get("fecha_final") or "").strip())
+        if fecha_inicio:
+            qs = qs.filter(fecha_oc__gte=fecha_inicio)
+        if fecha_final:
+            qs = qs.filter(fecha_oc__lte=fecha_final)
+
+        qs = qs.order_by("-fecha_oc", "-id")
+
+        estatus_labels = dict(OrdenCompra.EstatusOrdenCompra.choices)
+        resumen = {
+            "total_ordenes": qs.count(),
+            "por_estatus": {
+                estatus_labels.get(fila["estatus"], fila["estatus"]): fila["total"]
+                for fila in qs.values("estatus").annotate(total=Count("id"))
+            },
+            # Excluye CANCELADA: una orden anulada no debe inflar el monto
+            # histórico comprado al proveedor. Separado por moneda porque un
+            # proveedor puede tener OC en más de una.
+            "monto_por_moneda": [
+                {"moneda": fila["moneda__codigo_iso"], "total": fila["total"]}
+                for fila in qs.exclude(estatus=OrdenCompra.EstatusOrdenCompra.CANCELADA)
+                .values("moneda__codigo_iso")
+                .annotate(total=Sum("gran_total"))
+            ],
+        }
+
+        paginator = HistorialOrdenesCompraPagination()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        data = OrdenCompraSerializer(page, many=True).data
+        response = paginator.get_paginated_response(data)
+        response.data["resumen"] = resumen
+        return Response(response.data)
 
 class DireccionClienteViewSet(viewsets.ModelViewSet):
     queryset = DireccionCliente.objects.filter(activo=True)

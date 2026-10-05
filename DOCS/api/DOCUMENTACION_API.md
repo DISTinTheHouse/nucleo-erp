@@ -1121,6 +1121,38 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
   - `ultimo_pedido` es `null` si el cliente no tiene pedidos todavía; si existe, es el mismo objeto que aparece primero en `pedidos_recientes`.
   - `pedidos_recientes` trae como máximo los 5 pedidos más nuevos (por fecha de creación), pensado para una mini-tabla o timeline en la ficha del cliente — no es un listado paginado; si se necesita el historial completo, usar `GET /api/v1/ventas/pedidos/?cliente={id}`.
 
+### Histórico de Órdenes de Compra por Proveedor (EC-399)
+
+- **Endpoint**: `GET /api/v1/terceros/proveedores/{id}/historial-ordenes-compra/`
+- Pensado para la ficha del proveedor (a diferencia del resumen de cliente, aquí sí es el listado completo y **paginado**, no solo los últimos 5).
+- `get_object` acota por la empresa del usuario igual que el resto de `ProveedorViewSet` → 404 si el proveedor no es de tu empresa.
+- **Query params** (todos opcionales):
+  | Param | Formato | Efecto |
+  |---|---|---|
+  | `estatus` | int (`OrdenCompra.EstatusOrdenCompra`) | Filtra por un solo estatus |
+  | `fecha_inicio` | `YYYY-MM-DD` | `fecha_oc >=` |
+  | `fecha_final` | `YYYY-MM-DD` | `fecha_oc <=` |
+  | `page` / `page_size` | int | Paginación estándar DRF (`page_size` máx. 100, default 20) |
+- **Respuesta**:
+  ```json
+  {
+    "count": 34,
+    "next": "http://.../historial-ordenes-compra/?page=2",
+    "previous": null,
+    "results": [
+      { "id": 120, "folio": "OC-7-120", "estatus": 5, "estatus_label": "Recibida", "fecha_oc": "2026-09-10", "gran_total": "15400.00", "moneda_codigo": "MXN", "...": "resto de campos planos de OrdenCompraSerializer" }
+    ],
+    "resumen": {
+      "total_ordenes": 34,
+      "por_estatus": { "Recibida": 28, "Cancelada": 2, "Autorizada": 4 },
+      "monto_por_moneda": [ { "moneda": "MXN", "total": "410500.00" } ]
+    }
+  }
+  ```
+- `resumen` se calcula sobre el queryset ya filtrado (respeta `estatus`/`fecha_inicio`/`fecha_final` si se mandan), no solo sobre la página actual.
+- `monto_por_moneda` excluye `CANCELADA` (mismo criterio que `resumen_comercial` de cliente y que el dashboard de compras).
+- Solo trae OC activas (`activo=true`); una OC dada de baja no aparece aquí.
+
 ### Direcciones Cliente
 
 Listado de direcciones registradas de los clientes, incluyendo información de ubicación y configuración.
