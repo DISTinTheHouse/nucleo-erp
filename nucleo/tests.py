@@ -761,10 +761,11 @@ class OrdenBordadoBusquedaTests(BusquedaGlobalBaseTestCase):
     def test_codigo_de_seccion_basta(self):
         self.assertIn("orden_bordado", self._tipos(self._usuario_con("sec", ["R-PRODUCCION-OB"])))
 
-    def test_codigo_de_modulo_basta(self):
-        self.assertIn("orden_bordado", self._tipos(self._usuario_con("mod", ["R-PRODUCCION"])))
+    def test_codigo_de_modulo_solo_no_basta(self):
+        """``R-PRODUCCION`` no abre la sección de OB en el frontend."""
+        self.assertNotIn("orden_bordado", self._tipos(self._usuario_con("mod", ["R-PRODUCCION"])))
 
-    def test_sin_ninguno_de_los_dos_se_omite(self):
+    def test_sin_el_codigo_de_seccion_se_omite(self):
         user = self._usuario_con("otros", ["R-PRODUCCION-OR", "R-PRODUCCION-CM", "R-CRM-PEDIDOS"])
         self.assertNotIn("orden_bordado", self._tipos(user))
 
@@ -966,11 +967,12 @@ class FacturaBusquedaTests(_GrupoPropioMixin, BusquedaGlobalBaseTestCase):
         user = self._usuario_con("sec", ["R-CONTABILIDAD-FACTURACION"])
         self.assertIn("factura", self._tipos(user, "FAC"))
 
-    def test_codigo_de_modulo_basta(self):
+    def test_codigo_de_modulo_solo_no_basta(self):
+        """``R-CONTABILIDAD`` no abre la sección de facturación en el frontend."""
         user = self._usuario_con("mod", ["R-CONTABILIDAD"])
-        self.assertIn("factura", self._tipos(user, "FAC"))
+        self.assertNotIn("factura", self._tipos(user, "FAC"))
 
-    def test_sin_ninguno_de_los_dos_se_omite(self):
+    def test_sin_el_codigo_de_seccion_se_omite(self):
         # Ni la sección de clientes de Contabilidad ni la de CxC conceden facturas.
         user = self._usuario_con(
             "otros", ["R-CONTABILIDAD-CLIENTES", "R-CONTABILIDAD-CXC", "R-CRM-PEDIDOS"]
