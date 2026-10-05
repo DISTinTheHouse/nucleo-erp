@@ -14,7 +14,12 @@ from seguridad.role_identity import (
 )
 
 from produccion.services.common import config_como_dict, pendientes_por_linea
-from produccion.scope import ordenes_bordado_base, ordenes_bordado_visibles
+from produccion.scope import (
+    ordenes_bordado_base,
+    ordenes_bordado_visibles,
+    ordenes_reflejante_base,
+    ordenes_reflejante_visibles,
+)
 
 from produccion.models import (
     ListaMaterialBom,
@@ -957,7 +962,9 @@ class OrdenReflejanteViewSet(
     def get_queryset(self):
         """Aislamiento multi-tenant: empresa + sucursal.
 
-        Mismo criterio que ``OrdenBordadoViewSet``/``PickingViewSet``.
+        El predicado vive en ``produccion.scope`` (base + visibles), compartido
+        con el buscador global. Mismo criterio que ``OrdenBordadoViewSet``/
+        ``PickingViewSet``.
 
         El ``select_related``/``prefetch_related`` corta el N+1 del serializer:
         cada orden resolvía ``empresa``/``sucursal`` (``*_nombre``), ``pedido``
@@ -969,9 +976,8 @@ class OrdenReflejanteViewSet(
         orden. Con esto el list queda en 2 queries constantes, sin importar
         cuántas órdenes o renglones traiga.
         """
-        user = self.request.user
         qs = (
-            OrdenesReflejante.objects.filter(activo=True)
+            ordenes_reflejante_base()
             .select_related("empresa", "sucursal", "pedido", "usuario_asignado")
             .prefetch_related(
                 Prefetch(
@@ -986,16 +992,7 @@ class OrdenReflejanteViewSet(
             # Listado más reciente primero; ``-id`` como desempate estable.
             .order_by("-fecha_inicio", "-id")
         )
-
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        return ordenes_reflejante_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
         # Ver ``OrdenBordadoViewSet.get_serializer_class``.

@@ -409,6 +409,17 @@ class OrdenesReflejante(StatusLifecycleModel):
         db_table = 'orden_reflejante'
         verbose_name = 'Orden Reflejante'
         verbose_name_plural = 'Ordenes Reflejante'
+        indexes = [
+            # Buscador global: ``folio_reflejante__icontains`` (el año va delante
+            # del consecutivo) se compila como
+            # ``UPPER("folio_reflejante"::text) LIKE UPPER('%...%')``. Mismo
+            # patrón que ``OrdenesBordado``. Sólo existe en PostgreSQL: ver
+            # ``nucleo.indices``.
+            GinIndexSoloPostgres(
+                OpClass(Upper("folio_reflejante"), name="gin_trgm_ops"),
+                name="orden_refl_folio_up_trgm",
+            ),
+        ]
 
     def __str__(self):
         return self.folio_reflejante
