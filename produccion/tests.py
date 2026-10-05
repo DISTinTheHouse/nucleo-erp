@@ -14,6 +14,7 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
 """
 
 from decimal import Decimal
+from unittest import mock
 
 from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
@@ -4145,3 +4146,162 @@ class OnboardingPostLineaMuestraTests(TestCase):
                 self.assertFalse(modelo.objects.filter(pedido=self.pedido).exists())
                 serie.refresh_from_db()
                 self.assertEqual(serie.folio_actual, folio_previo)
+
+
+class OrdenCorteMangaParcialidadesTests(TestCase):
+    """OCMs parciales vía ``detalles_override[]``: mismas garantías de cupo,
+    override y concurrencia que OB/OR (#277).
+
+        pedido -> pedido_detalle -> talla CH: cantidad 10
+                                 -> talla M : cantidad 6
+    """
+
+    URL = "/api/v1/produccion/orden-corte-manga/onboarding/"
+    CANTIDAD_CH = 10
+    CANTIDAD_M = 6
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal,
+            tipo_documento="ORDEN_CORTE_MANGA", serie="OCM",
+        )
+        cls.usuario = Usuario.objects.create(
+            username="operador", email="operador@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla_ch = Talla.objects.create(nombre="CH")
+        cls.talla_m = Talla.objects.create(nombre="M")
+        cls.talla_g = Talla.objects.create(nombre="G")
+
+    def setUp(self):
+        self.pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        self.detalle = PedidoDetalle.objects.create(pedido=self.pedido, producto=self.producto)
+        self.pdt_ch = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_ch,
+            cantidad=self.CANTIDAD_CH, lleva_corte_manga=True,
+        )
+        self.pdt_m = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_m,
+            cantidad=self.CANTIDAD_M, lleva_corte_manga=True,
+        )
+
+    def _post(self, overrides):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client.post(
+            self.URL,
+            {
+                "pedido": self.pedido.pk,
+                "detalles_override": [
+                    {"pedido_detalle_talla_id": pdt.pk, "cantidad": cantidad}
+                    for pdt, cantidad in overrides
+                ],
+            },
+            format="json",
+        )
+
+    def _save(self, overrides):
+        return OrdenCorteMangaService.save(
+            {
+                "pedido": self.pedido,
+                "detalles_override": [
+                    {"pedido_detalle_talla_id": pdt.pk, "cantidad": cantidad}
+                    for pdt, cantidad in overrides
+                ],
+            },
+            self.usuario,
+        )
+
+    def test_dos_parciales_sobre_la_misma_linea_hasta_agotar_el_cupo(self):
+        self.assertEqual(self._post([(self.pdt_ch, 4)]).status_code, 201)
+        segunda = self._post([(self.pdt_ch, 6)])
+
+        self.assertEqual(segunda.status_code, 201, segunda.data)
+        total = sum(
+            d.cantidad for d in OrdenCorteMangaDetalle.objects.filter(
+                ocm__pedido=self.pedido, ocm__activo=True, talla=self.talla_ch
+            )
+        )
+        self.assertEqual(total, float(self.CANTIDAD_CH))
+
+    def test_parcial_que_excede_el_pendiente_se_rechaza(self):
+        self.assertEqual(self._post([(self.pdt_ch, 4)]).status_code, 201)
+
+        resp = self._post([(self.pdt_ch, 7)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        exceso = " ".join(str(x) for x in resp.data["detalles_exceso"])
+        self.assertIn("disponible_restante=6.0", exceso)
+        self.assertEqual(OrdenesCorteManga.objects.filter(pedido=self.pedido).count(), 1)
+
+    def test_override_con_talla_fuera_de_las_elegibles_se_rechaza(self):
+        """Antes se descartaba en silencio y se creaba una OCM con menos
+        renglones de los pedidos. Una talla en cantidad 0 no entra a
+        ``tallas_orden_trabajo_qs``."""
+        pdt_g = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_g, cantidad=0, lleva_corte_manga=True,
+        )
+
+        with self.assertRaises(DRFValidationError) as ctx:
+            self._save([(self.pdt_ch, 5), (pdt_g, 3)])
+
+        self.assertIn(str(pdt_g.pk), str(ctx.exception.detail))
+        self.assertFalse(OrdenesCorteManga.objects.filter(pedido=self.pedido).exists())
+
+    def test_renglones_sin_talla_consumen_cupo(self):
+        """El renglón tiene 16 piezas (CH 10 + M 6); con 10 ya programadas sin
+        talla (p. ej. desde picking) solo quedan 6."""
+        orden = OrdenesCorteManga.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            folio_ocm="OCM-SIN-TALLA",
+        )
+        OrdenCorteMangaDetalle.objects.create(
+            ocm=orden, pedido_detalle=self.detalle, producto=self.producto,
+            cantidad=10, talla=None,
+        )
+
+        resp = self._post([(self.pdt_ch, self.CANTIDAD_CH)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        exceso = " ".join(str(x) for x in resp.data["detalles_exceso"])
+        self.assertIn("total del renglón", exceso)
+        self.assertIn("ya_asignado=10.0", exceso)
+        self.assertIn("disponible_restante=6.0", exceso)
+
+    def test_cantidad_fraccionaria_se_rechaza(self):
+        resp = self._post([(self.pdt_ch, 2.5)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("entero", str(resp.data["detalles_override"]))
+        self.assertFalse(OrdenesCorteManga.objects.filter(pedido=self.pedido).exists())
+
+    def test_cupo_no_dispara_una_query_por_linea(self):
+        def _queries_para(overrides):
+            with CaptureQueriesContext(connection) as ctx:
+                self._save(overrides)
+            return len(ctx)
+
+        con_1 = _queries_para([(self.pdt_ch, 1)])
+        con_2 = _queries_para([(self.pdt_ch, 1), (self.pdt_m, 1)])
+
+        self.assertEqual(con_1, con_2)
+
+    def test_bloquea_el_pedido_antes_de_leer_lo_asignado(self):
+        """``select_for_update`` es no-op en SQLite; se verifica que se pida."""
+        with mock.patch.object(
+            Pedido.objects, "select_for_update", wraps=Pedido.objects.select_for_update
+        ) as candado:
+            self._save([(self.pdt_ch, 1)])
+
+        candado.assert_called_once_with()
