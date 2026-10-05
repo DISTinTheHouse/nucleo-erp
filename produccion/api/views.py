@@ -17,6 +17,8 @@ from produccion.services.common import config_como_dict, pendientes_por_linea
 from produccion.scope import (
     ordenes_bordado_base,
     ordenes_bordado_visibles,
+    ordenes_corte_manga_base,
+    ordenes_corte_manga_visibles,
     ordenes_reflejante_base,
     ordenes_reflejante_visibles,
 )
@@ -1231,7 +1233,9 @@ class OrdenesCorteMangaViewSet(
     def get_queryset(self):
         """Aislamiento multi-tenant: empresa + sucursal.
 
-        Mismo criterio que ``OrdenBordadoViewSet``/``OrdenReflejanteViewSet``.
+        El predicado vive en ``produccion.scope`` (base + visibles), compartido
+        con el buscador global. Mismo criterio que ``OrdenBordadoViewSet``/
+        ``OrdenReflejanteViewSet``.
 
         ``select_related``/``prefetch_related`` cortan el N+1: el serializer
         resuelve ``pedido`` (``pedido_folio``), ``usuario_asignado``
@@ -1241,9 +1245,8 @@ class OrdenesCorteMangaViewSet(
         ``OrdenCorteMangaDetalle.configuracion`` es un ``JSONField`` plano (no
         una FK), así que no necesita ``select_related``.
         """
-        user = self.request.user
         qs = (
-            OrdenesCorteManga.objects.filter(activo=True)
+            ordenes_corte_manga_base()
             .select_related("pedido", "usuario_asignado", "empresa", "sucursal")
             .prefetch_related(
                 Prefetch(
@@ -1258,16 +1261,7 @@ class OrdenesCorteMangaViewSet(
             # Listado más reciente primero; ``-id`` como desempate estable.
             .order_by("-fecha_inicio", "-id")
         )
-
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        return ordenes_corte_manga_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
         # Ver ``OrdenBordadoViewSet.get_serializer_class``.

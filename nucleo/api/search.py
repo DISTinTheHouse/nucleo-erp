@@ -103,6 +103,8 @@ from nucleo.utils import entero_acotado
 from produccion.scope import (
     ordenes_bordado_base,
     ordenes_bordado_visibles,
+    ordenes_corte_manga_base,
+    ordenes_corte_manga_visibles,
     ordenes_reflejante_base,
     ordenes_reflejante_visibles,
 )
@@ -337,6 +339,22 @@ def _fila_orden_reflejante(orden) -> dict:
     }
 
 
+def _fila_orden_corte_manga(orden) -> dict:
+    # Misma forma que ``_fila_orden_bordado``. ``folio_ocm`` es NOT NULL y único.
+    pedido = orden.pedido
+    cliente = _texto(pedido.cliente_razon_social) or _texto(pedido.cliente_nombre)
+    partes = [p for p in (_texto(pedido.folio), cliente) if p]
+    folio = _texto(orden.folio_ocm)
+    return {
+        "tipo": "orden_corte_manga",
+        "id": orden.pk,
+        "codigo": folio,
+        "titulo": folio,
+        "subtitulo": " · ".join(partes) or None,
+        "estatus": orden.get_estatus_corte_display(),
+    }
+
+
 #: Orden del registro = orden de los grupos en la respuesta.
 REGISTRO: tuple[EntidadBuscable, ...] = (
     EntidadBuscable(
@@ -426,6 +444,30 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         # Sólo la SECCIÓN: el frontend abre las órdenes de reflejante con
         # ``R-PRODUCCION-OR``; ``R-PRODUCCION`` no las abre.
         permisos_visibilidad=("R-PRODUCCION-OR",),
+        orden=(F("fecha_inicio").desc(nulls_last=True), "-id"),
+    ),
+    EntidadBuscable(
+        tipo="orden_corte_manga",
+        etiqueta="Órdenes de corte de manga",
+        # Misma plantilla que la orden de bordado. Alcance de
+        # ``OrdenesCorteMangaViewSet`` (``produccion.scope``).
+        alcance=lambda user: ordenes_corte_manga_visibles(
+            ordenes_corte_manga_base().select_related("pedido"), user
+        ),
+        fila=_fila_orden_corte_manga,
+        # Sólo por su folio, como NOMBRE (subcadena): el formato real es
+        # ``2026-CM-00005`` —año delante y serie ``CM``, no ``OCM``—.
+        campos_nombre=("folio_ocm",),
+        campos_only=(
+            "folio_ocm",
+            "estatus_corte",
+            "pedido__folio",
+            "pedido__cliente_nombre",
+            "pedido__cliente_razon_social",
+        ),
+        # Sólo la SECCIÓN: el frontend abre las órdenes de corte de manga con
+        # ``R-PRODUCCION-CM``; ``R-PRODUCCION`` no las abre.
+        permisos_visibilidad=("R-PRODUCCION-CM",),
         orden=(F("fecha_inicio").desc(nulls_last=True), "-id"),
     ),
     EntidadBuscable(
