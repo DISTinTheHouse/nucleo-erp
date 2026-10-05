@@ -37,6 +37,7 @@ from produccion.models import (
     OrdenesCorteManga,
     OrdenesReflejante,
     OrdenProduccion,
+    OrdenProduccionRutaCritica,
     OrdenReflejanteDetalle,
     ReflejanteAvances,
     ReflejanteIncidencias,
@@ -4305,3 +4306,110 @@ class OrdenCorteMangaParcialidadesTests(TestCase):
             self._save([(self.pdt_ch, 1)])
 
         candado.assert_called_once_with()
+
+
+class RutaCriticaOPTests(TestCase):
+    """``/orden-produccion/{op_id}/ruta-critica/`` (#282, #284, #285, #286)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
+        cls.produccion = Usuario.objects.create(
+            username="produccion", email="produccion@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.lector = Usuario.objects.create(
+            username="lector", email="lector@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+
+    def setUp(self):
+        self.op = OrdenProduccion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, folio_op=f"OP-{OrdenProduccion.objects.count() + 1}",
+        )
+        self.url = f"/api/v1/produccion/orden-produccion/{self.op.pk}/ruta-critica/"
+
+    def _client(self, user=None):
+        client = APIClient()
+        client.force_authenticate(user=user or self.produccion)
+        return client
+
+    def _patch(self, body):
+        return self._client().patch(self.url, body, format="json")
+
+    # --- #282: el GET no escribe ---------------------------------------------
+
+    def test_get_sin_registro_no_lo_crea(self):
+        resp = self._client(self.lector).get(self.url)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(resp.data["existencia_tela"])
+        self.assertIsNone(resp.data["cantidad_real_corte"])
+        self.assertFalse(OrdenProduccionRutaCritica.objects.filter(op=self.op).exists())
+
+    def test_primer_patch_crea_el_registro(self):
+        resp = self._patch({"corte_recibido": True})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(OrdenProduccionRutaCritica.objects.get(op=self.op).corte_recibido)
+        self.assertTrue(self._client(self.lector).get(self.url).data["corte_recibido"])
+
+    # --- #284: la fecha es "marcado desde" -----------------------------------
+
+    def test_desmarcar_limpia_la_fecha(self):
+        marcado = self._patch({"existencia_tela": True})
+        self.assertIsNotNone(marcado.data["fecha_existencia_tela"])
+
+        desmarcado = self._patch({"existencia_tela": False})
+
+        self.assertFalse(desmarcado.data["existencia_tela"])
+        self.assertIsNone(desmarcado.data["fecha_existencia_tela"])
+
+    def test_reenviar_el_mismo_valor_conserva_la_fecha(self):
+        fecha = self._patch({"existencia_avios": True}).data["fecha_existencia_avios"]
+
+        resp = self._patch({"existencia_avios": True, "kit_completo": True})
+
+        self.assertEqual(resp.data["fecha_existencia_avios"], fecha)
+
+    # --- #285: OP cerrada no se edita ----------------------------------------
+
+    def test_patch_en_op_completada_o_cancelada_responde_409(self):
+        for estatus in (
+            OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+            OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
+        ):
+            with self.subTest(estatus=estatus):
+                OrdenProduccion.objects.filter(pk=self.op.pk).update(estatus_op=estatus)
+
+                resp = self._patch({"corte_recibido": True})
+
+                self.assertEqual(resp.status_code, 409, resp.data)
+                self.assertFalse(OrdenProduccionRutaCritica.objects.filter(op=self.op).exists())
+                self.assertEqual(self._client().get(self.url).status_code, 200)
+
+    def test_patch_en_op_detenida_sigue_permitido(self):
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.DETENIDO
+        )
+
+        self.assertEqual(self._patch({"corte_recibido": True}).status_code, 200)
+
+    # --- #286: cantidad_real_corte -------------------------------------------
+
+    def test_cantidad_real_corte_rechaza_negativos_y_decimales(self):
+        for valor in (-3, "-3.5", "12.5"):
+            with self.subTest(valor=valor):
+                resp = self._patch({"cantidad_real_corte": valor})
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIn("cantidad_real_corte", resp.data)
+
+    def test_cantidad_real_corte_acepta_enteros_cero_y_null(self):
+        for valor, esperado in ((120, "120.00"), (0, "0.00"), (None, None)):
+            with self.subTest(valor=valor):
+                resp = self._patch({"cantidad_real_corte": valor})
+
+                self.assertEqual(resp.status_code, 200, resp.data)
+                self.assertEqual(resp.data["cantidad_real_corte"], esperado)

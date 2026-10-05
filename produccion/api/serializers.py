@@ -266,8 +266,8 @@ class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
     Deliberadamente separado de ``OrdenProduccionSerializer``: éste no lo
     declara, así que list/retrieve de la OP no cargan ni serializan esta
     tabla. Los cuatro campos ``fecha_*`` de existencia son ``read_only``
-    porque los sella el servidor en ``update()`` cuando su boolean asociado
-    cambia de valor -- el cliente solo manda el checkbox.
+    porque los sella (o limpia) el servidor en ``update()`` cuando su boolean
+    asociado cambia de valor -- el cliente solo manda el checkbox.
     """
 
     estatus_paquete_tecnico_display = serializers.CharField(
@@ -292,12 +292,23 @@ class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
 
+    def validate_cantidad_real_corte(self, value):
+        if value is None:
+            return value
+        if value < 0 or value != value.to_integral_value():
+            raise serializers.ValidationError(
+                "Debe ser un número entero de piezas, mayor o igual a 0."
+            )
+        return value
+
     def update(self, instance, validated_data):
         from django.utils import timezone
 
+        # La fecha significa "marcado desde": se sella al pasar a true y se
+        # limpia al pasar a false.
         for campo_bool, campo_fecha in self.CAMPOS_ESTADO_CON_FECHA.items():
             if campo_bool in validated_data and validated_data[campo_bool] != getattr(instance, campo_bool):
-                validated_data[campo_fecha] = timezone.now()
+                validated_data[campo_fecha] = timezone.now() if validated_data[campo_bool] else None
         return super().update(instance, validated_data)
 
 class ConsumoProduccionSerializer(serializers.ModelSerializer):
