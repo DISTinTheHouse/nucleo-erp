@@ -2,6 +2,7 @@ from django.conf import settings
 from django.contrib.postgres.indexes import OpClass
 from django.db import models
 from django.db.models.functions import Upper
+from nucleo.indices import IndexSoloPostgres
 from django.utils import timezone
 from nucleo.models import StatusLifecycleModel
 from simple_history.models import HistoricalRecords
@@ -154,8 +155,8 @@ class Factura(StatusLifecycleModel):
             # índice de expresión sobre ``UPPER(folio)`` puede servir. Mismo
             # patrón que ``ventas.Pedido`` (ver ``nucleo/api/search.py``). Sólo
             # existe en PostgreSQL: ver
-            # ``nucleo.migration_operations.AddIndexSoloPostgres``.
-            models.Index(
+            # ``nucleo.indices``.
+            IndexSoloPostgres(
                 OpClass(Upper("folio"), name="text_pattern_ops"),
                 name="facturas_folio_upper_like",
             ),

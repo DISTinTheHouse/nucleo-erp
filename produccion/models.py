@@ -1,6 +1,7 @@
-from django.contrib.postgres.indexes import GinIndex, OpClass
+from django.contrib.postgres.indexes import OpClass
 from django.db import models
 from django.db.models.functions import Upper
+from nucleo.indices import GinIndexSoloPostgres
 from nucleo.models import Empresa, Sucursal, StatusLifecycleModel
 from catalogo.models import Producto, ProductoVariante, Talla, Color, UnidadMedida, VarianteProductoProduccion
 from ventas.models import Pedido, PedidoDetalle
@@ -271,8 +272,8 @@ class OrdenesBordado(StatusLifecycleModel):
             # único del campo ni su ``_like`` sirven a eso; un GIN trigram sobre
             # ``UPPER(col)`` sí. Mismo patrón que ``ventas.Pedido`` (ver
             # ``nucleo/api/search.py``). Sólo existe en PostgreSQL: ver
-            # ``nucleo.migration_operations.AddIndexSoloPostgres``.
-            GinIndex(
+            # ``nucleo.indices``.
+            GinIndexSoloPostgres(
                 OpClass(Upper("folio_bordado"), name="gin_trgm_ops"),
                 name="orden_bordado_folio_up_trgm",
             ),
