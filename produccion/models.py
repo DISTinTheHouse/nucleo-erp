@@ -511,6 +511,16 @@ class OrdenesCorteManga(StatusLifecycleModel):
         db_table = 'orden_corte_manga'
         verbose_name = 'Orden Corte Manga'
         verbose_name_plural = 'Ordenes Corte Manga'
+        indexes = [
+            # Buscador global: ``folio_ocm__icontains`` (el año va delante del
+            # consecutivo) se compila como
+            # ``UPPER("folio_ocm"::text) LIKE UPPER('%...%')``. Mismo patrón que
+            # ``OrdenesBordado``. Sólo existe en PostgreSQL: ver ``nucleo.indices``.
+            GinIndexSoloPostgres(
+                OpClass(Upper("folio_ocm"), name="gin_trgm_ops"),
+                name="orden_cm_folio_up_trgm",
+            ),
+        ]
 
     def __str__(self):
         return self.folio_ocm

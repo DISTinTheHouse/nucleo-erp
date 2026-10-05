@@ -5,14 +5,15 @@ incrustado en el ViewSet, porque tiene dos consumidores —``OrdenBordadoViewSet
 el buscador global (``nucleo.api.search``)— y con una sola definición no pueden
 separarse.
 
-Cubre las órdenes de bordado y de reflejante. Corte de manga tiene hoy el mismo
-predicado copiado en su ViewSet; se extraerá cuando entre al buscador.
+Cubre las tres órdenes de trabajo: bordado, reflejante y corte de manga. Las tres
+tienen hoy el mismo criterio, pero cada una conserva su propio predicado para que
+su ViewSet siga siendo la referencia.
 
 Ninguna función aplica ``select_related``/``prefetch_related`` ni orden: eso sigue
 siendo responsabilidad de cada consumidor.
 """
 
-from produccion.models import OrdenesBordado, OrdenesReflejante
+from produccion.models import OrdenesBordado, OrdenesCorteManga, OrdenesReflejante
 
 
 def ordenes_bordado_base():
@@ -52,6 +53,28 @@ def ordenes_reflejante_visibles(qs, user):
     el mismo criterio que la orden de bordado: el superusuario ve todo; sin
     empresa no se ve nada; dentro de la empresa, ``is_admin_empresa`` ve todas las
     sucursales y el resto sólo las de ``user.sucursales_permitidas()``.
+    """
+    if getattr(user, "is_superuser", False):
+        return qs
+    empresa = getattr(user, "empresa", None)
+    if not empresa:
+        return qs.none()
+    qs = qs.filter(empresa=empresa)
+    if getattr(user, "is_admin_empresa", False):
+        return qs
+    return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+
+
+def ordenes_corte_manga_base():
+    """Filas existentes de ``produccion.OrdenesCorteManga``: excluye las borradas (soft delete)."""
+    return OrdenesCorteManga.objects.filter(activo=True)
+
+
+def ordenes_corte_manga_visibles(qs, user):
+    """Alcance de ``produccion.OrdenesCorteManga``: empresa + sucursal.
+
+    Réplica exacta del que tenía ``OrdenesCorteMangaViewSet.get_queryset()``, el
+    mismo criterio que bordado y reflejante.
     """
     if getattr(user, "is_superuser", False):
         return qs

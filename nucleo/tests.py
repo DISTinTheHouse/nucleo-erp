@@ -24,7 +24,7 @@ from finanzas.models import Factura
 from nucleo.api.search import REGISTRO
 from nucleo.models import Empresa, Moneda, Sucursal
 from nucleo.permisos import permisos_efectivos
-from produccion.models import OrdenesBordado, OrdenesReflejante
+from produccion.models import OrdenesBordado, OrdenesCorteManga, OrdenesReflejante
 from seguridad.models import Permiso, Rol, RolPermiso, UsuarioPermiso, UsuarioRol
 from terceros.models import Cliente
 from usuarios.models import Usuario
@@ -36,7 +36,7 @@ COTIZACIONES_URL = "/api/v1/ventas/cotizaciones/"
 #: Grupos que ve quien pasa el cortocircuito de permisos (superuser/admin), en el
 #: orden del ``REGISTRO``.
 TODOS_LOS_TIPOS = [
-    "pedido", "orden_bordado", "orden_reflejante",
+    "pedido", "orden_bordado", "orden_reflejante", "orden_corte_manga",
     "cliente", "cotizacion", "producto", "factura",
 ]
 
@@ -1099,6 +1099,21 @@ class OrdenReflejanteBusquedaTests(_OrdenTrabajoBusquedaMixin, BusquedaGlobalBas
     FOLIO_FIELD = "folio_reflejante"
     SERIE = "OR"
     CLAVE = "R-PRODUCCION-OR"
+
+
+class OrdenCorteMangaBusquedaTests(_OrdenTrabajoBusquedaMixin, BusquedaGlobalBaseTestCase):
+    """Órdenes de corte de manga: alcance de ``OrdenesCorteMangaViewSet``.
+
+    La serie real del folio es ``CM`` (``2026-CM-00005``), no ``OCM`` como el
+    nombre del campo.
+    """
+
+    TIPO = "orden_corte_manga"
+    ETIQUETA = "Órdenes de corte de manga"
+    MODEL = OrdenesCorteManga
+    FOLIO_FIELD = "folio_ocm"
+    SERIE = "CM"
+    CLAVE = "R-PRODUCCION-CM"
 
 
 class _GrupoPropioMixin:
