@@ -323,8 +323,13 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
 | `producto` | Productos | `sku` | nombre de la variante, nombre del producto | `R-CATALOGO-PRODUCTOS` ⚠️ | nombre del producto, sku |
 | `factura` | Facturas | `folio` | nombre y razón social del cliente | `R-CONTABILIDAD-FACTURACION` | `fecha_emision` desc |
 
-- **`orden_bordado`**: el folio real tiene el año delante (`2026-OB-00017`), por eso se busca por **subcadena** y no por prefijo: `OB-00017`, `00017` y `2026-OB` la encuentran, pero hace falta un mínimo de **3 caracteres** (con 2 el grupo llega vacío). No se busca por folio del pedido ni por cliente; esos datos sólo aparecen en `subtitulo` (`"<folio pedido> · <cliente>"`). Sólo la clave de sección: `R-PRODUCCION` por sí sola **no** basta, porque en el frontend el código de módulo no abre la sección de órdenes de bordado.
-- **`factura`**: folio `FAC-<n>` por prefijo (`00024` sólo no la encuentra). Excluye facturas con soft delete. Sólo la clave de sección: `R-CONTABILIDAD` por sí sola **no** basta, por la misma razón.
+**Regla de los permisos de visibilidad**: las claves de una entidad son las que le permiten al usuario *abrir* esa entidad en algún lugar del frontend.
+- `orden_bordado` / `factura`: sólo la clave de sección (`R-PRODUCCION-OB` / `R-CONTABILIDAD-FACTURACION`); los códigos de módulo `R-PRODUCCION` / `R-CONTABILIDAD` no abren esas rutas.
+- `cotizacion`: `R-CRM` / `R-MESACONTROL` sí cuentan, porque los dashboards de esos módulos (`/sales`, `/operations`) abren cotizaciones.
+- `pedido`: incluye claves de otras secciones (OB/OR/CM, OC, picking) porque esas vistas enlazan al pedido y la ruta `/orders/[id]` las acepta.
+
+- **`orden_bordado`**: el folio real tiene el año delante (`2026-OB-00017`), por eso se busca por **subcadena** y no por prefijo: `OB-00017`, `00017` y `2026-OB` la encuentran, pero hace falta un mínimo de **3 caracteres** (con 2 el grupo llega vacío). No se busca por folio del pedido ni por cliente; esos datos sólo aparecen en `subtitulo` (`"<folio pedido> · <cliente>"`).
+- **`factura`**: folio `FAC-<n>` por prefijo (`00024` sólo no la encuentra). Excluye facturas con soft delete.
 - **`producto`**: ⚠️ la clave `R-CATALOGO-PRODUCTOS` **no existe todavía en el catálogo de permisos** (BD) y está pendiente de decisión; mientras tanto sólo superusuario e `is_admin_empresa` ven este grupo. Busca sobre variantes (`ProductoVariante`) activas; `estatus` es siempre `null`.
 
 ---

@@ -300,7 +300,10 @@ class PermisosEfectivosEquivalenciaTests(BusquedaGlobalBaseTestCase):
             "wms": ["R-WMS", "R-WMS-PEDIDOS", "R-WMS-PICKING"],
             "compras": ["R-COMPRAS", "R-COMPRAS-OC", "R-COMPRAS-PEDIDOS"],
             "produccion": ["R-PRODUCCION", "R-PRODUCCION-OB", "R-PRODUCCION-OR", "R-PRODUCCION-CM"],
-            "contabilidad": ["R-CONTABILIDAD", "R-CONTABILIDAD-CLIENTES"],
+            "contabilidad": [
+                "R-CONTABILIDAD", "R-CONTABILIDAD-CLIENTES",
+                "R-CONTABILIDAD-CXC", "R-CONTABILIDAD-FACTURACION",
+            ],
         }
         for nombre, claves in roles_reales.items():
             user = self._usuario(f"rol-{nombre}", claves)
