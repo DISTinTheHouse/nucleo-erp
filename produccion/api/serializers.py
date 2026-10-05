@@ -2050,6 +2050,15 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         "detalles_override": f"`cantidad` debe ser mayor a 0 para `pedido_detalle_talla_id={pdt_id}`."
                     })
+                # Piezas enteras, mismo criterio y mensaje que OB/OR: los
+                # fraccionarios dejaban residuos de coma flotante en el cupo.
+                if cantidad_num != int(cantidad_num):
+                    raise serializers.ValidationError({
+                        "detalles_override": (
+                            f"`cantidad` debe ser un número entero de piezas para "
+                            f"`pedido_detalle_talla_id={pdt_id}` (llegó {cantidad_num})."
+                        )
+                    })
                 if pedido is not None:
                     # Filtrado por el pedido: un id de otro pedido responde igual que uno
                     # inexistente y no deja enumerar tallas ajenas.
