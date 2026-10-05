@@ -2045,6 +2045,14 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             return RecepcionRFIDEncuadreCreateSerializer
         return RecepcionRFIDEncuadreSerializer
 
+    @action(detail=False, methods=["get"])
+    def onboarding(self, request):
+        # Mismos candidatos que recibir normalmente (OC/OP con pendiente) +
+        # almacenes: un encuadre solo tiene sentido sobre algo que todavía
+        # falta por recibir. Reusa RecepcionViewSet.handle_get_onboarding
+        # para no duplicar esa lógica (pendiente ya resta rechazos de Calidad).
+        return Response(RecepcionViewSet().handle_get_onboarding(request))
+
     def create(self, request, *args, **kwargs):
         user = request.user
         empresa = getattr(user, "empresa", None)
