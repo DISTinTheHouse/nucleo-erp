@@ -457,6 +457,10 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         fila=_fila_orden_corte_manga,
         # Sólo por su folio, como NOMBRE (subcadena): el formato real es
         # ``2026-CM-00005`` —año delante y serie ``CM``, no ``OCM``—.
+        # Excepción: el respaldo de la generación automática (hoy desactivada,
+        # ``ventas/api/views.py`` ``_generar_ordenes_corte_manga``) crea folios
+        # ``OCM-<folio pedido>``; esas filas SÍ coincidirían buscando el folio
+        # del pedido. Hoy no hay ninguna en la BD.
         campos_nombre=("folio_ocm",),
         campos_only=(
             "folio_ocm",

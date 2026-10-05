@@ -1,13 +1,16 @@
 """Alcance de las entidades de producción: queryset base + aislamiento multi-tenant.
 
 Mismo patrón que ``ventas/scope.py`` y ``terceros/scope.py``: vive aquí, y no
-incrustado en el ViewSet, porque tiene dos consumidores —``OrdenBordadoViewSet`` y
-el buscador global (``nucleo.api.search``)— y con una sola definición no pueden
-separarse.
+incrustado en los ViewSets, porque cada predicado tiene dos consumidores —su ViewSet
+y el buscador global (``nucleo.api.search``)— y con una sola definición no pueden
+separarse:
 
-Cubre las tres órdenes de trabajo: bordado, reflejante y corte de manga. Las tres
-tienen hoy el mismo criterio, pero cada una conserva su propio predicado para que
-su ViewSet siga siendo la referencia.
+- ``ordenes_bordado_*``: ``OrdenBordadoViewSet`` + buscador.
+- ``ordenes_reflejante_*``: ``OrdenReflejanteViewSet`` + buscador.
+- ``ordenes_corte_manga_*``: ``OrdenesCorteMangaViewSet`` + buscador.
+
+Hoy los tres predicados aplican el mismo criterio (son copias): cambiar la
+política de uno exige revisar los otros dos.
 
 Ninguna función aplica ``select_related``/``prefetch_related`` ni orden: eso sigue
 siendo responsabilidad de cada consumidor.
