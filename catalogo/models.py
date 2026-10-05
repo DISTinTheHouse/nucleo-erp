@@ -127,6 +127,10 @@ class Producto(models.Model):
             # Sólo existen en PostgreSQL: ver
             # ``nucleo.indices``.
             # - ``nombre`` (NOMBRE, subcadena, vía ``producto__nombre``): GIN trigram.
+            #   OJO: hoy el buscador sólo consulta este campo dentro de un OR que
+            #   cruza ``variantes_producto`` y ``productos``, y ese OR no puede usar
+            #   índices de una sola tabla (ver la entrada ``producto`` en
+            #   ``nucleo/api/search.py``).
             GinIndexSoloPostgres(
                 OpClass(Upper("nombre"), name="gin_trgm_ops"),
                 name="productos_nombre_upper_trgm",

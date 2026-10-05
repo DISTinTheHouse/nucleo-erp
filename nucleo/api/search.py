@@ -433,8 +433,15 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         ).select_related("producto"),
         fila=_fila_producto,
         # ``sku`` real (``10808015XG``: modelo + color + talla) empieza por lo que
-        # se teclea: va por prefijo. Los tres campos tienen índice de expresión
-        # ``UPPER(col)`` en ``catalogo``.
+        # se teclea: va por prefijo.
+        #
+        # Índices: con q de 2 caracteres sólo se consulta el sku y lo sirve el
+        # btree ``UPPER(sku)`` de ``catalogo.ProductoVariante``. Desde 3
+        # caracteres el predicado es ``sku OR nombre OR producto.nombre``: un OR
+        # que cruza ``variantes_producto`` y ``productos`` sólo se puede evaluar
+        # después del JOIN, así que ningún índice de una sola tabla se usa —ni
+        # el btree de sku ni los GIN ``UPPER(nombre)`` de las dos tablas;
+        # verificado con EXPLAIN forzado—. Misma limitación conocida que factura.
         campos_codigo=("sku",),
         campos_nombre=("nombre", "producto__nombre"),
         campos_only=("sku", "nombre", "producto__nombre"),
@@ -457,9 +464,15 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         ),
         fila=_fila_factura,
         # El folio real es ``FAC-<consecutivo>``: empieza por lo que se teclea, así
-        # que va por prefijo (CÓDIGO), como el de pedido. Lo sirve el btree
-        # ``UPPER(folio)`` de ``finanzas.Factura``; el cliente, los GIN
-        # ``UPPER(col)`` de ``clientes``.
+        # que va por prefijo (CÓDIGO), como el de pedido.
+        #
+        # Índices: con q de 2 caracteres sólo se consulta el folio y lo sirve el
+        # btree ``UPPER(folio)`` de ``finanzas.Factura``. Desde 3 caracteres el
+        # predicado es ``folio OR cliente.nombre OR cliente.razon_social``: un OR
+        # que cruza ``facturas`` y ``clientes`` sólo se puede evaluar después del
+        # JOIN, así que NI ese btree NI los GIN ``UPPER(col)`` de ``clientes`` se
+        # usan (verificado con EXPLAIN forzado). Es una limitación conocida del
+        # OR único de ``EntidadBuscable.predicado()``, pendiente.
         campos_codigo=("folio",),
         campos_nombre=("cliente__nombre", "cliente__razon_social"),
         campos_only=("folio", "estatus", "cliente__nombre", "cliente__razon_social"),

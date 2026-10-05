@@ -295,12 +295,37 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
 
 ## 🔎 4.1 Buscador Global
 
-- **Endpoint**: `GET /api/v1/search/?q=texto&limit=5`
-- Busca en varias entidades a la vez y devuelve los resultados **agrupados por tipo** (`grupos: [{tipo, etiqueta, resultados[], hay_mas}]`).
-- `q` mínimo 2 caracteres (si no, `grupos` vacíos, no error). Campos de NOMBRE (no código) requieren mínimo 3 caracteres.
-- `grupos` solo incluye las entidades que el usuario puede ver por permiso — puede traer menos de las disponibles. Cada fila: `{tipo, id, codigo, titulo, subtitulo, estatus}`.
-- Entidades disponibles hoy: `pedido`, `orden_bordado` (folio OB), `cliente`, `cotizacion`, `producto` (SKU), `factura` (folio FAC). Pendientes: OP, orden de reflejante, corte de manga, orden de compra.
-- Cada entidad requiere que el usuario tenga el permiso declarado (ej. `orden_bordado` pide `R-PRODUCCION-OB`). `producto` pide `R-CATALOGO-PRODUCTOS` y `factura` pide `R-CONTABILIDAD-FACTURAS` — **ambas claves nuevas, hay que crearlas en el catálogo de permisos (BD) y asignarlas a los roles correspondientes**, no existían antes.
+- **Endpoint**: `GET /api/v1/search/?q=texto&limit=5` (`IsAuthenticated`). Código: `nucleo/api/search.py`.
+- Busca en varias entidades a la vez y devuelve los resultados **agrupados por tipo**, en el orden de la tabla de abajo:
+
+```text
+{
+  "q": "texto", "limit": 5, "longitud_minima": 2, "longitud_minima_nombre": 3,
+  "grupos": [{"tipo": "pedido", "etiqueta": "Pedidos", "hay_mas": false,
+              "resultados": [{"tipo", "id", "codigo", "titulo", "subtitulo", "estatus"}]}]
+}
+```
+
+- `limit`: resultados por grupo; por defecto 5, tope 25. `hay_mas` indica que el grupo se recortó.
+- **Umbrales de `q`**:
+  - menos de 2 caracteres: no se consulta nada; los grupos visibles llegan vacíos (200, no error);
+  - 2 caracteres: sólo se consultan los campos de CÓDIGO (prefijo). Un grupo sin campos de código llega vacío;
+  - 3 o más: además se consultan los campos de NOMBRE (subcadena).
+- **Coincidencia**: CÓDIGO = prefijo sin distinguir mayúsculas (`istartswith`); NOMBRE = subcadena sin distinguir mayúsculas (`icontains`). Los resultados no se rankean: cada grupo sale en el orden natural de su entidad.
+- **Visibilidad**: cada entidad declara sus claves de permiso; basta tener UNA. La entidad sin permiso **se omite** de `grupos` (no llega vacía). Superusuario e `is_admin_empresa` ven todas. El alcance de filas (empresa, sucursal, vendedor, soft delete) es el mismo que el del ViewSet de cada entidad.
+
+| `tipo` | Etiqueta | CÓDIGO (prefijo, 2+) | NOMBRE (subcadena, 3+) | Permisos (basta uno) | Orden |
+|---|---|---|---|---|---|
+| `pedido` | Pedidos | `folio` | `cliente_nombre`, `cliente_razon_social` | `R-CRM-PEDIDOS`, `R-WMS-PEDIDOS`, `R-COMPRAS-PEDIDOS`, `R-MESACONTROL-PEDIDOS`, `R-PRODUCCION-OB`, `R-PRODUCCION-OR`, `R-PRODUCCION-CM`, `R-COMPRAS-OC`, `R-WMS-PICKING` | más reciente primero |
+| `orden_bordado` | Órdenes de bordado | — | `folio_bordado` | `R-PRODUCCION-OB`, `R-PRODUCCION` | más reciente primero (`fecha_inicio`) |
+| `cliente` | Clientes | — | `nombre`, `razon_social`, `correo` | `R-CRM-CLIENTES`, `R-MESACONTROL-CLIENTES`, `R-CONTABILIDAD-CLIENTES` | alfabético |
+| `cotizacion` | Cotizaciones | — | nombre y razón social del cliente | `R-CRM-COTIZACIONES`, `R-CRM`, `R-MESACONTROL-COTI`, `R-MESACONTROL` | más reciente primero |
+| `producto` | Productos | `sku` | nombre de la variante, nombre del producto | `R-CATALOGO-PRODUCTOS` ⚠️ | nombre del producto, sku |
+| `factura` | Facturas | `folio` | nombre y razón social del cliente | `R-CONTABILIDAD-FACTURACION`, `R-CONTABILIDAD` | `fecha_emision` desc |
+
+- **`orden_bordado`**: el folio real tiene el año delante (`2026-OB-00017`), por eso se busca por **subcadena** y no por prefijo: `OB-00017`, `00017` y `2026-OB` la encuentran, pero hace falta un mínimo de **3 caracteres** (con 2 el grupo llega vacío). No se busca por folio del pedido ni por cliente; esos datos sólo aparecen en `subtitulo` (`"<folio pedido> · <cliente>"`).
+- **`factura`**: folio `FAC-<n>` por prefijo (`00024` sólo no la encuentra). Excluye facturas con soft delete.
+- **`producto`**: ⚠️ la clave `R-CATALOGO-PRODUCTOS` **no existe todavía en el catálogo de permisos** (BD) y está pendiente de decisión; mientras tanto sólo superusuario e `is_admin_empresa` ven este grupo. Busca sobre variantes (`ProductoVariante`) activas; `estatus` es siempre `null`.
 
 ---
 
