@@ -8,6 +8,8 @@ from compras.models import (
     OrdenCompraDetalle,
     Recepcion,
     RecepcionDetalle,
+    RecepcionRFIDEncuadre,
+    RecepcionRFIDLectura,
 )
 
 
@@ -482,4 +484,61 @@ class CalidadInspeccionInputSerializer(serializers.Serializer):
     fecha = serializers.DateField(required=False, allow_null=True)
     observaciones = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     detalle = CalidadInspeccionDetalleInputSerializer(many=True)
+
+
+class RecepcionRFIDLecturaSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True, default=None)
+    producto_variante_nombre = serializers.CharField(
+        source="producto_variante.nombre", read_only=True, default=None
+    )
+
+    class Meta:
+        model = RecepcionRFIDLectura
+        fields = [
+            "id", "codigo_tag", "orden_compra_detalle", "orden_produccion_detalle",
+            "producto", "producto_nombre", "producto_variante", "producto_variante_nombre",
+            "cantidad_leida", "metadata", "created_at",
+        ]
+        read_only_fields = [
+            "producto", "producto_variante", "orden_compra_detalle",
+            "orden_produccion_detalle", "metadata",
+        ]
+
+
+class RecepcionRFIDEncuadreSerializer(serializers.ModelSerializer):
+    orden_compra_folio = serializers.CharField(source="orden_compra.folio", read_only=True, default=None)
+    op_folio = serializers.CharField(source="op.folio_op", read_only=True, default=None)
+    proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True, default=None)
+    almacen_nombre = serializers.CharField(source="almacen.nombre", read_only=True, default=None)
+    estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)
+    lecturas = RecepcionRFIDLecturaSerializer(many=True, read_only=True)
+    resumen = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RecepcionRFIDEncuadre
+        fields = [
+            "id", "tipo_origen", "orden_compra", "orden_compra_folio", "op", "op_folio",
+            "recepcion", "empresa", "sucursal", "proveedor", "proveedor_nombre",
+            "almacen", "almacen_nombre", "usuario", "serie_codigo", "fecha_recepcion",
+            "remision", "factura_referencia", "observaciones", "estatus", "estatus_label",
+            "activo", "created_at", "updated_at", "lecturas", "resumen",
+        ]
+        read_only_fields = ["empresa", "sucursal", "proveedor", "usuario", "recepcion", "estatus", "activo"]
+
+    def get_resumen(self, obj):
+        from compras.api.views import resumen_encuadre_rfid
+        return resumen_encuadre_rfid(obj)
+
+
+class RecepcionRFIDEncuadreCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RecepcionRFIDEncuadre
+        fields = [
+            "tipo_origen", "orden_compra", "op", "almacen",
+            "serie_codigo", "remision", "factura_referencia", "observaciones",
+        ]
+
+
+class RecepcionRFIDLecturaInputSerializer(serializers.Serializer):
+    codigo_tag = serializers.CharField()
 

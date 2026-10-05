@@ -2341,6 +2341,47 @@ Ya NO trae `movimiento_id`/`movimiento_inventario_id` — no hubo movimiento de 
 
 ---
 
+## 🧾 Compras - Encuadre RFID de Recepción
+
+Conteo RFID previo a la recepción formal (OC u OP). Antes solo existía como página HTML interna (`/QA/rfid/recepciones/`, sesión+CSRF); esto es el mismo flujo vía API v1.
+
+**1) Crear encuadre** — `POST /api/v1/compras/recepcion-rfid-encuadres/`
+
+```json
+{
+  "tipo_origen": "OC",
+  "orden_compra": 45,
+  "almacen": 3,
+  "serie_codigo": "RC",
+  "remision": "REM-001"
+}
+```
+Manda `orden_compra` **u** `op` (nunca ambos). `empresa`/`sucursal`/`proveedor`/`usuario` los pone el backend.
+
+**2) Escanear un tag** — `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/lecturas/`
+
+```json
+{ "codigo_tag": "9999-NEG" }
+```
+Resuelve por `sku` de variante, o `codigo`/`cod_proscai` de producto. Un tag repetido en el mismo encuadre regresa `400`. Solo funciona si el encuadre sigue `PENDIENTE`.
+
+**3) Ver detalle + resumen** — `GET /api/v1/compras/recepcion-rfid-encuadres/{id}/`
+
+```json
+{
+  "id": 1, "estatus": "PENDIENTE", "lecturas": [ { "codigo_tag": "9999-NEG", "cantidad_leida": "1.0000", "producto_nombre": "Tela RFID" } ],
+  "resumen": {
+    "detalle": [ { "detalle_id": 1, "producto_nombre": "Tela RFID", "ordenado": "100", "ya_recibido": "0", "esperado": "100", "leido": "1.0000", "diferencia": "99.0000" } ],
+    "total_esperado": "100", "total_leido": "1.0000", "total_sin_asignar": "0", "completo": false
+  }
+}
+```
+`esperado` = ordenado − ya recibido (no el total bruto de la OC/OP). `completo` es solo informativo; el backend no bloquea aceptar un encuadre incompleto.
+
+**4) Aceptar** — `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/aceptar/` (sin body). Pasa a `ACEPTADO`. **No mueve inventario ni crea `Recepcion`** — solo deja el conteo validado; la recepción formal se sigue haciendo con `recepciones/onboarding/` de siempre.
+
+---
+
 ## 🧾 Compras - Dashboard
 
 **Endpoint**: `GET /api/v1/compras/dashboard/`
