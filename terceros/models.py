@@ -1,6 +1,7 @@
-from django.contrib.postgres.indexes import GinIndex, OpClass
+from django.contrib.postgres.indexes import OpClass
 from django.db import models
 from django.db.models.functions import Upper
+from nucleo.indices import GinIndexSoloPostgres
 from django.conf import settings
 from nucleo.models import StatusLifecycleModel
 from nucleo.models import Empresa, SatRegimenFiscal, SatUsoCfdi, SatFormaPago, SatMetodoPago, Moneda, Sucursal
@@ -56,16 +57,16 @@ class Cliente(StatusLifecycleModel):
             # ``UPPER("col"::text) LIKE UPPER(%s)`` —no ``ILIKE`` — y un índice
             # sobre la columna cruda no sirve a ese predicado (verificado con
             # EXPLAIN y ``enable_seqscan = off``). Sólo existen en PostgreSQL:
-            # ver ``nucleo.migration_operations.AddIndexSoloPostgres``.
-            GinIndex(
+            # ver ``nucleo.indices``.
+            GinIndexSoloPostgres(
                 OpClass(Upper("nombre"), name="gin_trgm_ops"),
                 name="clientes_nombre_upper_trgm",
             ),
-            GinIndex(
+            GinIndexSoloPostgres(
                 OpClass(Upper("razon_social"), name="gin_trgm_ops"),
                 name="clientes_rsocial_upper_trgm",
             ),
-            GinIndex(
+            GinIndexSoloPostgres(
                 OpClass(Upper("correo"), name="gin_trgm_ops"),
                 name="clientes_correo_upper_trgm",
             ),

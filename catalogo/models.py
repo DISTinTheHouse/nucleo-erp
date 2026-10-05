@@ -1,6 +1,7 @@
-from django.contrib.postgres.indexes import GinIndex, OpClass
+from django.contrib.postgres.indexes import OpClass
 from django.db import models
 from django.db.models.functions import Upper
+from nucleo.indices import GinIndexSoloPostgres, IndexSoloPostgres
 from nucleo.models import Empresa, UnidadMedida, Impuesto, SatClaveProdServ, SatClaveUnidad
 from simple_history.models import HistoricalRecords
 
@@ -124,9 +125,9 @@ class Producto(models.Model):
             # columna cruda ni el ``_like`` de un campo ``unique`` pueden servir.
             # Mismo patrón que ``ventas.Pedido`` (ver ``nucleo/api/search.py``).
             # Sólo existen en PostgreSQL: ver
-            # ``nucleo.migration_operations.AddIndexSoloPostgres``.
+            # ``nucleo.indices``.
             # - ``nombre`` (NOMBRE, subcadena, vía ``producto__nombre``): GIN trigram.
-            GinIndex(
+            GinIndexSoloPostgres(
                 OpClass(Upper("nombre"), name="gin_trgm_ops"),
                 name="productos_nombre_upper_trgm",
             ),
@@ -159,14 +160,14 @@ class ProductoVariante(models.Model):
             # columna cruda ni el ``_like`` de un campo ``unique`` pueden servir.
             # Mismo patrón que ``ventas.Pedido`` (ver ``nucleo/api/search.py``).
             # Sólo existen en PostgreSQL: ver
-            # ``nucleo.migration_operations.AddIndexSoloPostgres``.
+            # ``nucleo.indices``.
             # - ``sku`` (CÓDIGO, prefijo): btree ``text_pattern_ops``.
             # - ``nombre`` (NOMBRE, subcadena): GIN trigram.
-            models.Index(
+            IndexSoloPostgres(
                 OpClass(Upper("sku"), name="text_pattern_ops"),
                 name="variantes_sku_upper_like",
             ),
-            GinIndex(
+            GinIndexSoloPostgres(
                 OpClass(Upper("nombre"), name="gin_trgm_ops"),
                 name="variantes_nombre_upper_trgm",
             ),

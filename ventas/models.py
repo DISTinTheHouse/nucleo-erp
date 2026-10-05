@@ -1,6 +1,7 @@
-from django.contrib.postgres.indexes import GinIndex, OpClass
+from django.contrib.postgres.indexes import OpClass
 from django.db import models
 from django.db.models.functions import Upper
+from nucleo.indices import GinIndexSoloPostgres, IndexSoloPostgres
 from django.conf import settings
 from nucleo.models import Empresa, Sucursal, Moneda, SerieFolio, StatusLifecycleModel, SatRegimenFiscal
 from terceros.models import Cliente, DireccionCliente
@@ -398,16 +399,16 @@ class Pedido(StatusLifecycleModel):
             # - columnas snapshot del cliente (NOMBRE, subcadena): GIN trigram.
             #
             # Sólo existen en PostgreSQL: ver
-            # ``nucleo.migration_operations.AddIndexSoloPostgres``.
-            models.Index(
+            # ``nucleo.indices``.
+            IndexSoloPostgres(
                 OpClass(Upper("folio"), name="text_pattern_ops"),
                 name="pedidos_folio_upper_like",
             ),
-            GinIndex(
+            GinIndexSoloPostgres(
                 OpClass(Upper("cliente_nombre"), name="gin_trgm_ops"),
                 name="pedidos_cli_nom_upper_trgm",
             ),
-            GinIndex(
+            GinIndexSoloPostgres(
                 OpClass(Upper("cliente_razon_social"), name="gin_trgm_ops"),
                 name="pedidos_cli_rs_upper_trgm",
             ),

@@ -76,7 +76,7 @@ en el ``Meta.indexes`` de cada modelo):
 PostgreSQL guarda ``UPPER(col)`` de un ``varchar`` como ``upper((col)::text)``, que es
 exactamente la expresión del ORM; el planner los empareja. Sólo existen en
 PostgreSQL: SQLite, donde corren las pruebas, no conoce los opclasses (ver
-``nucleo.migration_operations.AddIndexSoloPostgres``).
+``nucleo.indices``).
 
 Los resultados NO vienen rankeados por relevancia: cada grupo sale en el orden
 natural de su entidad (el más reciente primero, o alfabético en clientes). Rankear
