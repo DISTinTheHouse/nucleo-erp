@@ -5,12 +5,14 @@ from compras.api.views import (
     ComprasDashboardView,
     OrdenCompraViewSet,
     RecepcionViewSet,
+    RecepcionRFIDEncuadreViewSet,
 )
 
 router = DefaultRouter()
 router.register(r'ordenes', OrdenCompraViewSet, basename='ordenes-compra')
 router.register(r'recepciones', RecepcionViewSet, basename='recepciones')
 router.register(r'calidad-inspecciones', CalidadInspeccionViewSet, basename='calidad-inspecciones')
+router.register(r'recepcion-rfid-encuadres', RecepcionRFIDEncuadreViewSet, basename='recepcion-rfid-encuadres')
 
 urlpatterns = [
     path('dashboard/', ComprasDashboardView.as_view(), name='compras-dashboard'),
