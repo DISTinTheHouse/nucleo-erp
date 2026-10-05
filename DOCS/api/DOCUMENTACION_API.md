@@ -332,7 +332,7 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
 
 - **`orden_bordado`**: el folio real tiene el año delante (`2026-OB-00017`), por eso se busca por **subcadena** y no por prefijo: `OB-00017`, `00017` y `2026-OB` la encuentran, pero hace falta un mínimo de **3 caracteres** (con 2 el grupo llega vacío). No se busca por folio del pedido ni por cliente; esos datos sólo aparecen en `subtitulo` (`"<folio pedido> · <cliente>"`).
 - **`orden_reflejante`**: misma plantilla que `orden_bordado`. Folio `2026-OR-00006` por **subcadena** (`OR-00006`, `00006`, `2026-OR`), mínimo **3 caracteres**; folio del pedido y cliente sólo en `subtitulo`.
-- **`orden_corte_manga`**: misma plantilla. Folio `2026-CM-00005` (serie `CM`, no `OCM`) por **subcadena** (`CM-00005`, `00005`, `2026-CM`), mínimo **3 caracteres**.
+- **`orden_corte_manga`**: misma plantilla. Folio `2026-CM-00005` (serie `CM`, no `OCM`) por **subcadena** (`CM-00005`, `00005`, `2026-CM`), mínimo **3 caracteres**. Excepción: la generación automática desactivada en `ventas` tiene un respaldo que crea folios `OCM-<folio pedido>`; si existieran, esas órdenes sí aparecerían al buscar el folio del pedido (hoy no hay ninguna).
 - **`factura`**: folio `FAC-<n>` por prefijo (`00024` sólo no la encuentra). Excluye facturas con soft delete.
 - **`producto`**: ⚠️ la clave `R-CATALOGO-PRODUCTOS` **no existe todavía en el catálogo de permisos** (BD) y está pendiente de decisión; mientras tanto sólo superusuario e `is_admin_empresa` ven este grupo. Busca sobre variantes (`ProductoVariante`) activas; `estatus` es siempre `null`.
 
