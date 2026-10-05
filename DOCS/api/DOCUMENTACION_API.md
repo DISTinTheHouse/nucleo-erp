@@ -318,17 +318,19 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
 |---|---|---|---|---|---|
 | `pedido` | Pedidos | `folio` | `cliente_nombre`, `cliente_razon_social` | `R-CRM-PEDIDOS`, `R-WMS-PEDIDOS`, `R-COMPRAS-PEDIDOS`, `R-MESACONTROL-PEDIDOS`, `R-PRODUCCION-OB`, `R-PRODUCCION-OR`, `R-PRODUCCION-CM`, `R-COMPRAS-OC`, `R-WMS-PICKING` | más reciente primero |
 | `orden_bordado` | Órdenes de bordado | — | `folio_bordado` | `R-PRODUCCION-OB` | más reciente primero (`fecha_inicio`) |
+| `orden_reflejante` | Órdenes de reflejante | — | `folio_reflejante` | `R-PRODUCCION-OR` | más reciente primero (`fecha_inicio`) |
 | `cliente` | Clientes | — | `nombre`, `razon_social`, `correo` | `R-CRM-CLIENTES`, `R-MESACONTROL-CLIENTES`, `R-CONTABILIDAD-CLIENTES` | alfabético |
 | `cotizacion` | Cotizaciones | — | nombre y razón social del cliente | `R-CRM-COTIZACIONES`, `R-CRM`, `R-MESACONTROL-COTI`, `R-MESACONTROL` | más reciente primero |
 | `producto` | Productos | `sku` | nombre de la variante, nombre del producto | `R-CATALOGO-PRODUCTOS` ⚠️ | nombre del producto, sku |
 | `factura` | Facturas | `folio` | nombre y razón social del cliente | `R-CONTABILIDAD-FACTURACION` | `fecha_emision` desc |
 
 **Regla de los permisos de visibilidad**: las claves de una entidad son las que le permiten al usuario *abrir* esa entidad en algún lugar del frontend.
-- `orden_bordado` / `factura`: sólo la clave de sección (`R-PRODUCCION-OB` / `R-CONTABILIDAD-FACTURACION`); los códigos de módulo `R-PRODUCCION` / `R-CONTABILIDAD` no abren esas rutas.
+- `orden_bordado` / `orden_reflejante` / `factura`: sólo la clave de sección (`R-PRODUCCION-OB` / `R-PRODUCCION-OR` / `R-CONTABILIDAD-FACTURACION`); los códigos de módulo `R-PRODUCCION` / `R-CONTABILIDAD` no abren esas rutas.
 - `cotizacion`: `R-CRM` / `R-MESACONTROL` sí cuentan, porque los dashboards de esos módulos (`/sales`, `/operations`) abren cotizaciones.
 - `pedido`: incluye claves de otras secciones (OB/OR/CM, OC, picking) porque esas vistas enlazan al pedido y la ruta `/orders/[id]` las acepta.
 
 - **`orden_bordado`**: el folio real tiene el año delante (`2026-OB-00017`), por eso se busca por **subcadena** y no por prefijo: `OB-00017`, `00017` y `2026-OB` la encuentran, pero hace falta un mínimo de **3 caracteres** (con 2 el grupo llega vacío). No se busca por folio del pedido ni por cliente; esos datos sólo aparecen en `subtitulo` (`"<folio pedido> · <cliente>"`).
+- **`orden_reflejante`**: misma plantilla que `orden_bordado`. Folio `2026-OR-00006` por **subcadena** (`OR-00006`, `00006`, `2026-OR`), mínimo **3 caracteres**; folio del pedido y cliente sólo en `subtitulo`.
 - **`factura`**: folio `FAC-<n>` por prefijo (`00024` sólo no la encuentra). Excluye facturas con soft delete.
 - **`producto`**: ⚠️ la clave `R-CATALOGO-PRODUCTOS` **no existe todavía en el catálogo de permisos** (BD) y está pendiente de decisión; mientras tanto sólo superusuario e `is_admin_empresa` ven este grupo. Busca sobre variantes (`ProductoVariante`) activas; `estatus` es siempre `null`.
 

@@ -100,7 +100,12 @@ from finanzas.api.views import _aplicar_scope_empresa as _aplicar_scope_empresa_
 from finanzas.models import Factura
 from nucleo.permisos import PermisosEfectivos, permisos_efectivos
 from nucleo.utils import entero_acotado
-from produccion.scope import ordenes_bordado_base, ordenes_bordado_visibles
+from produccion.scope import (
+    ordenes_bordado_base,
+    ordenes_bordado_visibles,
+    ordenes_reflejante_base,
+    ordenes_reflejante_visibles,
+)
 from terceros.scope import clientes_base, clientes_visibles
 from ventas.scope import (
     cotizaciones_base,
@@ -314,6 +319,24 @@ def _fila_orden_bordado(orden) -> dict:
     }
 
 
+def _fila_orden_reflejante(orden) -> dict:
+    # Misma forma que ``_fila_orden_bordado``: ``folio_reflejante`` es NOT NULL y
+    # único; el subtítulo junta folio del pedido y cliente (snapshot del pedido) y
+    # se degrada a la parte que exista.
+    pedido = orden.pedido
+    cliente = _texto(pedido.cliente_razon_social) or _texto(pedido.cliente_nombre)
+    partes = [p for p in (_texto(pedido.folio), cliente) if p]
+    folio = _texto(orden.folio_reflejante)
+    return {
+        "tipo": "orden_reflejante",
+        "id": orden.pk,
+        "codigo": folio,
+        "titulo": folio,
+        "subtitulo": " · ".join(partes) or None,
+        "estatus": orden.get_estatus_reflejante_display(),
+    }
+
+
 #: Orden del registro = orden de los grupos en la respuesta.
 REGISTRO: tuple[EntidadBuscable, ...] = (
     EntidadBuscable(
@@ -379,6 +402,30 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         permisos_visibilidad=("R-PRODUCCION-OB",),
         # ``fecha_inicio`` es ``auto_now_add`` y NOT NULL, así que ``nulls_last``
         # no cambia nada hoy; se deja por coherencia con ``ORDEN_RECIENTE``.
+        orden=(F("fecha_inicio").desc(nulls_last=True), "-id"),
+    ),
+    EntidadBuscable(
+        tipo="orden_reflejante",
+        etiqueta="Órdenes de reflejante",
+        # Misma plantilla que la orden de bordado. Alcance de
+        # ``OrdenReflejanteViewSet`` (``produccion.scope``).
+        alcance=lambda user: ordenes_reflejante_visibles(
+            ordenes_reflejante_base().select_related("pedido"), user
+        ),
+        fila=_fila_orden_reflejante,
+        # Sólo por su folio, como NOMBRE (subcadena): el formato real es
+        # ``2026-OR-00006`` —año delante—, así que el prefijo no serviría.
+        campos_nombre=("folio_reflejante",),
+        campos_only=(
+            "folio_reflejante",
+            "estatus_reflejante",
+            "pedido__folio",
+            "pedido__cliente_nombre",
+            "pedido__cliente_razon_social",
+        ),
+        # Sólo la SECCIÓN: el frontend abre las órdenes de reflejante con
+        # ``R-PRODUCCION-OR``; ``R-PRODUCCION`` no las abre.
+        permisos_visibilidad=("R-PRODUCCION-OR",),
         orden=(F("fecha_inicio").desc(nulls_last=True), "-id"),
     ),
     EntidadBuscable(

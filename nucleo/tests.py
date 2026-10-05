@@ -24,7 +24,7 @@ from finanzas.models import Factura
 from nucleo.api.search import REGISTRO
 from nucleo.models import Empresa, Moneda, Sucursal
 from nucleo.permisos import permisos_efectivos
-from produccion.models import OrdenesBordado
+from produccion.models import OrdenesBordado, OrdenesReflejante
 from seguridad.models import Permiso, Rol, RolPermiso, UsuarioPermiso, UsuarioRol
 from terceros.models import Cliente
 from usuarios.models import Usuario
@@ -36,7 +36,8 @@ COTIZACIONES_URL = "/api/v1/ventas/cotizaciones/"
 #: Grupos que ve quien pasa el cortocircuito de permisos (superuser/admin), en el
 #: orden del ``REGISTRO``.
 TODOS_LOS_TIPOS = [
-    "pedido", "orden_bordado", "cliente", "cotizacion", "producto", "factura",
+    "pedido", "orden_bordado", "orden_reflejante",
+    "cliente", "cotizacion", "producto", "factura",
 ]
 
 
@@ -894,6 +895,210 @@ class OrdenBordadoBusquedaTests(BusquedaGlobalBaseTestCase):
         coste_4, payload = consultas()
         self.assertEqual(len(self._ids(payload, "orden_bordado")), 4)
         self.assertEqual(coste_4, coste_1)
+
+
+class _OrdenTrabajoBusquedaMixin:
+    """Batería de ``OrdenBordadoBusquedaTests`` para las otras órdenes de trabajo.
+
+    Reflejante y corte de manga siguen la plantilla de la OB: alcance de su propio
+    ViewSet (``produccion.scope``), folio como NOMBRE (subcadena, 3+ caracteres),
+    sólo su clave de sección y la misma forma de fila. Cada subclase declara su
+    modelo, su campo de folio y la serie real de su folio.
+    """
+
+    TIPO = None
+    ETIQUETA = None
+    MODEL = None
+    FOLIO_FIELD = None
+    SERIE = None  # "OR" / "CM": ``<año>-<serie>-<consecutivo>``, como en producción.
+    CLAVE = None
+    ESTATUS_INICIAL = "Pendiente"
+
+    @classmethod
+    def _orden(cls, tenant, folio, sucursal=None):
+        return cls.MODEL.objects.create(
+            empresa=tenant["empresa"],
+            sucursal=sucursal or tenant["sucursal"],
+            pedido=tenant["pedido"],
+            **{cls.FOLIO_FIELD: folio},
+        )
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Mismo consecutivo base en las dos empresas: ``<SERIE>-000`` está en el
+        # folio de ambas, así que una fuga de aislamiento se vería al buscarlo.
+        cls.orden_a = cls._orden(cls.a, f"2026-{cls.SERIE}-00027")
+        cls.orden_b = cls._orden(cls.b, f"2026-{cls.SERIE}-00028")
+        # Segunda sucursal de la empresa A, a la que los usuarios no admin de
+        # abajo no tienen acceso salvo que se les dé por el M2M.
+        cls.sucursal_a2 = Sucursal.objects.create(
+            empresa=cls.a["empresa"], codigo="AC2", nombre="acme-search 2"
+        )
+        cls.orden_otra_sucursal = cls._orden(
+            cls.a, f"2026-{cls.SERIE}-00029", sucursal=cls.sucursal_a2
+        )
+
+    def _usuario_con(self, sufijo, claves=()):
+        user = Usuario.objects.create(
+            username=f"{self.TIPO}-{sufijo}",
+            email=f"{self.TIPO}-{sufijo}@acme-search.test",
+            empresa=self.a["empresa"],
+            sucursal_default=self.a["sucursal"],
+        )
+        if claves:
+            rol = self._rol_con(self.a["empresa"], f"rol-{self.TIPO}-{sufijo}", claves)
+            UsuarioRol.objects.create(usuario=user, rol=rol, empresa=self.a["empresa"])
+        return user
+
+    def _tipos(self, user, q=None):
+        return [g["tipo"] for g in self._buscar(user, q or f"{self.SERIE}-")["grupos"]]
+
+    def _grupo(self, payload):
+        return next(g for g in payload["grupos"] if g["tipo"] == self.TIPO)
+
+    # --- visibilidad ----------------------------------------------------------
+
+    def test_codigo_de_seccion_basta(self):
+        self.assertIn(self.TIPO, self._tipos(self._usuario_con("sec", [self.CLAVE])))
+
+    def test_codigo_de_modulo_solo_no_basta(self):
+        """``R-PRODUCCION`` no abre la sección de esta orden en el frontend."""
+        self.assertNotIn(self.TIPO, self._tipos(self._usuario_con("mod", ["R-PRODUCCION"])))
+
+    def test_sin_el_codigo_de_seccion_se_omite(self):
+        otras = [
+            c for c in ("R-PRODUCCION-OB", "R-PRODUCCION-OR", "R-PRODUCCION-CM")
+            if c != self.CLAVE
+        ]
+        user = self._usuario_con("otros", otras + ["R-CRM-PEDIDOS"])
+        self.assertNotIn(self.TIPO, self._tipos(user))
+
+    def test_deny_oculta_la_entidad_si_nada_mas_la_concede(self):
+        user = self._usuario_con("deny", [self.CLAVE])
+        self.assertIn(self.TIPO, self._tipos(user))
+        UsuarioPermiso.objects.create(
+            usuario=user,
+            permiso=Permiso.objects.get(clave=self.CLAVE),
+            tipo=UsuarioPermiso.TIPO_DENY,
+        )
+        self.assertNotIn(self.TIPO, self._tipos(user))
+
+    # --- alcance de fila ------------------------------------------------------
+
+    def test_orden_de_otra_empresa_no_aparece(self):
+        payload = self._buscar(self.a["admin"], f"{self.SERIE}-000")
+        self.assertEqual(
+            sorted(self._ids(payload, self.TIPO)),
+            sorted([self.orden_a.pk, self.orden_otra_sucursal.pk]),
+        )
+
+    def test_superuser_ve_las_dos_empresas(self):
+        payload = self._buscar(self.superuser, f"{self.SERIE}-000")
+        self.assertEqual(
+            sorted(self._ids(payload, self.TIPO)),
+            sorted([self.orden_a.pk, self.orden_b.pk, self.orden_otra_sucursal.pk]),
+        )
+
+    def test_no_admin_no_ve_ordenes_fuera_de_sus_sucursales(self):
+        user = self._usuario_con("suc", [self.CLAVE])
+        payload = self._buscar(user, f"{self.SERIE}-000")
+        self.assertEqual(self._ids(payload, self.TIPO), [self.orden_a.pk])
+
+    def test_no_admin_ve_la_sucursal_que_le_da_el_m2m(self):
+        user = self._usuario_con("m2m", [self.CLAVE])
+        user.sucursales.add(self.sucursal_a2)
+        payload = self._buscar(user, f"{self.SERIE}-000")
+        self.assertEqual(
+            sorted(self._ids(payload, self.TIPO)),
+            sorted([self.orden_a.pk, self.orden_otra_sucursal.pk]),
+        )
+
+    def test_orden_con_soft_delete_no_aparece(self):
+        self.orden_a.soft_delete()
+        payload = self._buscar(self.a["admin"], f"{self.SERIE}-000")
+        self.assertEqual(self._ids(payload, self.TIPO), [self.orden_otra_sucursal.pk])
+
+    # --- coincidencia ---------------------------------------------------------
+
+    def test_folio_coincide_por_subcadena(self):
+        """El año va delante del folio: lo que se teclea está en medio."""
+        serie = self.SERIE
+        for q in (f"2026-{serie}", f"{serie}-00027", f"{serie.lower()}-00027", "00027"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertIn(self.orden_a.pk, self._ids(payload, self.TIPO))
+        payload = self._buscar(self.a["admin"], "00027")
+        self.assertEqual(self._ids(payload, self.TIPO), [self.orden_a.pk])
+
+    def test_q_de_2_caracteres_no_devuelve_ordenes(self):
+        grupo = self._grupo(self._buscar(self.a["admin"], self.SERIE))
+        self.assertEqual(grupo["resultados"], [])
+        self.assertFalse(grupo["hay_mas"])
+
+    def test_solo_coincide_por_su_folio(self):
+        """Ni el folio del pedido ni el nombre del cliente encuentran la orden."""
+        for q in ("P-00027", "acme"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertEqual(self._ids(payload, self.TIPO), [])
+
+    # --- forma de la fila -----------------------------------------------------
+
+    def test_fila_lleva_folio_pedido_cliente_y_estatus_legible(self):
+        folio = f"2026-{self.SERIE}-00027"
+        grupo = self._grupo(self._buscar(self.a["admin"], folio))
+        self.assertEqual(grupo["etiqueta"], self.ETIQUETA)
+        self.assertEqual(
+            grupo["resultados"][0],
+            {
+                "tipo": self.TIPO,
+                "id": self.orden_a.pk,
+                "codigo": folio,
+                "titulo": folio,
+                "subtitulo": f"P-00027 · {self.a['cliente'].razon_social}",
+                "estatus": self.ESTATUS_INICIAL,
+            },
+        )
+
+    def test_subtitulo_degrada_si_el_pedido_no_tiene_folio(self):
+        self.a["pedido"].folio = None
+        self.a["pedido"].save(update_fields=["folio"])
+        grupo = self._grupo(self._buscar(self.a["admin"], f"{self.SERIE}-00027"))
+        self.assertEqual(grupo["resultados"][0]["subtitulo"], self.a["cliente"].razon_social)
+
+    # --- coste ----------------------------------------------------------------
+
+    def test_coste_no_crece_con_el_numero_de_filas(self):
+        """Pedido y cliente salen del ``select_related``: sin N+1 por fila."""
+        user = self._usuario_con("coste", [self.CLAVE])
+
+        def consultas():
+            client = APIClient()
+            client.force_authenticate(user=user)
+            with CaptureQueriesContext(connection) as capturadas:
+                resp = client.get(f"{SEARCH_URL}?q={self.SERIE}-")
+            self.assertEqual(resp.status_code, 200)
+            return len(capturadas), resp.json()
+
+        coste_1, payload = consultas()
+        self.assertEqual(len(self._ids(payload, self.TIPO)), 1)
+        for i in range(3):
+            self._orden(self.a, f"2026-{self.SERIE}-1000{i}")
+        coste_4, payload = consultas()
+        self.assertEqual(len(self._ids(payload, self.TIPO)), 4)
+        self.assertEqual(coste_4, coste_1)
+
+
+class OrdenReflejanteBusquedaTests(_OrdenTrabajoBusquedaMixin, BusquedaGlobalBaseTestCase):
+    """Órdenes de reflejante: alcance de ``OrdenReflejanteViewSet``."""
+
+    TIPO = "orden_reflejante"
+    ETIQUETA = "Órdenes de reflejante"
+    MODEL = OrdenesReflejante
+    FOLIO_FIELD = "folio_reflejante"
+    SERIE = "OR"
+    CLAVE = "R-PRODUCCION-OR"
 
 
 class _GrupoPropioMixin:
