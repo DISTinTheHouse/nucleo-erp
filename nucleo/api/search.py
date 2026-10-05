@@ -371,9 +371,12 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
             "pedido__cliente_nombre",
             "pedido__cliente_razon_social",
         ),
-        # Sección (ver órdenes de bordado) o módulo (entrar a Producción), como
-        # en cotizaciones: cadenas planas, cualquiera de las dos basta.
-        permisos_visibilidad=("R-PRODUCCION-OB", "R-PRODUCCION"),
+        # Sólo la SECCIÓN, sin el código de módulo ``R-PRODUCCION``: en el
+        # frontend el código de módulo no abre las secciones con regla propia, y
+        # tanto el listado como el detalle de OB exigen ``R-PRODUCCION-OB``. Con
+        # el de módulo, el buscador mostraría órdenes que el usuario no puede
+        # abrir.
+        permisos_visibilidad=("R-PRODUCCION-OB",),
         # ``fecha_inicio`` es ``auto_now_add`` y NOT NULL, así que ``nulls_last``
         # no cambia nada hoy; se deja por coherencia con ``ORDEN_RECIENTE``.
         orden=(F("fecha_inicio").desc(nulls_last=True), "-id"),
@@ -476,10 +479,11 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         campos_codigo=("folio",),
         campos_nombre=("cliente__nombre", "cliente__razon_social"),
         campos_only=("folio", "estatus", "cliente__nombre", "cliente__razon_social"),
-        # Sección (ver facturación) o módulo (entrar a Contabilidad), como en
-        # cotizaciones y órdenes de bordado. Ambas claves existen en el catálogo y
-        # las tiene el rol Contabilidad.
-        permisos_visibilidad=("R-CONTABILIDAD-FACTURACION", "R-CONTABILIDAD"),
+        # Sólo la SECCIÓN, sin el código de módulo ``R-CONTABILIDAD``, por la
+        # misma razón que en órdenes de bordado: en el frontend el listado de
+        # facturación exige ``R-CONTABILIDAD-FACTURACION`` y el código de módulo
+        # no lo abre.
+        permisos_visibilidad=("R-CONTABILIDAD-FACTURACION",),
         orden=("-fecha_emision", "-id"),
     ),
 )
