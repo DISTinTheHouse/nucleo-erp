@@ -2340,6 +2340,10 @@ Ya NO trae `movimiento_id`/`movimiento_inventario_id` — no hubo movimiento de 
 
 Conteo RFID previo a la recepción formal (OC u OP). Antes solo existía como página HTML interna (`/QA/rfid/recepciones/`, sesión+CSRF); esto es el mismo flujo vía API v1.
 
+**0) Candidatos** — `GET /api/v1/compras/recepcion-rfid-encuadres/onboarding/`
+
+Mismo payload que `recepciones/onboarding/` (reusa la lógica, no la duplica): `busqueda.ordenes_compra[]` / `busqueda.ordenes_produccion[]` (ya filtradas a las que tienen algo pendiente) y `catalogos.almacenes[]`. Úsalo para llenar el formulario de "crear encuadre" — solo tiene sentido levantar un encuadre sobre una OC/OP que todavía le falta recibir algo.
+
 **1) Crear encuadre** — `POST /api/v1/compras/recepcion-rfid-encuadres/`
 
 ```json

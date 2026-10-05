@@ -358,4 +358,4 @@ Ese orden reduce riesgo, facilita mantenimiento y permite avanzar con valor real
   - [ ] antenna/rssi aparecen en admin (código listo, falta correr un FX post).
   - [ ] MATCH=SI real con chip con EPC bien grabado (LAB-000012 no sirve porque salió sin ^RS/^RB, hay que reimprimir).
 - **FASE 4 = 0% (como corresponde)**: se mantiene off hasta confirmar lectura 100% real + match SI en producción.
-  - [x] 2026-10-05: API REST del encuadre de recepción lista (`POST/GET .../compras/recepcion-rfid-encuadres/`, `.../lecturas/`, `.../aceptar/`), soporta OC y OP, `esperado` ya resta lo recibido. Documentado en `DOCUMENTACION_API.md`. Sigue sin usarse en producción — falta que Next.js lo consuma y falta el match SI real con hardware.
+  - [x] 2026-10-05: API REST del encuadre de recepción lista (`POST/GET .../compras/recepcion-rfid-encuadres/`, `.../lecturas/`, `.../aceptar/`, `GET .../onboarding/` con candidatos OC/OP+almacenes), soporta OC y OP, `esperado` ya resta lo recibido. Documentado en `DOCUMENTACION_API.md`. Sigue sin usarse en producción — falta que Next.js lo consuma y falta el match SI real con hardware.
