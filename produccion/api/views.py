@@ -531,15 +531,28 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         if op is None:
             return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
 
-        instance, _created = OrdenProduccionRutaCritica.objects.get_or_create(op=op)
-
         if request.method == 'GET':
+            # Leer no escribe: sin renglón aún se devuelven los valores por
+            # defecto sin persistirlos; el renglón nace en el primer PATCH.
+            instance = (
+                OrdenProduccionRutaCritica.objects.filter(op=op).first()
+                or OrdenProduccionRutaCritica(op=op)
+            )
             return Response(OrdenProduccionRutaCriticaSerializer(instance).data)
 
         # PATCH: solo produccion (o superuser/admin_empresa) puede escribir
         # ruta crítica -- mismo patrón que ``_require_mesa_control`` en
         # ``ventas.api.views`` para ``Pedido.clasificacion``/``fecha_confirmacion``.
         self._require_produccion(request.user)
+        if op.estatus_op in (
+            OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+            OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
+        ):
+            return Response(
+                {'msg': f'La OP está {op.get_estatus_op_display().lower()}: su ruta crítica ya no se puede editar.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        instance, _created = OrdenProduccionRutaCritica.objects.get_or_create(op=op)
         serializer = OrdenProduccionRutaCriticaSerializer(instance, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
