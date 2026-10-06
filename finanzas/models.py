@@ -210,6 +210,13 @@ class FacturaProveedor(models.Model):
         default=FacturaProveedorStatus.BORRADOR,
     )
     observaciones = models.TextField(null=True, blank=True)
+    # PDF de la factura del proveedor (EC-397), guardado como bytes en la
+    # propia fila: nada de almacenamiento de archivos en disco, que en
+    # serverless (Vercel) es efímero y que habría que reconfigurar otra vez
+    # al migrar a Oracle OCI. Es un documento chico (una factura), así que
+    # vive bien en la base de datos sin necesitar un bucket.
+    pdf_adjunto = models.BinaryField(null=True, blank=True)
+    pdf_adjunto_nombre = models.CharField(max_length=255, null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
     activo = models.BooleanField(default=True)

@@ -2553,6 +2553,15 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 | `polizas`           | `id`, `empresa_id`, `sucursal_id`, `centro_costo_id`                                                                                                      |
 | `poliza_detalle`    | `id`, `poliza_id`, `cuenta_contable_id`, `centro_costo_id` y vínculos opcionales a `factura`, `factura_proveedor`, `pago`, `cobro`, `movimiento_bancario` |
 
+### Factura Proveedor: adjuntar PDF y fusión OC + RC + factura (EC-397)
+
+`FacturaProveedor` ya trae `oc` y `recepcion` como FK, así que es el ancla natural para los 3 documentos.
+
+- **`POST /api/v1/finanzas/facturas-proveedor/{id}/adjuntar-pdf/`** — `multipart/form-data` con campo `archivo` (el PDF de la factura del proveedor). Valida que empiece con `%PDF` y pese ≤ 10 MB; si no, `400`. Se guarda como bytes en la propia fila (`pdf_adjunto`/`pdf_adjunto_nombre`), sin storage externo. Respuesta `200`: `{ "tiene_pdf_adjunto": true, "pdf_adjunto_nombre": "factura.pdf" }`.
+- **`GET /api/v1/finanzas/facturas-proveedor/{id}/pdf-fusionado/`** — genera un PDF simple de la OC (datos + renglones) y otro de la Recepción, y los junta con el PDF adjunto en un solo archivo (`application/pdf`, `Content-Disposition: inline`), en ese orden: OC → RC → factura. `400` si todavía no se adjuntó el PDF de la factura.
+- `list`/`retrieve` de `facturas-proveedor` exponen `tiene_pdf_adjunto` (bool); **no** devuelven el binario (`pdf_adjunto` se excluye del serializer a propósito).
+- Deliberadamente simple: nada de storage en disco ni de servicios externos (Vercel serverless tiene filesystem efímero, y esto se va a Oracle OCI pronto) — el PDF vive como bytes en Postgres igual en cualquier infraestructura.
+
 ### Catálogo oficial de endpoints
 
 | Pantalla Next.js         | Endpoint principal                                    | Acciones útiles                                                                                           | Ids clave                                                   |
