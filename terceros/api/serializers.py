@@ -50,10 +50,23 @@ class ClienteSerializer(serializers.ModelSerializer):
         return attrs
 
 class ProveedorSerializer(serializers.ModelSerializer):
+    def validate_moneda(self, moneda):
+        # Global (sin empresa) o privada de la empresa del proveedor.
+        if moneda is None or moneda.empresa_id is None:
+            return moneda
+        if self.instance is not None:
+            empresa_id = self.instance.empresa_id
+        else:
+            empresa_id = getattr(getattr(self.context.get("request"), "user", None), "empresa_id", None)
+        if moneda.empresa_id != empresa_id:
+            raise serializers.ValidationError("La moneda no está disponible para la empresa del proveedor.")
+        return moneda
+
     class Meta:
         model = Proveedor
         fields = "__all__"
-        read_only_fields = ["activo"]
+        # ``empresa`` la asigna el servidor (``ProveedorViewSet.perform_create``).
+        read_only_fields = ["activo", "empresa"]
 
 class DireccionClienteSerializer(serializers.ModelSerializer):
     class Meta:
