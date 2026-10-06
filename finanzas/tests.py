@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 
 from django.apps import apps as django_apps
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models.signals import post_delete
 from django.test import TestCase
@@ -4764,3 +4765,79 @@ class ConciliacionPrepararIdempotenteTests(FinanzasBase):
                 self.assertEqual(
                     ConciliacionBancaria.objects.filter(cuenta_bancaria=cuenta).count(), 2,
                 )
+
+
+class PdfFusionFacturaProveedorTests(FinanzasBase):
+    """``adjuntar-pdf`` + ``pdf-fusionado`` de ``FacturaProveedorViewSet`` (EC-397)."""
+
+    def _factura(self):
+        *_, factura = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"],
+        )
+        return factura
+
+    def _pdf_falso(self, nombre="factura.pdf"):
+        # Bytes mínimos pero reales de un PDF de una página — suficiente para
+        # que pypdf lo lea sin reventar; no se usa reportlab aquí para no
+        # acoplar el test a cómo se arma el PDF de prueba.
+        contenido = (
+            b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+            b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+            b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n"
+            b"xref\n0 4\n0000000000 65535 f \n"
+            b"trailer<</Size 4/Root 1 0 R>>\nstartxref\n0\n%%EOF"
+        )
+        return SimpleUploadedFile(nombre, contenido, content_type="application/pdf")
+
+    def test_pdf_fusionado_sin_adjunto_es_400(self):
+        factura = self._factura()
+        client = self._client(self.a["usuario"])
+        resp = client.get(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/pdf-fusionado/")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_adjuntar_pdf_rechaza_archivo_que_no_es_pdf(self):
+        factura = self._factura()
+        client = self._client(self.a["usuario"])
+        archivo = SimpleUploadedFile("factura.txt", b"no es un pdf", content_type="text/plain")
+        resp = client.post(
+            f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/adjuntar-pdf/", {"archivo": archivo}, format="multipart",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        factura.refresh_from_db()
+        self.assertFalse(factura.pdf_adjunto)
+
+    def test_adjuntar_pdf_de_otra_empresa_es_404(self):
+        factura = self._factura()
+        client_b = self._client(self.b["usuario"])
+        resp = client_b.post(
+            f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/adjuntar-pdf/", {"archivo": self._pdf_falso()}, format="multipart",
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_adjuntar_y_fusionar_pdf_de_principio_a_fin(self):
+        factura = self._factura()
+        client = self._client(self.a["usuario"])
+
+        subida = client.post(
+            f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/adjuntar-pdf/", {"archivo": self._pdf_falso()}, format="multipart",
+        )
+        self.assertEqual(subida.status_code, 200, subida.data)
+        self.assertTrue(subida.data["tiene_pdf_adjunto"])
+        factura.refresh_from_db()
+        self.assertTrue(bytes(factura.pdf_adjunto).startswith(b"%PDF"))
+        self.assertEqual(factura.pdf_adjunto_nombre, "factura.pdf")
+
+        detalle = client.get(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/")
+        self.assertTrue(detalle.data["tiene_pdf_adjunto"])
+        self.assertNotIn("pdf_adjunto", detalle.data)
+
+        fusion = client.get(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/pdf-fusionado/")
+        self.assertEqual(fusion.status_code, 200)
+        self.assertEqual(fusion["Content-Type"], "application/pdf")
+        self.assertTrue(fusion.content.startswith(b"%PDF"))
+
+        from pypdf import PdfReader
+        import io
+        lector = PdfReader(io.BytesIO(fusion.content))
+        # OC (1 página) + Recepción (1 página) + factura adjunta (1 página).
+        self.assertEqual(len(lector.pages), 3)
