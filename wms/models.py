@@ -1,5 +1,6 @@
 import secrets
 
+from django.core.exceptions import ValidationError
 from django.db import models
 from simple_history.models import HistoricalRecords
 
@@ -541,12 +542,13 @@ class LectorRFID(models.Model):
         on_delete=models.CASCADE,
         related_name="lectores_rfid",
     )
+    # Obligatoria en formularios; nullable en BD solo por lectores dados de alta
+    # antes de exigirla. Un lector sin sucursal solo lo ven los admins.
     sucursal = models.ForeignKey(
         "nucleo.Sucursal",
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         related_name="lectores_rfid",
         null=True,
-        blank=True,
     )
     nombre = models.CharField(max_length=100)
     token = models.CharField(max_length=64, unique=True, default=_generar_token_lector)
@@ -564,15 +566,23 @@ class LectorRFID(models.Model):
     def __str__(self):
         return f"{self.nombre} ({self.empresa_id})"
 
+    def clean(self):
+        if self.sucursal_id and self.empresa_id and self.sucursal.empresa_id != self.empresa_id:
+            raise ValidationError({"sucursal": "La sucursal no pertenece a la empresa del lector."})
+
 
 class RfidScanQuerySet(models.QuerySet):
     def visibles_para(self, user):
+        """Superusuario: todo. Admin de empresa: su empresa. Resto: sucursales permitidas."""
         if getattr(user, "is_superuser", False):
             return self
         empresa_id = getattr(user, "empresa_id", None)
         if not empresa_id:
             return self.none()
-        return self.filter(empresa_id=empresa_id)
+        qs = self.filter(empresa_id=empresa_id)
+        if getattr(user, "is_admin_empresa", False):
+            return qs
+        return qs.filter(lector__sucursal_id__in=user.sucursales_permitidas())
 
 
 class RfidScan(models.Model):

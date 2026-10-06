@@ -697,8 +697,7 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
     def scans(self, request):
         """Polling endpoint p/ Next.js: últimas 50 lecturas del FX + match automático.
 
-        Igual que /QA/scanner_rfid/get/ pero filtrado empresa (sucursales permitidas)
-        y enrutado vía DRF ViewSet V1.
+        Acotado a la empresa del usuario; no admin: lectores de sus sucursales.
 
         Query params (debug opcional, sin auth):
             epc (opcional): si enviamos un EPC (hex), se busca directamente y en
@@ -780,15 +779,13 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                 "impresion__producto_variante__talla__nombre",
             )
         )
-        # Scope empresa (solo ver scans que hagan match con detalles de mi empresa)
-        empresa = getattr(user, "empresa", None)
-        if empresa and not getattr(user, "is_superuser", False):
-            detalle_qs = detalle_qs.filter(impresion__empresa=empresa)
-        sucursales_ok = None
-        if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
-            sucursales_ok = user.sucursales_permitidas()
-            if sucursales_ok:
-                detalle_qs = detalle_qs.filter(impresion__sucursal_id__in=sucursales_ok)
+        # Mismo alcance que get_queryset: sin empresa o sin sucursales no hay match.
+        if not getattr(user, "is_superuser", False):
+            detalle_qs = detalle_qs.filter(impresion__empresa_id=user.empresa_id)
+            if not getattr(user, "is_admin_empresa", False):
+                detalle_qs = detalle_qs.filter(
+                    impresion__sucursal_id__in=user.sucursales_permitidas()
+                )
 
         detalle_by_epc_variant = {}
         for d in detalle_qs:

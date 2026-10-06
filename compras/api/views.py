@@ -1910,7 +1910,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 def _resolver_tag_rfid(encuadre, codigo_tag):
-    """Mismo matching que el workspace QA (sku/codigo/cod_proscai), pero soporta OC y OP."""
+    """Resuelve un tag por sku/codigo/cod_proscai contra la OC u OP del encuadre."""
     tokens = [t.strip() for t in codigo_tag.replace(",", " ").split() if t.strip()] or [codigo_tag]
 
     producto_variante = (
@@ -2023,10 +2023,10 @@ def resumen_encuadre_rfid(encuadre):
 
 
 class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
-    """API REST del encuadre RFID de recepción -- antes solo existía como
-    página HTML con sesión+CSRF (``/QA/rfid/recepciones/``), inconsumible desde
-    Next.js. Mismo matching y reglas que esa pantalla, con dos fixes del audit:
-    soporta OP (antes solo OC) y "esperado" resta lo ya recibido.
+    """API REST del encuadre RFID de recepción (OC u OP).
+
+    "Esperado" resta lo ya recibido. Las lecturas se resuelven por SKU/código,
+    todavía no por EPC.
     """
 
     queryset = RecepcionRFIDEncuadre.objects.all()
