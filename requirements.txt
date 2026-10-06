@@ -5,7 +5,7 @@ cffi==2.0.0
 charset-normalizer==3.5.1
 cryptography==50.0.0
 dj-database-url==2.1.0
-Django==6.0.7
+Django==6.0.8
 django-allauth==65.16.0
 django-axes==8.1.0
 django-cors-headers==4.9.0
