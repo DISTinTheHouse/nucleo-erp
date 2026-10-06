@@ -2384,7 +2384,7 @@ Ya NO trae `movimiento_id`/`movimiento_inventario_id` — no hubo movimiento de 
 
 ## 🧾 Compras - Encuadre RFID de Recepción
 
-Conteo RFID previo a la recepción formal (OC u OP). Antes solo existía como página HTML interna (`/QA/rfid/recepciones/`, sesión+CSRF); esto es el mismo flujo vía API v1.
+Conteo RFID previo a la recepción formal (OC u OP).
 
 **0) Candidatos** — `GET /api/v1/compras/recepcion-rfid-encuadres/onboarding/`
 
@@ -4926,9 +4926,7 @@ El frontend selecciona la impresora, envía el ZPL vía Zebra Browser Print y no
 
 - **Origen y descarga**: Zebra Browser Print es utilería de Zebra Technologies instalada localmente en la estación de trabajo.
   - Instalador y documentación oficial: https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html
-- **Librería cliente servida por el backend Django**:
-  - Endpoint estático: `GET /QA/browserprint/BrowserPrint-3.1.250.min.js/`
-  - Implementación: vista `qa_browserprint_asset` en [QA/views.py](file:///c:/Users/Jes%C3%BAs%20Ibarra/Desktop/django-backend-v2/QA/views.py#L512-L520), URL registrada en [QA/urls.py](file:///c:/Users/Jes%C3%BAs%20Ibarra/Desktop/django-backend-v2/QA/urls.py).
+- **Librería cliente**: la sirve el propio frontend Next.js (SDK de Zebra copiado en su repo). El backend no la sirve.
 - **Modo de uso en Next.js**: cargar dicha librería en el contexto del modal y usar su API (`BrowserPrint.getDefaultDevice`, `device.send(zpl)`)
   para enviar cada ZPL directamente a la impresora detectada (USB / red). El nombre y dirección de la impresora que devuelve Browser Print
   se persisten en el backend a través del `POST onboarding`.
@@ -5263,7 +5261,7 @@ La impresión ya quedó registrada y se verá en `GET /api/v1/wms/etiquetas-rfid
 | 1    | Abrir modal y consultar `GET /api/v1/wms/etiquetas-rfid/onboarding/` para obtener resultados iniciales.                                                                                                                                                                               |
 | 2    | Buscar texto: `GET /api/v1/wms/etiquetas-rfid/onboarding/?q=<texto>`. Renderizar la lista con el campo `label`.                                                                                                                                                                       |
 | 3    | Seleccionar variante/producto y cantidad, consultar `GET /onboarding/?variante=X&cantidad=N&rfid_mode=true` (o `?producto=Y`). Usar `preview.zpl_individual[]` como fuente de ZPL.                                                                                                    |
-| 4    | Cargar Zebra Browser Print desde `GET /QA/browserprint/BrowserPrint-3.1.250.min.js/`, detectar impresora (`BrowserPrint.getDefaultDevice` o listado de dispositivos) y enviar cada ZPL individual con `device.send(zpl)`.                                                             |
+| 4    | Cargar Zebra Browser Print (SDK incluido en el frontend), detectar impresora (`BrowserPrint.getDefaultDevice` o listado de dispositivos) y enviar cada ZPL individual con `device.send(zpl)`.                                                             |
 | 5    | Al finalizar el envío de las etiquetas, registrar la operación con `POST /api/v1/wms/etiquetas-rfid/onboarding/`: `producto_variante`, `cantidad`, `rfid_mode`, `printer_name`, `printer_address`, `status`. Enviar opcionalmente el arreglo `etiquetas[]` con los EPC reales usados. |
 | 6    | Actualizar el listado de impresiones en pantalla a partir de `GET /api/v1/wms/etiquetas-rfid/`.                                                                                                                                                                                       |
 
@@ -5643,66 +5641,6 @@ GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=000012E32827000147C0C5F5
 | 3    | Click **Iniciar Monitoreo** = `setInterval` cada **2000 ms (2s)** llamando `GET /api/v1/wms/etiquetas-rfid/scans/`. Usa `lastSeenId` (Ref) para agregar solo scans nuevos (ids mayores).                       |
 | 4    | Render tabla: columna `MATCH=✅/❌` + `sku`, `color`, `talla`, `folio`, `antenna`, `rssi`, `timestamp`. Si `match_impresion=false` mostrar EPC hex crudo; si `true` pintar fila VERDE con los campos producto. |
 | 5    | Debug rápido: ante duda click **Status FX** = `GET /scanner-stats/?epc=<EPC_IMPRESO>` y revisa `query_epc_found_count` (0 no leída, ≥1 leída) + `last_scan_seconds_ago` (>300s = FX offline).                  |
-
----
-
-## 🧪 QA RFID Workspace
-
-Flujo de pruebas locales para validar impresión Zebra y captura de lecturas desde dispositivos Zebra sin afectar inventario.
-
-### 1) Workspace de Recepciones RFID
-
-- **URL**: `GET /QA/rfid/recepciones/`
-- **Descripción**: permite crear un encuadre QA, registrar lecturas y comparar lo esperado vs lo leído antes de pasar a una recepción formal.
-
-#### Query params
-
-- `encuadre` opcional: abre un encuadre existente para seguir escaneando.
-
-#### Notas operativas
-
-- El flujo QA no genera movimientos de stock.
-- La captura actual acepta valores por `sku`, `codigo` o `cod_proscai`.
-- Si el código no se puede resolver, la lectura queda registrada como no asignada.
-
-### 2) Workspace de Impresión QA
-
-- **URL**: `GET /QA/imprimir_etiqueta/`
-- **Alias tolerado**: `GET /QA/imrpimir_etiqueta/`
-- **Descripción**: busca variantes o productos base, genera un ZPL de prueba y permite imprimirlo vía Zebra Browser Print local.
-
-#### Query params
-
-- `q` opcional: busca por `sku`, nombre, `codigo` o `cod_proscai`.
-- `variante` opcional: selecciona una `ProductoVariante`.
-- `producto` opcional: selecciona un `Producto` cuando no existen variantes.
-- `encuadre` opcional: conserva el retorno al workspace de recepción QA.
-
-#### Comportamiento
-
-- Si la búsqueda encuentra variantes, se puede imprimir por `sku`.
-- Si la búsqueda encuentra un producto sin variantes, se puede imprimir por `codigo` o `cod_proscai`.
-- Si solo existe un producto coincidente y no hay variantes, la pantalla lo selecciona automáticamente.
-- El frontend carga Browser Print desde rutas QA dedicadas para no depender de `collectstatic` durante pruebas locales.
-
-#### Assets locales usados por Browser Print
-
-- `GET /QA/browserprint/BrowserPrint-3.1.250.min.js`
-- `GET /QA/browserprint/BrowserPrint-Zebra-1.1.250.min.js`
-
-### 3) Flujo validado en pruebas
-
-1. Crear o abrir un encuadre en `GET /QA/rfid/recepciones/?encuadre={id}`.
-2. Ir a `GET /QA/imprimir_etiqueta/?encuadre={id}`.
-3. Buscar una variante o un producto base, por ejemplo `93E0`.
-4. Imprimir la etiqueta desde la PC con Zebra Browser Print.
-5. Abrir el encuadre en el Zebra `MC3300X`.
-6. Escanear el código impreso para registrar la lectura en QA.
-
-### 4) Alcance actual
-
-- La validación completada en QA corresponde a lectura por código de barras enviado por el Zebra como entrada de teclado.
-- La lectura RFID real será una fase posterior, donde el dispositivo deberá enviar `EPC` u otro identificador RFID al backend.
 
 ---
 
