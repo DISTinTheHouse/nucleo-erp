@@ -3,6 +3,7 @@ from django.db import models
 from django.utils import timezone
 from nucleo.models import StatusLifecycleModel
 from simple_history.models import HistoricalRecords
+import uuid
 
 class MetodoPago(models.TextChoices):
     EFECTIVO = 'Efectivo', 'Efectivo'
@@ -650,3 +651,149 @@ class SyncfyUser(models.Model):
         db_table = "syncfy_users"
         verbose_name = "Syncfy user"
         verbose_name_plural = "Syncfy users"
+
+class SyncfyWebhookNotification(models.Model):
+
+    class Status(models.TextChoices):
+        RECEIVED = "received", "Received"
+        PROCESSING = "processing", "Processing"
+        PROCESSED = "processed", "Processed"
+        FAILED = "failed", "Failed"
+
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
+    rid = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+    )
+
+    # SHA-256 del body HTTP original.
+    # Sirve para detectar exactamente la misma notificación.
+    body_hash = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+    )
+
+    # Body completo recibido de Syncfy.
+    payload = models.JSONField()
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.RECEIVED,
+        db_index=True,
+    )
+
+    error_message = models.TextField(
+        blank=True,
+    )
+
+    attempts = models.PositiveIntegerField(
+        default=0,
+    )
+
+    received_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    processed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        db_table = "syncfy_webhook_notifications"
+        ordering = ["-received_at"]
+
+
+class SyncfyWebhookEvent(models.Model):
+
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
+    notification = models.ForeignKey(
+        SyncfyWebhookNotification,
+        on_delete=models.CASCADE,
+        related_name="events",
+    )
+
+    # header.event.eid
+    event_id = models.UUIDField(
+        db_index=True,
+    )
+
+    # header.event.name
+    event_name = models.CharField(
+        max_length=100,
+        db_index=True,
+    )
+
+    # header.event.version
+    event_version = models.CharField(
+        max_length=20,
+        blank=True,
+    )
+
+    # header.event.at
+    event_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    id_environment = models.CharField(
+        max_length=100,
+        blank=True,
+    )
+
+    id_external = models.CharField(
+        max_length=255,
+        blank=True,
+    )
+
+    id_user = models.CharField(
+        max_length=100,
+        blank=True,
+    )
+
+    id_credential = models.CharField(
+        max_length=100,
+        blank=True,
+        db_index=True,
+    )
+
+    # payload específico del evento.
+    payload = models.JSONField()
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    class Meta:
+        db_table = "syncfy_webhook_events"
+
+        ordering = ["created_at"]
+
+        constraints = [
+            models.UniqueConstraint(
+                fields=["notification", "event_id"],
+                name="unique_syncfy_event_per_notification",
+            ),
+        ]
+
+        indexes = [
+            models.Index(
+                fields=["event_name", "id_credential"],
+            ),
+            models.Index(
+                fields=["event_name", "created_at"],
+            ),
+        ]

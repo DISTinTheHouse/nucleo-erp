@@ -22,6 +22,7 @@ from .views import (
     FacturamaCfdiEmisionViewSet,
     SyncfySessionViewSet,
 )
+from finanzas.webhooks.views import SyncfyWebhookView
 
 router = DefaultRouter()
 router.register(r'bancos', BancoViewSet, basename='banco')
@@ -45,7 +46,7 @@ router.register(r'facturama/productos', FacturamaProductsViewSet, basename='fact
 router.register(r'facturama/cfdi', FacturamaCfdiEmisionViewSet, basename='facturama-cfdi')
 router.register(r'syncfy/sessions', SyncfySessionViewSet, basename='syncfy-sessions')
 
-
 urlpatterns = [
+    path('syncfy/webhook', SyncfyWebhookView.as_view(), name='syncfy-webhook'),
     path('', include(router.urls)),
 ]
