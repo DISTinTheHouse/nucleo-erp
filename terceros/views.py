@@ -9,7 +9,11 @@ from urllib.error import HTTPError, URLError
 import base64
 import json
 
-class RfcStatusView(LoginRequiredMixin, View):
+from nucleo.views import SuperuserRequiredMixin
+
+
+# Páginas del Core que usan las credenciales de Facturama: sólo superusuario.
+class RfcStatusView(LoginRequiredMixin, SuperuserRequiredMixin, View):
     template_name = "terceros/rfc_status.html"
 
     def get(self, request):
@@ -48,7 +52,7 @@ class RfcStatusView(LoginRequiredMixin, View):
                 messages.error(request, "El RFC no tiene formato válido.")
         return render(request, self.template_name, {"result": data, "rfc": rfc, "is_sandbox": is_sandbox})
 
-class ClientCreateView(LoginRequiredMixin, View):
+class ClientCreateView(LoginRequiredMixin, SuperuserRequiredMixin, View):
     template_name = "terceros/client_by_id.html"
 
     def get(self, request):

@@ -9,6 +9,8 @@ from rest_framework.exceptions import APIException, NotFound, PermissionDenied, 
 from rest_framework.fields import get_error_detail
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
+from rest_framework.permissions import BasePermission, IsAuthenticated
+from finanzas.services.facturama.acceso import puede_usar_facturama
 from finanzas.services.facturama.service import FacturamaService
 from finanzas.services.facturama.exceptions import FacturamaAPIException
 from finanzas.services.pdf_fusion_service import fusionar_pdf_factura_proveedor
@@ -2287,7 +2289,21 @@ class DashboardFinancieroViewSet(FinanzasBaseSimpleViewSet):
             )
         )
 
+class PuedeUsarFacturama(BasePermission):
+    """Candado de la cuenta única de Facturama (ver ``facturama/acceso.py``).
+
+    Estos ViewSets no filtran por empresa: hablan directo con Facturama, así que
+    el aislamiento multi-tenant vive aquí y responde 403, no 404.
+    """
+
+    message = "No tienes acceso a Facturama."
+
+    def has_permission(self, request, view):
+        return puede_usar_facturama(request.user)
+
+
 class FacturamaProductsViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated, PuedeUsarFacturama]
     service_class = FacturamaService
 
     def get_service(self):
@@ -2360,6 +2376,7 @@ class FacturamaProductsViewSet(viewsets.ViewSet):
             return self.handle_facturama_error(exc)
 
 class FacturamaCfdiEmisionViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated, PuedeUsarFacturama]
     service_class = FacturamaService
 
     def get_service(self):

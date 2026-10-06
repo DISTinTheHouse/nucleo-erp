@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from django.conf import settings
 from django.db.models import Count, Sum
 from django.utils.dateparse import parse_date
+from finanzas.services.facturama.acceso import empresa_usa_facturama
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import ProveedorSerializer, ClienteSerializer, DireccionClienteSerializer
 from terceros.scope import clientes_base, clientes_visibles
@@ -111,6 +112,10 @@ class ClienteViewSet(viewsets.ModelViewSet):
                 cliente.vendedores.add(user)
         except Exception:
             pass
+        # La cuenta de Facturama es de UNA empresa: los clientes de las demás no se
+        # le suben (antes se mandaban todos, de cualquier tenant).
+        if not empresa_usa_facturama(cliente.empresa):
+            return
         try:
             base_url = getattr(settings, "FACTURAMA_BASE_URL", "https://apisandbox.facturama.mx").rstrip("/")
             url = f"{base_url}/Client"
