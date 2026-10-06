@@ -4841,3 +4841,115 @@ class PdfFusionFacturaProveedorTests(FinanzasBase):
         lector = PdfReader(io.BytesIO(fusion.content))
         # OC (1 página) + Recepción (1 página) + factura adjunta (1 página).
         self.assertEqual(len(lector.pages), 3)
+
+
+class FacturamaAccesoTests(TestCase):
+    """Candado de la cuenta única de Facturama (``facturama/acceso.py``).
+
+    Antes cualquier usuario autenticado de cualquier empresa podía timbrar con el
+    RFC de la empresa dueña, tocar su catálogo o bajar el XML de cualquier CFDI.
+    El servicio se sustituye por un mock: ninguna prueba sale a Facturama.
+    """
+
+    PRODUCTOS = "/api/v1/finanzas/facturama/productos/"
+    CFDI = "/api/v1/finanzas/facturama/cfdi/"
+    CFDI_XML = "/api/v1/finanzas/facturama/cfdi/xml/issued/abc123/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        cls.duena = Empresa.objects.create(codigo="duena", razon_social="Dueña SA")
+        cls.otra = Empresa.objects.create(codigo="otra", razon_social="Otra SA")
+        cls.superusuario = Usuario.objects.create_superuser(
+            username="root@fac.test", email="root@fac.test", password="x",
+        )
+        cls.admin_duena = Usuario.objects.create(
+            username="admin@duena.test", email="admin@duena.test",
+            empresa=cls.duena, is_admin_empresa=True,
+        )
+        cls.admin_otra = Usuario.objects.create(
+            username="admin@otra.test", email="admin@otra.test",
+            empresa=cls.otra, is_admin_empresa=True,
+        )
+        cls.usuario_duena = Usuario.objects.create(
+            username="user@duena.test", email="user@duena.test", empresa=cls.duena,
+        )
+        cls.usuario_con_grant = Usuario.objects.create(
+            username="grant@duena.test", email="grant@duena.test", empresa=cls.duena,
+        )
+        permiso = Permiso.objects.create(clave="R-FIN-FACTURAMA", nombre="Facturama")
+        UsuarioPermiso.objects.create(
+            usuario=cls.usuario_con_grant, permiso=permiso,
+            tipo=UsuarioPermiso.TIPO_GRANT, empresa=cls.duena,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.servicio = MagicMock()
+        self.servicio.get_products.return_value = []
+        self.servicio.get_cfdi_file.return_value = {"Content": "PD94"}
+        for viewset in (
+            finanzas_views.FacturamaProductsViewSet,
+            finanzas_views.FacturamaCfdiEmisionViewSet,
+        ):
+            parche = patch.object(viewset, "service_class", return_value=self.servicio)
+            parche.start()
+            self.addCleanup(parche.stop)
+
+    def _get(self, usuario, url):
+        self.client.force_authenticate(user=usuario)
+        return self.client.get(url)
+
+    def test_anonimo_no_entra(self):
+        self.assertIn(self.client.get(self.PRODUCTOS).status_code, (401, 403))
+        self.servicio.get_products.assert_not_called()
+
+    def test_sin_empresa_configurada_solo_superusuario(self):
+        with self.settings(FACTURAMA_EMPRESA_CODIGO=""):
+            self.assertEqual(self._get(self.admin_duena, self.PRODUCTOS).status_code, 403)
+            self.assertEqual(self._get(self.superusuario, self.PRODUCTOS).status_code, 200)
+
+    def test_admin_de_otra_empresa_no_usa_la_cuenta(self):
+        with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"):
+            self.assertEqual(self._get(self.admin_otra, self.PRODUCTOS).status_code, 403)
+            self.assertEqual(self._get(self.admin_otra, self.CFDI_XML).status_code, 403)
+            self.client.force_authenticate(user=self.admin_otra)
+            self.assertEqual(self.client.post(self.CFDI, {}, format="json").status_code, 403)
+        self.servicio.get_products.assert_not_called()
+        self.servicio.get_cfdi_file.assert_not_called()
+        self.servicio.create_cfdi_emision.assert_not_called()
+
+    def test_usuario_de_la_duena_sin_permiso_no_entra(self):
+        with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"):
+            self.assertEqual(self._get(self.usuario_duena, self.PRODUCTOS).status_code, 403)
+            self.assertEqual(self._get(self.usuario_duena, self.CFDI_XML).status_code, 403)
+
+    def test_admin_y_grant_de_la_duena_si_entran(self):
+        with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"):
+            self.assertEqual(self._get(self.admin_duena, self.PRODUCTOS).status_code, 200)
+            self.assertEqual(self._get(self.usuario_con_grant, self.CFDI_XML).status_code, 200)
+        self.servicio.get_cfdi_file.assert_called_once_with(
+            file_format="xml", cfdi_type="issued", cfdi_id="abc123"
+        )
+
+    def test_alta_de_cliente_solo_se_sube_a_facturama_desde_la_duena(self):
+        with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"), patch(
+            "terceros.api.views.urlopen"
+        ) as urlopen:
+            self.client.force_authenticate(user=self.admin_otra)
+            r = self.client.post("/api/v1/terceros/clientes/", {"nombre": "Cliente otra"}, format="json")
+            self.assertEqual(r.status_code, 201, r.content)
+            urlopen.assert_not_called()
+
+            self.client.force_authenticate(user=self.admin_duena)
+            r = self.client.post("/api/v1/terceros/clientes/", {"nombre": "Cliente dueña"}, format="json")
+            self.assertEqual(r.status_code, 201, r.content)
+            urlopen.assert_called_once()
+
+    def test_paginas_core_de_facturama_solo_superusuario(self):
+        for url in ("/core/terceros/validar-rfc/", "/core/terceros/crear-cliente/"):
+            self.client.force_login(self.admin_duena)
+            self.assertEqual(self.client.get(url).status_code, 403, url)
+            self.client.force_login(self.superusuario)
+            self.assertEqual(self.client.get(url).status_code, 200, url)

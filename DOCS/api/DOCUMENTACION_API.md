@@ -3054,6 +3054,106 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 ---
 
+## 🧾 Finanzas - Facturama (CFDI)
+
+**Base URL**: `/api/v1/finanzas/facturama/`
+
+Estos endpoints hablan **directo** con Facturama: no leen ni escriben tablas del ERP. Hay **una sola cuenta** de Facturama (un emisor), con credenciales en variables de entorno.
+
+> ⚠️ **Integración en pausa.** El timbrado está detenido hasta coordinar con CxC y CxP: si `FACTURAMA_BASE_URL` apunta a producción, cada prueba genera un CFDI fiscal real. Revisa los [detalles conocidos](#detalles-conocidos-facturama) antes de integrar.
+
+### Quién puede usarlos
+
+| Usuario | Acceso |
+| --- | --- |
+| Superusuario | ✅ Siempre |
+| Admin de la empresa dueña de la cuenta | ✅ |
+| Usuario de la empresa dueña con la clave `R-FIN-FACTURAMA` (por rol o GRANT) | ✅ |
+| Usuario de la empresa dueña sin la clave | ❌ `403` |
+| Cualquier usuario (incluido admin) de otra empresa | ❌ `403` |
+
+- La empresa dueña se configura con la variable de entorno **`FACTURAMA_EMPRESA_CODIGO`** (= `Empresa.codigo`).
+- **Si la variable no está definida, solo el superusuario entra** (falla cerrado). Defínela en Vercel antes de usar estos endpoints.
+- La clave `R-FIN-FACTURAMA` **no existe sola**: el catálogo de permisos vive en la BD, así que hay que darla de alta en `seguridad.Permiso` y asignarla a un rol.
+- La respuesta es `403` (no `404`) porque no hay registro por empresa que esconder: lo que se protege es la cuenta completa.
+- Implementación: `finanzas/services/facturama/acceso.py` + permiso `PuedeUsarFacturama` en los dos ViewSets. Pruebas en `finanzas.tests.FacturamaAccesoTests`.
+
+### Endpoints
+
+| Método | Ruta | Qué hace en Facturama |
+| --- | --- | --- |
+| `GET` | `/facturama/productos/` | Lista el catálogo de productos. Los query params se reenvían tal cual. |
+| `GET` | `/facturama/productos/{id}/` | Detalle de un producto. |
+| `POST` | `/facturama/productos/` | Alta de producto (ver detalle 1). |
+| `PUT` | `/facturama/productos/{id}/` | Reemplaza un producto: exige el body **completo**. `PATCH` no existe (`405`). |
+| `DELETE` | `/facturama/productos/{id}/` | Borra el producto en Facturama. |
+| `POST` | `/facturama/cfdi/` | Emite (timbra) un CFDI 4.0 (ver detalle 1). |
+| `GET` | `/facturama/cfdi/{formato}/{tipo}/{id}/` | Descarga el CFDI. `formato`: `pdf`, `html`, `xml`. `tipo`: `issued`, `issuedLite`, `received`, `payroll`. |
+| `GET` | `/facturama/cfdi/acuse/{formato}/{tipo}/{id}/` | Acuse de cancelación. `formato`: `pdf`, `html`. `tipo`: `issued`, `issuedLite`, `payroll`. |
+
+**Errores de Facturama** se devuelven con este formato. Si Facturama responde `4xx` se respeta su código; si responde `5xx` o no contesta, el ERP devuelve `502`:
+
+```json
+{
+  "error": "FACTURAMA_API_ERROR",
+  "message": "Facturama API returned an error.",
+  "details": { "...": "respuesta original de Facturama" }
+}
+```
+
+Otros `error` posibles: `FACTURAMA_TIMEOUT`, `FACTURAMA_CONNECTION_ERROR`, `FACTURAMA_REQUEST_ERROR`.
+
+### Body mínimo para emitir un CFDI
+
+```json
+{
+  "Date": "2026-10-06T10:00:00",
+  "Currency": "MXN",
+  "ExpeditionPlace": "64000",
+  "Exportation": "01",
+  "CfdiType": "I",
+  "PaymentForm": "03",
+  "PaymentMethod": "PUE",
+  "Receiver": {
+    "Rfc": "XAXX010101000",
+    "Name": "PUBLICO EN GENERAL",
+    "CfdiUse": "S01",
+    "FiscalRegime": "616",
+    "TaxZipCode": "64000"
+  },
+  "Items": [
+    {
+      "ProductCode": "01010101",
+      "Description": "Producto de prueba",
+      "UnitCode": "H87",
+      "Quantity": 1,
+      "UnitPrice": 100.0,
+      "TaxObject": "02"
+    }
+  ]
+}
+```
+
+Regla validada en el backend: con `PaymentMethod = "PPD"`, `PaymentForm` debe ser `"99"`.
+
+### Otras piezas que usan la cuenta de Facturama
+
+- **Alta de cliente** (`POST /api/v1/terceros/clientes/`): después de guardar el cliente, el backend lo da de alta también en Facturama (`/Client`). **Solo** se hace para clientes de la empresa dueña de la cuenta; los de otras empresas ya no se suben.
+- **Páginas del Core** `/core/terceros/validar-rfc/` y `/core/terceros/crear-cliente/`: consultan y crean clientes en Facturama. **Solo superusuario.**
+
+### Detalles conocidos (Facturama)
+
+Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró; lo demás sigue abierto **a propósito** porque arreglarlo activaría el timbrado, que está en pausa.
+
+1. **Emitir CFDI y crear/editar productos truena con `500`.** El backend manda `validated_data` tal cual a `requests`, que no sabe serializar `Decimal` (`Price`, `Quantity`, `UnitPrice`) ni `datetime` (`Date`). Falla antes de llegar a Facturama, así que **nunca se ha timbrado un CFDI por este endpoint**. `FacturamaProductSerializer` ya trae `to_facturama_payload()`, que convierte los `Decimal`, pero la vista no lo usa.
+2. **El CFDI timbrado no queda ligado a la factura del ERP.** `Factura` no guarda UUID, XML ni estatus SAT; la emisión es independiente de `facturas/`.
+3. **La descarga acepta `received` y `payroll`.** Con permiso de Facturama se pueden bajar CFDIs recibidos y de nómina de toda la cuenta, no solo los emitidos por el ERP.
+4. **`details` reenvía la respuesta cruda de Facturama**, y los mensajes `message` están en inglés.
+5. **El alta de cliente en Facturama es silenciosa.** Cualquier error (red, RFC inválido, credenciales) se ignora sin log, y no se guarda el id de Facturama, así que no hay forma de saber si el cliente se subió ni de evitar duplicados.
+6. **No hay endpoint para cancelar un CFDI**, solo para descargar el acuse.
+
+---
+
 ## 🏭 Producción - Lista de Materiales (BOM)
 
 **Base URL**: `/api/v1/produccion/`

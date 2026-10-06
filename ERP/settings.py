@@ -195,6 +195,9 @@ FACTURAMA_BASE_URL = config('FACTURAMA_BASE_URL', default='https://apisandbox.fa
 FACTURAMA_USERNAME = config('FACTURAMA_USERNAME', default=config('FACTURAMA_USER', default=''))
 FACTURAMA_PASSWORD = config('FACTURAMA_PASSWORD', default='')
 FACTURAMA_TIMEOUT = config('FACTURAMA_TIMEOUT', default=30)
+# Empresa.codigo dueña de la cuenta de Facturama. Vacío = sólo superusuario la usa
+# (ver finanzas/services/facturama/acceso.py).
+FACTURAMA_EMPRESA_CODIGO = config('FACTURAMA_EMPRESA_CODIGO', default='')
 
 SYNCFY_BASE_URL = config('SYNCFY_BASE_URL', default='')
 SYNCFY_APIKEY = config('SYNCFY_APIKEY', default='')
