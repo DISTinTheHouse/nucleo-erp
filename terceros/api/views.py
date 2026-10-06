@@ -159,6 +159,20 @@ class HistorialOrdenesCompraPagination(PageNumberPagination):
     max_page_size = 100
 
 
+def _fecha_param(request, nombre):
+    """Fecha ``YYYY-MM-DD`` del query string; mal formada o imposible → 400."""
+    valor = (request.query_params.get(nombre) or "").strip()
+    if not valor:
+        return None
+    try:
+        fecha = parse_date(valor)
+    except ValueError:
+        fecha = None
+    if fecha is None:
+        raise ValidationError({nombre: "Fecha inválida; formato YYYY-MM-DD."})
+    return fecha
+
+
 class ProveedorViewSet(viewsets.ModelViewSet):
     queryset = Proveedor.objects.filter(activo=True)
     serializer_class = ProveedorSerializer
@@ -180,26 +194,37 @@ class ProveedorViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"], url_path="historial-ordenes-compra")
     def historial_ordenes_compra(self, request, pk=None):
-        """OC de este proveedor para su detalle (EC-399). ``get_object`` ya
-        acota por la empresa del usuario, igual que el resto del ViewSet."""
+        """OC de este proveedor para su detalle (EC-399). El proveedor se acota
+        con ``get_object``; las OC, por la empresa del usuario con el mismo
+        criterio que el listado de OC (superusuario incluido)."""
         from compras.models import OrdenCompra
         from compras.api.serializers import OrdenCompraSerializer
+        from compras.services.orden_compra_view_service import (
+            filtrar_campos_contabilidad_orden_compra,
+            puede_ver_contabilidad,
+        )
 
         proveedor = self.get_object()
+        empresa = getattr(request.user, "empresa", None)
         qs = (
-            OrdenCompra.objects.filter(proveedor=proveedor, activo=True)
-            .select_related("empresa", "sucursal", "moneda", "usuario", "pedido")
-        )
+            OrdenCompra.objects.filter(proveedor=proveedor, empresa=empresa, activo=True)
+            .select_related("empresa", "sucursal", "moneda", "usuario", "pedido", "proveedor")
+        ) if empresa is not None else OrdenCompra.objects.none()
 
         estatus = (request.query_params.get("estatus") or "").strip()
         if estatus:
             try:
-                qs = qs.filter(estatus=int(estatus))
+                estatus = int(estatus)
             except ValueError:
                 raise ValidationError({"estatus": "Debe ser un entero válido."})
+            if estatus not in OrdenCompra.EstatusOrdenCompra.values:
+                raise ValidationError({"estatus": "Estatus de OC inexistente."})
+            qs = qs.filter(estatus=estatus)
 
-        fecha_inicio = parse_date((request.query_params.get("fecha_inicio") or "").strip())
-        fecha_final = parse_date((request.query_params.get("fecha_final") or "").strip())
+        fecha_inicio = _fecha_param(request, "fecha_inicio")
+        fecha_final = _fecha_param(request, "fecha_final")
+        if fecha_inicio and fecha_final and fecha_inicio > fecha_final:
+            raise ValidationError({"fecha_inicio": "No puede ser posterior a `fecha_final`."})
         if fecha_inicio:
             qs = qs.filter(fecha_oc__gte=fecha_inicio)
         if fecha_final:
@@ -207,28 +232,34 @@ class ProveedorViewSet(viewsets.ModelViewSet):
 
         qs = qs.order_by("-fecha_oc", "-id")
 
-        estatus_labels = dict(OrdenCompra.EstatusOrdenCompra.choices)
-        resumen = {
-            "total_ordenes": qs.count(),
-            "por_estatus": {
-                estatus_labels.get(fila["estatus"], fila["estatus"]): fila["total"]
-                for fila in qs.values("estatus").annotate(total=Count("id"))
-            },
-            # Excluye CANCELADA: una orden anulada no debe inflar el monto
-            # histórico comprado al proveedor. Separado por moneda porque un
-            # proveedor puede tener OC en más de una.
-            "monto_por_moneda": [
-                {"moneda": fila["moneda__codigo_iso"], "total": fila["total"]}
-                for fila in qs.exclude(estatus=OrdenCompra.EstatusOrdenCompra.CANCELADA)
-                .values("moneda__codigo_iso")
-                .annotate(total=Sum("gran_total"))
-            ],
-        }
-
         paginator = HistorialOrdenesCompraPagination()
         page = paginator.paginate_queryset(qs, request, view=self)
-        data = OrdenCompraSerializer(page, many=True).data
+        ver_montos = puede_ver_contabilidad(request.user)
+        data = [
+            item if ver_montos else filtrar_campos_contabilidad_orden_compra(item, request.user)
+            for item in OrdenCompraSerializer(page, many=True).data
+        ]
         response = paginator.get_paginated_response(data)
+
+        resumen = {
+            # Mismo conteo que ``count``: lo hizo ya el paginador.
+            "total_ordenes": paginator.page.paginator.count,
+            "por_estatus": {
+                fila["estatus"]: fila["total"]
+                for fila in qs.order_by().values("estatus").annotate(total=Count("id"))
+            },
+        }
+        if ver_montos:
+            # Excluye CANCELADA: una orden anulada no debe inflar el monto
+            # histórico comprado al proveedor. Separado por moneda porque un
+            # proveedor puede tener OC en más de una. String, como en ``results``.
+            resumen["monto_por_moneda"] = [
+                {"moneda": fila["moneda__codigo_iso"], "total": f"{fila['total']:.2f}"}
+                for fila in qs.exclude(estatus=OrdenCompra.EstatusOrdenCompra.CANCELADA)
+                .order_by()
+                .values("moneda__codigo_iso")
+                .annotate(total=Sum("gran_total"))
+            ]
         response.data["resumen"] = resumen
         return Response(response.data)
 

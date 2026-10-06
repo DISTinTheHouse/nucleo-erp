@@ -1126,12 +1126,14 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
 - **Endpoint**: `GET /api/v1/terceros/proveedores/{id}/historial-ordenes-compra/`
 - Pensado para la ficha del proveedor (a diferencia del resumen de cliente, aquí sí es el listado completo y **paginado**, no solo los últimos 5).
 - `get_object` acota por la empresa del usuario igual que el resto de `ProveedorViewSet` → 404 si el proveedor no es de tu empresa.
+- Las OC también se acotan por la empresa del usuario (superusuario incluido), igual que `GET /api/v1/compras/ordenes/`.
 - **Query params** (todos opcionales):
   | Param | Formato | Efecto |
   |---|---|---|
-  | `estatus` | int (`OrdenCompra.EstatusOrdenCompra`) | Filtra por un solo estatus |
+  | `estatus` | int (`OrdenCompra.EstatusOrdenCompra`) | Filtra por un solo estatus. Fuera de choices → `400` |
   | `fecha_inicio` | `YYYY-MM-DD` | `fecha_oc >=` |
   | `fecha_final` | `YYYY-MM-DD` | `fecha_oc <=` |
+  | — | — | Fecha mal formada o imposible (`2026-02-30`) → `400`. `fecha_inicio > fecha_final` → `400` |
   | `page` / `page_size` | int | Paginación estándar DRF (`page_size` máx. 100, default 20) |
 - **Respuesta**:
   ```json
@@ -1144,7 +1146,7 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
     ],
     "resumen": {
       "total_ordenes": 34,
-      "por_estatus": { "Recibida": 28, "Cancelada": 2, "Autorizada": 4 },
+      "por_estatus": { "5": 28, "6": 2, "3": 4 },
       "monto_por_moneda": [ { "moneda": "MXN", "total": "410500.00" } ]
     }
   }
@@ -1152,6 +1154,9 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
 - `resumen` se calcula sobre el queryset ya filtrado (respeta `estatus`/`fecha_inicio`/`fecha_final` si se mandan), no solo sobre la página actual.
 - `monto_por_moneda` excluye `CANCELADA` (mismo criterio que `resumen_comercial` de cliente y que el dashboard de compras).
 - Solo trae OC activas (`activo=true`); una OC dada de baja no aparece aquí.
+- `por_estatus` usa como llave el estatus **entero** (en JSON, string: `"3"`), igual que `results[].estatus`.
+- `monto_por_moneda[].total` es string decimal, igual que los montos de `results`.
+- Sin permiso de contabilidad (`puede_ver_contabilidad`): `results[]` omite los campos de montos y `resumen` no trae `monto_por_moneda`. Mismo filtro en `GET /api/v1/compras/ordenes/`.
 
 ### Direcciones Cliente
 

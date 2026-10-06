@@ -186,6 +186,23 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             return OrdenCompraRetrieveSerializer
         return OrdenCompraSerializer
 
+    def list(self, request, *args, **kwargs):
+        from compras.services.orden_compra_view_service import (
+            filtrar_campos_contabilidad_orden_compra,
+            puede_ver_contabilidad,
+        )
+        response = super().list(request, *args, **kwargs)
+        if puede_ver_contabilidad(request.user):
+            return response
+        paginado = isinstance(response.data, dict) and "results" in response.data
+        filas = response.data["results"] if paginado else response.data
+        filas = [filtrar_campos_contabilidad_orden_compra(f, request.user) for f in filas]
+        if paginado:
+            response.data["results"] = filas
+        else:
+            response.data = filas
+        return response
+
     def retrieve(self, request, *args, **kwargs):
         from compras.services.orden_compra_view_service import filtrar_campos_contabilidad_orden_compra
         instance = self.get_object()
