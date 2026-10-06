@@ -1150,7 +1150,3 @@ class FacturamaAcuseSerializer(serializers.Serializer):
     id = serializers.CharField(
         required=True
     )
-
-class SyncfyCreateUserSerializer(serializers.Serializer):
-    id_external = serializers.CharField()
-    name = serializers.CharField()

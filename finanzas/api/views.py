@@ -71,7 +71,6 @@ from finanzas.api.serializers import (
     FacturamaCfdiCreateSerializer,
     FacturamaCfdiFileSerializer,
     FacturamaAcuseSerializer,
-    SyncfyCreateUserSerializer
 )
 
 from finanzas.services.alerta_mora_service import AlertaMoraService
