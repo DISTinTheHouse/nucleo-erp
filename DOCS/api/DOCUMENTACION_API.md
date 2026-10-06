@@ -2094,6 +2094,11 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 - Respuesta `200`: `{ "orden_compra": {...}, "detalle": [...] }`.
 - 404 si la OC no existe o no es de tu empresa (no 403).
 
+### Fecha de generación y fecha de vencimiento (EC-395)
+
+- `fecha_oc` (fecha de generación) **ya no se acepta en el body**, ni en `POST .../onboarding/` ni en `PUT`: el servidor la fija una sola vez al crear la OC (`timezone.now().date()`) y nunca se vuelve a tocar. Si la mandas en el body, se ignora en silencio (no es error).
+- `fecha_vencimiento` sí es editable: agrégala al objeto `orden_compra` del body (`POST .../onboarding/` o `PUT`) como `"fecha_vencimiento": "YYYY-MM-DD"`. El campo ya existía en el modelo pero no estaba expuesto en el onboarding; ahora sí.
+
 ### Cancelar una orden de compra
 
 Cancelar = la orden al proveedor queda anulada **pero se conserva y sigue visible**. Para borrar una OC capturada por error, ver "Eliminar" abajo.

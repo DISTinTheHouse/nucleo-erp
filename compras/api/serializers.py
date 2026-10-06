@@ -228,7 +228,11 @@ class OrdenCompraOnboardingHeaderSerializer(serializers.Serializer):
     sucursal = serializers.IntegerField(required=False, allow_null=True)
     proveedor = serializers.IntegerField(required=False, allow_null=True)
     moneda = serializers.IntegerField(required=False, allow_null=True)
-    fecha_oc = serializers.DateField(required=False, allow_null=True)
+    # ``fecha_oc`` (fecha de generación) ya NO se acepta aquí: la fija el
+    # servidor al crear la OC (ver EC-395) y no es editable. Se deja de
+    # declarar a propósito para que un valor enviado por el cliente se
+    # ignore en vez de validarse como si fuera a aplicarse.
+    fecha_vencimiento = serializers.DateField(required=False, allow_null=True)
     porcentaje_iva = serializers.DecimalField(
         max_digits=14,
         decimal_places=2,
