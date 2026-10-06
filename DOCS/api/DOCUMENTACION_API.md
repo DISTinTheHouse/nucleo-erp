@@ -5275,19 +5275,23 @@ Lector oficial para consumir lecturas desde el hardware Zebra FX (FX7500 / FX960
 El frontend (Next.js) NO habla directamente con el lector FX. El flujo es:
 
 ```
-  LECTOR FX ZEBRA  ──POST JSON/EPCs──▶  /QA/scanner_rfid/receive/  ──▶ DB: RfidScan
-                                                                          │
-  NEXT.JS  ──poll GET cada 2s──▶  /api/v1/wms/etiquetas-rfid/scans/  ◀──┘
+  LECTOR FX ZEBRA  ──POST + token──▶  /api/v1/wms/etiquetas-rfid/scans/receive/  ──▶ DB: RfidScan (empresa del lector)
+                                                                                         │
+  NEXT.JS  ──poll GET cada 2s──▶  /api/v1/wms/etiquetas-rfid/scans/  ◀─────────────────┘
                                   (match auto con detalle)
 ```
 
 **Importante arquitectura**:
 
-- El `POST /QA/scanner_rfid/receive/` es SOLO para el FX (no requiere token / `@csrf_exempt`). **Next.js NUNCA llama a receive**.
-- Next.js solo consume 3 endpoints del V1 (mismo Bearer token que el resto del ERP):
-  1. `GET /api/v1/wms/etiquetas-rfid/scans/` → polling (lista lecturas + MATCH)
-  2. `GET /api/v1/wms/etiquetas-rfid/scanner-stats/` → debug 1-clic (estado FX + busqueda ?epc=)
-  3. `POST /api/v1/wms/etiquetas-rfid/scans/clear/` → purge list (vaciar tabla)
+- `POST /api/v1/wms/etiquetas-rfid/scans/receive/` es SOLO para el FX. **Next.js NUNCA llama a receive**.
+  - Autenticación: token del `LectorRFID` (alta en admin Django → *Lectores RFID*; el token se genera solo).
+  - El token va en header `X-RFID-Token: <token>`, `Authorization: Bearer <token>` o query `?token=<token>`.
+  - Sin token válido o lector inactivo → `401`.
+  - Cada lectura queda ligada a la empresa y al lector.
+- Next.js solo consume 3 endpoints del V1 (mismo Bearer token que el resto del ERP). Todos acotados a la empresa del usuario; superusuario ve todo:
+  1. `GET /api/v1/wms/etiquetas-rfid/scans/` → polling (últimas 50 lecturas de la empresa + MATCH)
+  2. `GET /api/v1/wms/etiquetas-rfid/scanner-stats/` → debug (solo superusuario / admin de empresa)
+  3. `POST /api/v1/wms/etiquetas-rfid/scans/clear/` → borra las lecturas de la empresa (solo superusuario / admin de empresa)
 
 ---
 
@@ -5610,9 +5614,9 @@ GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=000012E32827000147C0C5F5
     }
   ],
   "receive_endpoint_info": {
-    "fx_post_url_required": "POST https://TU-BACKEND/QA/scanner_rfid/receive/ (FX llama aquí. Next.js NO)",
-    "method_required": "POST (FX no manda token; @csrf_exempt).",
-    "note": "Next.js solo consume scans/, scans/clear y scanner-stats."
+    "fx_post_url_required": "POST https://TU-BACKEND/api/v1/wms/etiquetas-rfid/scans/receive/ (el FX llama aquí, NO Next.js)",
+    "method_required": "POST con token del LectorRFID (header X-RFID-Token o ?token=). Next.js NO usa receive/",
+    "note": "Next.js solo consume scans/ (polling), scans/clear (purge) y scanner-stats (debug)."
   }
 }
 ```
@@ -5634,7 +5638,7 @@ GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=000012E32827000147C0C5F5
 
 | Paso | Acción                                                                                                                                                                                                         |
 | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | Configura en el LECTOR FX Zebra (FX7500/FX9600) su **POST URL**: `https://TU-BACKEND/QA/scanner_rfid/receive/` (content-type JSON).                                                                            |
+| 1    | Da de alta el lector en admin (*Lectores RFID*) y configura en el FX su **POST URL**: `https://TU-BACKEND/api/v1/wms/etiquetas-rfid/scans/receive/` con header `X-RFID-Token: <token>` (o `?token=<token>` si el FX no admite headers). |
 | 2    | (Antes de empezar) Click **Purge List** = `POST /api/v1/wms/etiquetas-rfid/scans/clear/`.                                                                                                                      |
 | 3    | Click **Iniciar Monitoreo** = `setInterval` cada **2000 ms (2s)** llamando `GET /api/v1/wms/etiquetas-rfid/scans/`. Usa `lastSeenId` (Ref) para agregar solo scans nuevos (ids mayores).                       |
 | 4    | Render tabla: columna `MATCH=✅/❌` + `sku`, `color`, `talla`, `folio`, `antenna`, `rssi`, `timestamp`. Si `match_impresion=false` mostrar EPC hex crudo; si `true` pintar fila VERDE con los campos producto. |
