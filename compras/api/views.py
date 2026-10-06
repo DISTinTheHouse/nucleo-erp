@@ -497,13 +497,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             has_sucursal = "sucursal" in header
             has_proveedor = "proveedor" in header
             has_moneda = "moneda" in header
-            has_fecha_oc = "fecha_oc" in header
+            has_fecha_vencimiento = "fecha_vencimiento" in header
             has_porcentaje_iva = "porcentaje_iva" in header
 
             sucursal_id = header.get("sucursal")
             proveedor_id = header.get("proveedor")
             moneda_id = header.get("moneda")
-            fecha_oc = header.get("fecha_oc") or timezone.now().date()
+            fecha_vencimiento = header.get("fecha_vencimiento")
             porcentaje_iva = header.get("porcentaje_iva")
 
             if not sucursal_id:
@@ -532,8 +532,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 oc.proveedor_id = proveedor_id
             if not oc.pk or has_moneda:
                 oc.moneda_id = moneda_id
-            if not oc.pk or has_fecha_oc:
-                oc.fecha_oc = fecha_oc
+            if not oc.pk:
+                # Fecha de generación (EC-395): la fija el servidor al crear y
+                # nunca se vuelve a tocar, ni siquiera en una edición
+                # posterior por este mismo endpoint.
+                oc.fecha_oc = timezone.now().date()
+            if has_fecha_vencimiento:
+                oc.fecha_vencimiento = fecha_vencimiento
             if not oc.pk or has_porcentaje_iva:
                 oc.porcentaje_iva = Decimal(str(porcentaje_iva or 0))
             if "referencia" in header:
@@ -677,13 +682,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             has_sucursal = "sucursal" in header
             has_proveedor = "proveedor" in header
             has_moneda = "moneda" in header
-            has_fecha_oc = "fecha_oc" in header
+            has_fecha_vencimiento = "fecha_vencimiento" in header
             has_porcentaje_iva = "porcentaje_iva" in header
 
             sucursal_id = header.get("sucursal")
             proveedor_id = header.get("proveedor")
             moneda_id = header.get("moneda")
-            fecha_oc = header.get("fecha_oc")
+            fecha_vencimiento = header.get("fecha_vencimiento")
             porcentaje_iva = header.get("porcentaje_iva")
 
             # Antes de la primera escritura (``oc.save()``). La empresa sale de la
@@ -703,8 +708,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 oc.proveedor_id = proveedor_id
             if has_moneda and moneda_id:
                 oc.moneda_id = moneda_id
-            if has_fecha_oc and fecha_oc:
-                oc.fecha_oc = fecha_oc
+            # ``fecha_oc`` (generación) NO se toca aquí: fija, inmutable
+            # después de creada (EC-395).
+            if has_fecha_vencimiento:
+                oc.fecha_vencimiento = fecha_vencimiento
             if has_porcentaje_iva:
                 oc.porcentaje_iva = Decimal(str(porcentaje_iva or 0))
             if "referencia" in header:
