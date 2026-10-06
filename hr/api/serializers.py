@@ -8,6 +8,7 @@ from hr.models import (
     fecha_local,
     MENSAJE_CONTRATO_VIGENTE_DUPLICADO,
     MENSAJE_CONTRATO_VIGENTE_EMPLEADO_INACTIVO,
+    MENSAJE_NOMINA_PERIODO_DUPLICADO,
     Puesto,
     Empleado,
     Area,
@@ -482,36 +483,126 @@ class NominaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer
         model = Nomina
         fields = '__all__'
         read_only_fields = ('fecha_generacion', 'total_percepciones', 'total_deducciones', 'neto', 'creado_por')
+        # DRF deriva un ``UniqueTogetherValidator`` de
+        # ``uq_nomina_empleado_periodo_vigente``: reporta en ``non_field_errors``,
+        # vuelve requerido ``estado`` (campo de su condición) y en un PATCH sin
+        # ``estado`` revienta con ``KeyError`` (500). Se desactiva; de la unicidad
+        # se encarga ``_validar_periodo_unico``. Ojo: vaciar ``validators`` apaga
+        # TODOS los derivados; hoy ``Nomina`` no tiene otra constraint única.
+        validators = []
+
+    def validate_detalles(self, detalles):
+        """En un PATCH, cada línea se valida completa, igual que en el alta.
+
+        En modo parcial DRF salta los campos requeridos de TODO el árbol (lo
+        decide ``self.root.partial``), también los de las líneas anidadas: una
+        línea sin ``monto`` llegaba al INSERT (500) y una sin ``tipo`` o
+        ``concepto`` se guardaba con ``''``. Pero ``detalles`` reemplaza todas las
+        líneas, así que lo que llega debe ser una línea completa. Se revalida con
+        un serializer propio, que es su propia raíz y no es parcial.
+        """
+        if not self.partial:
+            return detalles
+        completas = NominaDetalleSerializer(
+            data=self.initial_data.get('detalles'), many=True, context=self.context,
+        )
+        if not completas.is_valid():
+            raise serializers.ValidationError(completas.errors)
+        return completas.validated_data
 
     def validate(self, data):
-        periodo_inicio = data.get('periodo_inicio')
-        periodo_fin = data.get('periodo_fin')
+        periodo_inicio = self._final(data, 'periodo_inicio')
+        periodo_fin = self._final(data, 'periodo_fin')
+        # Con los valores finales: un PATCH que manda una sola fecha se compara
+        # contra la guardada.
         if periodo_inicio and periodo_fin and periodo_fin < periodo_inicio:
             raise serializers.ValidationError({'periodo_fin': 'El periodo fin no puede ser anterior al inicio.'})
+        self._validar_periodo_unico(data)
         return data
 
+    def _final(self, data, campo):
+        """Valor con el que QUEDARÁ ``campo`` tras guardar.
+
+        Lo que no viene en la petición conserva el valor de la fila en una
+        edición y, en un alta, toma el default del modelo --el mismo con el que
+        se guardará--.
+        """
+        if campo in data:
+            return data[campo]
+        if self.instance is not None:
+            return getattr(self.instance, campo)
+        return Nomina._meta.get_field(campo).get_default()
+
+    def _chocaria_con_otra_vigente(self, data):
+        """Aplica ``uq_nomina_empleado_periodo_vigente`` con los valores finales.
+
+        ``empleado`` ya pasó por ``validate_empleado`` (o viene de una fila que
+        ``get_queryset`` dejó ver), así que la consulta no cruza empresas.
+        """
+        return Nomina.hay_otra_vigente(
+            getattr(self._final(data, 'empleado'), 'pk', None),
+            self._final(data, 'periodo_inicio'),
+            self._final(data, 'periodo_fin'),
+            estado=self._final(data, 'estado'),
+            excluir_pk=getattr(self.instance, 'pk', None),
+        )
+
+    def _validar_periodo_unico(self, data):
+        """Devuelve un 400 por campo donde la constraint daría un 500.
+
+        No se usa ``UniqueTogetherValidator`` (ver ``Meta.validators``): éste
+        compara contra los valores finales, así que un PATCH que sólo mueve una
+        fecha, cambia de empleado o reactiva una cancelada también se revisa.
+        """
+        if self._chocaria_con_otra_vigente(data):
+            raise serializers.ValidationError({'empleado': MENSAJE_NOMINA_PERIODO_DUPLICADO})
+
+    @contextmanager
+    def _atomico_con_choque_de_periodo_como_400(self, validated_data):
+        """Encabezado y líneas se guardan juntos o no se guarda nada.
+
+        Y si otra petición crea la nómina vigente del mismo empleado y periodo
+        entre ``validate`` y el INSERT/UPDATE, la violación de la constraint se
+        traduce al mismo 400 de ``_validar_periodo_unico``. Misma técnica que
+        ``ContratoSerializer``: se re-consulta en vez de leer el texto del
+        ``IntegrityError`` y cualquier otro se re-lanza.
+        """
+        try:
+            with transaction.atomic():
+                yield
+        except IntegrityError as exc:
+            if not self._chocaria_con_otra_vigente(validated_data):
+                raise
+            # Fuera de ``validate`` DRF no envuelve el mensaje en una lista; se
+            # hace aquí para que el cuerpo sea idéntico al de la ruta normal.
+            raise serializers.ValidationError(
+                {'empleado': [MENSAJE_NOMINA_PERIODO_DUPLICADO]}
+            ) from exc
+
     def create(self, validated_data):
-        detalles_data = validated_data.pop('detalles', [])
-        request = self.context.get('request')
-        user = getattr(request, 'user', None)
-        if user and not validated_data.get('creado_por'):
-            validated_data['creado_por'] = user
-        nomina = Nomina.objects.create(**validated_data)
-        for detalle_data in detalles_data:
-            NominaDetalle.objects.create(nomina=nomina, **detalle_data)
-        nomina._recalcular_totales()
+        with self._atomico_con_choque_de_periodo_como_400(validated_data):
+            detalles_data = validated_data.pop('detalles', [])
+            request = self.context.get('request')
+            user = getattr(request, 'user', None)
+            if user and not validated_data.get('creado_por'):
+                validated_data['creado_por'] = user
+            nomina = Nomina.objects.create(**validated_data)
+            for detalle_data in detalles_data:
+                NominaDetalle.objects.create(nomina=nomina, **detalle_data)
+            nomina._recalcular_totales()
         return nomina
 
     def update(self, instance, validated_data):
-        detalles_data = validated_data.pop('detalles', None)
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-        if detalles_data is not None:
-            instance.detalles.all().delete()
-            for detalle_data in detalles_data:
-                NominaDetalle.objects.create(nomina=instance, **detalle_data)
-            instance._recalcular_totales()
+        with self._atomico_con_choque_de_periodo_como_400(validated_data):
+            detalles_data = validated_data.pop('detalles', None)
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+            if detalles_data is not None:
+                instance.detalles.all().delete()
+                for detalle_data in detalles_data:
+                    NominaDetalle.objects.create(nomina=instance, **detalle_data)
+                instance._recalcular_totales()
         return instance
 
 

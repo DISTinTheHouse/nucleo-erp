@@ -16,6 +16,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from hr.models import (
     CONTRATO_VIGENTE,
+    NOMINA_VIGENTE,
     fecha_local,
     Puesto,
     Empleado,
@@ -80,6 +81,12 @@ class ChecadaInvalidaError(APIException):
     """
     status_code = status.HTTP_400_BAD_REQUEST
     default_code = "checada_invalida"
+
+
+class NominaPeriodoDuplicadoError(APIException):
+    """``generar_periodo`` chocaría con nóminas vigentes del mismo periodo; no se crea nada."""
+    status_code = status.HTTP_409_CONFLICT
+    default_code = "nomina_periodo_duplicado"
 
 
 MENSAJE_ENTRADA_YA_REGISTRADA = (
@@ -902,62 +909,114 @@ class NominaViewSet(
                 return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
 
         user = request.user
-        empleados_qs = Empleado.objects.filter(activo=True)
-        if getattr(user, "is_superuser", False):
-            pass
-        else:
-            empresa = getattr(user, "empresa", None)
-            if not empresa:
-                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
-            empleados_qs = empleados_qs.filter(empresa=empresa)
-        if sucursal_id:
-            from nucleo.models import Sucursal
-            sucursal_qs = Sucursal.objects.filter(pk=sucursal_id)
-            if not getattr(user, "is_superuser", False):
-                sucursal_empresa = getattr(user, "empresa", None)
-                if sucursal_empresa:
-                    sucursal_qs = sucursal_qs.filter(empresa=sucursal_empresa)
-            if not sucursal_qs.exists():
-                return Response({'sucursal_id': ['La sucursal no existe o no pertenece a la empresa del usuario.']}, status=status.HTTP_400_BAD_REQUEST)
-            empleados_qs = empleados_qs.filter(sucursal_id=sucursal_id)
+        es_superuser = getattr(user, "is_superuser", False)
+        empresa = None if es_superuser else getattr(user, "empresa", None)
+        if not es_superuser and not empresa:
+            return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+
+        # La sucursal es obligatoria: sin ella un superusuario generaba para los
+        # empleados de TODAS las empresas. Se genera sólo para esa sucursal.
+        if sucursal_id in (None, ''):
+            return Response({'sucursal_id': ['Este campo es requerido.']}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            # Mismo criterio que ``AsistenciaViewSet._resolver_checada``: un
+            # ``filter(pk='abc')`` lanzaba ``ValueError`` (500).
+            sucursal_id = drf_serializers.IntegerField().run_validation(sucursal_id)
+        except ValidationError as exc:
+            return Response({'sucursal_id': exc.detail}, status=status.HTTP_400_BAD_REQUEST)
+        from nucleo.models import Sucursal
+        sucursal_qs = Sucursal.objects.filter(pk=sucursal_id)
+        if not es_superuser:
+            sucursal_qs = sucursal_qs.filter(empresa=empresa)
+        sucursal = sucursal_qs.first()
+        if sucursal is None:
+            return Response({'sucursal_id': ['La sucursal no existe o no pertenece a la empresa del usuario.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        # La empresa sale de la sucursal, también para el superusuario: cada
+        # nómina queda en la empresa y la sucursal que se pidieron.
+        empleados = list(
+            Empleado.objects.filter(activo=True, empresa_id=sucursal.empresa_id, sucursal=sucursal)
+            .select_related('puesto')
+        )
+
+        # Chequeo previo, fuera de la transacción: sólo le pone mensaje. La
+        # garantía es ``uq_nomina_empleado_periodo_vigente``, que también detiene
+        # la carrera entre dos generaciones del mismo periodo.
+        choques = self._empleados_con_nomina_vigente(empleados, pi, pf)
+        if choques:
+            raise NominaPeriodoDuplicadoError(self._mensaje_periodo_duplicado(pi, pf, choques))
 
         creadas = []
-        for empleado in empleados_qs.select_related('sucursal', 'empresa', 'puesto').all():
-            salario_base = empleado.puesto.salario_base if (empleado.puesto and empleado.puesto.salario_base) else None
-            contrato_activo = empleado.contratos.filter(CONTRATO_VIGENTE).first()
-            if contrato_activo and contrato_activo.salario:
-                salario_base = contrato_activo.salario
+        try:
+            # Todo o nada: una falla a media generación no deja medio periodo.
+            with transaction.atomic():
+                for empleado in empleados:
+                    salario_base = empleado.puesto.salario_base if (empleado.puesto and empleado.puesto.salario_base) else None
+                    contrato_activo = empleado.contratos.filter(CONTRATO_VIGENTE).first()
+                    if contrato_activo and contrato_activo.salario:
+                        salario_base = contrato_activo.salario
 
-            nomina = Nomina.objects.create(
-                empresa=empleado.empresa,
-                sucursal=empleado.sucursal,
-                empleado=empleado,
-                periodo_inicio=pi,
-                periodo_fin=pf,
-                fecha_pago=fpago,
-                estado='pendiente',
-                salario_base=salario_base,
-                dias_pagados=15,
-                creado_por=request.user,
-            )
-            if salario_base:
-                percepcion_monto = (salario_base / Decimal('30.0')) * Decimal('15')
-                NominaDetalle.objects.create(
-                    nomina=nomina,
-                    codigo='PER001',
-                    concepto='Salario base',
-                    tipo='percepcion',
-                    cantidad=1,
-                    unidad='MXN',
-                    monto=Decimal(percepcion_monto).quantize(Decimal('0.01')),
-                )
-            nomina._recalcular_totales()
-            creadas.append(nomina.pk)
+                    nomina = Nomina.objects.create(
+                        empresa_id=sucursal.empresa_id,
+                        sucursal=sucursal,
+                        empleado=empleado,
+                        periodo_inicio=pi,
+                        periodo_fin=pf,
+                        fecha_pago=fpago,
+                        estado='pendiente',
+                        salario_base=salario_base,
+                        dias_pagados=15,
+                        creado_por=request.user,
+                    )
+                    if salario_base:
+                        percepcion_monto = (salario_base / Decimal('30.0')) * Decimal('15')
+                        NominaDetalle.objects.create(
+                            nomina=nomina,
+                            codigo='PER001',
+                            concepto='Salario base',
+                            tipo='percepcion',
+                            cantidad=1,
+                            unidad='MXN',
+                            monto=Decimal(percepcion_monto).quantize(Decimal('0.01')),
+                        )
+                    nomina._recalcular_totales()
+                    creadas.append(nomina.pk)
+        except IntegrityError as exc:
+            # La transacción ya se revirtió entera. Se re-consulta en vez de leer
+            # el texto del ``IntegrityError`` (PostgreSQL nombra la constraint,
+            # SQLite no); cualquier otro se re-lanza.
+            choques = self._empleados_con_nomina_vigente(empleados, pi, pf)
+            if not choques:
+                raise
+            raise NominaPeriodoDuplicadoError(self._mensaje_periodo_duplicado(pi, pf, choques)) from exc
 
         return Response({
             'creadas': len(creadas),
             'ids': creadas,
         }, status=status.HTTP_201_CREATED)
+
+    def _empleados_con_nomina_vigente(self, empleados, periodo_inicio, periodo_fin):
+        """Cuántos de ``empleados`` ya tienen nómina vigente de ese periodo exacto."""
+        if not empleados:
+            return 0
+        return (
+            Nomina.objects.filter(
+                NOMINA_VIGENTE,
+                empleado__in=empleados,
+                periodo_inicio=periodo_inicio,
+                periodo_fin=periodo_fin,
+            )
+            .values('empleado')
+            .distinct()
+            .count()
+        )
+
+    @staticmethod
+    def _mensaje_periodo_duplicado(periodo_inicio, periodo_fin, choques):
+        return (
+            f'El periodo {periodo_inicio.isoformat()} a {periodo_fin.isoformat()} ya tiene nóminas '
+            f'vigentes para {choques} empleado(s) de esta sucursal; cancélalas antes de volver a generarlo.'
+        )
 
 
 class ProductividadViewSet(

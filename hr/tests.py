@@ -12,14 +12,15 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, transaction
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from hr.api.serializers import AsistenciaSerializer, ContratoSerializer
+from hr.api.serializers import AsistenciaSerializer, ContratoSerializer, NominaSerializer
+from hr.api.views import NominaViewSet
 from hr.models import (
-    Asistencia, Contrato, Empleado, Nomina, PermisoAusencia, Puesto, Turno, Vacaciones,
+    Asistencia, Contrato, Empleado, Nomina, NominaDetalle, PermisoAusencia, Puesto, Turno, Vacaciones,
 )
 from nucleo.models import Departamento, Empresa, Sucursal
 from usuarios.models import Usuario
@@ -359,7 +360,9 @@ class GenerarPeriodoSalarioTests(HrBase):
 
     def _generar(self):
         resp = self._client().post(
-            self.URL, {"periodo_inicio": "2026-07-01", "periodo_fin": "2026-07-15"}, format="json",
+            self.URL,
+            {"periodo_inicio": "2026-07-01", "periodo_fin": "2026-07-15", "sucursal_id": self.a["sucursal"].pk},
+            format="json",
         )
         self.assertEqual(resp.status_code, 201, resp.content)
         return Nomina.objects.get(pk__in=resp.json()["ids"], empleado=self.empleado)
@@ -403,6 +406,524 @@ class GenerarPeriodoSalarioTests(HrBase):
 
         self.assertEqual(nomina.salario_base, Decimal("15000.00"))
         self.assertEqual(self._percepcion(nomina), [Decimal("7500.00")])
+
+
+NOMINAS_URL = "/api/v1/hr/nominas/"
+GENERAR_PERIODO_URL = f"{NOMINAS_URL}generar_periodo/"
+MENSAJE_NOMINA_DUPLICADA = "Este empleado ya tiene una nómina vigente para este periodo."
+INICIO, FIN = date(2026, 7, 1), date(2026, 7, 15)
+
+
+def _linea(**kwargs):
+    datos = {"codigo": "PER001", "concepto": "Salario base", "tipo": "percepcion", "monto": "6000.00"}
+    datos.update(kwargs)
+    return datos
+
+
+class NominaBase(HrBase):
+    def _nomina(self, empleado=None, tenant=None, periodo_inicio=INICIO, periodo_fin=FIN, **kwargs):
+        tenant = tenant or self.a
+        return Nomina.objects.create(
+            empresa=tenant["empresa"],
+            sucursal=tenant["sucursal"],
+            empleado=empleado or self.empleado,
+            periodo_inicio=periodo_inicio,
+            periodo_fin=periodo_fin,
+            **kwargs,
+        )
+
+    def _payload(self, **kwargs):
+        datos = {
+            "empresa": self.a["empresa"].pk,
+            "sucursal": self.a["sucursal"].pk,
+            "empleado": self.empleado.pk,
+            "periodo_inicio": INICIO.isoformat(),
+            "periodo_fin": FIN.isoformat(),
+        }
+        datos.update(kwargs)
+        return datos
+
+    def _post(self, data, user=None):
+        return self._client(user).post(NOMINAS_URL, data, format="json")
+
+    def _patch(self, nomina, data, user=None):
+        return self._client(user).patch(f"{NOMINAS_URL}{nomina.pk}/", data, format="json")
+
+    def _put(self, nomina, data, user=None):
+        return self._client(user).put(f"{NOMINAS_URL}{nomina.pk}/", data, format="json")
+
+    def _vigentes(self, empleado=None):
+        return Nomina.objects.filter(
+            empleado=empleado or self.empleado, periodo_inicio=INICIO, periodo_fin=FIN,
+        ).exclude(estado="cancelada").count()
+
+    def _assert_rechazo_por_duplicada(self, resp):
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"empleado": [MENSAJE_NOMINA_DUPLICADA]})
+
+
+class NominaUnicaPorPeriodoApiTests(NominaBase):
+    """A lo más una nómina vigente por empleado y periodo exacto.
+
+    ``uq_nomina_empleado_periodo_vigente`` es la garantía; el serializer le pone
+    un 400 por campo en el alta, el PUT y el PATCH. Una cancelada no cuenta.
+    """
+
+    def test_alta_duplicada_devuelve_400(self):
+        self._nomina()
+
+        resp = self._post(self._payload())
+
+        self._assert_rechazo_por_duplicada(resp)
+        self.assertEqual(self._vigentes(), 1)
+
+    def test_una_cancelada_no_bloquea_el_alta(self):
+        self._nomina(estado="cancelada")
+
+        resp = self._post(self._payload())
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(self._vigentes(), 1)
+
+    def test_un_alta_cancelada_no_choca_con_la_vigente(self):
+        self._nomina()
+
+        resp = self._post(self._payload(estado="cancelada"))
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_otro_periodo_u_otro_empleado_no_choca(self):
+        self._nomina()
+        otro = self._empleado(self.a, "E-002")
+
+        for extra in (
+            {"periodo_fin": "2026-07-14"},
+            {"periodo_inicio": "2026-07-02"},
+            {"empleado": otro.pk},
+        ):
+            with self.subTest(**extra):
+                resp = self._post(self._payload(**extra))
+                self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_patch_de_una_sola_fecha_que_choca_devuelve_400(self):
+        self._nomina()
+        corta = self._nomina(periodo_fin=date(2026, 7, 14))
+
+        resp = self._patch(corta, {"periodo_fin": FIN.isoformat()})
+
+        self._assert_rechazo_por_duplicada(resp)
+        corta.refresh_from_db()
+        self.assertEqual(corta.periodo_fin, date(2026, 7, 14))
+
+    def test_patch_que_cambia_de_empleado_y_choca_devuelve_400(self):
+        otro = self._empleado(self.a, "E-002")
+        self._nomina(empleado=otro)
+        nomina = self._nomina()
+
+        resp = self._patch(nomina, {"empleado": otro.pk})
+
+        self._assert_rechazo_por_duplicada(resp)
+
+    def test_put_que_choca_devuelve_400(self):
+        self._nomina()
+        corta = self._nomina(periodo_fin=date(2026, 7, 14))
+
+        resp = self._put(corta, self._payload())
+
+        self._assert_rechazo_por_duplicada(resp)
+
+    def test_reactivar_una_cancelada_que_choca_devuelve_400(self):
+        self._nomina()
+        cancelada = self._nomina(estado="cancelada")
+
+        resp = self._patch(cancelada, {"estado": "pendiente"})
+
+        self._assert_rechazo_por_duplicada(resp)
+        cancelada.refresh_from_db()
+        self.assertEqual(cancelada.estado, "cancelada")
+
+    def test_editar_una_nomina_no_choca_consigo_misma(self):
+        nomina = self._nomina()
+
+        with self.subTest("PATCH de otro campo"):
+            resp = self._patch(nomina, {"observaciones": "Revisada"})
+            self.assertEqual(resp.status_code, 200, resp.content)
+
+        with self.subTest("PATCH que reenvía el periodo"):
+            resp = self._patch(nomina, {"periodo_inicio": INICIO.isoformat(), "periodo_fin": FIN.isoformat()})
+            self.assertEqual(resp.status_code, 200, resp.content)
+
+        with self.subTest("PUT completo"):
+            resp = self._put(nomina, self._payload(observaciones="Final"))
+            self.assertEqual(resp.status_code, 200, resp.content)
+
+        self.assertEqual(self._vigentes(), 1)
+
+    def test_cancelar_una_vigente_se_permite(self):
+        nomina = self._nomina()
+
+        resp = self._patch(nomina, {"estado": "cancelada"})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(self._vigentes(), 0)
+
+    def test_estado_sigue_siendo_opcional_en_el_alta(self):
+        # Un ``UniqueTogetherValidator`` derivado de la constraint volvería
+        # requerido ``estado`` (campo de su condición).
+        resp = self._post(self._payload())
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()["estado"], "pendiente")
+
+    def test_alta_que_pierde_la_carrera_devuelve_400(self):
+        # La validación pasa, pero antes del INSERT otra petición crea la nómina
+        # vigente del mismo empleado y periodo. La constraint la detiene y el
+        # cliente recibe el mismo 400 que en la ruta normal.
+        validate_original = NominaSerializer.validate
+
+        def validate_y_pierde_la_carrera(serializer, data):
+            data = validate_original(serializer, data)
+            self._nomina()
+            return data
+
+        with patch.object(NominaSerializer, "validate", validate_y_pierde_la_carrera):
+            resp = self._post(self._payload(detalles=[_linea()]))
+
+        self._assert_rechazo_por_duplicada(resp)
+        self.assertEqual(Nomina.objects.filter(empleado=self.empleado).count(), 1)
+        self.assertFalse(NominaDetalle.objects.exists())
+
+    def test_edicion_que_pierde_la_carrera_devuelve_400_sin_tocar_las_lineas(self):
+        corta = self._nomina(periodo_fin=date(2026, 7, 14))
+        linea = NominaDetalle.objects.create(nomina=corta, **_linea(monto=Decimal("100.00")))
+        validate_original = NominaSerializer.validate
+
+        def validate_y_pierde_la_carrera(serializer, data):
+            data = validate_original(serializer, data)
+            self._nomina()
+            return data
+
+        with patch.object(NominaSerializer, "validate", validate_y_pierde_la_carrera):
+            resp = self._patch(corta, {"periodo_fin": FIN.isoformat(), "detalles": [_linea()]})
+
+        self._assert_rechazo_por_duplicada(resp)
+        corta.refresh_from_db()
+        self.assertEqual(corta.periodo_fin, date(2026, 7, 14))
+        self.assertEqual(list(corta.detalles.values_list("pk", flat=True)), [linea.pk])
+
+
+class NominaPeriodoRangoApiTests(NominaBase):
+    """``periodo_fin >= periodo_inicio`` con los valores finales, también en PATCH."""
+
+    MENSAJE = {"periodo_fin": ["El periodo fin no puede ser anterior al inicio."]}
+
+    def test_alta_con_fin_anterior_al_inicio_devuelve_400(self):
+        resp = self._post(self._payload(periodo_fin="2026-06-30"))
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), self.MENSAJE)
+
+    def test_patch_solo_de_fin_se_compara_con_el_inicio_guardado(self):
+        nomina = self._nomina()
+
+        resp = self._patch(nomina, {"periodo_fin": "2026-06-30"})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), self.MENSAJE)
+        nomina.refresh_from_db()
+        self.assertEqual(nomina.periodo_fin, FIN)
+
+    def test_patch_solo_de_inicio_se_compara_con_el_fin_guardado(self):
+        nomina = self._nomina()
+
+        resp = self._patch(nomina, {"periodo_inicio": "2026-07-16"})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), self.MENSAJE)
+
+
+class NominaUnicaPorPeriodoModeloTests(NominaBase):
+    """La constraint es la garantía aunque no se pase por el serializer."""
+
+    def test_la_constraint_rechaza_una_segunda_vigente(self):
+        self._nomina()
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self._nomina(estado="pagada")
+
+    def test_la_constraint_admite_canceladas_repetidas(self):
+        self._nomina()
+        self._nomina(estado="cancelada")
+        self._nomina(estado="cancelada")
+
+        self.assertEqual(Nomina.objects.filter(empleado=self.empleado).count(), 3)
+
+
+class NominaDetallesApiTests(NominaBase):
+    """``detalles`` en PUT/PATCH: cada línea se valida completa y el reemplazo es atómico."""
+
+    def setUp(self):
+        self.nomina = self._nomina()
+        self.lineas = [
+            NominaDetalle.objects.create(nomina=self.nomina, **_linea(monto=Decimal("6000.00"))),
+            NominaDetalle.objects.create(
+                nomina=self.nomina, **_linea(codigo="DED001", concepto="ISR", tipo="deduccion", monto=Decimal("500.00")),
+            ),
+        ]
+        self.nomina.refresh_from_db()
+
+    def _pks(self):
+        return sorted(self.nomina.detalles.values_list("pk", flat=True))
+
+    def _assert_lineas_intactas(self):
+        self.assertEqual(self._pks(), sorted(linea.pk for linea in self.lineas))
+        self.nomina.refresh_from_db()
+        self.assertEqual(
+            (self.nomina.total_percepciones, self.nomina.total_deducciones, self.nomina.neto),
+            (Decimal("6000.00"), Decimal("500.00"), Decimal("5500.00")),
+        )
+
+    def test_patch_con_una_linea_incompleta_devuelve_400_y_conserva_las_lineas(self):
+        for campo in ("monto", "tipo", "concepto"):
+            with self.subTest(falta=campo):
+                incompleta = _linea()
+                del incompleta[campo]
+
+                resp = self._patch(self.nomina, {"detalles": [_linea(), incompleta]})
+
+                self.assertEqual(resp.status_code, 400, resp.content)
+                errores = resp.json()["detalles"]
+                self.assertEqual(errores[0], {})
+                self.assertEqual(list(errores[1]), [campo])
+                self._assert_lineas_intactas()
+
+    def test_patch_con_lineas_completas_reemplaza_todas(self):
+        resp = self._patch(self.nomina, {"detalles": [_linea(monto="7000.00")]})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(len(resp.json()["detalles"]), 1)
+        self.assertNotIn(resp.json()["detalles"][0]["id"], [linea.pk for linea in self.lineas])
+        self.assertEqual(resp.json()["neto"], "7000.00")
+
+    def test_patch_sin_detalles_no_toca_las_lineas(self):
+        resp = self._patch(self.nomina, {"observaciones": "Sin cambios en líneas"})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self._assert_lineas_intactas()
+
+    def test_patch_con_detalles_vacio_quita_todas_las_lineas(self):
+        resp = self._patch(self.nomina, {"detalles": []})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(self._pks(), [])
+        self.assertEqual(resp.json()["neto"], "0.00")
+
+    def test_put_con_una_linea_incompleta_devuelve_400(self):
+        incompleta = _linea()
+        del incompleta["monto"]
+
+        resp = self._put(self.nomina, self._payload(detalles=[incompleta]))
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(list(resp.json()["detalles"][0]), ["monto"])
+        self._assert_lineas_intactas()
+
+    def test_patch_con_monto_negativo_sigue_rechazandose(self):
+        resp = self._patch(self.nomina, {"detalles": [_linea(monto="-1.00")]})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self._assert_lineas_intactas()
+
+    def _save_que_falla_en_la_llamada(self, numero):
+        save_original = NominaDetalle.save
+        llamadas = []
+
+        def save(detalle, *args, **kwargs):
+            llamadas.append(detalle)
+            if len(llamadas) == numero:
+                raise DatabaseError("falla simulada")
+            return save_original(detalle, *args, **kwargs)
+
+        return patch.object(NominaDetalle, "save", save)
+
+    def test_una_falla_al_reemplazar_las_lineas_no_cambia_nada(self):
+        with self._save_que_falla_en_la_llamada(2), self.assertRaises(DatabaseError):
+            self._patch(self.nomina, {"observaciones": "No debe quedar", "detalles": [_linea(), _linea()]})
+
+        self._assert_lineas_intactas()
+        self.assertIsNone(self.nomina.observaciones)
+
+    def test_una_falla_al_crear_una_linea_no_deja_encabezado_huerfano(self):
+        otro = self._empleado(self.a, "E-002")
+
+        with self._save_que_falla_en_la_llamada(2), self.assertRaises(DatabaseError):
+            self._post(self._payload(empleado=otro.pk, detalles=[_linea(), _linea()]))
+
+        self.assertFalse(Nomina.objects.filter(empleado=otro).exists())
+
+
+class GenerarPeriodoIntegridadTests(NominaBase):
+    """``generar_periodo`` pide sucursal, no duplica un periodo vivo y es todo o nada."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        Puesto.objects.filter(pk=cls.a["puesto"].pk).update(salario_base=Decimal("9000.00"))
+        cls.empleado_2 = cls._empleado(cls.a, "E-002")
+        # Misma empresa, otra sucursal: no entra al generar la de Monterrey.
+        cls.gdl = Sucursal.objects.create(empresa=cls.a["empresa"], codigo="GDL", nombre="Guadalajara")
+        cls.empleado_gdl = Empleado.objects.create(
+            empresa=cls.a["empresa"], sucursal=cls.gdl, departamento=cls.a["departamento"],
+            puesto=cls.a["puesto"], numero_empleado="E-GDL", nombre="Empleado GDL",
+            apellido_paterno="López", fecha_ingreso=date(2025, 1, 6),
+        )
+        cls.empleado_b = cls._empleado(cls.b, "E-B01")
+        cls.superusuario = Usuario.objects.create(
+            username="root@x.test", email="root@x.test", is_superuser=True, is_staff=True,
+        )
+
+    def _generar(self, user=None, **kwargs):
+        datos = {
+            "periodo_inicio": INICIO.isoformat(),
+            "periodo_fin": FIN.isoformat(),
+            "sucursal_id": self.a["sucursal"].pk,
+        }
+        datos.update(kwargs)
+        datos = {k: v for k, v in datos.items() if v is not None}
+        return self._client(user).post(GENERAR_PERIODO_URL, datos, format="json")
+
+    def _mensaje_409(self, n):
+        return (
+            f"El periodo {INICIO.isoformat()} a {FIN.isoformat()} ya tiene nóminas vigentes "
+            f"para {n} empleado(s) de esta sucursal; cancélalas antes de volver a generarlo."
+        )
+
+    def test_sin_sucursal_id_devuelve_400(self):
+        # ``None`` omite la clave; ``""`` la manda vacía.
+        for valor in (None, ""):
+            with self.subTest(sucursal_id=valor):
+                resp = self._generar(sucursal_id=valor)
+
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {"sucursal_id": ["Este campo es requerido."]})
+        self.assertFalse(Nomina.objects.exists())
+
+    def test_sucursal_id_no_numerico_devuelve_400(self):
+        resp = self._generar(sucursal_id="abc")
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(list(resp.json()), ["sucursal_id"])
+
+    def test_genera_solo_para_la_sucursal_indicada(self):
+        resp = self._generar()
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()["creadas"], 2)
+        generadas = Nomina.objects.filter(pk__in=resp.json()["ids"])
+        self.assertEqual(
+            set(generadas.values_list("empleado_id", flat=True)), {self.empleado.pk, self.empleado_2.pk},
+        )
+        self.assertEqual(
+            set(generadas.values_list("empresa_id", "sucursal_id")),
+            {(self.a["empresa"].pk, self.a["sucursal"].pk)},
+        )
+
+    def test_una_segunda_corrida_devuelve_409_sin_crear_nada(self):
+        self.assertEqual(self._generar().status_code, 201)
+
+        resp = self._generar()
+
+        self.assertEqual(resp.status_code, 409, resp.content)
+        self.assertEqual(resp.json(), {"detail": self._mensaje_409(2)})
+        self.assertEqual(Nomina.objects.count(), 2)
+
+    def test_un_solo_empleado_con_nomina_vigente_bloquea_todo_el_periodo(self):
+        manual = self._nomina(empleado=self.empleado_2)
+
+        resp = self._generar()
+
+        self.assertEqual(resp.status_code, 409, resp.content)
+        self.assertEqual(resp.json(), {"detail": self._mensaje_409(1)})
+        self.assertEqual(list(Nomina.objects.values_list("pk", flat=True)), [manual.pk])
+
+    def test_tras_cancelar_la_primera_corrida_se_puede_regenerar(self):
+        primera = self._generar().json()["ids"]
+        Nomina.objects.filter(pk__in=primera).update(estado="cancelada")
+
+        resp = self._generar()
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()["creadas"], 2)
+        self.assertEqual(Nomina.objects.exclude(estado="cancelada").count(), 2)
+
+    def test_la_nomina_de_otra_sucursal_u_otro_periodo_no_bloquea(self):
+        self._nomina(empleado=self.empleado_gdl)
+        self._nomina(periodo_fin=date(2026, 7, 14))
+
+        resp = self._generar()
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_sucursal_de_otra_empresa_sigue_rechazandose(self):
+        resp = self._generar(sucursal_id=self.b["sucursal"].pk)
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(
+            resp.json(), {"sucursal_id": ["La sucursal no existe o no pertenece a la empresa del usuario."]},
+        )
+        self.assertFalse(Nomina.objects.exists())
+
+    def test_superusuario_genera_solo_para_la_empresa_de_la_sucursal(self):
+        resp = self._generar(user=self.superusuario, sucursal_id=self.b["sucursal"].pk)
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        nomina = Nomina.objects.get()
+        self.assertEqual(
+            (nomina.empleado_id, nomina.empresa_id, nomina.sucursal_id),
+            (self.empleado_b.pk, self.b["empresa"].pk, self.b["sucursal"].pk),
+        )
+
+    def test_superusuario_sin_sucursal_id_devuelve_400(self):
+        resp = self._generar(user=self.superusuario, sucursal_id=None)
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(Nomina.objects.exists())
+
+    def test_una_carrera_que_choca_con_la_constraint_devuelve_409_sin_crear_nada(self):
+        # El chequeo previo no ve nada, pero antes de los INSERT otra petición
+        # crea la nómina vigente de un empleado. La constraint detiene la
+        # generación, se revierte entera y el cliente recibe el 409.
+        chequeo_original = NominaViewSet._empleados_con_nomina_vigente
+        rival = []
+
+        def chequeo_y_pierde_la_carrera(viewset, empleados, periodo_inicio, periodo_fin):
+            resultado = chequeo_original(viewset, empleados, periodo_inicio, periodo_fin)
+            if not rival:
+                rival.append(self._nomina(empleado=self.empleado_2))
+            return resultado
+
+        with patch.object(NominaViewSet, "_empleados_con_nomina_vigente", chequeo_y_pierde_la_carrera):
+            resp = self._generar()
+
+        self.assertEqual(resp.status_code, 409, resp.content)
+        self.assertEqual(resp.json(), {"detail": self._mensaje_409(1)})
+        self.assertEqual(list(Nomina.objects.values_list("pk", flat=True)), [rival[0].pk])
+
+    def test_una_falla_a_media_generacion_no_deja_nada(self):
+        save_original = NominaDetalle.save
+        llamadas = []
+
+        def save(detalle, *args, **kwargs):
+            llamadas.append(detalle)
+            if len(llamadas) == 2:
+                raise DatabaseError("falla simulada")
+            return save_original(detalle, *args, **kwargs)
+
+        with patch.object(NominaDetalle, "save", save), self.assertRaises(DatabaseError):
+            self._generar()
+
+        self.assertFalse(Nomina.objects.exists())
+        self.assertFalse(NominaDetalle.objects.exists())
 
 
 MENSAJE_EMPLEADO_INACTIVO = "No se puede dejar vigente un contrato de un empleado inactivo."

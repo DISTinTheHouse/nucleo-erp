@@ -646,6 +646,13 @@ class Capacitacion(models.Model):
         return str(self.id)
 
 
+# Una nómina es "vigente" mientras no esté cancelada: cancelar libera el periodo
+# para volver a generarlo. La usan la constraint de ``Nomina``, su serializer y
+# ``generar_periodo``: una sola definición.
+NOMINA_VIGENTE = ~models.Q(estado='cancelada')
+MENSAJE_NOMINA_PERIODO_DUPLICADO = 'Este empleado ya tiene una nómina vigente para este periodo.'
+
+
 class Nomina(models.Model):
     ESTADO_CHOICES = [
         ('pendiente', 'Pendiente'),
@@ -674,9 +681,42 @@ class Nomina(models.Model):
         db_table = "nominas"
         verbose_name = "Nomina"
         verbose_name_plural = "Nominas"
+        constraints = [
+            # A lo más una nómina vigente por empleado y periodo exacto. Es la
+            # garantía real: la validación del serializer y el chequeo previo de
+            # ``generar_periodo`` sólo le ponen mensaje, y esto cubre también la
+            # carrera entre dos peticiones. Una cancelada queda fuera del índice.
+            # Periodos que se traslapan sin ser idénticos no se detectan aquí.
+            models.UniqueConstraint(
+                fields=['empleado', 'periodo_inicio', 'periodo_fin'],
+                condition=NOMINA_VIGENTE,
+                name='uq_nomina_empleado_periodo_vigente',
+                violation_error_message=MENSAJE_NOMINA_PERIODO_DUPLICADO,
+            ),
+        ]
 
     def __str__(self):
         return str(self.id)
+
+    @classmethod
+    def hay_otra_vigente(cls, empleado_id, periodo_inicio, periodo_fin, *, estado, excluir_pk=None):
+        """¿Chocaría con otra vigente una nómina que quede así?
+
+        Recibe los valores con los que la nómina QUEDARÁ, no los que tenía: así
+        reactivar una cancelada o mover sus fechas también se revisa. Mismo
+        criterio que ``uq_nomina_empleado_periodo_vigente``.
+        """
+        if not (empleado_id and periodo_inicio and periodo_fin) or estado == 'cancelada':
+            return False
+        otras = cls.objects.filter(
+            NOMINA_VIGENTE,
+            empleado_id=empleado_id,
+            periodo_inicio=periodo_inicio,
+            periodo_fin=periodo_fin,
+        )
+        if excluir_pk is not None:
+            otras = otras.exclude(pk=excluir_pk)
+        return otras.exists()
 
     def save(self, *args, **kwargs):
         es_nuevo = self.pk is None
