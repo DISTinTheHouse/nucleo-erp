@@ -2,6 +2,7 @@ from django.db.models import Prefetch
 from rest_framework import mixins, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 from wms.api.serializers import (
@@ -32,6 +33,7 @@ from wms.models import (
     TransferenciaDetalle,
 )
 from wms.services.despacho_service import DespachoService
+from wms.services.rfid_scan_service import lector_desde_request, recibir_lecturas
 from wms.services.transferencia_service import TransferenciaService
 from wms.services.picking_service import PickingService
 from wms.services.packing_service import PackingService
@@ -666,9 +668,25 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         return self.registrar_impresion(request)
 
     # ── SCANNER / LECTOR RFID ───────────────────────────────────────────
-    # Next.js NO necesita usar routes /QA/* para el scanner.
-    # Consume estos 3 endpoints del V1 que ya respetan scope empresa/sucursales.
-    # (El receive/ lo usa SOLO el lector FX Zebra sin token — POST /QA/scanner_rfid/receive/)
+    # Next.js consume scans/, scans/clear y scanner-stats.
+    # scans/receive lo usa SOLO el lector FX, autenticado con el token de su LectorRFID.
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="scans/receive",
+        url_name="scans_receive",
+        authentication_classes=[],
+        permission_classes=[AllowAny],
+    )
+    def scans_receive(self, request):
+        lector = lector_desde_request(request)
+        if lector is None:
+            return Response(
+                {"status": "error", "message": "Lector no autorizado."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        return recibir_lecturas(request._request, lector)
 
     @action(
         detail=False,
@@ -702,8 +720,9 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
               debug_get: {...lookup info, query_epc_search si lo mandaste...}
             }
         """
+        user = request.user
         scans = list(
-            RfidScan.objects.order_by("-created_at", "-id")[:50]
+            RfidScan.objects.visibles_para(user).order_by("-created_at", "-id")[:50]
         )
         epc_list = [s.epc for s in scans if s.epc]
         epc_lower_set = {e.lower() for e in epc_list if e}
@@ -738,7 +757,6 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         for e in list(epc_lower_set):
             epc_search_set |= _epc_variants(e)
 
-        user = request.user
         detalle_qs = (
             EtiquetaRFIDDetalle.objects.filter(
                 epc__in=list(epc_search_set) + list({v.upper() for v in epc_search_set})
@@ -776,17 +794,6 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         for d in detalle_qs:
             for v in _epc_variants(d.epc):
                 detalle_by_epc_variant.setdefault(v, d)
-
-        # ``RfidScan`` no tiene FK a empresa: la unica forma de saber de quien es
-        # un renglon es que su EPC haga match contra una etiqueta YA acotada por
-        # empresa (detalle_by_epc_variant, arriba). Sin esto, un no-superusuario
-        # veia el EPC/antena/RSSI/IP crudos de lecturas de otras empresas como
-        # "no match" en vez de no verlas.
-        if not getattr(user, "is_superuser", False):
-            scans = [
-                scan for scan in scans
-                if any(v in detalle_by_epc_variant for v in _epc_variants((scan.epc or "").lower()))
-            ]
 
         data = []
         for scan in scans:
@@ -896,9 +903,8 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
     def scanner_stats(self, request):
         """Endpoint 1-clic para saber si el lector FX esta vivo SIN entrar a Vercel.
 
-        Solo superusuario o administrador de empresa: expone conteos y muestras
-        crudas de ``RfidScan``, que no tiene FK a empresa (mismo criterio que
-        ``scans_clear``).
+        Solo superusuario o administrador de empresa. Acotado a la empresa del
+        usuario (superusuario ve todo).
 
         Query params:
             epc (opcional): buscar si un EPC (ej recién impreso) existe en RfidScan.
@@ -915,9 +921,10 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
             raise PermissionDenied("No tiene permisos para realizar esta acción.")
 
-        total = RfidScan.objects.count()
+        scans_qs = RfidScan.objects.visibles_para(user)
+        total = scans_qs.count()
         last_5 = list(
-            RfidScan.objects.order_by("-created_at", "-id")[:5].values(
+            scans_qs.order_by("-created_at", "-id")[:5].values(
                 "id", "epc", "antenna", "rssi", "reader_ip", "created_at"
             )
         )
@@ -955,7 +962,7 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                 return vars
             base_vars = _v(q_epc)
             q_lookup = list(base_vars) + [v.upper() for v in base_vars]
-            qs_found = RfidScan.objects.filter(epc__in=q_lookup).order_by("-created_at")[:10]
+            qs_found = scans_qs.filter(epc__in=q_lookup).order_by("-created_at")[:10]
             for f in qs_found:
                 q_found_samples.append({
                     "id": f.id, "epc": f.epc, "epc_len": len(f.epc or ""),
@@ -973,11 +980,11 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             "query_epc_found_count": len(q_found_samples),
             "query_epc_found_samples": q_found_samples,
             "receive_endpoint_info": {
-                "fx_post_url_required": "POST https://TU-BACKEND/QA/scanner_rfid/receive/ (el FX llama aquí, NO Next.js)",
-                "method_required": "POST (FX no manda token; esta ruta es @csrf_exempt. Next.js NO usa receive/)",
+                "fx_post_url_required": "POST https://TU-BACKEND/api/v1/wms/etiquetas-rfid/scans/receive/ (el FX llama aquí, NO Next.js)",
+                "method_required": "POST con token del LectorRFID (header X-RFID-Token o ?token=). Next.js NO usa receive/",
                 "example_POST_test_1_tag": (
-                    "Invoke-RestMethod -Uri 'https://nucleo-erp.vercel.app/QA/scanner_rfid/receive/' "
-                    "-Method POST -ContentType 'application/json' -Body "
+                    "Invoke-RestMethod -Uri 'https://nucleo-erp.vercel.app/api/v1/wms/etiquetas-rfid/scans/receive/' "
+                    "-Method POST -Headers @{'X-RFID-Token'='<token>'} -ContentType 'application/json' -Body "
                     "ConvertTo-Json(@(@{epcId='000012e32827000147c0c5f5';antennaPort=1;peakRssiValue=-45}))"
                 ),
                 "note": "Next.js solo consume scans/ (polling), scans/clear (purge) y scanner-stats (debug).",
@@ -992,15 +999,14 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         url_name="scans_clear",
     )
     def scans_clear(self, request):
-        """Purge list: borra todos los renglones de RfidScan (lecturas).
+        """Purge list: borra las lecturas de la empresa del usuario.
         Respuesta: {"status": "success", "deleted": N}
 
-        Solo superusuario o administrador de empresa: el borrado es global
-        (``RfidScan`` no tiene FK a empresa todavía).
+        Solo superusuario o administrador de empresa. Superusuario borra todo.
         """
         user = request.user
         if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
             raise PermissionDenied("No tiene permisos para realizar esta acción.")
 
-        deleted, _ = RfidScan.objects.all().delete()
+        deleted, _ = RfidScan.objects.visibles_para(user).delete()
         return Response({"status": "success", "deleted": deleted})

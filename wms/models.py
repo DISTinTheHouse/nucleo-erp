@@ -1,3 +1,5 @@
+import secrets
+
 from django.db import models
 from simple_history.models import HistoricalRecords
 
@@ -529,12 +531,73 @@ class EtiquetaRFIDDetalle(models.Model):
         return self.epc
 
 
+def _generar_token_lector():
+    return secrets.token_urlsafe(32)
+
+
+class LectorRFID(models.Model):
+    empresa = models.ForeignKey(
+        "nucleo.Empresa",
+        on_delete=models.CASCADE,
+        related_name="lectores_rfid",
+    )
+    sucursal = models.ForeignKey(
+        "nucleo.Sucursal",
+        on_delete=models.SET_NULL,
+        related_name="lectores_rfid",
+        null=True,
+        blank=True,
+    )
+    nombre = models.CharField(max_length=100)
+    token = models.CharField(max_length=64, unique=True, default=_generar_token_lector)
+    activo = models.BooleanField(default=True)
+    ultima_lectura = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "lectores_rfid"
+        verbose_name = "Lector RFID"
+        verbose_name_plural = "Lectores RFID"
+        ordering = ["empresa_id", "nombre"]
+
+    def __str__(self):
+        return f"{self.nombre} ({self.empresa_id})"
+
+
+class RfidScanQuerySet(models.QuerySet):
+    def visibles_para(self, user):
+        if getattr(user, "is_superuser", False):
+            return self
+        empresa_id = getattr(user, "empresa_id", None)
+        if not empresa_id:
+            return self.none()
+        return self.filter(empresa_id=empresa_id)
+
+
 class RfidScan(models.Model):
+    # Nullable solo por las lecturas previas al token por lector.
+    empresa = models.ForeignKey(
+        "nucleo.Empresa",
+        on_delete=models.CASCADE,
+        related_name="rfid_scans",
+        null=True,
+        blank=True,
+    )
+    lector = models.ForeignKey(
+        LectorRFID,
+        on_delete=models.SET_NULL,
+        related_name="scans",
+        null=True,
+        blank=True,
+    )
     epc = models.CharField(max_length=255, db_index=True)
     reader_ip = models.GenericIPAddressField(null=True, blank=True)
     antenna = models.IntegerField(null=True, blank=True)
     rssi = models.FloatField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = RfidScanQuerySet.as_manager()
 
     class Meta:
         db_table = "rfid_scans"
