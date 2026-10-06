@@ -633,6 +633,10 @@ class ScannerRFIDSeguridadTests(TestCase):
         self.assertFalse(scan["match_impresion"])
         self.assertNotIn("impresion_folio", scan)
 
+    def test_lector_sin_sucursal_no_valida(self):
+        with self.assertRaises(DjangoValidationError):
+            LectorRFID(empresa=self.empresa_a, nombre="sin suc").full_clean()
+
     def test_lector_con_sucursal_de_otra_empresa_no_valida(self):
         lector = LectorRFID(empresa=self.empresa_a, sucursal=self.sucursal_b, nombre="mal")
         with self.assertRaises(DjangoValidationError):

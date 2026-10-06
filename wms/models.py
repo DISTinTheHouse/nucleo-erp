@@ -542,10 +542,13 @@ class LectorRFID(models.Model):
         on_delete=models.CASCADE,
         related_name="lectores_rfid",
     )
+    # Obligatoria en formularios; nullable en BD solo por lectores dados de alta
+    # antes de exigirla. Un lector sin sucursal solo lo ven los admins.
     sucursal = models.ForeignKey(
         "nucleo.Sucursal",
         on_delete=models.PROTECT,
         related_name="lectores_rfid",
+        null=True,
     )
     nombre = models.CharField(max_length=100)
     token = models.CharField(max_length=64, unique=True, default=_generar_token_lector)
