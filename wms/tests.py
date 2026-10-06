@@ -8,6 +8,7 @@ global): el pre-chequeo del serializer (400) y la red de seguridad del service
 import json
 from unittest.mock import patch
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.db.transaction import TransactionManagementError
 from django.test import TestCase
@@ -493,10 +494,29 @@ class ScannerRFIDSeguridadTests(TestCase):
     def setUpTestData(cls):
         cls.empresa_a = Empresa.objects.create(codigo="rfid-a", razon_social="Empresa A")
         cls.empresa_b = Empresa.objects.create(codigo="rfid-b", razon_social="Empresa B")
-        cls.lector_a = LectorRFID.objects.create(empresa=cls.empresa_a, nombre="FX A")
-        cls.lector_b = LectorRFID.objects.create(empresa=cls.empresa_b, nombre="FX B")
+        cls.sucursal_a = Sucursal.objects.create(empresa=cls.empresa_a, codigo="A1", nombre="A1")
+        cls.sucursal_a2 = Sucursal.objects.create(empresa=cls.empresa_a, codigo="A2", nombre="A2")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.empresa_b, codigo="B1", nombre="B1")
+        cls.lector_a = LectorRFID.objects.create(
+            empresa=cls.empresa_a, sucursal=cls.sucursal_a, nombre="FX A"
+        )
+        cls.lector_a2 = LectorRFID.objects.create(
+            empresa=cls.empresa_a, sucursal=cls.sucursal_a2, nombre="FX A2"
+        )
+        cls.lector_b = LectorRFID.objects.create(
+            empresa=cls.empresa_b, sucursal=cls.sucursal_b, nombre="FX B"
+        )
         cls.usuario_a = Usuario.objects.create(
-            username="scan-a", email="scan-a@example.com", empresa=cls.empresa_a
+            username="scan-a",
+            email="scan-a@example.com",
+            empresa=cls.empresa_a,
+            sucursal_default=cls.sucursal_a,
+        )
+        cls.usuario_sin_sucursales = Usuario.objects.create(
+            username="scan-a-sin-suc", email="scan-a-sin-suc@example.com", empresa=cls.empresa_a
+        )
+        cls.usuario_sin_empresa = Usuario.objects.create(
+            username="scan-sin-emp", email="scan-sin-emp@example.com"
         )
         cls.admin_a = Usuario.objects.create(
             username="scan-admin-a",
@@ -574,6 +594,49 @@ class ScannerRFIDSeguridadTests(TestCase):
         epcs = [s["epc"] for s in resp.json()["scans"]]
         self.assertEqual(len(epcs), 3)
         self.assertTrue(all(e.startswith("aaaa") for e in epcs))
+
+    def test_scans_no_admin_solo_ve_lectores_de_sus_sucursales(self):
+        self._sembrar(self.empresa_a, self.lector_a, 1, "aaaa")
+        self._sembrar(self.empresa_a, self.lector_a2, 1, "a2a2")
+
+        epcs = [s["epc"] for s in self._api(self.usuario_a).get(self.SCANS_URL).json()["scans"]]
+
+        self.assertEqual(epcs, ["aaaa00000000"])
+
+    def test_scans_admin_ve_toda_su_empresa(self):
+        self._sembrar(self.empresa_a, self.lector_a, 1, "aaaa")
+        self._sembrar(self.empresa_a, self.lector_a2, 1, "a2a2")
+        self._sembrar(self.empresa_b, self.lector_b, 1, "bbbb")
+        resp = self._api(self.admin_a).get(self.SCANS_URL)
+        self.assertEqual(len(resp.json()["scans"]), 2)
+
+    def test_scans_sin_empresa_o_sin_sucursales_no_ve_nada(self):
+        self._sembrar(self.empresa_a, self.lector_a, 2, "aaaa")
+        for user in (self.usuario_sin_empresa, self.usuario_sin_sucursales):
+            with self.subTest(user=user.username):
+                resp = self._api(user).get(self.SCANS_URL)
+                self.assertEqual(resp.json()["scans"], [])
+
+    def test_scans_match_no_cruza_etiquetas_de_otra_empresa(self):
+        impresion_b = EtiquetaRFIDImpresion.objects.create(
+            empresa=self.empresa_b, sucursal=self.sucursal_b, cantidad=1
+        )
+        EtiquetaRFIDDetalle.objects.create(
+            impresion=impresion_b, epc="BBBBBBBBBBBBBBBBBBBB0001", barcode_value="X"
+        )
+        RfidScan.objects.create(
+            empresa=self.empresa_a, lector=self.lector_a, epc="bbbbbbbbbbbbbbbbbbbb0001"
+        )
+
+        scan = self._api(self.usuario_a).get(self.SCANS_URL).json()["scans"][0]
+
+        self.assertFalse(scan["match_impresion"])
+        self.assertNotIn("impresion_folio", scan)
+
+    def test_lector_con_sucursal_de_otra_empresa_no_valida(self):
+        lector = LectorRFID(empresa=self.empresa_a, sucursal=self.sucursal_b, nombre="mal")
+        with self.assertRaises(DjangoValidationError):
+            lector.full_clean()
 
     def test_scans_superuser_ve_todas(self):
         self._sembrar(self.empresa_a, self.lector_a, 2, "aaaa")
