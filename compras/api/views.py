@@ -14,7 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import Producto
+from catalogo.models import Producto, ProductoVariante
 from compras.models import (
     CalidadInspeccion,
     CalidadInspeccionDetalle,
@@ -22,6 +22,8 @@ from compras.models import (
     OrdenCompraDetalle,
     Recepcion,
     RecepcionDetalle,
+    RecepcionRFIDEncuadre,
+    RecepcionRFIDLectura,
 )
 from finanzas.models import FacturaProveedor
 from compras.api.serializers import (
@@ -36,6 +38,10 @@ from compras.api.serializers import (
     RecepcionOnboardingSerializer,
     RecepcionRetrieveSerializer,
     RecepcionSerializer,
+    RecepcionRFIDEncuadreSerializer,
+    RecepcionRFIDEncuadreCreateSerializer,
+    RecepcionRFIDLecturaSerializer,
+    RecepcionRFIDLecturaInputSerializer,
 )
 from hr.models import Empleado
 from inventarios.models import (
@@ -491,13 +497,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             has_sucursal = "sucursal" in header
             has_proveedor = "proveedor" in header
             has_moneda = "moneda" in header
-            has_fecha_oc = "fecha_oc" in header
+            has_fecha_vencimiento = "fecha_vencimiento" in header
             has_porcentaje_iva = "porcentaje_iva" in header
 
             sucursal_id = header.get("sucursal")
             proveedor_id = header.get("proveedor")
             moneda_id = header.get("moneda")
-            fecha_oc = header.get("fecha_oc") or timezone.now().date()
+            fecha_vencimiento = header.get("fecha_vencimiento")
             porcentaje_iva = header.get("porcentaje_iva")
 
             if not sucursal_id:
@@ -526,8 +532,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 oc.proveedor_id = proveedor_id
             if not oc.pk or has_moneda:
                 oc.moneda_id = moneda_id
-            if not oc.pk or has_fecha_oc:
-                oc.fecha_oc = fecha_oc
+            if not oc.pk:
+                # Fecha de generación (EC-395): la fija el servidor al crear y
+                # nunca se vuelve a tocar, ni siquiera en una edición
+                # posterior por este mismo endpoint.
+                oc.fecha_oc = timezone.now().date()
+            if has_fecha_vencimiento:
+                oc.fecha_vencimiento = fecha_vencimiento
             if not oc.pk or has_porcentaje_iva:
                 oc.porcentaje_iva = Decimal(str(porcentaje_iva or 0))
             if "referencia" in header:
@@ -671,13 +682,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             has_sucursal = "sucursal" in header
             has_proveedor = "proveedor" in header
             has_moneda = "moneda" in header
-            has_fecha_oc = "fecha_oc" in header
+            has_fecha_vencimiento = "fecha_vencimiento" in header
             has_porcentaje_iva = "porcentaje_iva" in header
 
             sucursal_id = header.get("sucursal")
             proveedor_id = header.get("proveedor")
             moneda_id = header.get("moneda")
-            fecha_oc = header.get("fecha_oc")
+            fecha_vencimiento = header.get("fecha_vencimiento")
             porcentaje_iva = header.get("porcentaje_iva")
 
             # Antes de la primera escritura (``oc.save()``). La empresa sale de la
@@ -697,8 +708,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 oc.proveedor_id = proveedor_id
             if has_moneda and moneda_id:
                 oc.moneda_id = moneda_id
-            if has_fecha_oc and fecha_oc:
-                oc.fecha_oc = fecha_oc
+            # ``fecha_oc`` (generación) NO se toca aquí: fija, inmutable
+            # después de creada (EC-395).
+            if has_fecha_vencimiento:
+                oc.fecha_vencimiento = fecha_vencimiento
             if has_porcentaje_iva:
                 oc.porcentaje_iva = Decimal(str(porcentaje_iva or 0))
             if "referencia" in header:
@@ -1894,6 +1907,234 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+
+def _resolver_tag_rfid(encuadre, codigo_tag):
+    """Resuelve un tag por sku/codigo/cod_proscai contra la OC u OP del encuadre."""
+    tokens = [t.strip() for t in codigo_tag.replace(",", " ").split() if t.strip()] or [codigo_tag]
+
+    producto_variante = (
+        ProductoVariante.objects.select_related("producto")
+        .filter(empresa=encuadre.empresa, activo=True, sku__in=tokens)
+        .first()
+    )
+    producto = producto_variante.producto if producto_variante else (
+        Producto.objects.filter(empresa=encuadre.empresa, activo=True)
+        .filter(Q(codigo__in=tokens) | Q(cod_proscai__in=tokens))
+        .first()
+    )
+
+    orden_compra_detalle = None
+    orden_produccion_detalle = None
+    if producto:
+        if encuadre.orden_compra_id:
+            orden_compra_detalle = (
+                OrdenCompraDetalle.objects.filter(
+                    orden_compra_id=encuadre.orden_compra_id, producto_id=producto.pk
+                ).order_by("id").first()
+            )
+        elif encuadre.op_id:
+            orden_produccion_detalle = (
+                OrdenProduccionDetalle.objects.filter(
+                    op_id=encuadre.op_id, producto_variante__producto_id=producto.pk
+                ).order_by("op_detalle_id").first()
+            )
+
+    return {
+        "producto": producto,
+        "producto_variante": producto_variante,
+        "orden_compra_detalle": orden_compra_detalle,
+        "orden_produccion_detalle": orden_produccion_detalle,
+        "metadata": {"resolved": bool(producto), "tokens": tokens, "source": "API-RFID"},
+    }
+
+
+def resumen_encuadre_rfid(encuadre):
+    """Esperado = ordenado - ya recibido (no solo lo contratado, ver B1 del audit).
+
+    Reutiliza ``RecepcionViewSet._cantidad_recibida_oc``/``_op`` -- ya restan lo
+    que Calidad rechaza, una sola fuente de verdad para "cuánto falta".
+    """
+    recepcion_vs = RecepcionViewSet()
+    lecturas = list(encuadre.lecturas.all())
+
+    if encuadre.orden_compra_id:
+        detalle_qs = (
+            OrdenCompraDetalle.objects.filter(orden_compra_id=encuadre.orden_compra_id)
+            .select_related("producto").order_by("id")
+        )
+        recibido_fn = recepcion_vs._cantidad_recibida_oc
+    elif encuadre.op_id:
+        detalle_qs = (
+            OrdenProduccionDetalle.objects.filter(op_id=encuadre.op_id)
+            .select_related("producto_variante__producto").order_by("op_detalle_id")
+        )
+        recibido_fn = recepcion_vs._cantidad_recibida_op
+    else:
+        detalle_qs = []
+        recibido_fn = None
+
+    detalles = []
+    total_esperado = Decimal("0")
+    for detalle in detalle_qs:
+        ordenado = Decimal(str(detalle.cantidad or 0))
+        ya_recibido = recibido_fn(detalle.pk) if recibido_fn else Decimal("0")
+        esperado = max(ordenado - ya_recibido, Decimal("0"))
+        if encuadre.orden_compra_id:
+            leido = sum(
+                (Decimal(str(l.cantidad_leida or 0)) for l in lecturas if l.orden_compra_detalle_id == detalle.pk),
+                Decimal("0"),
+            )
+            producto = detalle.producto
+        else:
+            leido = sum(
+                (Decimal(str(l.cantidad_leida or 0)) for l in lecturas if l.orden_produccion_detalle_id == detalle.pk),
+                Decimal("0"),
+            )
+            producto = getattr(detalle.producto_variante, "producto", None)
+
+        total_esperado += esperado
+        detalles.append({
+            "detalle_id": detalle.pk,
+            "producto_id": getattr(producto, "pk", None),
+            "producto_nombre": getattr(producto, "nombre", None),
+            "ordenado": str(ordenado),
+            "ya_recibido": str(ya_recibido),
+            "esperado": str(esperado),
+            "leido": str(leido),
+            "diferencia": str(esperado - leido),
+        })
+
+    total_leido = Decimal("0")
+    total_sin_asignar = Decimal("0")
+    for l in lecturas:
+        cantidad = Decimal(str(l.cantidad_leida or 0))
+        total_leido += cantidad
+        if not l.orden_compra_detalle_id and not l.orden_produccion_detalle_id:
+            total_sin_asignar += cantidad
+
+    return {
+        "detalle": detalles,
+        "total_esperado": str(total_esperado),
+        "total_leido": str(total_leido),
+        "total_sin_asignar": str(total_sin_asignar),
+        "completo": bool(total_esperado > 0 and total_leido >= total_esperado),
+    }
+
+
+class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
+    """API REST del encuadre RFID de recepción (OC u OP).
+
+    "Esperado" resta lo ya recibido. Las lecturas se resuelven por SKU/código,
+    todavía no por EPC.
+    """
+
+    queryset = RecepcionRFIDEncuadre.objects.all()
+    serializer_class = RecepcionRFIDEncuadreSerializer
+    http_method_names = ["get", "post"]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = (
+            self.queryset
+            .select_related("orden_compra", "op", "almacen", "proveedor", "sucursal")
+            .prefetch_related("lecturas")
+        )
+        if getattr(user, "is_superuser", False):
+            return qs.order_by("-created_at", "-id")
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(empresa=empresa).order_by("-created_at", "-id")
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return RecepcionRFIDEncuadreCreateSerializer
+        return RecepcionRFIDEncuadreSerializer
+
+    @action(detail=False, methods=["get"])
+    def onboarding(self, request):
+        # Mismos candidatos que recibir normalmente (OC/OP con pendiente) +
+        # almacenes: un encuadre solo tiene sentido sobre algo que todavía
+        # falta por recibir. Reusa RecepcionViewSet.handle_get_onboarding
+        # para no duplicar esa lógica (pendiente ya resta rechazos de Calidad).
+        return Response(RecepcionViewSet().handle_get_onboarding(request))
+
+    def create(self, request, *args, **kwargs):
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        if not empresa and not getattr(user, "is_superuser", False):
+            raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        oc = data.get("orden_compra")
+        op = data.get("op")
+        if bool(oc) == bool(op):
+            raise ValidationError({"tipo_origen": "Debes enviar exactamente una de orden_compra u op."})
+
+        origen = oc or op
+        if empresa and origen.empresa_id != empresa.pk:
+            raise ValidationError({"tipo_origen": "No pertenece a tu empresa."})
+
+        almacen = data["almacen"]
+        if almacen.sucursal_id and origen.sucursal_id != almacen.sucursal_id:
+            raise ValidationError({"almacen": "Debe pertenecer a la misma sucursal de la orden."})
+
+        encuadre = RecepcionRFIDEncuadre.objects.create(
+            tipo_origen=data["tipo_origen"],
+            orden_compra=oc,
+            op=op,
+            empresa=origen.empresa,
+            sucursal=origen.sucursal,
+            proveedor=getattr(origen, "proveedor", None),
+            almacen=almacen,
+            usuario=user,
+            serie_codigo=(data.get("serie_codigo") or "RC").strip().upper()[:2] or "RC",
+            fecha_recepcion=timezone.now(),
+            remision=(data.get("remision") or "").strip() or None,
+            factura_referencia=(data.get("factura_referencia") or "").strip() or None,
+            observaciones=(data.get("observaciones") or "").strip() or None,
+        )
+        return Response(RecepcionRFIDEncuadreSerializer(encuadre).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def lecturas(self, request, pk=None):
+        encuadre = self.get_object()
+        if encuadre.estatus != RecepcionRFIDEncuadre.Estatus.PENDIENTE:
+            raise ValidationError({"estatus": "Solo se puede escanear un encuadre pendiente."})
+
+        input_serializer = RecepcionRFIDLecturaInputSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        codigo_tag = input_serializer.validated_data["codigo_tag"].strip()
+        if not codigo_tag:
+            raise ValidationError({"codigo_tag": "Requerido."})
+        if encuadre.lecturas.filter(codigo_tag=codigo_tag).exists():
+            raise ValidationError({"codigo_tag": "Este tag ya fue leído en este encuadre."})
+
+        resolved = _resolver_tag_rfid(encuadre, codigo_tag)
+        lectura = RecepcionRFIDLectura.objects.create(
+            encuadre=encuadre,
+            codigo_tag=codigo_tag,
+            orden_compra_detalle=resolved["orden_compra_detalle"],
+            orden_produccion_detalle=resolved["orden_produccion_detalle"],
+            producto=resolved["producto"],
+            producto_variante=resolved["producto_variante"],
+            cantidad_leida=Decimal("1"),
+            metadata=resolved["metadata"],
+        )
+        return Response(RecepcionRFIDLecturaSerializer(lectura).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def aceptar(self, request, pk=None):
+        encuadre = self.get_object()
+        if encuadre.estatus != RecepcionRFIDEncuadre.Estatus.PENDIENTE:
+            raise ValidationError({"estatus": "Solo se puede aceptar un encuadre pendiente."})
+        encuadre.estatus = RecepcionRFIDEncuadre.Estatus.ACEPTADO
+        encuadre.save(update_fields=["estatus", "updated_at"])
+        return Response(RecepcionRFIDEncuadreSerializer(encuadre).data)
 
 
 class ComprasDashboardView(APIView):

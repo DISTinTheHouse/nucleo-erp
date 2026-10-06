@@ -65,7 +65,6 @@ INSTALLED_APPS = [
     'ia',
     'auditoria',
     'axes',
-    'QA',
     'inventarios',
     'catalogo',
     'terceros',

@@ -510,10 +510,18 @@ class FacturaProveedorSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnSe
     factura_proveedor_detalles = FacturaProveedorDetalleSerializer(many=True, required=False)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     moneda_codigo = serializers.CharField(source="moneda.codigo_iso", read_only=True)
+    tiene_pdf_adjunto = serializers.SerializerMethodField()
 
     class Meta:
         model = FacturaProveedor
-        fields = "__all__"
+        # ``pdf_adjunto`` es ``BinaryField``: DRF no tiene mapeo para serializarlo
+        # y además no tiene sentido mandar el binario completo en cada
+        # list/retrieve. Se sube y se descarga por las acciones dedicadas
+        # (``adjuntar-pdf`` / ``pdf-fusionado``); aquí solo se informa si existe.
+        exclude = ["pdf_adjunto"]
+
+    def get_tiene_pdf_adjunto(self, obj):
+        return bool(obj.pdf_adjunto)
 
     def validate(self, attrs):
         req = self.context.get("request")

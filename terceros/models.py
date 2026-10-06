@@ -1,5 +1,7 @@
-from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.indexes import OpClass
 from django.db import models
+from django.db.models.functions import Upper
+from nucleo.indices import GinIndexSoloPostgres
 from django.conf import settings
 from nucleo.models import StatusLifecycleModel
 from nucleo.models import Empresa, SatRegimenFiscal, SatUsoCfdi, SatFormaPago, SatMetodoPago, Moneda, Sucursal
@@ -48,22 +50,25 @@ class Cliente(StatusLifecycleModel):
             # el ``icontains`` sobre los tres campos de texto del cliente. Estos
             # mismos índices sirven a la búsqueda de Cotización, que no tiene
             # folio y sólo se busca a través de ``cliente__nombre`` /
-            # ``cliente__razon_social``. La extensión ``pg_trgm`` ya está
-            # habilitada en la instancia; la migración sólo crea los índices.
-            GinIndex(
-                fields=["nombre"],
-                opclasses=["gin_trgm_ops"],
-                name="clientes_nombre_trgm",
+            # ``cliente__razon_social``.
+            #
+            # Son de EXPRESIÓN sobre ``UPPER(col)``, no sobre la columna: en
+            # PostgreSQL Django compila ``icontains`` como
+            # ``UPPER("col"::text) LIKE UPPER(%s)`` —no ``ILIKE`` — y un índice
+            # sobre la columna cruda no sirve a ese predicado (verificado con
+            # EXPLAIN y ``enable_seqscan = off``). Sólo existen en PostgreSQL:
+            # ver ``nucleo.indices``.
+            GinIndexSoloPostgres(
+                OpClass(Upper("nombre"), name="gin_trgm_ops"),
+                name="clientes_nombre_upper_trgm",
             ),
-            GinIndex(
-                fields=["razon_social"],
-                opclasses=["gin_trgm_ops"],
-                name="clientes_razon_social_trgm",
+            GinIndexSoloPostgres(
+                OpClass(Upper("razon_social"), name="gin_trgm_ops"),
+                name="clientes_rsocial_upper_trgm",
             ),
-            GinIndex(
-                fields=["correo"],
-                opclasses=["gin_trgm_ops"],
-                name="clientes_correo_trgm",
+            GinIndexSoloPostgres(
+                OpClass(Upper("correo"), name="gin_trgm_ops"),
+                name="clientes_correo_upper_trgm",
             ),
         ]
 

@@ -1,4 +1,7 @@
+from django.contrib.postgres.indexes import OpClass
 from django.db import models
+from django.db.models.functions import Upper
+from nucleo.indices import GinIndexSoloPostgres
 from nucleo.models import Empresa, Sucursal, StatusLifecycleModel
 from catalogo.models import Producto, ProductoVariante, Talla, Color, UnidadMedida, VarianteProductoProduccion
 from ventas.models import Pedido, PedidoDetalle
@@ -261,6 +264,20 @@ class OrdenesBordado(StatusLifecycleModel):
         db_table = 'orden_bordado'
         verbose_name = 'Orden Bordado'
         verbose_name_plural = 'Ordenes Bordado'
+        indexes = [
+            # Buscador global (``/api/v1/search/``): el folio se busca por
+            # subcadena (``folio_bordado__icontains``, el año va delante del
+            # consecutivo), que se compila como
+            # ``UPPER("folio_bordado"::text) LIKE UPPER('%...%')``. Ni el índice
+            # único del campo ni su ``_like`` sirven a eso; un GIN trigram sobre
+            # ``UPPER(col)`` sí. Mismo patrón que ``ventas.Pedido`` (ver
+            # ``nucleo/api/search.py``). Sólo existe en PostgreSQL: ver
+            # ``nucleo.indices``.
+            GinIndexSoloPostgres(
+                OpClass(Upper("folio_bordado"), name="gin_trgm_ops"),
+                name="orden_bordado_folio_up_trgm",
+            ),
+        ]
 
     def __str__(self):
         return self.folio_bordado
@@ -392,6 +409,17 @@ class OrdenesReflejante(StatusLifecycleModel):
         db_table = 'orden_reflejante'
         verbose_name = 'Orden Reflejante'
         verbose_name_plural = 'Ordenes Reflejante'
+        indexes = [
+            # Buscador global: ``folio_reflejante__icontains`` (el año va delante
+            # del consecutivo) se compila como
+            # ``UPPER("folio_reflejante"::text) LIKE UPPER('%...%')``. Mismo
+            # patrón que ``OrdenesBordado``. Sólo existe en PostgreSQL: ver
+            # ``nucleo.indices``.
+            GinIndexSoloPostgres(
+                OpClass(Upper("folio_reflejante"), name="gin_trgm_ops"),
+                name="orden_refl_folio_up_trgm",
+            ),
+        ]
 
     def __str__(self):
         return self.folio_reflejante
@@ -483,6 +511,16 @@ class OrdenesCorteManga(StatusLifecycleModel):
         db_table = 'orden_corte_manga'
         verbose_name = 'Orden Corte Manga'
         verbose_name_plural = 'Ordenes Corte Manga'
+        indexes = [
+            # Buscador global: ``folio_ocm__icontains`` (el año va delante del
+            # consecutivo) se compila como
+            # ``UPPER("folio_ocm"::text) LIKE UPPER('%...%')``. Mismo patrón que
+            # ``OrdenesBordado``. Sólo existe en PostgreSQL: ver ``nucleo.indices``.
+            GinIndexSoloPostgres(
+                OpClass(Upper("folio_ocm"), name="gin_trgm_ops"),
+                name="orden_cm_folio_up_trgm",
+            ),
+        ]
 
     def __str__(self):
         return self.folio_ocm

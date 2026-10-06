@@ -7,12 +7,6 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, Spec
 from django.contrib.auth.views import LoginView
 from terceros.views import RfcStatusView, ClientCreateView
 
-from QA.views import (
-    scanner_rfid_clear,
-    scanner_rfid_get,
-    scanner_rfid_receive,
-)
-
 
 def serve_favicon(_request):
     favicon_path = Path(__file__).resolve().parent.parent / "favicon.ico"
@@ -29,10 +23,6 @@ urlpatterns = [
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
     path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
-    # Compat Scanner-Zebra-RFID simulation (FX reader ya configurado con estas rutas)
-    path('api/receive-scan/', scanner_rfid_receive, name='simulation_receive_scan'),
-    path('api/get-scans/', scanner_rfid_get, name='simulation_get_scans'),
-    path('api/clear-scans/', scanner_rfid_clear, name='simulation_clear_scans'),
     # login
     path('', LoginView.as_view(template_name='registration/login.html', redirect_authenticated_user=True), name='login'),
     path('api/auth/', include('auth_kit.urls')),
@@ -54,9 +44,9 @@ urlpatterns = [
     path('api/v1/ai/', include('ia.api.urls')),
     path('api/v1/hr/', include('hr.api.urls')),
     path('api/v1/wms/', include('wms.api.urls')),
+    path('api/v1/logistica/', include('logistica.api.urls')),
     path('api/v1/notificaciones/', include('notificaciones.api.urls')),
     path('auditoria/', include('auditoria.urls')),
     path('accounts/', include('django.contrib.auth.urls')),
-    path('QA/', include('QA.urls')),
 ]
 

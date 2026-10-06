@@ -31,6 +31,35 @@ from catalogo.models import ProductoVariante
 from produccion.services.common import config_como_dict, revisar_empresa
 
 
+def _pedido_en_alcance(serializer, pedido, etiqueta_orden):
+    """``pedido`` de una OB/OR/OCM, validado a nivel de campo.
+
+    A nivel de campo y no solo en el service: si falla, ``validate()`` no corre
+    y sus mensajes sobre ``detalles_override`` no exponen tallas de otra
+    empresa. Mismo criterio que ``_validar_contexto`` de los services, que se
+    queda como segunda puerta.
+    """
+    if pedido is None:
+        return pedido
+    if serializer.instance is not None and serializer.instance.pedido_id == pedido.pk:
+        return pedido
+    user = getattr(serializer.context.get("request"), "user", None)
+    resultado = revisar_empresa(user, pedido)
+    if resultado == "sin_empresa":
+        raise serializers.ValidationError("El usuario no tiene una empresa asignada.")
+    if resultado == "otra_empresa":
+        # Mismo mensaje que un pk inexistente: no revela que existe en otra empresa.
+        raise serializers.ValidationError(
+            serializer.fields["pedido"].error_messages["does_not_exist"].format(pk_value=pedido.pk)
+        )
+    es_staff = getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)
+    if not es_staff and pedido.sucursal_id not in user.sucursales_permitidas():
+        raise serializers.ValidationError(
+            f"No tiene acceso a la sucursal del pedido para generar la orden de {etiqueta_orden}."
+        )
+    return pedido
+
+
 class BomDetalleSerializer(serializers.ModelSerializer):
     componente_nombre = serializers.SerializerMethodField()
     unidad_clave = serializers.SerializerMethodField()
@@ -184,6 +213,33 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         if not usuario: return None
         return usuario.get_full_name().strip() or usuario.email
 
+    def validate_pedido(self, pedido):
+        # Reglas de ``pedido`` aquí y no en la vista: aplican igual a POST, PUT y
+        # PATCH. ``get_queryset`` del viewset acota la OP a la empresa del
+        # usuario, así que comparar contra ella equivale a comparar contra la OP.
+        if pedido is None:
+            return pedido
+        request = self.context.get('request')
+        empresa_id = getattr(getattr(request, 'user', None), 'empresa_id', None)
+        if pedido.empresa_id != empresa_id:
+            # Mismo mensaje que un pk inexistente: no revela que existe en otra empresa.
+            raise serializers.ValidationError(
+                self.fields['pedido'].error_messages['does_not_exist'].format(pk_value=pedido.pk)
+            )
+        if self.instance is not None and self.instance.pedido_id == pedido.pk:
+            return pedido
+
+        from produccion.api.views import _detalles_especiales_qs
+        if not _detalles_especiales_qs().filter(pedido=pedido).exists():
+            raise serializers.ValidationError(
+                'El pedido no tiene ninguna línea de producción especial (muestra).'
+            )
+        if not pedido.clasificacion or not pedido.fecha_confirmacion:
+            raise serializers.ValidationError(
+                'El pedido debe estar clasificado y con fecha de confirmación antes de ligarlo a una OP.'
+            )
+        return pedido
+
     def validate(self, attrs):
         # ``empresa``/``sucursal`` son read-only (ver ``Meta``): nunca llegan
         # aquí desde el body, así que no hay nada que validar contra ellos en
@@ -210,8 +266,8 @@ class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
     Deliberadamente separado de ``OrdenProduccionSerializer``: éste no lo
     declara, así que list/retrieve de la OP no cargan ni serializan esta
     tabla. Los cuatro campos ``fecha_*`` de existencia son ``read_only``
-    porque los sella el servidor en ``update()`` cuando su boolean asociado
-    cambia de valor -- el cliente solo manda el checkbox.
+    porque los sella (o limpia) el servidor en ``update()`` cuando su boolean
+    asociado cambia de valor -- el cliente solo manda el checkbox.
     """
 
     estatus_paquete_tecnico_display = serializers.CharField(
@@ -236,12 +292,23 @@ class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
 
+    def validate_cantidad_real_corte(self, value):
+        if value is None:
+            return value
+        if value < 0 or value != value.to_integral_value():
+            raise serializers.ValidationError(
+                "Debe ser un número entero de piezas, mayor o igual a 0."
+            )
+        return value
+
     def update(self, instance, validated_data):
         from django.utils import timezone
 
+        # La fecha significa "marcado desde": se sella al pasar a true y se
+        # limpia al pasar a false.
         for campo_bool, campo_fecha in self.CAMPOS_ESTADO_CON_FECHA.items():
             if campo_bool in validated_data and validated_data[campo_bool] != getattr(instance, campo_bool):
-                validated_data[campo_fecha] = timezone.now()
+                validated_data[campo_fecha] = timezone.now() if validated_data[campo_bool] else None
         return super().update(instance, validated_data)
 
 class ConsumoProduccionSerializer(serializers.ModelSerializer):
@@ -458,6 +525,9 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
             "contacto_principal": getattr(prov, "contacto_principal", None),
         }
 
+    def validate_pedido(self, pedido):
+        return _pedido_en_alcance(self, pedido, "bordado")
+
     def validate(self, attrs):
         """Valida cross-tenant de ``proveedor`` y ``detalles_override``.
 
@@ -540,17 +610,17 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
                     })
 
                 if pedido is not None:
+                    # Filtrado por el pedido: un id de otro pedido responde igual que uno
+                    # inexistente y no deja enumerar tallas ajenas.
                     try:
-                        pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(pk=pdt_id)
+                        pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(
+                            pk=pdt_id, pedido_detalle__pedido=pedido
+                        )
                     except PedidoDetalleTalla.DoesNotExist:
                         raise serializers.ValidationError({
-                            "detalles_override": f"`pedido_detalle_talla_id={pdt_id}` no existe."
-                        })
-                    if pdt.pedido_detalle.pedido_id != pedido.pk:
-                        raise serializers.ValidationError({
                             "detalles_override": (
-                                f"`pedido_detalle_talla_id={pdt_id}` no pertenece "
-                                f"al pedido `{pedido.pk}`."
+                                f"`pedido_detalle_talla_id={pdt_id}` no existe "
+                                f"en el pedido `{pedido.pk}`."
                             )
                         })
                     if not pdt.lleva_bordado:
@@ -1508,6 +1578,9 @@ class OrdenReflejanteSerializer(serializers.ModelSerializer):
         if not usuario: return None
         return usuario.get_full_name().strip() or usuario.email
 
+    def validate_pedido(self, pedido):
+        return _pedido_en_alcance(self, pedido, "reflejante")
+
     def validate(self, attrs):
         detalles_override = attrs.get("detalles_override") or []
         pedido = attrs.get("pedido")
@@ -1554,17 +1627,17 @@ class OrdenReflejanteSerializer(serializers.ModelSerializer):
                         )
                     })
                 if pedido is not None:
+                    # Filtrado por el pedido: un id de otro pedido responde igual que uno
+                    # inexistente y no deja enumerar tallas ajenas.
                     try:
-                        pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(pk=pdt_id)
+                        pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(
+                            pk=pdt_id, pedido_detalle__pedido=pedido
+                        )
                     except PedidoDetalleTalla.DoesNotExist:
                         raise serializers.ValidationError({
-                            "detalles_override": f"`pedido_detalle_talla_id={pdt_id}` no existe."
-                        })
-                    if pdt.pedido_detalle.pedido_id != pedido.pk:
-                        raise serializers.ValidationError({
                             "detalles_override": (
-                                f"`pedido_detalle_talla_id={pdt_id}` no pertenece "
-                                f"al pedido `{pedido.pk}`."
+                                f"`pedido_detalle_talla_id={pdt_id}` no existe "
+                                f"en el pedido `{pedido.pk}`."
                             )
                         })
                     if not pdt.lleva_reflejante:
@@ -1952,6 +2025,9 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
         if not usuario: return None
         return usuario.get_full_name().strip() or usuario.email
 
+    def validate_pedido(self, pedido):
+        return _pedido_en_alcance(self, pedido, "corte de manga")
+
     def validate(self, attrs):
         detalles_override = attrs.get("detalles_override") or []
         pedido = attrs.get("pedido")
@@ -1985,18 +2061,27 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         "detalles_override": f"`cantidad` debe ser mayor a 0 para `pedido_detalle_talla_id={pdt_id}`."
                     })
+                # Piezas enteras, mismo criterio y mensaje que OB/OR: los
+                # fraccionarios dejaban residuos de coma flotante en el cupo.
+                if cantidad_num != int(cantidad_num):
+                    raise serializers.ValidationError({
+                        "detalles_override": (
+                            f"`cantidad` debe ser un número entero de piezas para "
+                            f"`pedido_detalle_talla_id={pdt_id}` (llegó {cantidad_num})."
+                        )
+                    })
                 if pedido is not None:
+                    # Filtrado por el pedido: un id de otro pedido responde igual que uno
+                    # inexistente y no deja enumerar tallas ajenas.
                     try:
-                        pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(pk=pdt_id)
+                        pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(
+                            pk=pdt_id, pedido_detalle__pedido=pedido
+                        )
                     except PedidoDetalleTalla.DoesNotExist:
                         raise serializers.ValidationError({
-                            "detalles_override": f"`pedido_detalle_talla_id={pdt_id}` no existe."
-                        })
-                    if pdt.pedido_detalle.pedido_id != pedido.pk:
-                        raise serializers.ValidationError({
                             "detalles_override": (
-                                f"`pedido_detalle_talla_id={pdt_id}` no pertenece "
-                                f"al pedido `{pedido.pk}`."
+                                f"`pedido_detalle_talla_id={pdt_id}` no existe "
+                                f"en el pedido `{pedido.pk}`."
                             )
                         })
                     if not pdt.lleva_corte_manga:

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Arquitectura del módulo RFID",
+    "output": "arquitectura-rfid.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    { "id": "nextjs", "type": "frontend", "label": "Next.js", "sublabel": "Frontend", "pos": [40, 60], "size": [140, 64] },
+    { "id": "browserprint", "type": "external", "label": "Zebra Browser Print", "sublabel": "puente navegador ↔ impresora", "pos": [440, 60], "size": [170, 64] },
+    { "id": "printer", "type": "external", "label": "Impresora Zebra", "sublabel": "imprime + graba chip", "pos": [860, 60], "size": [150, 64] },
+    { "id": "django", "type": "backend", "label": "Django API v1", "sublabel": "DRF, JWT cookie", "pos": [40, 280], "size": [160, 64] },
+    { "id": "receive", "type": "security", "label": "Webhook Receive", "sublabel": "QA/scanner_rfid/receive", "pos": [440, 280], "size": [180, 70], "tag": "sin auth" },
+    { "id": "lector", "type": "external", "label": "Lector FX", "sublabel": "RFID reader", "pos": [860, 280], "size": [140, 64] },
+    { "id": "db", "type": "database", "label": "PostgreSQL", "sublabel": "EtiquetaRFID*, RfidScan, Encuadre*", "pos": [420, 480], "size": [200, 64] }
+  ],
+  "connections": [
+    { "from": "nextjs", "to": "browserprint", "label": "ZPL", "fromSide": "right", "toSide": "left" },
+    { "from": "browserprint", "to": "printer", "label": "imprime + graba EPC", "fromSide": "right", "toSide": "left", "labelDy": -26 },
+    { "from": "nextjs", "to": "django", "label": "CRUD / onboarding / scans (poll 2s)", "variant": "emphasis", "fromSide": "bottom", "toSide": "top" },
+    { "from": "lector", "to": "receive", "label": "POST scans — sin auth (hardware)", "variant": "security", "fromSide": "left", "toSide": "right", "labelDy": -36 },
+    { "from": "django", "to": "db", "label": "lee / escribe", "fromSide": "bottom", "toSide": "top" },
+    { "from": "receive", "to": "db", "label": "guarda RfidScan", "fromSide": "bottom", "toSide": "top", "labelDy": 24 }
+  ],
+  "cards": [
+    { "dot": "rose", "title": "El único punto sin auth", "items": ["El webhook de hardware no lleva token — el lector físico no puede firmar JWT", "Todo lo demás pasa por JWT-cookie, tenant-scoped"] }
+  ]
+}

@@ -19,9 +19,12 @@ from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
+from catalogo.models import Color, Producto, ProductoVariante, Talla
+from finanzas.models import Factura
 from nucleo.api.search import REGISTRO
 from nucleo.models import Empresa, Moneda, Sucursal
 from nucleo.permisos import permisos_efectivos
+from produccion.models import OrdenesBordado, OrdenesCorteManga, OrdenesReflejante
 from seguridad.models import Permiso, Rol, RolPermiso, UsuarioPermiso, UsuarioRol
 from terceros.models import Cliente
 from usuarios.models import Usuario
@@ -29,6 +32,13 @@ from ventas.models import Cotizacion, Pedido
 
 SEARCH_URL = "/api/v1/search/"
 COTIZACIONES_URL = "/api/v1/ventas/cotizaciones/"
+
+#: Grupos que ve quien pasa el cortocircuito de permisos (superuser/admin), en el
+#: orden del ``REGISTRO``.
+TODOS_LOS_TIPOS = [
+    "pedido", "orden_bordado", "orden_reflejante", "orden_corte_manga",
+    "cliente", "cotizacion", "producto", "factura",
+]
 
 
 class BusquedaGlobalBaseTestCase(TestCase):
@@ -75,6 +85,15 @@ class BusquedaGlobalBaseTestCase(TestCase):
         cotizacion = Cotizacion.objects.create(
             empresa=empresa, sucursal=sucursal, cliente=cliente, vendedor=admin
         )
+        # Formato real de producción (``<año>-OB-<consecutivo>``). ``OB-000`` está
+        # en el folio de ambas empresas por diseño: una fuga de aislamiento se
+        # vería al buscarlo.
+        orden_bordado = OrdenesBordado.objects.create(
+            empresa=empresa,
+            sucursal=sucursal,
+            pedido=pedido,
+            folio_bordado=f"2026-OB-{sufijo_folio}",
+        )
         return {
             "empresa": empresa,
             "sucursal": sucursal,
@@ -82,6 +101,7 @@ class BusquedaGlobalBaseTestCase(TestCase):
             "admin": admin,
             "pedido": pedido,
             "cotizacion": cotizacion,
+            "orden_bordado": orden_bordado,
         }
 
     @classmethod
@@ -281,7 +301,10 @@ class PermisosEfectivosEquivalenciaTests(BusquedaGlobalBaseTestCase):
             "wms": ["R-WMS", "R-WMS-PEDIDOS", "R-WMS-PICKING"],
             "compras": ["R-COMPRAS", "R-COMPRAS-OC", "R-COMPRAS-PEDIDOS"],
             "produccion": ["R-PRODUCCION", "R-PRODUCCION-OB", "R-PRODUCCION-OR", "R-PRODUCCION-CM"],
-            "contabilidad": ["R-CONTABILIDAD", "R-CONTABILIDAD-CLIENTES"],
+            "contabilidad": [
+                "R-CONTABILIDAD", "R-CONTABILIDAD-CLIENTES",
+                "R-CONTABILIDAD-CXC", "R-CONTABILIDAD-FACTURACION",
+            ],
         }
         for nombre, claves in roles_reales.items():
             user = self._usuario(f"rol-{nombre}", claves)
@@ -431,11 +454,11 @@ class VisibilidadPorPermisosTests(BusquedaGlobalBaseTestCase):
 
     # --- superuser / admin salen gratis por el cortocircuito ------------------
 
-    def test_superuser_ve_las_tres_sin_permiso_alguno(self):
-        self.assertEqual(self._tipos(self.superuser), ["pedido", "cliente", "cotizacion"])
+    def test_superuser_ve_todas_sin_permiso_alguno(self):
+        self.assertEqual(self._tipos(self.superuser), TODOS_LOS_TIPOS)
 
-    def test_admin_empresa_ve_las_tres_sin_permiso_alguno(self):
-        self.assertEqual(self._tipos(self.a["admin"]), ["pedido", "cliente", "cotizacion"])
+    def test_admin_empresa_ve_todas_sin_permiso_alguno(self):
+        self.assertEqual(self._tipos(self.a["admin"]), TODOS_LOS_TIPOS)
 
     # --- overrides: DENY gana sobre el rol ------------------------------------
 
@@ -577,7 +600,7 @@ class AlcancePorEntidadTests(BusquedaGlobalBaseTestCase):
 class CoincidenciaYFormaTests(BusquedaGlobalBaseTestCase):
     def test_q_corta_devuelve_grupos_vacios_no_error(self):
         payload = self._buscar(self.a["admin"], "a")
-        self.assertEqual([g["tipo"] for g in payload["grupos"]], ["pedido", "cliente", "cotizacion"])
+        self.assertEqual([g["tipo"] for g in payload["grupos"]], TODOS_LOS_TIPOS)
         for grupo in payload["grupos"]:
             self.assertEqual(grupo["resultados"], [], grupo["tipo"])
             self.assertFalse(grupo["hay_mas"])
@@ -698,6 +721,726 @@ class LimitTests(BusquedaGlobalBaseTestCase):
     def test_limit_cero_o_negativo_se_sube_a_1(self):
         self.assertEqual(self._buscar(self.a["admin"], "acme", limit=0)["limit"], 1)
         self.assertEqual(self._buscar(self.a["admin"], "acme", limit=-3)["limit"], 1)
+
+
+class OrdenBordadoBusquedaTests(BusquedaGlobalBaseTestCase):
+    """Órdenes de bordado: visibilidad, alcance de fila y forma de la fila.
+
+    El alcance es el de ``OrdenBordadoViewSet`` (``produccion.scope``): empresa,
+    ``activo=True`` y, para quien no es admin, sólo sus ``sucursales_permitidas()``.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Segunda sucursal de la empresa A, con su propia OB. Los usuarios de
+        # producción de abajo tienen como única sucursal la principal de A.
+        cls.sucursal_a2 = Sucursal.objects.create(
+            empresa=cls.a["empresa"], codigo="AC2", nombre="acme-search 2"
+        )
+        cls.ob_otra_sucursal = OrdenesBordado.objects.create(
+            empresa=cls.a["empresa"],
+            sucursal=cls.sucursal_a2,
+            pedido=cls.a["pedido"],
+            folio_bordado="2026-OB-00029",
+        )
+
+    def _usuario_con(self, sufijo, claves=()):
+        user = Usuario.objects.create(
+            username=f"ob-{sufijo}",
+            email=f"ob-{sufijo}@acme-search.test",
+            empresa=self.a["empresa"],
+            sucursal_default=self.a["sucursal"],
+        )
+        if claves:
+            rol = self._rol_con(self.a["empresa"], f"rol-ob-{sufijo}", claves)
+            UsuarioRol.objects.create(usuario=user, rol=rol, empresa=self.a["empresa"])
+        return user
+
+    def _tipos(self, user, q="OB-"):
+        return [g["tipo"] for g in self._buscar(user, q)["grupos"]]
+
+    # --- visibilidad ----------------------------------------------------------
+
+    def test_codigo_de_seccion_basta(self):
+        self.assertIn("orden_bordado", self._tipos(self._usuario_con("sec", ["R-PRODUCCION-OB"])))
+
+    def test_codigo_de_modulo_solo_no_basta(self):
+        """``R-PRODUCCION`` no abre la sección de OB en el frontend."""
+        self.assertNotIn("orden_bordado", self._tipos(self._usuario_con("mod", ["R-PRODUCCION"])))
+
+    def test_sin_el_codigo_de_seccion_se_omite(self):
+        user = self._usuario_con("otros", ["R-PRODUCCION-OR", "R-PRODUCCION-CM", "R-CRM-PEDIDOS"])
+        self.assertNotIn("orden_bordado", self._tipos(user))
+
+    def test_deny_oculta_la_entidad_si_nada_mas_la_concede(self):
+        user = self._usuario_con("deny", ["R-PRODUCCION-OB"])
+        self.assertIn("orden_bordado", self._tipos(user))
+        UsuarioPermiso.objects.create(
+            usuario=user,
+            permiso=Permiso.objects.get(clave="R-PRODUCCION-OB"),
+            tipo=UsuarioPermiso.TIPO_DENY,
+        )
+        self.assertNotIn("orden_bordado", self._tipos(user))
+
+    # --- alcance de fila ------------------------------------------------------
+
+    def test_ob_de_otra_empresa_no_aparece(self):
+        """``OB-000`` está en el folio de las OBs de AMBAS empresas."""
+        payload = self._buscar(self.a["admin"], "OB-000")
+        self.assertEqual(
+            sorted(self._ids(payload, "orden_bordado")),
+            sorted([self.a["orden_bordado"].pk, self.ob_otra_sucursal.pk]),
+        )
+        self.assertNotIn(self.b["orden_bordado"].pk, self._ids(payload, "orden_bordado"))
+
+    def test_superuser_ve_las_dos_empresas(self):
+        payload = self._buscar(self.superuser, "OB-000")
+        self.assertIn(self.b["orden_bordado"].pk, self._ids(payload, "orden_bordado"))
+
+    def test_no_admin_no_ve_ob_fuera_de_sus_sucursales(self):
+        user = self._usuario_con("suc", ["R-PRODUCCION-OB"])
+        payload = self._buscar(user, "OB-000")
+        self.assertEqual(self._ids(payload, "orden_bordado"), [self.a["orden_bordado"].pk])
+
+    def test_no_admin_ve_la_sucursal_que_le_da_el_m2m(self):
+        user = self._usuario_con("m2m", ["R-PRODUCCION-OB"])
+        user.sucursales.add(self.sucursal_a2)
+        payload = self._buscar(user, "OB-000")
+        self.assertEqual(
+            sorted(self._ids(payload, "orden_bordado")),
+            sorted([self.a["orden_bordado"].pk, self.ob_otra_sucursal.pk]),
+        )
+
+    def test_ob_con_soft_delete_no_aparece(self):
+        self.a["orden_bordado"].soft_delete()
+        payload = self._buscar(self.a["admin"], "OB-000")
+        self.assertEqual(self._ids(payload, "orden_bordado"), [self.ob_otra_sucursal.pk])
+
+    # --- coincidencia ---------------------------------------------------------
+
+    def test_folio_coincide_por_subcadena(self):
+        """El folio es NOMBRE (``icontains``): el año va delante, así que lo que la
+        gente teclea —``OB-00027``, ``00027``— está en medio del folio."""
+        for q in ("2026-OB", "2026-ob-00027", "OB-00027", "ob-00027", "00027"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertIn(self.a["orden_bordado"].pk, self._ids(payload, "orden_bordado"))
+        payload = self._buscar(self.a["admin"], "00027")
+        self.assertEqual(self._ids(payload, "orden_bordado"), [self.a["orden_bordado"].pk])
+
+    def test_q_de_2_caracteres_no_devuelve_ordenes(self):
+        """Sin campos CÓDIGO, por debajo de 3 caracteres no se consulta nada: el
+        grupo llega vacío, igual que clientes y cotizaciones."""
+        payload = self._buscar(self.a["admin"], "OB")
+        grupo = next(g for g in payload["grupos"] if g["tipo"] == "orden_bordado")
+        self.assertEqual(grupo["resultados"], [])
+        self.assertFalse(grupo["hay_mas"])
+
+    def test_solo_coincide_por_su_folio(self):
+        """Ni el folio del pedido ni el nombre del cliente encuentran la OB."""
+        for q in ("P-00027", "acme"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertEqual(self._ids(payload, "orden_bordado"), [])
+
+    # --- forma de la fila -----------------------------------------------------
+
+    def test_fila_lleva_folio_pedido_cliente_y_estatus_legible(self):
+        payload = self._buscar(self.a["admin"], "OB-00027")
+        grupo = next(g for g in payload["grupos"] if g["tipo"] == "orden_bordado")
+        self.assertEqual(grupo["etiqueta"], "Órdenes de bordado")
+        self.assertEqual(
+            grupo["resultados"][0],
+            {
+                "tipo": "orden_bordado",
+                "id": self.a["orden_bordado"].pk,
+                "codigo": "2026-OB-00027",
+                "titulo": "2026-OB-00027",
+                "subtitulo": f"P-00027 · {self.a['cliente'].razon_social}",
+                "estatus": "Sin trabajar",
+            },
+        )
+
+    def test_subtitulo_degrada_si_el_pedido_no_tiene_folio(self):
+        self.a["pedido"].folio = None
+        self.a["pedido"].save(update_fields=["folio"])
+        payload = self._buscar(self.a["admin"], "OB-00027")
+        fila = next(g for g in payload["grupos"] if g["tipo"] == "orden_bordado")["resultados"][0]
+        self.assertEqual(fila["subtitulo"], self.a["cliente"].razon_social)
+
+    # --- coste ----------------------------------------------------------------
+
+    def test_coste_no_crece_con_el_numero_de_filas(self):
+        """Pedido y cliente salen del ``select_related``: sin N+1 por fila."""
+        user = self._usuario_con("coste", ["R-PRODUCCION-OB"])
+
+        def consultas():
+            client = APIClient()
+            client.force_authenticate(user=user)
+            with CaptureQueriesContext(connection) as capturadas:
+                resp = client.get(f"{SEARCH_URL}?q=OB-")
+            self.assertEqual(resp.status_code, 200)
+            return len(capturadas), resp.json()
+
+        coste_1, payload = consultas()
+        self.assertEqual(len(self._ids(payload, "orden_bordado")), 1)
+        for i in range(3):
+            OrdenesBordado.objects.create(
+                empresa=self.a["empresa"],
+                sucursal=self.a["sucursal"],
+                pedido=self.a["pedido"],
+                folio_bordado=f"2026-OB-1000{i}",
+            )
+        coste_4, payload = consultas()
+        self.assertEqual(len(self._ids(payload, "orden_bordado")), 4)
+        self.assertEqual(coste_4, coste_1)
+
+
+class _OrdenTrabajoBusquedaMixin:
+    """Batería de ``OrdenBordadoBusquedaTests`` para las otras órdenes de trabajo.
+
+    Reflejante y corte de manga siguen la plantilla de la OB: alcance de su propio
+    ViewSet (``produccion.scope``), folio como NOMBRE (subcadena, 3+ caracteres),
+    sólo su clave de sección y la misma forma de fila. Cada subclase declara su
+    modelo, su campo de folio y la serie real de su folio.
+    """
+
+    TIPO = None
+    ETIQUETA = None
+    MODEL = None
+    FOLIO_FIELD = None
+    SERIE = None  # "OR" / "CM": ``<año>-<serie>-<consecutivo>``, como en producción.
+    CLAVE = None
+    ESTATUS_INICIAL = "Pendiente"
+
+    @classmethod
+    def _orden(cls, tenant, folio, sucursal=None):
+        return cls.MODEL.objects.create(
+            empresa=tenant["empresa"],
+            sucursal=sucursal or tenant["sucursal"],
+            pedido=tenant["pedido"],
+            **{cls.FOLIO_FIELD: folio},
+        )
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Mismo consecutivo base en las dos empresas: ``<SERIE>-000`` está en el
+        # folio de ambas, así que una fuga de aislamiento se vería al buscarlo.
+        cls.orden_a = cls._orden(cls.a, f"2026-{cls.SERIE}-00027")
+        cls.orden_b = cls._orden(cls.b, f"2026-{cls.SERIE}-00028")
+        # Segunda sucursal de la empresa A, a la que los usuarios no admin de
+        # abajo no tienen acceso salvo que se les dé por el M2M.
+        cls.sucursal_a2 = Sucursal.objects.create(
+            empresa=cls.a["empresa"], codigo="AC2", nombre="acme-search 2"
+        )
+        cls.orden_otra_sucursal = cls._orden(
+            cls.a, f"2026-{cls.SERIE}-00029", sucursal=cls.sucursal_a2
+        )
+
+    def _usuario_con(self, sufijo, claves=()):
+        user = Usuario.objects.create(
+            username=f"{self.TIPO}-{sufijo}",
+            email=f"{self.TIPO}-{sufijo}@acme-search.test",
+            empresa=self.a["empresa"],
+            sucursal_default=self.a["sucursal"],
+        )
+        if claves:
+            rol = self._rol_con(self.a["empresa"], f"rol-{self.TIPO}-{sufijo}", claves)
+            UsuarioRol.objects.create(usuario=user, rol=rol, empresa=self.a["empresa"])
+        return user
+
+    def _tipos(self, user, q=None):
+        return [g["tipo"] for g in self._buscar(user, q or f"{self.SERIE}-")["grupos"]]
+
+    def _grupo(self, payload):
+        return next(g for g in payload["grupos"] if g["tipo"] == self.TIPO)
+
+    # --- visibilidad ----------------------------------------------------------
+
+    def test_codigo_de_seccion_basta(self):
+        self.assertIn(self.TIPO, self._tipos(self._usuario_con("sec", [self.CLAVE])))
+
+    def test_codigo_de_modulo_solo_no_basta(self):
+        """``R-PRODUCCION`` no abre la sección de esta orden en el frontend."""
+        self.assertNotIn(self.TIPO, self._tipos(self._usuario_con("mod", ["R-PRODUCCION"])))
+
+    def test_sin_el_codigo_de_seccion_se_omite(self):
+        otras = [
+            c for c in ("R-PRODUCCION-OB", "R-PRODUCCION-OR", "R-PRODUCCION-CM")
+            if c != self.CLAVE
+        ]
+        user = self._usuario_con("otros", otras + ["R-CRM-PEDIDOS"])
+        self.assertNotIn(self.TIPO, self._tipos(user))
+
+    def test_deny_oculta_la_entidad_si_nada_mas_la_concede(self):
+        user = self._usuario_con("deny", [self.CLAVE])
+        self.assertIn(self.TIPO, self._tipos(user))
+        UsuarioPermiso.objects.create(
+            usuario=user,
+            permiso=Permiso.objects.get(clave=self.CLAVE),
+            tipo=UsuarioPermiso.TIPO_DENY,
+        )
+        self.assertNotIn(self.TIPO, self._tipos(user))
+
+    # --- alcance de fila ------------------------------------------------------
+
+    def test_orden_de_otra_empresa_no_aparece(self):
+        payload = self._buscar(self.a["admin"], f"{self.SERIE}-000")
+        self.assertEqual(
+            sorted(self._ids(payload, self.TIPO)),
+            sorted([self.orden_a.pk, self.orden_otra_sucursal.pk]),
+        )
+
+    def test_superuser_ve_las_dos_empresas(self):
+        payload = self._buscar(self.superuser, f"{self.SERIE}-000")
+        self.assertEqual(
+            sorted(self._ids(payload, self.TIPO)),
+            sorted([self.orden_a.pk, self.orden_b.pk, self.orden_otra_sucursal.pk]),
+        )
+
+    def test_no_admin_no_ve_ordenes_fuera_de_sus_sucursales(self):
+        user = self._usuario_con("suc", [self.CLAVE])
+        payload = self._buscar(user, f"{self.SERIE}-000")
+        self.assertEqual(self._ids(payload, self.TIPO), [self.orden_a.pk])
+
+    def test_no_admin_ve_la_sucursal_que_le_da_el_m2m(self):
+        user = self._usuario_con("m2m", [self.CLAVE])
+        user.sucursales.add(self.sucursal_a2)
+        payload = self._buscar(user, f"{self.SERIE}-000")
+        self.assertEqual(
+            sorted(self._ids(payload, self.TIPO)),
+            sorted([self.orden_a.pk, self.orden_otra_sucursal.pk]),
+        )
+
+    def test_orden_con_soft_delete_no_aparece(self):
+        self.orden_a.soft_delete()
+        payload = self._buscar(self.a["admin"], f"{self.SERIE}-000")
+        self.assertEqual(self._ids(payload, self.TIPO), [self.orden_otra_sucursal.pk])
+
+    # --- coincidencia ---------------------------------------------------------
+
+    def test_folio_coincide_por_subcadena(self):
+        """El año va delante del folio: lo que se teclea está en medio."""
+        serie = self.SERIE
+        for q in (f"2026-{serie}", f"{serie}-00027", f"{serie.lower()}-00027", "00027"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertIn(self.orden_a.pk, self._ids(payload, self.TIPO))
+        payload = self._buscar(self.a["admin"], "00027")
+        self.assertEqual(self._ids(payload, self.TIPO), [self.orden_a.pk])
+
+    def test_q_de_2_caracteres_no_devuelve_ordenes(self):
+        grupo = self._grupo(self._buscar(self.a["admin"], self.SERIE))
+        self.assertEqual(grupo["resultados"], [])
+        self.assertFalse(grupo["hay_mas"])
+
+    def test_solo_coincide_por_su_folio(self):
+        """Ni el folio del pedido ni el nombre del cliente encuentran la orden."""
+        for q in ("P-00027", "acme"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertEqual(self._ids(payload, self.TIPO), [])
+
+    # --- forma de la fila -----------------------------------------------------
+
+    def test_fila_lleva_folio_pedido_cliente_y_estatus_legible(self):
+        folio = f"2026-{self.SERIE}-00027"
+        grupo = self._grupo(self._buscar(self.a["admin"], folio))
+        self.assertEqual(grupo["etiqueta"], self.ETIQUETA)
+        self.assertEqual(
+            grupo["resultados"][0],
+            {
+                "tipo": self.TIPO,
+                "id": self.orden_a.pk,
+                "codigo": folio,
+                "titulo": folio,
+                "subtitulo": f"P-00027 · {self.a['cliente'].razon_social}",
+                "estatus": self.ESTATUS_INICIAL,
+            },
+        )
+
+    def test_subtitulo_degrada_si_el_pedido_no_tiene_folio(self):
+        self.a["pedido"].folio = None
+        self.a["pedido"].save(update_fields=["folio"])
+        grupo = self._grupo(self._buscar(self.a["admin"], f"{self.SERIE}-00027"))
+        self.assertEqual(grupo["resultados"][0]["subtitulo"], self.a["cliente"].razon_social)
+
+    # --- coste ----------------------------------------------------------------
+
+    def test_coste_no_crece_con_el_numero_de_filas(self):
+        """Pedido y cliente salen del ``select_related``: sin N+1 por fila."""
+        user = self._usuario_con("coste", [self.CLAVE])
+
+        def consultas():
+            client = APIClient()
+            client.force_authenticate(user=user)
+            with CaptureQueriesContext(connection) as capturadas:
+                resp = client.get(f"{SEARCH_URL}?q={self.SERIE}-")
+            self.assertEqual(resp.status_code, 200)
+            return len(capturadas), resp.json()
+
+        coste_1, payload = consultas()
+        self.assertEqual(len(self._ids(payload, self.TIPO)), 1)
+        for i in range(3):
+            self._orden(self.a, f"2026-{self.SERIE}-1000{i}")
+        coste_4, payload = consultas()
+        self.assertEqual(len(self._ids(payload, self.TIPO)), 4)
+        self.assertEqual(coste_4, coste_1)
+
+
+class OrdenReflejanteBusquedaTests(_OrdenTrabajoBusquedaMixin, BusquedaGlobalBaseTestCase):
+    """Órdenes de reflejante: alcance de ``OrdenReflejanteViewSet``."""
+
+    TIPO = "orden_reflejante"
+    ETIQUETA = "Órdenes de reflejante"
+    MODEL = OrdenesReflejante
+    FOLIO_FIELD = "folio_reflejante"
+    SERIE = "OR"
+    CLAVE = "R-PRODUCCION-OR"
+
+
+class OrdenCorteMangaBusquedaTests(_OrdenTrabajoBusquedaMixin, BusquedaGlobalBaseTestCase):
+    """Órdenes de corte de manga: alcance de ``OrdenesCorteMangaViewSet``.
+
+    La serie real del folio es ``CM`` (``2026-CM-00005``), no ``OCM`` como el
+    nombre del campo.
+    """
+
+    TIPO = "orden_corte_manga"
+    ETIQUETA = "Órdenes de corte de manga"
+    MODEL = OrdenesCorteManga
+    FOLIO_FIELD = "folio_ocm"
+    SERIE = "CM"
+    CLAVE = "R-PRODUCCION-CM"
+
+
+class _GrupoPropioMixin:
+    """Atajos compartidos por las suites de una sola entidad."""
+
+    #: ``tipo`` del grupo que mide la suite.
+    TIPO = None
+
+    def _usuario_con(self, sufijo, claves=(), sucursal=None):
+        user = Usuario.objects.create(
+            username=f"{self.TIPO}-{sufijo}",
+            email=f"{self.TIPO}-{sufijo}@acme-search.test",
+            empresa=self.a["empresa"],
+            sucursal_default=sucursal or self.a["sucursal"],
+        )
+        if claves:
+            rol = self._rol_con(self.a["empresa"], f"rol-{self.TIPO}-{sufijo}", claves)
+            UsuarioRol.objects.create(usuario=user, rol=rol, empresa=self.a["empresa"])
+        return user
+
+    def _tipos(self, user, q):
+        return [g["tipo"] for g in self._buscar(user, q)["grupos"]]
+
+    def _grupo(self, payload):
+        return next(g for g in payload["grupos"] if g["tipo"] == self.TIPO)
+
+    def _deny(self, user, clave):
+        UsuarioPermiso.objects.create(
+            usuario=user,
+            permiso=Permiso.objects.get(clave=clave),
+            tipo=UsuarioPermiso.TIPO_DENY,
+        )
+
+    def _coste(self, user, q):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        with CaptureQueriesContext(connection) as capturadas:
+            resp = client.get(f"{SEARCH_URL}?q={q}")
+        self.assertEqual(resp.status_code, 200)
+        return len(capturadas), resp.json()
+
+
+class FacturaBusquedaTests(_GrupoPropioMixin, BusquedaGlobalBaseTestCase):
+    """Facturas: visibilidad, alcance de fila y forma de la fila.
+
+    El alcance es el de ``FacturaViewSet`` (``_aplicar_scope_empresa``: empresa,
+    sin sub-alcance por sucursal ni vendedor) más ``activo=True``.
+    """
+
+    TIPO = "factura"
+
+    @classmethod
+    def _factura(cls, tenant, folio, **extra):
+        return Factura.objects.create(
+            empresa=tenant["empresa"],
+            sucursal=tenant["sucursal"],
+            cliente=tenant["cliente"],
+            moneda=cls.moneda,
+            folio=folio,
+            **extra,
+        )
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Formato real: ``FAC-<consecutivo>``. ``FAC-000`` es prefijo de las dos
+        # empresas: una fuga de aislamiento se vería al buscarlo.
+        cls.fac_a = cls._factura(cls.a, "FAC-00027")
+        cls.fac_b = cls._factura(cls.b, "FAC-00028")
+
+    # --- visibilidad ----------------------------------------------------------
+
+    def test_codigo_de_seccion_basta(self):
+        user = self._usuario_con("sec", ["R-CONTABILIDAD-FACTURACION"])
+        self.assertIn("factura", self._tipos(user, "FAC"))
+
+    def test_codigo_de_modulo_solo_no_basta(self):
+        """``R-CONTABILIDAD`` no abre la sección de facturación en el frontend."""
+        user = self._usuario_con("mod", ["R-CONTABILIDAD"])
+        self.assertNotIn("factura", self._tipos(user, "FAC"))
+
+    def test_sin_el_codigo_de_seccion_se_omite(self):
+        # Ni la sección de clientes de Contabilidad ni la de CxC conceden facturas.
+        user = self._usuario_con(
+            "otros", ["R-CONTABILIDAD-CLIENTES", "R-CONTABILIDAD-CXC", "R-CRM-PEDIDOS"]
+        )
+        self.assertNotIn("factura", self._tipos(user, "FAC"))
+
+    def test_deny_oculta_la_entidad_si_nada_mas_la_concede(self):
+        user = self._usuario_con("deny", ["R-CONTABILIDAD-FACTURACION"])
+        self.assertIn("factura", self._tipos(user, "FAC"))
+        self._deny(user, "R-CONTABILIDAD-FACTURACION")
+        self.assertNotIn("factura", self._tipos(user, "FAC"))
+
+    # --- alcance de fila ------------------------------------------------------
+
+    def test_factura_de_otra_empresa_no_aparece(self):
+        user = self._usuario_con("emp", ["R-CONTABILIDAD-FACTURACION"])
+        payload = self._buscar(user, "FAC-000")
+        self.assertEqual(self._ids(payload, "factura"), [self.fac_a.pk])
+
+    def test_superuser_ve_las_dos_empresas(self):
+        payload = self._buscar(self.superuser, "FAC-000")
+        self.assertEqual(
+            sorted(self._ids(payload, "factura")), sorted([self.fac_a.pk, self.fac_b.pk])
+        )
+
+    def test_no_hay_sub_alcance_por_sucursal(self):
+        """Igual que ``FacturaViewSet``: el alcance es la empresa, no la sucursal."""
+        otra = Sucursal.objects.create(
+            empresa=self.a["empresa"], codigo="AC3", nombre="acme-search 3"
+        )
+        user = self._usuario_con("suc", ["R-CONTABILIDAD-FACTURACION"], sucursal=otra)
+        payload = self._buscar(user, "FAC-00027")
+        self.assertEqual(self._ids(payload, "factura"), [self.fac_a.pk])
+
+    def test_factura_con_soft_delete_no_aparece(self):
+        self.fac_a.soft_delete()
+        payload = self._buscar(self.a["admin"], "FAC-000")
+        self.assertEqual(self._ids(payload, "factura"), [])
+
+    # --- coincidencia ---------------------------------------------------------
+
+    def test_folio_coincide_por_prefijo_no_por_subcadena(self):
+        for q in ("FAC", "fac-00027", "FAC-00027"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertEqual(self._ids(payload, "factura"), [self.fac_a.pk])
+        payload = self._buscar(self.a["admin"], "00027")
+        self.assertEqual(self._ids(payload, "factura"), [])
+
+    def test_coincide_por_nombre_y_razon_social_del_cliente(self):
+        for q in ("comercial acme norte", "ACME NORTE SA DE CV"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertEqual(self._ids(payload, "factura"), [self.fac_a.pk])
+
+    def test_factura_sin_folio_se_encuentra_por_cliente(self):
+        sin_folio = self._factura(self.a, None)
+        payload = self._buscar(self.a["admin"], "acme norte")
+        self.assertIn(sin_folio.pk, self._ids(payload, "factura"))
+        fila = next(
+            f for f in self._grupo(payload)["resultados"] if f["id"] == sin_folio.pk
+        )
+        self.assertIsNone(fila["codigo"])
+        self.assertEqual(fila["titulo"], self.a["cliente"].razon_social)
+        self.assertIsNone(fila["subtitulo"])
+
+    def test_q_de_2_caracteres_va_solo_por_folio(self):
+        payload = self._buscar(self.a["admin"], "FA")
+        self.assertEqual(self._ids(payload, "factura"), [self.fac_a.pk])
+        payload = self._buscar(self.a["admin"], "Ac")
+        self.assertEqual(self._ids(payload, "factura"), [])
+
+    # --- forma de la fila -----------------------------------------------------
+
+    def test_fila_lleva_folio_cliente_y_estatus_legible(self):
+        payload = self._buscar(self.a["admin"], "FAC-00027")
+        grupo = self._grupo(payload)
+        self.assertEqual(grupo["etiqueta"], "Facturas")
+        self.assertEqual(
+            grupo["resultados"][0],
+            {
+                "tipo": "factura",
+                "id": self.fac_a.pk,
+                "codigo": "FAC-00027",
+                "titulo": "FAC-00027",
+                "subtitulo": self.a["cliente"].razon_social,
+                "estatus": "Borrador",
+            },
+        )
+
+    # --- coste ----------------------------------------------------------------
+
+    def test_coste_no_crece_con_el_numero_de_filas(self):
+        """El cliente sale del ``select_related``: sin N+1 por fila."""
+        user = self._usuario_con("coste", ["R-CONTABILIDAD-FACTURACION"])
+        coste_1, payload = self._coste(user, "FAC")
+        self.assertEqual(len(self._ids(payload, "factura")), 1)
+        for i in range(3):
+            self._factura(self.a, f"FAC-1000{i}")
+        coste_4, payload = self._coste(user, "FAC")
+        self.assertEqual(len(self._ids(payload, "factura")), 4)
+        self.assertEqual(coste_4, coste_1)
+
+
+class ProductoBusquedaTests(_GrupoPropioMixin, BusquedaGlobalBaseTestCase):
+    """Productos (``catalogo.ProductoVariante``): visibilidad, alcance y forma.
+
+    El alcance es el de ``ProductoVarianteViewSet`` (``_alcance_empresa``: empresa,
+    sin sub-alcance por sucursal) más ``activo=True`` sobre la variante.
+
+    ``R-CATALOGO-PRODUCTOS`` NO existe todavía en el catálogo real de permisos; aquí
+    se siembra en la BD de pruebas, como cualquier otra clave (``_rol_con``).
+    """
+
+    TIPO = "producto"
+    CLAVE = "R-CATALOGO-PRODUCTOS"
+
+    @classmethod
+    def _variante(cls, tenant, producto, sku, **extra):
+        return ProductoVariante.objects.create(
+            producto=producto,
+            empresa=tenant["empresa"],
+            color=cls.color,
+            talla=cls.talla,
+            sku=sku,
+            precio_base="100.00",
+            **extra,
+        )
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.color = Color.objects.create(nombre="Marino", codigo="MAR", codigo_hex="#000080")
+        cls.talla = Talla.objects.create(nombre="XG")
+        # Mismo nombre de producto y mismo prefijo de SKU en las dos empresas: una
+        # fuga de aislamiento se vería al buscar cualquiera de los dos. Formato de
+        # SKU real: modelo + color + talla concatenados (``10808015XG``).
+        cls.prod_a = Producto.objects.create(empresa=cls.a["empresa"], nombre="Camisola ignifuga")
+        cls.prod_b = Producto.objects.create(empresa=cls.b["empresa"], nombre="Camisola ignifuga")
+        cls.var_a = cls._variante(cls.a, cls.prod_a, "1080801XG")
+        cls.var_b = cls._variante(cls.b, cls.prod_b, "1080802XG")
+
+    # --- visibilidad ----------------------------------------------------------
+
+    def test_la_clave_de_productos_basta(self):
+        self.assertIn("producto", self._tipos(self._usuario_con("sec", [self.CLAVE]), "10808"))
+
+    def test_sin_la_clave_se_omite(self):
+        user = self._usuario_con("otros", ["R-WMS-EXISTENCIAS", "R-WMS", "R-COMPRAS"])
+        self.assertNotIn("producto", self._tipos(user, "10808"))
+
+    def test_deny_oculta_la_entidad(self):
+        user = self._usuario_con("deny", [self.CLAVE])
+        self.assertIn("producto", self._tipos(user, "10808"))
+        self._deny(user, self.CLAVE)
+        self.assertNotIn("producto", self._tipos(user, "10808"))
+
+    # --- alcance de fila ------------------------------------------------------
+
+    def test_producto_de_otra_empresa_no_aparece(self):
+        user = self._usuario_con("emp", [self.CLAVE])
+        for q in ("10808", "camisola"):
+            with self.subTest(q=q):
+                payload = self._buscar(user, q)
+                self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
+
+    def test_superuser_ve_las_dos_empresas(self):
+        payload = self._buscar(self.superuser, "10808")
+        self.assertEqual(
+            sorted(self._ids(payload, "producto")), sorted([self.var_a.pk, self.var_b.pk])
+        )
+
+    def test_no_hay_sub_alcance_por_sucursal(self):
+        """Igual que ``ProductoVarianteViewSet``: el alcance es la empresa."""
+        otra = Sucursal.objects.create(
+            empresa=self.a["empresa"], codigo="AC4", nombre="acme-search 4"
+        )
+        user = self._usuario_con("suc", [self.CLAVE], sucursal=otra)
+        payload = self._buscar(user, "1080801")
+        self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
+
+    def test_variante_inactiva_no_aparece(self):
+        ProductoVariante.objects.filter(pk=self.var_a.pk).update(activo=False)
+        payload = self._buscar(self.a["admin"], "10808")
+        self.assertEqual(self._ids(payload, "producto"), [])
+
+    # --- coincidencia ---------------------------------------------------------
+
+    def test_sku_coincide_por_prefijo_no_por_subcadena(self):
+        for q in ("10808", "1080801xg", "1080801XG"):
+            with self.subTest(q=q):
+                payload = self._buscar(self.a["admin"], q)
+                self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
+        payload = self._buscar(self.a["admin"], "0801XG")
+        self.assertEqual(self._ids(payload, "producto"), [])
+
+    def test_coincide_por_nombre_de_la_variante(self):
+        # ``ProductoVariante.save()`` arma ``nombre`` como "producto - color - talla":
+        # el color sólo está en el nombre de la variante, no en el del producto.
+        payload = self._buscar(self.a["admin"], "marino")
+        self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
+
+    def test_coincide_por_nombre_del_producto(self):
+        # Se vacía el nombre de la variante (sin pasar por ``save()``) para que sólo
+        # pueda coincidir por ``producto__nombre``.
+        ProductoVariante.objects.filter(pk=self.var_a.pk).update(nombre="")
+        payload = self._buscar(self.a["admin"], "ignifuga")
+        self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
+
+    def test_q_de_2_caracteres_va_solo_por_sku(self):
+        payload = self._buscar(self.a["admin"], "10")
+        self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
+        payload = self._buscar(self.a["admin"], "Ca")
+        self.assertEqual(self._ids(payload, "producto"), [])
+
+    # --- forma de la fila -----------------------------------------------------
+
+    def test_fila_lleva_sku_y_nombre_del_producto(self):
+        payload = self._buscar(self.a["admin"], "1080801XG")
+        grupo = self._grupo(payload)
+        self.assertEqual(grupo["etiqueta"], "Productos")
+        self.assertEqual(
+            grupo["resultados"][0],
+            {
+                "tipo": "producto",
+                "id": self.var_a.pk,
+                "codigo": "1080801XG",
+                "titulo": "1080801XG",
+                "subtitulo": "Camisola ignifuga",
+                "estatus": None,
+            },
+        )
+
+    # --- coste ----------------------------------------------------------------
+
+    def test_coste_no_crece_con_el_numero_de_filas(self):
+        """El producto sale del ``select_related``: sin N+1 por fila."""
+        user = self._usuario_con("coste", [self.CLAVE])
+        coste_1, payload = self._coste(user, "10808")
+        self.assertEqual(len(self._ids(payload, "producto")), 1)
+        for i in range(3):
+            self._variante(self.a, self.prod_a, f"1080810{i}XG")
+        coste_4, payload = self._coste(user, "10808")
+        self.assertEqual(len(self._ids(payload, "producto")), 4)
+        self.assertEqual(coste_4, coste_1)
 
 
 class CotizacionQFiltroNoRegresionTests(BusquedaGlobalBaseTestCase):

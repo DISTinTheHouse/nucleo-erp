@@ -4,7 +4,7 @@ from django.db import transaction
 from rest_framework.exceptions import ValidationError
 
 from logistica.models import Envio
-from wms.models import Despacho, DespachoDetalle, Packing
+from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle
 
 
 class DespachoService:
@@ -18,6 +18,34 @@ class DespachoService:
         for row in qs.values_list("packing_detalle_id", flat=True):
             map_ids[row] = True
         return map_ids
+
+    @classmethod
+    def _packings_totalmente_despachados(cls, base_qs):
+        """IDs de packings de ``base_qs`` donde ya no queda ningún renglón por despachar.
+
+        Un ``packing_detalle`` activo cuenta como pendiente si NO tiene
+        ningún ``DespachoDetalle`` ligado; si todos los renglones activos de
+        un packing ya lo tienen, el packing queda fuera de candidatos.
+        """
+        activos_por_packing = defaultdict(set)
+        for pd_id, packing_id in (
+            PackingDetalle.objects.filter(packing__in=base_qs)
+            .exclude(estado="CANCELADO")
+            .values_list("id", "packing_id")
+        ):
+            activos_por_packing[packing_id].add(pd_id)
+
+        despachados_ids = set(
+            DespachoDetalle.objects.filter(
+                packing_detalle__packing__in=base_qs
+            ).values_list("packing_detalle_id", flat=True)
+        )
+
+        return {
+            packing_id
+            for packing_id, pd_ids in activos_por_packing.items()
+            if pd_ids and pd_ids.issubset(despachados_ids)
+        }
 
     @classmethod
     def onboarding_payload(cls, user, packing_id=None):
@@ -38,6 +66,14 @@ class DespachoService:
         packings_qs = (
             Packing.objects.filter(empresa=empresa)
             .exclude(estado="CANCELADO")
+        )
+        if not es_staff:
+            packings_qs = packings_qs.filter(sucursal_id__in=sucursal_ids)
+
+        # Un packing ya despachado por completo no tiene nada más que ofrecer
+        # aquí: fuera de la lista de candidatos.
+        packings_qs = (
+            packings_qs.exclude(pk__in=cls._packings_totalmente_despachados(packings_qs))
             .select_related(
                 "pedido",
                 "pedido__cliente",
@@ -48,8 +84,6 @@ class DespachoService:
             )
             .order_by("-created_at", "-id")
         )
-        if not es_staff:
-            packings_qs = packings_qs.filter(sucursal_id__in=sucursal_ids)
 
         payload = {
             "packings": [
@@ -297,6 +331,7 @@ class DespachoService:
                 pk=envio_input.pk
             )
         despacho_detalle = data.pop("despacho_detalle")
+        guia = data.pop("guia", "") or ""
 
         DespachoService._validate_context(packing, envio, user)
         resolved_rows = DespachoService._resolve_requested_rows(packing, despacho_detalle)
@@ -304,6 +339,7 @@ class DespachoService:
         despacho = Despacho.objects.create(
             packing=packing,
             envio=envio,
+            guia=guia,
         )
         DespachoDetalle.objects.bulk_create(
             [

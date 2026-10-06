@@ -293,6 +293,51 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
 
 ---
 
+## 🔎 4.1 Buscador Global
+
+- **Endpoint**: `GET /api/v1/search/?q=texto&limit=5` (`IsAuthenticated`). Código: `nucleo/api/search.py`.
+- Busca en varias entidades a la vez y devuelve los resultados **agrupados por tipo**, en el orden de la tabla de abajo:
+
+```text
+{
+  "q": "texto", "limit": 5, "longitud_minima": 2, "longitud_minima_nombre": 3,
+  "grupos": [{"tipo": "pedido", "etiqueta": "Pedidos", "hay_mas": false,
+              "resultados": [{"tipo", "id", "codigo", "titulo", "subtitulo", "estatus"}]}]
+}
+```
+
+- `limit`: resultados por grupo; por defecto 5, tope 25. `hay_mas` indica que el grupo se recortó.
+- **Umbrales de `q`**:
+  - menos de 2 caracteres: no se consulta nada; los grupos visibles llegan vacíos (200, no error);
+  - 2 caracteres: sólo se consultan los campos de CÓDIGO (prefijo). Un grupo sin campos de código llega vacío;
+  - 3 o más: además se consultan los campos de NOMBRE (subcadena).
+- **Coincidencia**: CÓDIGO = prefijo sin distinguir mayúsculas (`istartswith`); NOMBRE = subcadena sin distinguir mayúsculas (`icontains`). Los resultados no se rankean: cada grupo sale en el orden natural de su entidad.
+- **Visibilidad**: cada entidad declara sus claves de permiso; basta tener UNA. La entidad sin permiso **se omite** de `grupos` (no llega vacía). Superusuario e `is_admin_empresa` ven todas. El alcance de filas (empresa, sucursal, vendedor, soft delete) es el mismo que el del ViewSet de cada entidad.
+
+| `tipo` | Etiqueta | CÓDIGO (prefijo, 2+) | NOMBRE (subcadena, 3+) | Permisos (basta uno) | Orden |
+|---|---|---|---|---|---|
+| `pedido` | Pedidos | `folio` | `cliente_nombre`, `cliente_razon_social` | `R-CRM-PEDIDOS`, `R-WMS-PEDIDOS`, `R-COMPRAS-PEDIDOS`, `R-MESACONTROL-PEDIDOS`, `R-PRODUCCION-OB`, `R-PRODUCCION-OR`, `R-PRODUCCION-CM`, `R-COMPRAS-OC`, `R-WMS-PICKING` | más reciente primero |
+| `orden_bordado` | Órdenes de bordado | — | `folio_bordado` | `R-PRODUCCION-OB` | más reciente primero (`fecha_inicio`) |
+| `orden_reflejante` | Órdenes de reflejante | — | `folio_reflejante` | `R-PRODUCCION-OR` | más reciente primero (`fecha_inicio`) |
+| `orden_corte_manga` | Órdenes de corte de manga | — | `folio_ocm` | `R-PRODUCCION-CM` | más reciente primero (`fecha_inicio`) |
+| `cliente` | Clientes | — | `nombre`, `razon_social`, `correo` | `R-CRM-CLIENTES`, `R-MESACONTROL-CLIENTES`, `R-CONTABILIDAD-CLIENTES` | alfabético |
+| `cotizacion` | Cotizaciones | — | nombre y razón social del cliente | `R-CRM-COTIZACIONES`, `R-CRM`, `R-MESACONTROL-COTI`, `R-MESACONTROL` | más reciente primero |
+| `producto` | Productos | `sku` | nombre de la variante, nombre del producto | `R-CATALOGO-PRODUCTOS` ⚠️ | nombre del producto, sku |
+| `factura` | Facturas | `folio` | nombre y razón social del cliente | `R-CONTABILIDAD-FACTURACION` | `fecha_emision` desc |
+
+**Regla de los permisos de visibilidad**: las claves de una entidad son las que le permiten al usuario *abrir* esa entidad en algún lugar del frontend.
+- `orden_bordado` / `orden_reflejante` / `orden_corte_manga` / `factura`: sólo la clave de sección (`R-PRODUCCION-OB` / `R-PRODUCCION-OR` / `R-PRODUCCION-CM` / `R-CONTABILIDAD-FACTURACION`); los códigos de módulo `R-PRODUCCION` / `R-CONTABILIDAD` no abren esas rutas.
+- `cotizacion`: `R-CRM` / `R-MESACONTROL` sí cuentan, porque los dashboards de esos módulos (`/sales`, `/operations`) abren cotizaciones.
+- `pedido`: incluye claves de otras secciones (OB/OR/CM, OC, picking) porque esas vistas enlazan al pedido y la ruta `/orders/[id]` las acepta.
+
+- **`orden_bordado`**: el folio real tiene el año delante (`2026-OB-00017`), por eso se busca por **subcadena** y no por prefijo: `OB-00017`, `00017` y `2026-OB` la encuentran, pero hace falta un mínimo de **3 caracteres** (con 2 el grupo llega vacío). No se busca por folio del pedido ni por cliente; esos datos sólo aparecen en `subtitulo` (`"<folio pedido> · <cliente>"`).
+- **`orden_reflejante`**: misma plantilla que `orden_bordado`. Folio `2026-OR-00006` por **subcadena** (`OR-00006`, `00006`, `2026-OR`), mínimo **3 caracteres**; folio del pedido y cliente sólo en `subtitulo`.
+- **`orden_corte_manga`**: misma plantilla. Folio `2026-CM-00005` (serie `CM`, no `OCM`) por **subcadena** (`CM-00005`, `00005`, `2026-CM`), mínimo **3 caracteres**. Excepción: la generación automática desactivada en `ventas` tiene un respaldo que crea folios `OCM-<folio pedido>`; si existieran, esas órdenes sí aparecerían al buscar el folio del pedido (hoy no hay ninguna).
+- **`factura`**: folio `FAC-<n>` por prefijo (`00024` sólo no la encuentra). Excluye facturas con soft delete.
+- **`producto`**: ⚠️ la clave `R-CATALOGO-PRODUCTOS` **no existe todavía en el catálogo de permisos** (BD) y está pendiente de decisión; mientras tanto sólo superusuario e `is_admin_empresa` ven este grupo. Busca sobre variantes (`ProductoVariante`) activas; `estatus` es siempre `null`.
+
+---
+
 ## 👥 5. Gestión de Usuarios
 
 API completa para gestionar el personal de la empresa (cajeros, vendedores, gerentes).
@@ -1075,6 +1120,38 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
   - `montos_por_moneda` **excluye pedidos CANCELADO** (no se sumaron a la venta real) y viene separado por moneda por si el cliente compra en más de una — no asumas que solo hay un elemento en el arreglo.
   - `ultimo_pedido` es `null` si el cliente no tiene pedidos todavía; si existe, es el mismo objeto que aparece primero en `pedidos_recientes`.
   - `pedidos_recientes` trae como máximo los 5 pedidos más nuevos (por fecha de creación), pensado para una mini-tabla o timeline en la ficha del cliente — no es un listado paginado; si se necesita el historial completo, usar `GET /api/v1/ventas/pedidos/?cliente={id}`.
+
+### Histórico de Órdenes de Compra por Proveedor (EC-399)
+
+- **Endpoint**: `GET /api/v1/terceros/proveedores/{id}/historial-ordenes-compra/`
+- Pensado para la ficha del proveedor (a diferencia del resumen de cliente, aquí sí es el listado completo y **paginado**, no solo los últimos 5).
+- `get_object` acota por la empresa del usuario igual que el resto de `ProveedorViewSet` → 404 si el proveedor no es de tu empresa.
+- **Query params** (todos opcionales):
+  | Param | Formato | Efecto |
+  |---|---|---|
+  | `estatus` | int (`OrdenCompra.EstatusOrdenCompra`) | Filtra por un solo estatus |
+  | `fecha_inicio` | `YYYY-MM-DD` | `fecha_oc >=` |
+  | `fecha_final` | `YYYY-MM-DD` | `fecha_oc <=` |
+  | `page` / `page_size` | int | Paginación estándar DRF (`page_size` máx. 100, default 20) |
+- **Respuesta**:
+  ```json
+  {
+    "count": 34,
+    "next": "http://.../historial-ordenes-compra/?page=2",
+    "previous": null,
+    "results": [
+      { "id": 120, "folio": "OC-7-120", "estatus": 5, "estatus_label": "Recibida", "fecha_oc": "2026-09-10", "gran_total": "15400.00", "moneda_codigo": "MXN", "...": "resto de campos planos de OrdenCompraSerializer" }
+    ],
+    "resumen": {
+      "total_ordenes": 34,
+      "por_estatus": { "Recibida": 28, "Cancelada": 2, "Autorizada": 4 },
+      "monto_por_moneda": [ { "moneda": "MXN", "total": "410500.00" } ]
+    }
+  }
+  ```
+- `resumen` se calcula sobre el queryset ya filtrado (respeta `estatus`/`fecha_inicio`/`fecha_final` si se mandan), no solo sobre la página actual.
+- `monto_por_moneda` excluye `CANCELADA` (mismo criterio que `resumen_comercial` de cliente y que el dashboard de compras).
+- Solo trae OC activas (`activo=true`); una OC dada de baja no aparece aquí.
 
 ### Direcciones Cliente
 
@@ -2017,6 +2094,11 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 - Respuesta `200`: `{ "orden_compra": {...}, "detalle": [...] }`.
 - 404 si la OC no existe o no es de tu empresa (no 403).
 
+### Fecha de generación y fecha de vencimiento (EC-395)
+
+- `fecha_oc` (fecha de generación) **ya no se acepta en el body**, ni en `POST .../onboarding/` ni en `PUT`: el servidor la fija una sola vez al crear la OC (`timezone.now().date()`) y nunca se vuelve a tocar. Si la mandas en el body, se ignora en silencio (no es error).
+- `fecha_vencimiento` sí es editable: agrégala al objeto `orden_compra` del body (`POST .../onboarding/` o `PUT`) como `"fecha_vencimiento": "YYYY-MM-DD"`. El campo ya existía en el modelo pero no estaba expuesto en el onboarding; ahora sí.
+
 ### Cancelar una orden de compra
 
 Cancelar = la orden al proveedor queda anulada **pero se conserva y sigue visible**. Para borrar una OC capturada por error, ver "Eliminar" abajo.
@@ -2300,6 +2382,51 @@ Ya NO trae `movimiento_id`/`movimiento_inventario_id` — no hubo movimiento de 
 
 ---
 
+## 🧾 Compras - Encuadre RFID de Recepción
+
+Conteo RFID previo a la recepción formal (OC u OP).
+
+**0) Candidatos** — `GET /api/v1/compras/recepcion-rfid-encuadres/onboarding/`
+
+Mismo payload que `recepciones/onboarding/` (reusa la lógica, no la duplica): `busqueda.ordenes_compra[]` / `busqueda.ordenes_produccion[]` (ya filtradas a las que tienen algo pendiente) y `catalogos.almacenes[]`. Úsalo para llenar el formulario de "crear encuadre" — solo tiene sentido levantar un encuadre sobre una OC/OP que todavía le falta recibir algo.
+
+**1) Crear encuadre** — `POST /api/v1/compras/recepcion-rfid-encuadres/`
+
+```json
+{
+  "tipo_origen": "OC",
+  "orden_compra": 45,
+  "almacen": 3,
+  "serie_codigo": "RC",
+  "remision": "REM-001"
+}
+```
+Manda `orden_compra` **u** `op` (nunca ambos). `empresa`/`sucursal`/`proveedor`/`usuario` los pone el backend.
+
+**2) Escanear un tag** — `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/lecturas/`
+
+```json
+{ "codigo_tag": "9999-NEG" }
+```
+Resuelve por `sku` de variante, o `codigo`/`cod_proscai` de producto. Un tag repetido en el mismo encuadre regresa `400`. Solo funciona si el encuadre sigue `PENDIENTE`.
+
+**3) Ver detalle + resumen** — `GET /api/v1/compras/recepcion-rfid-encuadres/{id}/`
+
+```json
+{
+  "id": 1, "estatus": "PENDIENTE", "lecturas": [ { "codigo_tag": "9999-NEG", "cantidad_leida": "1.0000", "producto_nombre": "Tela RFID" } ],
+  "resumen": {
+    "detalle": [ { "detalle_id": 1, "producto_nombre": "Tela RFID", "ordenado": "100", "ya_recibido": "0", "esperado": "100", "leido": "1.0000", "diferencia": "99.0000" } ],
+    "total_esperado": "100", "total_leido": "1.0000", "total_sin_asignar": "0", "completo": false
+  }
+}
+```
+`esperado` = ordenado − ya recibido (no el total bruto de la OC/OP). `completo` es solo informativo; el backend no bloquea aceptar un encuadre incompleto.
+
+**4) Aceptar** — `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/aceptar/` (sin body). Pasa a `ACEPTADO`. **No mueve inventario ni crea `Recepcion`** — solo deja el conteo validado; la recepción formal se sigue haciendo con `recepciones/onboarding/` de siempre.
+
+---
+
 ## 🧾 Compras - Dashboard
 
 **Endpoint**: `GET /api/v1/compras/dashboard/`
@@ -2425,6 +2552,15 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 | `centros_costo`     | `id`, `empresa_id`                                                                                                                                        |
 | `polizas`           | `id`, `empresa_id`, `sucursal_id`, `centro_costo_id`                                                                                                      |
 | `poliza_detalle`    | `id`, `poliza_id`, `cuenta_contable_id`, `centro_costo_id` y vínculos opcionales a `factura`, `factura_proveedor`, `pago`, `cobro`, `movimiento_bancario` |
+
+### Factura Proveedor: adjuntar PDF y fusión OC + RC + factura (EC-397)
+
+`FacturaProveedor` ya trae `oc` y `recepcion` como FK, así que es el ancla natural para los 3 documentos.
+
+- **`POST /api/v1/finanzas/facturas-proveedor/{id}/adjuntar-pdf/`** — `multipart/form-data` con campo `archivo` (el PDF de la factura del proveedor). Valida que empiece con `%PDF` y pese ≤ 10 MB; si no, `400`. Se guarda como bytes en la propia fila (`pdf_adjunto`/`pdf_adjunto_nombre`), sin storage externo. Respuesta `200`: `{ "tiene_pdf_adjunto": true, "pdf_adjunto_nombre": "factura.pdf" }`.
+- **`GET /api/v1/finanzas/facturas-proveedor/{id}/pdf-fusionado/`** — genera un PDF simple de la OC (datos + renglones) y otro de la Recepción, y los junta con el PDF adjunto en un solo archivo (`application/pdf`, `Content-Disposition: inline`), en ese orden: OC → RC → factura. `400` si todavía no se adjuntó el PDF de la factura.
+- `list`/`retrieve` de `facturas-proveedor` exponen `tiene_pdf_adjunto` (bool); **no** devuelven el binario (`pdf_adjunto` se excluye del serializer a propósito).
+- Deliberadamente simple: nada de storage en disco ni de servicios externos (Vercel serverless tiene filesystem efímero, y esto se va a Oracle OCI pronto) — el PDF vive como bytes en Postgres igual en cualquier infraestructura.
 
 ### Catálogo oficial de endpoints
 
@@ -4790,9 +4926,7 @@ El frontend selecciona la impresora, envía el ZPL vía Zebra Browser Print y no
 
 - **Origen y descarga**: Zebra Browser Print es utilería de Zebra Technologies instalada localmente en la estación de trabajo.
   - Instalador y documentación oficial: https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html
-- **Librería cliente servida por el backend Django**:
-  - Endpoint estático: `GET /QA/browserprint/BrowserPrint-3.1.250.min.js/`
-  - Implementación: vista `qa_browserprint_asset` en [QA/views.py](file:///c:/Users/Jes%C3%BAs%20Ibarra/Desktop/django-backend-v2/QA/views.py#L512-L520), URL registrada en [QA/urls.py](file:///c:/Users/Jes%C3%BAs%20Ibarra/Desktop/django-backend-v2/QA/urls.py).
+- **Librería cliente**: la sirve el propio frontend Next.js (SDK de Zebra copiado en su repo). El backend no la sirve.
 - **Modo de uso en Next.js**: cargar dicha librería en el contexto del modal y usar su API (`BrowserPrint.getDefaultDevice`, `device.send(zpl)`)
   para enviar cada ZPL directamente a la impresora detectada (USB / red). El nombre y dirección de la impresora que devuelve Browser Print
   se persisten en el backend a través del `POST onboarding`.
@@ -5127,7 +5261,7 @@ La impresión ya quedó registrada y se verá en `GET /api/v1/wms/etiquetas-rfid
 | 1    | Abrir modal y consultar `GET /api/v1/wms/etiquetas-rfid/onboarding/` para obtener resultados iniciales.                                                                                                                                                                               |
 | 2    | Buscar texto: `GET /api/v1/wms/etiquetas-rfid/onboarding/?q=<texto>`. Renderizar la lista con el campo `label`.                                                                                                                                                                       |
 | 3    | Seleccionar variante/producto y cantidad, consultar `GET /onboarding/?variante=X&cantidad=N&rfid_mode=true` (o `?producto=Y`). Usar `preview.zpl_individual[]` como fuente de ZPL.                                                                                                    |
-| 4    | Cargar Zebra Browser Print desde `GET /QA/browserprint/BrowserPrint-3.1.250.min.js/`, detectar impresora (`BrowserPrint.getDefaultDevice` o listado de dispositivos) y enviar cada ZPL individual con `device.send(zpl)`.                                                             |
+| 4    | Cargar Zebra Browser Print (SDK incluido en el frontend), detectar impresora (`BrowserPrint.getDefaultDevice` o listado de dispositivos) y enviar cada ZPL individual con `device.send(zpl)`.                                                             |
 | 5    | Al finalizar el envío de las etiquetas, registrar la operación con `POST /api/v1/wms/etiquetas-rfid/onboarding/`: `producto_variante`, `cantidad`, `rfid_mode`, `printer_name`, `printer_address`, `status`. Enviar opcionalmente el arreglo `etiquetas[]` con los EPC reales usados. |
 | 6    | Actualizar el listado de impresiones en pantalla a partir de `GET /api/v1/wms/etiquetas-rfid/`.                                                                                                                                                                                       |
 
@@ -5139,19 +5273,23 @@ Lector oficial para consumir lecturas desde el hardware Zebra FX (FX7500 / FX960
 El frontend (Next.js) NO habla directamente con el lector FX. El flujo es:
 
 ```
-  LECTOR FX ZEBRA  ──POST JSON/EPCs──▶  /QA/scanner_rfid/receive/  ──▶ DB: RfidScan
-                                                                          │
-  NEXT.JS  ──poll GET cada 2s──▶  /api/v1/wms/etiquetas-rfid/scans/  ◀──┘
+  LECTOR FX ZEBRA  ──POST + token──▶  /api/v1/wms/etiquetas-rfid/scans/receive/  ──▶ DB: RfidScan (empresa del lector)
+                                                                                         │
+  NEXT.JS  ──poll GET cada 2s──▶  /api/v1/wms/etiquetas-rfid/scans/  ◀─────────────────┘
                                   (match auto con detalle)
 ```
 
 **Importante arquitectura**:
 
-- El `POST /QA/scanner_rfid/receive/` es SOLO para el FX (no requiere token / `@csrf_exempt`). **Next.js NUNCA llama a receive**.
-- Next.js solo consume 3 endpoints del V1 (mismo Bearer token que el resto del ERP):
-  1. `GET /api/v1/wms/etiquetas-rfid/scans/` → polling (lista lecturas + MATCH)
-  2. `GET /api/v1/wms/etiquetas-rfid/scanner-stats/` → debug 1-clic (estado FX + busqueda ?epc=)
-  3. `POST /api/v1/wms/etiquetas-rfid/scans/clear/` → purge list (vaciar tabla)
+- `POST /api/v1/wms/etiquetas-rfid/scans/receive/` es SOLO para el FX. **Next.js NUNCA llama a receive**.
+  - Autenticación: token del `LectorRFID` (alta en admin Django → *Lectores RFID*; el token se genera solo).
+  - El token va en header `X-RFID-Token: <token>`, `Authorization: Bearer <token>` o query `?token=<token>`.
+  - Sin token válido o lector inactivo → `401`.
+  - Cada lectura queda ligada a la empresa y al lector.
+- Next.js solo consume 3 endpoints del V1 (mismo Bearer token que el resto del ERP). Todos acotados a la empresa del usuario; superusuario ve todo:
+  1. `GET /api/v1/wms/etiquetas-rfid/scans/` → polling (últimas 50 lecturas de la empresa + MATCH)
+  2. `GET /api/v1/wms/etiquetas-rfid/scanner-stats/` → debug (solo superusuario / admin de empresa)
+  3. `POST /api/v1/wms/etiquetas-rfid/scans/clear/` → borra las lecturas de la empresa (solo superusuario / admin de empresa)
 
 ---
 
@@ -5474,9 +5612,9 @@ GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=000012E32827000147C0C5F5
     }
   ],
   "receive_endpoint_info": {
-    "fx_post_url_required": "POST https://TU-BACKEND/QA/scanner_rfid/receive/ (FX llama aquí. Next.js NO)",
-    "method_required": "POST (FX no manda token; @csrf_exempt).",
-    "note": "Next.js solo consume scans/, scans/clear y scanner-stats."
+    "fx_post_url_required": "POST https://TU-BACKEND/api/v1/wms/etiquetas-rfid/scans/receive/ (el FX llama aquí, NO Next.js)",
+    "method_required": "POST con token del LectorRFID (header X-RFID-Token o ?token=). Next.js NO usa receive/",
+    "note": "Next.js solo consume scans/ (polling), scans/clear (purge) y scanner-stats (debug)."
   }
 }
 ```
@@ -5498,71 +5636,11 @@ GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=000012E32827000147C0C5F5
 
 | Paso | Acción                                                                                                                                                                                                         |
 | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | Configura en el LECTOR FX Zebra (FX7500/FX9600) su **POST URL**: `https://TU-BACKEND/QA/scanner_rfid/receive/` (content-type JSON).                                                                            |
+| 1    | Da de alta el lector en admin (*Lectores RFID*) y configura en el FX su **POST URL**: `https://TU-BACKEND/api/v1/wms/etiquetas-rfid/scans/receive/` con header `X-RFID-Token: <token>` (o `?token=<token>` si el FX no admite headers). |
 | 2    | (Antes de empezar) Click **Purge List** = `POST /api/v1/wms/etiquetas-rfid/scans/clear/`.                                                                                                                      |
 | 3    | Click **Iniciar Monitoreo** = `setInterval` cada **2000 ms (2s)** llamando `GET /api/v1/wms/etiquetas-rfid/scans/`. Usa `lastSeenId` (Ref) para agregar solo scans nuevos (ids mayores).                       |
 | 4    | Render tabla: columna `MATCH=✅/❌` + `sku`, `color`, `talla`, `folio`, `antenna`, `rssi`, `timestamp`. Si `match_impresion=false` mostrar EPC hex crudo; si `true` pintar fila VERDE con los campos producto. |
 | 5    | Debug rápido: ante duda click **Status FX** = `GET /scanner-stats/?epc=<EPC_IMPRESO>` y revisa `query_epc_found_count` (0 no leída, ≥1 leída) + `last_scan_seconds_ago` (>300s = FX offline).                  |
-
----
-
-## 🧪 QA RFID Workspace
-
-Flujo de pruebas locales para validar impresión Zebra y captura de lecturas desde dispositivos Zebra sin afectar inventario.
-
-### 1) Workspace de Recepciones RFID
-
-- **URL**: `GET /QA/rfid/recepciones/`
-- **Descripción**: permite crear un encuadre QA, registrar lecturas y comparar lo esperado vs lo leído antes de pasar a una recepción formal.
-
-#### Query params
-
-- `encuadre` opcional: abre un encuadre existente para seguir escaneando.
-
-#### Notas operativas
-
-- El flujo QA no genera movimientos de stock.
-- La captura actual acepta valores por `sku`, `codigo` o `cod_proscai`.
-- Si el código no se puede resolver, la lectura queda registrada como no asignada.
-
-### 2) Workspace de Impresión QA
-
-- **URL**: `GET /QA/imprimir_etiqueta/`
-- **Alias tolerado**: `GET /QA/imrpimir_etiqueta/`
-- **Descripción**: busca variantes o productos base, genera un ZPL de prueba y permite imprimirlo vía Zebra Browser Print local.
-
-#### Query params
-
-- `q` opcional: busca por `sku`, nombre, `codigo` o `cod_proscai`.
-- `variante` opcional: selecciona una `ProductoVariante`.
-- `producto` opcional: selecciona un `Producto` cuando no existen variantes.
-- `encuadre` opcional: conserva el retorno al workspace de recepción QA.
-
-#### Comportamiento
-
-- Si la búsqueda encuentra variantes, se puede imprimir por `sku`.
-- Si la búsqueda encuentra un producto sin variantes, se puede imprimir por `codigo` o `cod_proscai`.
-- Si solo existe un producto coincidente y no hay variantes, la pantalla lo selecciona automáticamente.
-- El frontend carga Browser Print desde rutas QA dedicadas para no depender de `collectstatic` durante pruebas locales.
-
-#### Assets locales usados por Browser Print
-
-- `GET /QA/browserprint/BrowserPrint-3.1.250.min.js`
-- `GET /QA/browserprint/BrowserPrint-Zebra-1.1.250.min.js`
-
-### 3) Flujo validado en pruebas
-
-1. Crear o abrir un encuadre en `GET /QA/rfid/recepciones/?encuadre={id}`.
-2. Ir a `GET /QA/imprimir_etiqueta/?encuadre={id}`.
-3. Buscar una variante o un producto base, por ejemplo `93E0`.
-4. Imprimir la etiqueta desde la PC con Zebra Browser Print.
-5. Abrir el encuadre en el Zebra `MC3300X`.
-6. Escanear el código impreso para registrar la lectura en QA.
-
-### 4) Alcance actual
-
-- La validación completada en QA corresponde a lectura por código de barras enviado por el Zebra como entrada de teclado.
-- La lectura RFID real será una fase posterior, donde el dispositivo deberá enviar `EPC` u otro identificador RFID al backend.
 
 ---
 

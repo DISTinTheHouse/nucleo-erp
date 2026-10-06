@@ -1,5 +1,7 @@
-from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.indexes import OpClass
 from django.db import models
+from django.db.models.functions import Upper
+from nucleo.indices import GinIndexSoloPostgres, IndexSoloPostgres
 from django.conf import settings
 from nucleo.models import Empresa, Sucursal, Moneda, SerieFolio, StatusLifecycleModel, SatRegimenFiscal
 from terceros.models import Cliente, DireccionCliente
@@ -385,22 +387,30 @@ class Pedido(StatusLifecycleModel):
             models.UniqueConstraint(fields=["serie_folio", "folio"], name="uq_pedido_seriefolio_folio")
         ]
         indexes = [
-            # Trigram GIN para el buscador global (``/api/v1/search/``): acelera
-            # el ``icontains`` sobre las dos columnas snapshot del cliente. La
-            # extensión ``pg_trgm`` ya está habilitada en la instancia, así que
-            # la migración sólo crea los índices.
-            # ``folio`` no aparece aquí: ya tiene su btree por ``db_index=True``,
-            # y el buscador lo consulta por prefijo (``istartswith``), que ese
-            # índice sí sirve.
-            GinIndex(
-                fields=["cliente_nombre"],
-                opclasses=["gin_trgm_ops"],
-                name="pedidos_cliente_nombre_trgm",
+            # Índices del buscador global (``/api/v1/search/``). Son de EXPRESIÓN
+            # sobre ``UPPER(col)``: en PostgreSQL Django compila ``istartswith``/
+            # ``icontains`` como ``UPPER("col"::text) LIKE UPPER(%s)`` —no
+            # ``ILIKE``—, y ni el btree de ``folio`` (``db_index=True``) ni su
+            # ``_like`` sirven a ese predicado (verificado con EXPLAIN y
+            # ``enable_seqscan = off``). Esos dos se conservan: son del campo y
+            # sirven a los lookups exactos / sensibles a mayúsculas.
+            #
+            # - ``folio`` (CÓDIGO, prefijo): btree ``text_pattern_ops``.
+            # - columnas snapshot del cliente (NOMBRE, subcadena): GIN trigram.
+            #
+            # Sólo existen en PostgreSQL: ver
+            # ``nucleo.indices``.
+            IndexSoloPostgres(
+                OpClass(Upper("folio"), name="text_pattern_ops"),
+                name="pedidos_folio_upper_like",
             ),
-            GinIndex(
-                fields=["cliente_razon_social"],
-                opclasses=["gin_trgm_ops"],
-                name="pedidos_cliente_rsocial_trgm",
+            GinIndexSoloPostgres(
+                OpClass(Upper("cliente_nombre"), name="gin_trgm_ops"),
+                name="pedidos_cli_nom_upper_trgm",
+            ),
+            GinIndexSoloPostgres(
+                OpClass(Upper("cliente_razon_social"), name="gin_trgm_ops"),
+                name="pedidos_cli_rs_upper_trgm",
             ),
         ]
     

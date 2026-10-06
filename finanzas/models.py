@@ -1,5 +1,8 @@
 from django.conf import settings
+from django.contrib.postgres.indexes import OpClass
 from django.db import models
+from django.db.models.functions import Upper
+from nucleo.indices import IndexSoloPostgres
 from django.utils import timezone
 from nucleo.models import StatusLifecycleModel
 from simple_history.models import HistoricalRecords
@@ -147,6 +150,18 @@ class Factura(StatusLifecycleModel):
         db_table = "facturas"
         verbose_name = "Factura"
         verbose_name_plural = "Facturas"
+        indexes = [
+            # Buscador global (``/api/v1/search/``): ``folio__istartswith`` se
+            # compila como ``UPPER("folio"::text) LIKE UPPER(%s)``, que sólo un
+            # índice de expresión sobre ``UPPER(folio)`` puede servir. Mismo
+            # patrón que ``ventas.Pedido`` (ver ``nucleo/api/search.py``). Sólo
+            # existe en PostgreSQL: ver
+            # ``nucleo.indices``.
+            IndexSoloPostgres(
+                OpClass(Upper("folio"), name="text_pattern_ops"),
+                name="facturas_folio_upper_like",
+            ),
+        ]
     
     def __str__(self):
         return str(self.id)
@@ -196,6 +211,13 @@ class FacturaProveedor(models.Model):
         default=FacturaProveedorStatus.BORRADOR,
     )
     observaciones = models.TextField(null=True, blank=True)
+    # PDF de la factura del proveedor (EC-397), guardado como bytes en la
+    # propia fila: nada de almacenamiento de archivos en disco, que en
+    # serverless (Vercel) es efímero y que habría que reconfigurar otra vez
+    # al migrar a Oracle OCI. Es un documento chico (una factura), así que
+    # vive bien en la base de datos sin necesitar un bucket.
+    pdf_adjunto = models.BinaryField(null=True, blank=True)
+    pdf_adjunto_nombre = models.CharField(max_length=255, null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
     activo = models.BooleanField(default=True)

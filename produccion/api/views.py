@@ -14,6 +14,14 @@ from seguridad.role_identity import (
 )
 
 from produccion.services.common import config_como_dict, pendientes_por_linea
+from produccion.scope import (
+    ordenes_bordado_base,
+    ordenes_bordado_visibles,
+    ordenes_corte_manga_base,
+    ordenes_corte_manga_visibles,
+    ordenes_reflejante_base,
+    ordenes_reflejante_visibles,
+)
 
 from produccion.models import (
     ListaMaterialBom,
@@ -455,24 +463,8 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         serializer.validated_data['empresa'] = empresa
         serializer.validated_data['sucursal'] = sucursal
 
-        # ``pedido`` es opcional en OP, pero si viene debe ser un pedido de
-        # producción especial (muestra) ya clasificado y confirmado — mismo
-        # criterio que filtra ``GET /pedidos-especiales/`` (de donde el
-        # frontend debe sacar el picker). Sin esto, cualquier pedido_id se
-        # colaba aunque el selector ya lo filtrara.
-        pedido = serializer.validated_data.get('pedido')
-        if pedido is not None:
-            if pedido.empresa_id != empresa.pk:
-                raise ValidationError({'pedido': 'El pedido no pertenece a esta empresa.'})
-            if not _detalles_especiales_qs().filter(pedido=pedido).exists():
-                raise ValidationError({
-                    'pedido': 'El pedido no tiene ninguna línea de producción especial (muestra).'
-                })
-            if not pedido.clasificacion or not pedido.fecha_confirmacion:
-                raise ValidationError({
-                    'pedido': 'El pedido debe estar clasificado y con fecha de confirmación antes de ligarlo a una OP.'
-                })
-
+        # Las reglas de ``pedido`` (empresa, producción especial, clasificado y
+        # confirmado) viven en ``OrdenProduccionSerializer.validate_pedido``.
         with transaction.atomic():
             for detalle in serializer.validated_data.get('orden_produccion_detalle', []):
                 producto_variante = detalle.get('producto_variante')
@@ -546,15 +538,28 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         if op is None:
             return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
 
-        instance, _created = OrdenProduccionRutaCritica.objects.get_or_create(op=op)
-
         if request.method == 'GET':
+            # Leer no escribe: sin renglón aún se devuelven los valores por
+            # defecto sin persistirlos; el renglón nace en el primer PATCH.
+            instance = (
+                OrdenProduccionRutaCritica.objects.filter(op=op).first()
+                or OrdenProduccionRutaCritica(op=op)
+            )
             return Response(OrdenProduccionRutaCriticaSerializer(instance).data)
 
         # PATCH: solo produccion (o superuser/admin_empresa) puede escribir
         # ruta crítica -- mismo patrón que ``_require_mesa_control`` en
         # ``ventas.api.views`` para ``Pedido.clasificacion``/``fecha_confirmacion``.
         self._require_produccion(request.user)
+        if op.estatus_op in (
+            OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+            OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
+        ):
+            return Response(
+                {'msg': f'La OP está {op.get_estatus_op_display().lower()}: su ruta crítica ya no se puede editar.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        instance, _created = OrdenProduccionRutaCritica.objects.get_or_create(op=op)
         serializer = OrdenProduccionRutaCriticaSerializer(instance, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -611,12 +616,11 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
     def get_queryset(self):
         """Aislamiento multi-tenant: empresa + sucursal.
 
-        Mismo criterio que ``PickingViewSet``/``PackingViewSet``/
-        ``DespachoViewSet``/``TransferenciaViewSet``: sin empresa no se ve
-        nada, el superusuario ve todo y el admin de empresa ve todas las
-        sucursales de la suya; el resto queda acotado a
-        ``sucursales_permitidas()``. ``list`` devuelve ``200 []`` fuera de
-        alcance y ``retrieve`` de otra empresa/sucursal devuelve ``404``
+        El predicado vive en ``produccion.scope`` (base + visibles), compartido
+        con el buscador global: sin empresa no se ve nada, el superusuario ve
+        todo y el admin de empresa ve todas las sucursales de la suya; el resto
+        queda acotado a ``sucursales_permitidas()``. ``list`` devuelve ``200 []``
+        fuera de alcance y ``retrieve`` de otra empresa/sucursal devuelve ``404``
         (no ``403``): no se revela la existencia del documento.
 
         ``select_related``/``prefetch_related`` cortan el N+1: el serializer
@@ -626,9 +630,8 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         (``proveedor_nombre``/``proveedor_display``) por orden, y por renglón de
         ``detalles``, ``producto``/``talla``/``color``.
         """
-        user = self.request.user
         qs = (
-            OrdenesBordado.objects.filter(activo=True)
+            ordenes_bordado_base()
             .select_related("pedido", "usuario_asignado", "empresa", "sucursal", "proveedor")
             .prefetch_related(
                 Prefetch(
@@ -646,16 +649,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
             # Listado más reciente primero; ``-id`` como desempate estable.
             .order_by("-fecha_inicio", "-id")
         )
-
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        return ordenes_bordado_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
         # list → renglón ligero, sin los campos que obligan a re-leer
@@ -970,7 +964,9 @@ class OrdenReflejanteViewSet(
     def get_queryset(self):
         """Aislamiento multi-tenant: empresa + sucursal.
 
-        Mismo criterio que ``OrdenBordadoViewSet``/``PickingViewSet``.
+        El predicado vive en ``produccion.scope`` (base + visibles), compartido
+        con el buscador global. Mismo criterio que ``OrdenBordadoViewSet``/
+        ``PickingViewSet``.
 
         El ``select_related``/``prefetch_related`` corta el N+1 del serializer:
         cada orden resolvía ``empresa``/``sucursal`` (``*_nombre``), ``pedido``
@@ -982,9 +978,8 @@ class OrdenReflejanteViewSet(
         orden. Con esto el list queda en 2 queries constantes, sin importar
         cuántas órdenes o renglones traiga.
         """
-        user = self.request.user
         qs = (
-            OrdenesReflejante.objects.filter(activo=True)
+            ordenes_reflejante_base()
             .select_related("empresa", "sucursal", "pedido", "usuario_asignado")
             .prefetch_related(
                 Prefetch(
@@ -999,16 +994,7 @@ class OrdenReflejanteViewSet(
             # Listado más reciente primero; ``-id`` como desempate estable.
             .order_by("-fecha_inicio", "-id")
         )
-
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        return ordenes_reflejante_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
         # Ver ``OrdenBordadoViewSet.get_serializer_class``.
@@ -1247,7 +1233,9 @@ class OrdenesCorteMangaViewSet(
     def get_queryset(self):
         """Aislamiento multi-tenant: empresa + sucursal.
 
-        Mismo criterio que ``OrdenBordadoViewSet``/``OrdenReflejanteViewSet``.
+        El predicado vive en ``produccion.scope`` (base + visibles), compartido
+        con el buscador global. Mismo criterio que ``OrdenBordadoViewSet``/
+        ``OrdenReflejanteViewSet``.
 
         ``select_related``/``prefetch_related`` cortan el N+1: el serializer
         resuelve ``pedido`` (``pedido_folio``), ``usuario_asignado``
@@ -1257,9 +1245,8 @@ class OrdenesCorteMangaViewSet(
         ``OrdenCorteMangaDetalle.configuracion`` es un ``JSONField`` plano (no
         una FK), así que no necesita ``select_related``.
         """
-        user = self.request.user
         qs = (
-            OrdenesCorteManga.objects.filter(activo=True)
+            ordenes_corte_manga_base()
             .select_related("pedido", "usuario_asignado", "empresa", "sucursal")
             .prefetch_related(
                 Prefetch(
@@ -1274,16 +1261,7 @@ class OrdenesCorteMangaViewSet(
             # Listado más reciente primero; ``-id`` como desempate estable.
             .order_by("-fecha_inicio", "-id")
         )
-
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        return ordenes_corte_manga_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
         # Ver ``OrdenBordadoViewSet.get_serializer_class``.

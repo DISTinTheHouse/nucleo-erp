@@ -1,14 +1,17 @@
 from decimal import Decimal
 from django.db import OperationalError, transaction
 from django.db.models import Q, Sum
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.fields import get_error_detail
+from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from finanzas.services.facturama.service import FacturamaService
 from finanzas.services.facturama.exceptions import FacturamaAPIException
+from finanzas.services.pdf_fusion_service import fusionar_pdf_factura_proveedor
 from finanzas.services.syncfy.client import SyncfyClient
 from finanzas.services.syncfy.exceptions import SyncfyAPIException
 from finanzas.exceptions import (
@@ -1281,6 +1284,42 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
             raise NotFound("La factura de proveedor ya no existe.")
         CuentaPorPagarService.ensure_invoice_deletable(locked)
         locked.delete()
+
+    @action(detail=True, methods=["post"], url_path="adjuntar-pdf", parser_classes=[MultiPartParser])
+    def adjuntar_pdf(self, request, pk=None):
+        """Sube el PDF de la factura del proveedor (EC-397). Se guarda como
+        bytes en la propia fila; ver ``FacturaProveedor.pdf_adjunto``."""
+        factura = self.get_object()
+        archivo = request.FILES.get("archivo")
+        if not archivo:
+            raise ValidationError({"archivo": "El archivo PDF es requerido."})
+        contenido = archivo.read()
+        if not contenido.startswith(b"%PDF"):
+            raise ValidationError({"archivo": "El archivo debe ser un PDF válido."})
+        if len(contenido) > 10 * 1024 * 1024:
+            raise ValidationError({"archivo": "El PDF no puede pesar más de 10 MB."})
+
+        factura.pdf_adjunto = contenido
+        factura.pdf_adjunto_nombre = archivo.name
+        factura.save(update_fields=["pdf_adjunto", "pdf_adjunto_nombre", "updated_at"])
+        return Response(
+            {"tiene_pdf_adjunto": True, "pdf_adjunto_nombre": factura.pdf_adjunto_nombre},
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["get"], url_path="pdf-fusionado")
+    def pdf_fusionado(self, request, pk=None):
+        """OC + Recepción + factura del proveedor en un solo PDF (EC-397)."""
+        factura = self.get_object()
+        if not factura.pdf_adjunto:
+            raise ValidationError(
+                {"pdf_adjunto": "Primero adjunta el PDF de la factura del proveedor (ver adjuntar-pdf/)."}
+            )
+        pdf_bytes = fusionar_pdf_factura_proveedor(factura)
+        nombre = f"OC-RC-Factura-{factura.folio or factura.pk}.pdf"
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'inline; filename="{nombre}"'
+        return response
 
 
 class BancoViewSet(FinanzasBaseViewSet):

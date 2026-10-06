@@ -5,11 +5,13 @@ from produccion.services.common import (
     EPS_CANTIDAD,
     cantidades_asignadas,
     crear_orden_con_guardia_duplicado,
+    exigir_producto_en_tallas,
     payload_duplicada,
     revisar_empresa,
     tallas_orden_trabajo_qs,
 )
 from produccion.utils.folios import generate_ocm_folio
+from ventas.models import Pedido
 
 
 class OrdenCorteMangaDuplicada409(APIException):
@@ -127,6 +129,12 @@ class OrdenCorteMangaService:
         if sucursal is None:
             raise ValidationError({"err": "El usuario no tiene una sucursal asignada."})
 
+        # Candado de concurrencia por pedido, mismo que OB/OR: sin la constraint
+        # ``uq_orden_corte_manga_activa_por_pedido`` (migración ``0025``) dos POST
+        # simultáneos leían el mismo asignado y ambos insertaban. En SQLite
+        # ``select_for_update`` es no-op; en Postgres es el bloqueo real.
+        Pedido.objects.select_for_update().filter(pk=pedido.pk).first()
+
         detalle_tallas_raw = list(
             OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id).select_related(
                 "pedido_detalle", "talla"
@@ -134,28 +142,40 @@ class OrdenCorteMangaService:
         )
 
         if not detalle_tallas_raw:
-             raise ValidationError({
+            raise ValidationError({
                 "err": "El pedido no tiene detalles con corte de manga para generar la orden."
             })
 
+        # Cantidad contratada por línea, capturada antes de que el override pise
+        # ``dt.cantidad``; evita re-consultar ``PedidoDetalleTalla`` por línea.
+        cantidad_pedido_por_id = {
+            dt.id: float(dt.cantidad or 0) for dt in detalle_tallas_raw
+        }
+
         detalles_override = data.get("detalles_override") or []
         if detalles_override:
-            override_map = {
+            by_id = {dt.id: dt for dt in detalle_tallas_raw}
+            override_by_id = {
                 int(item["pedido_detalle_talla_id"]): float(item["cantidad"])
                 for item in detalles_override
+                if item.get("pedido_detalle_talla_id") is not None
+                and item.get("cantidad") is not None
             }
-            detalle_tallas = [
-                next((dt for dt in detalle_tallas_raw if dt.id == pdt_id), None)
-                for pdt_id in override_map
-            ]
-            detalle_tallas = [dt for dt in detalle_tallas if dt is not None]
-            for dt in detalle_tallas:
-                try:
-                    dt.cantidad = override_map[dt.id]
-                except AttributeError:
-                    pass
+
+            detalle_tallas = []
+            for pdt_id, cantidad in override_by_id.items():
+                if pdt_id not in by_id:
+                    raise ValidationError({
+                        "err": (
+                            f"`pedido_detalle_talla_id={pdt_id}` no pertenece "
+                            "a este pedido o no lleva servicio de corte de manga."
+                        )
+                    })
+                dt = by_id[pdt_id]
+                dt.cantidad = cantidad
+                detalle_tallas.append(dt)
         else:
-            detalle_tallas = detalle_tallas_raw
+            detalle_tallas = list(detalle_tallas_raw)
 
         if not detalle_tallas:
             raise ValidationError({
@@ -176,27 +196,54 @@ class OrdenCorteMangaService:
                     OrdenCorteMangaService._payload_duplicada(existente)
                 )
 
-        asignado_por_linea, _asignado_sin_talla = (
+        asignado_por_linea, asignado_sin_talla = (
             OrdenCorteMangaService._cantidades_asignadas_por_linea(pedido)
         )
         errores_lineas = []
         for dt in detalle_tallas:
             key = (dt.pedido_detalle_id, getattr(dt.talla, "id", None))
-            try:
-                from ventas.models import PedidoDetalleTalla
-                original = PedidoDetalleTalla.objects.filter(pk=dt.id).values("cantidad").first()
-                disponible = float((original or {}).get("cantidad") or 0)
-            except Exception:
-                disponible = 0.0
-            nuevo = float(getattr(dt, "cantidad", None) or 0)
+            disponible = cantidad_pedido_por_id.get(dt.id, 0.0)
+            nuevo = float(dt.cantidad or 0)
             ya = asignado_por_linea.get(key, 0.0)
             faltante = max(0.0, disponible - ya)
-            if nuevo > faltante:
+            if nuevo > faltante + EPS_CANTIDAD:
                 errores_lineas.append(
                     f"  - talla_id={key[1]} pedido_detalle_id={key[0]}: "
                     f"pedido={disponible}, ya_asignado={ya}, solicitado={nuevo}, "
                     f"disponible_restante={faltante}"
                 )
+
+        # Segundo corte, por ``pedido_detalle``: absorbe las piezas ya programadas
+        # sin talla (``asignado_sin_talla``, p. ej. desde picking), que el corte
+        # por línea no ve.
+        capacidad_por_detalle = {}
+        for dt in detalle_tallas_raw:
+            capacidad_por_detalle[dt.pedido_detalle_id] = (
+                capacidad_por_detalle.get(dt.pedido_detalle_id, 0.0)
+                + cantidad_pedido_por_id.get(dt.id, 0.0)
+            )
+        solicitado_por_detalle = {}
+        for dt in detalle_tallas:
+            solicitado_por_detalle[dt.pedido_detalle_id] = (
+                solicitado_por_detalle.get(dt.pedido_detalle_id, 0.0)
+                + float(dt.cantidad or 0)
+            )
+        asignado_por_detalle = dict(asignado_sin_talla)
+        for (pedido_detalle_id, _talla_id), cantidad in asignado_por_linea.items():
+            asignado_por_detalle[pedido_detalle_id] = (
+                asignado_por_detalle.get(pedido_detalle_id, 0.0) + cantidad
+            )
+        for pedido_detalle_id, solicitado in solicitado_por_detalle.items():
+            capacidad = capacidad_por_detalle.get(pedido_detalle_id, 0.0)
+            ya = asignado_por_detalle.get(pedido_detalle_id, 0.0)
+            faltante = max(0.0, capacidad - ya)
+            if solicitado > faltante + EPS_CANTIDAD:
+                errores_lineas.append(
+                    f"  - pedido_detalle_id={pedido_detalle_id} (total del renglón): "
+                    f"pedido={capacidad}, ya_asignado={ya}, solicitado={solicitado}, "
+                    f"disponible_restante={faltante}"
+                )
+
         if errores_lineas:
             raise ValidationError({
                 "err": (
@@ -208,6 +255,7 @@ class OrdenCorteMangaService:
 
         # El folio se consume DESPUÉS de todas las validaciones, para que un
         # rechazo no gaste consecutivo de la serie.
+        exigir_producto_en_tallas(detalle_tallas, "corte de manga")
         folio_ocm = generate_ocm_folio(pedido.empresa_id, pedido.sucursal_id)
 
         orden_corte_manga = crear_orden_con_guardia_duplicado(

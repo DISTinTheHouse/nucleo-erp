@@ -1,3 +1,6 @@
+import secrets
+
+from django.core.exceptions import ValidationError
 from django.db import models
 from simple_history.models import HistoricalRecords
 
@@ -24,7 +27,7 @@ class LotePicking(models.Model):
     total_pedidos = models.IntegerField(default=0)
     total_lineas = models.IntegerField(default=0)
 
-    #estacion_sorting = models.CharField(max_length=50, blank=True, null=True)  # dónde se clasifica lo recolectado
+    #estacion_sorting = models.CharField(max_length=50, blank=True, null=True)  # dónde se clasifica lo recolectadoj
     #ruta_optimizada = models.JSONField(blank=True, null=True)  # secuencia de ubicaciones calculada, si aplica
     fecha_inicio = models.DateTimeField(blank=True, null=True)
     fecha_fin = models.DateTimeField(blank=True, null=True)
@@ -246,6 +249,7 @@ class PackingDetalle(models.Model):
 class Despacho(models.Model):
     packing = models.ForeignKey(Packing, on_delete=models.CASCADE, related_name="despachos")
     envio = models.ForeignKey("logistica.Envio", on_delete=models.CASCADE, related_name="despachos", null=True, blank=True)
+    guia = models.CharField(max_length=100, blank=True, default="")
 
     class Meta:
         db_table = "despachos"
@@ -528,12 +532,82 @@ class EtiquetaRFIDDetalle(models.Model):
         return self.epc
 
 
+def _generar_token_lector():
+    return secrets.token_urlsafe(32)
+
+
+class LectorRFID(models.Model):
+    empresa = models.ForeignKey(
+        "nucleo.Empresa",
+        on_delete=models.CASCADE,
+        related_name="lectores_rfid",
+    )
+    # Obligatoria en formularios; nullable en BD solo por lectores dados de alta
+    # antes de exigirla. Un lector sin sucursal solo lo ven los admins.
+    sucursal = models.ForeignKey(
+        "nucleo.Sucursal",
+        on_delete=models.PROTECT,
+        related_name="lectores_rfid",
+        null=True,
+    )
+    nombre = models.CharField(max_length=100)
+    token = models.CharField(max_length=64, unique=True, default=_generar_token_lector)
+    activo = models.BooleanField(default=True)
+    ultima_lectura = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "lectores_rfid"
+        verbose_name = "Lector RFID"
+        verbose_name_plural = "Lectores RFID"
+        ordering = ["empresa_id", "nombre"]
+
+    def __str__(self):
+        return f"{self.nombre} ({self.empresa_id})"
+
+    def clean(self):
+        if self.sucursal_id and self.empresa_id and self.sucursal.empresa_id != self.empresa_id:
+            raise ValidationError({"sucursal": "La sucursal no pertenece a la empresa del lector."})
+
+
+class RfidScanQuerySet(models.QuerySet):
+    def visibles_para(self, user):
+        """Superusuario: todo. Admin de empresa: su empresa. Resto: sucursales permitidas."""
+        if getattr(user, "is_superuser", False):
+            return self
+        empresa_id = getattr(user, "empresa_id", None)
+        if not empresa_id:
+            return self.none()
+        qs = self.filter(empresa_id=empresa_id)
+        if getattr(user, "is_admin_empresa", False):
+            return qs
+        return qs.filter(lector__sucursal_id__in=user.sucursales_permitidas())
+
+
 class RfidScan(models.Model):
+    # Nullable solo por las lecturas previas al token por lector.
+    empresa = models.ForeignKey(
+        "nucleo.Empresa",
+        on_delete=models.CASCADE,
+        related_name="rfid_scans",
+        null=True,
+        blank=True,
+    )
+    lector = models.ForeignKey(
+        LectorRFID,
+        on_delete=models.SET_NULL,
+        related_name="scans",
+        null=True,
+        blank=True,
+    )
     epc = models.CharField(max_length=255, db_index=True)
     reader_ip = models.GenericIPAddressField(null=True, blank=True)
     antenna = models.IntegerField(null=True, blank=True)
     rssi = models.FloatField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = RfidScanQuerySet.as_manager()
 
     class Meta:
         db_table = "rfid_scans"

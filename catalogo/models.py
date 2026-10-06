@@ -1,4 +1,7 @@
+from django.contrib.postgres.indexes import OpClass
 from django.db import models
+from django.db.models.functions import Upper
+from nucleo.indices import GinIndexSoloPostgres, IndexSoloPostgres
 from nucleo.models import Empresa, UnidadMedida, Impuesto, SatClaveProdServ, SatClaveUnidad
 from simple_history.models import HistoricalRecords
 
@@ -115,6 +118,24 @@ class Producto(models.Model):
         db_table = "productos"
         verbose_name = "Producto"
         verbose_name_plural = "Productos"
+        indexes = [
+            # Buscador global (``/api/v1/search/``). Índices de EXPRESIÓN sobre
+            # ``UPPER(col)``: Django compila ``istartswith``/``icontains`` como
+            # ``UPPER("col"::text) LIKE UPPER(%s)``, que ni un índice sobre la
+            # columna cruda ni el ``_like`` de un campo ``unique`` pueden servir.
+            # Mismo patrón que ``ventas.Pedido`` (ver ``nucleo/api/search.py``).
+            # Sólo existen en PostgreSQL: ver
+            # ``nucleo.indices``.
+            # - ``nombre`` (NOMBRE, subcadena, vía ``producto__nombre``): GIN trigram.
+            #   OJO: hoy el buscador sólo consulta este campo dentro de un OR que
+            #   cruza ``variantes_producto`` y ``productos``, y ese OR no puede usar
+            #   índices de una sola tabla (ver la entrada ``producto`` en
+            #   ``nucleo/api/search.py``).
+            GinIndexSoloPostgres(
+                OpClass(Upper("nombre"), name="gin_trgm_ops"),
+                name="productos_nombre_upper_trgm",
+            ),
+        ]
     
     def __str__(self):
         return self.nombre
@@ -136,6 +157,25 @@ class ProductoVariante(models.Model):
         db_table = "variantes_producto"
         verbose_name = "Variante Producto"
         verbose_name_plural = "Variantes Producto"
+        indexes = [
+            # Buscador global (``/api/v1/search/``). Índices de EXPRESIÓN sobre
+            # ``UPPER(col)``: Django compila ``istartswith``/``icontains`` como
+            # ``UPPER("col"::text) LIKE UPPER(%s)``, que ni un índice sobre la
+            # columna cruda ni el ``_like`` de un campo ``unique`` pueden servir.
+            # Mismo patrón que ``ventas.Pedido`` (ver ``nucleo/api/search.py``).
+            # Sólo existen en PostgreSQL: ver
+            # ``nucleo.indices``.
+            # - ``sku`` (CÓDIGO, prefijo): btree ``text_pattern_ops``.
+            # - ``nombre`` (NOMBRE, subcadena): GIN trigram.
+            IndexSoloPostgres(
+                OpClass(Upper("sku"), name="text_pattern_ops"),
+                name="variantes_sku_upper_like",
+            ),
+            GinIndexSoloPostgres(
+                OpClass(Upper("nombre"), name="gin_trgm_ops"),
+                name="variantes_nombre_upper_trgm",
+            ),
+        ]
 
     @property
     def nombre_completo(self):

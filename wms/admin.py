@@ -7,6 +7,7 @@ from .models import (
     ConteoCiclico, ConteoCiclicoDetalle,
     Transferencia, TransferenciaDetalle,
     EtiquetaRFIDImpresion, EtiquetaRFIDDetalle,
+    LectorRFID,
     RfidScan,
 )
 
@@ -350,17 +351,27 @@ class EtiquetaRFIDDetalleAdmin(admin.ModelAdmin):
     show_full_result_count = False
 
 
+@admin.register(LectorRFID)
+class LectorRFIDAdmin(admin.ModelAdmin):
+    list_display = ("id", "nombre", "empresa", "sucursal", "activo", "ultima_lectura")
+    list_filter = ("activo", "empresa")
+    search_fields = ("nombre",)
+    readonly_fields = ("token", "ultima_lectura", "created_at", "updated_at")
+
+
 @admin.register(RfidScan)
 class RfidScanAdmin(admin.ModelAdmin):
     list_display = (
         "id",
         "epc",
+        "empresa",
+        "lector",
         "reader_ip",
         "antenna",
         "rssi",
         "created_at",
     )
-    list_filter = ("created_at", "antenna", "reader_ip")
+    list_filter = ("created_at", "empresa", "lector", "antenna", "reader_ip")
     search_fields = ("epc", "reader_ip", "id")
     readonly_fields = ("created_at",)
     ordering = ("-created_at", "-id")

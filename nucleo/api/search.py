@@ -4,9 +4,10 @@ Consulta varias entidades a la vez y devuelve los resultados **agrupados por tip
 recortando cada grupo a los primeros ``limit``. Está pensado para el buscador del
 header: filas ligeras para pintar un dropdown, no vistas de detalle.
 
-Vive en ``nucleo`` porque es infraestructura transversal —cruza ventas y terceros—,
-igual que el resto de lo que comparten las apps (middleware, mixins, catálogos). La
-ruta se declara en ``nucleo/urls.py``, junto a las demás APIView de nucleo.
+Vive en ``nucleo`` porque es infraestructura transversal —cruza ventas, terceros,
+producción, catálogo y finanzas—, igual que el resto de lo que comparten las apps
+(middleware, mixins, catálogos). La ruta se declara en ``nucleo/urls.py``, junto a
+las demás APIView de nucleo.
 
 Añadir una entidad
 ------------------
@@ -17,9 +18,10 @@ CÓDIGO y cuáles NOMBRE, qué columnas hacen falta, cómo ordenar y cómo seria
 Aislamiento multi-tenant
 ------------------------
 ``alcance`` NO reimplementa nada: compone el queryset base y el predicado reales que
-ya usa el ViewSet de esa entidad (``ventas.scope`` / ``terceros.scope``). La política
-de superusuario es, por lo tanto, exactamente la que cada entidad ya tenía; este
-endpoint no inventa una.
+ya usa el ViewSet de esa entidad (``ventas.scope`` / ``terceros.scope`` /
+``produccion.scope``, o el helper de aislamiento de la vista en catálogo y
+finanzas). La política de superusuario es, por lo tanto, exactamente la que cada
+entidad ya tenía; este endpoint no inventa una.
 
 Permisos
 --------
@@ -29,7 +31,7 @@ filtro de visibilidad por entidad: éste es el primer endpoint del backend que u
 
 Cada ``EntidadBuscable`` declara sus ``permisos_visibilidad``; basta tener UNO para
 que su grupo aparezca. La entidad que el usuario no puede ver **se omite entera de
-la respuesta**, así que ``grupos`` puede traer menos de tres elementos. El
+la respuesta**, así que ``grupos`` puede traer menos elementos que el ``REGISTRO``. El
 superusuario y el ``is_admin_empresa`` pasan solos, por el cortocircuito que hay
 dentro de ``nucleo.permisos``: aquí no hay ni un ``is_superuser``.
 
@@ -44,13 +46,37 @@ son cosas independientes.
 Estrategia de coincidencia
 --------------------------
 - Campos CÓDIGO (``folio``): ``istartswith`` — prefijo. Es lo que se espera al teclear
-  un folio, y el btree de ``Pedido.folio`` (``db_index=True``) cubre el caso.
-- Campos NOMBRE: ``icontains`` — subcadena, acelerada por los índices GIN
-  ``gin_trgm_ops`` creados para esto. Se eligió ``icontains`` sobre
+  un folio.
+- Campos NOMBRE: ``icontains`` — subcadena. Se eligió ``icontains`` sobre
   ``TrigramSimilarity`` porque busca subcadena (lo que quiere un dropdown: "acme"
   debe encontrar "Comercial Acme SA"), porque es la forma que ya usa el filtro
   ``?q=`` de cotizaciones, y porque ordenar por ``similarity()`` obliga a recorrer
   toda la tabla para rankear —el índice GIN acelera el filtro, no el ORDER BY—.
+
+Índices: cómo se ejecutan de verdad estos lookups
+-------------------------------------------------
+En PostgreSQL Django NO emite ``ILIKE``. Compila ambos lookups como::
+
+    UPPER("tabla"."col"::text) LIKE UPPER('P-0%')     -- istartswith
+    UPPER("tabla"."col"::text) LIKE UPPER('%acme%')   -- icontains
+
+Un índice sobre la columna cruda no sirve a ese predicado: ni el btree de
+``Pedido.folio`` (``db_index=True``) ni su ``_like`` (``varchar_pattern_ops``) ni un
+GIN trigram sobre ``col``. La primera versión de este módulo se verificó con
+``ILIKE`` escrito a mano —que sí usa el GIN crudo—, no con el SQL del ORM; con el
+SQL real y ``SET LOCAL enable_seqscan = off`` el planner caía a Seq Scan.
+
+Por eso los índices del buscador son de EXPRESIÓN sobre ``UPPER(col)`` (declarados
+en el ``Meta.indexes`` de cada modelo):
+
+- CÓDIGO: btree ``(UPPER(col)) text_pattern_ops``. ``text_pattern_ops`` es lo que
+  permite al btree resolver ``LIKE 'prefijo%'`` con cualquier collation.
+- NOMBRE: GIN ``(UPPER(col)) gin_trgm_ops`` (``pg_trgm`` ya está habilitada).
+
+PostgreSQL guarda ``UPPER(col)`` de un ``varchar`` como ``upper((col)::text)``, que es
+exactamente la expresión del ORM; el planner los empareja. Sólo existen en
+PostgreSQL: SQLite, donde corren las pruebas, no conoce los opclasses (ver
+``nucleo.indices``).
 
 Los resultados NO vienen rankeados por relevancia: cada grupo sale en el orden
 natural de su entidad (el más reciente primero, o alfabético en clientes). Rankear
@@ -68,8 +94,20 @@ from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from catalogo.api.views import _alcance_empresa as _alcance_empresa_catalogo
+from catalogo.models import ProductoVariante
+from finanzas.api.views import _aplicar_scope_empresa as _aplicar_scope_empresa_finanzas
+from finanzas.models import Factura
 from nucleo.permisos import PermisosEfectivos, permisos_efectivos
 from nucleo.utils import entero_acotado
+from produccion.scope import (
+    ordenes_bordado_base,
+    ordenes_bordado_visibles,
+    ordenes_corte_manga_base,
+    ordenes_corte_manga_visibles,
+    ordenes_reflejante_base,
+    ordenes_reflejante_visibles,
+)
 from terceros.scope import clientes_base, clientes_visibles
 from ventas.scope import (
     cotizaciones_base,
@@ -82,10 +120,9 @@ from ventas.scope import (
 LONGITUD_MINIMA_Q = 2
 
 #: pg_trgm parte el texto en grupos de 3 caracteres: con menos de 3 no hay trigrama
-#: que buscar y el planner cae a Seq Scan (verificado con EXPLAIN contra la BD real:
-#: ``ILIKE '%acme%'`` usa ``Bitmap Index Scan``, ``ILIKE '%a%'`` no). Por eso, por
-#: debajo de este umbral se consultan SÓLO los campos CÓDIGO, que van por btree y sí
-#: funcionan con prefijos cortos. Así el buscador nunca emite una consulta que el
+#: que buscar y el GIN no puede acotar nada. Por eso, por debajo de este umbral se
+#: consultan SÓLO los campos CÓDIGO, que van por btree y sí funcionan con prefijos
+#: cortos. Así el buscador nunca emite una consulta que el
 #: índice no pueda servir. Se expone en la respuesta: sin él, el frontend no puede
 #: distinguir "escribe más" de "no hay resultados".
 LONGITUD_MINIMA_NOMBRE = 3
@@ -219,6 +256,32 @@ def _fila_cliente(cliente) -> dict:
     }
 
 
+def _fila_producto(variante) -> dict:
+    sku = _texto(variante.sku)
+    producto_nombre = _texto(variante.producto.nombre)
+    return {
+        "tipo": "producto",
+        "id": variante.pk,
+        "codigo": sku,
+        "titulo": sku or producto_nombre,
+        "subtitulo": producto_nombre,
+        "estatus": None,
+    }
+
+
+def _fila_factura(factura) -> dict:
+    cliente = _texto(factura.cliente.razon_social) or _texto(factura.cliente.nombre)
+    codigo = _texto(factura.folio)
+    return {
+        "tipo": "factura",
+        "id": factura.pk,
+        "codigo": codigo,
+        "titulo": codigo or cliente,
+        "subtitulo": cliente if codigo else None,
+        "estatus": factura.get_estatus_display(),
+    }
+
+
 def _fila_cotizacion(cotizacion) -> dict:
     # ``Cotizacion`` no tiene folio (se confirmó contra el modelo): ``codigo`` va en
     # ``None`` a propósito y la identidad viaja en ``id``, que es como la referencia
@@ -237,6 +300,61 @@ def _fila_cotizacion(cotizacion) -> dict:
     }
 
 
+def _fila_orden_bordado(orden) -> dict:
+    # ``folio_bordado`` es NOT NULL y único: siempre hay código y título. El
+    # subtítulo junta el folio del pedido y el cliente —tomado de las columnas
+    # snapshot del propio pedido, el mismo criterio que la fila de pedido— y se
+    # degrada a la parte que exista (``Pedido.folio`` es NULL-able).
+    pedido = orden.pedido
+    cliente = _texto(pedido.cliente_razon_social) or _texto(pedido.cliente_nombre)
+    partes = [p for p in (_texto(pedido.folio), cliente) if p]
+    folio = _texto(orden.folio_bordado)
+    return {
+        "tipo": "orden_bordado",
+        "id": orden.pk,
+        "codigo": folio,
+        "titulo": folio,
+        "subtitulo": " · ".join(partes) or None,
+        # Etiqueta legible, como las demás entidades: el valor crudo es un entero
+        # (1–8) que no significa nada fuera del backend.
+        "estatus": orden.get_estatus_bordado_display(),
+    }
+
+
+def _fila_orden_reflejante(orden) -> dict:
+    # Misma forma que ``_fila_orden_bordado``: ``folio_reflejante`` es NOT NULL y
+    # único; el subtítulo junta folio del pedido y cliente (snapshot del pedido) y
+    # se degrada a la parte que exista.
+    pedido = orden.pedido
+    cliente = _texto(pedido.cliente_razon_social) or _texto(pedido.cliente_nombre)
+    partes = [p for p in (_texto(pedido.folio), cliente) if p]
+    folio = _texto(orden.folio_reflejante)
+    return {
+        "tipo": "orden_reflejante",
+        "id": orden.pk,
+        "codigo": folio,
+        "titulo": folio,
+        "subtitulo": " · ".join(partes) or None,
+        "estatus": orden.get_estatus_reflejante_display(),
+    }
+
+
+def _fila_orden_corte_manga(orden) -> dict:
+    # Misma forma que ``_fila_orden_bordado``. ``folio_ocm`` es NOT NULL y único.
+    pedido = orden.pedido
+    cliente = _texto(pedido.cliente_razon_social) or _texto(pedido.cliente_nombre)
+    partes = [p for p in (_texto(pedido.folio), cliente) if p]
+    folio = _texto(orden.folio_ocm)
+    return {
+        "tipo": "orden_corte_manga",
+        "id": orden.pk,
+        "codigo": folio,
+        "titulo": folio,
+        "subtitulo": " · ".join(partes) or None,
+        "estatus": orden.get_estatus_corte_display(),
+    }
+
+
 #: Orden del registro = orden de los grupos en la respuesta.
 REGISTRO: tuple[EntidadBuscable, ...] = (
     EntidadBuscable(
@@ -248,7 +366,8 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         fila=_fila_pedido,
         campos_codigo=("folio",),
         # ``cliente_nombre``/``cliente_razon_social`` son columnas SNAPSHOT del propio
-        # ``pedidos`` (no FKs), así que no hay JOIN y los índices GIN son suyos.
+        # ``pedidos`` (no FKs), así que no hay JOIN y los índices GIN sobre
+        # ``UPPER(col)`` son suyos.
         campos_nombre=("cliente_nombre", "cliente_razon_social"),
         campos_only=("folio", "cliente_nombre", "cliente_razon_social", "estatus"),
         # Un pedido se ve desde muchos módulos: CRM lo vende, WMS lo surte,
@@ -266,6 +385,94 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
             "R-WMS-PICKING",
         ),
         orden=ORDEN_RECIENTE,
+    ),
+    EntidadBuscable(
+        tipo="orden_bordado",
+        etiqueta="Órdenes de bordado",
+        # Mismo predicado que ``OrdenBordadoViewSet`` (``produccion.scope``):
+        # empresa, ``activo=True`` y, para quien no es admin, sólo sus sucursales.
+        # ``select_related("pedido")``: la fila lee folio y cliente del pedido.
+        alcance=lambda user: ordenes_bordado_visibles(
+            ordenes_bordado_base().select_related("pedido"), user
+        ),
+        fila=_fila_orden_bordado,
+        # Sólo por su propio folio. El folio del pedido y el cliente aparecen en
+        # el subtítulo, pero NO se buscan: el pedido ya tiene su propio grupo.
+        #
+        # El folio va como NOMBRE (subcadena), no como CÓDIGO (prefijo): el
+        # formato real es ``2026-OB-00017`` —año delante—, así que lo que se
+        # teclea (``OB-00017``, ``00017``) está en medio. Consecuencia: con
+        # menos de ``LONGITUD_MINIMA_NOMBRE`` caracteres el grupo llega vacío,
+        # igual que clientes y cotizaciones.
+        campos_nombre=("folio_bordado",),
+        campos_only=(
+            "folio_bordado",
+            "estatus_bordado",
+            "pedido__folio",
+            "pedido__cliente_nombre",
+            "pedido__cliente_razon_social",
+        ),
+        # Sólo la SECCIÓN, sin el código de módulo ``R-PRODUCCION``: en el
+        # frontend el código de módulo no abre las secciones con regla propia, y
+        # tanto el listado como el detalle de OB exigen ``R-PRODUCCION-OB``. Con
+        # el de módulo, el buscador mostraría órdenes que el usuario no puede
+        # abrir.
+        permisos_visibilidad=("R-PRODUCCION-OB",),
+        # ``fecha_inicio`` es ``auto_now_add`` y NOT NULL, así que ``nulls_last``
+        # no cambia nada hoy; se deja por coherencia con ``ORDEN_RECIENTE``.
+        orden=(F("fecha_inicio").desc(nulls_last=True), "-id"),
+    ),
+    EntidadBuscable(
+        tipo="orden_reflejante",
+        etiqueta="Órdenes de reflejante",
+        # Misma plantilla que la orden de bordado. Alcance de
+        # ``OrdenReflejanteViewSet`` (``produccion.scope``).
+        alcance=lambda user: ordenes_reflejante_visibles(
+            ordenes_reflejante_base().select_related("pedido"), user
+        ),
+        fila=_fila_orden_reflejante,
+        # Sólo por su folio, como NOMBRE (subcadena): el formato real es
+        # ``2026-OR-00006`` —año delante—, así que el prefijo no serviría.
+        campos_nombre=("folio_reflejante",),
+        campos_only=(
+            "folio_reflejante",
+            "estatus_reflejante",
+            "pedido__folio",
+            "pedido__cliente_nombre",
+            "pedido__cliente_razon_social",
+        ),
+        # Sólo la SECCIÓN: el frontend abre las órdenes de reflejante con
+        # ``R-PRODUCCION-OR``; ``R-PRODUCCION`` no las abre.
+        permisos_visibilidad=("R-PRODUCCION-OR",),
+        orden=(F("fecha_inicio").desc(nulls_last=True), "-id"),
+    ),
+    EntidadBuscable(
+        tipo="orden_corte_manga",
+        etiqueta="Órdenes de corte de manga",
+        # Misma plantilla que la orden de bordado. Alcance de
+        # ``OrdenesCorteMangaViewSet`` (``produccion.scope``).
+        alcance=lambda user: ordenes_corte_manga_visibles(
+            ordenes_corte_manga_base().select_related("pedido"), user
+        ),
+        fila=_fila_orden_corte_manga,
+        # Sólo por su folio, como NOMBRE (subcadena): el formato real es
+        # ``2026-CM-00005`` —año delante y serie ``CM``, no ``OCM``—.
+        # Excepción: el respaldo de la generación automática (hoy desactivada,
+        # ``ventas/api/views.py`` ``_generar_ordenes_corte_manga``) crea folios
+        # ``OCM-<folio pedido>``; esas filas SÍ coincidirían buscando el folio
+        # del pedido. Hoy no hay ninguna en la BD.
+        campos_nombre=("folio_ocm",),
+        campos_only=(
+            "folio_ocm",
+            "estatus_corte",
+            "pedido__folio",
+            "pedido__cliente_nombre",
+            "pedido__cliente_razon_social",
+        ),
+        # Sólo la SECCIÓN: el frontend abre las órdenes de corte de manga con
+        # ``R-PRODUCCION-CM``; ``R-PRODUCCION`` no las abre.
+        permisos_visibilidad=("R-PRODUCCION-CM",),
+        orden=(F("fecha_inicio").desc(nulls_last=True), "-id"),
     ),
     EntidadBuscable(
         tipo="cliente",
@@ -294,7 +501,7 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         ),
         fila=_fila_cotizacion,
         # No tiene folio: sólo se busca a través del cliente relacionado. Estos dos
-        # campos los sirven los mismos índices GIN de ``clientes``.
+        # campos los sirven los mismos índices GIN ``UPPER(col)`` de ``clientes``.
         campos_nombre=("cliente__nombre", "cliente__razon_social"),
         campos_only=("oc", "estatus", "cliente__nombre", "cliente__razon_social"),
         # Mezcla códigos de SECCIÓN y de MÓDULO a propósito. En este catálogo son
@@ -309,6 +516,68 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
             "R-MESACONTROL",
         ),
         orden=ORDEN_RECIENTE,
+    ),
+    EntidadBuscable(
+        tipo="producto",
+        etiqueta="Productos",
+        # ``_alcance_empresa`` es el mismo helper que usa ``ProductoVarianteViewSet``
+        # (``catalogo/api/views.py``). El ViewSet real NO filtra ``activo=True`` en
+        # su queryset base; aquí sí se agrega explícito, a propósito: un catálogo
+        # descontinuado no debe aparecer en un buscador de uso diario.
+        alcance=lambda user: _alcance_empresa_catalogo(
+            ProductoVariante.objects.filter(activo=True), user
+        ).select_related("producto"),
+        fila=_fila_producto,
+        # ``sku`` real (``10808015XG``: modelo + color + talla) empieza por lo que
+        # se teclea: va por prefijo.
+        #
+        # Índices: con q de 2 caracteres sólo se consulta el sku y lo sirve el
+        # btree ``UPPER(sku)`` de ``catalogo.ProductoVariante``. Desde 3
+        # caracteres el predicado es ``sku OR nombre OR producto.nombre``: un OR
+        # que cruza ``variantes_producto`` y ``productos`` sólo se puede evaluar
+        # después del JOIN, así que ningún índice de una sola tabla se usa —ni
+        # el btree de sku ni los GIN ``UPPER(nombre)`` de las dos tablas;
+        # verificado con EXPLAIN forzado—. Misma limitación conocida que factura.
+        campos_codigo=("sku",),
+        campos_nombre=("nombre", "producto__nombre"),
+        campos_only=("sku", "nombre", "producto__nombre"),
+        # OJO: ``R-CATALOGO-PRODUCTOS`` todavía NO existe en el catálogo de
+        # permisos (BD). Hasta que producto decida qué clave(s) gobiernan el
+        # catálogo, sólo superusuario y ``is_admin_empresa`` ven este grupo.
+        permisos_visibilidad=("R-CATALOGO-PRODUCTOS",),
+        orden=("producto__nombre", "sku"),
+    ),
+    EntidadBuscable(
+        tipo="factura",
+        etiqueta="Facturas",
+        # ``_aplicar_scope_empresa`` es el mismo helper que usa ``FacturaViewSet``
+        # (``finanzas/api/views.py``). Ese ViewSet NO filtra ``activo=True`` en su
+        # queryset base; aquí sí se agrega explícito, a propósito (mismo criterio
+        # que ``producto``): una factura cancelada/soft-deleted no debe aparecer
+        # en un buscador de uso diario.
+        alcance=lambda user: _aplicar_scope_empresa_finanzas(
+            Factura.objects.filter(activo=True).select_related("cliente"), user
+        ),
+        fila=_fila_factura,
+        # El folio real es ``FAC-<consecutivo>``: empieza por lo que se teclea, así
+        # que va por prefijo (CÓDIGO), como el de pedido.
+        #
+        # Índices: con q de 2 caracteres sólo se consulta el folio y lo sirve el
+        # btree ``UPPER(folio)`` de ``finanzas.Factura``. Desde 3 caracteres el
+        # predicado es ``folio OR cliente.nombre OR cliente.razon_social``: un OR
+        # que cruza ``facturas`` y ``clientes`` sólo se puede evaluar después del
+        # JOIN, así que NI ese btree NI los GIN ``UPPER(col)`` de ``clientes`` se
+        # usan (verificado con EXPLAIN forzado). Es una limitación conocida del
+        # OR único de ``EntidadBuscable.predicado()``, pendiente.
+        campos_codigo=("folio",),
+        campos_nombre=("cliente__nombre", "cliente__razon_social"),
+        campos_only=("folio", "estatus", "cliente__nombre", "cliente__razon_social"),
+        # Sólo la SECCIÓN, sin el código de módulo ``R-CONTABILIDAD``, por la
+        # misma razón que en órdenes de bordado: en el frontend el listado de
+        # facturación exige ``R-CONTABILIDAD-FACTURACION`` y el código de módulo
+        # no lo abre.
+        permisos_visibilidad=("R-CONTABILIDAD-FACTURACION",),
+        orden=("-fecha_emision", "-id"),
     ),
 )
 
@@ -338,7 +607,7 @@ class BusquedaGlobalAPIView(APIView):
             "vacíos, no un error. Los campos de nombre requieren `longitud_minima_"
             "nombre` caracteres; por debajo sólo se consultan los de código. "
             "`grupos` sólo incluye las entidades que el usuario tiene permiso de "
-            "ver, así que puede traer menos de tres elementos."
+            "ver, así que puede traer menos grupos que entidades hay."
         ),
         parameters=[
             OpenApiParameter(
@@ -367,7 +636,7 @@ class BusquedaGlobalAPIView(APIView):
         )
         suficiente = len(q) >= LONGITUD_MINIMA_Q
         # Los permisos se resuelven UNA vez por petición y se reutilizan para las
-        # tres entidades: 2 consultas en total, o 0 si es superusuario/admin.
+        # entidades: 2 consultas en total, o 0 si es superusuario/admin.
         permisos = permisos_efectivos(request.user)
 
         grupos = []

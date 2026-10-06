@@ -14,6 +14,7 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
 """
 
 from decimal import Decimal
+from unittest import mock
 
 from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
@@ -36,6 +37,7 @@ from produccion.models import (
     OrdenesCorteManga,
     OrdenesReflejante,
     OrdenProduccion,
+    OrdenProduccionRutaCritica,
     OrdenReflejanteDetalle,
     ReflejanteAvances,
     ReflejanteIncidencias,
@@ -3931,3 +3933,483 @@ class OrdenProduccionPedidoOpcionalTests(TestCase):
         resp = self._client().post(self.URL, self._body(pedido), format="json")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("pedido", resp.data)
+
+    def test_pedido_ajeno_e_inexistente_responden_igual(self):
+        pedido = self._pedido_muestra(
+            empresa=self.otra_empresa, sucursal=self.otra_sucursal, cliente=self.otro_cliente,
+        )
+        ajeno = self._client().post(self.URL, self._body(pedido), format="json")
+        body = self._body()
+        body["pedido"] = pedido.pk + 999
+        inexistente = self._client().post(self.URL, body, format="json")
+
+        self.assertEqual(ajeno.status_code, 400)
+        self.assertEqual(
+            str(ajeno.data["pedido"][0]).replace(str(pedido.pk), "X"),
+            str(inexistente.data["pedido"][0]).replace(str(pedido.pk + 999), "X"),
+        )
+
+    def _op_creada(self, pedido=None):
+        resp = self._client().post(self.URL, self._body(pedido), format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return OrdenProduccion.objects.get(pk=resp.data["op_id"])
+
+    def test_patch_con_pedido_de_otra_empresa_rechaza(self):
+        op = self._op_creada()
+        pedido = self._pedido_muestra(
+            empresa=self.otra_empresa, sucursal=self.otra_sucursal, cliente=self.otro_cliente,
+        )
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedido": pedido.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("pedido", resp.data)
+        op.refresh_from_db()
+        self.assertIsNone(op.pedido_id)
+
+    def test_patch_con_pedido_sin_muestra_rechaza(self):
+        op = self._op_creada()
+        pedido = self._pedido_muestra()
+        PedidoDetalle.objects.filter(pedido=pedido).update(producto_nombre_externo="")
+
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedido": pedido.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        op.refresh_from_db()
+        self.assertIsNone(op.pedido_id)
+
+    def test_patch_con_pedido_valido_lo_liga(self):
+        op = self._op_creada()
+        pedido = self._pedido_muestra()
+
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedido": pedido.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.pedido_id, pedido.pk)
+
+    def test_patch_sin_cambiar_pedido_no_revalida_su_estado(self):
+        pedido = self._pedido_muestra()
+        op = self._op_creada(pedido)
+        Pedido.objects.filter(pk=pedido.pk).update(clasificacion=None)
+
+        resp = self._client().patch(
+            f"{self.URL}{op.pk}/", {"pedido": pedido.pk, "prioridad": 2}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+
+class OnboardingPostScopeTenantTests(TestCase):
+    """POST de onboarding de OB/OR/OCM: un pedido o una talla fuera del alcance
+    del usuario se rechaza sin exponer datos del registro ajeno (#275)."""
+
+    URLS = (
+        "/api/v1/produccion/orden-bordado/onboarding/",
+        "/api/v1/produccion/orden-reflejante/onboarding/",
+        "/api/v1/produccion/orden-corte-manga/onboarding/",
+    )
+    CANTIDAD_AJENA = 37
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.talla = Talla.objects.create(nombre="CH")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
+        cls.sucursal_sin_acceso = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="CDMX", nombre="CDMX"
+        )
+        cls.empresa_b = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.empresa_b, codigo="GDL", nombre="GDL")
+        cls.usuario = Usuario.objects.create(
+            username="operador", email="operador@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.pedido, cls.pdt = cls._pedido(cls.empresa, cls.sucursal, 10)
+        cls.pedido_b, cls.pdt_b = cls._pedido(cls.empresa_b, cls.sucursal_b, cls.CANTIDAD_AJENA)
+        cls.pedido_otra_sucursal, cls.pdt_otra_sucursal = cls._pedido(
+            cls.empresa, cls.sucursal_sin_acceso, cls.CANTIDAD_AJENA
+        )
+
+    @classmethod
+    def _pedido(cls, empresa, sucursal, cantidad):
+        cliente = Cliente.objects.create(empresa=empresa, nombre=f"Cliente {empresa.codigo}")
+        producto = Producto.objects.create(empresa=empresa, nombre="Playera")
+        pedido = Pedido.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=cls.moneda,
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=pedido, producto=producto)
+        pdt = PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=cls.talla, cantidad=cantidad,
+            lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
+        )
+        return pedido, pdt
+
+    def _post(self, url, pedido_id, pdt_id):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client.post(
+            url,
+            {"pedido": pedido_id, "detalles_override": [{"pedido_detalle_talla_id": pdt_id, "cantidad": 999999}]},
+            format="json",
+        )
+
+    def test_pedido_de_otra_empresa_responde_como_inexistente(self):
+        for url in self.URLS:
+            with self.subTest(url=url):
+                ajeno = self._post(url, self.pedido_b.pk, self.pdt_b.pk)
+                inexistente = self._post(url, 999999, self.pdt_b.pk)
+
+                self.assertEqual(ajeno.status_code, 400)
+                self.assertNotIn("detalles_override", ajeno.data)
+                self.assertEqual(
+                    str(ajeno.data["pedido"][0]).replace(str(self.pedido_b.pk), "X"),
+                    str(inexistente.data["pedido"][0]).replace("999999", "X"),
+                )
+
+    def test_talla_de_otro_pedido_responde_como_inexistente(self):
+        for url in self.URLS:
+            with self.subTest(url=url):
+                ajena = self._post(url, self.pedido.pk, self.pdt_b.pk)
+                inexistente = self._post(url, self.pedido.pk, 999999)
+
+                self.assertEqual(ajena.status_code, 400)
+                self.assertNotIn(str(self.CANTIDAD_AJENA), str(ajena.data))
+                self.assertEqual(
+                    str(ajena.data).replace(str(self.pdt_b.pk), "X"),
+                    str(inexistente.data).replace("999999", "X"),
+                )
+
+    def test_pedido_de_sucursal_sin_acceso_no_expone_tallas(self):
+        for url in self.URLS:
+            with self.subTest(url=url):
+                resp = self._post(url, self.pedido_otra_sucursal.pk, self.pdt_otra_sucursal.pk)
+
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("sucursal", str(resp.data["pedido"]))
+                self.assertNotIn(str(self.CANTIDAD_AJENA), str(resp.data))
+
+
+class OnboardingPostLineaMuestraTests(TestCase):
+    """POST de onboarding con tallas de una línea de muestra (``producto`` null):
+    400 accionable en vez del 500 por ``IntegrityError`` (#276)."""
+
+    CASOS = (
+        ("/api/v1/produccion/orden-bordado/onboarding/", OrdenesBordado, "ORDEN_BORDADO"),
+        ("/api/v1/produccion/orden-reflejante/onboarding/", OrdenesReflejante, "ORDEN_REFLEJANTE"),
+        ("/api/v1/produccion/orden-corte-manga/onboarding/", OrdenesCorteManga, "ORDEN_CORTE_MANGA"),
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
+        for tipo_documento, serie in SERIES:
+            SerieFolio.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal,
+                tipo_documento=tipo_documento, serie=serie,
+            )
+        cls.usuario = Usuario.objects.create(
+            username="operador", email="operador@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente,
+            moneda=Moneda.objects.create(codigo_iso="MXN", nombre="Peso"),
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(
+            pedido=cls.pedido, producto=None, producto_nombre_externo="ZXCZX"
+        )
+        cls.pdt = PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=Talla.objects.create(nombre="CH"), cantidad=5,
+            lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
+        )
+
+    def test_linea_de_muestra_responde_400_sin_crear_ni_consumir_folio(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        for url, modelo, tipo_documento in self.CASOS:
+            with self.subTest(url=url):
+                serie = SerieFolio.objects.get(empresa=self.empresa, tipo_documento=tipo_documento)
+                folio_previo = serie.folio_actual
+
+                resp = client.post(url, {"pedido": self.pedido.pk}, format="json")
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertEqual(
+                    [str(i) for i in resp.data["pedido_detalle_talla_ids"]], [str(self.pdt.pk)]
+                )
+                self.assertFalse(modelo.objects.filter(pedido=self.pedido).exists())
+                serie.refresh_from_db()
+                self.assertEqual(serie.folio_actual, folio_previo)
+
+
+class OrdenCorteMangaParcialidadesTests(TestCase):
+    """OCMs parciales vía ``detalles_override[]``: mismas garantías de cupo,
+    override y concurrencia que OB/OR (#277).
+
+        pedido -> pedido_detalle -> talla CH: cantidad 10
+                                 -> talla M : cantidad 6
+    """
+
+    URL = "/api/v1/produccion/orden-corte-manga/onboarding/"
+    CANTIDAD_CH = 10
+    CANTIDAD_M = 6
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal,
+            tipo_documento="ORDEN_CORTE_MANGA", serie="OCM",
+        )
+        cls.usuario = Usuario.objects.create(
+            username="operador", email="operador@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla_ch = Talla.objects.create(nombre="CH")
+        cls.talla_m = Talla.objects.create(nombre="M")
+        cls.talla_g = Talla.objects.create(nombre="G")
+
+    def setUp(self):
+        self.pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, persona_pagos="Pagos",
+            correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        self.detalle = PedidoDetalle.objects.create(pedido=self.pedido, producto=self.producto)
+        self.pdt_ch = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_ch,
+            cantidad=self.CANTIDAD_CH, lleva_corte_manga=True,
+        )
+        self.pdt_m = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_m,
+            cantidad=self.CANTIDAD_M, lleva_corte_manga=True,
+        )
+
+    def _post(self, overrides):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client.post(
+            self.URL,
+            {
+                "pedido": self.pedido.pk,
+                "detalles_override": [
+                    {"pedido_detalle_talla_id": pdt.pk, "cantidad": cantidad}
+                    for pdt, cantidad in overrides
+                ],
+            },
+            format="json",
+        )
+
+    def _save(self, overrides):
+        return OrdenCorteMangaService.save(
+            {
+                "pedido": self.pedido,
+                "detalles_override": [
+                    {"pedido_detalle_talla_id": pdt.pk, "cantidad": cantidad}
+                    for pdt, cantidad in overrides
+                ],
+            },
+            self.usuario,
+        )
+
+    def test_dos_parciales_sobre_la_misma_linea_hasta_agotar_el_cupo(self):
+        self.assertEqual(self._post([(self.pdt_ch, 4)]).status_code, 201)
+        segunda = self._post([(self.pdt_ch, 6)])
+
+        self.assertEqual(segunda.status_code, 201, segunda.data)
+        total = sum(
+            d.cantidad for d in OrdenCorteMangaDetalle.objects.filter(
+                ocm__pedido=self.pedido, ocm__activo=True, talla=self.talla_ch
+            )
+        )
+        self.assertEqual(total, float(self.CANTIDAD_CH))
+
+    def test_parcial_que_excede_el_pendiente_se_rechaza(self):
+        self.assertEqual(self._post([(self.pdt_ch, 4)]).status_code, 201)
+
+        resp = self._post([(self.pdt_ch, 7)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        exceso = " ".join(str(x) for x in resp.data["detalles_exceso"])
+        self.assertIn("disponible_restante=6.0", exceso)
+        self.assertEqual(OrdenesCorteManga.objects.filter(pedido=self.pedido).count(), 1)
+
+    def test_override_con_talla_fuera_de_las_elegibles_se_rechaza(self):
+        """Antes se descartaba en silencio y se creaba una OCM con menos
+        renglones de los pedidos. Una talla en cantidad 0 no entra a
+        ``tallas_orden_trabajo_qs``."""
+        pdt_g = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.detalle, talla=self.talla_g, cantidad=0, lleva_corte_manga=True,
+        )
+
+        with self.assertRaises(DRFValidationError) as ctx:
+            self._save([(self.pdt_ch, 5), (pdt_g, 3)])
+
+        self.assertIn(str(pdt_g.pk), str(ctx.exception.detail))
+        self.assertFalse(OrdenesCorteManga.objects.filter(pedido=self.pedido).exists())
+
+    def test_renglones_sin_talla_consumen_cupo(self):
+        """El renglón tiene 16 piezas (CH 10 + M 6); con 10 ya programadas sin
+        talla (p. ej. desde picking) solo quedan 6."""
+        orden = OrdenesCorteManga.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            folio_ocm="OCM-SIN-TALLA",
+        )
+        OrdenCorteMangaDetalle.objects.create(
+            ocm=orden, pedido_detalle=self.detalle, producto=self.producto,
+            cantidad=10, talla=None,
+        )
+
+        resp = self._post([(self.pdt_ch, self.CANTIDAD_CH)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        exceso = " ".join(str(x) for x in resp.data["detalles_exceso"])
+        self.assertIn("total del renglón", exceso)
+        self.assertIn("ya_asignado=10.0", exceso)
+        self.assertIn("disponible_restante=6.0", exceso)
+
+    def test_cantidad_fraccionaria_se_rechaza(self):
+        resp = self._post([(self.pdt_ch, 2.5)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("entero", str(resp.data["detalles_override"]))
+        self.assertFalse(OrdenesCorteManga.objects.filter(pedido=self.pedido).exists())
+
+    def test_cupo_no_dispara_una_query_por_linea(self):
+        def _queries_para(overrides):
+            with CaptureQueriesContext(connection) as ctx:
+                self._save(overrides)
+            return len(ctx)
+
+        con_1 = _queries_para([(self.pdt_ch, 1)])
+        con_2 = _queries_para([(self.pdt_ch, 1), (self.pdt_m, 1)])
+
+        self.assertEqual(con_1, con_2)
+
+    def test_bloquea_el_pedido_antes_de_leer_lo_asignado(self):
+        """``select_for_update`` es no-op en SQLite; se verifica que se pida."""
+        with mock.patch.object(
+            Pedido.objects, "select_for_update", wraps=Pedido.objects.select_for_update
+        ) as candado:
+            self._save([(self.pdt_ch, 1)])
+
+        candado.assert_called_once_with()
+
+
+class RutaCriticaOPTests(TestCase):
+    """``/orden-produccion/{op_id}/ruta-critica/`` (#282, #284, #285, #286)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
+        cls.produccion = Usuario.objects.create(
+            username="produccion", email="produccion@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.lector = Usuario.objects.create(
+            username="lector", email="lector@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+
+    def setUp(self):
+        self.op = OrdenProduccion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, folio_op=f"OP-{OrdenProduccion.objects.count() + 1}",
+        )
+        self.url = f"/api/v1/produccion/orden-produccion/{self.op.pk}/ruta-critica/"
+
+    def _client(self, user=None):
+        client = APIClient()
+        client.force_authenticate(user=user or self.produccion)
+        return client
+
+    def _patch(self, body):
+        return self._client().patch(self.url, body, format="json")
+
+    # --- #282: el GET no escribe ---------------------------------------------
+
+    def test_get_sin_registro_no_lo_crea(self):
+        resp = self._client(self.lector).get(self.url)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(resp.data["existencia_tela"])
+        self.assertIsNone(resp.data["cantidad_real_corte"])
+        self.assertFalse(OrdenProduccionRutaCritica.objects.filter(op=self.op).exists())
+
+    def test_primer_patch_crea_el_registro(self):
+        resp = self._patch({"corte_recibido": True})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(OrdenProduccionRutaCritica.objects.get(op=self.op).corte_recibido)
+        self.assertTrue(self._client(self.lector).get(self.url).data["corte_recibido"])
+
+    # --- #284: la fecha es "marcado desde" -----------------------------------
+
+    def test_desmarcar_limpia_la_fecha(self):
+        marcado = self._patch({"existencia_tela": True})
+        self.assertIsNotNone(marcado.data["fecha_existencia_tela"])
+
+        desmarcado = self._patch({"existencia_tela": False})
+
+        self.assertFalse(desmarcado.data["existencia_tela"])
+        self.assertIsNone(desmarcado.data["fecha_existencia_tela"])
+
+    def test_reenviar_el_mismo_valor_conserva_la_fecha(self):
+        fecha = self._patch({"existencia_avios": True}).data["fecha_existencia_avios"]
+
+        resp = self._patch({"existencia_avios": True, "kit_completo": True})
+
+        self.assertEqual(resp.data["fecha_existencia_avios"], fecha)
+
+    # --- #285: OP cerrada no se edita ----------------------------------------
+
+    def test_patch_en_op_completada_o_cancelada_responde_409(self):
+        for estatus in (
+            OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+            OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
+        ):
+            with self.subTest(estatus=estatus):
+                OrdenProduccion.objects.filter(pk=self.op.pk).update(estatus_op=estatus)
+
+                resp = self._patch({"corte_recibido": True})
+
+                self.assertEqual(resp.status_code, 409, resp.data)
+                self.assertFalse(OrdenProduccionRutaCritica.objects.filter(op=self.op).exists())
+                self.assertEqual(self._client().get(self.url).status_code, 200)
+
+    def test_patch_en_op_detenida_sigue_permitido(self):
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.DETENIDO
+        )
+
+        self.assertEqual(self._patch({"corte_recibido": True}).status_code, 200)
+
+    # --- #286: cantidad_real_corte -------------------------------------------
+
+    def test_cantidad_real_corte_rechaza_negativos_y_decimales(self):
+        for valor in (-3, "-3.5", "12.5"):
+            with self.subTest(valor=valor):
+                resp = self._patch({"cantidad_real_corte": valor})
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIn("cantidad_real_corte", resp.data)
+
+    def test_cantidad_real_corte_acepta_enteros_cero_y_null(self):
+        for valor, esperado in ((120, "120.00"), (0, "0.00"), (None, None)):
+            with self.subTest(valor=valor):
+                resp = self._patch({"cantidad_real_corte": valor})
+
+                self.assertEqual(resp.status_code, 200, resp.data)
+                self.assertEqual(resp.data["cantidad_real_corte"], esperado)
