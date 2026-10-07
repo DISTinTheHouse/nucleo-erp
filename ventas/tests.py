@@ -3121,3 +3121,111 @@ class PedidoKpisTests(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data["pedidos_activos"]["disponible"])
+
+
+class PedidoReglasEstatusTests(TestCase):
+    """#250: CANCELADO es terminal, solo mesa de control cancela y elimina, no se
+    cancela con picking/factura vivos, y bloquea picking y facturación."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from inventarios.models import Almacen
+
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.vendedor = Usuario.objects.create(
+            username="vendedor", email="v@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.mesa = Usuario.objects.create(
+            username="mesa", email="m@acme.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.almacen = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="A1", nombre="A1")
+
+    def setUp(self):
+        self.pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
+            persona_pagos="Pagos", correo_facturas="p@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03", estatus=3,
+        )
+        self.url = f"{PEDIDOS_URL}{self.pedido.pk}/"
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _estatus(self, user, estatus):
+        return self._client(user).patch(self.url, {"estatus": estatus}, format="json")
+
+    def test_solo_mesa_de_control_cancela(self):
+        self.assertEqual(self._estatus(self.vendedor, 5).status_code, 400)
+        self.pedido.refresh_from_db()
+        self.assertEqual(self.pedido.estatus, 3)
+
+        self.assertEqual(self._estatus(self.mesa, 5).status_code, 200)
+
+    def test_cancelado_es_terminal(self):
+        Pedido.objects.filter(pk=self.pedido.pk).update(estatus=5)
+
+        resp = self._estatus(self.mesa, 3)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.pedido.refresh_from_db()
+        self.assertEqual(self.pedido.estatus, 5)
+
+    def test_cambios_entre_1_y_4_siguen_como_hoy(self):
+        for estatus in (1, 2, 4, 3):
+            with self.subTest(estatus=estatus):
+                self.assertEqual(self._estatus(self.vendedor, estatus).status_code, 200)
+
+    def test_no_cancela_con_picking_o_factura_vivos(self):
+        picking = Picking.objects.create(
+            folio="PK-1", empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            operador=self.vendedor, usuario=self.vendedor, almacen=self.almacen,
+        )
+        self.assertEqual(self._estatus(self.mesa, 5).status_code, 400)
+
+        Picking.objects.filter(pk=picking.pk).update(estado=Picking.Estado.CANCELADO)
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, pedido=self.pedido,
+        )
+        self.assertEqual(self._estatus(self.mesa, 5).status_code, 400)
+
+        Factura.objects.filter(pk=factura.pk).update(estatus=Factura.FacturaStatus.CANCELADA)
+        self.assertEqual(self._estatus(self.mesa, 5).status_code, 200)
+
+    def test_patch_no_cambia_activo(self):
+        resp = self._client(self.mesa).patch(self.url, {"activo": False}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.pedido.refresh_from_db()
+        self.assertTrue(self.pedido.activo)
+
+    def test_solo_mesa_de_control_elimina(self):
+        self.assertEqual(self._client(self.vendedor).delete(self.url).status_code, 400)
+        self.pedido.refresh_from_db()
+        self.assertTrue(self.pedido.activo)
+
+        self.assertEqual(self._client(self.mesa).delete(self.url).status_code, 204)
+
+    def test_cancelado_bloquea_picking_y_facturacion(self):
+        from finanzas.exceptions import ErrorDeNegocio
+        from finanzas.services.factura_service import FacturaService
+        from wms.services.picking_pipeline.context import validar_contexto_picking
+
+        Pedido.objects.filter(pk=self.pedido.pk).update(estatus=5)
+        self.pedido.refresh_from_db()
+
+        with self.assertRaises(DRFValidationError) as picking:
+            validar_contexto_picking(self.pedido, self.almacen, self.almacen, self.vendedor, self.mesa)
+        self.assertIn("pedido", picking.exception.detail)
+        for llamada in (
+            lambda: FacturaService.facturar_pendiente(self.pedido, self.empresa, self.sucursal),
+            lambda: FacturaService._validar_lineas(self.pedido, []),
+        ):
+            with self.assertRaises(ErrorDeNegocio):
+                llamada()

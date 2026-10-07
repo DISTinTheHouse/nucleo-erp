@@ -674,6 +674,8 @@ class PedidoSerializer(serializers.ModelSerializer):
             # destino/cantidades y sella fecha/usuario en el servidor. Aquí de
             # solo lectura para que un PATCH genérico no se salte ese flujo.
             'programacion_conf',
+            # La baja va por DELETE (con su permiso); un PATCH no la hace ni la revierte.
+            'activo',
         ]
         fields = '__all__'
         extra_kwargs = {
