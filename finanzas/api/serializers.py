@@ -259,6 +259,28 @@ class FacturaSerializer(serializers.ModelSerializer):
         )
         return fields
 
+    # Fijos tras el alta: un PATCH que intente cambiarlos responde 400 (#338).
+    CAMPOS_FIJOS = ('pedido', 'serie_folio', 'activo')
+
+    def validate(self, attrs):
+        if self.instance is None:
+            # Alta: la serie es la del folio y la factura nace activa (#341).
+            attrs.pop('serie_folio', None)
+            attrs.pop('activo', None)
+            return attrs
+        if self.instance.estatus == Factura.FacturaStatus.CANCELADA:
+            raise ValidationError({'estatus': 'Una factura cancelada no se puede editar.'})
+        errores = {
+            campo: 'No editable; por PATCH solo fecha_vencimiento y observaciones.'
+            for campo in self.CAMPOS_FIJOS
+            if campo in attrs and attrs[campo] != getattr(self.instance, campo)
+        }
+        if 'factura_detalles' in attrs:
+            errores['factura_detalles'] = 'Los renglones no se editan por PATCH.'
+        if errores:
+            raise ValidationError(errores)
+        return attrs
+
     def get_correo_facturas(self, obj):
         pedido = getattr(obj, 'pedido', None)
         if pedido is not None and pedido.empresa_id == obj.empresa_id:
@@ -286,7 +308,9 @@ class FacturaSerializer(serializers.ModelSerializer):
             'impuestos',
             'total',
             'cliente',
-            'moneda'
+            'moneda',
+            # La fija el servidor (día local del alta); en PATCH se ignora.
+            'fecha_emision',
         ]
         fields = '__all__'
 

@@ -7,7 +7,8 @@ from django.db.models import Sum
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import Factura, FacturaDetalle
-from finanzas.utils.folios import generate_factura_folio
+from finanzas.utils.folios import TIPOS_DOCUMENTO_FACTURA, generate_factura_folio
+from nucleo.models import SerieFolio
 from ventas.models import PedidoDetalleTalla
 
 CENTAVO = Decimal('0.01')
@@ -381,6 +382,8 @@ class FacturaService:
             folio = generate_factura_folio(empresa, sucursal)
         except DjangoValidationError as exc:
             raise ErrorDeNegocio({'serie_folio': exc.messages})
+        # La serie guardada es la de la que salió el folio (#341).
+        serie_folio = SerieFolio.resolve(empresa, sucursal, TIPOS_DOCUMENTO_FACTURA)
 
         factura = Factura.objects.create(
             empresa=empresa,
@@ -388,6 +391,7 @@ class FacturaService:
             cliente=pedido.cliente,
             moneda=pedido.moneda,
             pedido=pedido,
+            serie_folio=serie_folio,
             folio=folio,
             **campos
         )
