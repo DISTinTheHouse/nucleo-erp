@@ -2840,9 +2840,28 @@ class PedidoViewSet(viewsets.ModelViewSet):
         campos_mesa_control = {"clasificacion", "fecha_confirmacion"}
         if campos_mesa_control & set(serializer.validated_data.keys()):
             self._require_mesa_control(self.request.user)
+        self._validar_cambio_estatus(serializer.instance, serializer.validated_data.get("estatus"))
         serializer.save()
 
+    def _validar_cambio_estatus(self, pedido, nuevo):
+        """CANCELADO es terminal y solo lo pone mesa de control, sin avance vivo."""
+        if nuevo is None or nuevo == pedido.estatus:
+            return
+        if pedido.estatus == Pedido.ESTATUS_CANCELADO:
+            raise ValidationError({"estatus": "Un pedido CANCELADO no cambia de estatus."})
+        if nuevo != Pedido.ESTATUS_CANCELADO:
+            return
+        from finanzas.models import Factura
+        from wms.models import Picking
+
+        self._require_mesa_control(self.request.user)
+        if pedido.pickings.exclude(estado=Picking.Estado.CANCELADO).exists():
+            raise ValidationError({"estatus": "El pedido tiene picking sin cancelar; cancélalo primero."})
+        if pedido.facturas.filter(activo=True).exclude(estatus=Factura.FacturaStatus.CANCELADA).exists():
+            raise ValidationError({"estatus": "El pedido tiene facturas vigentes; cancélalas primero."})
+
     def perform_destroy(self, instance):
+        self._require_mesa_control(self.request.user)
         instance.soft_delete()
 
     @action(detail=True, methods=["get"], url_path="editar-mesa-control-contexto")

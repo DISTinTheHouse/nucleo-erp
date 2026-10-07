@@ -310,6 +310,7 @@ class FacturaService:
     @transaction.atomic
     def facturar_pendiente(pedido, empresa, sucursal):
         """Factura todas las piezas que le quedan pendientes al pedido."""
+        FacturaService._exigir_pedido_vigente(pedido)
         lineas = [
             (pieza['pedido_detalle_talla'], pieza['cantidad_pendiente'])
             for pieza in FacturaService.piezas_por_facturar(pedido)
@@ -320,7 +321,13 @@ class FacturaService:
         return FacturaService._crear_factura(empresa, sucursal, pedido, lineas)
 
     @staticmethod
+    def _exigir_pedido_vigente(pedido):
+        if pedido.estatus == pedido.ESTATUS_CANCELADO:
+            raise ErrorDeNegocio({'pedido': 'El pedido está CANCELADO; no se puede facturar.'})
+
+    @staticmethod
     def _validar_lineas(pedido, lineas):
+        FacturaService._exigir_pedido_vigente(pedido)
         if not lineas:
             raise ErrorDeNegocio({
                 'factura_detalles': 'La factura debe incluir al menos una línea.'

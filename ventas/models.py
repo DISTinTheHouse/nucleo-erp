@@ -266,6 +266,7 @@ class Pedido(StatusLifecycleModel):
         (4, "EN PROCESO"),
         (5, "CANCELADO"),
     )
+    ESTATUS_CANCELADO = 5
 
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="pedidos")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="pedidos")

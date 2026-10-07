@@ -29,6 +29,8 @@ def validar_contexto_picking(pedido, almacen, almacen_destino, operador, user):
         raise ValidationError({"user": "El usuario no tiene una empresa asignada."})
     if pedido.empresa_id != empresa.pk:
         raise ValidationError({"pedido": "El pedido no pertenece a la empresa del usuario."})
+    if pedido.estatus == pedido.ESTATUS_CANCELADO:
+        raise ValidationError({"pedido": "El pedido está CANCELADO; no se puede surtir."})
     if almacen.empresa_id and almacen.empresa_id != pedido.empresa_id:
         raise ValidationError({"almacen": "El almacén origen no pertenece a la empresa del pedido."})
     if almacen.sucursal_id and almacen.sucursal_id != pedido.sucursal_id:

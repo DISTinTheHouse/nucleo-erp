@@ -1926,6 +1926,17 @@ Una vez que el pedido ya fue aceptado/autorizado, mesa de control reparte sus pi
   Úsalo para armar el `<select>` de destino en el formulario de programación — así mesa de control no puede ni intentar seleccionar un servicio que el pedido no pidió (el backend lo rechazaría de todas formas, pero evita el viaje redondo y el mensaje de error).
 - Uso recomendado en Next.js: pantalla de "programar entregas" con filas dinámicas `destino` (el `<select>` limitado a `destinos_aplicables`) + `cantidad` + `comentarios` (opcional); mostrar el total de piezas del pedido (de `GET /pedidos/{id}/` o de la respuesta de este mismo endpoint) para validar en el cliente antes de enviar, aunque el backend igual lo revalida.
 
+### Estatus, cancelación y baja del pedido (#250)
+
+Mismo `PATCH /api/v1/ventas/pedidos/{id}/` y mismo `DELETE` de siempre; solo cambian las reglas.
+
+- Entre `1` BORRADOR, `2` POR AUTORIZAR, `3` AUTORIZADA y `4` EN PROCESO: libre, como antes.
+- Pasar a `5` CANCELADO: solo mesa de control / `is_admin_empresa` / superusuario (`400 {"permiso"}`). Rechazado si el pedido tiene picking no cancelado o facturas vigentes → `400 {"estatus"}` (cancélalos primero).
+- `5` CANCELADO es terminal: cualquier otro estatus → `400 {"estatus"}`.
+- Pedido CANCELADO: crear picking → `400 {"pedido"}`; facturar (`onboarding`, `desde-pedido`) → `400 {"pedido"}`.
+- `activo` ya no se escribe por PATCH (se ignora). La baja es `DELETE`, solo mesa de control → `400 {"permiso"}` para el resto.
+- Totales y snapshot fiscal siguen editables por PATCH: el backend aún no los recalcula desde los renglones.
+
 ### Clasificar pedido (widget liviano en el detalle)
 
 Los **dos únicos campos manuales** que llena mesa de control directamente sobre el documento maestro del pedido: `clasificacion` y `fecha_confirmacion` (compromiso de entrega). **No es un endpoint nuevo** — viajan en el mismo `PATCH /api/v1/ventas/pedidos/{id}/` que ya usa el resto de la edición del pedido; el backend solo exige mesa de control cuando el body incluye alguno de esos dos campos.
