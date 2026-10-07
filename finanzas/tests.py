@@ -77,7 +77,7 @@ from nucleo.models import (
 )
 from terceros.models import Cliente, Proveedor
 from usuarios.models import Usuario
-from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+from ventas.models import Cotizacion, Pedido, PedidoDetalle, PedidoDetalleTalla
 
 ONBOARDING_URL = "/api/v1/finanzas/facturas/onboarding/"
 DESDE_PEDIDO_URL = "/api/v1/finanzas/facturas/desde-pedido/"
@@ -5463,3 +5463,138 @@ class FacturasReglasDeEstadoTests(FinanzasBase):
         self.assertTrue(factura.activo)
         self.assertEqual(factura.serie_folio_id, serie_factura.pk)
         self.assertEqual(factura.fecha_emision, timezone.localdate())
+
+
+class FacturaListadoLigeroTests(FinanzasBase):
+    """``GET /facturas/`` (y ``onboarding/`` sin ``?pedido=``) devuelve la tabla
+    con campos planos, sin renglones y con un número fijo de consultas."""
+
+    LISTADO_URL = "/api/v1/finanzas/facturas/"
+
+    def _facturar(self, cantidad=3, talla_pedido=None):
+        resp = self._client(self.a["usuario"]).post(
+            ONBOARDING_URL,
+            {
+                "pedido": self.a["pedido"].pk,
+                "factura_detalles": [
+                    {
+                        "pedido_detalle_talla": (talla_pedido or self.a["talla_pedido"]).pk,
+                        "cantidad": cantidad,
+                    }
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data["id"]
+
+    def _listar(self, url=None, params=None, user=None):
+        resp = self._client(user or self.a["usuario"]).get(url or self.LISTADO_URL, params or {})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data
+
+    def test_campos_de_la_tabla(self):
+        vendedor = Usuario.objects.create(
+            username="vende@acme.test", email="vende@acme.test", empresa=self.a["empresa"],
+            first_name="Ana", last_name="Ruiz",
+        )
+        cotizacion = Cotizacion.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+            moneda=self.moneda, vendedor=vendedor,
+        )
+        Pedido.objects.filter(pk=self.a["pedido"].pk).update(cotizacion=cotizacion)
+        self._facturar(cantidad=2)
+
+        fila = self._listar()[0]
+        self.assertEqual(set(fila), {
+            "id", "folio", "estatus", "fecha_emision", "fecha_vencimiento", "pedido",
+            "pedido_folio", "cliente", "cliente_nombre", "vendedor", "vendedor_nombre",
+            "cantidad", "precio_unitario", "subtotal", "impuestos", "total", "moneda",
+            "moneda_nombre",
+        })
+        self.assertEqual(fila["pedido_folio"], "PED-acme")
+        self.assertEqual(fila["cliente_nombre"], "Cliente acme")
+        self.assertEqual(fila["vendedor"], vendedor.pk)
+        self.assertEqual(fila["vendedor_nombre"], "Ana Ruiz")
+        self.assertEqual(fila["cantidad"], 2)
+        self.assertEqual(fila["precio_unitario"], "100.00")
+        self.assertEqual(fila["subtotal"], "200.00")
+        self.assertEqual(fila["total"], "232.00")
+        self.assertEqual(fila["moneda_nombre"], "MXN")
+
+    def test_sin_vendedor_ni_pedido(self):
+        Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+            moneda=self.moneda, folio="F-MONTO",
+        )
+        fila = self._listar()[0]
+        self.assertIsNone(fila["pedido"])
+        self.assertIsNone(fila["pedido_folio"])
+        self.assertIsNone(fila["vendedor"])
+        self.assertIsNone(fila["vendedor_nombre"])
+        self.assertEqual(fila["cantidad"], 0)
+        self.assertIsNone(fila["precio_unitario"])
+
+    def test_precio_nulo_si_hay_varios_precios(self):
+        talla_xl = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.a["detalle"], talla=Talla.objects.create(nombre="XL"),
+            cantidad=2, precio_unitario=Decimal("120.00"),
+        )
+        resp = self._client(self.a["usuario"]).post(
+            ONBOARDING_URL,
+            {
+                "pedido": self.a["pedido"].pk,
+                "factura_detalles": [
+                    {"pedido_detalle_talla": self.a["talla_pedido"].pk, "cantidad": 1},
+                    {"pedido_detalle_talla": talla_xl.pk, "cantidad": 2},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        fila = self._listar()[0]
+        self.assertEqual(fila["cantidad"], 3)
+        self.assertIsNone(fila["precio_unitario"])
+        self.assertEqual(fila["subtotal"], "340.00")
+
+    def test_consultas_fijas_sin_importar_cuantas_facturas(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._facturar(cantidad=1)
+        client = self._client(self.a["usuario"])
+        with CaptureQueriesContext(connection) as una:
+            client.get(self.LISTADO_URL)
+        self._facturar(cantidad=1)
+        self._facturar(cantidad=1)
+        with CaptureQueriesContext(connection) as tres:
+            data = client.get(self.LISTADO_URL).data
+        self.assertEqual(len(data), 3)
+        self.assertGreater(len(una.captured_queries), 0)
+        self.assertEqual(len(una.captured_queries), len(tres.captured_queries))
+
+    def test_filtro_saldo_pendiente_no_duplica_piezas(self):
+        factura_id = self._facturar(cantidad=2)
+        factura = Factura.objects.get(pk=factura_id)
+        for _ in range(2):
+            CuentaPorCobrar.objects.create(
+                empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+                total=Decimal("100.00"), saldo=Decimal("100.00"),
+            )
+        data = self._listar(params={"saldo_pendiente": "true"})
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["cantidad"], 2)
+
+    def test_onboarding_sin_pedido_usa_el_mismo_listado(self):
+        self._facturar(cantidad=1)
+        self.assertEqual(self._listar(url=ONBOARDING_URL), self._listar())
+
+    def test_no_lista_facturas_de_otra_empresa(self):
+        self._facturar(cantidad=1)
+        self.assertEqual(self._listar(user=self.b["usuario"]), [])
+
+    def test_el_detalle_sigue_completo(self):
+        factura_id = self._facturar(cantidad=1)
+        detalle = self._client(self.a["usuario"]).get(f"{self.LISTADO_URL}{factura_id}/").data
+        self.assertIn("factura_detalles", detalle)
+        self.assertEqual(len(detalle["factura_detalles"]), 1)
