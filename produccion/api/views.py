@@ -1,5 +1,6 @@
-from django.db.models import Exists, OuterRef, Prefetch, prefetch_related_objects
+from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, prefetch_related_objects
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import status, viewsets, mixins
 from rest_framework.decorators import action
 from rest_framework.viewsets import GenericViewSet
@@ -595,6 +596,123 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
+
+    # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-412): el
+    # dashboard siempre es "todas las OP de mi empresa", nunca una sola fila,
+    # y así evita el ``select_related``/``prefetch_related`` pesado del
+    # listado normal -- todo aquí es ``aggregate()``/``Count`` en DB, nunca
+    # iterar OPs fila por fila en Python.
+    @action(detail=False, methods=["get"], url_path="kpis")
+    def kpis(self, request):
+        empresa = getattr(request.user, "empresa", None)
+        if empresa is None:
+            return Response(self._kpis_vacio())
+
+        try:
+            meta_otd = float(request.query_params.get("meta_otd", 95))
+        except (TypeError, ValueError):
+            raise ValidationError({"meta_otd": "Debe ser un número."})
+
+        base = OrdenProduccion.objects.filter(empresa=empresa, activo=True)
+        data = {
+            "generado_en": timezone.now(),
+            "filtros": {"meta_otd": meta_otd},
+        }
+        data["cumplimiento_a_tiempo"] = self._kpi_otd(base, meta_otd)
+        data["avance_produccion"] = {
+            "disponible": False,
+            "motivo": "No se registra piezas terminadas por OP en el esquema actual (solo piezas programadas).",
+        }
+        data["eficiencia_linea"] = {
+            "disponible": False,
+            "motivo": "No existen campos de SAM, operarios asignados ni minutos trabajados en el esquema actual.",
+        }
+        data["ops_atrasadas"] = self._kpi_atrasadas(base)
+        return Response(data)
+
+    def _kpis_vacio(self):
+        return {
+            "generado_en": timezone.now(),
+            "filtros": None,
+            "cumplimiento_a_tiempo": {"disponible": False, "motivo": "Usuario sin empresa asignada."},
+            "avance_produccion": {"disponible": False, "motivo": "Usuario sin empresa asignada."},
+            "eficiencia_linea": {"disponible": False, "motivo": "Usuario sin empresa asignada."},
+            "ops_atrasadas": {"disponible": False, "motivo": "Usuario sin empresa asignada."},
+        }
+
+    def _semaforo(self, pct, meta):
+        if pct is None:
+            return "sin_datos"
+        if pct >= meta:
+            return "verde"
+        if pct >= meta - 10:
+            return "amarillo"
+        return "rojo"
+
+    def _kpi_otd(self, base, meta_otd):
+        # "Terminada" = tiene fecha_fin. A tiempo = terminó en o antes de su
+        # fecha_entrega_estimada; sin fecha_entrega_estimada no puede contar
+        # como a tiempo (no hay compromiso contra qué medirla).
+        terminadas = base.filter(fecha_fin__isnull=False)
+        agg = terminadas.aggregate(
+            total=Count("op_id"),
+            a_tiempo=Count(
+                "op_id",
+                filter=Q(fecha_entrega_estimada__isnull=False, fecha_fin__date__lte=F("fecha_entrega_estimada")),
+            ),
+        )
+        total = agg["total"] or 0
+        a_tiempo = agg["a_tiempo"] or 0
+        pct = round((a_tiempo / total) * 100, 1) if total else None
+
+        tardias = list(
+            terminadas.exclude(
+                fecha_entrega_estimada__isnull=False, fecha_fin__date__lte=F("fecha_entrega_estimada")
+            )
+            .order_by("-fecha_fin")
+            .values("op_id", "folio_op", "fecha_fin", "fecha_entrega_estimada")[:20]
+        )
+        return {
+            "disponible": True,
+            "pct": pct,
+            "meta": meta_otd,
+            "semaforo": self._semaforo(pct, meta_otd),
+            "ops_terminadas": total,
+            "ops_a_tiempo": a_tiempo,
+            "drill_down_tardias": tardias,
+        }
+
+    def _kpi_atrasadas(self, base):
+        # Solo cuenta lo que hoy es medible: OP vencida (fecha_entrega_estimada
+        # ya pasó) y todavía no cerrada. La otra mitad del KPI del ticket
+        # ("avance menor al tiempo transcurrido") necesita piezas terminadas
+        # por OP, que no existen en el esquema -- ver avance_produccion.
+        hoy = timezone.localdate()
+        abiertas = base.exclude(
+            estatus_op__in=[
+                OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+                OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
+            ]
+        )
+        vencidas_qs = abiertas.filter(fecha_entrega_estimada__lt=hoy)
+        total = vencidas_qs.count()
+        drill_down = [
+            {
+                "op_id": row["op_id"],
+                "folio_op": row["folio_op"],
+                "fecha_entrega_estimada": row["fecha_entrega_estimada"],
+                "dias_vencida": (hoy - row["fecha_entrega_estimada"]).days,
+            }
+            for row in vencidas_qs.order_by("fecha_entrega_estimada").values(
+                "op_id", "folio_op", "fecha_entrega_estimada"
+            )[:20]
+        ]
+        return {
+            "disponible": True,
+            "total": total,
+            "nota": "Solo cuenta OPs vencidas (fecha_entrega_estimada pasada); no incluye 'en riesgo por avance'.",
+            "drill_down": drill_down,
+        }
 
 class ConsumoProduccionViewSet(viewsets.ModelViewSet):
     queryset = ConsumoProduccion.objects.all().select_related('op').prefetch_related('detalles__producto')

@@ -13,6 +13,7 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test produccion --settings=sqlite_settings
 """
 
+from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
@@ -4563,3 +4564,102 @@ class RutaCriticaBulkTests(TestCase):
         resp = client.get(f"/api/v1/produccion/orden-produccion/{self.op2.pk}/ruta-critica/")
 
         self.assertEqual(resp.data["op_id"], self.op2.pk)
+
+
+class OrdenProduccionKpisTests(TestCase):
+    """``GET /orden-produccion/kpis/`` (EC-412): OTD + atrasadas con datos
+    reales; avance_produccion/eficiencia_linea van ``disponible: False`` a
+    propósito -- el esquema no registra piezas terminadas ni SAM/operarios."""
+
+    URL = "/api/v1/produccion/orden-produccion/kpis/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="GDL", nombre="GDL")
+        cls.usuario = Usuario.objects.create(username="u", email="u@acme.test", empresa=cls.empresa)
+        cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
+
+        hoy = timezone.localdate()
+        ahora = timezone.now()
+
+        # A tiempo: terminó antes de su fecha compromiso.
+        cls.op_a_tiempo = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-A",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+            fecha_entrega_estimada=hoy, fecha_fin=ahora - timedelta(days=1),
+        )
+        # Tardía: terminó después de su fecha compromiso.
+        cls.op_tardia = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-B",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+            fecha_entrega_estimada=hoy - timedelta(days=5), fecha_fin=ahora,
+        )
+        # Vencida y sin terminar: cuenta en ops_atrasadas, no en OTD.
+        cls.op_vencida = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-C",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.BORDANDO,
+            fecha_entrega_estimada=hoy - timedelta(days=2),
+        )
+        # En tiempo y sin terminar: no debe contar en ningún lado.
+        OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-D",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.PREPARACION,
+            fecha_entrega_estimada=hoy + timedelta(days=5),
+        )
+        # De otra empresa: no debe filtrarse al aislamiento multi-tenant.
+        OrdenProduccion.objects.create(
+            empresa=cls.otra, sucursal=cls.sucursal_otra, folio_op="OP-X",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.BORDANDO,
+            fecha_entrega_estimada=hoy - timedelta(days=30),
+        )
+
+    def _get(self, user, query=""):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(f"{self.URL}{query}")
+
+    def test_otd_cuenta_solo_lo_de_mi_empresa(self):
+        resp = self._get(self.usuario)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        otd = resp.data["cumplimiento_a_tiempo"]
+        self.assertTrue(otd["disponible"])
+        self.assertEqual(otd["ops_terminadas"], 2)
+        self.assertEqual(otd["ops_a_tiempo"], 1)
+        self.assertEqual(otd["pct"], 50.0)
+        self.assertEqual([d["op_id"] for d in otd["drill_down_tardias"]], [self.op_tardia.pk])
+
+    def test_ops_atrasadas_solo_cuenta_vencidas_abiertas(self):
+        resp = self._get(self.usuario)
+
+        atrasadas = resp.data["ops_atrasadas"]
+        self.assertTrue(atrasadas["disponible"])
+        self.assertEqual(atrasadas["total"], 1)
+        self.assertEqual(atrasadas["drill_down"][0]["op_id"], self.op_vencida.pk)
+        self.assertEqual(atrasadas["drill_down"][0]["dias_vencida"], 2)
+
+    def test_kpis_sin_datos_declaran_no_disponible(self):
+        resp = self._get(self.usuario)
+
+        self.assertFalse(resp.data["avance_produccion"]["disponible"])
+        self.assertFalse(resp.data["eficiencia_linea"]["disponible"])
+
+    def test_meta_otd_cambia_semaforo(self):
+        verde = self._get(self.usuario, "?meta_otd=40")
+        rojo = self._get(self.usuario, "?meta_otd=95")
+
+        self.assertEqual(verde.data["cumplimiento_a_tiempo"]["semaforo"], "verde")
+        self.assertEqual(rojo.data["cumplimiento_a_tiempo"]["semaforo"], "rojo")
+
+    def test_meta_otd_invalida_es_400(self):
+        resp = self._get(self.usuario, "?meta_otd=abc")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_usuario_sin_empresa_no_ve_nada(self):
+        resp = self._get(self.sin_empresa)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data["cumplimiento_a_tiempo"]["disponible"])
