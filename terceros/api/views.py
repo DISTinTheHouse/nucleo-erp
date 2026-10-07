@@ -5,6 +5,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from django.conf import settings
 from django.db.models import Count, Sum
+from django.utils import timezone
 from django.utils.dateparse import parse_date
 from finanzas.services.facturama.acceso import empresa_usa_facturama
 from terceros.models import Proveedor, Cliente, DireccionCliente
@@ -194,8 +195,16 @@ class ProveedorViewSet(viewsets.ModelViewSet):
             return qs.filter(empresa=empresa)
         return qs.none()
 
+    def perform_create(self, serializer):
+        empresa = getattr(self.request.user, "empresa", None)
+        if empresa is None:
+            raise ValidationError({"empresa": "El usuario no tiene una empresa asignada."})
+        serializer.save(empresa=empresa)
+
     def perform_destroy(self, instance):
-        instance.soft_delete()
+        instance.activo = False
+        instance.fecha_baja = timezone.localdate()
+        instance.save(update_fields=["activo", "fecha_baja"])
 
     @action(detail=True, methods=["get"], url_path="historial-ordenes-compra")
     def historial_ordenes_compra(self, request, pk=None):

@@ -1121,6 +1121,13 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
   - `ultimo_pedido` es `null` si el cliente no tiene pedidos todavía; si existe, es el mismo objeto que aparece primero en `pedidos_recientes`.
   - `pedidos_recientes` trae como máximo los 5 pedidos más nuevos (por fecha de creación), pensado para una mini-tabla o timeline en la ficha del cliente — no es un listado paginado; si se necesita el historial completo, usar `GET /api/v1/ventas/pedidos/?cliente={id}`.
 
+### Proveedores: escritura (`/api/v1/terceros/proveedores/`)
+
+- `empresa` es **solo lectura**: la asigna el servidor con la empresa del usuario. Si el body la manda, se ignora; un PATCH/PUT no la cambia.
+- Usuario sin empresa → `400 {"empresa": ...}` en el POST.
+- `moneda`: global o privada de la empresa del proveedor; de otra empresa → `400 {"moneda": ...}`.
+- `DELETE` es baja lógica: `activo = false` y `fecha_baja` = fecha del día.
+
 ### Histórico de Órdenes de Compra por Proveedor (EC-399)
 
 - **Endpoint**: `GET /api/v1/terceros/proveedores/{id}/historial-ordenes-compra/`
