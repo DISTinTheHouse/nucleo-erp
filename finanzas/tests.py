@@ -5355,3 +5355,111 @@ class FacturasAislamientoY500Tests(FinanzasBase):
         self.assertEqual(client.post(FACTURAS_URL, body, format="json").status_code, 405)
         self.assertEqual(client.put(f"{FACTURAS_URL}{factura.pk}/", body, format="json").status_code, 405)
         self.assertEqual(Factura.objects.count(), 1)
+
+
+class FacturasReglasDeEstadoTests(FinanzasBase):
+    """#338: PATCH solo cambia fecha_vencimiento/observaciones. #339: solo se
+    elimina en Borrador. #341: el alta ignora serie_folio/activo/fecha_emision."""
+
+    def _factura(self, **extra):
+        body = {"pedido": self.a["pedido"].pk,
+                "factura_detalles": [{"pedido_detalle_talla": self.a["talla_pedido"].pk, "cantidad": 1}], **extra}
+        resp = self._client(self.a["usuario"]).post(ONBOARDING_URL, body, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return Factura.objects.get(pk=resp.data["id"])
+
+    def _patch(self, factura, body):
+        return self._client(self.a["usuario"]).patch(f"{FACTURAS_URL}{factura.pk}/", body, format="json")
+
+    def _emitir(self, factura):
+        Factura.objects.filter(pk=factura.pk).update(estatus=Factura.FacturaStatus.EMITIDA)
+        factura.refresh_from_db()
+        return factura
+
+    # --- #338 -----------------------------------------------------------------
+
+    def test_reactivar_una_factura_eliminada_responde_400(self):
+        factura = self._factura()
+        self.assertEqual(self._client(self.a["usuario"]).delete(f"{FACTURAS_URL}{factura.pk}/").status_code, 204)
+
+        resp = self._patch(factura, {"activo": True})
+
+        self.assertIn(resp.status_code, (400, 404), resp.data)
+        factura.refresh_from_db()
+        self.assertFalse(factura.activo)
+
+    def test_emitida_no_cambia_pedido_ni_renglones(self):
+        factura = self._emitir(self._factura())
+
+        for body in ({"pedido": None},
+                     {"factura_detalles": [{"pedido_detalle_talla": self.a["talla_pedido"].pk, "cantidad": 1}]}):
+            with self.subTest(body=list(body)):
+                self.assertEqual(self._patch(factura, body).status_code, 400)
+        factura.refresh_from_db()
+        self.assertEqual(factura.pedido_id, self.a["pedido"].pk)
+
+    def test_emitida_edita_vencimiento_y_notas_e_ignora_fecha_emision(self):
+        factura = self._emitir(self._factura())
+        emision = factura.fecha_emision
+
+        resp = self._patch(factura, {"fecha_vencimiento": "2026-12-31", "observaciones": "OK", "fecha_emision": "2020-01-01"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual(str(factura.fecha_vencimiento), "2026-12-31")
+        self.assertEqual(factura.observaciones, "OK")
+        self.assertEqual(factura.fecha_emision, emision)
+
+    def test_cancelada_no_se_edita(self):
+        factura = self._factura()
+        Factura.objects.filter(pk=factura.pk).update(estatus=Factura.FacturaStatus.CANCELADA)
+
+        self.assertEqual(self._patch(factura, {"observaciones": "x"}).status_code, 400)
+
+    # --- #339 -----------------------------------------------------------------
+
+    def test_eliminar_solo_en_borrador(self):
+        emitida = self._emitir(self._factura())
+        client = self._client(self.a["usuario"])
+
+        resp = client.delete(f"{FACTURAS_URL}{emitida.pk}/")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        emitida.refresh_from_db()
+        self.assertTrue(emitida.activo)
+
+    def test_pendiente_de_cobro_emitida_no_se_elimina_y_su_cxc_queda(self):
+        self._crear_cuentas_contables(self.a["empresa"])
+        CuentaContable.objects.create(
+            empresa=self.a["empresa"], codigo="2080", nombre="IVA trasladado",
+            tipo=CuentaContable.CuentaTipo.PASIVO,
+        )
+        resp = self._client(self.a["usuario"]).post(
+            PENDIENTE_COBRO_URL,
+            {"cliente": self.a["cliente"].pk, "moneda": self.moneda.pk,
+             "subtotal": "10.00", "impuestos": "1.60", "total": "11.60"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        factura = Factura.objects.get(pk=resp.data.get("id") or resp.data["factura"]["id"])
+
+        borrado = self._client(self.a["usuario"]).delete(f"{FACTURAS_URL}{factura.pk}/")
+
+        self.assertEqual(borrado.status_code, 400, borrado.data)
+        factura.refresh_from_db()
+        self.assertTrue(factura.activo)
+        self.assertTrue(CuentaPorCobrar.objects.filter(factura=factura, saldo__gt=0).exists())
+
+    # --- #341 -----------------------------------------------------------------
+
+    def test_alta_ignora_serie_activo_y_fecha_emision(self):
+        serie_pedido = SerieFolio.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], tipo_documento="Pedido", serie="P",
+        )
+        serie_factura = SerieFolio.objects.get(empresa=self.a["empresa"], tipo_documento="Factura")
+
+        factura = self._factura(serie_folio=serie_pedido.pk, activo=False, fecha_emision="2020-01-01")
+
+        self.assertTrue(factura.activo)
+        self.assertEqual(factura.serie_folio_id, serie_factura.pk)
+        self.assertEqual(factura.fecha_emision, timezone.localdate())
