@@ -251,6 +251,12 @@ Table pedido_detalle {
   id_producto int
 }
 
+Table pedido_detalle_talla {
+  id_pedido_detalle_talla int [pk]
+  id_pedido_detalle int
+  id_talla int
+}
+
 // mesa de control
 Table backorders {
   id_backorder int [pk]
@@ -775,6 +781,7 @@ Table factura_detalle {
   id_factura_detalle int [pk]
   id_factura int
   id_pedido_detalle int
+  id_pedido_detalle_talla int // facturación parcial por piezas de cada talla
   id_producto int
 }
 
@@ -1143,6 +1150,8 @@ Ref: pedidos.id_moneda > monedas.id_moneda
 
 Ref: pedido_detalle.id_pedido > pedidos.id_pedido
 Ref: pedido_detalle.id_producto > productos.id_producto
+Ref: pedido_detalle_talla.id_pedido_detalle > pedido_detalle.id_pedido_detalle
+Ref: pedido_detalle_talla.id_talla > tallas.id_talla
 
 Ref: backorders.id_pedido > pedidos.id_pedido
 Ref: backorder_detalle.id_backorder > backorders.id_backorder
@@ -1362,6 +1371,7 @@ Ref: facturas.id_moneda > monedas.id_moneda
 
 Ref: factura_detalle.id_factura > facturas.id_factura
 Ref: factura_detalle.id_pedido_detalle > pedido_detalle.id_pedido_detalle
+Ref: factura_detalle.id_pedido_detalle_talla > pedido_detalle_talla.id_pedido_detalle_talla
 Ref: factura_detalle.id_producto > productos.id_producto
 
 Ref: cuentas_por_cobrar.id_cliente > clientes.id_cliente

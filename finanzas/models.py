@@ -169,11 +169,24 @@ class Factura(StatusLifecycleModel):
 class FacturaDetalle(models.Model):
     factura = models.ForeignKey(Factura, on_delete=models.CASCADE, related_name="factura_detalles")
     pedido_detalle = models.ForeignKey('ventas.PedidoDetalle', on_delete=models.PROTECT, related_name="factura_detalles")
+    # Talla exacta que se factura: un pedido se factura en parcialidades, por
+    # piezas de cada talla. Nulo solo en renglones anteriores a la facturación
+    # parcial, que facturaban el renglón del pedido sin distinguir talla.
+    pedido_detalle_talla = models.ForeignKey(
+        'ventas.PedidoDetalleTalla',
+        on_delete=models.PROTECT,
+        related_name="factura_detalles",
+        null=True,
+        blank=True,
+    )
     producto = models.ForeignKey('catalogo.Producto', on_delete=models.PROTECT, related_name="factura_detalles")
 
     cantidad = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     precio_unitario = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     descuento = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    # Tasa de IVA (en %) con la que se calculó ``impuesto``. Se congela en el
+    # renglón porque el timbrado del CFDI la necesita por concepto.
+    porcentaje_impuesto = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     impuesto = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     subtotal = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=18, decimal_places=2, default=0)

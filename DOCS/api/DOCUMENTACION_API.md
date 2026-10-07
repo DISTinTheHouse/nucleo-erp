@@ -2823,7 +2823,12 @@ No mandes `pago` dentro de `pago_detalles`: mismo caso.
 
 ### Recomendación de implementación para Next.js
 
-1. **Facturación simple**: usa `POST /facturas/desde-pedido/` cuando toda la factura sale del pedido.
+1. **Facturación por piezas (parcial)**: un pedido se factura en parcialidades, por talla.
+   - `GET /facturas/onboarding/?pedido={id}` → piezas por talla para armar el formulario: `tallas[]` con `pedido_detalle_talla`, `producto_nombre`, `talla_nombre`, `precio_unitario` (sin IVA), `cantidad_pedida`, `cantidad_facturada`, `cantidad_pendiente`, más `porcentaje_impuesto` y totales de piezas. Sin `?pedido=` sigue devolviendo el listado de facturas.
+   - `POST /facturas/onboarding/` con `{"pedido": id, "factura_detalles": [{"pedido_detalle_talla": id, "cantidad": n}]}` → crea la factura (Borrador) con esas piezas. El servidor deriva renglón, producto, precio e IVA (`Pedido.iva`); rechaza con 400 en `factura_detalles` si una cantidad no es entera, viene repetida o excede lo pendiente.
+   - `POST /facturas/desde-pedido/` factura **todo lo que quede pendiente** del pedido; 400 en `pedido` si ya no hay piezas pendientes.
+   - Toda factura activa no cancelada (también Borrador) aparta sus piezas; cancelarla o eliminarla las libera. Un pedido con una factura registrada solo por monto (`registrar-pendiente-cobro`) ya no admite facturas por piezas.
+   - Fuera de alcance por ahora: flete, servicios extra y descuento global del pedido (las facturas por piezas solo cubren piezas).
 2. **Facturación manual o saldo pendiente**: usa `POST /facturas/registrar-pendiente-cobro/`.
 3. **No intentes crear movimientos bancarios para cobros/pagos desde frontend** si ya estás usando cobros o pagos aplicados; el backend los genera.
 4. **Usa los detalles** de `cuentas-por-cobrar/{id}` para mostrar factura ligada y pólizas relacionadas sin armar joins en frontend.

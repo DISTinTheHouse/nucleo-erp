@@ -123,7 +123,7 @@ class FinanzasBase(TestCase):
         detalle = PedidoDetalle.objects.create(
             pedido=pedido, producto=producto, precio_unitario=Decimal("100.00")
         )
-        PedidoDetalleTalla.objects.create(
+        talla_pedido = PedidoDetalleTalla.objects.create(
             pedido_detalle=detalle, talla=cls.talla, cantidad=3
         )
         SerieFolio.objects.create(
@@ -141,6 +141,7 @@ class FinanzasBase(TestCase):
             "pedido": pedido,
             "producto": producto,
             "detalle": detalle,
+            "talla_pedido": talla_pedido,
         }
 
     @classmethod
@@ -216,11 +217,11 @@ class Defecto1OnboardingAislamiento(FinanzasBase):
     la empresa del usuario y bloquear la doble facturación, igual que
     ``desde_pedido``."""
 
-    def _payload(self, pedido, detalle, cantidad=3):
+    def _payload(self, pedido, talla_pedido, cantidad=3):
         return {
             "pedido": pedido.pk,
             "factura_detalles": [
-                {"pedido_detalle": detalle.pk, "cantidad": cantidad}
+                {"pedido_detalle_talla": talla_pedido.pk, "cantidad": cantidad}
             ],
         }
 
@@ -228,7 +229,7 @@ class Defecto1OnboardingAislamiento(FinanzasBase):
         client = self._client(self.a["usuario"])
         resp = client.post(
             ONBOARDING_URL,
-            self._payload(self.b["pedido"], self.b["detalle"]),
+            self._payload(self.b["pedido"], self.b["talla_pedido"]),
             format="json",
         )
         self.assertEqual(resp.status_code, 404, resp.data)
@@ -236,52 +237,38 @@ class Defecto1OnboardingAislamiento(FinanzasBase):
 
     def test_rechaza_pedido_detalle_de_otra_empresa(self):
         client = self._client(self.a["usuario"])
-        payload = self._payload(self.a["pedido"], self.b["detalle"])
+        payload = self._payload(self.a["pedido"], self.b["talla_pedido"])
         resp = client.post(ONBOARDING_URL, payload, format="json")
         self.assertEqual(resp.status_code, 400, resp.data)
         self.assertIn("factura_detalles", resp.data)
         self.assertFalse(Factura.objects.exists())
 
-    def test_bloquea_segunda_factura_del_mismo_pedido(self):
+    def test_bloquea_segunda_factura_de_las_mismas_piezas(self):
         client = self._client(self.a["usuario"])
-        payload = self._payload(self.a["pedido"], self.a["detalle"])
+        payload = self._payload(self.a["pedido"], self.a["talla_pedido"])
         primera = client.post(ONBOARDING_URL, payload, format="json")
         self.assertEqual(primera.status_code, 200, primera.data)
 
         segunda = client.post(ONBOARDING_URL, payload, format="json")
         self.assertEqual(segunda.status_code, 400, segunda.data)
-        self.assertIn("pedido", segunda.data)
+        self.assertIn("factura_detalles", segunda.data)
         self.assertEqual(Factura.objects.count(), 1)
 
-    def test_mismo_mensaje_de_guard_que_desde_pedido(self):
-        """El contrato del guard debe ser idéntico al de ``desde_pedido``."""
-        client_a = self._client(self.a["usuario"])
-        client_b = self._client(self.b["usuario"])
+    def test_desde_pedido_ya_facturado_completo_devuelve_400(self):
+        client = self._client(self.b["usuario"])
+        primera = client.post(DESDE_PEDIDO_URL, {"pedido": self.b["pedido"].pk}, format="json")
+        self.assertEqual(primera.status_code, 201, primera.data)
 
-        client_a.post(
-            ONBOARDING_URL,
-            self._payload(self.a["pedido"], self.a["detalle"]),
-            format="json",
-        )
-        onboarding = client_a.post(
-            ONBOARDING_URL,
-            self._payload(self.a["pedido"], self.a["detalle"]),
-            format="json",
-        )
-
-        client_b.post(DESDE_PEDIDO_URL, {"pedido": self.b["pedido"].pk}, format="json")
-        desde_pedido = client_b.post(
-            DESDE_PEDIDO_URL, {"pedido": self.b["pedido"].pk}, format="json"
-        )
-
-        self.assertEqual(onboarding.status_code, desde_pedido.status_code)
-        self.assertEqual(str(onboarding.data["pedido"][0]), str(desde_pedido.data["pedido"][0]))
+        segunda = client.post(DESDE_PEDIDO_URL, {"pedido": self.b["pedido"].pk}, format="json")
+        self.assertEqual(segunda.status_code, 400, segunda.data)
+        self.assertIn("pedido", segunda.data)
+        self.assertEqual(Factura.objects.count(), 1)
 
     def test_acepta_pedido_propio(self):
         client = self._client(self.a["usuario"])
         resp = client.post(
             ONBOARDING_URL,
-            self._payload(self.a["pedido"], self.a["detalle"]),
+            self._payload(self.a["pedido"], self.a["talla_pedido"]),
             format="json",
         )
         self.assertEqual(resp.status_code, 200, resp.data)
@@ -289,13 +276,15 @@ class Defecto1OnboardingAislamiento(FinanzasBase):
         self.assertEqual(factura.empresa_id, self.a["empresa"].pk)
         self.assertEqual(factura.pedido_id, self.a["pedido"].pk)
         self.assertEqual(factura.cliente_id, self.a["cliente"].pk)
-        self.assertEqual(factura.total, Decimal("300.00"))
+        self.assertEqual(factura.subtotal, Decimal("300.00"))
+        self.assertEqual(factura.impuestos, Decimal("48.00"))
+        self.assertEqual(factura.total, Decimal("348.00"))
 
     def test_pedido_ausente_devuelve_400_no_500(self):
         client = self._client(self.a["usuario"])
         resp = client.post(
             ONBOARDING_URL,
-            {"factura_detalles": [{"pedido_detalle": self.a["detalle"].pk, "cantidad": 1}]},
+            {"factura_detalles": [{"pedido_detalle_talla": self.a["talla_pedido"].pk, "cantidad": 1}]},
             format="json",
         )
         self.assertEqual(resp.status_code, 400, resp.data)
@@ -313,7 +302,7 @@ class Defecto1OnboardingAislamiento(FinanzasBase):
         """``serie_folio`` es el tercer FK escribible del serializer y también
         se resolvía contra el manager por defecto."""
         serie_ajena = SerieFolio.objects.get(sucursal=self.b["sucursal"])
-        payload = self._payload(self.a["pedido"], self.a["detalle"])
+        payload = self._payload(self.a["pedido"], self.a["talla_pedido"])
         payload["serie_folio"] = serie_ajena.pk
 
         resp = self._client(self.a["usuario"]).post(
@@ -339,10 +328,14 @@ class Defecto1OnboardingAislamiento(FinanzasBase):
             metodo_pago="PUE",
             uso_cfdi="G03",
         )
-        linea_ajena = PedidoDetalle.objects.create(
-            pedido=otro_pedido,
-            producto=self.a["producto"],
-            precio_unitario=Decimal("999.00"),
+        linea_ajena = PedidoDetalleTalla.objects.create(
+            pedido_detalle=PedidoDetalle.objects.create(
+                pedido=otro_pedido,
+                producto=self.a["producto"],
+                precio_unitario=Decimal("999.00"),
+            ),
+            talla=self.talla,
+            cantidad=1,
         )
 
         resp = self._client(self.a["usuario"]).post(
@@ -378,6 +371,183 @@ class Defecto1OnboardingAislamiento(FinanzasBase):
             DESDE_PEDIDO_URL, {"pedido": self.a["pedido"].pk}, format="json"
         )
         self.assertEqual(posterior.status_code, 201, posterior.data)
+
+
+class FacturacionParcialPorTalla(FinanzasBase):
+    """Un pedido se factura en parcialidades, por piezas de cada talla, sin
+    pasar de lo pendiente."""
+
+    def _facturar(self, cantidad, talla_pedido=None):
+        return self._client(self.a["usuario"]).post(
+            ONBOARDING_URL,
+            {
+                "pedido": self.a["pedido"].pk,
+                "factura_detalles": [
+                    {
+                        "pedido_detalle_talla": (talla_pedido or self.a["talla_pedido"]).pk,
+                        "cantidad": cantidad,
+                    }
+                ],
+            },
+            format="json",
+        )
+
+    def test_parcialidades_hasta_agotar_lo_pendiente(self):
+        self.assertEqual(self._facturar(1).status_code, 200)
+        self.assertEqual(self._facturar(2).status_code, 200)
+
+        excedida = self._facturar(1)
+        self.assertEqual(excedida.status_code, 400, excedida.data)
+        self.assertIn("factura_detalles", excedida.data)
+        self.assertEqual(Factura.objects.count(), 2)
+
+    def test_no_permite_facturar_mas_de_lo_pendiente(self):
+        self.assertEqual(self._facturar(2).status_code, 200)
+        resp = self._facturar(2)
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pendientes 1, solicitadas 2", str(resp.data["factura_detalles"]))
+
+    def test_renglon_guarda_talla_e_iva_del_pedido(self):
+        resp = self._facturar(2)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura = Factura.objects.get()
+        self.assertEqual(factura.subtotal, Decimal("200.00"))
+        self.assertEqual(factura.impuestos, Decimal("32.00"))
+        self.assertEqual(factura.total, Decimal("232.00"))
+
+        renglon = factura.factura_detalles.get()
+        self.assertEqual(renglon.pedido_detalle_talla_id, self.a["talla_pedido"].pk)
+        self.assertEqual(renglon.pedido_detalle_id, self.a["detalle"].pk)
+        self.assertEqual(renglon.producto_id, self.a["producto"].pk)
+        self.assertEqual(renglon.porcentaje_impuesto, Decimal("16.00"))
+        self.assertEqual(resp.data["factura_detalles"][0]["talla_nombre"], "M")
+
+    def test_precio_propio_de_la_talla_tiene_prioridad(self):
+        talla_xl = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.a["detalle"],
+            talla=Talla.objects.create(nombre="XL"),
+            cantidad=2,
+            precio_unitario=Decimal("120.00"),
+        )
+        resp = self._facturar(2, talla_pedido=talla_xl)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(Factura.objects.get().subtotal, Decimal("240.00"))
+
+    def test_desde_pedido_factura_solo_lo_pendiente(self):
+        self.assertEqual(self._facturar(1).status_code, 200)
+        resp = self._client(self.a["usuario"]).post(
+            DESDE_PEDIDO_URL, {"pedido": self.a["pedido"].pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        factura = Factura.objects.get(pk=resp.data["id"])
+        self.assertEqual(factura.factura_detalles.get().cantidad, Decimal("2"))
+
+    def test_factura_cancelada_libera_sus_piezas(self):
+        self.assertEqual(self._facturar(3).status_code, 200)
+        Factura.objects.update(estatus=Factura.FacturaStatus.CANCELADA)
+        self.assertEqual(self._facturar(3).status_code, 200)
+
+    def test_factura_eliminada_libera_sus_piezas(self):
+        self.assertEqual(self._facturar(3).status_code, 200)
+        Factura.objects.get().soft_delete()
+        self.assertEqual(self._facturar(3).status_code, 200)
+
+    def test_renglon_previo_sin_talla_cuenta_como_facturado(self):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+            moneda=self.moneda, pedido=self.a["pedido"], folio="F-LEGADO",
+        )
+        FacturaDetalle.objects.create(
+            factura=factura, pedido_detalle=self.a["detalle"], producto=self.a["producto"],
+            cantidad=Decimal("2"),
+        )
+        self.assertEqual(self._facturar(2).status_code, 400)
+        self.assertEqual(self._facturar(1).status_code, 200)
+
+    def test_factura_por_monto_bloquea_la_facturacion_por_piezas(self):
+        Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+            moneda=self.moneda, pedido=self.a["pedido"], folio="F-MONTO",
+        )
+        resp = self._facturar(1)
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pedido", resp.data)
+
+    def test_rechaza_cantidades_invalidas_sin_consumir_folio(self):
+        serie = SerieFolio.objects.get(sucursal=self.a["sucursal"])
+        for cantidad in ("0", "1.5", "-1"):
+            with self.subTest(cantidad=cantidad):
+                resp = self._facturar(cantidad)
+                self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(Factura.objects.exists())
+        serie.refresh_from_db()
+        self.assertEqual(serie.folio_actual, 0)
+
+    def test_rechaza_talla_repetida(self):
+        linea = {"pedido_detalle_talla": self.a["talla_pedido"].pk, "cantidad": 1}
+        resp = self._client(self.a["usuario"]).post(
+            ONBOARDING_URL,
+            {"pedido": self.a["pedido"].pk, "factura_detalles": [linea, linea]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(Factura.objects.exists())
+
+    def test_rechaza_renglon_sin_producto_de_catalogo(self):
+        externa = PedidoDetalleTalla.objects.create(
+            pedido_detalle=PedidoDetalle.objects.create(
+                pedido=self.a["pedido"], producto_nombre_externo="Gorra externa",
+                precio_unitario=Decimal("50.00"),
+            ),
+            talla=self.talla,
+            cantidad=1,
+        )
+        resp = self._facturar(1, talla_pedido=externa)
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(Factura.objects.exists())
+
+    def test_rechaza_linea_sin_talla(self):
+        resp = self._client(self.a["usuario"]).post(
+            ONBOARDING_URL,
+            {
+                "pedido": self.a["pedido"].pk,
+                "factura_detalles": [{"pedido_detalle": self.a["detalle"].pk, "cantidad": 1}],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(Factura.objects.exists())
+
+    def test_onboarding_con_pedido_devuelve_piezas_por_talla(self):
+        self.assertEqual(self._facturar(1).status_code, 200)
+        resp = self._client(self.a["usuario"]).get(
+            ONBOARDING_URL, {"pedido": self.a["pedido"].pk}
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["total_piezas_pedidas"], 3)
+        self.assertEqual(resp.data["total_piezas_facturadas"], 1)
+        self.assertEqual(resp.data["total_piezas_pendientes"], 2)
+        talla = resp.data["tallas"][0]
+        self.assertEqual(talla["pedido_detalle_talla"], self.a["talla_pedido"].pk)
+        self.assertEqual(talla["talla_nombre"], "M")
+        self.assertEqual(talla["cantidad_pendiente"], 2)
+
+    def test_onboarding_con_pedido_de_otra_empresa_devuelve_404(self):
+        resp = self._client(self.a["usuario"]).get(
+            ONBOARDING_URL, {"pedido": self.b["pedido"].pk}
+        )
+        self.assertEqual(resp.status_code, 404, resp.data)
+
+    def test_onboarding_pedido_invalido_devuelve_400(self):
+        resp = self._client(self.a["usuario"]).get(ONBOARDING_URL, {"pedido": "abc"})
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_onboarding_sin_pedido_sigue_listando_facturas(self):
+        self.assertEqual(self._facturar(1).status_code, 200)
+        resp = self._client(self.a["usuario"]).get(ONBOARDING_URL)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(len(resp.data), 1)
+        self.assertIn("folio", resp.data[0])
 
 
 class Defecto2PolizaDetalleSerializer(FinanzasBase):
@@ -622,7 +792,7 @@ class Defecto4SucursalDefault(FinanzasBase):
             {
                 "pedido": self.a["pedido"].pk,
                 "factura_detalles": [
-                    {"pedido_detalle": self.a["detalle"].pk, "cantidad": 3}
+                    {"pedido_detalle_talla": self.a["talla_pedido"].pk, "cantidad": 3}
                 ],
             },
             format="json",
@@ -638,7 +808,7 @@ class Defecto4SucursalDefault(FinanzasBase):
             {
                 "pedido": self.c["pedido"].pk,
                 "factura_detalles": [
-                    {"pedido_detalle": self.c["detalle"].pk, "cantidad": 1}
+                    {"pedido_detalle_talla": self.c["talla_pedido"].pk, "cantidad": 1}
                 ],
             },
             format="json",

@@ -181,7 +181,7 @@ _(retoma lo que en Fase 3 se dejó "para después")_
 ## Fase 12 - Cuentas por cobrar / por pagar |
 
 - [x] ¿TERMINADO?
-- [x] facturación de cliente, incluida la factura desde pedido (`facturas/desde-pedido`; un pedido solo se factura una vez)
+- [x] facturación de cliente, incluida la factura desde pedido (`facturas/desde-pedido`) y facturación parcial por piezas de cada talla (`facturas/onboarding`)
 - [x] registrar factura pendiente de cobro → crea Factura + CxC + póliza de ingreso automáticamente
 - [x] cobros aplicados a CxC (generan movimiento bancario; se pueden cancelar)
 - [x] notas de crédito aplicadas / canceladas contra CxC
