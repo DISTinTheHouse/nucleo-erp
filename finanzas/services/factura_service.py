@@ -16,6 +16,16 @@ def _redondear(valor):
     return valor.quantize(CENTAVO, rounding=ROUND_HALF_UP)
 
 
+def _texto(valor):
+    return str(valor) if valor is not None else None
+
+
+def _codigo_y_descripcion(catalogo_sat):
+    if catalogo_sat is None:
+        return None
+    return {'codigo': catalogo_sat.codigo, 'descripcion': catalogo_sat.descripcion}
+
+
 def _precio_de_talla(pedido_detalle_talla):
     """Precio unitario (sin IVA) de una talla: el propio de la talla si lo
     tiene, si no el del renglón del pedido."""
@@ -84,6 +94,192 @@ class FacturaService:
                 'cantidad_pendiente': pendiente,
             })
         return piezas
+
+    @staticmethod
+    def desglose(factura):
+        """Factura completa para consulta: emisor, receptor, pedido, conceptos
+        por producto con las piezas de cada talla, importes, avance de
+        facturación del pedido, parcialidades, cobranza y notas de crédito.
+
+        Los importes van como texto, igual que en los serializers de la API.
+        """
+        renglones = (
+            factura.factura_detalles.select_related(
+                'producto__sat_prodserv',
+                'producto__sat_unidad',
+                'producto__unidad_medida',
+                'pedido_detalle__color',
+                'pedido_detalle_talla__talla',
+            )
+            .order_by('pedido_detalle_id', 'pedido_detalle_talla_id', 'id')
+        )
+
+        pedido = factura.pedido
+        piezas_pedido = {}
+        if pedido is not None:
+            piezas_pedido = {
+                pieza['pedido_detalle_talla'].pk: pieza
+                for pieza in FacturaService.piezas_por_facturar(pedido)
+            }
+
+        conceptos = {}
+        total_piezas = Decimal('0')
+        for renglon in renglones:
+            concepto = conceptos.get(renglon.pedido_detalle_id)
+            if concepto is None:
+                producto = renglon.producto
+                color = renglon.pedido_detalle.color
+                concepto = conceptos[renglon.pedido_detalle_id] = {
+                    'pedido_detalle': renglon.pedido_detalle_id,
+                    'producto': {
+                        'id': producto.pk,
+                        'nombre': producto.nombre,
+                        'codigo': producto.codigo,
+                        'descripcion': producto.descripcion,
+                        'unidad_medida': getattr(producto.unidad_medida, 'clave', None),
+                        'sat_clave_prodserv': _codigo_y_descripcion(producto.sat_prodserv),
+                        'sat_clave_unidad': _codigo_y_descripcion(producto.sat_unidad),
+                    },
+                    'color': {'id': color.pk, 'nombre': color.nombre} if color else None,
+                    'cantidad': Decimal('0'),
+                    'subtotal': Decimal('0'),
+                    'descuento': Decimal('0'),
+                    'impuesto': Decimal('0'),
+                    'total': Decimal('0'),
+                    'tallas': [],
+                }
+
+            talla_pedido = renglon.pedido_detalle_talla
+            pieza = piezas_pedido.get(getattr(talla_pedido, 'pk', None))
+            concepto['tallas'].append({
+                'factura_detalle': renglon.pk,
+                'pedido_detalle_talla': getattr(talla_pedido, 'pk', None),
+                'talla': getattr(talla_pedido, 'talla_id', None),
+                'talla_nombre': talla_pedido.talla.nombre if talla_pedido else None,
+                'cantidad': int(renglon.cantidad),
+                'precio_unitario': _texto(renglon.precio_unitario),
+                'subtotal': _texto(renglon.subtotal),
+                'descuento': _texto(renglon.descuento),
+                'porcentaje_impuesto': _texto(renglon.porcentaje_impuesto),
+                'impuesto': _texto(renglon.impuesto),
+                'total': _texto(renglon.total),
+                'cantidad_pedida': int(pieza['cantidad_pedida']) if pieza else None,
+                'cantidad_pendiente_pedido': int(pieza['cantidad_pendiente']) if pieza else None,
+            })
+            for campo in ('cantidad', 'subtotal', 'descuento', 'impuesto', 'total'):
+                concepto[campo] += getattr(renglon, campo)
+            total_piezas += renglon.cantidad
+
+        for concepto in conceptos.values():
+            concepto['cantidad'] = int(concepto['cantidad'])
+            for campo in ('subtotal', 'descuento', 'impuesto', 'total'):
+                concepto[campo] = _texto(concepto[campo])
+
+        cliente = factura.cliente
+        # Datos fiscales del receptor: los congelados en el pedido (los que se
+        # usarán al timbrar) y, si no hay pedido o vienen vacíos, los del cliente.
+        regimen = (getattr(pedido, 'cliente_regimen_fiscal', None)
+                   or cliente.sat_regimen_fiscal)
+        receptor = {
+            'cliente': cliente.pk,
+            'nombre': cliente.nombre,
+            'razon_social': getattr(pedido, 'cliente_razon_social', None) or cliente.razon_social,
+            'rfc': getattr(pedido, 'cliente_rfc', None) or cliente.rfc,
+            'regimen_fiscal': _codigo_y_descripcion(regimen),
+            'codigo_postal': getattr(pedido, 'cliente_codigo_postal', None) or cliente.codigo_postal,
+            'correo_facturas': (getattr(pedido, 'correo_facturas', None) or cliente.correo or None),
+        }
+
+        datos_pedido = None
+        avance_pedido = None
+        parcialidades = []
+        if pedido is not None:
+            datos_pedido = {
+                'id': pedido.pk,
+                'folio': pedido.folio,
+                'oc': pedido.oc,
+                'forma_pago': pedido.forma_pago,
+                'forma_pago_nombre': pedido.get_forma_pago_display(),
+                'metodo_pago': pedido.metodo_pago,
+                'metodo_pago_nombre': pedido.get_metodo_pago_display(),
+                'uso_cfdi': pedido.uso_cfdi,
+                'uso_cfdi_nombre': pedido.get_uso_cfdi_display(),
+            }
+            avance_pedido = {
+                'piezas_pedidas': int(sum(p['cantidad_pedida'] for p in piezas_pedido.values())),
+                'piezas_facturadas': int(sum(p['cantidad_facturada'] for p in piezas_pedido.values())),
+                'piezas_pendientes': int(sum(p['cantidad_pendiente'] for p in piezas_pedido.values())),
+            }
+            parcialidades = [
+                {
+                    'id': otra.pk,
+                    'folio': otra.folio,
+                    'estatus': otra.estatus,
+                    'fecha_emision': otra.fecha_emision,
+                    'total': _texto(otra.total),
+                    'es_esta_factura': otra.pk == factura.pk,
+                }
+                for otra in Factura.objects.filter(pedido=pedido, activo=True)
+                .order_by('fecha_emision', 'id')
+            ]
+
+        return {
+            'id': factura.pk,
+            'folio': factura.folio,
+            'estatus': factura.estatus,
+            'fecha_emision': factura.fecha_emision,
+            'fecha_vencimiento': factura.fecha_vencimiento,
+            'observaciones': factura.observaciones,
+            'created_at': factura.created_at,
+            'emisor': {
+                'empresa': factura.empresa_id,
+                'razon_social': factura.empresa.razon_social,
+                'nombre_comercial': factura.empresa.nombre_comercial,
+                'rfc': factura.empresa.rfc,
+                'sucursal': factura.sucursal_id,
+                'sucursal_nombre': factura.sucursal.nombre,
+            },
+            'receptor': receptor,
+            'pedido': datos_pedido,
+            'moneda': {
+                'id': factura.moneda_id,
+                'codigo_iso': factura.moneda.codigo_iso,
+                'nombre': factura.moneda.nombre,
+                'simbolo': factura.moneda.simbolo,
+            },
+            'conceptos': list(conceptos.values()),
+            'importes': {
+                'total_piezas': int(total_piezas),
+                'subtotal': _texto(factura.subtotal),
+                'descuento': _texto(factura.descuento),
+                'impuestos': _texto(factura.impuestos),
+                'total': _texto(factura.total),
+            },
+            'avance_pedido': avance_pedido,
+            'parcialidades': parcialidades,
+            'cobranza': [
+                {
+                    'id': cxc.pk,
+                    'estatus': cxc.estatus,
+                    'total': _texto(cxc.total),
+                    'saldo': _texto(cxc.saldo),
+                    'fecha_vencimiento': cxc.fecha_vencimiento,
+                    'fecha_ultimo_pago': cxc.fecha_ultimo_pago,
+                }
+                for cxc in factura.cuentas_por_cobrar.order_by('id')
+            ],
+            'notas_credito': [
+                {
+                    'id': nota.pk,
+                    'folio': nota.folio,
+                    'estatus': nota.estatus,
+                    'motivo': nota.motivo,
+                    'fecha_emision': nota.fecha_emision,
+                    'total': _texto(nota.total),
+                }
+                for nota in factura.nota_creditos.order_by('id')
+            ],
+        }
 
     @staticmethod
     @transaction.atomic

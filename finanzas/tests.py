@@ -550,6 +550,131 @@ class FacturacionParcialPorTalla(FinanzasBase):
         self.assertIn("folio", resp.data[0])
 
 
+class FacturaDesglose(FinanzasBase):
+    """GET /facturas/{id}/desglose/: la factura completa con las piezas de
+    cada talla, acotada a la empresa del usuario."""
+
+    def _url(self, factura_id):
+        return f"/api/v1/finanzas/facturas/{factura_id}/desglose/"
+
+    def _facturar(self, lineas):
+        resp = self._client(self.a["usuario"]).post(
+            ONBOARDING_URL,
+            {
+                "pedido": self.a["pedido"].pk,
+                "factura_detalles": [
+                    {"pedido_detalle_talla": talla.pk, "cantidad": cantidad}
+                    for talla, cantidad in lineas
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data["id"]
+
+    def test_desglosa_conceptos_por_producto_y_talla(self):
+        talla_xl = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.a["detalle"],
+            talla=Talla.objects.create(nombre="XL"),
+            cantidad=4,
+            precio_unitario=Decimal("120.00"),
+        )
+        factura_id = self._facturar([(self.a["talla_pedido"], 2), (talla_xl, 1)])
+
+        resp = self._client(self.a["usuario"]).get(self._url(factura_id))
+        self.assertEqual(resp.status_code, 200, resp.data)
+        data = resp.data
+
+        self.assertEqual(data["emisor"]["empresa"], self.a["empresa"].pk)
+        self.assertEqual(data["receptor"]["cliente"], self.a["cliente"].pk)
+        self.assertEqual(data["pedido"]["folio"], "PED-acme")
+        self.assertEqual(data["pedido"]["metodo_pago"], "PUE")
+        self.assertEqual(data["moneda"]["codigo_iso"], "MXN")
+
+        self.assertEqual(len(data["conceptos"]), 1)
+        concepto = data["conceptos"][0]
+        self.assertEqual(concepto["producto"]["id"], self.a["producto"].pk)
+        self.assertEqual(concepto["cantidad"], 3)
+        self.assertEqual(concepto["subtotal"], "320.00")
+        self.assertEqual(concepto["impuesto"], "51.20")
+        self.assertEqual(concepto["total"], "371.20")
+
+        tallas = {t["talla_nombre"]: t for t in concepto["tallas"]}
+        self.assertEqual(tallas["M"]["cantidad"], 2)
+        self.assertEqual(tallas["M"]["precio_unitario"], "100.00")
+        self.assertEqual(tallas["M"]["porcentaje_impuesto"], "16.00")
+        self.assertEqual(tallas["M"]["cantidad_pedida"], 3)
+        self.assertEqual(tallas["M"]["cantidad_pendiente_pedido"], 1)
+        self.assertEqual(tallas["XL"]["cantidad"], 1)
+        self.assertEqual(tallas["XL"]["precio_unitario"], "120.00")
+        self.assertEqual(tallas["XL"]["cantidad_pendiente_pedido"], 3)
+
+        self.assertEqual(data["importes"]["total_piezas"], 3)
+        self.assertEqual(data["importes"]["total"], "371.20")
+        self.assertEqual(
+            data["avance_pedido"],
+            {"piezas_pedidas": 7, "piezas_facturadas": 3, "piezas_pendientes": 4},
+        )
+
+    def test_lista_las_parcialidades_del_pedido(self):
+        primera = self._facturar([(self.a["talla_pedido"], 1)])
+        segunda = self._facturar([(self.a["talla_pedido"], 2)])
+
+        resp = self._client(self.a["usuario"]).get(self._url(segunda))
+        self.assertEqual(resp.status_code, 200, resp.data)
+        parcialidades = resp.data["parcialidades"]
+        self.assertEqual([p["id"] for p in parcialidades], [primera, segunda])
+        self.assertEqual([p["es_esta_factura"] for p in parcialidades], [False, True])
+        self.assertEqual(resp.data["avance_pedido"]["piezas_pendientes"], 0)
+
+    def test_factura_de_otra_empresa_devuelve_404(self):
+        factura_id = self._facturar([(self.a["talla_pedido"], 1)])
+        resp = self._client(self.b["usuario"]).get(self._url(factura_id))
+        self.assertEqual(resp.status_code, 404, resp.data)
+
+    def test_factura_sin_pedido_ni_renglones(self):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+            moneda=self.moneda, folio="F-MONTO", total=Decimal("100.00"),
+        )
+        resp = self._client(self.a["usuario"]).get(self._url(factura.pk))
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIsNone(resp.data["pedido"])
+        self.assertIsNone(resp.data["avance_pedido"])
+        self.assertEqual(resp.data["conceptos"], [])
+        self.assertEqual(resp.data["parcialidades"], [])
+        self.assertEqual(resp.data["receptor"]["correo_facturas"], "pagos@acme.test")
+
+    def test_renglon_previo_sin_talla(self):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+            moneda=self.moneda, pedido=self.a["pedido"], folio="F-LEGADO",
+        )
+        FacturaDetalle.objects.create(
+            factura=factura, pedido_detalle=self.a["detalle"], producto=self.a["producto"],
+            cantidad=Decimal("3"), precio_unitario=Decimal("100.00"),
+        )
+        resp = self._client(self.a["usuario"]).get(self._url(factura.pk))
+        self.assertEqual(resp.status_code, 200, resp.data)
+        talla = resp.data["conceptos"][0]["tallas"][0]
+        self.assertIsNone(talla["talla_nombre"])
+        self.assertIsNone(talla["cantidad_pendiente_pedido"])
+        self.assertEqual(talla["cantidad"], 3)
+        self.assertEqual(resp.data["avance_pedido"]["piezas_pendientes"], 0)
+
+    def test_incluye_cobranza(self):
+        factura_id = self._facturar([(self.a["talla_pedido"], 1)])
+        factura = Factura.objects.get(pk=factura_id)
+        CuentaPorCobrar.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+            total=factura.total, saldo=factura.total,
+        )
+        resp = self._client(self.a["usuario"]).get(self._url(factura_id))
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(len(resp.data["cobranza"]), 1)
+        self.assertEqual(resp.data["cobranza"][0]["saldo"], "116.00")
+
+
 class Defecto2PolizaDetalleSerializer(FinanzasBase):
     """``PolizaDetalleRelacionadoSerializer`` ya no revienta por ``source``
     redundante, y sigue devolviendo los mismos enteros."""

@@ -827,6 +827,14 @@ class FacturaViewSet(FinanzasBaseViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    @action(detail=True, methods=['get'], url_path='desglose', url_name='desglose')
+    def desglose(self, request, pk=None):
+        """Factura completa para consulta: conceptos por producto con las piezas
+        de cada talla, importes, avance del pedido, parcialidades, cobranza y
+        notas de crédito. ``get_object`` aplica el alcance por empresa: la de
+        otra empresa responde 404."""
+        return Response(FacturaService.desglose(self.get_object()))
+
     def _onboarding_piezas(self, request):
         """Piezas del pedido por talla (pedidas, facturadas, pendientes) para
         elegir qué se factura en la siguiente parcialidad."""

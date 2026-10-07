@@ -2829,6 +2829,7 @@ No mandes `pago` dentro de `pago_detalles`: mismo caso.
    - `POST /facturas/desde-pedido/` factura **todo lo que quede pendiente** del pedido; 400 en `pedido` si ya no hay piezas pendientes.
    - Toda factura activa no cancelada (también Borrador) aparta sus piezas; cancelarla o eliminarla las libera. Un pedido con una factura registrada solo por monto (`registrar-pendiente-cobro`) ya no admite facturas por piezas.
    - Fuera de alcance por ahora: flete, servicios extra y descuento global del pedido (las facturas por piezas solo cubren piezas).
+   - `GET /facturas/{id}/desglose/` → la factura completa para consulta: `emisor`, `receptor` (datos fiscales del pedido, o del cliente si faltan), `pedido` (forma/método de pago, uso CFDI), `moneda`, `conceptos[]` por producto (claves SAT de producto y unidad, color, totales) con `tallas[]` (piezas, precio, IVA, y lo pedido/pendiente de esa talla), `importes`, `avance_pedido` (piezas pedidas/facturadas/pendientes), `parcialidades[]` (todas las facturas del pedido, `es_esta_factura`), `cobranza[]` (CxC) y `notas_credito[]`. Mismo alcance por empresa que el resto: la de otra empresa responde 404.
 2. **Facturación manual o saldo pendiente**: usa `POST /facturas/registrar-pendiente-cobro/`.
 3. **No intentes crear movimientos bancarios para cobros/pagos desde frontend** si ya estás usando cobros o pagos aplicados; el backend los genera.
 4. **Usa los detalles** de `cuentas-por-cobrar/{id}` para mostrar factura ligada y pólizas relacionadas sin armar joins en frontend.
