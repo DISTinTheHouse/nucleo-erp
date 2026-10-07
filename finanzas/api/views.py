@@ -491,6 +491,11 @@ class FacturaViewSet(FinanzasBaseViewSet):
         return super().update(request, *args, **kwargs)
 
     def perform_destroy(self, instance):
+        # Una Emitida ya tiene CxC y póliza: borrarla las dejaba vivas (#339).
+        if instance.estatus != Factura.FacturaStatus.BORRADOR:
+            raise ValidationError({
+                'estatus': f'Solo se puede eliminar una factura en Borrador (esta está {instance.estatus}).'
+            })
         instance.soft_delete()
 
     def _get_default_sucursal(self, user, empresa):
