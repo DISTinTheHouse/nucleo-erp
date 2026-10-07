@@ -3035,3 +3035,89 @@ class FkCrossTenantEscrituraTests(TestCase):
         self.assertEqual(
             [p["id"] for p in resumen["pedidos_recientes"]], [self.b["pedido"].pk]
         )
+
+
+class PedidoKpisTests(TestCase):
+    """``GET /pedidos/kpis/`` (EC-420): solo ``pedidos_activos`` es real, y
+    siempre acotado a "mis pedidos" (``cotizacion.vendedor``) -- otif,
+    lead_time_promedio y pedidos_en_riesgo van ``disponible: False`` porque
+    Entrega/Envio no registran fecha ni cantidad, y el pedido no tiene fecha
+    compromiso."""
+
+    URL = "/api/v1/ventas/pedidos/kpis/"
+
+    @classmethod
+    def _pedido(cls, folio, cotizacion, estatus, gran_total="0"):
+        return Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente, moneda=cls.moneda,
+            cotizacion=cotizacion, folio=folio, estatus=estatus, gran_total=Decimal(gran_total),
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+
+    @classmethod
+    def _cotizacion(cls, vendedor):
+        return Cotizacion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente, moneda=cls.moneda,
+            vendedor=vendedor,
+        )
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente ACME")
+        cls.vendedor_a = Usuario.objects.create(
+            username="vendedor_a", email="vendedor.a@acme.test", empresa=cls.empresa
+        )
+        cls.vendedor_b = Usuario.objects.create(
+            username="vendedor_b", email="vendedor.b@acme.test", empresa=cls.empresa
+        )
+        cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
+
+        cot_a = cls._cotizacion(cls.vendedor_a)
+        cot_b = cls._cotizacion(cls.vendedor_b)
+        # Del vendedor A: una autorizada y una en proceso (activas), una
+        # cancelada (no cuenta) y una borrador (no cuenta).
+        cls.autorizada = cls._pedido("PED-1", cot_a, estatus=3, gran_total="1000.00")
+        cls.en_proceso = cls._pedido("PED-2", cot_a, estatus=4, gran_total="500.00")
+        cls._pedido("PED-3", cot_a, estatus=5, gran_total="9999.00")  # cancelado
+        cls._pedido("PED-4", cot_a, estatus=1, gran_total="9999.00")  # borrador
+        # Del vendedor B: no debe aparecer en los KPIs de A.
+        cls._pedido("PED-5", cot_b, estatus=3, gran_total="7777.00")
+
+    def _get(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(self.URL)
+
+    def test_pedidos_activos_solo_cuenta_lo_mio_autorizado_o_en_proceso(self):
+        resp = self._get(self.vendedor_a)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        activos = resp.data["pedidos_activos"]
+        self.assertTrue(activos["disponible"])
+        self.assertEqual(activos["total"], 2)
+        self.assertEqual(activos["valor"], Decimal("1500.00"))
+        self.assertEqual(
+            {d["id"] for d in activos["drill_down"]}, {self.autorizada.pk, self.en_proceso.pk},
+        )
+
+    def test_otros_tres_kpis_declaran_no_disponible(self):
+        resp = self._get(self.vendedor_a)
+
+        self.assertFalse(resp.data["otif"]["disponible"])
+        self.assertFalse(resp.data["lead_time_promedio"]["disponible"])
+        self.assertFalse(resp.data["pedidos_en_riesgo"]["disponible"])
+
+    def test_otro_vendedor_no_ve_nada_del_vendedor_a(self):
+        resp = self._get(self.vendedor_b)
+
+        self.assertEqual(resp.data["pedidos_activos"]["total"], 1)
+
+    def test_usuario_sin_empresa_no_ve_nada(self):
+        resp = self._get(self.sin_empresa)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data["pedidos_activos"]["disponible"])

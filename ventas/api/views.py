@@ -3,7 +3,7 @@ import logging
 from decimal import Decimal, ROUND_HALF_UP
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
-from django.db.models import F, OuterRef, Prefetch, Q, Subquery, Sum
+from django.db.models import Count, F, OuterRef, Prefetch, Q, Subquery, Sum
 from django.db.models.functions import Coalesce
 from datetime import timedelta
 from django.utils import timezone
@@ -3254,6 +3254,72 @@ class PedidoViewSet(viewsets.ModelViewSet):
             resultados.append(item)
 
         return Response(resultados)
+
+    # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-420): mismo
+    # criterio que ``OrdenProduccionViewSet.kpis``/``OrdenBordadoViewSet.kpis``
+    # -- todo con ``aggregate()`` en DB, nunca iterando pedidos fila por fila.
+    # Siempre acotado a "mis pedidos" (``cotizacion__vendedor=user``), igual
+    # que ``?mis_pedidos=true``: es el dashboard personal del vendedor, no uno
+    # de toda la empresa.
+    ESTATUS_PEDIDO_ACTIVOS = [Pedido.CHOICES_ESTATUS[2][0], Pedido.CHOICES_ESTATUS[3][0]]  # AUTORIZADA, EN PROCESO
+
+    @action(detail=False, methods=["get"], url_path="kpis")
+    def kpis(self, request):
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        if empresa is None and not getattr(user, "is_superuser", False):
+            return Response(self._kpis_vacio())
+
+        base = pedidos_visibles(pedidos_base(), user).filter(cotizacion__vendedor=user)
+        data = {
+            "generado_en": timezone.now(),
+            "pedidos_activos": self._kpi_pedidos_activos(base),
+            "otif": {
+                "disponible": False,
+                "motivo": "Entrega/EnvioDetalle no registran fecha ni cantidad entregada: no hay forma de saber si un pedido se entregó a tiempo y completo.",
+            },
+            "lead_time_promedio": {
+                "disponible": False,
+                "motivo": "No existe fecha de embarque en ningún lado (logistica.Envio y wms.Despacho no tienen campos de fecha).",
+            },
+            "pedidos_en_riesgo": {
+                "disponible": False,
+                "motivo": "El pedido no tiene fecha compromiso (solo una clasificación A-F en días) y no hay proyección de avance de OP.",
+            },
+        }
+        return Response(data)
+
+    def _kpis_vacio(self):
+        motivo = {"disponible": False, "motivo": "Usuario sin empresa asignada."}
+        return {
+            "generado_en": timezone.now(),
+            "pedidos_activos": motivo,
+            "otif": motivo,
+            "lead_time_promedio": motivo,
+            "pedidos_en_riesgo": motivo,
+        }
+
+    def _kpi_pedidos_activos(self, base):
+        # "Activo" = AUTORIZADA o EN PROCESO: ya es un pedido en firme, no un
+        # borrador ni algo cancelado. Mismo criterio que
+        # ``ComprasDashboardView.ESTATUS_GASTO_OC`` (excluir lo que todavía no
+        # es compromiso real).
+        activos = base.filter(estatus__in=self.ESTATUS_PEDIDO_ACTIVOS)
+        agg = activos.aggregate(total=Count("id"), valor=Sum("gran_total"))
+        drill_down = list(
+            activos.order_by("-gran_total", "-id").values(
+                "id", "folio", "estatus", "gran_total", "cliente_nombre"
+            )[:20]
+        )
+        estatus_labels = dict(Pedido.CHOICES_ESTATUS)
+        for fila in drill_down:
+            fila["estatus_label"] = estatus_labels.get(fila["estatus"], str(fila["estatus"]))
+        return {
+            "disponible": True,
+            "total": agg["total"] or 0,
+            "valor": agg["valor"] or Decimal("0"),
+            "drill_down": drill_down,
+        }
 
 
 class PedidoDetalleViewSet(viewsets.ModelViewSet):
