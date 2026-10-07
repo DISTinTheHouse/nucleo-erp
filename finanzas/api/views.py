@@ -35,7 +35,6 @@ from finanzas.models import (
     CuentaPorCobrar,
     CuentaPorPagar,
     Factura,
-    FacturaDetalle,
     FacturaProveedor,
     FacturaProveedorDetalle,
     MovimientoBancario,
@@ -87,7 +86,7 @@ from finanzas.services.pago_service import PagoService
 from finanzas.services.poliza_service import PolizaService
 from finanzas.utils.folios import generate_factura_folio
 from nucleo.models import Moneda, Sucursal
-from ventas.models import Pedido, PedidoDetalle
+from ventas.models import Pedido, PedidoDetalleTalla
 from terceros.models import Cliente
 from terceros.api.serializers import ClienteSerializer
 
@@ -740,30 +739,17 @@ class FacturaViewSet(FinanzasBaseViewSet):
         if pedido is None:
             raise NotFound('El pedido no existe o no pertenece a tu empresa.')
 
-        ya_facturado = (
-            Factura.objects.filter(pedido=pedido, activo=True)
-            .exclude(estatus=Factura.FacturaStatus.CANCELADA)
-            .exists()
-        )
-        if ya_facturado:
-            raise ValidationError({
-                'pedido': 'El pedido ya tiene una factura activa; no puede facturarse más de una vez.'
-            })
-
+        # Las piezas pendientes, las líneas vacías y la doble facturación las
+        # valida ``FacturaService``; aquí solo se acota a la empresa y al pedido.
         detalles = validated_data.get('factura_detalles') or []
-        if not detalles:
-            raise ValidationError({
-                'factura_detalles': 'La factura debe incluir al menos una línea.'
-            })
-
-        ids_detalle = {fila['pedido_detalle'].pk for fila in detalles}
+        ids_talla = {fila['pedido_detalle_talla'].pk for fila in detalles}
         ids_propios = set(
-            PedidoDetalle.objects.filter(
-                pk__in=ids_detalle,
-                pedido=pedido,
+            PedidoDetalleTalla.objects.filter(
+                pk__in=ids_talla,
+                pedido_detalle__pedido=pedido,
             ).values_list('pk', flat=True)
         )
-        ajenos = sorted(ids_detalle - ids_propios)
+        ajenos = sorted(ids_talla - ids_propios)
         if ajenos:
             raise ValidationError({
                 'factura_detalles': f'Líneas que no pertenecen al pedido indicado: {ajenos}.'
@@ -781,6 +767,10 @@ class FacturaViewSet(FinanzasBaseViewSet):
     @action(detail=False, methods=['get', 'post'], url_path='onboarding', url_name='onboarding')
     def onboarding(self, request):
         if request.method == 'GET':
+            # Con ``?pedido=``: las piezas por talla de ese pedido para armar la
+            # siguiente parcialidad. Sin él, el listado de facturas de siempre.
+            if 'pedido' in request.query_params:
+                return self._onboarding_piezas(request)
             queryset = self.filter_queryset(self.get_queryset())
             serializer = self.get_serializer(queryset, many=True)
             return Response(serializer.data)
@@ -830,86 +820,62 @@ class FacturaViewSet(FinanzasBaseViewSet):
             if pedido is None:
                 raise NotFound('El pedido no existe o no pertenece a tu empresa.')
 
-            ya_facturado = (
-                Factura.objects.filter(pedido=pedido, activo=True)
-                .exclude(estatus=Factura.FacturaStatus.CANCELADA)
-                .exists()
-            )
-            if ya_facturado:
-                raise ValidationError({
-                    'pedido': 'El pedido ya tiene una factura activa; no puede facturarse más de una vez.'
-                })
-
-            factura = self._facturar_pedido_completo(pedido, empresa, sucursal)
+            factura = FacturaService.facturar_pendiente(pedido, empresa, sucursal)
 
         return Response(
             FacturaSerializer(factura).data,
             status=status.HTTP_201_CREATED,
         )
 
-    def _facturar_pedido_completo(self, pedido, empresa, sucursal):
-        folio_factura = generate_factura_folio(empresa, sucursal)
-        factura = Factura.objects.create(
-            empresa=empresa,
-            sucursal=sucursal,
-            cliente=pedido.cliente,
-            moneda=pedido.moneda,
-            pedido=pedido,
-            folio=folio_factura,
-        )
+    @action(detail=True, methods=['get'], url_path='desglose', url_name='desglose')
+    def desglose(self, request, pk=None):
+        """Factura completa para consulta: conceptos por producto con las piezas
+        de cada talla, importes, avance del pedido, parcialidades, cobranza y
+        notas de crédito. ``get_object`` aplica el alcance por empresa: la de
+        otra empresa responde 404."""
+        return Response(FacturaService.desglose(self.get_object()))
 
-        detalles = (
-            PedidoDetalle.objects.filter(pedido=pedido)
-            .select_related('producto')
-            .prefetch_related('tallas')
-            .order_by('id')
-        )
+    def _onboarding_piezas(self, request):
+        """Piezas del pedido por talla (pedidas, facturadas, pendientes) para
+        elegir qué se factura en la siguiente parcialidad."""
+        input_serializer = FacturaDesdePedidoInputSerializer(data=request.query_params)
+        input_serializer.is_valid(raise_exception=True)
 
-        bulk_data = []
-        factura_subtotal = Decimal('0.00')
-        factura_descuento = Decimal('0.00')
-        factura_impuestos = Decimal('0.00')
-        factura_total = Decimal('0.00')
+        pedido = _aplicar_scope_empresa(
+            Pedido.objects.filter(pk=input_serializer.validated_data['pedido']),
+            request.user,
+        ).first()
+        if pedido is None:
+            raise NotFound('El pedido no existe o no pertenece a tu empresa.')
 
-        for det in detalles:
-            cantidad = Decimal(sum(t.cantidad for t in det.tallas.all()))
-            precio_unitario = det.precio_unitario or Decimal('0')
+        piezas = FacturaService.piezas_por_facturar(pedido)
+        tallas = []
+        for pieza in piezas:
+            talla = pieza['pedido_detalle_talla']
+            detalle = talla.pedido_detalle
+            producto = detalle.producto
+            tallas.append({
+                'pedido_detalle_talla': talla.pk,
+                'pedido_detalle': detalle.pk,
+                'producto': getattr(producto, 'pk', None),
+                'producto_nombre': producto.nombre if producto else detalle.producto_nombre_externo,
+                'talla': talla.talla_id,
+                'talla_nombre': talla.talla.nombre,
+                'precio_unitario': str(pieza['precio_unitario']),
+                'cantidad_pedida': int(pieza['cantidad_pedida']),
+                'cantidad_facturada': int(pieza['cantidad_facturada']),
+                'cantidad_pendiente': int(pieza['cantidad_pendiente']),
+            })
 
-            descuento = Decimal('0.00')
-            impuesto = Decimal('0.00')
-
-            subtotal = cantidad * precio_unitario
-            total = subtotal - descuento + impuesto
-
-            bulk_data.append(
-                FacturaDetalle(
-                    factura=factura,
-                    pedido_detalle=det,
-                    producto=det.producto,
-                    cantidad=cantidad,
-                    precio_unitario=precio_unitario,
-                    descuento=descuento,
-                    impuesto=impuesto,
-                    subtotal=subtotal,
-                    total=total,
-                )
-            )
-
-            factura_subtotal += subtotal
-            factura_descuento += descuento
-            factura_impuestos += impuesto
-            factura_total += total
-
-        FacturaDetalle.objects.bulk_create(bulk_data)
-
-        factura.subtotal = factura_subtotal
-        factura.descuento = factura_descuento
-        factura.impuestos = factura_impuestos
-        factura.total = factura_total
-        factura.save(
-            update_fields=['subtotal', 'descuento', 'impuestos', 'total']
-        )
-        return factura
+        return Response({
+            'pedido': pedido.pk,
+            'pedido_folio': pedido.folio,
+            'porcentaje_impuesto': str(Decimal(pedido.iva or 0)),
+            'total_piezas_pedidas': sum(t['cantidad_pedida'] for t in tallas),
+            'total_piezas_facturadas': sum(t['cantidad_facturada'] for t in tallas),
+            'total_piezas_pendientes': sum(t['cantidad_pendiente'] for t in tallas),
+            'tallas': tallas,
+        })
 
 
 class CuentaContableViewSet(FinanzasBaseViewSet):

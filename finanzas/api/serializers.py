@@ -207,19 +207,29 @@ class PolizaDetalleRelacionadoSerializer(serializers.ModelSerializer):
 
 class FacturaDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    talla_nombre = serializers.CharField(
+        source='pedido_detalle_talla.talla.nombre', read_only=True, default=None
+    )
 
     class Meta:
         model = FacturaDetalle
+        # Se factura por piezas de una talla: el renglón del pedido, el producto
+        # y los importes los deriva el servidor de ``pedido_detalle_talla``.
         read_only_fields = [
             'factura',
+            'pedido_detalle',
             'precio_unitario',
             'descuento',
+            'porcentaje_impuesto',
             'impuesto',
             'subtotal',
             'total',
             'producto'
         ]
         fields = '__all__'
+        extra_kwargs = {
+            'pedido_detalle_talla': {'required': True, 'allow_null': False},
+        }
 
 
 class FacturaSerializer(serializers.ModelSerializer):
