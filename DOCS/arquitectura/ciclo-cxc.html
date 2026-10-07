@@ -5159,7 +5159,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <path d="M 72 112 L 958 112" class="a-default" stroke-width="0.8" stroke-dasharray="3,8"/>
         <text x="72" y="100" class="t-dim" font-size="10" font-weight="600">01 / Estatus de la CxC</text>
         <path d="M 72 264 L 958 264" class="a-default" stroke-width="0.8" stroke-dasharray="3,8"/>
-        <text x="72" y="252" class="t-dim" font-size="10" font-weight="600">02 / Vencimiento</text>
+        <text x="72" y="252" class="t-dim" font-size="10" font-weight="600">02 / Entrada manual y vencimiento</text>
         <path d="M 72 436 L 958 436" class="a-default" stroke-width="0.8" stroke-dasharray="3,8"/>
         <text x="72" y="424" class="t-dim" font-size="10" font-weight="600">03 / Salida manual</text>
 
@@ -5168,14 +5168,15 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
         <!-- Transition paths -->
         <path data-edge-from="factura" data-edge-to="pendiente" data-edge-key="0" data-edge-id="alta" data-composition-points="153,157;189,157" d="M 153 157 L 189 157" class="a-default" stroke-width="1.1" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="pendiente" data-edge-to="parcial" data-edge-label="cobro / NC" data-edge-key="1" data-edge-id="abono" data-composition-points="307,157;343,157" d="M 307 157 L 343 157" class="a-emphasis" stroke-width="2" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="parcial" data-edge-to="pagada" data-edge-label="liquida" data-edge-key="2" data-edge-id="liquida" data-composition-points="461,157;497,157" d="M 461 157 L 497 157" class="a-emphasis" stroke-width="2" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="parcial" data-edge-to="mora" data-edge-label="vence" data-edge-key="3" data-edge-id="vence" data-composition-points="402,188;402,278" d="M 402 188 L 402 278" class="a-security" stroke-width="1.1" marker-end="url(#arrowhead-security)"/>
-        <path data-edge-from="pendiente" data-edge-to="cancelada" data-edge-key="4" data-edge-id="cancela" data-composition-points="248,126;248,98;710,98;710,450" d="M 248 126 L 248 108 Q 248 98 258 98 L 700 98 Q 710 98 710 108 L 710 450" class="a-dashed" stroke-width="1.1" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="factura_parcial" data-edge-to="pendiente" data-edge-label="alta manual" data-edge-key="1" data-edge-id="alta_manual" data-composition-points="153,307;248,307;248,188" d="M 153 307 L 238 307 Q 248 307 248 297 L 248 188" class="a-dashed" stroke-width="1.1" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="pendiente" data-edge-to="parcial" data-edge-label="cobro / NC" data-edge-key="2" data-edge-id="abono" data-composition-points="307,157;343,157" d="M 307 157 L 343 157" class="a-emphasis" stroke-width="2" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="parcial" data-edge-to="pagada" data-edge-label="liquida" data-edge-key="3" data-edge-id="liquida" data-composition-points="461,157;497,157" d="M 461 157 L 497 157" class="a-emphasis" stroke-width="2" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="parcial" data-edge-to="mora" data-edge-label="vence" data-edge-key="4" data-edge-id="vence" data-composition-points="402,188;402,278" d="M 402 188 L 402 278" class="a-security" stroke-width="1.1" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="pendiente" data-edge-to="cancelada" data-edge-key="5" data-edge-id="cancela" data-composition-points="248,126;248,98;710,98;710,450" d="M 248 126 L 248 108 Q 248 98 258 98 L 700 98 Q 710 98 710 108 L 710 450" class="a-dashed" stroke-width="1.1" marker-end="url(#arrowhead-dashed)"/>
 
         <!-- States -->
-        <g id="node-factura" data-node-id="factura" data-node-label="Factura emitida" tabindex="0" role="button" aria-label="Focus Factura emitida, crea CxC + póliza, Estatus de la CxC" aria-pressed="false" data-node-kind="start" data-node-sublabel="crea CxC + póliza" data-node-tag="entrada" data-node-context="Estatus de la CxC">
-          <title>Factura emitida · crea CxC + póliza · Estatus de la CxC · entrada</title>
+        <g id="node-factura" data-node-id="factura" data-node-label="Factura emitida" tabindex="0" role="button" aria-label="Focus Factura emitida, registrar pendiente, Estatus de la CxC" aria-pressed="false" data-node-kind="start" data-node-sublabel="registrar pendiente" data-node-tag="crea CxC + póliza" data-node-context="Estatus de la CxC">
+          <title>Factura emitida · registrar pendiente · Estatus de la CxC · crea CxC + póliza</title>
           <rect x="35" y="126" width="118" height="62" rx="7" class="c-mask"/>
           <rect x="35" y="126" width="118" height="62" rx="7" class="c-frontend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="start" class="semantic-sigil s-frontend" transform="translate(136 132) scale(0.6875)">
@@ -5184,8 +5185,21 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           </g>
         <text data-detail="fine" x="45" y="140" class="t-frontend" font-size="7" font-weight="700">01</text>
           <text data-node-label="" data-detail-anchor="" x="94" y="147" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">Factura emitida</text>
-          <text data-detail="context" x="94" y="163" class="t-muted" font-size="7" text-anchor="middle">crea CxC + póliza</text>
-        <text data-detail="fine" x="94" y="177" class="t-frontend" font-size="7" text-anchor="middle">entrada</text>
+          <text data-detail="context" x="94" y="163" class="t-muted" font-size="7" text-anchor="middle">registrar pendiente</text>
+        <text data-detail="fine" x="94" y="177" class="t-frontend" font-size="7" text-anchor="middle">crea CxC + póliza</text>
+        </g>
+
+        <g id="node-factura_parcial" data-node-id="factura_parcial" data-node-label="Factura parcial" tabindex="0" role="button" aria-label="Focus Factura parcial, Borrador, sin CxC, Estatus de la CxC" aria-pressed="false" data-node-kind="start" data-node-sublabel="Borrador, sin CxC" data-node-tag="por piezas" data-node-context="Estatus de la CxC">
+          <title>Factura parcial · Borrador, sin CxC · Estatus de la CxC · por piezas</title>
+          <rect x="35" y="276" width="118" height="62" rx="7" class="c-mask"/>
+          <rect x="35" y="276" width="118" height="62" rx="7" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="start" class="semantic-sigil s-frontend" transform="translate(136 282) scale(0.6875)">
+            <circle cx="8" cy="8" r="5"/>
+            <path d="m7 5.4 3.6 2.6L7 10.6Z" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="94" y="297" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">Factura parcial</text>
+          <text data-detail="context" x="94" y="313" class="t-muted" font-size="7" text-anchor="middle">Borrador, sin CxC</text>
+        <text data-detail="fine" x="94" y="327" class="t-frontend" font-size="7" text-anchor="middle">por piezas</text>
         </g>
 
         <g id="node-pendiente" data-node-id="pendiente" data-node-label="Pendiente" tabindex="0" role="button" aria-label="Focus Pendiente, saldo = total, Estatus de la CxC" aria-pressed="false" data-node-kind="active" data-node-sublabel="saldo = total" data-node-context="Estatus de la CxC">
@@ -5226,8 +5240,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="556" y="177" class="t-database" font-size="7" text-anchor="middle">liquidada</text>
         </g>
 
-        <g id="node-mora" data-node-id="mora" data-node-label="Vencida" tabindex="0" role="button" aria-label="Focus Vencida, alerta por días de atraso, Vencimiento" aria-pressed="false" data-node-kind="waiting" data-node-sublabel="alerta por días de atraso" data-node-tag="alerta, no estatus" data-node-context="Vencimiento">
-          <title>Vencida · alerta por días de atraso · Vencimiento · alerta, no estatus</title>
+        <g id="node-mora" data-node-id="mora" data-node-label="Vencida" tabindex="0" role="button" aria-label="Focus Vencida, alerta por días de atraso, Entrada manual y vencimiento" aria-pressed="false" data-node-kind="waiting" data-node-sublabel="alerta por días de atraso" data-node-tag="alerta, no estatus" data-node-context="Entrada manual y vencimiento">
+          <title>Vencida · alerta por días de atraso · Entrada manual y vencimiento · alerta, no estatus</title>
           <rect x="339" y="278" width="126" height="58" rx="7" class="c-mask"/>
           <rect x="339" y="278" width="126" height="58" rx="7" class="c-cloud" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="waiting" class="semantic-sigil s-cloud" transform="translate(448 284) scale(0.6875)">
@@ -5253,15 +5267,19 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
         <!-- Transition labels -->
 
-        <g data-detail="context" data-edge-from="pendiente" data-edge-to="parcial" data-edge-label="cobro / NC" data-edge-key="1" data-edge-id="abono">
+        <g data-detail="context" data-edge-from="factura_parcial" data-edge-to="pendiente" data-edge-label="alta manual" data-edge-key="1" data-edge-id="alta_manual">
+          <rect x="215.05" y="226.5" width="65.9" height="16" rx="4" class="c-mask"/>
+          <text x="248" y="237.5" class="t-messagebus" font-size="8" text-anchor="middle">alta manual</text>
+        </g>
+        <g data-detail="context" data-edge-from="pendiente" data-edge-to="parcial" data-edge-label="cobro / NC" data-edge-key="2" data-edge-id="abono">
           <rect x="294.5" y="111" width="61" height="16" rx="4" class="c-mask"/>
           <text x="325" y="122" class="t-backend" font-size="8" text-anchor="middle">cobro / NC</text>
         </g>
-        <g data-detail="context" data-edge-from="parcial" data-edge-to="pagada" data-edge-label="liquida" data-edge-key="2" data-edge-id="liquida">
+        <g data-detail="context" data-edge-from="parcial" data-edge-to="pagada" data-edge-label="liquida" data-edge-key="3" data-edge-id="liquida">
           <rect x="455.85" y="111" width="46.300000000000004" height="16" rx="4" class="c-mask"/>
           <text x="479" y="122" class="t-backend" font-size="8" text-anchor="middle">liquida</text>
         </g>
-        <g data-detail="context" data-edge-from="parcial" data-edge-to="mora" data-edge-label="vence" data-edge-key="3" data-edge-id="vence">
+        <g data-detail="context" data-edge-from="parcial" data-edge-to="mora" data-edge-label="vence" data-edge-key="4" data-edge-id="vence">
           <rect x="383.75" y="191" width="36.5" height="16" rx="4" class="c-mask"/>
           <text x="402" y="202" class="t-security" font-size="8" text-anchor="middle">vence</text>
         </g>
@@ -5495,7 +5513,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         </div>
         <ul>
           <li>&bull; Cobros y NC aún no generan póliza; solo la factura</li>
-          <li>&bull; Cancelar una factura no cancela su CxC automáticamente</li>
+          <li>&bull; Cancelar una factura no cancela su CxC</li>
+          <li>&bull; La factura parcial no crea CxC: hoy se da de alta a mano</li>
         </ul>
       </div>
     </div>
