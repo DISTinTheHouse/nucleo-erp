@@ -355,17 +355,22 @@ class PermisosEfectivosEquivalenciaTests(BusquedaGlobalBaseTestCase):
             with CaptureQueriesContext(connection) as capturadas:
                 resp = client.get(f"{SEARCH_URL}?q=acme")
             self.assertEqual(resp.status_code, 200)
-            return len(capturadas)
+            return [q["sql"] for q in capturadas.captured_queries]
+
+        def de_permisos(sqls):
+            # Las 2 de ``permisos_efectivos``: overrides del usuario y claves por rol.
+            return sum(1 for sql in sqls if '"usuarios_permisos"' in sql or '"roles_permisos"' in sql)
 
         self.assertEqual([g["tipo"] for g in self._buscar(un_grupo, "acme")["grupos"]], ["pedido"])
-        coste_1 = consultas(un_grupo)
-        coste_3 = consultas(tres_grupos)
+        sql_1 = consultas(un_grupo)
+        sql_3 = consultas(tres_grupos)
 
-        # Dos grupos más = dos búsquedas más. Si los permisos se resolvieran por
-        # entidad, la diferencia sería de 6 (2 búsquedas + 4 de permisos).
-        self.assertEqual(coste_3 - coste_1, 2, f"{coste_1} -> {coste_3}")
-        # Y el coste absoluto se mantiene pequeño: permisos + una consulta por grupo.
-        self.assertLessEqual(coste_1, 4, f"la petición de 1 grupo costó {coste_1}")
+        # Los permisos se resuelven una vez por petición, vea 1 grupo o 3. Se
+        # cuentan solo esas consultas: el resto depende del alcance de filas de
+        # cada entidad (p. ej. clientes consulta el rol de Mesa de Control).
+        self.assertEqual(de_permisos(sql_1), 2)
+        self.assertEqual(de_permisos(sql_3), 2)
+        self.assertLessEqual(len(sql_1), 4, f"la petición de 1 grupo costó {len(sql_1)}")
 
     def test_usuario_anonimo_no_revienta_y_no_ve_nada(self):
         permisos = permisos_efectivos(AnonymousUser())
