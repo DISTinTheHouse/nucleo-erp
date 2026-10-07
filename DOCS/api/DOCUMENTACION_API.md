@@ -1694,6 +1694,69 @@ Botón "Revisar inventario" en el detalle del pedido: por cada producto/talla de
 - **Canal hacia producción**: `GET /api/v1/produccion/pedidos-especiales/` (`PedidoEspecialViewSet`, solo lectura) — lista los pedidos con al menos una línea `requiere_produccion=True` **y que ya tienen `clasificacion` y `fecha_confirmacion`** (filtro fijo, ver detalle en la sección de Pedidos Especiales más abajo). El detalle trae solo esas líneas/tallas especiales.
 - **No se genera ninguna Orden de Producción automáticamente**: `OrdenProduccion` exige un `ListaMaterialBom` activo por `producto_variante`, y una muestra sin SKU no tiene variante ni BOM — intentarlo fallaría por diseño. El flujo real es manual: producción da de alta el SKU/variante (proceso aparte, catálogo) y **después** crea la OP a mano desde `POST /api/v1/produccion/orden-produccion/`, mandando `pedido: <id>` en el body para ligarla al documento maestro (folio P) — `OrdenProduccion.pedido` ya es un campo normal, no hace falta nada nuevo para esto.
 
+### Trazabilidad del pedido (tracker + semáforo)
+
+En qué paso va el pedido, cuánto lleva y si va a tiempo. Todo se calcula en el servidor con lo que ya registran producción, WMS y finanzas; no hay nada que capturar.
+
+- **Endpoint**: `GET /api/v1/ventas/pedidos/{id}/trazabilidad/`
+- Solo lectura. Mismo alcance que el resto de `PedidoViewSet` (`404` para un pedido de otra empresa).
+- **Respuesta** (`200`):
+  ```json
+  {
+    "pedido": {
+      "id": 120, "folio": "P-00120", "cliente": "Cliente SA",
+      "estatus_label": "AUTORIZADA", "clasificacion": "D",
+      "fecha_compromiso": "2026-11-03", "dias_restantes": 27, "total_piezas": 420
+    },
+    "resumen": {
+      "paso_actual": "maquila",
+      "avance": 34.5,
+      "semaforo": "amarillo",
+      "motivos": ["OB-2026-00045 detenida"],
+      "facturado_pct": 0.0,
+      "cobrado_pct": null
+    },
+    "pasos": [
+      { "clave": "confirmado", "label": "Confirmado", "estado": "completo", "pct": 100.0, "hecho": null, "total": null },
+      { "clave": "programado", "label": "Programado", "estado": "completo", "pct": 100.0, "hecho": 420, "total": 420 },
+      { "clave": "surtido", "label": "Surtido", "estado": "completo", "pct": 100.0, "hecho": 420, "total": 420 },
+      {
+        "clave": "maquila", "label": "Maquila", "estado": "detenido", "pct": 38.1, "hecho": null, "total": null,
+        "procesos": [
+          {
+            "clave": "bordado", "label": "Bordado", "estado": "detenido", "pct": 38.1,
+            "hecho": 160, "total": 420, "sin_orden": 0,
+            "ordenes": [
+              { "tipo": "BORDADO", "id": 45, "folio": "OB-2026-00045", "estatus_label": "Detenido",
+                "pct": 38.1, "hecho": 160, "cubierto": 420, "detenida": true }
+            ]
+          },
+          { "clave": "reflejante", "label": "Reflejante", "estado": "no_aplica", "pct": null, "hecho": null, "total": null, "sin_orden": 0, "ordenes": [] },
+          { "clave": "corte_manga", "label": "Corte de manga", "estado": "no_aplica", "pct": null, "hecho": null, "total": null, "sin_orden": 0, "ordenes": [] },
+          { "clave": "op", "label": "Orden de producción", "estado": "no_aplica", "pct": null, "hecho": null, "total": null, "sin_orden": 0, "ordenes": [] }
+        ]
+      },
+      { "clave": "empacado", "label": "Empacado", "estado": "pendiente", "pct": 0.0, "hecho": 0, "total": 420 },
+      { "clave": "embarcado", "label": "Embarcado", "estado": "pendiente", "pct": 0.0, "hecho": 0, "total": 420 }
+    ]
+  }
+  ```
+- **Forma fija**: `pasos` siempre trae los 6 pasos en ese orden; cada paso trae siempre `clave/label/estado/pct/hecho/total`. `maquila.procesos` siempre trae los 4 procesos. Lo que no aplica viene con `estado: "no_aplica"` y `pct: null`.
+- **`estado`**: `no_aplica` · `pendiente` · `en_proceso` · `completo` · `detenido`.
+- **`resumen.semaforo`**: `verde` · `amarillo` · `rojo` · `terminado` (embarcado al 100%) · `gris` (cancelado, sin clasificación o clasificación `X`). `motivos` explica el color en texto listo para mostrar.
+- **`resumen.paso_actual`**: el último paso que ya arrancó (`clave` de `pasos`).
+- **`resumen.avance`**: promedio de Surtido, Maquila, Empacado y Embarcado (los que apliquen).
+- **`resumen.cobrado_pct`**: `null` si el usuario no puede ver contabilidad o si el pedido no tiene cuentas por cobrar.
+- **Cómo se mide cada paso** (todo en piezas contra `total_piezas`):
+  - Confirmado: pedido autorizado + `clasificacion` + `fecha_confirmacion` (falta alguna → `en_proceso`, `pct: 50`).
+  - Programado: suma de `programacion_conf.programaciones[].cantidad`.
+  - Surtido: piezas con folio de picking (no cancelado).
+  - Maquila: promedio de sus procesos. Bordado/reflejante: piezas avanzadas (avances capturados; una orden finalizada cuenta completa). Corte de manga: solo órdenes completadas (no tiene avances). OP: hitos de ruta crítica (5 hitos + completada). `sin_orden` = piezas que llevan el proceso y aún no tienen orden de trabajo.
+  - Empacado: piezas empacadas. Embarcado: piezas empacadas que ya tienen despacho.
+  - `facturado_pct`: piezas en facturas emitidas.
+- **Semáforo** (plazo = `fecha_confirmacion` → `fecha_compromiso`): rojo si ya venció o el avance va 30+ puntos atrás del plazo consumido; amarillo si va 10+ puntos atrás, hay una orden detenida, o quedan piezas sin orden de trabajo con más del 25% del plazo consumido; si no, verde.
+- **Uso en Next.js**: una sola llamada. Tracker = `pasos.map(...)` (color por `estado`), semáforo = `resumen.semaforo` + `resumen.motivos`, y al expandir Maquila, `procesos[].ordenes[]` (cada orden se abre en su detalle por `tipo` + `id`).
+
 ---
 
 ## 🧮 Mesa de Control
@@ -1960,7 +2023,7 @@ Los **dos únicos campos manuales** que llena mesa de control directamente sobre
     "...": "resto de campos del pedido, sin cambios"
   }
   ```
-- **`fecha_entrega_min` / `fecha_entrega_max`**: se calculan en el servidor a partir de `clasificacion` + `created_at` del pedido (fecha de alta, no la de confirmación) — **no son campos editables ni columnas en BD**, se recalculan en cada lectura (`ventas/services/clasificacion_service.py`) y **ya vienen incluidas en cualquier `GET`/`PATCH` de `/pedidos/{id}/`**, no solo cuando cambias la clasificación. Rangos usados:
+- **`fecha_entrega_min` / `fecha_entrega_max`**: se calculan en el servidor a partir de `clasificacion` + `fecha_confirmacion` del pedido (si aún no tiene confirmación, desde `created_at`) — **no son campos editables ni columnas en BD**, se recalculan en cada lectura (`ventas/services/clasificacion_service.py`) y **ya vienen incluidas en cualquier `GET`/`PATCH` de `/pedidos/{id}/`**, no solo cuando cambias la clasificación. Rangos usados:
   | Clasificación | Rango |
   |---|---|
   | A | 2 a 5 días |
