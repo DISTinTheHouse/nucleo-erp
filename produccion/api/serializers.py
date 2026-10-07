@@ -277,6 +277,7 @@ class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
     asociado cambia de valor -- el cliente solo manda el checkbox.
     """
 
+    op_id = serializers.IntegerField(read_only=True)
     estatus_paquete_tecnico_display = serializers.CharField(
         source="get_estatus_paquete_tecnico_display", read_only=True, allow_null=True
     )
