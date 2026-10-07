@@ -149,3 +149,26 @@ class ProveedorEmpresaTests(TestCase):
         proveedor.refresh_from_db()
         self.assertFalse(proveedor.activo)
         self.assertIsNotNone(proveedor.fecha_baja)
+
+
+    # --- #315: acumulados de solo lectura -------------------------------------
+
+    ACUMULADOS = {
+        "saldo_anterior": "10.00", "saldo_actual": "20.00", "saldo_acumulado": "30.00",
+        "plazo_real_dias": 15, "fecha_ultima_compra": "2026-01-01",
+        "fecha_ultimo_pago": "2026-01-02", "fecha_baja": "2026-01-03",
+    }
+
+    def test_post_y_patch_ignoran_los_acumulados(self):
+        resp = self.client_api.post(self.URL, self._body(**self.ACUMULADOS), format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        proveedor = Proveedor.objects.get(pk=resp.data["id"])
+
+        self.client_api.patch(f"{self.URL}{proveedor.pk}/", self.ACUMULADOS, format="json")
+
+        proveedor.refresh_from_db()
+        self.assertEqual(proveedor.saldo_actual, 0)
+        self.assertEqual(proveedor.plazo_real_dias, 0)
+        self.assertIsNone(proveedor.fecha_ultima_compra)
+        self.assertIsNone(proveedor.fecha_baja)
+        self.assertIn("saldo_actual", resp.data)
