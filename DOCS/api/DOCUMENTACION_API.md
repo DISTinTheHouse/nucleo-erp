@@ -3302,10 +3302,12 @@ Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró
 Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos, trazo, corte, producción). Compras queda pendiente hasta nuevo aviso. Es un renglón por OP (no por línea/variante), en tabla separada de `OrdenProduccion` para que el `GET`/`PATCH` sea barato — no toca el serializer pesado con BOM/detalles anidados.
 
 - **Endpoint**: `GET|PATCH /api/v1/produccion/orden-produccion/{op_id}/ruta-critica/`
-- **GET**: cualquier usuario con acceso a la OP (mismo scope multi-tenant). Si la OP no tiene ruta crítica creada aún, se crea vacía automáticamente.
-- **PATCH**: solo usuarios del departamento **Producción** (o superuser/admin_empresa). `400 {"permiso": "..."}` para el resto.
+- **GET**: cualquier usuario con acceso a la OP (mismo scope multi-tenant). Si la OP no tiene ruta crítica capturada, devuelve los valores por defecto **sin crear nada** (`updated_at: null`); el renglón se crea en el primer `PATCH`.
+- **Varias OPs**: `GET /api/v1/produccion/orden-produccion/ruta-critica/?op_id=1,2,3` → arreglo, una fila por OP (con `op_id`). Máx. 200 ids; ids de otra empresa o inexistentes se omiten; `op_id` faltante o no numérico → `400`.
+- **PATCH**: solo usuarios del departamento **Producción** (o superuser/admin_empresa). `400 {"permiso": "..."}` para el resto. OP Completada (5) o Cancelada (7) → `409 {"msg": "..."}`.
 - Acepta `PATCH` parcial — solo manda los campos que cambian.
-- Los 4 campos `fecha_existencia_*` son de solo lectura: el backend los sella con la fecha/hora actual cuando su checkbox asociado cambia de valor (el cliente nunca los manda).
+- Los 4 campos `fecha_existencia_*` son de solo lectura: el backend los sella con la fecha/hora actual al **marcar** su checkbox y los limpia (`null`) al **desmarcarlo**. Reenviar el mismo valor no los toca.
+- Toda respuesta incluye `op_id`.
 
 **Campos**
 
@@ -3323,7 +3325,7 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
 | `fecha_embarque_materia_prima` | date | Telas & avíos |
 | `fecha_trazo` | date | Trazo |
 | `fecha_real_corte` | date | Corte |
-| `cantidad_real_corte` | decimal | Corte |
+| `cantidad_real_corte` | decimal (string), **entero ≥ 0** o `null`; negativos/decimales → `400` | Corte |
 | `corte_recibido` | bool | Producción |
 
 **Ejemplo PATCH**
@@ -3437,6 +3439,8 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
 ```
 
 **Reglas del GET onboarding**
+
+**POST** (OB/OR/OCM): el pedido debe estar programado por Mesa de Control hacia el destino del endpoint (`BORDADO`/`REFLEJANTE`/`CORTE_MANGA`); si no → `400 {"pedido": [...]}`. Mismo criterio que este GET.
 
 | Campo                                      | Regla                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

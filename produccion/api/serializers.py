@@ -31,7 +31,7 @@ from catalogo.models import ProductoVariante
 from produccion.services.common import config_como_dict, revisar_empresa
 
 
-def _pedido_en_alcance(serializer, pedido, etiqueta_orden):
+def _pedido_en_alcance(serializer, pedido, etiqueta_orden, destino):
     """``pedido`` de una OB/OR/OCM, validado a nivel de campo.
 
     A nivel de campo y no solo en el service: si falla, ``validate()`` no corre
@@ -56,6 +56,13 @@ def _pedido_en_alcance(serializer, pedido, etiqueta_orden):
     if not es_staff and pedido.sucursal_id not in user.sucursales_permitidas():
         raise serializers.ValidationError(
             f"No tiene acceso a la sucursal del pedido para generar la orden de {etiqueta_orden}."
+        )
+    # Mismo criterio que el GET de onboarding: solo pedidos que Mesa de Control
+    # programó hacia este destino.
+    from produccion.api.views import _programado_para_destino
+    if _programado_para_destino(pedido, destino) is None:
+        raise serializers.ValidationError(
+            f"El pedido no está programado hacia {destino} por Mesa de Control."
         )
     return pedido
 
@@ -270,6 +277,7 @@ class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
     asociado cambia de valor -- el cliente solo manda el checkbox.
     """
 
+    op_id = serializers.IntegerField(read_only=True)
     estatus_paquete_tecnico_display = serializers.CharField(
         source="get_estatus_paquete_tecnico_display", read_only=True, allow_null=True
     )
@@ -526,7 +534,7 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
         }
 
     def validate_pedido(self, pedido):
-        return _pedido_en_alcance(self, pedido, "bordado")
+        return _pedido_en_alcance(self, pedido, "bordado", "BORDADO")
 
     def validate(self, attrs):
         """Valida cross-tenant de ``proveedor`` y ``detalles_override``.
@@ -1579,7 +1587,7 @@ class OrdenReflejanteSerializer(serializers.ModelSerializer):
         return usuario.get_full_name().strip() or usuario.email
 
     def validate_pedido(self, pedido):
-        return _pedido_en_alcance(self, pedido, "reflejante")
+        return _pedido_en_alcance(self, pedido, "reflejante", "REFLEJANTE")
 
     def validate(self, attrs):
         detalles_override = attrs.get("detalles_override") or []
@@ -2026,7 +2034,7 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
         return usuario.get_full_name().strip() or usuario.email
 
     def validate_pedido(self, pedido):
-        return _pedido_en_alcance(self, pedido, "corte de manga")
+        return _pedido_en_alcance(self, pedido, "corte de manga", "CORTE_MANGA")
 
     def validate(self, attrs):
         detalles_override = attrs.get("detalles_override") or []

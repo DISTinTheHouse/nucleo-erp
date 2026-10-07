@@ -522,6 +522,37 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             return
         raise ValidationError({"permiso": "Acción disponible solo para producción."})
 
+    MAX_OPS_RUTA_CRITICA = 200
+
+    @action(detail=False, methods=['get'], url_path='ruta-critica')
+    def ruta_critica_bulk(self, request):
+        """Ruta crítica de varias OPs: ``?op_id=1,2,3``. Solo lectura, acotada
+        por empresa; los ids ajenos o inexistentes se omiten. Sin captura, la OP
+        sale con los valores por defecto (sin escribir), igual que el detalle."""
+        try:
+            ids = {int(x) for x in request.query_params.get('op_id', '').split(',') if x.strip()}
+        except ValueError:
+            raise ValidationError({'op_id': 'Lista de enteros separados por coma.'})
+        if not ids:
+            raise ValidationError({'op_id': 'Requerido.'})
+        if len(ids) > self.MAX_OPS_RUTA_CRITICA:
+            raise ValidationError({'op_id': f'Máximo {self.MAX_OPS_RUTA_CRITICA} OPs por llamada.'})
+
+        empresa = getattr(request.user, 'empresa', None)
+        ops = list(
+            OrdenProduccion.objects.filter(pk__in=ids, empresa=empresa).order_by('op_id')
+            if empresa is not None else []
+        )
+        capturadas = {
+            rc.op_id: rc for rc in OrdenProduccionRutaCritica.objects.filter(op__in=[op.pk for op in ops])
+        }
+        return Response([
+            OrdenProduccionRutaCriticaSerializer(
+                capturadas.get(op.pk) or OrdenProduccionRutaCritica(op=op)
+            ).data
+            for op in ops
+        ])
+
     @action(detail=True, methods=['get', 'patch'], url_path='ruta-critica')
     def ruta_critica(self, request, pk=None):
         # Deliberadamente NO pasa por ``get_queryset()``: ese queryset trae el

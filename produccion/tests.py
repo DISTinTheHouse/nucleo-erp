@@ -68,6 +68,14 @@ SERIES = (
     ("ORDEN_CORTE_MANGA", "OCM"),
 )
 
+DESTINOS = ("BORDADO", "REFLEJANTE", "CORTE_MANGA")
+
+
+def _programar(pedido, destinos=DESTINOS):
+    """Mesa de Control programa el pedido: el POST de onboarding lo exige (#278)."""
+    pedido.programacion_conf = {"programaciones": [{"destino": d, "cantidad": 1} for d in destinos]}
+    pedido.save(update_fields=["programacion_conf"])
+
 
 class BaseOrdenTrabajoTests:
     """Batería compartida por los tres tipos de orden de trabajo.
@@ -2658,6 +2666,7 @@ class ConfiguracionCompletaEnDetalleTests(TestCase):
             pedido_detalle=detalle, talla=self.talla_ch, cantidad=5,
             **{flag: True, campo_config: valor},
         )
+        _programar(pedido)
         return pedido
 
     def _crear(self, url, pedido):
@@ -3193,6 +3202,7 @@ class ToleranciaFormaConfigTests(TestCase):
             pedido_detalle=detalle, talla=self.talla_ch, cantidad=5,
             **{flag: True, campo_config: valor},
         )
+        _programar(pedido)
         return pedido, pdt
 
     # --- sitio 1: OrdenBordadoService.save -----------------------------------
@@ -4045,6 +4055,7 @@ class OnboardingPostScopeTenantTests(TestCase):
             pedido_detalle=detalle, talla=cls.talla, cantidad=cantidad,
             lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
         )
+        _programar(pedido)
         return pedido, pdt
 
     def _post(self, url, pedido_id, pdt_id):
@@ -4129,6 +4140,7 @@ class OnboardingPostLineaMuestraTests(TestCase):
             pedido_detalle=detalle, talla=Talla.objects.create(nombre="CH"), cantidad=5,
             lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
         )
+        _programar(cls.pedido)
 
     def test_linea_de_muestra_responde_400_sin_crear_ni_consumir_folio(self):
         client = APIClient()
@@ -4196,6 +4208,7 @@ class OrdenCorteMangaParcialidadesTests(TestCase):
             pedido_detalle=self.detalle, talla=self.talla_m,
             cantidad=self.CANTIDAD_M, lleva_corte_manga=True,
         )
+        _programar(self.pedido, ("CORTE_MANGA",))
 
     def _post(self, overrides):
         client = APIClient()
@@ -4413,3 +4426,140 @@ class RutaCriticaOPTests(TestCase):
 
                 self.assertEqual(resp.status_code, 200, resp.data)
                 self.assertEqual(resp.data["cantidad_real_corte"], esperado)
+
+
+class OnboardingPostProgramacionTests(TestCase):
+    """#278: el POST de onboarding exige la misma programación de Mesa de
+    Control que el GET usa para ofrecer el pedido."""
+
+    CASOS = (
+        ("/api/v1/produccion/orden-bordado/onboarding/", OrdenesBordado, "BORDADO"),
+        ("/api/v1/produccion/orden-reflejante/onboarding/", OrdenesReflejante, "REFLEJANTE"),
+        ("/api/v1/produccion/orden-corte-manga/onboarding/", OrdenesCorteManga, "CORTE_MANGA"),
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
+        for tipo_documento, serie in SERIES:
+            SerieFolio.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento=tipo_documento, serie=serie,
+            )
+        cls.usuario = Usuario.objects.create(
+            username="operador", email="operador@acme.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla = Talla.objects.create(nombre="CH")
+
+    def _pedido(self):
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=self.talla, cantidad=5,
+            lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
+        )
+        return pedido
+
+    def _post(self, url, pedido):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client.post(url, {"pedido": pedido.pk}, format="json")
+
+    def test_pedido_sin_programar_responde_400(self):
+        for url, modelo, destino in self.CASOS:
+            with self.subTest(destino=destino):
+                pedido = self._pedido()
+
+                resp = self._post(url, pedido)
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIn("pedido", resp.data)
+                self.assertFalse(modelo.objects.filter(pedido=pedido).exists())
+
+    def test_pedido_programado_hacia_otro_destino_responde_400(self):
+        for url, modelo, destino in self.CASOS:
+            with self.subTest(destino=destino):
+                pedido = self._pedido()
+                _programar(pedido, tuple(d for d in DESTINOS if d != destino))
+
+                self.assertEqual(self._post(url, pedido).status_code, 400)
+
+    def test_pedido_programado_hacia_su_destino_se_crea(self):
+        for url, modelo, destino in self.CASOS:
+            with self.subTest(destino=destino):
+                pedido = self._pedido()
+                _programar(pedido, (destino,))
+
+                resp = self._post(url, pedido)
+
+                self.assertIn(resp.status_code, (200, 201), resp.data)
+                self.assertTrue(modelo.objects.filter(pedido=pedido).exists())
+
+
+class RutaCriticaBulkTests(TestCase):
+    """#283: ``GET /orden-produccion/ruta-critica/?op_id=...``."""
+
+    URL = "/api/v1/produccion/orden-produccion/ruta-critica/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="GDL", nombre="GDL")
+        cls.usuario = Usuario.objects.create(username="u", email="u@acme.test", empresa=cls.empresa)
+        cls.op1 = OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-1")
+        cls.op2 = OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-2")
+        cls.op_ajena = OrdenProduccion.objects.create(empresa=cls.otra, sucursal=cls.sucursal_otra, folio_op="OP-X")
+        OrdenProduccionRutaCritica.objects.create(op=cls.op1, corte_recibido=True)
+
+    def _get(self, query):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client.get(f"{self.URL}{query}")
+
+    def test_devuelve_varias_ops_con_op_id_sin_escribir(self):
+        resp = self._get(f"?op_id={self.op1.pk},{self.op2.pk}")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        filas = {f["op_id"]: f for f in resp.data}
+        self.assertEqual(set(filas), {self.op1.pk, self.op2.pk})
+        self.assertTrue(filas[self.op1.pk]["corte_recibido"])
+        self.assertFalse(filas[self.op2.pk]["corte_recibido"])
+        self.assertFalse(OrdenProduccionRutaCritica.objects.filter(op=self.op2).exists())
+
+    def test_omite_ops_de_otra_empresa(self):
+        resp = self._get(f"?op_id={self.op1.pk},{self.op_ajena.pk}")
+
+        self.assertEqual([f["op_id"] for f in resp.data], [self.op1.pk])
+
+    def test_parametro_invalido_o_faltante_responde_400(self):
+        for query in ("", "?op_id=", "?op_id=1,abc"):
+            with self.subTest(query=query):
+                self.assertEqual(self._get(query).status_code, 400)
+
+    def test_queries_constantes(self):
+        from django.test.utils import CaptureQueriesContext
+
+        def queries(ids):
+            with CaptureQueriesContext(connection) as ctx:
+                self._get("?op_id=" + ",".join(str(i) for i in ids))
+            return len(ctx)
+
+        self.assertEqual(queries([self.op1.pk]), queries([self.op1.pk, self.op2.pk]))
+
+    def test_detalle_tambien_trae_op_id(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+
+        resp = client.get(f"/api/v1/produccion/orden-produccion/{self.op2.pk}/ruta-critica/")
+
+        self.assertEqual(resp.data["op_id"], self.op2.pk)
