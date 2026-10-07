@@ -65,8 +65,13 @@ class ProveedorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Proveedor
         fields = "__all__"
-        # ``empresa`` la asigna el servidor (``ProveedorViewSet.perform_create``).
-        read_only_fields = ["activo", "empresa"]
+        # ``empresa`` la asigna el servidor (``ProveedorViewSet.perform_create``);
+        # ``fecha_baja`` la llena el DELETE. Los acumulados no se escriben por API.
+        read_only_fields = [
+            "activo", "empresa", "fecha_baja",
+            "saldo_anterior", "saldo_actual", "saldo_acumulado",
+            "plazo_real_dias", "fecha_ultima_compra", "fecha_ultimo_pago",
+        ]
 
 class DireccionClienteSerializer(serializers.ModelSerializer):
     class Meta:

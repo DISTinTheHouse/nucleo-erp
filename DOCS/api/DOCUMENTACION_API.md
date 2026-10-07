@@ -1127,6 +1127,7 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
 - Usuario sin empresa → `400 {"empresa": ...}` en el POST.
 - `moneda`: global o privada de la empresa del proveedor; de otra empresa → `400 {"moneda": ...}`.
 - `DELETE` es baja lógica: `activo = false` y `fecha_baja` = fecha del día.
+- Solo lectura (POST/PATCH los ignoran): `saldo_anterior`, `saldo_actual`, `saldo_acumulado`, `plazo_real_dias`, `fecha_ultima_compra`, `fecha_ultimo_pago`, `fecha_baja`.
 
 ### Histórico de Órdenes de Compra por Proveedor (EC-399)
 
