@@ -1003,3 +1003,122 @@ class OrdenCompraCancelacionTests(TestCase):
             self._eliminar(oc, user=self.b["usuario"]), {"detail": "Orden de compra no encontrada."},
             oc, self._estado(oc), status_code=404,
         )
+
+
+class HistorialOCProveedorTests(TestCase):
+    """EC-399 ``historial-ordenes-compra``: #311 (empresa), #312 (montos),
+    #313 (validación y contrato), #314 (queries)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from compras.models import OrdenCompra
+        from nucleo.models import Moneda, SatFormaPago, SatMetodoPago, SatRegimenFiscal, Sucursal
+
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Una exhibición")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="GDL", nombre="GDL")
+
+        def proveedor(codigo):
+            return Proveedor.objects.create(
+                empresa=cls.empresa, nombre=codigo, moneda=cls.moneda, sat_regimen_fiscal=regimen,
+                sat_forma_pago=forma, sat_metodo_pago=metodo, codigo=codigo, razon_social=codigo,
+                telefono="8100000000", contacto_principal="Ana", rfc="XAXX010101000", email=f"{codigo}@p.test",
+            )
+
+        cls.proveedor = proveedor("P1")
+        cls.proveedor_vacio = proveedor("P2")
+        cls.admin = Usuario.objects.create(username="admin", email="a@acme.test", empresa=cls.empresa, is_admin_empresa=True)
+        cls.almacenista = Usuario.objects.create(username="alm", email="alm@acme.test", empresa=cls.empresa)
+        cls.root = Usuario.objects.create(username="root", email="r@acme.test", empresa=cls.empresa, is_superuser=True)
+
+        E = OrdenCompra.EstatusOrdenCompra
+        cls.oc_autorizada = cls._oc(cls.empresa, cls.sucursal, E.AUTORIZADA, "100.50", "2026-03-10")
+        cls.oc_cancelada = cls._oc(cls.empresa, cls.sucursal, E.CANCELADA, "50.00", "2026-03-11")
+        # Par cruzado: OC de otra empresa con un proveedor de ACME (datos previos al candado de escritura).
+        cls.oc_cruzada = cls._oc(cls.otra, cls.sucursal_otra, E.AUTORIZADA, "999.00", "2026-03-12")
+
+    @classmethod
+    def _oc(cls, empresa, sucursal, estatus, gran_total, fecha):
+        from compras.models import OrdenCompra
+        return OrdenCompra.objects.create(
+            empresa=empresa, sucursal=sucursal, proveedor=cls.proveedor, moneda=cls.moneda,
+            estatus=estatus, gran_total=gran_total, fecha_oc=fecha, usuario=cls.admin,
+        )
+
+    def _get(self, user, query="", proveedor=None):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        p = proveedor or self.proveedor
+        return client.get(f"/api/v1/terceros/proveedores/{p.pk}/historial-ordenes-compra/{query}")
+
+    def test_oc_de_otra_empresa_no_aparece(self):
+        for user in (self.admin, self.root):
+            with self.subTest(user=user.username):
+                data = self._get(user).json()
+
+                self.assertEqual(data["count"], 2)
+                self.assertNotIn(self.oc_cruzada.pk, [r["id"] for r in data["results"]])
+                self.assertEqual(data["resumen"]["total_ordenes"], 2)
+                self.assertEqual(data["resumen"]["monto_por_moneda"], [{"moneda": "MXN", "total": "100.50"}])
+
+    def test_por_estatus_usa_el_entero(self):
+        data = self._get(self.admin).json()
+
+        self.assertEqual(data["resumen"]["por_estatus"], {
+            str(self.oc_autorizada.estatus): 1, str(self.oc_cancelada.estatus): 1,
+        })
+
+    def test_sin_permiso_de_contabilidad_no_ve_montos(self):
+        historial = self._get(self.almacenista).json()
+        client = APIClient()
+        client.force_authenticate(user=self.almacenista)
+        listado = client.get("/api/v1/compras/ordenes/").json()
+        filas = listado["results"] if isinstance(listado, dict) else listado
+
+        self.assertNotIn("gran_total", historial["results"][0])
+        self.assertNotIn("monto_por_moneda", historial["resumen"])
+        self.assertTrue(filas)
+        self.assertNotIn("gran_total", filas[0])
+
+    def test_con_permiso_de_contabilidad_ve_montos_en_el_listado(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        listado = client.get("/api/v1/compras/ordenes/").json()
+        filas = listado["results"] if isinstance(listado, dict) else listado
+
+        self.assertIn("gran_total", filas[0])
+
+    def test_parametros_invalidos_responden_400(self):
+        for query in (
+            "?fecha_inicio=2026-02-30", "?fecha_inicio=abc", "?fecha_final=2026-13-01",
+            "?estatus=99", "?estatus=abc", "?fecha_inicio=2026-03-12&fecha_final=2026-03-10",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self._get(self.admin, query).status_code, 400)
+
+    def test_proveedor_sin_oc(self):
+        resp = self._get(self.admin, proveedor=self.proveedor_vacio)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["count"], 0)
+        self.assertEqual(resp.json()["resumen"], {"total_ordenes": 0, "por_estatus": {}, "monto_por_moneda": []})
+
+    def test_queries_no_crecen_con_las_filas(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        def queries():
+            with CaptureQueriesContext(connection) as ctx:
+                self._get(self.admin)
+            return len(ctx)
+
+        antes = queries()
+        for dia in range(1, 6):
+            self._oc(self.empresa, self.sucursal, self.oc_autorizada.estatus, "1.00", f"2026-04-0{dia}")
+
+        self.assertEqual(queries(), antes)
