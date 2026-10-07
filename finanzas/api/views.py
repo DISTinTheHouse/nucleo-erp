@@ -1,6 +1,6 @@
 from decimal import Decimal
 from django.db import OperationalError, transaction
-from django.db.models import Q, Sum
+from django.db.models import DecimalField, Max, Min, OuterRef, Q, Subquery, Sum
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -35,6 +35,7 @@ from finanzas.models import (
     CuentaPorCobrar,
     CuentaPorPagar,
     Factura,
+    FacturaDetalle,
     FacturaProveedor,
     FacturaProveedorDetalle,
     MovimientoBancario,
@@ -60,6 +61,7 @@ from finanzas.api.serializers import (
     CuentaPorCobrarSerializer,
     CuentaPorPagarCreateSerializer,
     CuentaPorPagarSerializer,
+    FacturaListSerializer,
     FacturaSerializer,
     FacturaDesdePedidoInputSerializer,
     FacturaPendienteCobroInputSerializer,
@@ -448,12 +450,51 @@ class FacturaViewSet(FinanzasBaseViewSet):
     serializer_class = FacturaSerializer
     http_method_names = ['delete', 'get', 'post', 'put', 'patch']
 
+    def _es_listado(self):
+        """``GET /facturas/`` y ``GET /facturas/onboarding/`` sin ``?pedido=``:
+        los dos devuelven la tabla de facturas."""
+        if self.action == 'list':
+            return True
+        request = getattr(self, 'request', None)
+        return (
+            self.action == 'onboarding'
+            and request is not None
+            and request.method == 'GET'
+            and 'pedido' not in request.query_params
+        )
+
+    def get_serializer_class(self):
+        if self._es_listado():
+            return FacturaListSerializer
+        return super().get_serializer_class()
+
     def get_queryset(self):
         user = self.request.user
         qs = (
             Factura.objects
             .select_related('pedido', 'cliente', 'moneda')
         )
+        if self._es_listado():
+            # Piezas y precio por subconsulta, no uniendo renglones: el filtro
+            # ``saldo_pendiente`` ya une con CxC y multiplicaría las sumas.
+            renglones = (
+                FacturaDetalle.objects.filter(factura=OuterRef('pk'))
+                .order_by()
+                .values('factura')
+            )
+            decimal = DecimalField(max_digits=18, decimal_places=2)
+
+            def _por_factura(agregado):
+                return Subquery(
+                    renglones.annotate(valor=agregado).values('valor')[:1],
+                    output_field=decimal,
+                )
+
+            qs = qs.select_related('pedido__cotizacion__vendedor').annotate(
+                cantidad_piezas=_por_factura(Sum('cantidad')),
+                precio_minimo=_por_factura(Min('precio_unitario')),
+                precio_maximo=_por_factura(Max('precio_unitario')),
+            )
         qs = _aplicar_scope_empresa(qs, user, lookup="empresa")
         qp = self.request.query_params
         cliente_id = qp.get('cliente') or qp.get('cliente_id')

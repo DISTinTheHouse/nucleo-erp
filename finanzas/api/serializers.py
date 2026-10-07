@@ -315,6 +315,74 @@ class FacturaSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+class FacturaListSerializer(serializers.ModelSerializer):
+    """Serializer minimalista para el LISTADO de facturas.
+
+    Campos planos de la tabla del frontend, sin ``factura_detalles``: los
+    renglones costaban ~13 consultas por factura y viven en el detalle y en
+    ``desglose/``. ``cantidad_piezas``/``precio_minimo``/``precio_maximo`` los
+    anota ``FacturaViewSet.get_queryset`` con subconsultas, sin unir renglones.
+    """
+
+    pedido_folio = serializers.CharField(source='pedido.folio', read_only=True, default=None)
+    cliente_nombre = serializers.CharField(source='cliente.nombre', read_only=True)
+    moneda_nombre = serializers.CharField(source='moneda.codigo_iso', read_only=True)
+    vendedor = serializers.SerializerMethodField()
+    vendedor_nombre = serializers.SerializerMethodField()
+    cantidad = serializers.SerializerMethodField()
+    precio_unitario = serializers.SerializerMethodField()
+
+    def _vendedor(self, obj):
+        # El vendedor del pedido es el de su cotización (mismo criterio que el
+        # alcance de "mis pedidos" en ventas).
+        return getattr(getattr(obj.pedido, 'cotizacion', None), 'vendedor', None)
+
+    def get_vendedor(self, obj) -> int | None:
+        return getattr(self._vendedor(obj), 'pk', None)
+
+    def get_vendedor_nombre(self, obj) -> str | None:
+        vendedor = self._vendedor(obj)
+        if vendedor is None:
+            return None
+        return vendedor.get_full_name() or vendedor.email
+
+    def get_cantidad(self, obj) -> int:
+        """Total de piezas facturadas."""
+        return int(getattr(obj, 'cantidad_piezas', None) or 0)
+
+    def get_precio_unitario(self, obj) -> str | None:
+        """Precio por pieza (sin IVA) si todas las piezas tienen el mismo; con
+        varios precios (o sin renglones) es ``null``."""
+        minimo = getattr(obj, 'precio_minimo', None)
+        if minimo is None or minimo != getattr(obj, 'precio_maximo', None):
+            return None
+        return str(Decimal(minimo).quantize(Decimal('0.01')))
+
+    class Meta:
+        model = Factura
+        fields = [
+            'id',
+            'folio',
+            'estatus',
+            'fecha_emision',
+            'fecha_vencimiento',
+            'pedido',
+            'pedido_folio',
+            'cliente',
+            'cliente_nombre',
+            'vendedor',
+            'vendedor_nombre',
+            'cantidad',
+            'precio_unitario',
+            'subtotal',
+            'impuestos',
+            'total',
+            'moneda',
+            'moneda_nombre',
+        ]
+        read_only_fields = fields
+
+
 class CuentaPorCobrarDetalleSerializer(CuentaPorCobrarSerializer):
     factura = FacturaSerializer(read_only=True)
     total_pagado = serializers.SerializerMethodField()
