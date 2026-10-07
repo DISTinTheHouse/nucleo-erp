@@ -345,7 +345,7 @@ API completa para gestionar el personal de la empresa (cajeros, vendedores, gere
 **Permisos**:
 
 - **Superusuario**: Acceso total.
-- **Admin Empresa**: Puede crear, editar y eliminar usuarios que pertenezcan a **su misma empresa**. No puede crear Superusuarios ni otros Admins de Empresa.
+- **Admin Empresa**: Puede crear, editar y eliminar usuarios que pertenezcan a **su misma empresa**. No puede conceder `is_superuser`, `is_admin_empresa` ni `is_staff`, ni al crear ni al editar → `403`. Reenviar el valor que el usuario ya tiene sí se permite.
 
 ### Endpoints
 

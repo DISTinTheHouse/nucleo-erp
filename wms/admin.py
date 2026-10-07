@@ -376,3 +376,11 @@ class RfidScanAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at",)
     ordering = ("-created_at", "-id")
     show_full_result_count = False
+
+    def get_queryset(self, request):
+        # Staff no superusuario: solo lecturas de su empresa.
+        qs = super().get_queryset(request)
+        if request.user.is_superuser:
+            return qs
+        empresa_id = getattr(request.user, "empresa_id", None)
+        return qs.filter(empresa_id=empresa_id) if empresa_id else qs.none()
