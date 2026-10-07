@@ -1444,6 +1444,32 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 
 Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
+### KPIs de Mis Pedidos (EC-420)
+
+- **Endpoint**: `GET /api/v1/ventas/pedidos/kpis/`
+- Siempre es "MIS pedidos" (igual que `?mis_pedidos=true`): filtra por `cotizacion.vendedor = usuario autenticado`. Sin query params.
+- Solo **`pedidos_activos`** trae datos reales. `otif`, `lead_time_promedio` y `pedidos_en_riesgo` responden `"disponible": false` + `"motivo"` — el sistema no registra fecha/cantidad de entrega ni fecha compromiso del pedido. **Pinta esos 3 como "próximamente", no los ocultes ni los calcules en frontend.**
+- Sin empresa asignada → 200 con los 4 bloques en `disponible: false`.
+
+```json
+{
+  "generado_en": "2026-10-07T20:00:00Z",
+  "pedidos_activos": {
+    "disponible": true,
+    "total": 12,
+    "valor": "185000.00",
+    "drill_down": [
+      { "id": 88, "folio": "PED-000088", "estatus": 4, "estatus_label": "EN PROCESO", "gran_total": "10500.00", "cliente_nombre": "Comercializadora Ejemplo" }
+    ]
+  },
+  "otif": { "disponible": false, "motivo": "..." },
+  "lead_time_promedio": { "disponible": false, "motivo": "..." },
+  "pedidos_en_riesgo": { "disponible": false, "motivo": "..." }
+}
+```
+
+- `drill_down` trae hasta 20 pedidos activos (`AUTORIZADA`+`EN PROCESO`), ordenados por `gran_total` desc.
+
 #### Automatización de Órdenes de Trabajo (Producción)
 
 > 🚨 **Decisión de negocio (Presidencia) — v2 en producción**
