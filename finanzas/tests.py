@@ -232,7 +232,9 @@ class Defecto1OnboardingAislamiento(FinanzasBase):
             self._payload(self.b["pedido"], self.b["talla_pedido"]),
             format="json",
         )
-        self.assertEqual(resp.status_code, 404, resp.data)
+        # 400 por campo, igual que un id inexistente (#342): no revela que existe.
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pedido", resp.data)
         self.assertFalse(Factura.objects.exists())
 
     def test_rechaza_pedido_detalle_de_otra_empresa(self):
@@ -5248,3 +5250,108 @@ class FacturamaAccesoTests(TestCase):
             self.assertEqual(self.client.get(url).status_code, 403, url)
             self.client.force_login(self.superusuario)
             self.assertEqual(self.client.get(url).status_code, 200, url)
+
+
+FACTURAS_URL = "/api/v1/finanzas/facturas/"
+
+
+class FacturasAislamientoY500Tests(FinanzasBase):
+    """#337/#342: pedido, serie y talla de otra empresa se rechazan sin revelar
+    que existen. #340: entradas corregibles → 4xx, nunca 500."""
+
+    def _payload(self, pedido_id, talla_id, cantidad=1):
+        return {"pedido": pedido_id, "factura_detalles": [{"pedido_detalle_talla": talla_id, "cantidad": cantidad}]}
+
+    def _factura_a(self):
+        resp = self._client(self.a["usuario"]).post(
+            ONBOARDING_URL, self._payload(self.a["pedido"].pk, self.a["talla_pedido"].pk), format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return Factura.objects.get(pk=resp.data["id"])
+
+    # --- #342: enumeración --------------------------------------------------
+
+    def test_pedido_ajeno_e_inexistente_responden_igual(self):
+        client = self._client(self.a["usuario"])
+        ajeno = client.post(ONBOARDING_URL, self._payload(self.b["pedido"].pk, self.b["talla_pedido"].pk), format="json")
+        inexistente = client.post(ONBOARDING_URL, self._payload(999999, self.b["talla_pedido"].pk), format="json")
+
+        self.assertEqual(ajeno.status_code, inexistente.status_code)
+        self.assertEqual(
+            str(ajeno.data["pedido"]).replace(str(self.b["pedido"].pk), "X"),
+            str(inexistente.data["pedido"]).replace("999999", "X"),
+        )
+
+    def test_talla_ajena_e_inexistente_responden_igual(self):
+        client = self._client(self.a["usuario"])
+        ajena = client.post(ONBOARDING_URL, self._payload(self.a["pedido"].pk, self.b["talla_pedido"].pk), format="json")
+        inexistente = client.post(ONBOARDING_URL, self._payload(self.a["pedido"].pk, 999999), format="json")
+
+        self.assertEqual(ajena.status_code, 400)
+        self.assertEqual(
+            str(ajena.data).replace(str(self.b["talla_pedido"].pk), "X"),
+            str(inexistente.data).replace("999999", "X"),
+        )
+        self.assertFalse(Factura.objects.exists())
+
+    # --- #337: PATCH y lectura ----------------------------------------------
+
+    def test_patch_con_pedido_o_serie_de_otra_empresa_no_persiste(self):
+        factura = self._factura_a()
+        serie_b = SerieFolio.objects.get(empresa=self.b["empresa"])
+        client = self._client(self.a["usuario"])
+
+        for body in ({"pedido": self.b["pedido"].pk}, {"serie_folio": serie_b.pk}):
+            with self.subTest(body=body):
+                resp = client.patch(f"{FACTURAS_URL}{factura.pk}/", body, format="json")
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual(factura.pedido_id, self.a["pedido"].pk)
+        self.assertNotEqual(factura.serie_folio_id, serie_b.pk)
+
+    def test_lectura_no_expone_un_pedido_ajeno_ya_ligado(self):
+        factura = self._factura_a()
+        Factura.objects.filter(pk=factura.pk).update(pedido=self.b["pedido"])
+        client = self._client(self.a["usuario"])
+
+        desglose = client.get(f"{FACTURAS_URL}{factura.pk}/desglose/").data
+        detalle = client.get(f"{FACTURAS_URL}{factura.pk}/").data
+
+        self.assertIsNone(desglose["pedido"])
+        self.assertIsNone(desglose["avance_pedido"])
+        self.assertNotEqual(desglose["receptor"]["correo_facturas"], self.b["pedido"].correo_facturas)
+        self.assertNotEqual(detalle["correo_facturas"], self.b["pedido"].correo_facturas)
+
+    # --- #340: 500 → 4xx ----------------------------------------------------
+
+    def test_linea_sin_cantidad_responde_400(self):
+        resp = self._client(self.a["usuario"]).post(
+            ONBOARDING_URL,
+            {"pedido": self.a["pedido"].pk, "factura_detalles": [{"pedido_detalle_talla": self.a["talla_pedido"].pk}]},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("factura_detalles", resp.data)
+
+    def test_sin_serie_de_factura_responde_400_sin_crear_nada(self):
+        SerieFolio.objects.filter(empresa=self.a["empresa"]).delete()
+        client = self._client(self.a["usuario"])
+
+        onboarding = client.post(ONBOARDING_URL, self._payload(self.a["pedido"].pk, self.a["talla_pedido"].pk), format="json")
+        desde_pedido = client.post(DESDE_PEDIDO_URL, {"pedido": self.a["pedido"].pk}, format="json")
+
+        for resp in (onboarding, desde_pedido):
+            self.assertEqual(resp.status_code, 400, resp.data)
+            self.assertIn("serie_folio", resp.data)
+        self.assertFalse(Factura.objects.exists())
+
+    def test_post_y_put_genericos_responden_405(self):
+        factura = self._factura_a()
+        client = self._client(self.a["usuario"])
+        body = self._payload(self.a["pedido"].pk, self.a["talla_pedido"].pk)
+
+        self.assertEqual(client.post(FACTURAS_URL, body, format="json").status_code, 405)
+        self.assertEqual(client.put(f"{FACTURAS_URL}{factura.pk}/", body, format="json").status_code, 405)
+        self.assertEqual(Factura.objects.count(), 1)

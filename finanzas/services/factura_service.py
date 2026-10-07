@@ -1,6 +1,7 @@
 from collections import defaultdict
 from decimal import ROUND_HALF_UP, Decimal
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Sum
 
@@ -114,7 +115,10 @@ class FacturaService:
             .order_by('pedido_detalle_id', 'pedido_detalle_talla_id', 'id')
         )
 
+        # Un pedido de otra empresa (datos previos al candado de escritura) no se lee.
         pedido = factura.pedido
+        if pedido is not None and pedido.empresa_id != factura.empresa_id:
+            pedido = None
         piezas_pedido = {}
         if pedido is not None:
             piezas_pedido = {
@@ -373,6 +377,10 @@ class FacturaService:
     def _crear_factura(empresa, sucursal, pedido, lineas, **campos):
         # Se valida todo antes de generar el folio para no consumirlo en balde.
         pendientes = FacturaService._validar_lineas(pedido, lineas)
+        try:
+            folio = generate_factura_folio(empresa, sucursal)
+        except DjangoValidationError as exc:
+            raise ErrorDeNegocio({'serie_folio': exc.messages})
 
         factura = Factura.objects.create(
             empresa=empresa,
@@ -380,7 +388,7 @@ class FacturaService:
             cliente=pedido.cliente,
             moneda=pedido.moneda,
             pedido=pedido,
-            folio=generate_factura_folio(empresa, sucursal),
+            folio=folio,
             **campos
         )
 

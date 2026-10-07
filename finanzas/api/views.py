@@ -5,7 +5,7 @@ from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, MethodNotAllowed, NotFound, PermissionDenied, ValidationError
 from rest_framework.fields import get_error_detail
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
@@ -477,6 +477,18 @@ class FacturaViewSet(FinanzasBaseViewSet):
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha_emision")
         qs = _aplicar_ordering(qs, qp, ["-fecha_emision", "-id"])
         return qs
+
+    def create(self, request, *args, **kwargs):
+        # El alta va por ``onboarding/``, ``desde-pedido/`` o
+        # ``registrar-pendiente-cobro/``; el POST genérico nunca funcionó (500).
+        raise MethodNotAllowed(
+            'POST', detail='Usa POST /facturas/onboarding/, /facturas/desde-pedido/ o /facturas/registrar-pendiente-cobro/.'
+        )
+
+    def update(self, request, *args, **kwargs):
+        if not kwargs.get('partial', False):
+            raise MethodNotAllowed('PUT', detail='Usa PATCH /facturas/{id}/.')
+        return super().update(request, *args, **kwargs)
 
     def perform_destroy(self, instance):
         instance.soft_delete()

@@ -229,6 +229,7 @@ class FacturaDetalleSerializer(serializers.ModelSerializer):
         fields = '__all__'
         extra_kwargs = {
             'pedido_detalle_talla': {'required': True, 'allow_null': False},
+            'cantidad': {'required': True},
         }
 
 
@@ -238,9 +239,29 @@ class FacturaSerializer(serializers.ModelSerializer):
     cliente_nombre = serializers.CharField(source='cliente.nombre', read_only=True)
     correo_facturas = serializers.SerializerMethodField()
 
+    def get_fields(self):
+        # ``pedido``, ``serie_folio`` y la talla de cada renglón solo aceptan
+        # registros de la empresa de la factura (la del usuario en el alta). Un id
+        # de otra empresa responde igual que uno inexistente: no deja enumerar.
+        from nucleo.models import SerieFolio
+        from ventas.models import Pedido, PedidoDetalleTalla
+
+        fields = super().get_fields()
+        if self.instance is not None and not hasattr(self.instance, '__iter__'):
+            empresa_id = self.instance.empresa_id
+        else:
+            request = self.context.get('request')
+            empresa_id = getattr(getattr(request, 'user', None), 'empresa_id', None)
+        fields['pedido'].queryset = Pedido.objects.filter(empresa_id=empresa_id)
+        fields['serie_folio'].queryset = SerieFolio.objects.filter(empresa_id=empresa_id)
+        fields['factura_detalles'].child.fields['pedido_detalle_talla'].queryset = (
+            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido__empresa_id=empresa_id)
+        )
+        return fields
+
     def get_correo_facturas(self, obj):
         pedido = getattr(obj, 'pedido', None)
-        if pedido is not None:
+        if pedido is not None and pedido.empresa_id == obj.empresa_id:
             correo_pedido = (pedido.correo_facturas or '').strip()
             if correo_pedido:
                 return correo_pedido
