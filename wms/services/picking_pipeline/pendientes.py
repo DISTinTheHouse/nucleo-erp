@@ -32,14 +32,35 @@ def _safe_pct(num, den):
 
 def _picking_scope_queryset(pedido):
     """Scope base de ``PickingDetalle`` (pickings activos y no cancelados)."""
+    return _picking_scope_por_pedidos([pedido.pk])
+
+
+def _picking_scope_por_pedidos(pedido_ids):
+    """``_picking_scope_queryset`` para varios pedidos a la vez."""
     return PickingDetalle.objects.filter(
-        pedido_detalle__pedido=pedido,
+        pedido_detalle__pedido_id__in=list(pedido_ids),
         pedido_detalle_talla__isnull=False,
     ).exclude(
         picking__estado=Picking.Estado.CANCELADO,
     ).exclude(
         estado=PickingDetalle.EstadoLinea.CANCELADA,
     )
+
+
+def asignado_por_pedidos(pedido_ids):
+    """``{pedido_id: Σ cantidad_asignada}`` de pickings activos, en UNA query.
+
+    Mismo scope que el tracker del pedido (``armar_tracker_pedido``): lo que ya
+    tiene folio de picking cuenta como surtido.
+    """
+    filas = (
+        _picking_scope_por_pedidos(pedido_ids)
+        .values("pedido_detalle__pedido_id")
+        .annotate(total=Sum("cantidad_asignada"))
+    )
+    return {
+        f["pedido_detalle__pedido_id"]: normalizar_decimal(f["total"]) for f in filas
+    }
 
 
 def historical_maps(pedido, talla_ids=None):

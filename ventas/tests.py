@@ -6,11 +6,13 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test ventas --settings=sqlite_settings
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
@@ -18,7 +20,7 @@ from rest_framework.test import APIClient
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Color, Producto, ProductoVariante, Talla
 from inventarios.models import MovimientoInventario
-from finanzas.models import Factura, FacturaDetalle
+from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
 from inventarios.models import (
     Almacen,
     Existencia,
@@ -29,11 +31,17 @@ from inventarios.models import (
 )
 from ventas.api.views import CotizacionViewSet, PedidoViewSet
 from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal
-from produccion.models import OrdenesBordado
+from produccion.models import (
+    BordadoAvances,
+    OrdenBordadoDetalle,
+    OrdenesBordado,
+    OrdenProduccion,
+    OrdenProduccionRutaCritica,
+)
 from seguridad.models import Rol, UsuarioRol
 from terceros.models import Cliente, DireccionCliente
 from usuarios.models import Usuario
-from wms.models import Picking, PickingDetalle
+from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle, Picking, PickingDetalle
 from ventas.models import (
     Cotizacion,
     CotizacionDetalle,
@@ -3229,3 +3237,279 @@ class PedidoReglasEstatusTests(TestCase):
         ):
             with self.assertRaises(ErrorDeNegocio):
                 llamada()
+
+
+def pedido_trazabilidad_url(pedido_id):
+    return f"/api/v1/ventas/pedidos/{pedido_id}/trazabilidad/"
+
+
+class PedidoTrazabilidadTests(TestCase):
+    """``GET /pedidos/{id}/trazabilidad/``: paso actual, avance y semáforo.
+
+    Todo derivado de producción, WMS y finanzas (ver
+    ``ventas.services.trazabilidad_service``).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="Acme SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente Acme")
+        cls.usuario = Usuario.objects.create(
+            username="op@acme.test", email="op@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.admin = Usuario.objects.create(
+            username="admin@acme.test", email="admin@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.talla = Talla.objects.create(nombre="M")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM", nombre="Almacen",
+        )
+
+    def setUp(self):
+        self._folio = 0
+
+    def _siguiente(self, prefijo):
+        self._folio += 1
+        return f"{prefijo}-{self._folio:05d}"
+
+    def _pedido(self, cantidad=10, clasificacion="D", dias_confirmado=1, **flags):
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, folio=self._siguiente("P"), estatus=3,
+            clasificacion=clasificacion,
+            fecha_confirmacion=timezone.now() - timedelta(days=dias_confirmado),
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=self.talla, cantidad=cantidad, **flags
+        )
+        return pedido
+
+    def _ob(self, pedido, cantidad=10, estatus=OrdenesBordado.EstatusBordado.BORDANDO, avance=0, **extra):
+        ob = OrdenesBordado.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=pedido,
+            folio_bordado=self._siguiente("OB"), estatus_bordado=estatus, **extra,
+        )
+        OrdenBordadoDetalle.objects.create(
+            ob=ob, pedido_detalle=pedido.detalles.get(), producto=self.producto, cantidad=cantidad,
+        )
+        if avance:
+            BordadoAvances.objects.create(ob=ob, cantidad_bordada=avance, usuario=self.usuario)
+        return ob
+
+    def _picking(self, pedido, cantidad):
+        picking = Picking.objects.create(
+            folio=self._siguiente("PK"), empresa=self.empresa, sucursal=self.sucursal,
+            pedido=pedido, operador=self.usuario, usuario=self.usuario, almacen=self.almacen,
+        )
+        detalle = pedido.detalles.get()
+        return PickingDetalle.objects.create(
+            picking=picking, pedido_detalle=detalle, pedido_detalle_talla=detalle.tallas.get(),
+            producto=self.producto, cantidad_solicitada=cantidad, cantidad_asignada=cantidad,
+        )
+
+    def _empacar(self, picking_detalle, cantidad, despachar=False):
+        picking = picking_detalle.picking
+        packing = Packing.objects.create(
+            folio=self._siguiente("PA"), empresa=self.empresa, sucursal=self.sucursal,
+            pedido=picking.pedido, picking=picking, operador=self.usuario, usuario=self.usuario,
+        )
+        packing_detalle = PackingDetalle.objects.create(
+            packing=packing, picking_detalle=picking_detalle, cantidad_empacada=cantidad,
+        )
+        if despachar:
+            despacho = Despacho.objects.create(packing=packing)
+            DespachoDetalle.objects.create(despacho=despacho, packing_detalle=packing_detalle)
+
+    def _factura(self, pedido, total="1000", saldo="250", piezas=None):
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, pedido=pedido, estatus=Factura.FacturaStatus.EMITIDA,
+            total=Decimal(total),
+        )
+        if piezas:
+            FacturaDetalle.objects.create(
+                factura=factura, pedido_detalle=pedido.detalles.get(),
+                producto=self.producto, cantidad=piezas,
+            )
+        CuentaPorCobrar.objects.create(
+            empresa=self.empresa, cliente=self.cliente, factura=factura,
+            total=Decimal(total), saldo=Decimal(saldo),
+        )
+
+    def _get(self, pedido, user=None):
+        client = APIClient()
+        client.force_authenticate(user=user or self.admin)
+        return client.get(pedido_trazabilidad_url(pedido.pk))
+
+    def _data(self, pedido, user=None):
+        resp = self._get(pedido, user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    @staticmethod
+    def _paso(data, clave):
+        return next(p for p in data["pasos"] if p["clave"] == clave)
+
+    @classmethod
+    def _proceso(cls, data, clave):
+        return next(p for p in cls._paso(data, "maquila")["procesos"] if p["clave"] == clave)
+
+    # --- forma ------------------------------------------------------------
+
+    def test_todos_los_pasos_traen_las_mismas_llaves(self):
+        data = self._data(self._pedido())
+        self.assertEqual(
+            [p["clave"] for p in data["pasos"]],
+            ["confirmado", "programado", "surtido", "maquila", "empacado", "embarcado"],
+        )
+        for paso in data["pasos"]:
+            self.assertTrue({"clave", "label", "estado", "pct", "hecho", "total"} <= set(paso))
+        for proceso in self._paso(data, "maquila")["procesos"]:
+            self.assertTrue(
+                {"clave", "label", "estado", "pct", "hecho", "total", "sin_orden", "ordenes"}
+                <= set(proceso)
+            )
+
+    def test_pedido_de_stock_sin_procesos(self):
+        data = self._data(self._pedido(cantidad=10))
+        self.assertEqual(data["pedido"]["total_piezas"], 10)
+        self.assertEqual(self._paso(data, "maquila")["estado"], "no_aplica")
+        self.assertEqual(data["resumen"]["paso_actual"], "confirmado")
+        self.assertEqual(data["resumen"]["semaforo"], "verde")
+
+    # --- maquila ----------------------------------------------------------
+
+    def test_bordado_parcial_mide_piezas_bordadas(self):
+        pedido = self._pedido(cantidad=10, lleva_bordado=True)
+        ob = self._ob(pedido, cantidad=10, avance=4)
+        data = self._data(pedido)
+        bordado = self._proceso(data, "bordado")
+        self.assertEqual(bordado["estado"], "en_proceso")
+        self.assertEqual(bordado["pct"], 40.0)
+        self.assertEqual(bordado["ordenes"][0]["folio"], ob.folio_bordado)
+        self.assertEqual(self._paso(data, "maquila")["pct"], 40.0)
+        self.assertEqual(data["resumen"]["paso_actual"], "maquila")
+
+    def test_ob_finalizada_sin_avances_cuenta_completa(self):
+        pedido = self._pedido(cantidad=10, lleva_bordado=True)
+        self._ob(pedido, cantidad=10, estatus=OrdenesBordado.EstatusBordado.FINALIZADO)
+        self.assertEqual(self._proceso(self._data(pedido), "bordado")["estado"], "completo")
+
+    def test_ob_detenida_pone_amarillo(self):
+        pedido = self._pedido(cantidad=10, lleva_bordado=True)
+        ob = self._ob(pedido, estatus=OrdenesBordado.EstatusBordado.DETENIDO)
+        data = self._data(pedido)
+        self.assertEqual(self._proceso(data, "bordado")["estado"], "detenido")
+        self.assertEqual(data["resumen"]["semaforo"], "amarillo")
+        self.assertIn(f"{ob.folio_bordado} detenida", data["resumen"]["motivos"])
+
+    def test_ob_dada_de_baja_no_cuenta(self):
+        pedido = self._pedido(cantidad=10, lleva_bordado=True)
+        self._ob(pedido, estatus=OrdenesBordado.EstatusBordado.FINALIZADO, activo=False)
+        bordado = self._proceso(self._data(pedido), "bordado")
+        self.assertEqual(bordado["pct"], 0.0)
+        self.assertEqual(bordado["ordenes"], [])
+        self.assertEqual(bordado["sin_orden"], 10)
+
+    def test_piezas_sin_orden_generan_motivo(self):
+        # D = 28-42 días; a 20 días ya pasó el 25% del plazo.
+        pedido = self._pedido(cantidad=10, dias_confirmado=20, lleva_reflejante=True)
+        data = self._data(pedido)
+        self.assertEqual(self._proceso(data, "reflejante")["sin_orden"], 10)
+        self.assertIn("10 pzs de reflejante sin orden de trabajo", data["resumen"]["motivos"])
+
+    def test_op_avanza_por_hitos_de_ruta_critica(self):
+        pedido = self._pedido()
+        op = OrdenProduccion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=pedido, folio_op="OP-1",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.BORDANDO,
+        )
+        OrdenProduccionRutaCritica.objects.create(
+            op=op, kit_completo=True, fecha_trazo=timezone.localdate(),
+        )
+        op_proceso = self._proceso(self._data(pedido), "op")
+        self.assertEqual(op_proceso["estado"], "en_proceso")
+        self.assertEqual(op_proceso["pct"], 33.3)  # 2 de 6
+
+    # --- almacén y finanzas -----------------------------------------------
+
+    def test_surtido_empacado_embarcado_y_facturado(self):
+        pedido = self._pedido(cantidad=10)
+        self._empacar(self._picking(pedido, 10), 6, despachar=True)
+        self._factura(pedido, total="1000", saldo="250", piezas=5)
+        data = self._data(pedido)
+        self.assertEqual(self._paso(data, "surtido")["pct"], 100.0)
+        self.assertEqual(self._paso(data, "empacado")["pct"], 60.0)
+        self.assertEqual(self._paso(data, "embarcado")["pct"], 60.0)
+        self.assertEqual(data["resumen"]["paso_actual"], "embarcado")
+        self.assertEqual(data["resumen"]["facturado_pct"], 50.0)
+        self.assertEqual(data["resumen"]["cobrado_pct"], 75.0)
+
+    def test_cobrado_oculto_sin_permiso_de_contabilidad(self):
+        pedido = self._pedido()
+        self._factura(pedido, total="100", saldo="0")
+        self.assertEqual(self._data(pedido, self.admin)["resumen"]["cobrado_pct"], 100.0)
+        self.assertIsNone(self._data(pedido, self.usuario)["resumen"]["cobrado_pct"])
+
+    def test_paso_actual_no_se_queda_en_programado(self):
+        pedido = self._pedido(cantidad=10)  # sin programación
+        self._empacar(self._picking(pedido, 10), 10)
+        data = self._data(pedido)
+        self.assertEqual(self._paso(data, "programado")["estado"], "pendiente")
+        self.assertEqual(data["resumen"]["paso_actual"], "empacado")
+
+    # --- semáforo ---------------------------------------------------------
+
+    def test_embarcado_completo_es_terminado(self):
+        pedido = self._pedido(cantidad=10)
+        self._empacar(self._picking(pedido, 10), 10, despachar=True)
+        self.assertEqual(self._data(pedido)["resumen"]["semaforo"], "terminado")
+
+    def test_vencido_es_rojo(self):
+        pedido = self._pedido(clasificacion="A", dias_confirmado=10)  # A = 2-5 días
+        data = self._data(pedido)
+        self.assertEqual(data["resumen"]["semaforo"], "rojo")
+        self.assertTrue(data["resumen"]["motivos"][0].startswith("Vencido desde"))
+        self.assertLess(data["pedido"]["dias_restantes"], 0)
+
+    def test_gris_sin_compromiso(self):
+        cancelado = self._pedido()
+        cancelado.estatus = Pedido.ESTATUS_CANCELADO
+        cancelado.save(update_fields=["estatus"])
+        for pedido in (cancelado, self._pedido(clasificacion=None), self._pedido(clasificacion="X")):
+            self.assertEqual(self._data(pedido)["resumen"]["semaforo"], "gris")
+
+    def test_compromiso_corre_desde_fecha_confirmacion(self):
+        pedido = self._pedido(clasificacion="A")
+        pedido.fecha_confirmacion = timezone.now() + timedelta(days=3)
+        pedido.save(update_fields=["fecha_confirmacion"])
+        esperado = timezone.localdate(pedido.fecha_confirmacion) + timedelta(days=5)
+        self.assertEqual(self._data(pedido)["pedido"]["fecha_compromiso"], esperado.isoformat())
+
+    # --- scope y costo ----------------------------------------------------
+
+    def test_pedido_de_otra_empresa_da_404(self):
+        otra = Empresa.objects.create(codigo="globex", razon_social="Globex SA")
+        intruso = Usuario.objects.create(username="b@globex.test", email="b@globex.test", empresa=otra)
+        self.assertEqual(self._get(self._pedido(), intruso).status_code, 404)
+
+    def test_queries_constantes_sin_importar_ordenes(self):
+        from ventas.services.trazabilidad_service import trazabilidad_pedido
+
+        pedido = self._pedido(cantidad=30, lleva_bordado=True)
+        with CaptureQueriesContext(connection) as vacio:
+            trazabilidad_pedido(pedido)
+        for _ in range(3):
+            self._ob(pedido, cantidad=10, avance=5)
+            self._empacar(self._picking(pedido, 10), 5, despachar=True)
+        with CaptureQueriesContext(connection) as lleno:
+            trazabilidad_pedido(pedido)
+        self.assertEqual(len(vacio), len(lleno))

@@ -80,7 +80,10 @@ from ventas.utils.helpers import (
     _save_pedido_detalle,
     _save_pedido_servicios_extras,
 )
-from ventas.services.pedido_field_filter_service import filtrar_campos_contabilidad_pedido
+from ventas.services.pedido_field_filter_service import (
+    filtrar_campos_contabilidad_pedido,
+    puede_ver_contabilidad,
+)
 from wms.models import Picking, PickingDetalle
 
 logger = logging.getLogger(__name__)
@@ -3216,6 +3219,22 @@ class PedidoViewSet(viewsets.ModelViewSet):
                     stock_por_producto.get(producto_id, Decimal("0.0000")) + total
                 )
         return stock_por_variante, stock_por_producto
+
+    @action(detail=True, methods=["get"], url_path="trazabilidad")
+    def trazabilidad(self, request, pk=None):
+        """Paso actual, avance por paso y semáforo del pedido.
+
+        Ver ``ventas.services.trazabilidad_service``. Sin ``get_object()``: el
+        ``get_queryset()`` de detalle prefetchea renglones que aquí no se usan.
+        Mismo scope multi-tenant (404 para un pedido de otra empresa).
+        """
+        from ventas.services.trazabilidad_service import trazabilidad_pedido
+
+        pedido = get_object_or_404(pedidos_visibles(pedidos_base(), request.user), pk=pk)
+        data = trazabilidad_pedido(pedido)
+        if not puede_ver_contabilidad(request.user):
+            data["resumen"]["cobrado_pct"] = None
+        return Response(data)
 
     @action(detail=True, methods=["get"], url_path="stock-detalle")
     def stock_detalle(self, request, pk=None):

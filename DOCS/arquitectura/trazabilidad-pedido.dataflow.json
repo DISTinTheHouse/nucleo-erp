@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "Trazabilidad del pedido",
+    "viewBox": [
+      1080,
+      500
+    ],
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "emphasis": {
+          "label": "flujo principal"
+        },
+        "database": {
+          "label": "fuente de datos"
+        },
+        "default": {
+          "label": "flujo de datos"
+        }
+      }
+    }
+  },
+  "stages": [
+    {
+      "label": "Registro"
+    },
+    {
+      "label": "Pasos"
+    },
+    {
+      "label": "Semáforo"
+    },
+    {
+      "label": "API"
+    },
+    {
+      "label": "Consumo"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "ventas",
+      "type": "database",
+      "label": "Pedido",
+      "sublabel": "ventas · tallas",
+      "stage": 0,
+      "row": 0,
+      "yOffset": -24,
+      "tag": "mesa de control"
+    },
+    {
+      "id": "wms",
+      "type": "database",
+      "label": "Almacén",
+      "sublabel": "picking → despacho",
+      "stage": 0,
+      "row": 1,
+      "yOffset": -50,
+      "tag": "WMS"
+    },
+    {
+      "id": "produccion",
+      "type": "database",
+      "label": "Producción",
+      "sublabel": "OB · OR · OCM · OP",
+      "stage": 0,
+      "row": 2,
+      "yOffset": -76,
+      "tag": "maquila"
+    },
+    {
+      "id": "finanzas",
+      "type": "database",
+      "label": "Finanzas",
+      "sublabel": "factura · CxC",
+      "stage": 0,
+      "row": 3,
+      "yOffset": -102,
+      "tag": "indicadores"
+    },
+    {
+      "id": "pasos",
+      "type": "backend",
+      "label": "Pasos",
+      "sublabel": "por piezas",
+      "stage": 1,
+      "row": 1,
+      "yOffset": -6,
+      "width": 96,
+      "tag": "trazabilidad_service"
+    },
+    {
+      "id": "semaforo",
+      "type": "backend",
+      "label": "Semáforo",
+      "sublabel": "avance vs plazo",
+      "stage": 2,
+      "row": 1,
+      "yOffset": -6,
+      "width": 96,
+      "tag": "motivos"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "API REST",
+      "sublabel": "PedidoViewSet",
+      "stage": 3,
+      "row": 1,
+      "yOffset": -6,
+      "width": 96,
+      "tag": "scope empresa"
+    },
+    {
+      "id": "nextjs",
+      "type": "frontend",
+      "label": "Next.js",
+      "sublabel": "detalle pedido",
+      "stage": 4,
+      "row": 1,
+      "yOffset": -6,
+      "width": 96,
+      "tag": "tracker",
+      "brand": "next-js"
+    }
+  ],
+  "flows": [
+    {
+      "id": "ventas-pasos",
+      "from": "ventas",
+      "to": "pasos",
+      "label": "tallas + plazo",
+      "classification": "programación",
+      "fromSide": "right",
+      "toSide": "top",
+      "via": [
+        [
+          315,
+          133
+        ]
+      ]
+    },
+    {
+      "id": "wms-pasos",
+      "from": "wms",
+      "to": "pasos",
+      "label": "piezas",
+      "classification": "surtido→embarque",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "produccion-pasos",
+      "from": "produccion",
+      "to": "pasos",
+      "label": "avances",
+      "classification": "+ hitos OP",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "finanzas-pasos",
+      "from": "finanzas",
+      "to": "pasos",
+      "label": "facturado + saldo",
+      "classification": "factura · CxC",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "via": [
+        [
+          315,
+          397
+        ]
+      ]
+    },
+    {
+      "id": "pasos-semaforo",
+      "from": "pasos",
+      "to": "semaforo",
+      "label": "avance + plazo",
+      "variant": "emphasis"
+    },
+    {
+      "id": "semaforo-api",
+      "from": "semaforo",
+      "to": "api",
+      "label": "pasos + resumen",
+      "variant": "emphasis"
+    },
+    {
+      "id": "api-nextjs",
+      "from": "api",
+      "to": "nextjs",
+      "label": "JSON",
+      "classification": "1 llamada",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Cómo se mide",
+      "items": [
+        "Todo en piezas contra el total del pedido",
+        "Confirmado → Programado → Surtido → Maquila → Empacado → Embarcado",
+        "Maquila = promedio de bordado, reflejante, corte de manga y OP"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Semáforo",
+      "items": [
+        "Plazo: confirmación → fecha compromiso de la clasificación",
+        "Rojo: vencido o 30+ puntos atrás del plazo",
+        "Amarillo: 10+ puntos atrás, orden detenida o piezas sin orden"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Para Next.js",
+      "items": [
+        "GET /api/v1/ventas/pedidos/{id}/trazabilidad/",
+        "Forma fija: 6 pasos y 4 procesos, mismas llaves",
+        "cobrado_pct solo con permiso de contabilidad"
+      ]
+    }
+  ]
+}
