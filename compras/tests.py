@@ -1122,3 +1122,72 @@ class HistorialOCProveedorTests(TestCase):
             self._oc(self.empresa, self.sucursal, self.oc_autorizada.estatus, "1.00", f"2026-04-0{dia}")
 
         self.assertEqual(queries(), antes)
+
+
+class OrdenCompraPutPlanoYFechaLocalTests(TestCase):
+    """#329: PUT con encabezado plano valida igual que el anidado (400, no 500).
+    #330: ``fecha_oc`` y ``hoy`` usan el día local, no el de UTC."""
+
+    @classmethod
+    def setUpTestData(cls):
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Una exhibición")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.proveedor = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="P1", moneda=cls.moneda, sat_regimen_fiscal=regimen,
+            sat_forma_pago=forma, sat_metodo_pago=metodo, codigo="P1", razon_social="P1",
+            telefono="8100000000", contacto_principal="Ana", rfc="XAXX010101000", email="p1@p.test",
+        )
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Tela")
+        cls.usuario = Usuario.objects.create(
+            username="compras", email="c@acme.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+
+    def setUp(self):
+        self.client_api = APIClient()
+        self.client_api.force_authenticate(user=self.usuario)
+        self.oc = OrdenCompra.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, proveedor=self.proveedor, moneda=self.moneda,
+            usuario=self.usuario, fecha_oc="2026-10-01", estatus=OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+        )
+
+    def _put(self, body):
+        body = {"proveedor": self.proveedor.pk, "detalles": [{"producto": self.producto.pk, "cantidad": 1, "precio": 10}], **body}
+        return self.client_api.put(f"{ORDENES_URL}{self.oc.pk}/", body, format="json")
+
+    def test_put_plano_con_valores_invalidos_responde_400(self):
+        for campo, valor in (("fecha_vencimiento", "no-es-fecha"), ("porcentaje_iva", "abc")):
+            with self.subTest(campo=campo):
+                resp = self._put({campo: valor})
+
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertIn(campo, resp.json())
+
+    def test_put_plano_con_fecha_vacia_no_responde_500(self):
+        self.assertIn(self._put({"fecha_vencimiento": ""}).status_code, (200, 400))
+
+    def test_put_plano_valido_aplica_los_valores(self):
+        resp = self._put({"fecha_vencimiento": "2026-12-01", "porcentaje_iva": "8.00"})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.oc.refresh_from_db()
+        self.assertEqual(str(self.oc.fecha_vencimiento), "2026-12-01")
+        self.assertEqual(self.oc.porcentaje_iva, Decimal("8.00"))
+
+    def test_fecha_oc_usa_el_dia_local(self):
+        # 2026-10-08 01:30 UTC = 2026-10-07 19:30 en Ciudad de México.
+        noche_local = timezone.datetime(2026, 10, 8, 1, 30, tzinfo=timezone.UTC)
+        with mock.patch("django.utils.timezone.now", return_value=noche_local):
+            resp = self.client_api.post(
+                f"{ORDENES_URL}onboarding/",
+                {"orden_compra": {"proveedor": self.proveedor.pk},
+                 "detalle": [{"producto": self.producto.pk, "cantidad": 1, "precio": "10.00"}]},
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["orden_compra"]["fecha_oc"], "2026-10-07")

@@ -29,6 +29,7 @@ from finanzas.models import FacturaProveedor
 from compras.api.serializers import (
     CalidadInspeccionInputSerializer,
     CalidadInspeccionSerializer,
+    OrdenCompraOnboardingHeaderSerializer,
     OrdenCompraOnboardingSerializer,
     OrdenCompraRetrieveSerializer,
     OrdenCompraSerializer,
@@ -553,7 +554,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 # Fecha de generación (EC-395): la fija el servidor al crear y
                 # nunca se vuelve a tocar, ni siquiera en una edición
                 # posterior por este mismo endpoint.
-                oc.fecha_oc = timezone.now().date()
+                oc.fecha_oc = timezone.localdate()
             if has_fecha_vencimiento:
                 oc.fecha_vencimiento = fecha_vencimiento
             if not oc.pk or has_porcentaje_iva:
@@ -654,7 +655,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        header = data.get("orden_compra") or raw
+        header = data.get("orden_compra")
+        if not header:
+            # Encabezado plano (sin ``orden_compra``): se valida con el mismo
+            # serializer que el anidado, para que un valor inválido dé 400 y no 500.
+            plano = OrdenCompraOnboardingHeaderSerializer(data=raw)
+            plano.is_valid(raise_exception=True)
+            header = plano.validated_data
         detalle = data.get("detalle") or data.get("detalles")
 
         with transaction.atomic():
@@ -1846,7 +1853,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             inspeccion = CalidadInspeccion.objects.create(
                 recepcion=recepcion,
                 inspector=inspector,
-                fecha=data.get("fecha") or timezone.now().date(),
+                fecha=data.get("fecha") or timezone.localdate(),
                 estado="pendiente",
                 observaciones=data.get("observaciones") or None,
             )
@@ -2235,7 +2242,7 @@ class ComprasDashboardView(APIView):
         }
 
     def _vencimientos(self, oc_base, dias):
-        hoy = timezone.now().date()
+        hoy = timezone.localdate()
         limite = hoy + timedelta(days=dias)
         agg = oc_base.exclude(estatus__in=self.ESTATUS_CERRADOS_OC).aggregate(
             vencidas=Count("id", filter=Q(fecha_vencimiento__lt=hoy)),
