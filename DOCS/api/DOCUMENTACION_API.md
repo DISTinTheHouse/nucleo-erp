@@ -3368,6 +3368,52 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
 }
 ```
 
+### 6.2) KPIs de Órdenes de Producción (EC-412)
+
+- **Endpoint**: `GET /api/v1/produccion/orden-produccion/kpis/`
+- Un solo GET agregado en DB (sin iterar OPs en Python) — pensado para tarjetas de dashboard, no para una tabla.
+- **Query param opcional**: `meta_otd` (float, default `95`) — el objetivo de % de cumplimiento a tiempo contra el que se calcula el semáforo (`verde` si `pct >= meta`, `amarillo` si está a ≤10 puntos, `rojo` si no). `meta_otd` no numérico → `400`.
+- **`cumplimiento_a_tiempo`** (OTD): `ops_a_tiempo / ops_terminadas` (OP con `fecha_fin`), a tiempo = `fecha_fin <= fecha_entrega_estimada`. `drill_down_tardias[]` trae hasta 20 OPs terminadas fuera de tiempo (`op_id`, `folio_op`, `fecha_fin`, `fecha_entrega_estimada`), para abrir el detalle.
+- **`ops_atrasadas`**: cuenta OPs no `Completado`/`Cancelado` con `fecha_entrega_estimada` ya vencida. `drill_down[]` (máx. 20) trae `op_id`, `folio_op`, `fecha_entrega_estimada`, `dias_vencida`.
+- **`avance_produccion` y `eficiencia_linea` vienen `"disponible": false`** con un `"motivo"` explicando por qué — el esquema actual no registra piezas terminadas por OP (solo piezas programadas en `OrdenProduccionDetalle`), ni SAM, operarios asignados o minutos trabajados. No se inventan estos dos KPIs con datos que no existen; se habilitan cuando se defina cómo capturar esa información.
+- Aislamiento multi-tenant: solo OPs (`activo=true`) de la empresa del usuario. Sin empresa asignada → los 4 bloques responden `"disponible": false` con `"motivo": "Usuario sin empresa asignada."` (200, no 403).
+
+**Respuesta**
+
+```json
+{
+  "generado_en": "2026-10-07T18:00:00Z",
+  "filtros": { "meta_otd": 95.0 },
+  "cumplimiento_a_tiempo": {
+    "disponible": true,
+    "pct": 87.5,
+    "meta": 95.0,
+    "semaforo": "amarillo",
+    "ops_terminadas": 40,
+    "ops_a_tiempo": 35,
+    "drill_down_tardias": [
+      { "op_id": 112, "folio_op": "OP-000112", "fecha_fin": "2026-10-01T18:00:00Z", "fecha_entrega_estimada": "2026-09-28" }
+    ]
+  },
+  "avance_produccion": {
+    "disponible": false,
+    "motivo": "No se registra piezas terminadas por OP en el esquema actual (solo piezas programadas)."
+  },
+  "eficiencia_linea": {
+    "disponible": false,
+    "motivo": "No existen campos de SAM, operarios asignados ni minutos trabajados en el esquema actual."
+  },
+  "ops_atrasadas": {
+    "disponible": true,
+    "total": 5,
+    "nota": "Solo cuenta OPs vencidas (fecha_entrega_estimada pasada); no incluye 'en riesgo por avance'.",
+    "drill_down": [
+      { "op_id": 120, "folio_op": "OP-000120", "fecha_entrega_estimada": "2026-10-02", "dias_vencida": 5 }
+    ]
+  }
+}
+```
+
 ### 7) Orden de Bordado Onboarding (patrón sencillo / manual)
 
 - **Endpoints CRUD**:
