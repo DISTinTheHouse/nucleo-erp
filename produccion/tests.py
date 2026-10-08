@@ -13,6 +13,7 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test produccion --settings=sqlite_settings
 """
 
+import json
 from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
@@ -4578,9 +4579,22 @@ class OrdenProduccionKpisTests(TestCase):
         cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
         cls.otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
         cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.sucursal_2 = Sucursal.objects.create(empresa=cls.empresa, codigo="CDMX", nombre="CDMX")
         cls.sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="GDL", nombre="GDL")
-        cls.usuario = Usuario.objects.create(username="u", email="u@acme.test", empresa=cls.empresa)
+        # ``sucursal_default=cls.sucursal`` (MTY): con el scope por sucursal
+        # (#355), un usuario normal sin sucursal asignada no vería nada: las
+        # OPs de este fixture viven todas en MTY salvo ``op_vencida_sucursal_2``.
+        cls.usuario = Usuario.objects.create(
+            username="u", email="u@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
         cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
+        cls.admin_empresa = Usuario.objects.create(
+            username="admin", email="admin@acme.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.superuser = Usuario.objects.create(
+            username="root", email="root@acme.test", is_superuser=True, is_staff=True,
+        )
 
         hoy = timezone.localdate()
         ahora = timezone.now()
@@ -4616,6 +4630,35 @@ class OrdenProduccionKpisTests(TestCase):
             fecha_entrega_estimada=hoy - timedelta(days=30),
         )
 
+        # #354: Cancelada con fecha_fin capturada -- no debe contar como
+        # "terminada" en OTD (antes sí, porque solo miraba fecha_fin).
+        cls.op_cancelada_con_fecha_fin = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-E",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
+            fecha_entrega_estimada=hoy - timedelta(days=1), fecha_fin=ahora,
+        )
+        # #354: Completada sin fecha_fin -- antes no contaba ni como
+        # terminada; ahora sí entra al denominador (no al numerador).
+        cls.op_completada_sin_fecha_fin = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-F",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+            fecha_entrega_estimada=hoy,
+        )
+        # #354: Completada sin fecha compromiso -- antes contaba como tardía
+        # (el exclude la incluía); ahora no es ni a tiempo ni tardía.
+        cls.op_completada_sin_compromiso = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-G",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+            fecha_fin=ahora,
+        )
+
+        # #355: OP vencida en una sucursal a la que ``usuario_mty`` NO tiene acceso.
+        cls.op_vencida_sucursal_2 = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal_2, folio_op="OP-H",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.BORDANDO,
+            fecha_entrega_estimada=hoy - timedelta(days=1),
+        )
+
     def _get(self, user, query=""):
         client = APIClient()
         client.force_authenticate(user=user)
@@ -4627,10 +4670,90 @@ class OrdenProduccionKpisTests(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         otd = resp.data["cumplimiento_a_tiempo"]
         self.assertTrue(otd["disponible"])
-        self.assertEqual(otd["ops_terminadas"], 2)
+        # Terminadas = Completado (4): a_tiempo, tardia, sin_fecha_fin, sin_compromiso.
+        self.assertEqual(otd["ops_terminadas"], 4)
         self.assertEqual(otd["ops_a_tiempo"], 1)
-        self.assertEqual(otd["pct"], 50.0)
+        self.assertEqual(otd["pct"], 25.0)
         self.assertEqual([d["op_id"] for d in otd["drill_down_tardias"]], [self.op_tardia.pk])
+
+    # --- #354: "terminada" es por estatus, no por fecha_fin --------------------
+
+    def test_cancelada_con_fecha_fin_no_cuenta_como_terminada(self):
+        resp = self._get(self.usuario)
+
+        otd = resp.data["cumplimiento_a_tiempo"]
+        atrasadas = resp.data["ops_atrasadas"]
+        tardias_ids = [d["op_id"] for d in otd["drill_down_tardias"]]
+        atrasadas_ids = [d["op_id"] for d in atrasadas["drill_down"]]
+        # Cancelada no debe aparecer en ninguna de las dos tarjetas.
+        self.assertNotIn(self.op_cancelada_con_fecha_fin.pk, tardias_ids)
+        self.assertNotIn(self.op_cancelada_con_fecha_fin.pk, atrasadas_ids)
+
+    def test_completada_sin_fecha_fin_cuenta_en_total_no_en_a_tiempo(self):
+        resp = self._get(self.usuario)
+
+        otd = resp.data["cumplimiento_a_tiempo"]
+        tardias_ids = [d["op_id"] for d in otd["drill_down_tardias"]]
+        # Entra al denominador (ya se verificó arriba: ops_terminadas=4) pero
+        # no puede ser "a tiempo" ni "tardía" sin fecha_fin.
+        self.assertNotIn(self.op_completada_sin_fecha_fin.pk, tardias_ids)
+
+    def test_completada_sin_compromiso_no_es_tardia(self):
+        resp = self._get(self.usuario)
+
+        tardias_ids = [d["op_id"] for d in resp.data["cumplimiento_a_tiempo"]["drill_down_tardias"]]
+        self.assertNotIn(self.op_completada_sin_compromiso.pk, tardias_ids)
+
+    # --- #355: alcance por sucursal ---------------------------------------------
+
+    def test_usuario_limitado_a_su_sucursal_no_ve_otra(self):
+        resp = self._get(self.usuario)  # sucursal_default = MTY
+
+        atrasadas_ids = [d["op_id"] for d in resp.data["ops_atrasadas"]["drill_down"]]
+        self.assertIn(self.op_vencida.pk, atrasadas_ids)  # MTY: sí
+        self.assertNotIn(self.op_vencida_sucursal_2.pk, atrasadas_ids)  # CDMX: no
+
+    def test_admin_empresa_ve_todas_las_sucursales(self):
+        resp = self._get(self.admin_empresa)
+
+        atrasadas_ids = [d["op_id"] for d in resp.data["ops_atrasadas"]["drill_down"]]
+        self.assertIn(self.op_vencida.pk, atrasadas_ids)
+        self.assertIn(self.op_vencida_sucursal_2.pk, atrasadas_ids)
+
+    def test_superuser_sin_empresa_ve_todo(self):
+        resp = self._get(self.superuser)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data["ops_atrasadas"]["disponible"])
+        atrasadas_ids = [d["op_id"] for d in resp.data["ops_atrasadas"]["drill_down"]]
+        self.assertIn(self.op_vencida_sucursal_2.pk, atrasadas_ids)
+
+    # --- #356: meta_otd no finito o fuera de rango ------------------------------
+
+    def test_meta_otd_no_finito_es_400(self):
+        for valor in ("nan", "inf", "-inf", "1e999"):
+            with self.subTest(valor=valor):
+                resp = self._get(self.usuario, f"?meta_otd={valor}")
+                self.assertEqual(resp.status_code, 400)
+
+    def test_meta_otd_fuera_de_rango_es_400(self):
+        for valor in ("-1", "101"):
+            with self.subTest(valor=valor):
+                resp = self._get(self.usuario, f"?meta_otd={valor}")
+                self.assertEqual(resp.status_code, 400)
+
+    # --- #358: fecha_fin en el drill-down usa hora local, no UTC ---------------
+
+    def test_fecha_fin_en_drill_down_usa_hora_local(self):
+        resp = self._get(self.usuario)
+
+        payload = json.loads(resp.content)
+        tardia = next(
+            d for d in payload["cumplimiento_a_tiempo"]["drill_down_tardias"]
+            if d["op_id"] == self.op_tardia.pk
+        )
+        # DRF renderiza "+00:00" como "Z"; con hora local (UTC-6) nunca pasa.
+        self.assertFalse(tardia["fecha_fin"].endswith("Z"))
 
     def test_ops_atrasadas_solo_cuenta_vencidas_abiertas(self):
         resp = self._get(self.usuario)
@@ -4648,7 +4771,8 @@ class OrdenProduccionKpisTests(TestCase):
         self.assertFalse(resp.data["eficiencia_linea"]["disponible"])
 
     def test_meta_otd_cambia_semaforo(self):
-        verde = self._get(self.usuario, "?meta_otd=40")
+        # pct real = 25.0 (ver test_otd_cuenta_solo_lo_de_mi_empresa).
+        verde = self._get(self.usuario, "?meta_otd=20")
         rojo = self._get(self.usuario, "?meta_otd=95")
 
         self.assertEqual(verde.data["cumplimiento_a_tiempo"]["semaforo"], "verde")

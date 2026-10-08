@@ -3531,11 +3531,12 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
 
 - **Endpoint**: `GET /api/v1/produccion/orden-produccion/kpis/`
 - Un solo GET agregado en DB (sin iterar OPs en Python) — pensado para tarjetas de dashboard, no para una tabla.
-- **Query param opcional**: `meta_otd` (float, default `95`) — el objetivo de % de cumplimiento a tiempo contra el que se calcula el semáforo (`verde` si `pct >= meta`, `amarillo` si está a ≤10 puntos, `rojo` si no). `meta_otd` no numérico → `400`.
-- **`cumplimiento_a_tiempo`** (OTD): `ops_a_tiempo / ops_terminadas` (OP con `fecha_fin`), a tiempo = `fecha_fin <= fecha_entrega_estimada`. `drill_down_tardias[]` trae hasta 20 OPs terminadas fuera de tiempo (`op_id`, `folio_op`, `fecha_fin`, `fecha_entrega_estimada`), para abrir el detalle.
-- **`ops_atrasadas`**: cuenta OPs no `Completado`/`Cancelado` con `fecha_entrega_estimada` ya vencida. `drill_down[]` (máx. 20) trae `op_id`, `folio_op`, `fecha_entrega_estimada`, `dias_vencida`.
+- **Único query param soportado**: `meta_otd` (float, default `95`, rango `0`–`100`) — el objetivo de % de cumplimiento a tiempo contra el que se calcula el semáforo (`verde` si `pct >= meta`, `amarillo` si está a ≤10 puntos, `rojo` si no). No finito (`nan`/`inf`/`-inf`), no numérico, o fuera de `0`–`100` → `400`. **Cualquier otro query param se ignora en silencio** (no hay filtro por sucursal, periodo ni cliente todavía — es una decisión de producto pendiente, no un bug).
+- **Alcance**: superusuario ve todas las empresas; dentro de la empresa, `is_admin_empresa` ve todas las sucursales y el resto solo `sucursales_permitidas()` — mismo criterio que bordado/reflejante/corte de manga. Sin empresa asignada (y sin ser superusuario) → los 4 bloques responden `"disponible": false` con `"motivo": "Usuario sin empresa asignada."` (200, no 403). **Nota:** el listado/detalle normal de OP (`GET /orden-produccion/`) todavía no aplica este mismo filtro de sucursal — alinearlos es una decisión aparte.
+- **`cumplimiento_a_tiempo`** (OTD): "terminada" = `estatus_op = Completado` (no por `fecha_fin`: ese campo casi nunca se llena, y decidir por su presencia contaba Canceladas y perdía Completadas sin fecha). `ops_a_tiempo / ops_terminadas`; a tiempo = tiene `fecha_fin` **y** `fecha_entrega_estimada`, y `fecha_fin <= fecha_entrega_estimada`. Una OP Completada sin alguna de esas dos fechas cuenta en `ops_terminadas` pero no en `ops_a_tiempo` ni en `drill_down_tardias` (no se puede afirmar que llegó tarde sin ambos datos). `drill_down_tardias[]` (máx. 20) trae `op_id`, `folio_op`, `fecha_fin` (hora local, no UTC), `fecha_entrega_estimada`.
+- **`ops_atrasadas`**: cuenta OPs no `Completado`/`Cancelado` con `fecha_entrega_estimada` ya vencida. `drill_down[]` (máx. 20) trae `op_id`, `folio_op`, `fecha_entrega_estimada`, `dias_vencida`. Por construcción, ninguna OP puede aparecer aquí **y** en `cumplimiento_a_tiempo` a la vez (uno exige `Completado`, el otro lo excluye).
 - **`avance_produccion` y `eficiencia_linea` vienen `"disponible": false`** con un `"motivo"` explicando por qué — el esquema actual no registra piezas terminadas por OP (solo piezas programadas en `OrdenProduccionDetalle`), ni SAM, operarios asignados o minutos trabajados. No se inventan estos dos KPIs con datos que no existen; se habilitan cuando se defina cómo capturar esa información.
-- Aislamiento multi-tenant: solo OPs (`activo=true`) de la empresa del usuario. Sin empresa asignada → los 4 bloques responden `"disponible": false` con `"motivo": "Usuario sin empresa asignada."` (200, no 403).
+- **Límite conocido**: los drill-down (`drill_down_tardias`, `ops_atrasadas.drill_down`) topan en 20 filas, sin paginación. Si una empresa tiene más de 20 OPs tardías o atrasadas, hoy no hay forma de ver el resto desde este endpoint — pendiente de diseño (paginar aquí vs. exponer filtros equivalentes en el listado de OP).
 
 **Respuesta**
 
@@ -3551,7 +3552,7 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
     "ops_terminadas": 40,
     "ops_a_tiempo": 35,
     "drill_down_tardias": [
-      { "op_id": 112, "folio_op": "OP-000112", "fecha_fin": "2026-10-01T18:00:00Z", "fecha_entrega_estimada": "2026-09-28" }
+      { "op_id": 112, "folio_op": "OP-000112", "fecha_fin": "2026-10-01T12:00:00-06:00", "fecha_entrega_estimada": "2026-09-28" }
     ]
   },
   "avance_produccion": {

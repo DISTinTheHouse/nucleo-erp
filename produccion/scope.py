@@ -16,7 +16,34 @@ Ninguna función aplica ``select_related``/``prefetch_related`` ni orden: eso si
 siendo responsabilidad de cada consumidor.
 """
 
-from produccion.models import OrdenesBordado, OrdenesCorteManga, OrdenesReflejante
+from produccion.models import OrdenesBordado, OrdenesCorteManga, OrdenesReflejante, OrdenProduccion
+
+
+def ordenes_produccion_base():
+    """Filas existentes de ``produccion.OrdenProduccion``: excluye las borradas (soft delete)."""
+    return OrdenProduccion.objects.filter(activo=True)
+
+
+def ordenes_produccion_visibles(qs, user):
+    """Alcance de ``produccion.OrdenProduccion``: empresa + sucursal.
+
+    Mismo criterio que bordado/reflejante/corte de manga: el superusuario ve
+    todo; sin empresa no se ve nada; dentro de la empresa, ``is_admin_empresa``
+    ve todas las sucursales y el resto sólo las de
+    ``user.sucursales_permitidas()``. Usado hoy solo por
+    ``OrdenProduccionViewSet.kpis`` (#355): el listado/detalle
+    (``OrdenProduccionViewSet.get_queryset()``) todavía solo filtra por
+    empresa -- alinearlos es una decisión aparte, de mayor alcance.
+    """
+    if getattr(user, "is_superuser", False):
+        return qs
+    empresa = getattr(user, "empresa", None)
+    if not empresa:
+        return qs.none()
+    qs = qs.filter(empresa=empresa)
+    if getattr(user, "is_admin_empresa", False):
+        return qs
+    return qs.filter(sucursal_id__in=user.sucursales_permitidas())
 
 
 def ordenes_bordado_base():
