@@ -21,12 +21,20 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import Color, Producto, ProductoVariante
+from catalogo.models import CategoriaProducto, Color, Producto, ProductoVariante
 from compras.api.views import CalidadInspeccionViewSet, OrdenCompraViewSet, RecepcionViewSet
-from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+from compras.models import (
+    CalidadInspeccion,
+    CalidadInspeccionDetalle,
+    OrdenCompra,
+    OrdenCompraDetalle,
+    Recepcion,
+    RecepcionDetalle,
+)
 from finanzas.models import FacturaProveedor, FacturaProveedorDetalle
+from hr.models import Empleado, Puesto
 from inventarios.models import Almacen, Existencia, MovimientoInventario, MovimientoInventarioDetalle, Ubicacion
-from nucleo.models import Empresa, Moneda, SatFormaPago, SatMetodoPago, SatRegimenFiscal, SerieFolio, Sucursal
+from nucleo.models import Departamento, Empresa, Moneda, SatFormaPago, SatMetodoPago, SatRegimenFiscal, SerieFolio, Sucursal
 from terceros.models import Proveedor
 from usuarios.models import Usuario
 
@@ -1191,3 +1199,260 @@ class OrdenCompraPutPlanoYFechaLocalTests(TestCase):
 
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(resp.json()["orden_compra"]["fecha_oc"], "2026-10-07")
+
+
+class RecepcionKpisTests(TestCase):
+    """``GET /recepciones/kpis/`` (EC-434): los 4 KPIs son reales."""
+
+    URL = "/api/v1/compras/recepciones/kpis/"
+
+    @classmethod
+    def setUpTestData(cls):
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.proveedor = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="Proveedor Test", moneda=cls.moneda, sat_regimen_fiscal=regimen,
+            sat_forma_pago=forma, sat_metodo_pago=metodo, codigo="PROV-1", razon_social="Prov SA",
+            telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000", email="p@acme.test",
+        )
+        cls.almacen = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM", nombre="Almacen")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Insumo Test")
+        cls.usuario = Usuario.objects.create(
+            username="u@acme.test", email="u@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
+
+        departamento = Departamento.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="CAL", nombre="Calidad",
+        )
+        puesto = Puesto.objects.create(empresa=cls.empresa, nombre="Inspector")
+        cls.inspector = Empleado.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, departamento=departamento, puesto=puesto,
+            numero_empleado="EMP-1", nombre="Juan", apellido_paterno="Perez",
+            fecha_ingreso=timezone.localdate(),
+        )
+
+        # OC #1: AUTORIZADA, ordenó 10 @ $5.00, recibió 6 -> parcial, cumplimiento 60%.
+        cls.oc1 = OrdenCompra.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, proveedor=cls.proveedor, moneda=cls.moneda,
+            usuario=cls.usuario, fecha_oc=timezone.now().date(),
+            estatus=OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+        )
+        cls.oc1_det = OrdenCompraDetalle.objects.create(
+            orden_compra=cls.oc1, producto=cls.producto, sucursal=cls.sucursal, cantidad=10, precio=Decimal("5.00"),
+        )
+        cls.rec1 = Recepcion.objects.create(
+            orden_compra=cls.oc1, empresa=cls.empresa, sucursal=cls.sucursal, proveedor=cls.proveedor,
+            almacen=cls.almacen, usuario=cls.usuario, folio="RC-1", fecha_recepcion=timezone.now(),
+            estatus=Recepcion.EstatusRecepcion.RECIBIDA,
+        )
+        cls.rec1_det = RecepcionDetalle.objects.create(
+            recepcion=cls.rec1, orden_compra_detalle=cls.oc1_det, producto=cls.producto, cantidad_recibida=6,
+        )
+
+        # OC #2: RECIBIDA completa, 5 @ $10.00, recibido 5 -> cumplimiento 100%.
+        cls.oc2 = OrdenCompra.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, proveedor=cls.proveedor, moneda=cls.moneda,
+            usuario=cls.usuario, fecha_oc=timezone.now().date(),
+            estatus=OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+        )
+        oc2_det = OrdenCompraDetalle.objects.create(
+            orden_compra=cls.oc2, producto=cls.producto, sucursal=cls.sucursal, cantidad=5, precio=Decimal("10.00"),
+        )
+        rec2 = Recepcion.objects.create(
+            orden_compra=cls.oc2, empresa=cls.empresa, sucursal=cls.sucursal, proveedor=cls.proveedor,
+            almacen=cls.almacen, usuario=cls.usuario, folio="RC-2", fecha_recepcion=timezone.now(),
+            estatus=Recepcion.EstatusRecepcion.RECIBIDA,
+        )
+        rec2_det = RecepcionDetalle.objects.create(
+            recepcion=rec2, orden_compra_detalle=oc2_det, producto=cls.producto, cantidad_recibida=5,
+        )
+
+        # Factura de la OC #1: facturado a $6.00 (vs pactado $5.00) -> diferencia +$1 x 6 = $6.
+        factura = FacturaProveedor.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, proveedor=cls.proveedor, oc=cls.oc1, recepcion=cls.rec1,
+            moneda=cls.moneda, estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA,
+        )
+        FacturaProveedorDetalle.objects.create(
+            factura_proveedor=factura, oc_detalle=cls.oc1_det, recepcion_detalle=cls.rec1_det,
+            producto=cls.producto, cantidad=6, precio_unitario=Decimal("6.00"),
+        )
+
+        # Calidad rechaza 2 de lo recibido en la OC #1 -> valor = 2 * $5.00 = $10.
+        inspeccion = CalidadInspeccion.objects.create(
+            recepcion=cls.rec1, inspector=cls.inspector, fecha=timezone.localdate(), estado="aprobada_condicion",
+        )
+        CalidadInspeccionDetalle.objects.create(
+            calidad_inspeccion=inspeccion, recepcion_detalle=cls.rec1_det,
+            cantidad_inspeccionada=6, cantidad_aprobada=4, cantidad_rechazada=2,
+            resultado="rechazo", motivo_rechazo="Material defectuoso",
+        )
+
+    def _get(self, user=None):
+        client = APIClient()
+        client.force_authenticate(user=user or self.usuario)
+        return client.get(self.URL)
+
+    def test_cumplimiento_cantidad(self):
+        resp = self._get()
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        kpi = resp.data["cumplimiento_cantidad"]
+        self.assertTrue(kpi["disponible"])
+        self.assertEqual(kpi["cantidad_ordenada"], Decimal("15"))  # 10 + 5
+        self.assertEqual(kpi["cantidad_recibida"], Decimal("11"))  # 6 + 5
+        self.assertAlmostEqual(kpi["pct"], 73.3, places=1)
+        self.assertEqual(len(kpi["drill_down"]), 1)
+        self.assertEqual(kpi["drill_down"][0]["oc_id"], self.oc1.pk)
+
+    def test_recepciones_parciales(self):
+        resp = self._get()
+
+        kpi = resp.data["recepciones_parciales"]
+        self.assertEqual(kpi["ocs_parciales"], 1)
+        self.assertEqual(kpi["ocs_recibidas_o_parciales"], 2)
+        self.assertEqual(kpi["pct"], 50.0)
+
+    def test_diferencia_precio(self):
+        resp = self._get()
+
+        kpi = resp.data["diferencia_precio"]
+        self.assertTrue(kpi["disponible"])
+        self.assertEqual(kpi["costo_facturado"], Decimal("36.00"))  # 6 * 6.00
+        self.assertEqual(kpi["costo_pactado_oc"], Decimal("30.00"))  # 6 * 5.00
+        self.assertEqual(kpi["diferencia"], Decimal("6.00"))
+        self.assertEqual(len(kpi["drill_down"]), 1)
+
+    def test_material_rechazado(self):
+        resp = self._get()
+
+        kpi = resp.data["material_rechazado"]
+        self.assertTrue(kpi["disponible"])
+        self.assertEqual(kpi["cantidad_rechazada"], Decimal("2"))
+        self.assertEqual(kpi["valor_rechazado"], Decimal("10.00"))  # 2 * 5.00
+        self.assertEqual(kpi["drill_down"][0]["motivo_rechazo"], "Material defectuoso")
+
+    def test_otra_empresa_no_contamina_los_totales(self):
+        resp = self._get()
+        kpi = resp.data["cumplimiento_cantidad"]
+        # Si hubiera fuga cross-tenant el total ordenado/recibido cambiaría.
+        self.assertEqual(kpi["cantidad_ordenada"], Decimal("15"))
+
+    def test_usuario_sin_empresa_no_ve_nada(self):
+        resp = self._get(self.sin_empresa)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data["cumplimiento_cantidad"]["disponible"])
+
+
+class OrdenCompraKpisTests(TestCase):
+    """``GET /ordenes/kpis/`` (EC-432): 3 de 4 KPIs son reales; ciclo_compra
+    queda ``disponible: False`` -- el flujo Requisición → Solicitud de compra
+    no se usa hoy, así que no hay fecha de requisición contra qué medir."""
+
+    URL = "/api/v1/compras/ordenes/kpis/"
+
+    @classmethod
+    def setUpTestData(cls):
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.proveedor = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="Proveedor Test", moneda=cls.moneda, sat_regimen_fiscal=regimen,
+            sat_forma_pago=forma, sat_metodo_pago=metodo, codigo="PROV-1", razon_social="Prov SA",
+            telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000", email="p@acme.test",
+        )
+        cls.usuario = Usuario.objects.create(
+            username="u@acme.test", email="u@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
+
+        tela = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Tela", codigo="TEL", descripcion="")
+        hilo = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Hilo", codigo="HIL", descripcion="")
+        cls.prod_tela = Producto.objects.create(empresa=cls.empresa, nombre="Tela Azul", categoria_producto=tela)
+        cls.prod_hilo = Producto.objects.create(empresa=cls.empresa, nombre="Hilo Blanco", categoria_producto=hilo)
+
+        hoy = timezone.now().date()
+
+        # OC abierta (AUTORIZADA), no vencida.
+        cls.oc_abierta = OrdenCompra.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, proveedor=cls.proveedor, moneda=cls.moneda,
+            usuario=cls.usuario, fecha_oc=hoy, estatus=OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+            gran_total=Decimal("1000.00"), fecha_entrega_estimada=hoy + timedelta(days=5),
+        )
+        OrdenCompraDetalle.objects.create(
+            orden_compra=cls.oc_abierta, producto=cls.prod_tela, sucursal=cls.sucursal,
+            cantidad=10, precio=Decimal("50.00"), importe=Decimal("500.00"),
+        )
+        OrdenCompraDetalle.objects.create(
+            orden_compra=cls.oc_abierta, producto=cls.prod_hilo, sucursal=cls.sucursal,
+            cantidad=10, precio=Decimal("50.00"), importe=Decimal("500.00"),
+        )
+
+        # OC vencida sin recibir (PARCIALMENTE_RECIBIDA, fecha ya pasada).
+        cls.oc_vencida = OrdenCompra.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, proveedor=cls.proveedor, moneda=cls.moneda,
+            usuario=cls.usuario, fecha_oc=hoy - timedelta(days=20),
+            estatus=OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+            gran_total=Decimal("300.00"), fecha_entrega_estimada=hoy - timedelta(days=3),
+        )
+        OrdenCompraDetalle.objects.create(
+            orden_compra=cls.oc_vencida, producto=cls.prod_tela, sucursal=cls.sucursal,
+            cantidad=5, precio=Decimal("60.00"), importe=Decimal("300.00"),
+        )
+
+        # OC recibida (cerrada): no cuenta como abierta ni como vencida.
+        OrdenCompra.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, proveedor=cls.proveedor, moneda=cls.moneda,
+            usuario=cls.usuario, fecha_oc=hoy - timedelta(days=30),
+            estatus=OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+            gran_total=Decimal("999.00"), fecha_entrega_estimada=hoy - timedelta(days=25),
+        )
+
+    def _get(self, user=None):
+        client = APIClient()
+        client.force_authenticate(user=user or self.usuario)
+        return client.get(self.URL)
+
+    def test_ocs_abiertas(self):
+        resp = self._get()
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        kpi = resp.data["ocs_abiertas"]
+        self.assertTrue(kpi["disponible"])
+        self.assertEqual(kpi["total"], 2)  # abierta + vencida (ambas en estatus abierto)
+        self.assertEqual(kpi["monto"], Decimal("1300.00"))
+
+    def test_ocs_vencidas_sin_recibir(self):
+        resp = self._get()
+
+        kpi = resp.data["ocs_vencidas_sin_recibir"]
+        self.assertTrue(kpi["disponible"])
+        self.assertEqual(kpi["total"], 1)
+        self.assertEqual(kpi["drill_down"][0]["oc_id"], self.oc_vencida.pk)
+        self.assertEqual(kpi["drill_down"][0]["dias_vencida"], 3)
+
+    def test_ciclo_compra_no_disponible(self):
+        resp = self._get()
+        self.assertFalse(resp.data["ciclo_compra"]["disponible"])
+
+    def test_gasto_por_categoria(self):
+        resp = self._get()
+
+        categorias = {c["categoria"]: c["monto"] for c in resp.data["gasto_por_categoria"]["categorias"]}
+        self.assertEqual(categorias["Tela"], Decimal("800.00"))  # 500 (abierta) + 300 (vencida)
+        self.assertEqual(categorias["Hilo"], Decimal("500.00"))
+
+    def test_usuario_sin_empresa_no_ve_nada(self):
+        resp = self._get(self.sin_empresa)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data["ocs_abiertas"]["disponible"])

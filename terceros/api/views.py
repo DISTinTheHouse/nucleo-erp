@@ -1,10 +1,12 @@
+from decimal import Decimal
+
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from django.conf import settings
-from django.db.models import Count, Sum
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from finanzas.services.facturama.acceso import empresa_usa_facturama
@@ -276,6 +278,202 @@ class ProveedorViewSet(viewsets.ModelViewSet):
             ]
         response.data["resumen"] = resumen
         return Response(response.data)
+
+    def _semaforo(self, valor, meta):
+        if valor is None:
+            return "sin_datos"
+        if valor >= meta:
+            return "verde"
+        if valor >= meta - 10:
+            return "amarillo"
+        return "rojo"
+
+    @action(detail=False, methods=["get"], url_path="kpis")
+    def kpis(self, request):
+        """Scorecard por proveedor (EC-436): puntualidad, calidad, cumplimiento
+        de cantidad y diferencia de precio, todo contra datos reales de
+        compras (``Recepcion``/``CalidadInspeccionDetalle``/
+        ``FacturaProveedorDetalle``). ``scorecard`` es el promedio simple de
+        los factores que sí tienen dato para ese proveedor -- si falta uno
+        (p. ej. nunca le han facturado), se re-normaliza entre los demás en
+        vez de inventar un valor."""
+        from compras.models import CalidadInspeccionDetalle, OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+        from finanzas.models import FacturaProveedor, FacturaProveedorDetalle
+
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        if empresa is None and not getattr(user, "is_superuser", False):
+            return Response({"generado_en": timezone.now(), "proveedores": []})
+
+        por_proveedor = {}
+
+        def _bucket(pid, nombre):
+            return por_proveedor.setdefault(pid, {
+                "proveedor_id": pid, "proveedor_nombre": nombre,
+                "recepciones_total": 0, "recepciones_a_tiempo": 0,
+                "dias_reales": [], "dias_pactados": [],
+                "cantidad_rechazada": Decimal("0"), "cantidad_inspeccionada": Decimal("0"),
+                "cantidad_ordenada": Decimal("0"), "cantidad_recibida": Decimal("0"),
+                "facturado": Decimal("0"), "pactado_oc": Decimal("0"),
+            })
+
+        # 1) Puntualidad + lead time: una fila por recepción contra su OC.
+        recepciones = (
+            Recepcion.objects.filter(
+                empresa=empresa, activo=True, tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
+                proveedor__isnull=False, orden_compra__isnull=False,
+            )
+            .exclude(estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            .values(
+                "proveedor_id", "proveedor__nombre", "fecha_recepcion",
+                "orden_compra__fecha_oc", "orden_compra__fecha_entrega_estimada",
+            )
+        )
+        for row in recepciones:
+            b = _bucket(row["proveedor_id"], row["proveedor__nombre"])
+            b["recepciones_total"] += 1
+            fecha_recepcion = row["fecha_recepcion"].date() if row["fecha_recepcion"] else None
+            fecha_compromiso = row["orden_compra__fecha_entrega_estimada"]
+            fecha_oc = row["orden_compra__fecha_oc"]
+            if fecha_recepcion and fecha_compromiso and fecha_recepcion <= fecha_compromiso:
+                b["recepciones_a_tiempo"] += 1
+            if fecha_recepcion and fecha_oc:
+                b["dias_reales"].append((fecha_recepcion - fecha_oc).days)
+            if fecha_compromiso and fecha_oc:
+                b["dias_pactados"].append((fecha_compromiso - fecha_oc).days)
+
+        # 2) Calidad: rechazado vs. inspeccionado.
+        for row in (
+            CalidadInspeccionDetalle.objects.filter(
+                recepcion_detalle__recepcion__empresa=empresa, recepcion_detalle__recepcion__activo=True,
+                recepcion_detalle__recepcion__proveedor__isnull=False,
+            )
+            .exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            .values("recepcion_detalle__recepcion__proveedor_id", "recepcion_detalle__recepcion__proveedor__nombre")
+            .annotate(rechazada=Sum("cantidad_rechazada"), inspeccionada=Sum("cantidad_inspeccionada"))
+        ):
+            b = _bucket(row["recepcion_detalle__recepcion__proveedor_id"], row["recepcion_detalle__recepcion__proveedor__nombre"])
+            b["cantidad_rechazada"] += row["rechazada"] or 0
+            b["cantidad_inspeccionada"] += row["inspeccionada"] or 0
+
+        # 3) Cumplimiento de cantidad: ordenado vs. recibido, OCs comprometidas.
+        estatus_comprometidas = [
+            OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+            OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+            OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+        ]
+        for row in (
+            OrdenCompraDetalle.objects.filter(
+                orden_compra__empresa=empresa, orden_compra__activo=True,
+                orden_compra__estatus__in=estatus_comprometidas, orden_compra__proveedor__isnull=False,
+            )
+            .values("orden_compra__proveedor_id", "orden_compra__proveedor__nombre")
+            .annotate(ordenado=Sum("cantidad"))
+        ):
+            b = _bucket(row["orden_compra__proveedor_id"], row["orden_compra__proveedor__nombre"])
+            b["cantidad_ordenada"] += row["ordenado"] or 0
+
+        for row in (
+            RecepcionDetalle.objects.filter(
+                orden_compra_detalle__orden_compra__empresa=empresa,
+                orden_compra_detalle__orden_compra__activo=True,
+                orden_compra_detalle__orden_compra__estatus__in=estatus_comprometidas,
+                orden_compra_detalle__orden_compra__proveedor__isnull=False,
+                recepcion__activo=True, recepcion__tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
+            )
+            .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            .values(
+                "orden_compra_detalle__orden_compra__proveedor_id",
+                "orden_compra_detalle__orden_compra__proveedor__nombre",
+            )
+            .annotate(recibido=Sum("cantidad_recibida"))
+        ):
+            b = _bucket(
+                row["orden_compra_detalle__orden_compra__proveedor_id"],
+                row["orden_compra_detalle__orden_compra__proveedor__nombre"],
+            )
+            b["cantidad_recibida"] += row["recibido"] or 0
+
+        # 4) Diferencia de precio: facturado vs. pactado en la OC.
+        money = DecimalField(max_digits=18, decimal_places=2)
+        for row in (
+            FacturaProveedorDetalle.objects.filter(
+                factura_proveedor__empresa=empresa, factura_proveedor__proveedor__isnull=False,
+            )
+            .exclude(factura_proveedor__estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA)
+            .annotate(
+                facturado_linea=ExpressionWrapper(F("precio_unitario") * F("cantidad"), output_field=money),
+                pactado_linea=ExpressionWrapper(F("oc_detalle__precio") * F("cantidad"), output_field=money),
+            )
+            .values("factura_proveedor__proveedor_id", "factura_proveedor__proveedor__nombre")
+            .annotate(facturado=Sum("facturado_linea"), pactado=Sum("pactado_linea"))
+        ):
+            b = _bucket(row["factura_proveedor__proveedor_id"], row["factura_proveedor__proveedor__nombre"])
+            b["facturado"] += row["facturado"] or Decimal("0")
+            b["pactado_oc"] += row["pactado"] or Decimal("0")
+
+        proveedores = []
+        for b in por_proveedor.values():
+            pct_a_tiempo = (
+                round(b["recepciones_a_tiempo"] / b["recepciones_total"] * 100, 1)
+                if b["recepciones_total"] else None
+            )
+            dias_real_prom = round(sum(b["dias_reales"]) / len(b["dias_reales"]), 1) if b["dias_reales"] else None
+            dias_pactado_prom = (
+                round(sum(b["dias_pactados"]) / len(b["dias_pactados"]), 1) if b["dias_pactados"] else None
+            )
+            pct_rechazo = (
+                round(float(b["cantidad_rechazada"]) / float(b["cantidad_inspeccionada"]) * 100, 1)
+                if b["cantidad_inspeccionada"] else None
+            )
+            pct_cumplimiento = (
+                round(float(b["cantidad_recibida"]) / float(b["cantidad_ordenada"]) * 100, 1)
+                if b["cantidad_ordenada"] else None
+            )
+            pct_diferencia_precio = (
+                round(float(b["facturado"] - b["pactado_oc"]) / float(b["pactado_oc"]) * 100, 1)
+                if b["pactado_oc"] else None
+            )
+
+            factores = []
+            if pct_a_tiempo is not None:
+                factores.append(pct_a_tiempo)
+            if pct_rechazo is not None:
+                factores.append(max(0.0, 100 - pct_rechazo))
+            if pct_cumplimiento is not None:
+                factores.append(min(pct_cumplimiento, 100.0))
+            if pct_diferencia_precio is not None:
+                factores.append(max(0.0, 100 - abs(pct_diferencia_precio)))
+            scorecard = round(sum(factores) / len(factores), 1) if factores else None
+
+            proveedores.append({
+                "proveedor_id": b["proveedor_id"],
+                "proveedor_nombre": b["proveedor_nombre"],
+                "entrega_a_tiempo": {
+                    "pct": pct_a_tiempo,
+                    "recepciones_a_tiempo": b["recepciones_a_tiempo"],
+                    "recepciones_total": b["recepciones_total"],
+                },
+                "calidad": {
+                    "pct_rechazado": pct_rechazo,
+                    "cantidad_rechazada": b["cantidad_rechazada"],
+                    "cantidad_inspeccionada": b["cantidad_inspeccionada"],
+                },
+                "lead_time": {
+                    "dias_promedio_real": dias_real_prom,
+                    "dias_promedio_pactado": dias_pactado_prom,
+                },
+                "cumplimiento_cantidad": {
+                    "pct": pct_cumplimiento,
+                    "cantidad_ordenada": b["cantidad_ordenada"],
+                    "cantidad_recibida": b["cantidad_recibida"],
+                },
+                "diferencia_precio": {"pct": pct_diferencia_precio},
+                "scorecard": {"puntaje": scorecard, "semaforo": self._semaforo(scorecard, 80)},
+            })
+
+        proveedores.sort(key=lambda r: (r["scorecard"]["puntaje"] is None, -(r["scorecard"]["puntaje"] or 0)))
+        return Response({"generado_en": timezone.now(), "proveedores": proveedores[:50]})
 
 class DireccionClienteViewSet(viewsets.ModelViewSet):
     queryset = DireccionCliente.objects.filter(activo=True)

@@ -2600,6 +2600,58 @@ Sin `desde`/`hasta` el gasto es histórico completo. `desde`/`hasta` inválidos 
 - **No incluye nada de Calidad todavía** (`recepciones_por_estatus` ya puede traer `EN_CALIDAD`/`CERRADA`, pero no hay un desglose de aprobado/rechazado/cuarentena en este dashboard — pendiente si lo necesitan). `EnvioProveedor` sigue sin usarse en ningún lado, ese sí es puro modelo sin dato real.
 - Desde este cambio, `Existencia` se abona en `POST /api/v1/compras/calidad-inspecciones/onboarding/`, no en `recepciones/onboarding/` — ver `DOCS/arquitectura/flujo-recepcion-calidad-compras.md`.
 
+## 🧾 Compras - KPIs por pantalla (EC-432 / EC-434 / EC-436)
+
+Distintos de `/dashboard/` de arriba: cada uno es la tarjeta de KPIs de **una pantalla específica**, no el resumen general. Mismo patrón en los 3: `GET`, sin query params, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.
+
+### Órdenes de Compra — `GET /api/v1/compras/ordenes/kpis/`
+
+```json
+{
+  "generado_en": "2026-10-08T12:00:00Z",
+  "ocs_abiertas": { "disponible": true, "total": 12, "monto": "185000.00", "por_estatus": [{ "estatus": 3, "estatus_label": "Autorizada", "total": 8, "monto": "120000.00" }] },
+  "ocs_vencidas_sin_recibir": { "disponible": true, "total": 3, "drill_down": [{ "oc_id": 88, "folio": "OC-000088", "fecha_entrega_estimada": "2026-10-01", "dias_vencida": 7 }] },
+  "ciclo_compra": { "disponible": false, "motivo": "El flujo Requisición → Solicitud de compra no se usa hoy; no hay fecha de requisición." },
+  "gasto_por_categoria": { "disponible": true, "categorias": [{ "categoria": "Tela", "monto": "80000.00" }, { "categoria": "Sin categoría", "monto": "5000.00" }] }
+}
+```
+`gasto_por_categoria` agrupa por `Producto.categoria_producto.nombre` (lo que exista en el catálogo, no una lista fija) y solo cuenta OCs comprometidas (Autorizada/Parcial/Recibida).
+
+### Recepciones — `GET /api/v1/compras/recepciones/kpis/`
+
+```json
+{
+  "generado_en": "2026-10-08T12:00:00Z",
+  "cumplimiento_cantidad": { "disponible": true, "cantidad_ordenada": "500.00", "cantidad_recibida": "430.00", "pct": 86.0, "drill_down": [{ "oc_id": 12, "folio": "OC-000012", "cantidad_ordenada": "50", "cantidad_recibida": "20", "pct": 40.0 }] },
+  "recepciones_parciales": { "disponible": true, "ocs_parciales": 4, "ocs_recibidas_o_parciales": 15, "pct": 26.7 },
+  "diferencia_precio": { "disponible": true, "costo_facturado": "52000.00", "costo_pactado_oc": "50000.00", "diferencia": "2000.00", "pct": 4.0, "drill_down": [...] },
+  "material_rechazado": { "disponible": true, "cantidad_rechazada": "12.00", "valor_rechazado": "1800.00", "drill_down": [{ "id": 5, "recepcion_detalle__recepcion__folio": "RC-000005", "recepcion_detalle__producto__nombre": "Tela Azul", "cantidad_rechazada": "5.00", "valor_linea": "750.00", "motivo_rechazo": "Fuera de tono" }] }
+}
+```
+`diferencia_precio` compara `FacturaProveedorDetalle.precio_unitario` contra `OrdenCompraDetalle.precio` de la misma línea. `material_rechazado` viene de `CalidadInspeccionDetalle.cantidad_rechazada`, valorizado al precio pactado en la OC.
+
+### Proveedores — `GET /api/v1/terceros/proveedores/kpis/`
+
+Shape distinto: es una **lista de proveedores** (scorecard), no un solo agregado — ordenada de mejor a peor por `scorecard.puntaje`.
+
+```json
+{
+  "generado_en": "2026-10-08T12:00:00Z",
+  "proveedores": [
+    {
+      "proveedor_id": 7, "proveedor_nombre": "Textiles ACME",
+      "entrega_a_tiempo": { "pct": 92.0, "recepciones_a_tiempo": 23, "recepciones_total": 25 },
+      "calidad": { "pct_rechazado": 2.1, "cantidad_rechazada": "8.00", "cantidad_inspeccionada": "380.00" },
+      "lead_time": { "dias_promedio_real": 11.2, "dias_promedio_pactado": 10.0 },
+      "cumplimiento_cantidad": { "pct": 97.5, "cantidad_ordenada": "400.00", "cantidad_recibida": "390.00" },
+      "diferencia_precio": { "pct": 1.5 },
+      "scorecard": { "puntaje": 96.5, "semaforo": "verde" }
+    }
+  ]
+}
+```
+`scorecard.puntaje` es el **promedio simple** de los 4 factores de arriba (entrega a tiempo, 100-%rechazo, cumplimiento, 100-|%diferencia precio|) — si a un proveedor le falta un factor (p. ej. nunca se le ha facturado), se promedia solo entre los que sí tiene, no se inventa el que falta. Semáforo: verde ≥80, amarillo ≥70, rojo <70. Tope de 50 proveedores por respuesta.
+
 ---
 
 ## 💰 Finanzas y Contabilidad (Módulo Completo)

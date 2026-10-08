@@ -4,7 +4,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Count, Prefetch, Q, Sum
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, Prefetch, Q, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
@@ -25,7 +25,7 @@ from compras.models import (
     RecepcionRFIDEncuadre,
     RecepcionRFIDLectura,
 )
-from finanzas.models import FacturaProveedor
+from finanzas.models import FacturaProveedor, FacturaProveedorDetalle
 from compras.api.serializers import (
     CalidadInspeccionInputSerializer,
     CalidadInspeccionSerializer,
@@ -830,6 +830,109 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-432): mismo
+    # criterio que los demás ``kpis`` -- todo con ``aggregate()``/``Sum`` en
+    # DB, nunca iterando OCs fila por fila.
+    ESTATUS_OC_ABIERTAS = {
+        OrdenCompra.EstatusOrdenCompra.BORRADOR,
+        OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+    }
+
+    @action(detail=False, methods=["get"], url_path="kpis")
+    def kpis(self, request):
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        if empresa is None and not getattr(user, "is_superuser", False):
+            return Response(self._kpis_vacio())
+
+        base = OrdenCompra.objects.filter(empresa=empresa, activo=True)
+        data = {
+            "generado_en": timezone.now(),
+            "ocs_abiertas": self._kpi_ocs_abiertas(base),
+            "ocs_vencidas_sin_recibir": self._kpi_ocs_vencidas(base),
+            "ciclo_compra": {
+                "disponible": False,
+                "motivo": "El flujo Requisición → Solicitud de compra → OC no se usa hoy (OrdenCompra.solicitud_compra siempre queda null); no hay fecha de requisición contra qué medir el ciclo.",
+            },
+            "gasto_por_categoria": self._kpi_gasto_por_categoria(base),
+        }
+        return Response(data)
+
+    def _kpis_vacio(self):
+        motivo = {"disponible": False, "motivo": "Usuario sin empresa asignada."}
+        return {
+            "generado_en": timezone.now(),
+            "ocs_abiertas": motivo,
+            "ocs_vencidas_sin_recibir": motivo,
+            "ciclo_compra": motivo,
+            "gasto_por_categoria": motivo,
+        }
+
+    def _kpi_ocs_abiertas(self, base):
+        abiertas = base.filter(estatus__in=self.ESTATUS_OC_ABIERTAS)
+        por_estatus = {}
+        estatus_labels = dict(OrdenCompra.EstatusOrdenCompra.choices)
+        for fila in abiertas.values("estatus").annotate(total=Count("id"), monto=Sum("gran_total")):
+            por_estatus[fila["estatus"]] = {
+                "estatus": fila["estatus"],
+                "estatus_label": estatus_labels.get(fila["estatus"], str(fila["estatus"])),
+                "total": fila["total"],
+                "monto": fila["monto"] or Decimal("0"),
+            }
+        agg = abiertas.aggregate(total=Count("id"), monto=Sum("gran_total"))
+        return {
+            "disponible": True,
+            "total": agg["total"] or 0,
+            "monto": agg["monto"] or Decimal("0"),
+            "por_estatus": list(por_estatus.values()),
+        }
+
+    def _kpi_ocs_vencidas(self, base):
+        hoy = timezone.localdate()
+        vencidas_qs = base.exclude(
+            estatus__in=[OrdenCompra.EstatusOrdenCompra.RECIBIDA, OrdenCompra.EstatusOrdenCompra.CANCELADA]
+        ).filter(fecha_entrega_estimada__lt=hoy)
+        total = vencidas_qs.count()
+        drill_down = [
+            {
+                "oc_id": row["id"],
+                "folio": row["folio"],
+                "fecha_entrega_estimada": row["fecha_entrega_estimada"],
+                "dias_vencida": (hoy - row["fecha_entrega_estimada"]).days,
+            }
+            for row in vencidas_qs.order_by("fecha_entrega_estimada").values(
+                "id", "folio", "fecha_entrega_estimada"
+            )[:20]
+        ]
+        return {"disponible": True, "total": total, "drill_down": drill_down}
+
+    def _kpi_gasto_por_categoria(self, base):
+        # Solo OCs comprometidas (no borrador ni cancelada): mismo criterio
+        # que el gasto del dashboard (``ComprasDashboardView.ESTATUS_GASTO_OC``).
+        estatus_gasto = [
+            OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+            OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+            OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+        ]
+        filas = (
+            OrdenCompraDetalle.objects.filter(orden_compra__in=base.filter(estatus__in=estatus_gasto))
+            .values("producto__categoria_producto__nombre")
+            .annotate(monto=Sum("importe"))
+            .order_by("-monto")
+        )
+        return {
+            "disponible": True,
+            "categorias": [
+                {
+                    "categoria": fila["producto__categoria_producto__nombre"] or "Sin categoría",
+                    "monto": fila["monto"] or Decimal("0"),
+                }
+                for fila in filas
+            ],
+        }
+
 class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Recepcion.objects.all().select_related(
         "orden_compra",
@@ -1615,6 +1718,203 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 getattr(exc, "detail", exc),
             )
             raise
+
+    # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-434): mismo
+    # criterio que los demás ``kpis`` -- todo con ``aggregate()``/``Sum`` en
+    # DB, nunca iterando recepciones fila por fila.
+    ESTATUS_OC_CON_RECEPCION_ESPERADA = {
+        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+        OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+    }
+
+    @action(detail=False, methods=["get"], url_path="kpis")
+    def kpis(self, request):
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        if empresa is None and not getattr(user, "is_superuser", False):
+            return Response(self._kpis_vacio())
+
+        data = {
+            "generado_en": timezone.now(),
+            "cumplimiento_cantidad": self._kpi_cumplimiento_cantidad(empresa),
+            "recepciones_parciales": self._kpi_recepciones_parciales(empresa),
+            "diferencia_precio": self._kpi_diferencia_precio(empresa),
+            "material_rechazado": self._kpi_material_rechazado(empresa),
+        }
+        return Response(data)
+
+    def _kpis_vacio(self):
+        motivo = {"disponible": False, "motivo": "Usuario sin empresa asignada."}
+        return {
+            "generado_en": timezone.now(),
+            "cumplimiento_cantidad": motivo,
+            "recepciones_parciales": motivo,
+            "diferencia_precio": motivo,
+            "material_rechazado": motivo,
+        }
+
+    def _kpi_cumplimiento_cantidad(self, empresa):
+        # Ordenado = renglones de OCs comprometidas (autorizada/parcial/recibida,
+        # no borrador ni cancelada). Recibido = lo realmente capturado en
+        # recepciones activas y no canceladas contra esas mismas OCs.
+        detalles = OrdenCompraDetalle.objects.filter(
+            orden_compra__empresa=empresa,
+            orden_compra__activo=True,
+            orden_compra__estatus__in=self.ESTATUS_OC_CON_RECEPCION_ESPERADA,
+        )
+        ordenado = detalles.aggregate(t=Sum("cantidad"))["t"] or 0
+
+        recibido_qs = RecepcionDetalle.objects.filter(
+            orden_compra_detalle__orden_compra__empresa=empresa,
+            orden_compra_detalle__orden_compra__activo=True,
+            orden_compra_detalle__orden_compra__estatus__in=self.ESTATUS_OC_CON_RECEPCION_ESPERADA,
+            recepcion__activo=True,
+            recepcion__tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
+        ).exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        recibido = recibido_qs.aggregate(t=Sum("cantidad_recibida"))["t"] or 0
+
+        pct = round(float(recibido) / float(ordenado) * 100, 1) if ordenado else None
+
+        # Drill-down: OCs con algo pendiente, peor cobertura primero.
+        recibido_por_oc = dict(
+            recibido_qs.values("orden_compra_detalle__orden_compra_id")
+            .annotate(recibido=Sum("cantidad_recibida"))
+            .values_list("orden_compra_detalle__orden_compra_id", "recibido")
+        )
+        drill_down = []
+        for fila in (
+            detalles.values("orden_compra_id", "orden_compra__folio")
+            .annotate(ordenado=Sum("cantidad"))
+        ):
+            oc_id = fila["orden_compra_id"]
+            ord_oc = fila["ordenado"] or 0
+            rec_oc = recibido_por_oc.get(oc_id) or 0
+            if rec_oc >= ord_oc:
+                continue
+            drill_down.append({
+                "oc_id": oc_id,
+                "folio": fila["orden_compra__folio"],
+                "cantidad_ordenada": ord_oc,
+                "cantidad_recibida": rec_oc,
+                "pct": round(float(rec_oc) / float(ord_oc) * 100, 1) if ord_oc else 0.0,
+            })
+        drill_down.sort(key=lambda d: d["pct"])
+
+        return {
+            "disponible": True,
+            "cantidad_ordenada": ordenado,
+            "cantidad_recibida": recibido,
+            "pct": pct,
+            "drill_down": drill_down[:20],
+        }
+
+    def _kpi_recepciones_parciales(self, empresa):
+        # % de OCs que ya recibieron algo (parcial o recibida) que se
+        # quedaron en parcial -- no cuenta las que nunca han recibido nada.
+        agg = OrdenCompra.objects.filter(
+            empresa=empresa,
+            activo=True,
+            estatus__in=[
+                OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+                OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+            ],
+        ).aggregate(
+            parciales=Count("id", filter=Q(estatus=OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA)),
+            total=Count("id"),
+        )
+        total = agg["total"] or 0
+        parciales = agg["parciales"] or 0
+        pct = round(parciales / total * 100, 1) if total else None
+        return {
+            "disponible": True,
+            "ocs_parciales": parciales,
+            "ocs_recibidas_o_parciales": total,
+            "pct": pct,
+        }
+
+    def _kpi_diferencia_precio(self, empresa):
+        # Costo facturado (FacturaProveedorDetalle.precio_unitario) vs. costo
+        # pactado en la OC (OrdenCompraDetalle.precio), línea por línea vía
+        # el FK ``oc_detalle``. Excluye facturas canceladas.
+        money = DecimalField(max_digits=18, decimal_places=2)
+        lineas = (
+            FacturaProveedorDetalle.objects.filter(
+                factura_proveedor__empresa=empresa,
+            )
+            .exclude(factura_proveedor__estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA)
+            .annotate(
+                facturado_linea=ExpressionWrapper(F("precio_unitario") * F("cantidad"), output_field=money),
+                pactado_linea=ExpressionWrapper(F("oc_detalle__precio") * F("cantidad"), output_field=money),
+            )
+        )
+        agg = lineas.aggregate(facturado=Sum("facturado_linea"), pactado=Sum("pactado_linea"))
+        facturado = agg["facturado"] or Decimal("0")
+        pactado = agg["pactado"] or Decimal("0")
+        diferencia = facturado - pactado
+        pct = round(float(diferencia) / float(pactado) * 100, 1) if pactado else None
+
+        drill_down = list(
+            lineas.exclude(facturado_linea=F("pactado_linea"))
+            .select_related("oc_detalle__producto", "factura_proveedor")
+            .annotate(diferencia_linea=ExpressionWrapper(F("facturado_linea") - F("pactado_linea"), output_field=money))
+            .order_by("-diferencia_linea")
+            .values(
+                "id",
+                "factura_proveedor__folio",
+                "oc_detalle__producto__nombre",
+                "precio_unitario",
+                "oc_detalle__precio",
+                "diferencia_linea",
+            )[:20]
+        )
+        return {
+            "disponible": True,
+            "costo_facturado": facturado,
+            "costo_pactado_oc": pactado,
+            "diferencia": diferencia,
+            "pct": pct,
+            "drill_down": drill_down,
+        }
+
+    def _kpi_material_rechazado(self, empresa):
+        # Cantidad y valor (a precio pactado en la OC) rechazado en Calidad,
+        # contra recepciones activas y no canceladas.
+        money = DecimalField(max_digits=18, decimal_places=2)
+        rechazos = (
+            CalidadInspeccionDetalle.objects.filter(
+                recepcion_detalle__recepcion__empresa=empresa,
+                recepcion_detalle__recepcion__activo=True,
+            )
+            .exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            .filter(cantidad_rechazada__gt=0)
+            .annotate(
+                valor_linea=ExpressionWrapper(
+                    F("cantidad_rechazada") * F("recepcion_detalle__orden_compra_detalle__precio"),
+                    output_field=money,
+                )
+            )
+        )
+        agg = rechazos.aggregate(cantidad=Sum("cantidad_rechazada"), valor=Sum("valor_linea"))
+
+        drill_down = list(
+            rechazos.select_related("recepcion_detalle__producto", "recepcion_detalle__recepcion")
+            .order_by("-cantidad_rechazada")
+            .values(
+                "id",
+                "recepcion_detalle__recepcion__folio",
+                "recepcion_detalle__producto__nombre",
+                "cantidad_rechazada",
+                "valor_linea",
+                "motivo_rechazo",
+            )[:20]
+        )
+        return {
+            "disponible": True,
+            "cantidad_rechazada": agg["cantidad"] or Decimal("0"),
+            "valor_rechazado": agg["valor"] or Decimal("0"),
+            "drill_down": drill_down,
+        }
 
 
 class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
