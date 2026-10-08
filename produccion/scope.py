@@ -25,23 +25,27 @@ def ordenes_produccion_base():
 
 
 def ordenes_produccion_visibles(qs, user):
-    """Alcance de ``produccion.OrdenProduccion``: empresa + sucursal.
+    """Alcance de ``produccion.OrdenProduccion``: SIEMPRE la empresa activa
+    del usuario (``user.empresa``), incluido el superusuario -- a propósito
+    DISTINTO de bordado/reflejante/corte de manga, donde el superusuario ve
+    todas las empresas.
 
-    Mismo criterio que bordado/reflejante/corte de manga: el superusuario ve
-    todo; sin empresa no se ve nada; dentro de la empresa, ``is_admin_empresa``
-    ve todas las sucursales y el resto sólo las de
-    ``user.sucursales_permitidas()``. Usado hoy solo por
-    ``OrdenProduccionViewSet.kpis`` (#355): el listado/detalle
-    (``OrdenProduccionViewSet.get_queryset()``) todavía solo filtra por
-    empresa -- alinearlos es una decisión aparte, de mayor alcance.
+    Se decidió así en #361: ``OrdenProduccionViewSet.get_queryset()``
+    (list/detail de OP) nunca le dio alcance global al superusuario, solo
+    filtra por ``empresa``. Darle a ``kpis`` el criterio de OB/OR/OCM dejaba
+    la tarjeta de KPIs y la tabla de OPs de la misma pantalla sin cuadrar
+    para un superusuario con empresa asignada. Las dos fuentes deben usar el
+    mismo criterio; se igualó ``kpis`` a list/detail, no al revés.
+
+    Sin empresa (cualquier usuario, incluido superusuario) no se ve nada.
+    Dentro de la empresa: superusuario e ``is_admin_empresa`` ven todas las
+    sucursales, el resto solo las de ``user.sucursales_permitidas()``.
     """
-    if getattr(user, "is_superuser", False):
-        return qs
     empresa = getattr(user, "empresa", None)
     if not empresa:
         return qs.none()
     qs = qs.filter(empresa=empresa)
-    if getattr(user, "is_admin_empresa", False):
+    if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
         return qs
     return qs.filter(sucursal_id__in=user.sucursales_permitidas())
 

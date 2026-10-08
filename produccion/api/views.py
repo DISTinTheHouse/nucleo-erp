@@ -609,7 +609,11 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], url_path="kpis")
     def kpis(self, request):
         user = request.user
-        if not getattr(user, "is_superuser", False) and getattr(user, "empresa", None) is None:
+        # Sin empresa no se ve nada, NI el superusuario (#361): el alcance
+        # debe cuadrar con ``OrdenProduccionViewSet.get_queryset()``
+        # (list/detail de OP), que tampoco le da vista global al
+        # superusuario -- ver el docstring de ``ordenes_produccion_visibles``.
+        if getattr(user, "empresa", None) is None:
             return Response(self._kpis_vacio())
 
         meta_otd_raw = request.query_params.get("meta_otd", "95")
@@ -620,11 +624,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         if not math.isfinite(meta_otd) or not (0 <= meta_otd <= 100):
             raise ValidationError({"meta_otd": "Debe ser un número entre 0 y 100."})
 
-        # Alcance por sucursal (#355), mismo criterio que OB/OR/OCM: superuser
-        # ve todo, admin de empresa ve todas sus sucursales, el resto solo
-        # ``sucursales_permitidas()``. Nota: el listado/detalle de
-        # ``OrdenProduccionViewSet`` todavía no aplica este mismo criterio
-        # (solo filtra por empresa) -- alinearlos queda fuera de este fix.
+        # Alcance: SIEMPRE la empresa activa del usuario (#361), y dentro de
+        # ella por sucursal (#355) -- admin/superuser ven todas, el resto
+        # solo ``sucursales_permitidas()``.
         base = ordenes_produccion_visibles(ordenes_produccion_base(), user)
         data = {
             "generado_en": timezone.now(),
@@ -676,15 +678,23 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         a_tiempo_filter = con_ambas_fechas & Q(fecha_fin__date__lte=F("fecha_entrega_estimada"))
         tardia_filter = con_ambas_fechas & Q(fecha_fin__date__gt=F("fecha_entrega_estimada"))
 
+        # #362: conteo exacto de tardías y sin-clasificar en el mismo
+        # aggregate() (nunca len(drill_down_tardias), que se corta en 20).
+        # Invariante: ops_a_tiempo + ops_tardias + ops_sin_clasificar ==
+        # ops_terminadas.
         agg = terminadas.aggregate(
             total=Count("op_id"),
             a_tiempo=Count("op_id", filter=a_tiempo_filter),
+            tardias=Count("op_id", filter=tardia_filter),
+            sin_clasificar=Count("op_id", filter=~con_ambas_fechas),
         )
         total = agg["total"] or 0
         a_tiempo = agg["a_tiempo"] or 0
+        n_tardias = agg["tardias"] or 0
+        sin_clasificar = agg["sin_clasificar"] or 0
         pct = round((a_tiempo / total) * 100, 1) if total else None
 
-        tardias = [
+        drill_down_tardias = [
             {**row, "fecha_fin": timezone.localtime(row["fecha_fin"]) if row["fecha_fin"] else None}
             for row in terminadas.filter(tardia_filter)
             .order_by("-fecha_fin")
@@ -697,7 +707,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             "semaforo": self._semaforo(pct, meta_otd),
             "ops_terminadas": total,
             "ops_a_tiempo": a_tiempo,
-            "drill_down_tardias": tardias,
+            "ops_tardias": n_tardias,
+            "ops_sin_clasificar": sin_clasificar,
+            "drill_down_tardias": drill_down_tardias,
         }
 
     def _kpi_atrasadas(self, base):
