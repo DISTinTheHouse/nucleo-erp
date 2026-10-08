@@ -364,6 +364,9 @@ class FacturaListSerializer(serializers.ModelSerializer):
             'id',
             'folio',
             'estatus',
+            # El listado incluye las facturas eliminadas (baja lógica): ``activo``
+            # es lo que las distingue.
+            'activo',
             'fecha_emision',
             'fecha_vencimiento',
             'pedido',
