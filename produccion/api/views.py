@@ -1,3 +1,5 @@
+import math
+
 from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, prefetch_related_objects
 from django.db import transaction
 from django.utils import timezone
@@ -20,6 +22,8 @@ from produccion.scope import (
     ordenes_bordado_visibles,
     ordenes_corte_manga_base,
     ordenes_corte_manga_visibles,
+    ordenes_produccion_base,
+    ordenes_produccion_visibles,
     ordenes_reflejante_base,
     ordenes_reflejante_visibles,
 )
@@ -598,22 +602,30 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-412): el
-    # dashboard siempre es "todas las OP de mi empresa", nunca una sola fila,
-    # y así evita el ``select_related``/``prefetch_related`` pesado del
-    # listado normal -- todo aquí es ``aggregate()``/``Count`` en DB, nunca
-    # iterar OPs fila por fila en Python.
+    # dashboard siempre es "todas las OP de mi empresa/sucursales", nunca una
+    # sola fila, y así evita el ``select_related``/``prefetch_related``
+    # pesado del listado normal -- todo aquí es ``aggregate()``/``Count`` en
+    # DB, nunca iterar OPs fila por fila en Python.
     @action(detail=False, methods=["get"], url_path="kpis")
     def kpis(self, request):
-        empresa = getattr(request.user, "empresa", None)
-        if empresa is None:
+        user = request.user
+        if not getattr(user, "is_superuser", False) and getattr(user, "empresa", None) is None:
             return Response(self._kpis_vacio())
 
+        meta_otd_raw = request.query_params.get("meta_otd", "95")
         try:
-            meta_otd = float(request.query_params.get("meta_otd", 95))
+            meta_otd = float(meta_otd_raw)
         except (TypeError, ValueError):
             raise ValidationError({"meta_otd": "Debe ser un número."})
+        if not math.isfinite(meta_otd) or not (0 <= meta_otd <= 100):
+            raise ValidationError({"meta_otd": "Debe ser un número entre 0 y 100."})
 
-        base = OrdenProduccion.objects.filter(empresa=empresa, activo=True)
+        # Alcance por sucursal (#355), mismo criterio que OB/OR/OCM: superuser
+        # ve todo, admin de empresa ve todas sus sucursales, el resto solo
+        # ``sucursales_permitidas()``. Nota: el listado/detalle de
+        # ``OrdenProduccionViewSet`` todavía no aplica este mismo criterio
+        # (solo filtra por empresa) -- alinearlos queda fuera de este fix.
+        base = ordenes_produccion_visibles(ordenes_produccion_base(), user)
         data = {
             "generado_en": timezone.now(),
             "filtros": {"meta_otd": meta_otd},
@@ -650,28 +662,34 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         return "rojo"
 
     def _kpi_otd(self, base, meta_otd):
-        # "Terminada" = tiene fecha_fin. A tiempo = terminó en o antes de su
-        # fecha_entrega_estimada; sin fecha_entrega_estimada no puede contar
-        # como a tiempo (no hay compromiso contra qué medirla).
-        terminadas = base.filter(fecha_fin__isnull=False)
+        # "Terminada" = estatus_op Completado (#354) -- NO por fecha_fin: ese
+        # campo casi nunca se llena (solo lo hace una recepción automática de
+        # OC con cerrar_orden=True), así que decidir por su presencia dejaba
+        # fuera OPs completadas de verdad y, al revés, dejaba entrar
+        # Canceladas que sí tuvieran fecha_fin capturada a mano.
+        # "A tiempo" exige fecha_fin Y fecha_entrega_estimada: sin alguna de
+        # las dos no se puede afirmar que llegó a tiempo NI que llegó tarde,
+        # así que esa OP cuenta en el denominador (está terminada) pero no
+        # entra ni al numerador ni al drill-down de tardías.
+        terminadas = base.filter(estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO)
+        con_ambas_fechas = Q(fecha_fin__isnull=False, fecha_entrega_estimada__isnull=False)
+        a_tiempo_filter = con_ambas_fechas & Q(fecha_fin__date__lte=F("fecha_entrega_estimada"))
+        tardia_filter = con_ambas_fechas & Q(fecha_fin__date__gt=F("fecha_entrega_estimada"))
+
         agg = terminadas.aggregate(
             total=Count("op_id"),
-            a_tiempo=Count(
-                "op_id",
-                filter=Q(fecha_entrega_estimada__isnull=False, fecha_fin__date__lte=F("fecha_entrega_estimada")),
-            ),
+            a_tiempo=Count("op_id", filter=a_tiempo_filter),
         )
         total = agg["total"] or 0
         a_tiempo = agg["a_tiempo"] or 0
         pct = round((a_tiempo / total) * 100, 1) if total else None
 
-        tardias = list(
-            terminadas.exclude(
-                fecha_entrega_estimada__isnull=False, fecha_fin__date__lte=F("fecha_entrega_estimada")
-            )
+        tardias = [
+            {**row, "fecha_fin": timezone.localtime(row["fecha_fin"]) if row["fecha_fin"] else None}
+            for row in terminadas.filter(tardia_filter)
             .order_by("-fecha_fin")
             .values("op_id", "folio_op", "fecha_fin", "fecha_entrega_estimada")[:20]
-        )
+        ]
         return {
             "disponible": True,
             "pct": pct,
