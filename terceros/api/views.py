@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from rest_framework import viewsets
@@ -6,7 +7,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from django.conf import settings
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, Sum
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, Q, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from finanzas.services.facturama.acceso import empresa_usa_facturama
@@ -160,6 +161,137 @@ class ClienteViewSet(viewsets.ModelViewSet):
 
     def perform_destroy(self, instance):
         instance.soft_delete()
+
+    # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-422): mismo
+    # criterio que los demás ``kpis`` -- todo con ``aggregate()``/``Sum``/
+    # ``Count`` en DB, nunca iterando clientes/facturas/CxC fila por fila.
+    @action(detail=False, methods=["get"], url_path="kpis")
+    def kpis(self, request):
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        if empresa is None and not getattr(user, "is_superuser", False):
+            return Response(self._kpis_vacio())
+
+        # Mismo alcance que el listado (``clientes_visibles``): un vendedor
+        # normal solo ve los KPIs de SUS clientes, Mesa de Control/admin ven
+        # toda la empresa. Import local: ver nota en ``_resumen_comercial``.
+        clientes_qs = clientes_visibles(clientes_base(), user)
+        data = {
+            "generado_en": timezone.now(),
+            "ventas_por_cliente": self._kpi_ventas_por_cliente(clientes_qs),
+            "clientes_activos": self._kpi_clientes_activos(clientes_qs),
+            "reclamos_devoluciones": {
+                "disponible": False,
+                "motivo": "Devolucion/DevolucionDetalle no registran cantidad de piezas (solo los FKs); Entrega tampoco, así que no hay piezas devueltas ni piezas embarcadas que dividir.",
+            },
+            "cartera_antiguedad": self._kpi_cartera_antiguedad(clientes_qs),
+        }
+        return Response(data)
+
+    def _kpis_vacio(self):
+        motivo = {"disponible": False, "motivo": "Usuario sin empresa asignada."}
+        return {
+            "generado_en": timezone.now(),
+            "ventas_por_cliente": motivo,
+            "clientes_activos": motivo,
+            "reclamos_devoluciones": motivo,
+            "cartera_antiguedad": motivo,
+        }
+
+    def _kpi_ventas_por_cliente(self, clientes_qs):
+        from finanzas.models import Factura
+
+        filas = list(
+            Factura.objects.filter(cliente__in=clientes_qs, activo=True)
+            .exclude(estatus=Factura.FacturaStatus.CANCELADA)
+            .values("cliente_id", "cliente__nombre")
+            .annotate(monto=Sum("total"))
+            .order_by("-monto")
+        )
+        gran_total = sum((f["monto"] or Decimal("0")) for f in filas)
+
+        top_clientes = []
+        acumulado = Decimal("0")
+        for fila in filas[:5]:
+            monto = fila["monto"] or Decimal("0")
+            acumulado += monto
+            top_clientes.append({
+                "cliente_id": fila["cliente_id"],
+                "cliente_nombre": fila["cliente__nombre"],
+                "monto": monto,
+                "pct_del_total": round(float(monto) / float(gran_total) * 100, 1) if gran_total else 0.0,
+                "pct_acumulado": round(float(acumulado) / float(gran_total) * 100, 1) if gran_total else 0.0,
+            })
+
+        return {
+            "disponible": True,
+            "total_facturado": gran_total,
+            "total_clientes_facturados": len(filas),
+            "top_clientes": top_clientes,
+        }
+
+    def _kpi_clientes_activos(self, clientes_qs):
+        from ventas.models import Pedido
+
+        desde = timezone.now() - timedelta(days=90)
+        total = clientes_qs.count()
+        activos = (
+            Pedido.objects.filter(cliente__in=clientes_qs, activo=True, created_at__gte=desde)
+            .values("cliente_id")
+            .distinct()
+            .count()
+        )
+        inactivos = max(total - activos, 0)
+        return {
+            "disponible": True,
+            "total": total,
+            "activos": activos,
+            "inactivos": inactivos,
+            "pct_activos": round(activos / total * 100, 1) if total else None,
+            "ventana_dias": 90,
+        }
+
+    def _kpi_cartera_antiguedad(self, clientes_qs):
+        from finanzas.models import CuentaPorCobrar
+
+        hoy = timezone.localdate()
+        hace_30 = hoy - timedelta(days=30)
+        hace_60 = hoy - timedelta(days=60)
+        vencidas = CuentaPorCobrar.objects.filter(
+            cliente__in=clientes_qs,
+            estatus__in=[CuentaPorCobrar.EstatusCxC.PENDIENTE, CuentaPorCobrar.EstatusCxC.PARCIAL],
+            fecha_vencimiento__isnull=False,
+            fecha_vencimiento__lt=hoy,
+        )
+        agg = vencidas.aggregate(
+            total_cuentas=Count("id"),
+            saldo_total=Sum("saldo"),
+            b_0_30_total=Count("id", filter=Q(fecha_vencimiento__gte=hace_30)),
+            b_0_30_monto=Sum("saldo", filter=Q(fecha_vencimiento__gte=hace_30)),
+            b_31_60_total=Count("id", filter=Q(fecha_vencimiento__lt=hace_30, fecha_vencimiento__gte=hace_60)),
+            b_31_60_monto=Sum("saldo", filter=Q(fecha_vencimiento__lt=hace_30, fecha_vencimiento__gte=hace_60)),
+            b_60_mas_total=Count("id", filter=Q(fecha_vencimiento__lt=hace_60)),
+            b_60_mas_monto=Sum("saldo", filter=Q(fecha_vencimiento__lt=hace_60)),
+        )
+        drill_down = list(
+            vencidas.select_related("cliente")
+            .order_by("fecha_vencimiento")
+            .values("id", "cliente_id", "cliente__nombre", "saldo", "fecha_vencimiento")[:20]
+        )
+        for fila in drill_down:
+            fila["dias_vencida"] = (hoy - fila["fecha_vencimiento"]).days
+
+        return {
+            "disponible": True,
+            "saldo_total_vencido": agg["saldo_total"] or Decimal("0"),
+            "total_cuentas_vencidas": agg["total_cuentas"] or 0,
+            "buckets": {
+                "0_30": {"total": agg["b_0_30_total"] or 0, "monto": agg["b_0_30_monto"] or Decimal("0")},
+                "31_60": {"total": agg["b_31_60_total"] or 0, "monto": agg["b_31_60_monto"] or Decimal("0")},
+                "60_mas": {"total": agg["b_60_mas_total"] or 0, "monto": agg["b_60_mas_monto"] or Decimal("0")},
+            },
+            "drill_down": drill_down,
+        }
 
 class HistorialOrdenesCompraPagination(PageNumberPagination):
     page_size = 20

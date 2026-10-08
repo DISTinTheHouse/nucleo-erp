@@ -1,3 +1,6 @@
+from datetime import timedelta
+from decimal import Decimal
+
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -324,3 +327,128 @@ class ProveedorKpisTests(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data["proveedores"], [])
+
+
+class ClienteKpisTests(TestCase):
+    """``GET /clientes/kpis/`` (EC-422): 3 de 4 KPIs son reales; siempre
+    acotado al alcance de ``clientes_visibles`` (un vendedor normal solo ve
+    sus propios clientes, igual que el listado). reclamos_devoluciones queda
+    ``disponible: False`` -- Devolucion/Entrega no registran cantidad."""
+
+    URL = "/api/v1/terceros/clientes/kpis/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from decimal import Decimal as D
+
+        from finanzas.models import CuentaPorCobrar, Factura
+        from nucleo.models import Moneda, Sucursal
+        from ventas.models import Pedido
+
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+
+        cls.vendedor_a = Usuario.objects.create(username="va", email="va@acme.test", empresa=cls.empresa)
+        cls.vendedor_b = Usuario.objects.create(username="vb", email="vb@acme.test", empresa=cls.empresa)
+        cls.admin_empresa = Usuario.objects.create(
+            username="admin", email="admin@acme.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
+
+        cls.cliente_a = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente A", correo="a@test.mx")
+        cls.cliente_a.vendedores.add(cls.vendedor_a)
+        cls.cliente_b = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente B", correo="b@test.mx")
+        cls.cliente_b.vendedores.add(cls.vendedor_b)
+
+        def _pedido(cliente, hace_dias):
+            p = Pedido.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=cls.moneda,
+                persona_pagos="Pagos", correo_facturas="p@acme.test", telefono_pagos="8100000000",
+                forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            )
+            if hace_dias:
+                Pedido.objects.filter(pk=p.pk).update(created_at=timezone.now() - timedelta(days=hace_dias))
+            return p
+
+        def _factura(cliente, total, estatus=None):
+            Estatus = Factura.FacturaStatus
+            return Factura.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=cls.moneda,
+                total=D(total), estatus=estatus or Estatus.EMITIDA,
+            )
+
+        def _cxc(cliente, factura, saldo, hace_dias_vencida):
+            return CuentaPorCobrar.objects.create(
+                empresa=cls.empresa, cliente=cliente, factura=factura, total=D(saldo), saldo=D(saldo),
+                estatus=CuentaPorCobrar.EstatusCxC.PENDIENTE,
+                fecha_vencimiento=timezone.localdate() - timedelta(days=hace_dias_vencida),
+            )
+
+        # Cliente A: pedido reciente (activo), facturado 1000 + 500 cancelada (no cuenta).
+        _pedido(cls.cliente_a, hace_dias=5)
+        factura_a1 = _factura(cls.cliente_a, "1000.00")
+        _factura(cls.cliente_a, "500.00", estatus=Factura.FacturaStatus.CANCELADA)
+        _cxc(cls.cliente_a, factura_a1, "300.00", hace_dias_vencida=10)  # bucket 0-30
+
+        # Cliente B: pedido viejo (inactivo), facturado 2000.
+        _pedido(cls.cliente_b, hace_dias=200)
+        factura_b1 = _factura(cls.cliente_b, "2000.00")
+        _cxc(cls.cliente_b, factura_b1, "700.00", hace_dias_vencida=45)  # bucket 31-60
+        _cxc(cls.cliente_b, factura_b1, "200.00", hace_dias_vencida=90)  # bucket 60+
+
+    def _get(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(self.URL)
+
+    def test_vendedor_solo_ve_sus_propios_clientes(self):
+        resp = self._get(self.vendedor_a)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        ventas = resp.data["ventas_por_cliente"]
+        self.assertEqual(ventas["total_facturado"], Decimal("1000.00"))  # excluye la cancelada
+        self.assertEqual(ventas["total_clientes_facturados"], 1)
+        self.assertEqual([c["cliente_id"] for c in ventas["top_clientes"]], [self.cliente_a.pk])
+
+    def test_admin_ve_todos_los_clientes_de_la_empresa(self):
+        resp = self._get(self.admin_empresa)
+
+        ventas = resp.data["ventas_por_cliente"]
+        self.assertEqual(ventas["total_facturado"], Decimal("3000.00"))
+        self.assertEqual(ventas["total_clientes_facturados"], 2)
+
+    def test_clientes_activos_vs_inactivos(self):
+        resp = self._get(self.admin_empresa)
+
+        activos = resp.data["clientes_activos"]
+        self.assertEqual(activos["total"], 2)
+        self.assertEqual(activos["activos"], 1)  # solo cliente A (pedido hace 5 días)
+        self.assertEqual(activos["inactivos"], 1)
+        self.assertEqual(activos["pct_activos"], 50.0)
+
+    def test_cartera_antiguedad_buckets(self):
+        resp = self._get(self.admin_empresa)
+
+        cartera = resp.data["cartera_antiguedad"]
+        self.assertTrue(cartera["disponible"])
+        self.assertEqual(cartera["saldo_total_vencido"], Decimal("1200.00"))
+        self.assertEqual(cartera["buckets"]["0_30"], {"total": 1, "monto": Decimal("300.00")})
+        self.assertEqual(cartera["buckets"]["31_60"], {"total": 1, "monto": Decimal("700.00")})
+        self.assertEqual(cartera["buckets"]["60_mas"], {"total": 1, "monto": Decimal("200.00")})
+
+    def test_cartera_acotada_por_vendedor(self):
+        resp = self._get(self.vendedor_a)
+
+        cartera = resp.data["cartera_antiguedad"]
+        self.assertEqual(cartera["saldo_total_vencido"], Decimal("300.00"))
+
+    def test_reclamos_devoluciones_no_disponible(self):
+        resp = self._get(self.admin_empresa)
+        self.assertFalse(resp.data["reclamos_devoluciones"]["disponible"])
+
+    def test_usuario_sin_empresa_no_ve_nada(self):
+        resp = self._get(self.sin_empresa)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data["ventas_por_cliente"]["disponible"])

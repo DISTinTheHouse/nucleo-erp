@@ -1121,6 +1121,50 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
   - `ultimo_pedido` es `null` si el cliente no tiene pedidos todavía; si existe, es el mismo objeto que aparece primero en `pedidos_recientes`.
   - `pedidos_recientes` trae como máximo los 5 pedidos más nuevos (por fecha de creación), pensado para una mini-tabla o timeline en la ficha del cliente — no es un listado paginado; si se necesita el historial completo, usar `GET /api/v1/ventas/pedidos/?cliente={id}`.
 
+### KPIs de Clientes (EC-422)
+
+- **Endpoint**: `GET /api/v1/terceros/clientes/kpis/`. Sin query params.
+- Alcance = mismo que el listado de clientes (`clientes_visibles`): un vendedor normal solo ve KPIs de **sus propios clientes** (M2M `vendedores`); Mesa de Control/`is_admin_empresa`/superuser ven toda la empresa.
+- Solo **3 de 4 KPIs son reales**. `reclamos_devoluciones` viene `"disponible": false` — `Devolucion`/`Entrega` no registran cantidad de piezas, solo los FKs.
+
+```json
+{
+  "generado_en": "2026-10-08T15:00:00Z",
+  "ventas_por_cliente": {
+    "disponible": true,
+    "total_facturado": "185000.00",
+    "total_clientes_facturados": 12,
+    "top_clientes": [
+      { "cliente_id": 7, "cliente_nombre": "Comercializadora Ejemplo", "monto": "52000.00", "pct_del_total": 28.1, "pct_acumulado": 28.1 }
+    ]
+  },
+  "clientes_activos": {
+    "disponible": true, "total": 40, "activos": 22, "inactivos": 18, "pct_activos": 55.0, "ventana_dias": 90
+  },
+  "reclamos_devoluciones": {
+    "disponible": false,
+    "motivo": "Devolucion/DevolucionDetalle no registran cantidad de piezas (solo los FKs); Entrega tampoco, así que no hay piezas devueltas ni piezas embarcadas que dividir."
+  },
+  "cartera_antiguedad": {
+    "disponible": true,
+    "saldo_total_vencido": "45000.00",
+    "total_cuentas_vencidas": 9,
+    "buckets": {
+      "0_30": { "total": 4, "monto": "18000.00" },
+      "31_60": { "total": 3, "monto": "15000.00" },
+      "60_mas": { "total": 2, "monto": "12000.00" }
+    },
+    "drill_down": [
+      { "id": 55, "cliente_id": 7, "cliente__nombre": "Comercializadora Ejemplo", "saldo": "5000.00", "fecha_vencimiento": "2026-09-15", "dias_vencida": 23 }
+    ]
+  }
+}
+```
+
+- `ventas_por_cliente`: `Factura` con `activo=true`, excluye `Cancelada`. `top_clientes` trae los 5 de mayor facturación, con `pct_acumulado` listo para graficar un Pareto.
+- `clientes_activos`: "activo" = tiene al menos un `Pedido` creado en los últimos 90 días (fijo, no configurable).
+- `cartera_antiguedad`: `CuentaPorCobrar` con estatus `Pendiente`/`Parcial` y `fecha_vencimiento` ya pasada. `drill_down` trae hasta 20, ordenadas por más antigua primero.
+
 ### Proveedores: escritura (`/api/v1/terceros/proveedores/`)
 
 - `empresa` es **solo lectura**: la asigna el servidor con la empresa del usuario. Si el body la manda, se ignora; un PATCH/PUT no la cambia.
