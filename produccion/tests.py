@@ -4675,6 +4675,31 @@ class OrdenProduccionKpisTests(TestCase):
         self.assertEqual(otd["ops_a_tiempo"], 1)
         self.assertEqual(otd["pct"], 25.0)
         self.assertEqual([d["op_id"] for d in otd["drill_down_tardias"]], [self.op_tardia.pk])
+        # #362: totales exactos, no inferidos por resta.
+        self.assertEqual(otd["ops_tardias"], 1)
+        self.assertEqual(otd["ops_sin_clasificar"], 2)  # sin_fecha_fin + sin_compromiso
+        self.assertEqual(
+            otd["ops_a_tiempo"] + otd["ops_tardias"] + otd["ops_sin_clasificar"], otd["ops_terminadas"],
+        )
+
+    # --- #362: total exacto de tardías/sin-clasificar ---------------------------
+
+    def test_ops_tardias_total_exacto_con_mas_de_20(self):
+        # El drill-down se corta en 20; el total no debe.
+        hoy = timezone.localdate()
+        ahora = timezone.now()
+        for i in range(25):
+            OrdenProduccion.objects.create(
+                empresa=self.empresa, sucursal=self.sucursal, folio_op=f"OP-TARDE-{i}",
+                estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+                fecha_entrega_estimada=hoy - timedelta(days=5), fecha_fin=ahora,
+            )
+
+        resp = self._get(self.usuario)
+
+        otd = resp.data["cumplimiento_a_tiempo"]
+        self.assertEqual(otd["ops_tardias"], 26)  # 25 nuevas + op_tardia del fixture
+        self.assertEqual(len(otd["drill_down_tardias"]), 20)
 
     # --- #354: "terminada" es por estatus, no por fecha_fin --------------------
 
@@ -4720,12 +4745,28 @@ class OrdenProduccionKpisTests(TestCase):
         self.assertIn(self.op_vencida.pk, atrasadas_ids)
         self.assertIn(self.op_vencida_sucursal_2.pk, atrasadas_ids)
 
-    def test_superuser_sin_empresa_ve_todo(self):
+    def test_superuser_sin_empresa_no_ve_nada(self):
+        # #361: alcance = SIEMPRE la empresa activa, ni el superusuario se
+        # salva -- igual que list/detail de OP, que tampoco le da vista
+        # global. Sin empresa no hay "mi empresa" que mostrar.
         resp = self._get(self.superuser)
 
         self.assertEqual(resp.status_code, 200)
-        self.assertTrue(resp.data["ops_atrasadas"]["disponible"])
-        atrasadas_ids = [d["op_id"] for d in resp.data["ops_atrasadas"]["drill_down"]]
+        self.assertFalse(resp.data["ops_atrasadas"]["disponible"])
+
+    def test_superuser_con_empresa_solo_ve_su_empresa_pero_todas_sus_sucursales(self):
+        # #361: con empresa asignada, el superusuario queda acotado a ESA
+        # empresa (como list/detail) pero sigue viendo todas sus sucursales
+        # (como admin_empresa) -- nunca la de "otra" (globex).
+        self.superuser.empresa = self.empresa
+        self.superuser.save(update_fields=["empresa"])
+
+        resp = self._get(self.superuser)
+
+        atrasadas = resp.data["ops_atrasadas"]
+        self.assertEqual(atrasadas["total"], 2)  # op_vencida (MTY) + op_vencida_sucursal_2 (CDMX)
+        atrasadas_ids = [d["op_id"] for d in atrasadas["drill_down"]]
+        self.assertIn(self.op_vencida.pk, atrasadas_ids)
         self.assertIn(self.op_vencida_sucursal_2.pk, atrasadas_ids)
 
     # --- #356: meta_otd no finito o fuera de rango ------------------------------
