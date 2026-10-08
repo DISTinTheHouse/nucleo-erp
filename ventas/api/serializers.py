@@ -402,11 +402,17 @@ class PedidoDetalleReadSerializer(serializers.ModelSerializer):
     viven por talla (``PedidoDetalleTalla``), así que aquí se anidan las
     ``tallas`` y se agrega ``cantidad_total`` como suma de sus cantidades ya
     prefetcheadas — mismo criterio que ``get_piezas`` en cotizaciones.
+
+    ``sku_base`` es el SKU del renglón sin talla (``producto.codigo`` +
+    ``color.codigo``, p. ej. ``6003703``); en el catálogo real es el prefijo
+    de los ``variante_sku`` de sus ``tallas``. ``None`` cuando falta alguno de
+    los dos códigos (muestras, renglones sin color).
     """
 
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
     color_nombre = serializers.CharField(source="color.nombre", read_only=True, default=None)
     color_codigo_hex = serializers.CharField(source="color.codigo_hex", read_only=True, default=None)
+    sku_base = serializers.SerializerMethodField()
     tallas = serializers.SerializerMethodField()
     cantidad_total = serializers.SerializerMethodField()
     tracker_picking = serializers.SerializerMethodField()
@@ -414,6 +420,23 @@ class PedidoDetalleReadSerializer(serializers.ModelSerializer):
     class Meta:
         model = PedidoDetalle
         fields = "__all__"
+
+    def get_sku_base(self, obj):
+        # SKU del renglón (producto + color) sin la talla. Concatena y normaliza
+        # (sin espacios, mayúsculas) igual que el snapshot ``sku`` de
+        # ``_save_cotizacion_detalle`` (``ventas/utils/helpers.py``), pero NO
+        # con su regla para códigos faltantes: aquel conserva las partes que
+        # haya (``703M`` sin producto), aquí falta uno -> ``None``. Sin
+        # producto (muestra), sin color o sin alguno de los dos códigos ->
+        # ``None``. Sale de las FK del renglón, que
+        # ``_pedido_detalles_prefetch()`` ya trae con ``select_related`` — no
+        # de los SKU de las variantes.
+        producto, color = obj.producto, obj.color
+        codigo_producto = (getattr(producto, "codigo", None) or "").strip()
+        codigo_color = (getattr(color, "codigo", None) or "").strip()
+        if not codigo_producto or not codigo_color:
+            return None
+        return f"{codigo_producto}{codigo_color}".replace(" ", "").upper()
 
     def get_tallas(self, obj):
         # Reusamos la clase PedidoDetalleTallaReadSerializer pero le inyectamos

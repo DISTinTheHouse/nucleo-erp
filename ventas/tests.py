@@ -3513,3 +3513,92 @@ class PedidoTrazabilidadTests(TestCase):
         with CaptureQueriesContext(connection) as lleno:
             trazabilidad_pedido(pedido)
         self.assertEqual(len(vacio), len(lleno))
+
+
+class PedidoDetalleSkuBaseTests(TestCase):
+    """``sku_base`` de cada renglón en ``GET /pedidos/{id}/``.
+
+    ``producto.codigo + color.codigo`` (sin espacios, en mayúsculas) cuando el
+    renglón tiene ambos códigos; ``None`` en cualquier otro caso.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="Acme SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente Acme")
+        cls.admin = Usuario.objects.create(
+            username="admin@acme.test", email="admin@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.talla = Talla.objects.create(nombre="M")
+        cls.color = Color.objects.create(nombre="Marino", codigo="703", codigo_hex="#000080")
+        cls.color_sin_codigo = Color.objects.create(nombre="Sin codigo", codigo="", codigo_hex="#FFFFFF")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera", codigo="6003")
+        cls.producto_sin_codigo = Producto.objects.create(empresa=cls.empresa, nombre="Legacy")
+        cls.producto_codigo_vacio = Producto.objects.create(empresa=cls.empresa, nombre="Vacio", codigo="")
+        cls.producto_minusculas = Producto.objects.create(empresa=cls.empresa, nombre="Min", codigo="ab 1")
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente,
+            moneda=cls.moneda, folio="P-00001",
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+
+    def _detalle(self, **campos):
+        detalle = PedidoDetalle.objects.create(pedido=self.pedido, **campos)
+        PedidoDetalleTalla.objects.create(pedido_detalle=detalle, talla=self.talla, cantidad=1)
+        return detalle
+
+    def _sku_base(self, detalle):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        resp = client.get(f"{PEDIDOS_URL}{self.pedido.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        linea = next(d for d in resp.json()["detalles"] if d["id"] == detalle.pk)
+        self.assertIn("sku_base", linea)
+        return linea["sku_base"]
+
+    def test_producto_y_color_con_codigo(self):
+        detalle = self._detalle(producto=self.producto, color=self.color)
+        self.assertEqual(self._sku_base(detalle), "6003703")
+
+    def test_normaliza_espacios_y_mayusculas(self):
+        detalle = self._detalle(producto=self.producto_minusculas, color=self.color)
+        self.assertEqual(self._sku_base(detalle), "AB1703")
+
+    def test_muestra_sin_producto_es_none(self):
+        detalle = self._detalle(producto_nombre_externo="Muestra bordada", color=self.color)
+        self.assertIsNone(self._sku_base(detalle))
+
+    def test_sin_color_es_none(self):
+        detalle = self._detalle(producto=self.producto)
+        self.assertIsNone(self._sku_base(detalle))
+
+    def test_producto_con_codigo_nulo_es_none(self):
+        detalle = self._detalle(producto=self.producto_sin_codigo, color=self.color)
+        self.assertIsNone(self._sku_base(detalle))
+
+    def test_producto_con_codigo_vacio_es_none(self):
+        detalle = self._detalle(producto=self.producto_codigo_vacio, color=self.color)
+        self.assertIsNone(self._sku_base(detalle))
+
+    def test_color_con_codigo_vacio_es_none(self):
+        detalle = self._detalle(producto=self.producto, color=self.color_sin_codigo)
+        self.assertIsNone(self._sku_base(detalle))
+
+    def test_no_consulta_producto_ni_color_por_su_cuenta(self):
+        """Con las FK ya cargadas, ``get_sku_base`` no hace ninguna consulta.
+
+        Se llama directo (no vía el endpoint) para que la prueba no dependa de
+        que otros campos calculados, como ``producto_nombre``/``color_nombre``,
+        ya hayan resuelto ``producto``/``color`` antes.
+        """
+        from ventas.api.serializers import PedidoDetalleReadSerializer
+
+        detalle = self._detalle(producto=self.producto, color=self.color)
+        detalle = PedidoDetalle.objects.select_related("producto", "color").get(pk=detalle.pk)
+        with self.assertNumQueries(0):
+            sku_base = PedidoDetalleReadSerializer().get_sku_base(detalle)
+        self.assertEqual(sku_base, "6003703")
