@@ -313,7 +313,7 @@ class SerieFolio(StatusLifecycleModel):
 
     @classmethod
     @transaction.atomic
-    def consumir_siguiente_folio(
+    def consumir_siguiente_folio_detallado(
         cls,
         empresa_id,
         sucursal_id,
@@ -321,11 +321,11 @@ class SerieFolio(StatusLifecycleModel):
         *,
         descripcion_documento=None,
     ):
-        """Resolve + lock TX + consume folio y persiste el consecutivo.
+        """Igual que ``consumir_siguiente_folio`` pero devuelve ``(folio, consecutivo)``.
 
-        Lanza ``django.core.exceptions.ValidationError`` si:
-        - No existe ninguna SerieFolio activa para esos tipos_documento
-        - El rango de folios está agotado (ValueError de get_siguiente_folio)
+        Quien además guarda el consecutivo en su propia tabla --``Poliza`` lo
+        hace en ``folio_consecutivo``-- lo necesita, y derivarlo del folio
+        formateado obligaría a volver a parsear prefijo, separador y relleno.
         """
         from django.core.exceptions import ValidationError as DjangoValidationError
 
@@ -352,6 +352,29 @@ class SerieFolio(StatusLifecycleModel):
         serie_folio.folio_actual = nuevo_consecutivo
         serie_folio.ultimo_anio = anio_actual
         serie_folio.save(update_fields=["folio_actual", "ultimo_anio", "updated_at"])
+        return folio_formateado, nuevo_consecutivo
+
+    @classmethod
+    def consumir_siguiente_folio(
+        cls,
+        empresa_id,
+        sucursal_id,
+        tipos_documento,
+        *,
+        descripcion_documento=None,
+    ):
+        """Resolve + lock TX + consume folio y persiste el consecutivo.
+
+        Lanza ``django.core.exceptions.ValidationError`` si:
+        - No existe ninguna SerieFolio activa para esos tipos_documento
+        - El rango de folios está agotado (ValueError de get_siguiente_folio)
+        """
+        folio_formateado, _ = cls.consumir_siguiente_folio_detallado(
+            empresa_id,
+            sucursal_id,
+            tipos_documento,
+            descripcion_documento=descripcion_documento,
+        )
         return folio_formateado
 
     @classmethod

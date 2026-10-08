@@ -1124,6 +1124,18 @@ class PolizaViewSet(FinanzasBaseViewSet):
             empresa = getattr(user, "empresa", None)
             if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
+        # Un asiento contabilizado es un hecho registrado: se corrige con una
+        # póliza de reversa, no editándolo. Sin este guard, un PATCH podía
+        # cambiarle concepto, tipo, centro de costo e incluso el ``estatus``
+        # --saltándose ``PolizaService``, que es quien exige el cuadre--.
+        estatus_actual = serializer.instance.estatus
+        if estatus_actual in (Poliza.PolizaStatus.CONTABILIZADA, Poliza.PolizaStatus.CANCELADA):
+            raise ValidationError({
+                "estatus": (
+                    f"No se puede editar una póliza {estatus_actual.lower()}. "
+                    "Cancélela y registre una nueva."
+                )
+            })
         serializer.save()
 
     def perform_destroy(self, instance):

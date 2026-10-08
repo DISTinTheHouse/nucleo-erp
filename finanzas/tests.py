@@ -20,6 +20,7 @@ from django.apps import apps as django_apps
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, OperationalError, transaction
+from django.db.models import ProtectedError
 from django.db.models.signals import post_delete
 from django.test import TestCase
 from django.utils import timezone
@@ -65,6 +66,7 @@ from finanzas.models import (
     PolizaDetalle,
 )
 from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
+from finanzas.services.poliza_service import PolizaService
 from inventarios.models import Almacen
 from nucleo.models import (
     Empresa,
@@ -766,15 +768,23 @@ class Defecto3FechaEmision(FinanzasBase):
         (Poliza, "fecha"),
     ]
 
-    def test_los_cinco_campos_son_auto_now_add(self):
+    def test_los_cinco_campos_se_fijan_al_crear_y_no_se_reescriben(self):
+        """El invariante es que la fecha se fije al crear y ``save()`` no la toque.
+
+        Antes se exigía ``auto_now_add``, que la fija pero además impide
+        *elegirla*: toda fila queda fechada el día de su captura. Eso es
+        justamente lo que no sirve para la fecha contable --una factura de ayer
+        contabilizada hoy pertenece al periodo de la factura--, así que estos
+        campos usan ``default`` y el serializer decide si los expone.
+        """
         for modelo, nombre in self.CAMPOS:
             with self.subTest(modelo=modelo.__name__):
                 campo = modelo._meta.get_field(nombre)
                 self.assertFalse(campo.auto_now, f"{modelo.__name__}.{nombre} sigue en auto_now")
-                self.assertTrue(campo.auto_now_add)
-                # auto_now_add mantiene el campo no editable: los serializers
-                # con fields='__all__' lo siguen exponiendo como read-only.
-                self.assertFalse(campo.editable)
+                self.assertTrue(
+                    campo.auto_now_add or campo.has_default(),
+                    f"{modelo.__name__}.{nombre} no se fija solo al crear",
+                )
 
     def test_factura_no_reescribe_fecha_emision_en_save(self):
         factura = Factura.objects.create(
@@ -5624,3 +5634,160 @@ class FacturasActivoEnListadoYDesgloseTests(FinanzasBase):
                 fila = next(f for f in self._filas(client.get(url)) if f["id"] == factura_id)
                 self.assertIs(fila["activo"], False)
         self.assertIs(client.get(f"{FACTURAS_URL}{factura_id}/desglose/").data["activo"], False)
+
+
+class PolizaCimientosTests(FinanzasBase):
+    """Fecha contable fijable, folio atómico por serie, contrapóliza enganchable
+    y una póliza contabilizada que ya no se puede editar."""
+
+    def _poliza(self, empresa, sucursal, **extra):
+        return Poliza.objects.create(empresa=empresa, sucursal=sucursal, **extra)
+
+    # --- Fecha contable -----------------------------------------------------
+
+    def test_la_fecha_contable_se_puede_fijar_al_crear(self):
+        """Con ``auto_now_add`` toda póliza quedaba fechada el día de captura."""
+        contable = date(2026, 1, 15)
+        poliza = self._poliza(self.a["empresa"], self.a["sucursal"], fecha=contable)
+        poliza.refresh_from_db()
+        self.assertEqual(poliza.fecha, contable)
+
+    def test_sin_fecha_explicita_usa_el_dia_de_hoy(self):
+        poliza = self._poliza(self.a["empresa"], self.a["sucursal"])
+        poliza.refresh_from_db()
+        self.assertEqual(poliza.fecha, timezone.localdate())
+
+    def test_created_at_y_updated_at_existen_y_se_mueven(self):
+        """Sin ellos, ``PolizaService`` no podía incluirlos en update_fields."""
+        poliza = self._poliza(self.a["empresa"], self.a["sucursal"])
+        self.assertIsNotNone(poliza.created_at)
+        primera = poliza.updated_at
+
+        poliza.concepto = "reclasificado"
+        poliza.save(update_fields=["concepto", "updated_at"])
+        poliza.refresh_from_db()
+        self.assertGreaterEqual(poliza.updated_at, primera)
+
+    def test_str_no_revienta_sin_folio(self):
+        """``folio`` es nullable y el POST manual no lo exige: ``return self.folio``
+        lanzaba TypeError en el admin y en los logs."""
+        poliza = self._poliza(self.a["empresa"], self.a["sucursal"])
+        self.assertEqual(str(poliza), f"Póliza {poliza.pk}")
+        poliza.folio = "POL-000009"
+        self.assertEqual(str(poliza), "POL-000009")
+
+    # --- Folio --------------------------------------------------------------
+
+    def test_folio_consecutivo_y_autoprovision_de_la_serie(self):
+        from nucleo.models import SerieFolio
+        from finanzas.utils.folios import generate_poliza_folio
+
+        empresa, sucursal = self.a["empresa"], self.a["sucursal"]
+        self.assertFalse(
+            SerieFolio.objects.filter(sucursal=sucursal, tipo_documento="Poliza").exists()
+        )
+
+        primero, consec_1 = generate_poliza_folio(empresa, sucursal)
+        segundo, consec_2 = generate_poliza_folio(empresa, sucursal)
+
+        self.assertEqual(primero, "POL-000001")
+        self.assertEqual(segundo, "POL-000002")
+        self.assertEqual((consec_1, consec_2), (1, 2))
+        # La serie de Factura que crea ``_tenant`` no se toca.
+        self.assertEqual(
+            SerieFolio.objects.get(sucursal=sucursal, tipo_documento="Factura").folio_actual, 0
+        )
+
+    def test_folio_reusa_una_serie_de_poliza_ya_configurada(self):
+        from nucleo.models import SerieFolio
+        from finanzas.utils.folios import generate_poliza_folio
+
+        SerieFolio.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"],
+            tipo_documento="POLIZA", serie="DIARIO", folio_actual=40, relleno_ceros=4,
+        )
+        folio, consecutivo = generate_poliza_folio(self.a["empresa"], self.a["sucursal"])
+        self.assertEqual((folio, consecutivo), ("DIARIO-0041", 41))
+        self.assertEqual(SerieFolio.objects.filter(tipo_documento__iexact="poliza").count(), 1)
+
+    def test_folio_reabre_una_serie_desactivada(self):
+        """``resolve`` solo ve las activas, pero la fila sigue ocupando la
+        combinación única: sin reabrirla el folio quedaba inalcanzable."""
+        from nucleo.models import SerieFolio
+        from finanzas.utils.folios import generate_poliza_folio
+
+        SerieFolio.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"],
+            tipo_documento="Poliza", serie="POL", folio_actual=7, activo=False,
+        )
+        folio, consecutivo = generate_poliza_folio(self.a["empresa"], self.a["sucursal"])
+        self.assertEqual((folio, consecutivo), ("POL-000008", 8))
+
+    def test_el_folio_es_independiente_por_sucursal(self):
+        from finanzas.utils.folios import generate_poliza_folio
+
+        _, consec_a = generate_poliza_folio(self.a["empresa"], self.a["sucursal"])
+        _, consec_b = generate_poliza_folio(self.b["empresa"], self.b["sucursal"])
+        self.assertEqual((consec_a, consec_b), (1, 1))
+
+    def test_consumir_siguiente_folio_sigue_devolviendo_solo_el_folio(self):
+        """El shim que ya usaban Factura, OC y producción no cambia de forma."""
+        from finanzas.utils.folios import generate_factura_folio
+
+        self.assertEqual(generate_factura_folio(self.a["empresa"], self.a["sucursal"]), "A-000001")
+
+    # --- Contrapóliza -------------------------------------------------------
+
+    def test_una_poliza_solo_admite_una_reversa(self):
+        original = self._poliza(self.a["empresa"], self.a["sucursal"], folio="POL-1")
+        self._poliza(self.a["empresa"], self.a["sucursal"], folio="POL-2", poliza_reversa_de=original)
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self._poliza(
+                    self.a["empresa"], self.a["sucursal"], folio="POL-3",
+                    poliza_reversa_de=original,
+                )
+
+    def test_no_se_puede_borrar_el_original_dejando_viva_su_reversa(self):
+        original = self._poliza(self.a["empresa"], self.a["sucursal"], folio="POL-1")
+        self._poliza(self.a["empresa"], self.a["sucursal"], folio="POL-2", poliza_reversa_de=original)
+
+        with self.assertRaises(ProtectedError):
+            original.delete()
+
+    # --- Edición de una póliza cerrada --------------------------------------
+
+    def test_no_se_puede_editar_una_poliza_contabilizada(self):
+        """Antes un PATCH podía cambiarle hasta el ``estatus``, saltándose el
+        service que es quien exige el cuadre."""
+        poliza = self._poliza(
+            self.a["empresa"], self.a["sucursal"], folio="POL-1",
+            estatus=Poliza.PolizaStatus.CONTABILIZADA,
+        )
+        resp = self._client(self.a["usuario"]).patch(
+            f"{POLIZAS_URL}{poliza.pk}/", {"concepto": "editado"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("estatus", resp.data)
+        poliza.refresh_from_db()
+        self.assertIsNone(poliza.concepto)
+
+    def test_no_se_puede_editar_una_poliza_cancelada(self):
+        poliza = self._poliza(
+            self.a["empresa"], self.a["sucursal"], folio="POL-1",
+            estatus=Poliza.PolizaStatus.CANCELADA,
+        )
+        resp = self._client(self.a["usuario"]).patch(
+            f"{POLIZAS_URL}{poliza.pk}/", {"concepto": "editado"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_una_poliza_en_borrador_si_se_edita(self):
+        poliza = self._poliza(self.a["empresa"], self.a["sucursal"], folio="POL-1")
+        resp = self._client(self.a["usuario"]).patch(
+            f"{POLIZAS_URL}{poliza.pk}/", {"concepto": "editado"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        poliza.refresh_from_db()
+        self.assertEqual(poliza.concepto, "editado")

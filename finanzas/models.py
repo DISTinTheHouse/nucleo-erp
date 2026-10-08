@@ -105,20 +105,40 @@ class Poliza(models.Model):
     folio = models.CharField(max_length=30, null=True, blank=True)
     folio_consecutivo = models.PositiveIntegerField(null=True, blank=True)
     tipo = models.CharField(max_length=30, choices=PolizaTipo.choices, default=PolizaTipo.DIARIO.value)
-    # Fecha contable: se fija al crear. Con ``auto_now`` se reescribía en cada save().
-    fecha = models.DateField(auto_now_add=True, null=True, blank=True)
+    # Fecha CONTABLE: la del documento que origina el asiento, no la de captura.
+    # Con ``auto_now`` se reescribía en cada save(); con ``auto_now_add`` tampoco
+    # se podía fijar --toda póliza quedaba fechada el día en que se creó--, así
+    # que una factura de ayer contabilizada hoy caía en el periodo equivocado.
+    fecha = models.DateField(default=timezone.localdate, null=True, blank=True)
     concepto = models.CharField(max_length=200, null=True, blank=True)
     estatus = models.CharField(max_length=30, choices=PolizaStatus.choices, default=PolizaStatus.BORRADOR.value)
     usuario_creacion = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="polizas", null=True, blank=True)
+    # Contrapóliza: la que revierte a ``poliza_reversa_de`` invirtiendo cargos y
+    # abonos. PROTECT para que no se pueda borrar el original dejando viva su
+    # reversa, y único parcial para que un asiento no se revierta dos veces.
+    poliza_reversa_de = models.ForeignKey(
+        "self", on_delete=models.PROTECT, related_name="reversas", null=True, blank=True
+    )
     activo = models.BooleanField(default=True)
+    created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         db_table = "polizas"
         verbose_name = "Poliza"
         verbose_name_plural = "Polizas"
-    
+        constraints = [
+            models.UniqueConstraint(
+                fields=("poliza_reversa_de",),
+                condition=models.Q(poliza_reversa_de__isnull=False),
+                name="uq_poliza_reversa_de",
+            ),
+        ]
+
     def __str__(self):
-        return self.folio
+        # ``folio`` es nullable y el POST manual de pólizas no lo exige, así que
+        # devolverlo a secas reventaba con TypeError en el admin y en los logs.
+        return self.folio or f"Póliza {self.pk}"
 
 class Factura(StatusLifecycleModel):
     class FacturaStatus(models.TextChoices):
