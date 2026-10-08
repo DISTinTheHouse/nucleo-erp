@@ -5507,7 +5507,7 @@ class FacturaListadoLigeroTests(FinanzasBase):
 
         fila = self._listar()[0]
         self.assertEqual(set(fila), {
-            "id", "folio", "estatus", "fecha_emision", "fecha_vencimiento", "pedido",
+            "id", "folio", "estatus", "activo", "fecha_emision", "fecha_vencimiento", "pedido",
             "pedido_folio", "cliente", "cliente_nombre", "vendedor", "vendedor_nombre",
             "cantidad", "precio_unitario", "subtotal", "impuestos", "total", "moneda",
             "moneda_nombre",
@@ -5598,3 +5598,29 @@ class FacturaListadoLigeroTests(FinanzasBase):
         detalle = self._client(self.a["usuario"]).get(f"{self.LISTADO_URL}{factura_id}/").data
         self.assertIn("factura_detalles", detalle)
         self.assertEqual(len(detalle["factura_detalles"]), 1)
+
+
+class FacturasActivoEnListadoYDesgloseTests(FinanzasBase):
+    """#351: el listado ligero y el desglose exponen ``activo``."""
+
+    def _filas(self, resp):
+        data = resp.data
+        return data["results"] if isinstance(data, dict) and "results" in data else data
+
+    def test_factura_eliminada_se_distingue_en_listado_y_desglose(self):
+        client = self._client(self.a["usuario"])
+        crea = client.post(ONBOARDING_URL, {
+            "pedido": self.a["pedido"].pk,
+            "factura_detalles": [{"pedido_detalle_talla": self.a["talla_pedido"].pk, "cantidad": 1}],
+        }, format="json")
+        self.assertEqual(crea.status_code, 200, crea.data)
+        factura_id = crea.data["id"]
+        self.assertTrue(client.get(f"{FACTURAS_URL}{factura_id}/desglose/").data["activo"])
+
+        self.assertEqual(client.delete(f"{FACTURAS_URL}{factura_id}/").status_code, 204)
+
+        for url in (FACTURAS_URL, ONBOARDING_URL):
+            with self.subTest(url=url):
+                fila = next(f for f in self._filas(client.get(url)) if f["id"] == factura_id)
+                self.assertIs(fila["activo"], False)
+        self.assertIs(client.get(f"{FACTURAS_URL}{factura_id}/desglose/").data["activo"], False)

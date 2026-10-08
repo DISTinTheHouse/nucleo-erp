@@ -232,6 +232,7 @@ class FacturaService:
             'id': factura.pk,
             'folio': factura.folio,
             'estatus': factura.estatus,
+            'activo': factura.activo,
             'fecha_emision': factura.fecha_emision,
             'fecha_vencimiento': factura.fecha_vencimiento,
             'observaciones': factura.observaciones,
