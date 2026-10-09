@@ -34,6 +34,9 @@ from finanzas.models import (
     CuentaContable,
     CuentaPorCobrar,
     CuentaPorPagar,
+    ConceptoContable,
+    ConfiguracionContable,
+    ParametrosContabilidad,
     Factura,
     FacturaDetalle,
     FacturaProveedor,
@@ -61,6 +64,8 @@ from finanzas.api.serializers import (
     CuentaPorCobrarSerializer,
     CuentaPorPagarCreateSerializer,
     CuentaPorPagarSerializer,
+    ConfiguracionContableSerializer,
+    ParametrosContabilidadSerializer,
     FacturaListSerializer,
     FacturaSerializer,
     FacturaDesdePedidoInputSerializer,
@@ -85,6 +90,7 @@ from finanzas.services.factura_service import FacturaService
 from finanzas.services.movimiento_bancario_service import MovimientoBancarioService
 from finanzas.services.nota_credito_service import NotaCreditoService
 from finanzas.services.pago_service import PagoService
+from finanzas.services.plan_contable_service import PlanContableService
 from finanzas.services.poliza_service import PolizaService
 from finanzas.utils.folios import generate_factura_folio
 from nucleo.models import Moneda, Sucursal
@@ -1055,6 +1061,132 @@ class CentroCostoViewSet(FinanzasBaseViewSet):
         instance.save(update_fields=["activo"])
 
 
+class ConfiguracionContableViewSet(FinanzasBaseViewSet):
+    """Concepto contable -> cuenta, por empresa. Es lo que lee el motor de
+    pólizas en vez de adivinar "la primera cuenta activa del tipo X"."""
+
+    queryset = ConfiguracionContable.objects.all()
+    serializer_class = ConfiguracionContableSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset().select_related("cuenta_contable", "centro_costo")
+        if not _puede_ver_todo(user):
+            empresa = getattr(user, "empresa", None)
+            if not empresa:
+                return qs.none()
+            qs = qs.filter(empresa=empresa)
+        qp = self.request.query_params
+        concepto = (qp.get("concepto") or "").strip()
+        activo = qp.get("activo")
+        if concepto:
+            qs = qs.filter(concepto=concepto)
+        if activo is not None:
+            qs = qs.filter(activo=_bool_param(activo))
+        return _aplicar_ordering(qs, qp, ["concepto", "clave", "id"])
+
+    def perform_create(self, serializer):
+        empresa = _resolve_empresa(self.request.user, serializer.validated_data, required=True)
+        serializer.save(empresa=empresa)
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        if not _puede_ver_todo(user):
+            empresa = getattr(user, "empresa", None)
+            if empresa and serializer.instance.empresa_id != empresa.pk:
+                raise PermissionDenied()
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        user = self.request.user
+        if not _puede_ver_todo(user):
+            empresa = getattr(user, "empresa", None)
+            if empresa and instance.empresa_id != empresa.pk:
+                raise PermissionDenied()
+        # Baja lógica: la constraint única sólo mira las activas, así que una
+        # baja libera el concepto y conserva el rastro de con qué cuenta se
+        # contabilizó en su momento.
+        instance.activo = False
+        instance.save(update_fields=["activo", "updated_at"])
+
+    @action(detail=False, methods=["get"], url_path="conceptos")
+    def conceptos(self, request):
+        """Catálogo de conceptos para armar el formulario."""
+        return Response([
+            {"clave": valor, "nombre": etiqueta}
+            for valor, etiqueta in ConceptoContable.choices
+        ])
+
+    @action(detail=False, methods=["get"], url_path="estado")
+    def estado(self, request):
+        """Qué conceptos ya tienen cuenta y cuáles faltan, más el interruptor."""
+        empresa = _resolve_empresa(request.user, required=False)
+        if empresa is None:
+            raise ValidationError({"empresa": "Superusuario debe indicar empresa."})
+        empresa_id = getattr(empresa, "pk", empresa)
+
+        configurados = {
+            fila.concepto: fila
+            for fila in ConfiguracionContable.objects.filter(
+                empresa_id=empresa_id, activo=True, clave=""
+            ).select_related("cuenta_contable")
+        }
+        parametros = PlanContableService.parametros(empresa_id)
+        return Response({
+            "empresa": empresa_id,
+            "contabilizacion_automatica": bool(
+                parametros and parametros.contabilizacion_automatica
+            ),
+            "fecha_inicio_contabilizacion": getattr(
+                parametros, "fecha_inicio_contabilizacion", None
+            ),
+            "conceptos": [
+                {
+                    "clave": valor,
+                    "nombre": etiqueta,
+                    "configurado": valor in configurados,
+                    "cuenta_codigo": getattr(
+                        getattr(configurados.get(valor), "cuenta_contable", None), "codigo", None
+                    ),
+                }
+                for valor, etiqueta in ConceptoContable.choices
+            ],
+        })
+
+
+class ParametrosContabilidadViewSet(FinanzasBaseViewSet):
+    """El interruptor de la contabilización automática, por empresa.
+
+    Nace apagado: el motor puede estar desplegado sin generar un solo asiento
+    hasta que contabilidad valide el plan de cuentas.
+    """
+
+    queryset = ParametrosContabilidad.objects.all()
+    serializer_class = ParametrosContabilidadSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if not _puede_ver_todo(user):
+            empresa = getattr(user, "empresa", None)
+            if not empresa:
+                return qs.none()
+            qs = qs.filter(empresa=empresa)
+        return qs.order_by("empresa_id")
+
+    def perform_create(self, serializer):
+        empresa = _resolve_empresa(self.request.user, serializer.validated_data, required=True)
+        serializer.save(empresa=empresa)
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        if not _puede_ver_todo(user):
+            empresa = getattr(user, "empresa", None)
+            if empresa and serializer.instance.empresa_id != empresa.pk:
+                raise PermissionDenied()
+        serializer.save()
+
+
 class PolizaViewSet(FinanzasBaseViewSet):
     queryset = Poliza.objects.all()
     serializer_class = PolizaSerializer
@@ -1124,6 +1256,18 @@ class PolizaViewSet(FinanzasBaseViewSet):
             empresa = getattr(user, "empresa", None)
             if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
+        # Un asiento contabilizado es un hecho registrado: se corrige con una
+        # póliza de reversa, no editándolo. Sin este guard, un PATCH podía
+        # cambiarle concepto, tipo, centro de costo e incluso el ``estatus``
+        # --saltándose ``PolizaService``, que es quien exige el cuadre--.
+        estatus_actual = serializer.instance.estatus
+        if estatus_actual in (Poliza.PolizaStatus.CONTABILIZADA, Poliza.PolizaStatus.CANCELADA):
+            raise ValidationError({
+                "estatus": (
+                    f"No se puede editar una póliza {estatus_actual.lower()}. "
+                    "Cancélela y registre una nueva."
+                )
+            })
         serializer.save()
 
     def perform_destroy(self, instance):

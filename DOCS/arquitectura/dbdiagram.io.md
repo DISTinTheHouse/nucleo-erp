@@ -680,10 +680,26 @@ Table centros_costo {
   id_empresa int
 }
 
+// concepto contable -> cuenta, por empresa: de aquí saca el motor de pólizas
+// la cuenta de cada renglón, en vez de adivinar por tipo de cuenta
+Table configuraciones_contables {
+  id_configuracion_contable int [pk]
+  id_empresa int
+  id_cuenta_contable int
+  id_centro_costo int
+}
+
+// interruptor de contabilización automática (nace apagado, por empresa)
+Table parametros_contabilidad {
+  id_parametros_contabilidad int [pk]
+  id_empresa int
+}
+
 Table polizas {
   id_poliza int [pk]
   id_empresa int
   id_sucursal int
+  id_poliza_reversa_de int // contrapóliza: revierte a esta
 }
 
 Table poliza_detalle {
@@ -691,7 +707,6 @@ Table poliza_detalle {
   id_poliza int
   id_cuenta_contable int
   id_centro_costo int
-  // vínculos opcionales típicos para trazabilidad contable:
   id_factura int
   id_factura_proveedor int
   id_pago int
@@ -709,6 +724,7 @@ Table cuentas_bancarias {
   id_cuenta_bancaria int [pk]
   id_banco int
   id_moneda int
+  id_cuenta_contable int
 }
 
 Table movimientos_bancarios {
@@ -716,6 +732,7 @@ Table movimientos_bancarios {
   id_cuenta_bancaria int
   id_pago int
   id_cobro int
+  id_cuenta_contable_contrapartida int
 }
 
 Table conciliaciones_bancarias {
@@ -1338,7 +1355,13 @@ Ref: envio_detalle.id_entrega > entregas.id_entrega
 Ref: cuentas_contables.id_empresa > empresas.id_empresa
 Ref: centros_costo.id_empresa > empresas.id_empresa
 
+Ref: configuraciones_contables.id_empresa > empresas.id_empresa
+Ref: configuraciones_contables.id_cuenta_contable > cuentas_contables.id_cuenta_contable
+Ref: configuraciones_contables.id_centro_costo > centros_costo.id_centro_costo
+Ref: parametros_contabilidad.id_empresa > empresas.id_empresa
+
 Ref: polizas.id_empresa > empresas.id_empresa
+Ref: polizas.id_poliza_reversa_de > polizas.id_poliza
 Ref: polizas.id_sucursal > sucursales.id_sucursal
 Ref: poliza_detalle.id_poliza > polizas.id_poliza
 Ref: poliza_detalle.id_cuenta_contable > cuentas_contables.id_cuenta_contable
@@ -1353,10 +1376,12 @@ Ref: poliza_detalle.id_movimiento_bancario > movimientos_bancarios.id_movimiento
 Ref: bancos.id_empresa > empresas.id_empresa
 Ref: cuentas_bancarias.id_banco > bancos.id_banco
 Ref: cuentas_bancarias.id_moneda > monedas.id_moneda
+Ref: cuentas_bancarias.id_cuenta_contable > cuentas_contables.id_cuenta_contable
 
 Ref: movimientos_bancarios.id_cuenta_bancaria > cuentas_bancarias.id_cuenta_bancaria
 Ref: movimientos_bancarios.id_pago > pagos.id_pago
 Ref: movimientos_bancarios.id_cobro > cobros.id_cobro
+Ref: movimientos_bancarios.id_cuenta_contable_contrapartida > cuentas_contables.id_cuenta_contable
 
 Ref: conciliaciones_bancarias.id_cuenta_bancaria > cuentas_bancarias.id_cuenta_bancaria
 Ref: conciliacion_detalle.id_conciliacion > conciliaciones_bancarias.id_conciliacion

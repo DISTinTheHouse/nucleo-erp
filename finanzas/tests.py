@@ -20,6 +20,7 @@ from django.apps import apps as django_apps
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, OperationalError, transaction
+from django.db.models import ProtectedError
 from django.db.models.signals import post_delete
 from django.test import TestCase
 from django.utils import timezone
@@ -50,6 +51,8 @@ from finanzas.models import (
     ConciliacionBancaria,
     ConciliacionDetalle,
     CuentaBancaria,
+    ConceptoContable,
+    ConfiguracionContable,
     CuentaContable,
     CuentaPorCobrar,
     CuentaPorPagar,
@@ -61,10 +64,13 @@ from finanzas.models import (
     NotaCreditoDetalle,
     Pago,
     PagoDetalle,
+    ParametrosContabilidad,
     Poliza,
     PolizaDetalle,
 )
 from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
+from finanzas.services.plan_contable_service import PlanContableService
+from finanzas.services.poliza_service import PolizaService
 from inventarios.models import Almacen
 from nucleo.models import (
     Empresa,
@@ -766,15 +772,23 @@ class Defecto3FechaEmision(FinanzasBase):
         (Poliza, "fecha"),
     ]
 
-    def test_los_cinco_campos_son_auto_now_add(self):
+    def test_los_cinco_campos_se_fijan_al_crear_y_no_se_reescriben(self):
+        """El invariante es que la fecha se fije al crear y ``save()`` no la toque.
+
+        Antes se exigía ``auto_now_add``, que la fija pero además impide
+        *elegirla*: toda fila queda fechada el día de su captura. Eso es
+        justamente lo que no sirve para la fecha contable --una factura de ayer
+        contabilizada hoy pertenece al periodo de la factura--, así que estos
+        campos usan ``default`` y el serializer decide si los expone.
+        """
         for modelo, nombre in self.CAMPOS:
             with self.subTest(modelo=modelo.__name__):
                 campo = modelo._meta.get_field(nombre)
                 self.assertFalse(campo.auto_now, f"{modelo.__name__}.{nombre} sigue en auto_now")
-                self.assertTrue(campo.auto_now_add)
-                # auto_now_add mantiene el campo no editable: los serializers
-                # con fields='__all__' lo siguen exponiendo como read-only.
-                self.assertFalse(campo.editable)
+                self.assertTrue(
+                    campo.auto_now_add or campo.has_default(),
+                    f"{modelo.__name__}.{nombre} no se fija solo al crear",
+                )
 
     def test_factura_no_reescribe_fecha_emision_en_save(self):
         factura = Factura.objects.create(
@@ -5624,3 +5638,500 @@ class FacturasActivoEnListadoYDesgloseTests(FinanzasBase):
                 fila = next(f for f in self._filas(client.get(url)) if f["id"] == factura_id)
                 self.assertIs(fila["activo"], False)
         self.assertIs(client.get(f"{FACTURAS_URL}{factura_id}/desglose/").data["activo"], False)
+
+
+class PolizaCimientosTests(FinanzasBase):
+    """Fecha contable fijable, folio atómico por serie, contrapóliza enganchable
+    y una póliza contabilizada que ya no se puede editar."""
+
+    def _poliza(self, empresa, sucursal, **extra):
+        return Poliza.objects.create(empresa=empresa, sucursal=sucursal, **extra)
+
+    # --- Fecha contable -----------------------------------------------------
+
+    def test_la_fecha_contable_se_puede_fijar_al_crear(self):
+        """Con ``auto_now_add`` toda póliza quedaba fechada el día de captura."""
+        contable = date(2026, 1, 15)
+        poliza = self._poliza(self.a["empresa"], self.a["sucursal"], fecha=contable)
+        poliza.refresh_from_db()
+        self.assertEqual(poliza.fecha, contable)
+
+    def test_sin_fecha_explicita_usa_el_dia_de_hoy(self):
+        poliza = self._poliza(self.a["empresa"], self.a["sucursal"])
+        poliza.refresh_from_db()
+        self.assertEqual(poliza.fecha, timezone.localdate())
+
+    def test_created_at_y_updated_at_existen_y_se_mueven(self):
+        """Sin ellos, ``PolizaService`` no podía incluirlos en update_fields."""
+        poliza = self._poliza(self.a["empresa"], self.a["sucursal"])
+        self.assertIsNotNone(poliza.created_at)
+        primera = poliza.updated_at
+
+        poliza.concepto = "reclasificado"
+        poliza.save(update_fields=["concepto", "updated_at"])
+        poliza.refresh_from_db()
+        self.assertGreaterEqual(poliza.updated_at, primera)
+
+    def test_str_no_revienta_sin_folio(self):
+        """``folio`` es nullable y el POST manual no lo exige: ``return self.folio``
+        lanzaba TypeError en el admin y en los logs."""
+        poliza = self._poliza(self.a["empresa"], self.a["sucursal"])
+        self.assertEqual(str(poliza), f"Póliza {poliza.pk}")
+        poliza.folio = "POL-000009"
+        self.assertEqual(str(poliza), "POL-000009")
+
+    # --- Folio --------------------------------------------------------------
+
+    def test_folio_consecutivo_y_autoprovision_de_la_serie(self):
+        from nucleo.models import SerieFolio
+        from finanzas.utils.folios import generate_poliza_folio
+
+        empresa, sucursal = self.a["empresa"], self.a["sucursal"]
+        self.assertFalse(
+            SerieFolio.objects.filter(sucursal=sucursal, tipo_documento="Poliza").exists()
+        )
+
+        primero, consec_1 = generate_poliza_folio(empresa, sucursal)
+        segundo, consec_2 = generate_poliza_folio(empresa, sucursal)
+
+        self.assertEqual(primero, "POL-000001")
+        self.assertEqual(segundo, "POL-000002")
+        self.assertEqual((consec_1, consec_2), (1, 2))
+        # La serie de Factura que crea ``_tenant`` no se toca.
+        self.assertEqual(
+            SerieFolio.objects.get(sucursal=sucursal, tipo_documento="Factura").folio_actual, 0
+        )
+
+    def test_folio_reusa_una_serie_de_poliza_ya_configurada(self):
+        from nucleo.models import SerieFolio
+        from finanzas.utils.folios import generate_poliza_folio
+
+        SerieFolio.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"],
+            tipo_documento="POLIZA", serie="DIARIO", folio_actual=40, relleno_ceros=4,
+        )
+        folio, consecutivo = generate_poliza_folio(self.a["empresa"], self.a["sucursal"])
+        self.assertEqual((folio, consecutivo), ("DIARIO-0041", 41))
+        self.assertEqual(SerieFolio.objects.filter(tipo_documento__iexact="poliza").count(), 1)
+
+    def test_folio_reabre_una_serie_desactivada(self):
+        """``resolve`` solo ve las activas, pero la fila sigue ocupando la
+        combinación única: sin reabrirla el folio quedaba inalcanzable."""
+        from nucleo.models import SerieFolio
+        from finanzas.utils.folios import generate_poliza_folio
+
+        SerieFolio.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"],
+            tipo_documento="Poliza", serie="POL", folio_actual=7, activo=False,
+        )
+        folio, consecutivo = generate_poliza_folio(self.a["empresa"], self.a["sucursal"])
+        self.assertEqual((folio, consecutivo), ("POL-000008", 8))
+
+    def test_el_folio_es_independiente_por_sucursal(self):
+        from finanzas.utils.folios import generate_poliza_folio
+
+        _, consec_a = generate_poliza_folio(self.a["empresa"], self.a["sucursal"])
+        _, consec_b = generate_poliza_folio(self.b["empresa"], self.b["sucursal"])
+        self.assertEqual((consec_a, consec_b), (1, 1))
+
+    def test_consumir_siguiente_folio_sigue_devolviendo_solo_el_folio(self):
+        """El shim que ya usaban Factura, OC y producción no cambia de forma."""
+        from finanzas.utils.folios import generate_factura_folio
+
+        self.assertEqual(generate_factura_folio(self.a["empresa"], self.a["sucursal"]), "A-000001")
+
+    # --- Contrapóliza -------------------------------------------------------
+
+    def test_una_poliza_solo_admite_una_reversa(self):
+        original = self._poliza(self.a["empresa"], self.a["sucursal"], folio="POL-1")
+        self._poliza(self.a["empresa"], self.a["sucursal"], folio="POL-2", poliza_reversa_de=original)
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self._poliza(
+                    self.a["empresa"], self.a["sucursal"], folio="POL-3",
+                    poliza_reversa_de=original,
+                )
+
+    def test_no_se_puede_borrar_el_original_dejando_viva_su_reversa(self):
+        original = self._poliza(self.a["empresa"], self.a["sucursal"], folio="POL-1")
+        self._poliza(self.a["empresa"], self.a["sucursal"], folio="POL-2", poliza_reversa_de=original)
+
+        with self.assertRaises(ProtectedError):
+            original.delete()
+
+    # --- Edición de una póliza cerrada --------------------------------------
+
+    def test_no_se_puede_editar_una_poliza_contabilizada(self):
+        """Antes un PATCH podía cambiarle hasta el ``estatus``, saltándose el
+        service que es quien exige el cuadre."""
+        poliza = self._poliza(
+            self.a["empresa"], self.a["sucursal"], folio="POL-1",
+            estatus=Poliza.PolizaStatus.CONTABILIZADA,
+        )
+        resp = self._client(self.a["usuario"]).patch(
+            f"{POLIZAS_URL}{poliza.pk}/", {"concepto": "editado"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("estatus", resp.data)
+        poliza.refresh_from_db()
+        self.assertIsNone(poliza.concepto)
+
+    def test_no_se_puede_editar_una_poliza_cancelada(self):
+        poliza = self._poliza(
+            self.a["empresa"], self.a["sucursal"], folio="POL-1",
+            estatus=Poliza.PolizaStatus.CANCELADA,
+        )
+        resp = self._client(self.a["usuario"]).patch(
+            f"{POLIZAS_URL}{poliza.pk}/", {"concepto": "editado"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_una_poliza_en_borrador_si_se_edita(self):
+        poliza = self._poliza(self.a["empresa"], self.a["sucursal"], folio="POL-1")
+        resp = self._client(self.a["usuario"]).patch(
+            f"{POLIZAS_URL}{poliza.pk}/", {"concepto": "editado"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        poliza.refresh_from_db()
+        self.assertEqual(poliza.concepto, "editado")
+
+
+CONFIG_CONTABLE_URL = "/api/v1/finanzas/configuraciones-contables/"
+PARAMETROS_CONTABILIDAD_URL = "/api/v1/finanzas/parametros-contabilidad/"
+
+
+class PlanContableTests(FinanzasBase):
+    """Concepto -> cuenta por empresa, el interruptor de contabilización y el
+    comando de siembra."""
+
+    @classmethod
+    def _cuenta(cls, empresa, codigo, tipo=CuentaContable.CuentaTipo.ACTIVO, **extra):
+        return CuentaContable.objects.create(
+            empresa=empresa, codigo=codigo, nombre=f"Cuenta {codigo}", tipo=tipo, **extra
+        )
+
+    def _config(self, empresa, concepto, cuenta, **extra):
+        return ConfiguracionContable.objects.create(
+            empresa=empresa, concepto=concepto, cuenta_contable=cuenta, **extra
+        )
+
+    # --- API de configuración ----------------------------------------------
+
+    def test_alta_de_una_configuracion(self):
+        cuenta = self._cuenta(self.a["empresa"], "1120")
+        resp = self._client(self.a["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {"concepto": ConceptoContable.CLIENTES, "cuenta_contable": cuenta.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["cuenta_codigo"], "1120")
+        fila = ConfiguracionContable.objects.get()
+        self.assertEqual(fila.empresa_id, self.a["empresa"].pk)
+
+    def test_rechaza_cuenta_de_otra_empresa(self):
+        ajena = self._cuenta(self.b["empresa"], "1120")
+        resp = self._client(self.a["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {"concepto": ConceptoContable.CLIENTES, "cuenta_contable": ajena.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cuenta_contable", resp.data)
+        self.assertFalse(ConfiguracionContable.objects.exists())
+
+    def test_rechaza_cuenta_de_agrupacion(self):
+        """Una cuenta que no acepta movimientos no puede recibir un asiento."""
+        cuenta = self._cuenta(self.a["empresa"], "1000", acepta_movimientos=False)
+        resp = self._client(self.a["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {"concepto": ConceptoContable.CLIENTES, "cuenta_contable": cuenta.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cuenta_contable", resp.data)
+
+    def test_rechaza_cuenta_dada_de_baja(self):
+        cuenta = self._cuenta(self.a["empresa"], "1120", activo=False)
+        resp = self._client(self.a["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {"concepto": ConceptoContable.CLIENTES, "cuenta_contable": cuenta.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_rechaza_centro_de_costo_de_otra_empresa(self):
+        cuenta = self._cuenta(self.a["empresa"], "1120")
+        centro_ajeno = CentroCosto.objects.create(empresa=self.b["empresa"], codigo="CC01")
+        resp = self._client(self.a["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {
+                "concepto": ConceptoContable.CLIENTES,
+                "cuenta_contable": cuenta.pk,
+                "centro_costo": centro_ajeno.pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("centro_costo", resp.data)
+
+    def test_un_concepto_no_admite_dos_cuentas_activas(self):
+        cuenta = self._cuenta(self.a["empresa"], "1120")
+        otra = self._cuenta(self.a["empresa"], "1121")
+        self._config(self.a["empresa"], ConceptoContable.CLIENTES, cuenta)
+
+        resp = self._client(self.a["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {"concepto": ConceptoContable.CLIENTES, "cuenta_contable": otra.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("concepto", resp.data)
+
+    def test_la_baja_libera_el_concepto(self):
+        """La constraint sólo mira las activas: una baja no lo secuestra."""
+        cuenta = self._cuenta(self.a["empresa"], "1120")
+        otra = self._cuenta(self.a["empresa"], "1121")
+        fila = self._config(self.a["empresa"], ConceptoContable.CLIENTES, cuenta)
+        client = self._client(self.a["usuario"])
+
+        self.assertEqual(client.delete(f"{CONFIG_CONTABLE_URL}{fila.pk}/").status_code, 204)
+        fila.refresh_from_db()
+        self.assertFalse(fila.activo)
+
+        resp = client.post(
+            CONFIG_CONTABLE_URL,
+            {"concepto": ConceptoContable.CLIENTES, "cuenta_contable": otra.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_misma_clave_en_empresas_distintas(self):
+        self._config(
+            self.a["empresa"], ConceptoContable.CLIENTES, self._cuenta(self.a["empresa"], "1120")
+        )
+        resp = self._client(self.b["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {
+                "concepto": ConceptoContable.CLIENTES,
+                "cuenta_contable": self._cuenta(self.b["empresa"], "1120").pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_aislamiento_entre_empresas(self):
+        fila = self._config(
+            self.a["empresa"], ConceptoContable.CLIENTES, self._cuenta(self.a["empresa"], "1120")
+        )
+        client_b = self._client(self.b["usuario"])
+        self.assertEqual(client_b.get(CONFIG_CONTABLE_URL).data, [])
+        self.assertEqual(client_b.get(f"{CONFIG_CONTABLE_URL}{fila.pk}/").status_code, 404)
+
+    def test_catalogo_de_conceptos(self):
+        resp = self._client(self.a["usuario"]).get(f"{CONFIG_CONTABLE_URL}conceptos/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        claves = {c["clave"] for c in resp.data}
+        self.assertIn(ConceptoContable.CLIENTES, claves)
+        self.assertIn(ConceptoContable.IVA_TRASLADADO, claves)
+
+    def test_estado_dice_que_falta(self):
+        self._config(
+            self.a["empresa"], ConceptoContable.CLIENTES, self._cuenta(self.a["empresa"], "1120")
+        )
+        resp = self._client(self.a["usuario"]).get(f"{CONFIG_CONTABLE_URL}estado/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(resp.data["contabilizacion_automatica"])
+        por_clave = {c["clave"]: c for c in resp.data["conceptos"]}
+        self.assertTrue(por_clave[ConceptoContable.CLIENTES]["configurado"])
+        self.assertEqual(por_clave[ConceptoContable.CLIENTES]["cuenta_codigo"], "1120")
+        self.assertFalse(por_clave[ConceptoContable.IVA_TRASLADADO]["configurado"])
+
+    # --- Interruptor --------------------------------------------------------
+
+    def test_la_contabilizacion_nace_apagada(self):
+        """Sin fila de parámetros, apagada. Es lo que permite desplegar el
+        motor en producción sin que genere un solo asiento."""
+        self.assertFalse(PlanContableService.contabilizacion_activa(self.a["empresa"].pk))
+
+    def test_encender_la_contabilizacion(self):
+        resp = self._client(self.a["usuario"]).post(
+            PARAMETROS_CONTABILIDAD_URL, {"contabilizacion_automatica": True}, format="json"
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertTrue(PlanContableService.contabilizacion_activa(self.a["empresa"].pk))
+
+    def test_el_piso_de_fecha_deja_fuera_los_documentos_viejos(self):
+        ParametrosContabilidad.objects.create(
+            empresa=self.a["empresa"],
+            contabilizacion_automatica=True,
+            fecha_inicio_contabilizacion=date(2026, 1, 1),
+        )
+        activa = PlanContableService.contabilizacion_activa
+        self.assertFalse(activa(self.a["empresa"].pk, fecha=date(2025, 12, 31)))
+        self.assertTrue(activa(self.a["empresa"].pk, fecha=date(2026, 1, 1)))
+        self.assertTrue(activa(self.a["empresa"].pk, fecha=date(2026, 6, 1)))
+
+    def test_el_interruptor_es_por_empresa(self):
+        ParametrosContabilidad.objects.create(
+            empresa=self.a["empresa"], contabilizacion_automatica=True
+        )
+        self.assertTrue(PlanContableService.contabilizacion_activa(self.a["empresa"].pk))
+        self.assertFalse(PlanContableService.contabilizacion_activa(self.b["empresa"].pk))
+
+    # --- Resolución de cuentas ---------------------------------------------
+
+    def test_resuelve_varios_conceptos_en_una_consulta(self):
+        empresa = self.a["empresa"]
+        self._config(empresa, ConceptoContable.CLIENTES, self._cuenta(empresa, "1120"))
+        self._config(
+            empresa, ConceptoContable.INGRESO_VENTAS,
+            self._cuenta(empresa, "4100", CuentaContable.CuentaTipo.INGRESO),
+        )
+        pares = [(ConceptoContable.CLIENTES, ""), (ConceptoContable.INGRESO_VENTAS, "")]
+
+        with self.assertNumQueries(1):
+            mapa = PlanContableService.mapa(empresa.pk, pares)
+
+        self.assertEqual(mapa[(ConceptoContable.CLIENTES, "")].cuenta_contable.codigo, "1120")
+        self.assertEqual(mapa[(ConceptoContable.INGRESO_VENTAS, "")].cuenta_contable.codigo, "4100")
+
+    def test_exigir_acumula_todos_los_faltantes(self):
+        """Configurar el plan descubriendo una cuenta ausente por vez sería un
+        suplicio: el error las nombra todas de una."""
+        empresa = self.a["empresa"]
+        self._config(empresa, ConceptoContable.CLIENTES, self._cuenta(empresa, "1120"))
+
+        with self.assertRaises(ErrorDeNegocio) as ctx:
+            PlanContableService.exigir(empresa.pk, [
+                (ConceptoContable.CLIENTES, ""),
+                (ConceptoContable.INGRESO_VENTAS, ""),
+                (ConceptoContable.IVA_TRASLADADO, ""),
+            ])
+
+        mensaje = str(ctx.exception.message_dict["configuracion_contable"])
+        self.assertIn("Ingresos por ventas", mensaje)
+        self.assertIn("IVA trasladado", mensaje)
+        self.assertNotIn("Clientes", mensaje)
+
+    def test_la_clave_cae_a_la_regla_por_omision(self):
+        """Nómina: una empresa manda todas sus percepciones a una sola cuenta
+        con una fila, y afina sólo las que lo ameriten."""
+        empresa = self.a["empresa"]
+        generica = self._cuenta(empresa, "5100", CuentaContable.CuentaTipo.GASTO)
+        extra = self._cuenta(empresa, "5110", CuentaContable.CuentaTipo.GASTO)
+        self._config(empresa, ConceptoContable.PERCEPCION_NOMINA, generica, clave="")
+        self._config(empresa, ConceptoContable.PERCEPCION_NOMINA, extra, clave="PER010")
+
+        mapa = PlanContableService.mapa(empresa.pk, [
+            (ConceptoContable.PERCEPCION_NOMINA, "PER001"),
+            (ConceptoContable.PERCEPCION_NOMINA, "PER010"),
+        ])
+        self.assertEqual(
+            mapa[(ConceptoContable.PERCEPCION_NOMINA, "PER001")].cuenta_contable.codigo, "5100"
+        )
+        self.assertEqual(
+            mapa[(ConceptoContable.PERCEPCION_NOMINA, "PER010")].cuenta_contable.codigo, "5110"
+        )
+
+    def test_una_configuracion_dada_de_baja_no_resuelve(self):
+        empresa = self.a["empresa"]
+        self._config(
+            empresa, ConceptoContable.CLIENTES, self._cuenta(empresa, "1120"), activo=False
+        )
+        self.assertEqual(PlanContableService.mapa(empresa.pk, [(ConceptoContable.CLIENTES, "")]), {})
+
+    def test_validar_cuenta_atrapa_la_baja_posterior(self):
+        """El serializer valida al configurar; la cuenta pudo morir después."""
+        empresa = self.a["empresa"]
+        cuenta = self._cuenta(empresa, "1120")
+        PlanContableService.validar_cuenta(cuenta, empresa.pk)
+
+        cuenta.activo = False
+        with self.assertRaises(ErrorDeNegocio):
+            PlanContableService.validar_cuenta(cuenta, empresa.pk)
+
+        cuenta.activo = True
+        cuenta.acepta_movimientos = False
+        with self.assertRaises(ErrorDeNegocio):
+            PlanContableService.validar_cuenta(cuenta, empresa.pk)
+
+    # --- Cuenta de bancos ---------------------------------------------------
+
+    def test_la_cuenta_del_banco_gana_al_concepto(self):
+        empresa = self.a["empresa"]
+        propia = self._cuenta(empresa, "1021")
+        self._config(empresa, ConceptoContable.BANCOS, self._cuenta(empresa, "1020"))
+        bancaria = self._crear_cuenta_bancaria(empresa)
+        bancaria.cuenta_contable = propia
+        bancaria.save(update_fields=["cuenta_contable"])
+
+        self.assertEqual(PlanContableService.cuenta_de_banco(bancaria).codigo, "1021")
+
+    def test_sin_cuenta_propia_usa_el_concepto_bancos(self):
+        empresa = self.a["empresa"]
+        self._config(empresa, ConceptoContable.BANCOS, self._cuenta(empresa, "1020"))
+        self.assertEqual(
+            PlanContableService.cuenta_de_banco(self._crear_cuenta_bancaria(empresa)).codigo, "1020"
+        )
+
+    def test_sin_ninguna_de_las_dos_falla_con_mensaje(self):
+        with self.assertRaises(ErrorDeNegocio) as ctx:
+            PlanContableService.cuenta_de_banco(self._crear_cuenta_bancaria(self.a["empresa"]))
+        self.assertIn("cuenta_contable", ctx.exception.message_dict)
+
+    def test_la_api_rechaza_ligar_una_cuenta_contable_ajena(self):
+        ajena = self._cuenta(self.b["empresa"], "1020")
+        bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
+        resp = self._client(self.a["usuario"]).patch(
+            f"/api/v1/finanzas/cuentas-bancarias/{bancaria.pk}/",
+            {"cuenta_contable": ajena.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cuenta_contable", resp.data)
+
+    # --- Comando de siembra -------------------------------------------------
+
+    def test_el_comando_siembra_y_es_idempotente(self):
+        from django.core.management import call_command
+
+        empresa = self.a["empresa"]
+        call_command("sembrar_plan_contable", empresa=empresa.pk, verbosity=0)
+        cuentas = CuentaContable.objects.filter(empresa=empresa).count()
+        configs = ConfiguracionContable.objects.filter(empresa=empresa).count()
+        self.assertGreater(cuentas, 0)
+        self.assertEqual(configs, len(ConceptoContable.choices))
+
+        call_command("sembrar_plan_contable", empresa=empresa.pk, verbosity=0)
+        self.assertEqual(CuentaContable.objects.filter(empresa=empresa).count(), cuentas)
+        self.assertEqual(ConfiguracionContable.objects.filter(empresa=empresa).count(), configs)
+
+    def test_sembrar_no_enciende_la_contabilizacion(self):
+        from django.core.management import call_command
+
+        call_command("sembrar_plan_contable", empresa=self.a["empresa"].pk, verbosity=0)
+        self.assertFalse(PlanContableService.contabilizacion_activa(self.a["empresa"].pk))
+
+    def test_dry_run_no_escribe(self):
+        from django.core.management import call_command
+
+        call_command(
+            "sembrar_plan_contable", empresa=self.a["empresa"].pk, dry_run=True, verbosity=0
+        )
+        self.assertFalse(ConfiguracionContable.objects.exists())
+
+    def test_el_comando_no_pisa_una_configuracion_existente(self):
+        from django.core.management import call_command
+
+        empresa = self.a["empresa"]
+        mia = self._cuenta(empresa, "9999")
+        self._config(empresa, ConceptoContable.CLIENTES, mia)
+
+        call_command("sembrar_plan_contable", empresa=empresa.pk, verbosity=0)
+
+        fila = ConfiguracionContable.objects.get(
+            empresa=empresa, concepto=ConceptoContable.CLIENTES, activo=True
+        )
+        self.assertEqual(fila.cuenta_contable_id, mia.pk)
