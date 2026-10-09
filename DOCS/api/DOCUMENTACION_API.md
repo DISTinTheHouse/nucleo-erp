@@ -1992,7 +1992,7 @@ Una vez que el pedido ya fue aceptado/autorizado, mesa de control reparte sus pi
   - `cantidad`: entero, mínimo 1.
   - `comentarios`: texto libre, **opcional**, hasta 500 caracteres. Es por parcialidad (por renglón), no uno solo para todo el PATCH — cada destino/cantidad lleva su propia nota. Si no se manda, se guarda como `""`.
   - `programaciones` puede ir vacío (`[]`) para **limpiar** la programación existente.
-  - Validación dura: la suma de todas las `cantidad` no puede exceder el total de piezas del pedido (`SUM(PedidoDetalleTalla.cantidad)`) — si se excede, `400` con el detalle de cuánto se mandó vs. cuánto hay.
+  - Validación dura: la suma de todas las `cantidad` no puede exceder el total de piezas **programables** del pedido — si se excede, `400` con el detalle de cuánto se mandó vs. cuánto hay. `total_piezas` excluye las líneas de **muestra** (`PedidoDetalle.producto_nombre_externo` puesto, sin SKU de catálogo): esas piezas no se surten/embarcan/bordan por este flujo genérico, tienen el suyo propio (`PedidoEspecialViewSet.variante_onboarding`, ver sección "Pedidos con Producción Especial"). Antes de este fix sí contaban, y mesa de control podía "programar" piezas de muestra que nunca se iban a poder cumplir por esta vía.
   - **Validación dura de destinos**: `BORDADO`/`REFLEJANTE`/`CORTE_MANGA` sólo se aceptan si el pedido realmente tiene al menos una talla con ese servicio (`lleva_bordado`/`lleva_reflejante`/`lleva_corte_manga=True`) — si no, `400`:
     ```json
     { "programaciones": "Este pedido no lleva estos servicios, no se puede programar: BORDADO." }

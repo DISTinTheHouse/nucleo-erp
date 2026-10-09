@@ -2986,11 +2986,21 @@ class PedidoViewSet(viewsets.ModelViewSet):
             # toma este mismo lock para reescribir las tallas, así que el total
             # validado no puede cambiar entre la validación y el guardado.
             pedido = Pedido.objects.select_for_update().get(pk=base_pedido.pk)
-            # Misma agregación que ``armar_tracker_pedido`` (total_prendas_pedido).
+            # Excluye líneas de MUESTRA (``PedidoDetalle.producto_nombre_externo``
+            # puesto -- mismo criterio que ``produccion._detalles_especiales_qs``,
+            # NO el flag ``requiere_produccion`` porque se desincroniza): esas
+            # piezas no tienen SKU todavía y no se surten/embarcan/bordan por este
+            # flujo genérico de programación, tienen el suyo propio
+            # (``PedidoEspecialViewSet.variante_onboarding``). Antes de este fix
+            # contaban aquí y mesa de control podía "programar" piezas de muestra
+            # que nunca iban a poder cumplirse por esta vía.
             total_piezas = (
-                PedidoDetalleTalla.objects.filter(
-                    pedido_detalle__pedido=pedido
-                ).aggregate(total=Sum("cantidad"))["total"]
+                PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
+                .filter(
+                    Q(pedido_detalle__producto_nombre_externo__isnull=True)
+                    | Q(pedido_detalle__producto_nombre_externo__exact="")
+                )
+                .aggregate(total=Sum("cantidad"))["total"]
                 or 0
             )
 
