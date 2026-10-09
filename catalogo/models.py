@@ -2,7 +2,7 @@ from django.contrib.postgres.indexes import OpClass
 from django.db import models
 from django.db.models.functions import Upper
 from nucleo.indices import GinIndexSoloPostgres, IndexSoloPostgres
-from nucleo.models import Empresa, UnidadMedida, Impuesto, SatClaveProdServ, SatClaveUnidad
+from nucleo.models import Empresa, UnidadMedida, Impuesto, SatClaveProdServ, SatClaveUnidad, StatusLifecycleModel
 from simple_history.models import HistoricalRecords
 
 class TipoProducto(models.Model):
@@ -191,12 +191,31 @@ class ProductoVariante(models.Model):
     def __str__(self):
         return self.nombre_completo
 
-class VarianteProductoProduccion(models.Model):
+class VarianteProductoProduccion(StatusLifecycleModel):
+    """SKU de producción nacido de una muestra (``PedidoDetalle.producto_nombre_externo``),
+    antes de que exista -- o sin que nunca llegue a existir -- su equivalente en el
+    catálogo real (``catalogo.Producto``/``ProductoVariante``).
+
+    Vive en tabla separada a propósito (ver ``DOCS/arquitectura/dbdiagram.io.md``,
+    sección CATALOGO): un listado o búsqueda de catálogo NO debe traer muestras que
+    tal vez nunca se vendan de nuevo. ``aplica_catalogo`` es el flag pendiente de
+    "promover a catálogo real", para que mesa de control decida después -- no hay
+    todavía una función que lo consuma.
+    """
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="variantes_produccion")
-    op = models.ForeignKey('produccion.OrdenProduccion', on_delete=models.CASCADE, related_name="variantes_produccion")
+    # Nullable: se crea desde el detalle del pedido especial, antes de que exista
+    # una OP (``produccion.api.views.PedidoEspecialViewSet.variante_onboarding``).
+    op = models.ForeignKey('produccion.OrdenProduccion', on_delete=models.CASCADE, null=True, blank=True, related_name="variantes_produccion")
+    # Línea de muestra que originó este SKU -- de aquí sale el "ya existe SKU"
+    # que consume ``PedidoEspecialDetailSerializer`` sin reconsultar nada más.
+    pedido_detalle = models.ForeignKey('ventas.PedidoDetalle', on_delete=models.CASCADE, null=True, blank=True, related_name="variantes_produccion")
     producto_base = models.ForeignKey(Producto, on_delete=models.CASCADE, null=True, blank=True, related_name="variantes_produccion")
     color = models.ForeignKey(Color, on_delete=models.CASCADE, null=True, blank=True, related_name="variantes_produccion")
     talla = models.ForeignKey(Talla, on_delete=models.CASCADE, null=True, blank=True, related_name="variantes_produccion")
+
+    nombre = models.CharField(max_length=150, blank=True, default="")
+    sku = models.CharField(max_length=50, unique=True, null=True, blank=True)
+    aplica_catalogo = models.BooleanField(default=False)
 
     history = HistoricalRecords()
 
@@ -204,5 +223,11 @@ class VarianteProductoProduccion(models.Model):
         db_table = "variantes_producto_produccion"
         verbose_name = "Variante Producto Produccion"
         verbose_name_plural = "Variantes Producto Produccion"
-    
+        constraints = [
+            models.UniqueConstraint(
+                fields=["pedido_detalle", "talla"],
+                name="uq_variante_produccion_pedido_detalle_talla",
+            )
+        ]
+
 

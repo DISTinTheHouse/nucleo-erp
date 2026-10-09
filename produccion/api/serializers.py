@@ -27,7 +27,7 @@ from produccion.models import (
 )
 
 from catalogo.api.serializers import ProductoVarianteSerializer
-from catalogo.models import ProductoVariante
+from catalogo.models import ProductoVariante, VarianteProductoProduccion
 from produccion.services.common import config_como_dict, revisar_empresa
 
 
@@ -2176,6 +2176,14 @@ class PedidoEspecialListSerializer(serializers.ModelSerializer):
 
 class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
     talla_nombre = serializers.CharField(source="talla.nombre", read_only=True)
+    # Llenado en la vista (``PedidoEspecialViewSet.retrieve``) como atributo
+    # ``variante_produccion`` -- evita un query por talla para saber si ya
+    # tiene SKU de producción generado.
+    sku_produccion = serializers.SerializerMethodField()
+
+    def get_sku_produccion(self, obj):
+        variante = getattr(obj, "variante_produccion", None)
+        return variante.sku if variante else None
 
     class Meta:
         model = PedidoDetalleTalla
@@ -2183,6 +2191,7 @@ class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
             "id",
             "talla_nombre",
             "cantidad",
+            "sku_produccion",
             "lleva_bordado",
             "bordado_config",
             "lleva_reflejante",
@@ -2215,3 +2224,24 @@ class PedidoEspecialDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Pedido
         fields = ["id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "detalles"]
+
+
+class VarianteProduccionOnboardingSerializer(serializers.Serializer):
+    """Input de ``PedidoEspecialViewSet.variante_onboarding``: una línea
+    especial + el detalle de materiales que se replica en el BOM de cada
+    talla que se de alta."""
+    pedido_detalle_id = serializers.IntegerField()
+    materia_prima_detalle = BomDetalleSerializer(many=True)
+
+    def validate_materia_prima_detalle(self, value):
+        if not value:
+            raise serializers.ValidationError("Se requiere al menos un insumo.")
+        return value
+
+
+class VarianteProduccionSerializer(serializers.ModelSerializer):
+    talla_nombre = serializers.CharField(source="talla.nombre", read_only=True)
+
+    class Meta:
+        model = VarianteProductoProduccion
+        fields = ["id", "sku", "nombre", "talla_nombre", "aplica_catalogo", "pedido_detalle"]
