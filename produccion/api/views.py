@@ -72,7 +72,10 @@ from produccion.api.serializers import (
     OrdenesCorteMangaRetrieveSerializer,
     PedidoEspecialListSerializer,
     PedidoEspecialDetailSerializer,
+    VarianteProduccionOnboardingSerializer,
+    VarianteProduccionSerializer,
 )
+from catalogo.models import VarianteProductoProduccion
 
 from produccion.services.orden_bordado_service import OrdenBordadoService
 from produccion.services.orden_reflejante_service import OrdenReflejanteService
@@ -518,14 +521,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         return self._crear_op_desde_request(request)
 
     def _require_produccion(self, user):
-        if getattr(user, "is_superuser", False):
-            return
-        if getattr(user, "is_admin_empresa", False):
-            return
-        empresa = getattr(user, "empresa", None)
-        if usuario_tiene_clave_departamento(user, CLAVE_DEPARTAMENTO_PRODUCCION, empresa=empresa):
-            return
-        raise ValidationError({"permiso": "Acción disponible solo para producción."})
+        _require_produccion(user)
 
     MAX_OPS_RUTA_CRITICA = 200
 
@@ -1604,14 +1600,32 @@ def _detalles_especiales_qs():
     )
 
 
+def _require_produccion(user):
+    """Gate compartido por las acciones de escritura de producción (ruta
+    crítica de OP, onboarding de SKU de muestra): superuser/admin_empresa
+    pasan siempre, el resto necesita el departamento Producción."""
+    if getattr(user, "is_superuser", False):
+        return
+    if getattr(user, "is_admin_empresa", False):
+        return
+    empresa = getattr(user, "empresa", None)
+    if usuario_tiene_clave_departamento(user, CLAVE_DEPARTAMENTO_PRODUCCION, empresa=empresa):
+        return
+    raise ValidationError({"permiso": "Acción disponible solo para producción."})
+
+
 class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
-    """Solo lectura: pedidos con produccion especial (muestras sin SKU de catalogo).
+    """Pedidos con produccion especial (muestras sin SKU de catalogo).
 
     Especial = al menos una linea con ``producto_nombre_externo`` (ver
     ``_detalles_especiales_qs``). El listado usa ``Exists`` (no join) para no
     aparecer pesado, y el detalle solo trae las lineas especiales con todas
     sus tallas -- nada de precios ni del resto del pedido, que no le interesa
     a produccion.
+
+    ``variante_onboarding`` (POST) es la única escritura: da de alta, en un
+    solo paso, el SKU de producción (``catalogo.VarianteProductoProduccion``)
+    de cada talla de una línea especial junto con su lista de materiales.
     """
 
     def get_serializer_class(self):
@@ -1649,6 +1663,96 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                 )
             )
         )
+        # "Ya existe SKU" sin reconsultar por talla: un solo query trae todas
+        # las variantes de producción ya generadas para estas líneas, y se
+        # cuelgan por (pedido_detalle_id, talla_id) sobre cada ``dt`` -- lo
+        # que lee ``PedidoDetalleTallaEspecialSerializer.get_sku_produccion``.
+        variantes = VarianteProductoProduccion.objects.filter(
+            pedido_detalle_id__in=[d.id for d in detalles], activo=True
+        ).only("id", "sku", "pedido_detalle_id", "talla_id")
+        variantes_por_talla = {(v.pedido_detalle_id, v.talla_id): v for v in variantes}
+        for det in detalles:
+            for dt in det.tallas_especiales:
+                dt.variante_produccion = variantes_por_talla.get((det.id, dt.talla_id))
+
         pedido.detalles_especiales = detalles
         serializer = self.get_serializer(pedido)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='variante-onboarding')
+    def variante_onboarding(self, request, pk=None):
+        """Alta rápida: una ``VarianteProductoProduccion`` (SKU) por cada
+        talla con cantidad de la línea especial indicada, cada una con su
+        propia ``ListaMaterialBom`` -- mismo detalle de insumos enviado una
+        sola vez, reutilizado para todas las tallas. Un solo POST, un solo
+        formulario de materiales; nada que capturar por talla.
+
+        Falla completa si la línea ya tiene algún SKU generado (idempotencia
+        simple: no hay merge, se reintenta desde cero o no se reintenta).
+        """
+        pedido = self.get_object()
+        _require_produccion(request.user)
+
+        serializer = VarianteProduccionOnboardingSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        pedido_detalle_id = serializer.validated_data['pedido_detalle_id']
+        detalles_bom = serializer.validated_data['materia_prima_detalle']
+
+        detalle = (
+            _detalles_especiales_qs()
+            .filter(pedido=pedido, pk=pedido_detalle_id)
+            .select_related("color")
+            .first()
+        )
+        if detalle is None:
+            raise ValidationError({
+                'pedido_detalle_id': 'No es una línea de producción especial de este pedido.'
+            })
+
+        color = detalle.color
+        if color is None or not color.codigo:
+            raise ValidationError({
+                'pedido_detalle_id': 'La línea no tiene color (o el color no tiene código) para generar el SKU.'
+            })
+
+        if VarianteProductoProduccion.objects.filter(pedido_detalle=detalle).exists():
+            raise ValidationError({
+                'pedido_detalle_id': 'Esta línea ya tiene SKU(s) de producción generados.'
+            })
+
+        tallas = list(
+            PedidoDetalleTalla.objects.filter(pedido_detalle=detalle, cantidad__gt=0)
+            .select_related("talla")
+        )
+        if not tallas:
+            raise ValidationError({'pedido_detalle_id': 'La línea no tiene tallas con cantidad.'})
+
+        creadas = []
+        with transaction.atomic():
+            for dt in tallas:
+                # Sin ``producto.codigo`` real que usar (es una muestra sin
+                # catálogo): el prefijo sale del propio ``pedido_detalle_id``,
+                # ya único, así que el SKU no choca sin pedirle nada al
+                # usuario -- mismo espíritu que el onboarding real
+                # (``ProductoVarianteViewSet.onboarding``), adaptado a que
+                # aquí no hay producto de catálogo del que sacar el código.
+                sku = f"MP{detalle.pk}-{color.codigo}-{dt.talla.nombre}".strip().upper()
+                variante = VarianteProductoProduccion.objects.create(
+                    empresa=pedido.empresa,
+                    pedido_detalle=detalle,
+                    color=color,
+                    talla=dt.talla,
+                    nombre=detalle.producto_nombre_externo,
+                    sku=sku,
+                )
+                bom = ListaMaterialBom.objects.create(empresa=pedido.empresa, variante_produccion=variante)
+                BomDetalle.objects.bulk_create([
+                    BomDetalle(bom=bom, **{**detalle_bom, "variante_produccion": variante})
+                    for detalle_bom in detalles_bom
+                ])
+                creadas.append(variante)
+
+        return Response(
+            VarianteProduccionSerializer(creadas, many=True).data,
+            status=status.HTTP_201_CREATED,
+        )

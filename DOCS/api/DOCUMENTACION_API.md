@@ -4644,11 +4644,19 @@ Cuando la solicitud de OCM parcial sí excede el cupo restante (validación de s
 
 ### Pedidos con Producción Especial (muestras)
 
-Solo lectura, para que producción vea qué pedidos traen muestras/renglones sin SKU de catálogo (`producto_nombre_externo`), sin cargar el resto del pedido.
+Para que producción vea qué pedidos traen muestras/renglones sin SKU de catálogo (`producto_nombre_externo`), sin cargar el resto del pedido, y pueda darles SKU + lista de materiales sin salir de la pantalla.
 
 - **Listar**: `GET /api/v1/produccion/pedidos-especiales/` — solo pedidos con al menos una línea especial (`PedidoDetalleTalla.requiere_produccion=True`) **Y** con `clasificacion` **Y** `fecha_confirmacion` ya puestos por mesa de control (`PATCH /api/v1/ventas/pedidos/{id}/`, ver "Clasificar pedido"). Filtro fijo, sin excepción: un pedido con muestra pero sin clasificar/confirmar **no aparece**, aunque la línea ya tenga `requiere_produccion=True` — mesa de control debe procesarlo primero para que producción tenga un compromiso de entrega real sobre el que planear. Respuesta ligera: `id`, `folio`, `cliente_nombre`, `clasificacion`, `fecha_confirmacion`.
-- **Detalle**: `GET /api/v1/produccion/pedidos-especiales/{id}/` — igual que el listado, más `detalles[]` con **solo** las líneas/tallas especiales (nunca las líneas de catálogo normales del mismo pedido, ni precios). Cada detalle trae `producto_nombre_externo`, `color_nombre`, y por talla: `cantidad` y los flags/config de bordado, reflejante, corte de manga y cambio de talla.
+- **Detalle**: `GET /api/v1/produccion/pedidos-especiales/{id}/` — igual que el listado, más `detalles[]` con **solo** las líneas/tallas especiales (nunca las líneas de catálogo normales del mismo pedido, ni precios). Cada detalle trae `producto_nombre_externo`, `color_nombre`, y por talla: `cantidad`, **`sku_produccion`** (string o `null`) y los flags/config de bordado, reflejante, corte de manga y cambio de talla.
 - Un pedido sin líneas especiales, o sin clasificar/confirmar, responde `404` en el detalle (no existe para este endpoint, aunque exista como pedido normal).
+
+**Alta de SKU + BOM en un solo paso**: `POST /api/v1/produccion/pedidos-especiales/{id}/variante-onboarding/`
+
+- Gateado a departamento Producción (o superuser/admin_empresa) — mismo patrón que la ruta crítica de OP.
+- Body: `{"pedido_detalle_id": 123, "materia_prima_detalle": [{"componente": 45, "cantidad": "1.50", "unidad": 3, "desperdicio": "5.00", "obligatorio": true}]}`. La lista de materiales se captura **una sola vez** y se replica en el BOM de cada talla.
+- Crea una `catalogo.VarianteProductoProduccion` (SKU server-generado, formato `MP{pedido_detalle_id}-{color.codigo}-{talla.nombre}`) **por cada talla con cantidad** de esa línea, cada una con su propia `ListaMaterialBom`. Vive en tabla separada del catálogo real (`productos`/`variantes_producto`) — no aparece en listados ni búsquedas de catálogo. Campo `aplica_catalogo` (bool, default `false`): flag para una futura promoción a catálogo real desde mesa de control, todavía sin función que lo consuma.
+- Si la línea ya tiene algún SKU generado, responde `400` sin tocar nada (no hay merge; es alta única).
+- Tras esto, el `GET` del detalle refleja `sku_produccion` en cada talla sin consultas extra.
 
 ---
 
