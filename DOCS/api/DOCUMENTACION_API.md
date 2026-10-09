@@ -1376,6 +1376,10 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 - `servicios_extras` es opcional y permite agregar cargos ilimitados con control de visibilidad en factura (`visible_en_factura`).
 - La cotización queda en `estatus=Por Autorizar (2)` para que mesa de control valide.
 
+**Línea de muestra (sin SKU de catálogo)**: en vez de `producto`, se manda `producto_nombre_externo` (texto libre, obligatorio para este caso). Dos campos opcionales que el vendedor puede sugerir en esta misma línea:
+- `color`/`color_id` → `CotizacionDetalle.color`.
+- `categoria_producto`/`categoria_producto_id` → `CotizacionDetalle.categoria_producto` (nuevo). Ninguno de los dos se valida como obligatorio ni exclusivo aquí — es orientación para cuando producción/catálogo den de alta el producto real (ver "Pedidos con Producción Especial" más abajo).
+
 **Folio de Pedido**
 
 - El folio `P-xxxxxx` se asigna **solo** cuando mesa de control autoriza (`POST /api/v1/ventas/cotizaciones/{id}/autorizar/`).

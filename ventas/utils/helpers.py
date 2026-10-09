@@ -34,6 +34,13 @@ def _merge_detalle(rows):
         )
         if color_id in ("", 0):
             color_id = None
+        categoria_producto_id = (
+            row.get("categoria_producto")
+            if row.get("categoria_producto") not in (None, "")
+            else row.get("categoria_producto_id")
+        )
+        if categoria_producto_id in ("", 0):
+            categoria_producto_id = None
         direccion_id = (
             row.get("direccion_envio_cliente")
             if row.get("direccion_envio_cliente") not in (None, "")
@@ -62,6 +69,7 @@ def _merge_detalle(rows):
             producto_id,
             producto_nombre_externo,
             color_id,
+            categoria_producto_id,
             direccion_id,
             tallas_config_str,
         )
@@ -71,6 +79,7 @@ def _merge_detalle(rows):
                 "producto": producto_id,
                 "producto_nombre_externo": producto_nombre_externo,
                 "color": color_id,
+                "categoria_producto": categoria_producto_id,
                 "direccion_envio_cliente": direccion_id,
                 "precio_lista": row.get("precio_lista"),
                 "precio_unitario": row.get("precio_unitario"),
@@ -134,6 +143,22 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
             if not color_obj:
                 raise ValidationError({"detalle": f"Color inválido: {color_id}"})
 
+        categoria_producto_obj = None
+        categoria_producto_id = item.get("categoria_producto") or item.get("categoria_producto_id")
+        if categoria_producto_id not in (None, "", 0):
+            try:
+                from catalogo.models import CategoriaProducto as CategoriaProductoModel
+
+                categoria_producto_obj = CategoriaProductoModel.objects.filter(
+                    pk=int(categoria_producto_id), activo=True
+                ).first()
+            except Exception:
+                categoria_producto_obj = None
+            if not categoria_producto_obj:
+                raise ValidationError(
+                    {"detalle": f"Categoría de producto inválida: {categoria_producto_id}"}
+                )
+
         direccion_obj = None
         direccion_id = item.get("direccion_envio_cliente")
         if direccion_id not in (None, "", 0):
@@ -166,6 +191,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
             producto=producto,
             producto_nombre_externo=producto_nombre_externo,
             color=color_obj,
+            categoria_producto=categoria_producto_obj,
             direccion_envio_cliente=direccion_obj,
             precio_lista=precio_lista,
             precio_unitario=precio_unitario,

@@ -238,6 +238,7 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
     color_nombre = serializers.CharField(source="color.nombre", read_only=True, default=None)
     color_codigo_hex = serializers.CharField(source="color.codigo_hex", read_only=True, default=None)
+    categoria_producto_nombre = serializers.CharField(source="categoria_producto.nombre", read_only=True, default=None)
 
     def validate_cotizacion(self, cotizacion):
         # Misma convención que ``PedidoDetalleSerializer.validate_pedido``
@@ -281,6 +282,7 @@ class CotizacionDetalleWithTallasSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
     color_nombre = serializers.CharField(source="color.nombre", read_only=True, default=None)
     color_codigo_hex = serializers.CharField(source="color.codigo_hex", read_only=True, default=None)
+    categoria_producto_nombre = serializers.CharField(source="categoria_producto.nombre", read_only=True, default=None)
 
     class Meta:
         model = CotizacionDetalle
@@ -974,6 +976,12 @@ class CotizacionOnboardingDetalleInputSerializer(serializers.Serializer):
     )
     color = serializers.IntegerField(required=False, allow_null=True)
     color_id = serializers.IntegerField(required=False, allow_null=True)
+    # Opcional, mismo criterio que ``color``/``color_id``: sugerencia del
+    # vendedor para una línea de MUESTRA, no exigida ni validada aquí (la
+    # exclusividad/precio los garantiza el frontend, igual que el resto de
+    # este serializer -- ver comentario de ``producto_nombre_externo``).
+    categoria_producto = serializers.IntegerField(required=False, allow_null=True)
+    categoria_producto_id = serializers.IntegerField(required=False, allow_null=True)
     direccion_envio_cliente = serializers.IntegerField(required=False, allow_null=True)
     direccion_envio = serializers.IntegerField(required=False, allow_null=True)
     precio_unitario = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)

@@ -5,7 +5,7 @@ from nucleo.indices import GinIndexSoloPostgres, IndexSoloPostgres
 from django.conf import settings
 from nucleo.models import Empresa, Sucursal, Moneda, SerieFolio, StatusLifecycleModel, SatRegimenFiscal
 from terceros.models import Cliente, DireccionCliente
-from catalogo.models import Producto, Talla, Color, ProductoVariante
+from catalogo.models import Producto, Talla, Color, ProductoVariante, CategoriaProducto
 from simple_history.models import HistoricalRecords
 
 TIPO_PEDIDO_CHOICES = (
@@ -175,6 +175,12 @@ class CotizacionDetalle(models.Model):
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="cotizaciondetalle", null=True, blank=True)
     producto_nombre_externo = models.CharField(max_length=350, null=True, blank=True)
     color = models.ForeignKey(Color, on_delete=models.PROTECT, related_name="cotizacion_detalles", null=True, blank=True)
+    # Opcional, mismo criterio que ``color``: el vendedor la puede sugerir al
+    # describir una MUESTRA sin SKU de catálogo (``producto_nombre_externo``),
+    # para orientar a producción/catálogo cuando den de alta el producto real.
+    categoria_producto = models.ForeignKey(
+        CategoriaProducto, on_delete=models.PROTECT, related_name="cotizacion_detalles", null=True, blank=True
+    )
     direccion_envio_cliente = models.ForeignKey(
         DireccionCliente, on_delete=models.PROTECT, related_name="cotizacion_detalles", null=True, blank=True
     )
