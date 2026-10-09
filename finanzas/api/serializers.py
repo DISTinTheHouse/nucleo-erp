@@ -10,7 +10,9 @@ from finanzas.models import (
     CentroCosto,
     Cobro,
     CobroDetalle,
+    ConceptoContable,
     ConciliacionBancaria,
+    ConfiguracionContable,
     CuentaBancaria,
     CuentaContable,
     CuentaPorCobrar,
@@ -23,6 +25,7 @@ from finanzas.models import (
     NotaCredito,
     NotaCreditoDetalle,
     Pago,
+    ParametrosContabilidad,
     PagoDetalle,
     Poliza,
     PolizaDetalle,
@@ -496,6 +499,105 @@ class CuentaContableSerializer(EmpresaResueltaEnServidorMixin, serializers.Model
         return getattr(getattr(user, "empresa", None), "pk", None)
 
 
+class _ValidaCuentaDeLaEmpresaMixin:
+    """Una cuenta usable en un asiento: de la empresa, viva y de movimientos.
+
+    Postgres no puede expresar "misma empresa" en un ``CheckConstraint``, así
+    que la regla vive en código. Aquí es el 400 por campo; el motor la vuelve a
+    comprobar al contabilizar, por si la cuenta se dio de baja después.
+    """
+
+    def _validar_cuenta(self, cuenta, empresa_id, campo):
+        if cuenta is None or empresa_id is None:
+            return
+        if cuenta.empresa_id != empresa_id:
+            raise ValidationError({campo: "La cuenta contable no pertenece a la empresa."})
+        if not cuenta.activo:
+            raise ValidationError({campo: "La cuenta contable está dada de baja."})
+        if not cuenta.acepta_movimientos:
+            raise ValidationError({
+                campo: "La cuenta contable es de agrupación: no acepta movimientos."
+            })
+
+
+class ConfiguracionContableSerializer(
+    _ValidaCuentaDeLaEmpresaMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer
+):
+    concepto_nombre = serializers.CharField(source="get_concepto_display", read_only=True)
+    cuenta_codigo = serializers.CharField(source="cuenta_contable.codigo", read_only=True)
+    cuenta_nombre = serializers.CharField(source="cuenta_contable.nombre", read_only=True)
+
+    class Meta:
+        model = ConfiguracionContable
+        fields = "__all__"
+        # Mismo motivo que en ``CuentaContableSerializer``: el
+        # ``UniqueTogetherValidator`` derivado sólo corre cuando el cliente manda
+        # ``empresa`` --que para el usuario normal es de sólo lectura-- y
+        # reportaría en ``non_field_errors``. La unicidad la explica
+        # ``_validar_concepto_unico``.
+        validators = []
+
+    def validate(self, attrs):
+        empresa_id = self._empresa_del_servidor(attrs)
+        req = self.context.get("request")
+        if req and hasattr(req, "user"):
+            user_empresa = getattr(req.user, "empresa", None)
+            emp = attrs.get("empresa")
+            if user_empresa and emp and getattr(emp, "pk", emp) != getattr(user_empresa, "pk", user_empresa):
+                raise ValidationError({"empresa": "Empresa no autorizada."})
+
+        cuenta = attrs.get("cuenta_contable", getattr(self.instance, "cuenta_contable", None))
+        self._validar_cuenta(cuenta, empresa_id, "cuenta_contable")
+
+        centro = attrs.get("centro_costo", getattr(self.instance, "centro_costo", None))
+        if centro is not None and empresa_id is not None and centro.empresa_id != empresa_id:
+            raise ValidationError({"centro_costo": "El centro de costo no pertenece a la empresa."})
+
+        self._validar_concepto_unico(attrs, empresa_id)
+        return attrs
+
+    def _validar_concepto_unico(self, attrs, empresa_id):
+        if empresa_id is None:
+            return
+        concepto = attrs.get("concepto", getattr(self.instance, "concepto", None))
+        clave = attrs.get("clave", getattr(self.instance, "clave", "") or "")
+        activo = attrs.get("activo", getattr(self.instance, "activo", True))
+        if concepto is None or not activo:
+            return
+        gemelas = ConfiguracionContable.objects.filter(
+            empresa_id=empresa_id, concepto=concepto, clave=clave, activo=True
+        )
+        if self.instance is not None:
+            gemelas = gemelas.exclude(pk=self.instance.pk)
+        if gemelas.exists():
+            raise ValidationError({
+                "concepto": "Ya existe una configuración activa para este concepto en la empresa."
+            })
+
+    def _empresa_del_servidor(self, attrs):
+        if self.instance is not None:
+            return self.instance.empresa_id
+        emp = attrs.get("empresa")
+        if emp is not None:
+            return getattr(emp, "pk", emp)
+        user = getattr(self.context.get("request"), "user", None)
+        return getattr(getattr(user, "empresa", None), "pk", None)
+
+
+class ParametrosContabilidadSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+    class Meta:
+        model = ParametrosContabilidad
+        fields = "__all__"
+        validators = []
+
+
+class ConceptoContableSerializer(serializers.Serializer):
+    """El catálogo de conceptos, para que el front arme el formulario."""
+
+    clave = serializers.CharField()
+    nombre = serializers.CharField()
+
+
 class CentroCostoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     class Meta:
         model = CentroCosto
@@ -687,7 +789,9 @@ class BancoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerialize
         return attrs
 
 
-class CuentaBancariaSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+class CuentaBancariaSerializer(
+    _ValidaCuentaDeLaEmpresaMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer
+):
     banco_nombre = serializers.CharField(source="banco.nombre", read_only=True)
     moneda_codigo = serializers.CharField(source="moneda.codigo_iso", read_only=True)
 
@@ -697,15 +801,17 @@ class CuentaBancariaSerializer(EmpresaResueltaEnServidorMixin, serializers.Model
 
     def validate(self, attrs):
         req = self.context.get("request")
+        emp_id = getattr(self.instance, "empresa_id", None)
         if req and hasattr(req, "user"):
             user_empresa = getattr(req.user, "empresa", None)
             emp = attrs.get("empresa")
             if user_empresa and emp and getattr(emp, "pk", emp) != getattr(user_empresa, "pk", user_empresa):
                 raise ValidationError({"empresa": "Empresa no autorizada."})
-            emp_id = getattr(emp, "pk", emp) if emp else getattr(user_empresa, "pk", None)
+            emp_id = emp_id or (getattr(emp, "pk", emp) if emp else getattr(user_empresa, "pk", None))
             banco = attrs.get("banco")
             if banco and emp_id and getattr(banco, "empresa_id", None) and banco.empresa_id != emp_id:
                 raise ValidationError({"banco": "Banco no pertenece a la empresa."})
+        self._validar_cuenta(attrs.get("cuenta_contable"), emp_id, "cuenta_contable")
         return attrs
 
 

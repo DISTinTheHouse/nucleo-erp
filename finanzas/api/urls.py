@@ -4,6 +4,8 @@ from .views import (
     AlertaMoraViewSet,
     BancoViewSet,
     CentroCostoViewSet,
+    ConfiguracionContableViewSet,
+    ParametrosContabilidadViewSet,
     ClienteViewSetContabilidad,
     CobroViewSet,
     ConciliacionBancariaViewSet,
@@ -31,6 +33,8 @@ router.register(r'cuentas-contables', CuentaContableViewSet, basename='cuenta-co
 router.register(r'cuentas-por-cobrar', CuentaPorCobrarViewSet, basename='cuenta-por-cobrar')
 router.register(r'clientes-contabilidad', ClienteViewSetContabilidad, basename='cliente-contabilidad')
 router.register(r'centros-costo', CentroCostoViewSet, basename='centro-costo')
+router.register(r'configuraciones-contables', ConfiguracionContableViewSet, basename='configuracion-contable')
+router.register(r'parametros-contabilidad', ParametrosContabilidadViewSet, basename='parametros-contabilidad')
 router.register(r'facturas', FacturaViewSet, basename='factura')
 router.register(r'polizas', PolizaViewSet, basename='poliza')
 router.register(r'facturas-proveedor', FacturaProveedorViewSet, basename='factura-proveedor')

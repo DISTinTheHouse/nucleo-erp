@@ -51,6 +51,8 @@ from finanzas.models import (
     ConciliacionBancaria,
     ConciliacionDetalle,
     CuentaBancaria,
+    ConceptoContable,
+    ConfiguracionContable,
     CuentaContable,
     CuentaPorCobrar,
     CuentaPorPagar,
@@ -62,10 +64,12 @@ from finanzas.models import (
     NotaCreditoDetalle,
     Pago,
     PagoDetalle,
+    ParametrosContabilidad,
     Poliza,
     PolizaDetalle,
 )
 from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
+from finanzas.services.plan_contable_service import PlanContableService
 from finanzas.services.poliza_service import PolizaService
 from inventarios.models import Almacen
 from nucleo.models import (
@@ -5791,3 +5795,343 @@ class PolizaCimientosTests(FinanzasBase):
         self.assertEqual(resp.status_code, 200, resp.data)
         poliza.refresh_from_db()
         self.assertEqual(poliza.concepto, "editado")
+
+
+CONFIG_CONTABLE_URL = "/api/v1/finanzas/configuraciones-contables/"
+PARAMETROS_CONTABILIDAD_URL = "/api/v1/finanzas/parametros-contabilidad/"
+
+
+class PlanContableTests(FinanzasBase):
+    """Concepto -> cuenta por empresa, el interruptor de contabilización y el
+    comando de siembra."""
+
+    @classmethod
+    def _cuenta(cls, empresa, codigo, tipo=CuentaContable.CuentaTipo.ACTIVO, **extra):
+        return CuentaContable.objects.create(
+            empresa=empresa, codigo=codigo, nombre=f"Cuenta {codigo}", tipo=tipo, **extra
+        )
+
+    def _config(self, empresa, concepto, cuenta, **extra):
+        return ConfiguracionContable.objects.create(
+            empresa=empresa, concepto=concepto, cuenta_contable=cuenta, **extra
+        )
+
+    # --- API de configuración ----------------------------------------------
+
+    def test_alta_de_una_configuracion(self):
+        cuenta = self._cuenta(self.a["empresa"], "1120")
+        resp = self._client(self.a["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {"concepto": ConceptoContable.CLIENTES, "cuenta_contable": cuenta.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["cuenta_codigo"], "1120")
+        fila = ConfiguracionContable.objects.get()
+        self.assertEqual(fila.empresa_id, self.a["empresa"].pk)
+
+    def test_rechaza_cuenta_de_otra_empresa(self):
+        ajena = self._cuenta(self.b["empresa"], "1120")
+        resp = self._client(self.a["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {"concepto": ConceptoContable.CLIENTES, "cuenta_contable": ajena.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cuenta_contable", resp.data)
+        self.assertFalse(ConfiguracionContable.objects.exists())
+
+    def test_rechaza_cuenta_de_agrupacion(self):
+        """Una cuenta que no acepta movimientos no puede recibir un asiento."""
+        cuenta = self._cuenta(self.a["empresa"], "1000", acepta_movimientos=False)
+        resp = self._client(self.a["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {"concepto": ConceptoContable.CLIENTES, "cuenta_contable": cuenta.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cuenta_contable", resp.data)
+
+    def test_rechaza_cuenta_dada_de_baja(self):
+        cuenta = self._cuenta(self.a["empresa"], "1120", activo=False)
+        resp = self._client(self.a["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {"concepto": ConceptoContable.CLIENTES, "cuenta_contable": cuenta.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_rechaza_centro_de_costo_de_otra_empresa(self):
+        cuenta = self._cuenta(self.a["empresa"], "1120")
+        centro_ajeno = CentroCosto.objects.create(empresa=self.b["empresa"], codigo="CC01")
+        resp = self._client(self.a["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {
+                "concepto": ConceptoContable.CLIENTES,
+                "cuenta_contable": cuenta.pk,
+                "centro_costo": centro_ajeno.pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("centro_costo", resp.data)
+
+    def test_un_concepto_no_admite_dos_cuentas_activas(self):
+        cuenta = self._cuenta(self.a["empresa"], "1120")
+        otra = self._cuenta(self.a["empresa"], "1121")
+        self._config(self.a["empresa"], ConceptoContable.CLIENTES, cuenta)
+
+        resp = self._client(self.a["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {"concepto": ConceptoContable.CLIENTES, "cuenta_contable": otra.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("concepto", resp.data)
+
+    def test_la_baja_libera_el_concepto(self):
+        """La constraint sólo mira las activas: una baja no lo secuestra."""
+        cuenta = self._cuenta(self.a["empresa"], "1120")
+        otra = self._cuenta(self.a["empresa"], "1121")
+        fila = self._config(self.a["empresa"], ConceptoContable.CLIENTES, cuenta)
+        client = self._client(self.a["usuario"])
+
+        self.assertEqual(client.delete(f"{CONFIG_CONTABLE_URL}{fila.pk}/").status_code, 204)
+        fila.refresh_from_db()
+        self.assertFalse(fila.activo)
+
+        resp = client.post(
+            CONFIG_CONTABLE_URL,
+            {"concepto": ConceptoContable.CLIENTES, "cuenta_contable": otra.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_misma_clave_en_empresas_distintas(self):
+        self._config(
+            self.a["empresa"], ConceptoContable.CLIENTES, self._cuenta(self.a["empresa"], "1120")
+        )
+        resp = self._client(self.b["usuario"]).post(
+            CONFIG_CONTABLE_URL,
+            {
+                "concepto": ConceptoContable.CLIENTES,
+                "cuenta_contable": self._cuenta(self.b["empresa"], "1120").pk,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_aislamiento_entre_empresas(self):
+        fila = self._config(
+            self.a["empresa"], ConceptoContable.CLIENTES, self._cuenta(self.a["empresa"], "1120")
+        )
+        client_b = self._client(self.b["usuario"])
+        self.assertEqual(client_b.get(CONFIG_CONTABLE_URL).data, [])
+        self.assertEqual(client_b.get(f"{CONFIG_CONTABLE_URL}{fila.pk}/").status_code, 404)
+
+    def test_catalogo_de_conceptos(self):
+        resp = self._client(self.a["usuario"]).get(f"{CONFIG_CONTABLE_URL}conceptos/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        claves = {c["clave"] for c in resp.data}
+        self.assertIn(ConceptoContable.CLIENTES, claves)
+        self.assertIn(ConceptoContable.IVA_TRASLADADO, claves)
+
+    def test_estado_dice_que_falta(self):
+        self._config(
+            self.a["empresa"], ConceptoContable.CLIENTES, self._cuenta(self.a["empresa"], "1120")
+        )
+        resp = self._client(self.a["usuario"]).get(f"{CONFIG_CONTABLE_URL}estado/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(resp.data["contabilizacion_automatica"])
+        por_clave = {c["clave"]: c for c in resp.data["conceptos"]}
+        self.assertTrue(por_clave[ConceptoContable.CLIENTES]["configurado"])
+        self.assertEqual(por_clave[ConceptoContable.CLIENTES]["cuenta_codigo"], "1120")
+        self.assertFalse(por_clave[ConceptoContable.IVA_TRASLADADO]["configurado"])
+
+    # --- Interruptor --------------------------------------------------------
+
+    def test_la_contabilizacion_nace_apagada(self):
+        """Sin fila de parámetros, apagada. Es lo que permite desplegar el
+        motor en producción sin que genere un solo asiento."""
+        self.assertFalse(PlanContableService.contabilizacion_activa(self.a["empresa"].pk))
+
+    def test_encender_la_contabilizacion(self):
+        resp = self._client(self.a["usuario"]).post(
+            PARAMETROS_CONTABILIDAD_URL, {"contabilizacion_automatica": True}, format="json"
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertTrue(PlanContableService.contabilizacion_activa(self.a["empresa"].pk))
+
+    def test_el_piso_de_fecha_deja_fuera_los_documentos_viejos(self):
+        ParametrosContabilidad.objects.create(
+            empresa=self.a["empresa"],
+            contabilizacion_automatica=True,
+            fecha_inicio_contabilizacion=date(2026, 1, 1),
+        )
+        activa = PlanContableService.contabilizacion_activa
+        self.assertFalse(activa(self.a["empresa"].pk, fecha=date(2025, 12, 31)))
+        self.assertTrue(activa(self.a["empresa"].pk, fecha=date(2026, 1, 1)))
+        self.assertTrue(activa(self.a["empresa"].pk, fecha=date(2026, 6, 1)))
+
+    def test_el_interruptor_es_por_empresa(self):
+        ParametrosContabilidad.objects.create(
+            empresa=self.a["empresa"], contabilizacion_automatica=True
+        )
+        self.assertTrue(PlanContableService.contabilizacion_activa(self.a["empresa"].pk))
+        self.assertFalse(PlanContableService.contabilizacion_activa(self.b["empresa"].pk))
+
+    # --- Resolución de cuentas ---------------------------------------------
+
+    def test_resuelve_varios_conceptos_en_una_consulta(self):
+        empresa = self.a["empresa"]
+        self._config(empresa, ConceptoContable.CLIENTES, self._cuenta(empresa, "1120"))
+        self._config(
+            empresa, ConceptoContable.INGRESO_VENTAS,
+            self._cuenta(empresa, "4100", CuentaContable.CuentaTipo.INGRESO),
+        )
+        pares = [(ConceptoContable.CLIENTES, ""), (ConceptoContable.INGRESO_VENTAS, "")]
+
+        with self.assertNumQueries(1):
+            mapa = PlanContableService.mapa(empresa.pk, pares)
+
+        self.assertEqual(mapa[(ConceptoContable.CLIENTES, "")].cuenta_contable.codigo, "1120")
+        self.assertEqual(mapa[(ConceptoContable.INGRESO_VENTAS, "")].cuenta_contable.codigo, "4100")
+
+    def test_exigir_acumula_todos_los_faltantes(self):
+        """Configurar el plan descubriendo una cuenta ausente por vez sería un
+        suplicio: el error las nombra todas de una."""
+        empresa = self.a["empresa"]
+        self._config(empresa, ConceptoContable.CLIENTES, self._cuenta(empresa, "1120"))
+
+        with self.assertRaises(ErrorDeNegocio) as ctx:
+            PlanContableService.exigir(empresa.pk, [
+                (ConceptoContable.CLIENTES, ""),
+                (ConceptoContable.INGRESO_VENTAS, ""),
+                (ConceptoContable.IVA_TRASLADADO, ""),
+            ])
+
+        mensaje = str(ctx.exception.message_dict["configuracion_contable"])
+        self.assertIn("Ingresos por ventas", mensaje)
+        self.assertIn("IVA trasladado", mensaje)
+        self.assertNotIn("Clientes", mensaje)
+
+    def test_la_clave_cae_a_la_regla_por_omision(self):
+        """Nómina: una empresa manda todas sus percepciones a una sola cuenta
+        con una fila, y afina sólo las que lo ameriten."""
+        empresa = self.a["empresa"]
+        generica = self._cuenta(empresa, "5100", CuentaContable.CuentaTipo.GASTO)
+        extra = self._cuenta(empresa, "5110", CuentaContable.CuentaTipo.GASTO)
+        self._config(empresa, ConceptoContable.PERCEPCION_NOMINA, generica, clave="")
+        self._config(empresa, ConceptoContable.PERCEPCION_NOMINA, extra, clave="PER010")
+
+        mapa = PlanContableService.mapa(empresa.pk, [
+            (ConceptoContable.PERCEPCION_NOMINA, "PER001"),
+            (ConceptoContable.PERCEPCION_NOMINA, "PER010"),
+        ])
+        self.assertEqual(
+            mapa[(ConceptoContable.PERCEPCION_NOMINA, "PER001")].cuenta_contable.codigo, "5100"
+        )
+        self.assertEqual(
+            mapa[(ConceptoContable.PERCEPCION_NOMINA, "PER010")].cuenta_contable.codigo, "5110"
+        )
+
+    def test_una_configuracion_dada_de_baja_no_resuelve(self):
+        empresa = self.a["empresa"]
+        self._config(
+            empresa, ConceptoContable.CLIENTES, self._cuenta(empresa, "1120"), activo=False
+        )
+        self.assertEqual(PlanContableService.mapa(empresa.pk, [(ConceptoContable.CLIENTES, "")]), {})
+
+    def test_validar_cuenta_atrapa_la_baja_posterior(self):
+        """El serializer valida al configurar; la cuenta pudo morir después."""
+        empresa = self.a["empresa"]
+        cuenta = self._cuenta(empresa, "1120")
+        PlanContableService.validar_cuenta(cuenta, empresa.pk)
+
+        cuenta.activo = False
+        with self.assertRaises(ErrorDeNegocio):
+            PlanContableService.validar_cuenta(cuenta, empresa.pk)
+
+        cuenta.activo = True
+        cuenta.acepta_movimientos = False
+        with self.assertRaises(ErrorDeNegocio):
+            PlanContableService.validar_cuenta(cuenta, empresa.pk)
+
+    # --- Cuenta de bancos ---------------------------------------------------
+
+    def test_la_cuenta_del_banco_gana_al_concepto(self):
+        empresa = self.a["empresa"]
+        propia = self._cuenta(empresa, "1021")
+        self._config(empresa, ConceptoContable.BANCOS, self._cuenta(empresa, "1020"))
+        bancaria = self._crear_cuenta_bancaria(empresa)
+        bancaria.cuenta_contable = propia
+        bancaria.save(update_fields=["cuenta_contable"])
+
+        self.assertEqual(PlanContableService.cuenta_de_banco(bancaria).codigo, "1021")
+
+    def test_sin_cuenta_propia_usa_el_concepto_bancos(self):
+        empresa = self.a["empresa"]
+        self._config(empresa, ConceptoContable.BANCOS, self._cuenta(empresa, "1020"))
+        self.assertEqual(
+            PlanContableService.cuenta_de_banco(self._crear_cuenta_bancaria(empresa)).codigo, "1020"
+        )
+
+    def test_sin_ninguna_de_las_dos_falla_con_mensaje(self):
+        with self.assertRaises(ErrorDeNegocio) as ctx:
+            PlanContableService.cuenta_de_banco(self._crear_cuenta_bancaria(self.a["empresa"]))
+        self.assertIn("cuenta_contable", ctx.exception.message_dict)
+
+    def test_la_api_rechaza_ligar_una_cuenta_contable_ajena(self):
+        ajena = self._cuenta(self.b["empresa"], "1020")
+        bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
+        resp = self._client(self.a["usuario"]).patch(
+            f"/api/v1/finanzas/cuentas-bancarias/{bancaria.pk}/",
+            {"cuenta_contable": ajena.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cuenta_contable", resp.data)
+
+    # --- Comando de siembra -------------------------------------------------
+
+    def test_el_comando_siembra_y_es_idempotente(self):
+        from django.core.management import call_command
+
+        empresa = self.a["empresa"]
+        call_command("sembrar_plan_contable", empresa=empresa.pk, verbosity=0)
+        cuentas = CuentaContable.objects.filter(empresa=empresa).count()
+        configs = ConfiguracionContable.objects.filter(empresa=empresa).count()
+        self.assertGreater(cuentas, 0)
+        self.assertEqual(configs, len(ConceptoContable.choices))
+
+        call_command("sembrar_plan_contable", empresa=empresa.pk, verbosity=0)
+        self.assertEqual(CuentaContable.objects.filter(empresa=empresa).count(), cuentas)
+        self.assertEqual(ConfiguracionContable.objects.filter(empresa=empresa).count(), configs)
+
+    def test_sembrar_no_enciende_la_contabilizacion(self):
+        from django.core.management import call_command
+
+        call_command("sembrar_plan_contable", empresa=self.a["empresa"].pk, verbosity=0)
+        self.assertFalse(PlanContableService.contabilizacion_activa(self.a["empresa"].pk))
+
+    def test_dry_run_no_escribe(self):
+        from django.core.management import call_command
+
+        call_command(
+            "sembrar_plan_contable", empresa=self.a["empresa"].pk, dry_run=True, verbosity=0
+        )
+        self.assertFalse(ConfiguracionContable.objects.exists())
+
+    def test_el_comando_no_pisa_una_configuracion_existente(self):
+        from django.core.management import call_command
+
+        empresa = self.a["empresa"]
+        mia = self._cuenta(empresa, "9999")
+        self._config(empresa, ConceptoContable.CLIENTES, mia)
+
+        call_command("sembrar_plan_contable", empresa=empresa.pk, verbosity=0)
+
+        fila = ConfiguracionContable.objects.get(
+            empresa=empresa, concepto=ConceptoContable.CLIENTES, activo=True
+        )
+        self.assertEqual(fila.cuenta_contable_id, mia.pk)

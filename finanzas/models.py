@@ -82,6 +82,114 @@ class CentroCosto(models.Model):
     def __str__(self):
         return f"{self.codigo} - {self.nombre}"
 
+
+class ConceptoContable(models.TextChoices):
+    """Los papeles que juega una cuenta en un asiento automático.
+
+    El asiento declara *conceptos*, no cuentas: cada empresa decide con qué
+    cuenta de su catálogo responde a cada concepto (``ConfiguracionContable``).
+    Antes se elegía "la primera cuenta activa del tipo X por código", que podía
+    mandar el cargo de clientes a Caja y el IVA a cualquier pasivo.
+
+    Incluye desde ahora los conceptos de los documentos que aún no se
+    contabilizan, para no migrar el enum cada vez que entre uno.
+    """
+
+    # Ventas y clientes
+    CLIENTES = 'Clientes', 'Clientes (cuentas por cobrar)'
+    INGRESO_VENTAS = 'IngresoVentas', 'Ingresos por ventas'
+    DESCUENTO_VENTAS = 'DescuentoSobreVentas', 'Descuentos sobre ventas'
+    DEVOLUCIONES_VENTAS = 'DevolucionesSobreVentas', 'Devoluciones y rebajas sobre ventas'
+    IVA_TRASLADADO = 'IvaTrasladado', 'IVA trasladado'
+    # Compras y proveedores
+    PROVEEDORES = 'Proveedores', 'Proveedores (cuentas por pagar)'
+    COMPRAS_INVENTARIO = 'ComprasInventario', 'Compras / inventario'
+    GASTOS_COMPRA = 'GastosCompra', 'Gastos por compras'
+    DESCUENTO_COMPRAS = 'DescuentoSobreCompras', 'Descuentos sobre compras'
+    IVA_ACREDITABLE = 'IvaAcreditable', 'IVA acreditable'
+    # Tesorería
+    BANCOS = 'Bancos', 'Bancos (cuenta por omisión)'
+    CONTRAPARTIDA_MB_CARGO = 'ContrapartidaMovimientoCargo', 'Contrapartida de retiro sin documento'
+    CONTRAPARTIDA_MB_ABONO = 'ContrapartidaMovimientoAbono', 'Contrapartida de depósito sin documento'
+    # Nómina
+    PERCEPCION_NOMINA = 'PercepcionNomina', 'Percepción de nómina'
+    DEDUCCION_NOMINA = 'DeduccionNomina', 'Deducción de nómina'
+    NOMINA_POR_PAGAR = 'NominaPorPagar', 'Nómina por pagar'
+
+
+class ConfiguracionContable(models.Model):
+    """Concepto contable -> cuenta, una fila por concepto y empresa."""
+
+    empresa = models.ForeignKey(
+        'nucleo.Empresa', on_delete=models.PROTECT, related_name="configuraciones_contables"
+    )
+    concepto = models.CharField(max_length=40, choices=ConceptoContable.choices)
+    # Subclave DENTRO del concepto: el ``codigo`` de ``NominaDetalle``, para
+    # mandar cada percepción o deducción a su cuenta. "" es la regla por
+    # omisión del concepto, y es a la que se cae cuando la clave no está dada
+    # de alta; para los demás conceptos siempre va vacía.
+    clave = models.CharField(max_length=30, default="", blank=True)
+    cuenta_contable = models.ForeignKey(
+        CuentaContable, on_delete=models.PROTECT, related_name="configuraciones_contables"
+    )
+    centro_costo = models.ForeignKey(
+        CentroCosto, on_delete=models.SET_NULL, related_name="configuraciones_contables",
+        null=True, blank=True,
+    )
+    descripcion = models.CharField(max_length=200, default="", blank=True)
+    activo = models.BooleanField(default=True)
+    created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        db_table = "configuraciones_contables"
+        verbose_name = "Configuración Contable"
+        verbose_name_plural = "Configuraciones Contables"
+        constraints = [
+            # Un concepto resuelve a UNA cuenta. Igual que en ``CentroCosto``,
+            # la condición deja fuera las bajas para que una fila dada de baja
+            # no secuestre el concepto para siempre.
+            models.UniqueConstraint(
+                fields=("empresa", "concepto", "clave"),
+                condition=models.Q(activo=True),
+                name="uq_config_contable_empresa_concepto_clave",
+            ),
+        ]
+        indexes = [models.Index(fields=["empresa", "concepto"])]
+
+    def __str__(self):
+        return f"{self.get_concepto_display()} -> {self.cuenta_contable_id}"
+
+
+class ParametrosContabilidad(models.Model):
+    """Interruptores de contabilización de una empresa.
+
+    Sembrar el catálogo y encender la contabilización son actos distintos: se
+    puede configurar y revisar el plan en producción con la generación
+    apagada, y encenderla sólo cuando contabilidad valide los asientos.
+    """
+
+    empresa = models.OneToOneField(
+        'nucleo.Empresa', on_delete=models.CASCADE, related_name="parametros_contabilidad"
+    )
+    # Nace apagada a propósito: el motor puede estar desplegado sin efecto.
+    contabilizacion_automatica = models.BooleanField(default=False)
+    # Evita que editar un documento viejo genere un asiento retroactivo en un
+    # periodo ya entregado. Nulo = sin piso.
+    fecha_inicio_contabilizacion = models.DateField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+    class Meta:
+        db_table = "parametros_contabilidad"
+        verbose_name = "Parámetros de Contabilidad"
+        verbose_name_plural = "Parámetros de Contabilidad"
+
+    def __str__(self):
+        estado = "activa" if self.contabilizacion_automatica else "apagada"
+        return f"Contabilización {estado} (empresa {self.empresa_id})"
+
+
 class Poliza(models.Model):
     class PolizaTipo(models.TextChoices):
         DIARIO = 'Diario', 'Diario'
@@ -312,6 +420,13 @@ class CuentaBancaria(models.Model):
     clabe = models.CharField(max_length=30, null=True, blank=True)
     numero_cliente = models.CharField(max_length=30, null=True, blank=True)
     convenio = models.CharField(max_length=50, null=True, blank=True)
+    # Cada cuenta de banco se asienta en su propia cuenta contable, así que no
+    # basta el concepto ``BANCOS`` de la configuración: ese queda de respaldo
+    # para quien sólo maneja una.
+    cuenta_contable = models.ForeignKey(
+        CuentaContable, on_delete=models.PROTECT, related_name="cuentas_bancarias",
+        null=True, blank=True,
+    )
     fecha_apertura = models.DateField(default=timezone.localdate, null=True, blank=True)
     saldo_actual = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     observaciones = models.TextField(null=True, blank=True)
@@ -517,6 +632,14 @@ class MovimientoBancario(models.Model):
     cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.PROTECT, related_name="movimientos_bancarios")
     pago = models.ForeignKey(Pago, on_delete=models.PROTECT, related_name="movimientos_bancarios", null=True, blank=True)
     cobro = models.ForeignKey(Cobro, on_delete=models.PROTECT, related_name="movimientos_bancarios", null=True, blank=True)
+    # Contra qué va este movimiento cuando no nace de un cobro ni de un pago
+    # (una comisión, un depósito suelto). Sin ella el motor cae a los conceptos
+    # CONTRAPARTIDA_MB_*, que conviene que sean cuentas transitorias para que
+    # nada aterrice en resultados sin que alguien lo clasifique.
+    cuenta_contable_contrapartida = models.ForeignKey(
+        CuentaContable, on_delete=models.PROTECT, related_name="movimientos_bancarios",
+        null=True, blank=True,
+    )
     fecha = models.DateField(default=timezone.localdate)
     fecha_aplicacion = models.DateField(null=True, blank=True)
     concepto = models.CharField(max_length=255, null=True, blank=True)

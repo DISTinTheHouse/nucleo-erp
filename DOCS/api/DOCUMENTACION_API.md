@@ -2790,9 +2790,127 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 | Notas de crédito         | `GET/POST /api/v1/finanzas/notas-credito/`            | `POST /notas-credito/{id}/cancelar/`                                                                      | `id`, `factura`, `cliente`, `nota_credito_detalles[].factura_detalle` |
 | Cuentas contables        | `GET/POST /api/v1/finanzas/cuentas-contables/`        | CRUD estándar                                                                                             | `id`, `cuenta_padre`                                        |
 | Centros de costo         | `GET/POST /api/v1/finanzas/centros-costo/`            | CRUD estándar                                                                                             | `id`                                                        |
+| Plan contable            | `GET/POST /api/v1/finanzas/configuraciones-contables/` | `GET /conceptos/`, `GET /estado/`                                                                        | `id`, `cuenta_contable`, `centro_costo`                     |
+| Contabilización (switch) | `GET/POST /api/v1/finanzas/parametros-contabilidad/`  | CRUD estándar                                                                                             | `id`, `empresa`                                             |
 | Pólizas                  | `GET/POST /api/v1/finanzas/polizas/`                  | `POST /polizas/{id}/contabilizar/`, `POST /polizas/{id}/validar-cuadre/`, `POST /polizas/{id}/cancelar/`  | `id`, `sucursal`, `centro_costo`, `poliza_detalles[].cuenta_contable` |
 | Alertas de mora          | `GET /api/v1/finanzas/alertas-mora/`                  | `POST /alertas-mora/generar/`                                                                             | `id`, `cuenta_por_cobrar`, `cuenta_por_pagar`               |
 | Dashboard                | `GET /api/v1/finanzas/dashboard/`                     | lectura agregada                                                                                          | `empresa_id`                                                |
+
+### Pólizas automáticas — avance
+
+> **La contabilización automática está APAGADA.** Nace apagada por empresa y se enciende a
+> mano, después de que Contabilidad valide el plan de cuentas. Mientras tanto el código está
+> desplegado sin generar un solo asiento.
+
+- [x] **PR 1 · Cimientos** — sin cambio de comportamiento: fecha contable fijable, folio
+  atómico por `SerieFolio` (antes `MAX+1`, con carrera), enganche de contrapóliza,
+  `created_at`/`updated_at`, y ya no se puede editar por PATCH una póliza contabilizada.
+- [x] **PR 2 · Plan contable configurable** — `ConfiguracionContable` (concepto → cuenta),
+  el interruptor `ParametrosContabilidad`, cuenta contable por banco, API y comando de siembra.
+- [ ] **PR 3 · Motor + factura de cliente** — generar/previsualizar/reversar, conversión a
+  moneda base (facturan en MXN y USD), y `GET /facturas/{id}/previsualizar-poliza/`.
+- [ ] **PR 4 · Factura de proveedor, cobro y pago**
+- [ ] **PR 5 · Nota de crédito y movimiento bancario**
+- [ ] **PR 6 · Nómina**
+- [ ] **PR 7 · Constraints sobre datos existentes** (cargo XOR abono, folio único, `uq_cxc_factura`)
+- [ ] **PR 8 · IVA PPD** — hoy todo se trata como PUE
+- [ ] **PR 9 · Sucursal persistida** en `Cobro`, `Pago` y `CuentaBancaria`
+
+**Encendido en producción:** mergear con el candado apagado → sembrar el plan y ajustarlo al
+catálogo real → Contabilidad revisa con `previsualizar-poliza/` una muestra de facturas en
+pesos y dólares → encender **una** empresa → encender el resto. Apagar el interruptor detiene
+la generación al instante; lo ya creado se corrige con contrapóliza, no borrándolo.
+
+**Pendientes con Contabilidad:** IVA PPD (hoy todo PUE); compras a inventario o a gasto —y
+que `inventarios` no genera pólizas, así que **no hay costo de ventas automático**—; la fecha
+de la contrapóliza; y quién puede editar el plan contable.
+
+**Decisiones tomadas:** la póliza nace **Contabilizada**; cancelar el documento genera
+**contrapóliza** y deja la original Cancelada; el mayor se lleva en la moneda base de la
+empresa.
+
+### Plan contable (pantalla de configuración)
+
+Define con qué cuenta responde la empresa a cada concepto contable. Es lo que el sistema
+usará para generar las pólizas solo; hoy **la generación automática está apagada**.
+
+**Armar la pantalla con dos llamadas:**
+
+```http
+GET /api/v1/finanzas/configuraciones-contables/estado/
+```
+
+Devuelve todo lo que necesita la vista: el interruptor y los 16 conceptos, cada uno diciendo
+si ya tiene cuenta o no. Ideal para una tabla con un renglón por concepto y un selector de
+cuenta.
+
+```json
+{
+  "empresa": 1,
+  "contabilizacion_automatica": false,
+  "fecha_inicio_contabilizacion": null,
+  "conceptos": [
+    { "clave": "Clientes", "nombre": "Clientes (cuentas por cobrar)", "configurado": true,  "cuenta_codigo": "1120" },
+    { "clave": "IvaTrasladado", "nombre": "IVA trasladado", "configurado": false, "cuenta_codigo": null }
+  ]
+}
+```
+
+```http
+GET /api/v1/finanzas/cuentas-contables/?activo=true
+```
+
+Para llenar el selector de cuentas. Solo son elegibles las que tienen
+`acepta_movimientos: true`.
+
+**Asignar una cuenta a un concepto:**
+
+```http
+POST /api/v1/finanzas/configuraciones-contables/
+{ "concepto": "IvaTrasladado", "cuenta_contable": 42 }
+```
+
+La empresa la pone el servidor. Responde **400** si la cuenta es de otra empresa, está dada
+de baja, es de agrupación (`acepta_movimientos: false`), o si ese concepto ya tiene una
+cuenta activa. El error viene por campo: `cuenta_contable`, `centro_costo` o `concepto`.
+
+Para **cambiar** la cuenta de un concepto, haz `PATCH` sobre la fila existente. `DELETE` es
+baja lógica y libera el concepto.
+
+Campos de lectura extra en cada fila: `concepto_nombre`, `cuenta_codigo`, `cuenta_nombre`.
+
+Otros endpoints: `GET /configuraciones-contables/conceptos/` devuelve el catálogo plano
+(`clave`, `nombre`) por si prefieres armar el formulario tú; `GET /configuraciones-contables/?concepto=Clientes`
+filtra.
+
+**Nómina** es el único concepto que usa `clave`: manda cada código de percepción o deducción
+a su cuenta (`{"concepto": "PercepcionNomina", "clave": "PER010", "cuenta_contable": 51}`).
+Una fila con `clave: ""` es la regla general a la que caen los códigos sin cuenta propia.
+
+### Encender la contabilización automática
+
+Nace **apagada** en cada empresa, a propósito: primero se configura y se revisa el plan, y
+solo después se enciende.
+
+```http
+POST /api/v1/finanzas/parametros-contabilidad/
+{ "contabilizacion_automatica": true, "fecha_inicio_contabilizacion": "2026-01-01" }
+```
+
+`fecha_inicio_contabilizacion` es opcional y evita que editar un documento viejo genere un
+asiento retroactivo: solo se contabiliza lo fechado de ese día en adelante.
+
+Una vez creada la fila, se prende y apaga con `PATCH`. Apagarla detiene la generación al
+instante; las pólizas ya creadas se quedan.
+
+**Mientras esté apagada no cambia nada** en facturas, cobros ni pagos. Cuando se encienda,
+el backend avisará qué cambia en cada flujo.
+
+### Cuenta contable de un banco
+
+`CuentaBancaria` acepta `cuenta_contable` (opcional): cada banco se asienta en su propia
+cuenta. Si se deja vacía, se usa el concepto `Bancos` del plan contable. Mismo 400 por campo
+si la cuenta es de otra empresa, está de baja o es de agrupación.
 
 ### Query params realmente soportados
 
