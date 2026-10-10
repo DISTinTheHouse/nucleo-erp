@@ -3657,7 +3657,7 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
 - **Varias OPs**: `GET /api/v1/produccion/orden-produccion/ruta-critica/?op_id=1,2,3` → arreglo, una fila por OP (con `op_id`). Máx. 200 ids; ids de otra empresa o inexistentes se omiten; `op_id` faltante o no numérico → `400`.
 - **PATCH**: solo usuarios del departamento **Producción** (o superuser/admin_empresa). `400 {"permiso": "..."}` para el resto. OP Completada (5) o Cancelada (7) → `409 {"msg": "..."}`.
 - Acepta `PATCH` parcial — solo manda los campos que cambian.
-- Los 4 campos `fecha_existencia_*` son de solo lectura: el backend los sella con la fecha/hora actual al **marcar** su checkbox y los limpia (`null`) al **desmarcarlo**. Reenviar el mismo valor no los toca.
+- Los campos `fecha_existencia_*` y `fecha_kit_completo` son de solo lectura: el backend los sella con la fecha/hora actual al **marcar** su checkbox y los limpia (`null`) al **desmarcarlo**. Reenviar el mismo valor no los toca.
 - Toda respuesta incluye `op_id`.
 
 **Campos**
@@ -3673,7 +3673,9 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
 | `corte_externo` | bool | Telas & avíos |
 | `comentarios_telas_avios` | text | Telas & avíos |
 | `kit_completo` | bool | Telas & avíos |
+| `fecha_kit_completo` | datetime, **read-only** (mismo criterio que `fecha_existencia_*`) | Telas & avíos |
 | `fecha_embarque_materia_prima` | date | Telas & avíos |
+| `fecha_llegada_centro_confeccion` | date | Telas & avíos |
 | `fecha_trazo` | date | Trazo |
 | `fecha_real_corte` | date | Corte |
 | `cantidad_real_corte` | decimal (string), **entero ≥ 0** o `null`; negativos/decimales → `400` | Corte |

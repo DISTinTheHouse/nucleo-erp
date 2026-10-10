@@ -394,6 +394,7 @@ class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
         "sin_existencia_tela": "fecha_sin_existencia_tela",
         "existencia_avios": "fecha_existencia_avios",
         "sin_existencia_avios": "fecha_sin_existencia_avios",
+        "kit_completo": "fecha_kit_completo",
     }
 
     class Meta:
@@ -404,6 +405,7 @@ class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
             'fecha_sin_existencia_tela',
             'fecha_existencia_avios',
             'fecha_sin_existencia_avios',
+            'fecha_kit_completo',
             'updated_at',
         ]
 

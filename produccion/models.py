@@ -161,7 +161,9 @@ class OrdenProduccionRutaCritica(models.Model):
     corte_externo = models.BooleanField(default=False)
     comentarios_telas_avios = models.TextField(blank=True, null=True)
     kit_completo = models.BooleanField(default=False)
+    fecha_kit_completo = models.DateTimeField(null=True, blank=True)
     fecha_embarque_materia_prima = models.DateField(null=True, blank=True)
+    fecha_llegada_centro_confeccion = models.DateField(null=True, blank=True)
 
     # 4. Trazo
     fecha_trazo = models.DateField(null=True, blank=True)
