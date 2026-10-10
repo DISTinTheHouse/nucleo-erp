@@ -221,6 +221,19 @@ class OrdenProduccionDetalleSerializer(serializers.ModelSerializer):
         read_only=True
     )
 
+    # Aislamiento multi-tenant, explícito por campo: antes ``producto_variante``
+    # sólo quedaba acotado de rebote por el lookup de BOM de la vista, y
+    # ``pedido_detalle`` no se validaba. Que el renglón sea del ``pedido`` de la
+    # OP lo revisa ``OrdenProduccionSerializer.validate`` (necesita el encabezado).
+    def validate_producto_variante_id(self, producto_variante):
+        return _fk_de_la_empresa_del_usuario(
+            self, 'producto_variante_id', producto_variante, getattr(producto_variante, 'empresa_id', None)
+        )
+
+    def validate_pedido_detalle(self, pedido_detalle):
+        empresa_id = pedido_detalle.pedido.empresa_id if pedido_detalle is not None else None
+        return _fk_de_la_empresa_del_usuario(self, 'pedido_detalle', pedido_detalle, empresa_id)
+
     class Meta:
         model = OrdenProduccionDetalle
         fields = '__all__'
@@ -295,6 +308,11 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
             )
         return pedido
 
+    def validate_ruta_produccion(self, ruta_produccion):
+        return _fk_de_la_empresa_del_usuario(
+            self, 'ruta_produccion', ruta_produccion, getattr(ruta_produccion, 'empresa_id', None)
+        )
+
     def validate(self, attrs):
         # ``empresa``/``sucursal`` son read-only (ver ``Meta``): nunca llegan
         # aquí desde el body, así que no hay nada que validar contra ellos en
@@ -306,6 +324,23 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
 
         if not user_empresa:
             raise serializers.ValidationError('Usuario sin empresa asignada')
+
+        # Si la OP tiene ``pedido`` (el del body o, en PATCH, el de la
+        # instancia), cada ``pedido_detalle`` de sus renglones debe ser de ESE
+        # pedido. La empresa del renglón ya la validó el serializer hijo. Sin
+        # ``pedido`` en la OP no se exige nada más: rechazar o no esa
+        # combinación es una decisión de negocio pendiente.
+        pedido = attrs['pedido'] if 'pedido' in attrs else getattr(self.instance, 'pedido', None)
+        if pedido is not None:
+            errores = [
+                {'pedido_detalle': ['El renglón no pertenece al pedido de la orden de producción.']}
+                if renglon.get('pedido_detalle') is not None
+                and renglon['pedido_detalle'].pedido_id != pedido.pk
+                else {}
+                for renglon in attrs.get('orden_produccion_detalle', [])
+            ]
+            if any(errores):
+                raise serializers.ValidationError({'orden_produccion_detalle': errores})
 
         return attrs
 

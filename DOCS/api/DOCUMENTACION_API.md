@@ -3616,6 +3616,11 @@ Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró
   - Debe tener **`clasificacion` y `fecha_confirmacion`** ya puestos por mesa de control.
   - Ejemplo de rechazo: `400 {"pedido": "El pedido no tiene ninguna línea de producción especial (muestra)."}` o `400 {"pedido": "El pedido debe estar clasificado y con fecha de confirmación antes de ligarlo a una OP."}`.
   - Omitir `pedido` por completo sigue funcionando igual que siempre (OP sin ligar a ningún pedido).
+- **Aislamiento multi-empresa de los renglones** (`orden_produccion_detalle[i]`, `400` por campo, no crea nada):
+  - `producto_variante_id` debe ser de la empresa del usuario (validación explícita, ya no depende del lookup de BOM).
+  - `pedido_detalle` (opcional) debe ser de la empresa del usuario y, si la OP tiene `pedido`, ser un renglón de **ese** pedido: `400 {"orden_produccion_detalle": [{"pedido_detalle": ["El renglón no pertenece al pedido de la orden de producción."]}]}`. Si la OP no tiene `pedido`, solo se exige la empresa.
+  - `ruta_produccion` (encabezado, opcional) debe ser de la empresa del usuario.
+  - Un id de otra empresa responde con el mismo mensaje que un id inexistente. Aplica igual al superusuario y a `PUT`/`PATCH`.
 
 **Respuesta (resumen)**
 
