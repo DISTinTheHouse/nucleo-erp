@@ -6235,3 +6235,52 @@ class VarianteOnboardingColorTests(_BomTenantBase, TestCase):
 
         self.assertEqual(resp.status_code, 500)
         self._nada_creado(linea)
+
+    # --- reglas de color: inactivo y sin ``codigo`` ---
+
+    def test_mismo_color_inactivo_de_la_linea_se_acepta(self):
+        # El color de la línea se desactivó después de capturar el pedido:
+        # reenviarlo no puede fallar si omitirlo funciona.
+        linea = self._linea(self.color_inactivo)
+        resp = self._post(linea, color=self.color_inactivo.pk)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data[0]["sku"], f"MP{linea.pk}-VIE-M")
+
+    def test_color_inactivo_distinto_al_de_la_linea_se_rechaza(self):
+        con_color = self._linea(self.color)
+        sin_color = self._linea()
+        for linea, color_id in ((con_color, self.color.pk), (sin_color, None)):
+            with self.subTest(color_de_la_linea=color_id):
+                resp = self._post(linea, color=self.color_inactivo.pk)
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertEqual(set(resp.data), {"color"})
+                self._nada_creado(linea, color_id)
+
+    def test_color_del_body_sin_codigo_responde_en_color(self):
+        linea = self._linea()
+        resp = self._post(linea, color=self.color_sin_codigo.pk)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(set(resp.data), {"color"})
+        self.assertIn("color seleccionado no tiene código", str(resp.data["color"]))
+        self._nada_creado(linea)
+
+    def test_color_de_la_linea_sin_codigo_responde_en_pedido_detalle_id(self):
+        linea = self._linea(self.color_sin_codigo)
+        for extra in ({}, {"color": self.color_sin_codigo.pk}):
+            with self.subTest(body=extra):
+                resp = self._post(linea, **extra)
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertEqual(set(resp.data), {"pedido_detalle_id"})
+                self.assertIn("catálogo de colores", str(resp.data["pedido_detalle_id"]))
+        self._nada_creado(linea, self.color_sin_codigo.pk)
+
+    def test_otro_color_no_reemplaza_al_de_la_linea_aunque_no_tenga_codigo(self):
+        # Decisión: el color que capturó ventas no se sobrescribe desde aquí.
+        linea = self._linea(self.color_sin_codigo)
+        resp = self._post(linea, color=self.otro_color.pk)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(set(resp.data), {"color"})
+        self._nada_creado(linea, self.color_sin_codigo.pk)

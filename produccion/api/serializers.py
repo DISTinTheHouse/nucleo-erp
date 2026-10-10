@@ -2371,10 +2371,11 @@ class VarianteProduccionOnboardingSerializer(serializers.Serializer):
     talla que se de alta."""
     pedido_detalle_id = serializers.IntegerField()
     # Opcional en el contrato; la vista lo exige si la línea no tiene color.
-    # ``Color`` es catálogo global (sin empresa): sólo se acota a los activos,
-    # igual que ``_save_pedido_detalle`` al capturar el color de un renglón.
+    # ``Color`` es catálogo global (sin empresa). Aquí sólo se resuelve el id:
+    # que esté activo lo decide la vista, porque reenviar el color que la línea
+    # YA tiene debe aceptarse aunque ese color se haya desactivado después.
     color = serializers.PrimaryKeyRelatedField(
-        queryset=Color.objects.filter(activo=True), required=False, allow_null=True
+        queryset=Color.objects.all(), required=False, allow_null=True
     )
     materia_prima_detalle = BomDetalleSerializer(many=True)
 
