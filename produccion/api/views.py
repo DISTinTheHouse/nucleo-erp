@@ -1,7 +1,7 @@
 import math
 
 from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, prefetch_related_objects
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import status, viewsets, mixins
 from rest_framework.decorators import action
@@ -1733,85 +1733,106 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         pedido_detalle_id = serializer.validated_data['pedido_detalle_id']
         detalles_bom = serializer.validated_data['materia_prima_detalle']
 
-        detalle = (
-            _detalles_especiales_qs()
-            .filter(pedido=pedido, pk=pedido_detalle_id)
-            .select_related("color")
-            .first()
-        )
-        if detalle is None:
-            raise ValidationError({
-                'pedido_detalle_id': 'No es una línea de producción especial de este pedido.'
-            })
+        YA_TIENE_SKU = {'pedido_detalle_id': 'Esta línea ya tiene SKU(s) de producción generados.'}
 
-        color_body = serializer.validated_data.get('color')
-        color = detalle.color
-        asignar_color = color is None
-        if asignar_color:
-            if color_body is None:
-                raise ValidationError({
-                    'color': 'La línea no tiene color: envía `color` para generar el SKU.'
-                })
-            color = color_body
-        elif color_body is not None and color_body.pk != color.pk:
-            raise ValidationError({
-                'color': 'La línea ya tiene otro color; omite `color` o envía el mismo.'
-            })
-        if not color.codigo:
-            raise ValidationError({
-                'color' if asignar_color else 'pedido_detalle_id':
-                    'El color no tiene código para generar el SKU.'
-            })
-
-        if VarianteProductoProduccion.objects.filter(pedido_detalle=detalle).exists():
-            raise ValidationError({
-                'pedido_detalle_id': 'Esta línea ya tiene SKU(s) de producción generados.'
-            })
-
-        tallas = list(
-            PedidoDetalleTalla.objects.filter(pedido_detalle=detalle, cantidad__gt=0)
-            .select_related("talla")
-        )
-        if not tallas:
-            raise ValidationError({'pedido_detalle_id': 'La línea no tiene tallas con cantidad.'})
-
-        # ``producto_nombre_externo`` admite más caracteres que ``nombre`` de la
-        # variante y Postgres no trunca solo (DataError -> 500): se recorta al
-        # ``max_length`` del campo. Sólo al recortar se quitan los espacios y
-        # separadores que el corte deje colgando; un nombre que cabe se copia
-        # tal cual. No lleva sufijo de talla/color: eso lo distingue el SKU.
-        max_nombre = VarianteProductoProduccion._meta.get_field('nombre').max_length
-        nombre = detalle.producto_nombre_externo or ''
-        if len(nombre) > max_nombre:
-            nombre = nombre[:max_nombre].rstrip(' -_,;:./|')
-
-        creadas = []
+        # Todo el chequeo-y-escritura va en UNA transacción con la línea
+        # bloqueada (``select_for_update``): dos altas simultáneas de la misma
+        # línea se serializan y la segunda ya ve los SKU de la primera. Sin
+        # ``select_related``: Postgres no admite FOR UPDATE sobre el lado
+        # nullable del JOIN con ``colores``.
         with transaction.atomic():
+            detalle = (
+                _detalles_especiales_qs()
+                .select_for_update()
+                .filter(pedido=pedido, pk=pedido_detalle_id)
+                .first()
+            )
+            if detalle is None:
+                raise ValidationError({
+                    'pedido_detalle_id': 'No es una línea de producción especial de este pedido.'
+                })
+
+            # Antes que cualquier validación de color: en un reintento lo que
+            # importa es que la línea ya no admite otra alta.
+            if VarianteProductoProduccion.objects.filter(pedido_detalle=detalle).exists():
+                raise ValidationError(YA_TIENE_SKU)
+
+            color_body = serializer.validated_data.get('color')
+            color = detalle.color
+            asignar_color = color is None
             if asignar_color:
-                detalle.color = color
-                detalle.save(update_fields=['color'])
-            for dt in tallas:
-                # Sin ``producto.codigo`` real que usar (es una muestra sin
-                # catálogo): el prefijo sale del propio ``pedido_detalle_id``,
-                # ya único, así que el SKU no choca sin pedirle nada al
-                # usuario -- mismo espíritu que el onboarding real
-                # (``ProductoVarianteViewSet.onboarding``), adaptado a que
-                # aquí no hay producto de catálogo del que sacar el código.
-                sku = f"MP{detalle.pk}-{color.codigo}-{dt.talla.nombre}".strip().upper()
-                variante = VarianteProductoProduccion.objects.create(
-                    empresa=pedido.empresa,
-                    pedido_detalle=detalle,
-                    color=color,
-                    talla=dt.talla,
-                    nombre=nombre,
-                    sku=sku,
-                )
-                bom = ListaMaterialBom.objects.create(empresa=pedido.empresa, variante_produccion=variante)
-                BomDetalle.objects.bulk_create([
-                    BomDetalle(bom=bom, **{**detalle_bom, "variante_produccion": variante})
-                    for detalle_bom in detalles_bom
-                ])
-                creadas.append(variante)
+                if color_body is None:
+                    raise ValidationError({
+                        'color': 'La línea no tiene color: envía `color` para generar el SKU.'
+                    })
+                color = color_body
+            elif color_body is not None and color_body.pk != color.pk:
+                raise ValidationError({
+                    'color': 'La línea ya tiene otro color; omite `color` o envía el mismo.'
+                })
+            if not color.codigo:
+                raise ValidationError({
+                    'color' if asignar_color else 'pedido_detalle_id':
+                        'El color no tiene código para generar el SKU.'
+                })
+
+            tallas = list(
+                PedidoDetalleTalla.objects.filter(pedido_detalle=detalle, cantidad__gt=0)
+                .select_related("talla")
+            )
+            if not tallas:
+                raise ValidationError({'pedido_detalle_id': 'La línea no tiene tallas con cantidad.'})
+
+            # ``producto_nombre_externo`` admite más caracteres que ``nombre`` de la
+            # variante y Postgres no trunca solo (DataError -> 500): se recorta al
+            # ``max_length`` del campo. Sólo al recortar se quitan los espacios y
+            # separadores que el corte deje colgando; un nombre que cabe se copia
+            # tal cual. No lleva sufijo de talla/color: eso lo distingue el SKU.
+            max_nombre = VarianteProductoProduccion._meta.get_field('nombre').max_length
+            nombre = detalle.producto_nombre_externo or ''
+            if len(nombre) > max_nombre:
+                nombre = nombre[:max_nombre].rstrip(' -_,;:./|')
+
+            creadas = []
+            try:
+                # Savepoint propio: si el índice único rechaza una variante, se
+                # deshace sólo esto y la transacción externa sigue utilizable.
+                with transaction.atomic():
+                    if asignar_color:
+                        detalle.color = color
+                        detalle.save(update_fields=['color'])
+                    for dt in tallas:
+                        # Sin ``producto.codigo`` real que usar (es una muestra sin
+                        # catálogo): el prefijo sale del propio ``pedido_detalle_id``,
+                        # ya único, así que el SKU no choca sin pedirle nada al
+                        # usuario -- mismo espíritu que el onboarding real
+                        # (``ProductoVarianteViewSet.onboarding``), adaptado a que
+                        # aquí no hay producto de catálogo del que sacar el código.
+                        sku = f"MP{detalle.pk}-{color.codigo}-{dt.talla.nombre}".strip().upper()
+                        variante = VarianteProductoProduccion.objects.create(
+                            empresa=pedido.empresa,
+                            pedido_detalle=detalle,
+                            color=color,
+                            talla=dt.talla,
+                            nombre=nombre,
+                            sku=sku,
+                        )
+                        bom = ListaMaterialBom.objects.create(
+                            empresa=pedido.empresa, variante_produccion=variante
+                        )
+                        BomDetalle.objects.bulk_create([
+                            BomDetalle(bom=bom, **{**detalle_bom, "variante_produccion": variante})
+                            for detalle_bom in detalles_bom
+                        ])
+                        creadas.append(variante)
+            except IntegrityError as exc:
+                # Red de seguridad del candado: si aun así otra alta ganó, el
+                # índice único (pedido_detalle, talla) rechaza el INSERT. Se
+                # responde lo mismo que el chequeo de arriba; cualquier otro
+                # error de integridad no se disfraza.
+                if 'uq_variante_produccion_pedido_detalle_talla' not in str(exc):
+                    raise
+                raise ValidationError(YA_TIENE_SKU)
 
         return Response(
             VarianteProduccionSerializer(creadas, many=True).data,
