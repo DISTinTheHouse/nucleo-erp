@@ -409,6 +409,9 @@ class ConsumoProduccionSerializer(serializers.ModelSerializer):
         model = ConsumoProduccion
         fields = ['consumo_produccion_id', 'op', 'detalles']
 
+    def validate_op(self, op):
+        return _fk_de_la_empresa_del_usuario(self, 'op', op, getattr(op, 'empresa_id', None))
+
     def get_detalles(self, obj):
         detalles = getattr(obj, 'detalles', None)
         if detalles is None:
