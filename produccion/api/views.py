@@ -1777,10 +1777,13 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
 
         # ``producto_nombre_externo`` admite más caracteres que ``nombre`` de la
         # variante y Postgres no trunca solo (DataError -> 500): se recorta al
-        # ``max_length`` del campo, sin dejar espacios ni separadores colgando.
-        # El nombre no lleva sufijo de talla/color; eso lo distingue el SKU.
+        # ``max_length`` del campo. Sólo al recortar se quitan los espacios y
+        # separadores que el corte deje colgando; un nombre que cabe se copia
+        # tal cual. No lleva sufijo de talla/color: eso lo distingue el SKU.
         max_nombre = VarianteProductoProduccion._meta.get_field('nombre').max_length
-        nombre = (detalle.producto_nombre_externo or '')[:max_nombre].rstrip(' -_,;:./|')
+        nombre = detalle.producto_nombre_externo or ''
+        if len(nombre) > max_nombre:
+            nombre = nombre[:max_nombre].rstrip(' -_,;:./|')
 
         creadas = []
         with transaction.atomic():

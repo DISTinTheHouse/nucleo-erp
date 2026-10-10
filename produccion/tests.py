@@ -6181,3 +6181,11 @@ class VarianteOnboardingColorTests(_BomTenantBase, TestCase):
                 _, variantes = self._onboarding_con_nombre(nombre)
                 for variante in variantes:
                     self.assertEqual(variante.nombre, nombre)
+
+    def test_nombre_corto_que_termina_en_separador_se_copia_igual(self):
+        # El recorte de separadores sólo aplica cuando hubo truncado.
+        for nombre in ("Playera modelo A.", "Pantalón 40/", "Gorra - ", " - "):
+            with self.subTest(nombre=nombre):
+                _, variantes = self._onboarding_con_nombre(nombre)
+                for variante in variantes:
+                    self.assertEqual(variante.nombre, nombre)
