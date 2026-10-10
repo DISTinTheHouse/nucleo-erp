@@ -44,6 +44,11 @@ from compras.api.serializers import (
     RecepcionRFIDLecturaSerializer,
     RecepcionRFIDLecturaInputSerializer,
 )
+from compras.services.orden_compra_view_service import (
+    SIN_PERMISO_CONTABILIDAD,
+    puede_ver_contabilidad,
+    quitar_montos,
+)
 from hr.models import Empleado
 from inventarios.models import (
     Almacen,
@@ -858,6 +863,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             },
             "gasto_por_categoria": self._kpi_gasto_por_categoria(base),
         }
+        if not puede_ver_contabilidad(user):
+            quitar_montos(data["ocs_abiertas"], ["monto"])
+            data["gasto_por_categoria"] = SIN_PERMISO_CONTABILIDAD
         return Response(data)
 
     def _kpis_vacio(self):
@@ -1742,6 +1750,9 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             "diferencia_precio": self._kpi_diferencia_precio(empresa),
             "material_rechazado": self._kpi_material_rechazado(empresa),
         }
+        if not puede_ver_contabilidad(user):
+            data["diferencia_precio"] = SIN_PERMISO_CONTABILIDAD
+            quitar_montos(data["material_rechazado"], ["valor_rechazado", "valor_linea"])
         return Response(data)
 
     def _kpis_vacio(self):

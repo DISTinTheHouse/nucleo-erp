@@ -2652,6 +2652,8 @@ Sin `desde`/`hasta` el gasto es histórico completo. `desde`/`hasta` inválidos 
 
 Distintos de `/dashboard/` de arriba: cada uno es la tarjeta de KPIs de **una pantalla específica**, no el resumen general. Mismo patrón en los 3: `GET`, sin query params, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.
 
+**Montos y permiso de contabilidad** (mismo criterio que el listado de OC, `puede_ver_contabilidad`): sin permiso, `ordenes/kpis/` omite `ocs_abiertas.monto` y `por_estatus[].monto`, y `gasto_por_categoria` llega como `{"disponible": false, "motivo": "Sin permiso de contabilidad."}`; `recepciones/kpis/` hace lo mismo con `diferencia_precio` y omite `material_rechazado.valor_rechazado` y `drill_down[].valor_linea`. Conteos y cantidades no cambian.
+
 ### Órdenes de Compra — `GET /api/v1/compras/ordenes/kpis/`
 
 ```json

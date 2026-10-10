@@ -40,6 +40,18 @@ def puede_ver_contabilidad(user) -> bool:
     return bool(claves & CLAVES_CONTABILIDAD_COMPRAS) if claves else False
 
 
+SIN_PERMISO_CONTABILIDAD = {"disponible": False, "motivo": "Sin permiso de contabilidad."}
+
+
+def quitar_montos(bloque: dict, campos) -> None:
+    """Quita ``campos`` del bloque de KPI y de las filas de sus listas."""
+    _drop_keys(bloque, campos)
+    for valor in bloque.values():
+        if isinstance(valor, list):
+            for fila in valor:
+                _drop_keys(fila, campos)
+
+
 def _drop_keys(d: dict, keys: list) -> None:
     if not isinstance(d, dict):
         return
