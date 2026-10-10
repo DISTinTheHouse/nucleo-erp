@@ -6284,3 +6284,28 @@ class VarianteOnboardingColorTests(_BomTenantBase, TestCase):
         self.assertEqual(resp.status_code, 400, resp.data)
         self.assertEqual(set(resp.data), {"color"})
         self._nada_creado(linea, self.color_sin_codigo.pk)
+
+    # --- pedido cancelado ---
+
+    def test_pedido_cancelado_rechaza_el_alta_sin_escribir_nada(self):
+        linea = self._linea()
+        Pedido.objects.filter(pk=self.pedido.pk).update(estatus=Pedido.ESTATUS_CANCELADO)
+        resp = self._post(linea, color=self.otro_color.pk)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(set(resp.data), {"pedido"})
+        self._nada_creado(linea)
+        # El GET no cambia: el pedido cancelado sigue visible para producción.
+        detalle = self._client(self.admin).get(
+            f"/api/v1/produccion/pedidos-especiales/{self.pedido.pk}/"
+        )
+        self.assertEqual(detalle.status_code, 200)
+
+    def test_pedido_en_cualquier_otro_estatus_permite_el_alta(self):
+        for estatus, _ in Pedido.CHOICES_ESTATUS:
+            if estatus == Pedido.ESTATUS_CANCELADO:
+                continue
+            with self.subTest(estatus=estatus):
+                Pedido.objects.filter(pk=self.pedido.pk).update(estatus=estatus)
+                resp = self._post(self._linea(), color=self.otro_color.pk)
+                self.assertEqual(resp.status_code, 201, resp.data)
