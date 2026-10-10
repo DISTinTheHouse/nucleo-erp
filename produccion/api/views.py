@@ -1761,20 +1761,32 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             color = detalle.color
             asignar_color = color is None
             if asignar_color:
+                # El color lo aporta el body: debe existir activo y con código.
                 if color_body is None:
                     raise ValidationError({
                         'color': 'La línea no tiene color: envía `color` para generar el SKU.'
                     })
+                if not color_body.activo:
+                    raise ValidationError({'color': 'El color seleccionado está inactivo.'})
+                if not color_body.codigo:
+                    raise ValidationError({
+                        'color': 'El color seleccionado no tiene código para generar el SKU.'
+                    })
                 color = color_body
-            elif color_body is not None and color_body.pk != color.pk:
-                raise ValidationError({
-                    'color': 'La línea ya tiene otro color; omite `color` o envía el mismo.'
-                })
-            if not color.codigo:
-                raise ValidationError({
-                    'color' if asignar_color else 'pedido_detalle_id':
-                        'El color no tiene código para generar el SKU.'
-                })
+            else:
+                # Manda el color de la línea (lo capturó ventas): el body sólo
+                # puede repetirlo, aunque hoy esté inactivo, nunca reemplazarlo.
+                if color_body is not None and color_body.pk != color.pk:
+                    raise ValidationError({
+                        'color': 'La línea ya tiene otro color; omite `color` o envía el mismo.'
+                    })
+                if not color.codigo:
+                    raise ValidationError({
+                        'pedido_detalle_id': (
+                            'El color de la línea no tiene código para generar el SKU; '
+                            'complétalo en el catálogo de colores.'
+                        )
+                    })
 
             tallas = list(
                 PedidoDetalleTalla.objects.filter(pedido_detalle=detalle, cantidad__gt=0)
