@@ -23,6 +23,7 @@ from inventarios.models import (
     TipoMovimiento,
     inventario_reservas,
 )
+from catalogo.models import VarianteProductoProduccion
 from finanzas.models import Factura, FacturaDetalle, NotaCreditoDetalle
 from ventas.models import (
     Cotizacion,
@@ -3119,6 +3120,54 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 "programacion_conf": pedido.programacion_conf,
             }
         )
+
+    @action(detail=True, methods=["post"], url_path="vincular-sku-muestra")
+    def vincular_sku_muestra(self, request, pk=None):
+        """Copia el SKU de producción (``variante_onboarding``, muestra sin
+        catálogo) a la talla del pedido -- y, si hay cotización de origen, a
+        su talla espejo. Un clic, no crea nada nuevo: solo refleja lo que
+        producción ya generó. No toca ``producto_nombre_externo``.
+        """
+        user = request.user
+        self._require_mesa_control(user)
+        pedido = self.get_object()
+
+        talla_id = request.data.get("pedido_detalle_talla_id")
+        if not talla_id:
+            raise ValidationError({"pedido_detalle_talla_id": "Este campo es requerido."})
+
+        dt = (
+            PedidoDetalleTalla.objects.filter(pk=talla_id, pedido_detalle__pedido=pedido)
+            .select_related("pedido_detalle")
+            .first()
+        )
+        if dt is None:
+            raise ValidationError({"pedido_detalle_talla_id": "No pertenece a este pedido."})
+
+        variante = VarianteProductoProduccion.objects.filter(
+            pedido_detalle_id=dt.pedido_detalle_id, talla_id=dt.talla_id, activo=True
+        ).first()
+        if variante is None or not variante.sku:
+            raise ValidationError({
+                "pedido_detalle_talla_id": "Esta talla no tiene SKU de producción generado todavía."
+            })
+
+        dt.sku_muestra = variante.sku
+        dt.save(update_fields=["sku_muestra"])
+
+        # Reflejo best-effort en la cotización de origen: match por
+        # producto_nombre_externo + color + talla, mismo criterio que agrupa
+        # líneas en ``_merge_detalle``. Sin cotización o sin match, el pedido
+        # ya quedó actualizado -- eso es lo que pidió el clic.
+        if pedido.cotizacion_id:
+            CotizacionDetalleTalla.objects.filter(
+                cotizacion_detalle__cotizacion_id=pedido.cotizacion_id,
+                cotizacion_detalle__producto_nombre_externo=dt.pedido_detalle.producto_nombre_externo,
+                cotizacion_detalle__color_id=dt.pedido_detalle.color_id,
+                talla_id=dt.talla_id,
+            ).update(sku_muestra=variante.sku)
+
+        return Response({"pedido_detalle_talla_id": dt.pk, "sku_muestra": dt.sku_muestra})
 
     @action(detail=True, methods=["post"], url_path="recomprar")
     def recomprar(self, request, pk=None):

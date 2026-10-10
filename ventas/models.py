@@ -212,6 +212,11 @@ class CotizacionDetalleTalla(models.Model):
     lleva_cambio_talla = models.BooleanField(default=False)
     cambio_talla_config = models.JSONField(null=True, blank=True)
     sku = models.CharField(max_length=150, null=True, blank=True)
+    # Distinto de ``sku`` de arriba (ese es snapshot del SKU de CATÁLOGO real
+    # al recomprar, vía ``variante``). Este es el SKU de producción de una
+    # MUESTRA (``catalogo.VarianteProductoProduccion``, fuera de catálogo) --
+    # ver el mismo campo en ``PedidoDetalleTalla`` para el porqué no es FK.
+    sku_muestra = models.CharField(max_length=50, null=True, blank=True)
     requiere_produccion = models.BooleanField(default=False)
     variante = models.ForeignKey(ProductoVariante, on_delete=models.SET_NULL, null=True, blank=True, related_name="cotizacion_tallas")
 
@@ -478,6 +483,13 @@ class PedidoDetalleTalla(models.Model):
     cambio_talla_config = models.JSONField(null=True, blank=True)
     requiere_produccion = models.BooleanField(default=False)
     variante = models.ForeignKey(ProductoVariante, on_delete=models.SET_NULL, null=True, blank=True, related_name="pedido_tallas")
+    # Copia de ``catalogo.VarianteProductoProduccion.sku`` (SKU de producción
+    # para una muestra, fuera del catálogo real) -- NO es FK a propósito: esa
+    # variante vive en otra tabla por diseño (no es ``ProductoVariante``/
+    # ``variante`` de arriba), y copiar el string es más simple/rápido que
+    # unir contra ella en cada lectura. La pone mesa de control con un clic
+    # (``PedidoViewSet.vincular_sku_muestra``); no toca ``producto_nombre_externo``.
+    sku_muestra = models.CharField(max_length=50, null=True, blank=True)
 
     class Meta:
         db_table = "pedido_detalle_talla"
