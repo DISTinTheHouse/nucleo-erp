@@ -1771,3 +1771,53 @@ class PermisoAusenciaEstadoApiTests(HrBase):
         resp = self._delete(p)
         self.assertEqual(resp.status_code, 400, resp.content)
         self.assertTrue(PermisoAusencia.objects.filter(pk=p.pk).exists())
+
+
+class NominaCoherenciaYFechasTests(NominaBase):
+    """#398 empresa/sucursal/empleado coherentes (también superusuario), #399
+    sucursal = la del empleado, #404 fechas no-string en generar_periodo → 400."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.root = Usuario.objects.create(username="root", email="root@x.test", is_superuser=True)
+        cls.gdl = Sucursal.objects.create(empresa=cls.a["empresa"], codigo="GDL", nombre="Guadalajara")
+        cls.empleado_b = cls._empleado(cls.b, "B-001")
+
+    def test_superusuario_no_mezcla_empresas(self):
+        resp = self._post(self._payload(sucursal=self.b["sucursal"].pk, empleado=self.empleado_b.pk), user=self.root)
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(set(resp.json()), {"sucursal", "empleado"})
+        self.assertFalse(Nomina.objects.exists())
+
+    def test_sucursal_distinta_a_la_del_empleado_se_rechaza(self):
+        for user in (None, self.root):
+            with self.subTest(superusuario=user is not None):
+                resp = self._post(self._payload(sucursal=self.gdl.pk), user=user)
+
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertIn("sucursal", resp.json())
+
+    def test_patch_no_mueve_la_sucursal(self):
+        nomina = self._nomina()
+
+        resp = self._patch(nomina, {"sucursal": self.gdl.pk})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        nomina.refresh_from_db()
+        self.assertEqual(nomina.sucursal_id, self.a["sucursal"].pk)
+
+    def test_alta_coherente_sigue_funcionando(self):
+        self.assertEqual(self._post(self._payload()).status_code, 201)
+
+    def test_generar_periodo_con_fecha_no_string_responde_400(self):
+        for campo, valor in (("periodo_inicio", 20260901), ("periodo_fin", ["2026-09-15"]), ("fecha_pago", True)):
+            with self.subTest(campo=campo):
+                body = {"periodo_inicio": "2026-09-01", "periodo_fin": "2026-09-15", "sucursal_id": self.a["sucursal"].pk}
+                body[campo] = valor
+
+                resp = self._client().post(GENERAR_PERIODO_URL, body, format="json")
+
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertIn(campo, resp.json())

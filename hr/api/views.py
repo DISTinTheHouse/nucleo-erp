@@ -832,6 +832,14 @@ class CapacitacionViewSet(
         return qs.filter(empleado__empresa=empresa)
 
 
+def _fecha_param(nombre, valor):
+    """Fecha ``YYYY-MM-DD`` del body; cualquier otro valor (también no-string) → 400."""
+    try:
+        return drf_serializers.DateField().run_validation(valor)
+    except drf_serializers.ValidationError as exc:
+        raise drf_serializers.ValidationError({nombre: exc.detail})
+
+
 class NominaViewSet(
     SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
@@ -893,20 +901,11 @@ class NominaViewSet(
                 'periodo_fin': ['Este campo es requerido.'],
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            pi = datetime.strptime(periodo_inicio, '%Y-%m-%d').date()
-            pf = datetime.strptime(periodo_fin, '%Y-%m-%d').date()
-        except ValueError:
-            return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
+        pi = _fecha_param('periodo_inicio', periodo_inicio)
+        pf = _fecha_param('periodo_fin', periodo_fin)
         if pf < pi:
             return Response({'periodo_fin': ['Debe ser posterior a periodo_inicio.']}, status=status.HTTP_400_BAD_REQUEST)
-
-        fpago = None
-        if fecha_pago:
-            try:
-                fpago = datetime.strptime(fecha_pago, '%Y-%m-%d').date()
-            except ValueError:
-                return Response({'detail': 'Formato de fecha inválido (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
+        fpago = _fecha_param('fecha_pago', fecha_pago) if fecha_pago else None
 
         user = request.user
         es_superuser = getattr(user, "is_superuser", False)

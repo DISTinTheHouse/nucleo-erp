@@ -6923,6 +6923,7 @@ Bitácora de eventos: retardos acumulados, faltas, problemas de conducta, recono
   - **Ordering**: `periodo_inicio`, `fecha_pago`, `neto`, `total_percepciones`, `total_deducciones`
 - **CRUD**: `POST /api/v1/hr/nominas/`, `GET /{id}/`, `PUT/PATCH /{id}/`, `DELETE /{id}/` (soft)
 - `creado_por = request.user` y `fecha_generacion = now()` (auto). No mandar.
+- `empresa`, `sucursal` y `empleado` deben ser de la misma empresa, y `sucursal` la del empleado (alta y edición, también superusuario) → si no, `400` por campo.
 
 **Estados nómina**: `pendiente` / `autorizada` / `pagada` / `cancelada`.
 
@@ -7029,6 +7030,7 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 
 - **Endpoint**: `POST /api/v1/hr/nominas/generar_periodo/`
 - **Propósito**: crear nómina para TODOS los empleados activos de la empresa (o de una sucursal específica).
+- Fechas (`periodo_inicio`, `periodo_fin`, `fecha_pago`) como string `YYYY-MM-DD`; cualquier otro valor → `400` con el campo.
 
 **Body**
 
