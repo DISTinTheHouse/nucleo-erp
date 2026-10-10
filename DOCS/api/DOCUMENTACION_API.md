@@ -3524,7 +3524,6 @@ Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró
 
 ```json
 {
-  "empresa": 1,
   "producto_variante": 15,
   "version": 1,
   "observaciones": "BOM inicial",
@@ -3550,6 +3549,8 @@ Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró
 
 - Si el request incluye `materia_prima_detalle`, el backend reemplaza el detalle actual por el nuevo arreglo enviado.
 - Si en `PATCH` no se envía `materia_prima_detalle`, se conserva el detalle existente.
+- **Aislamiento multi-empresa**: `empresa` es de **solo lectura** en la entrada. En el alta la fija el servidor con la empresa del usuario autenticado (superusuario incluido) y en `PUT`/`PATCH` no se reasigna; si el body la trae, se ignora. Sigue saliendo en la respuesta. Un usuario sin empresa recibe `400`.
+- `producto_variante` y `variante_produccion` deben ser de la empresa del usuario: un id de otra empresa responde `400` en ese campo, con el mismo mensaje que un id inexistente.
 
 ### 5) Orden de Producción (Onboarding)
 
