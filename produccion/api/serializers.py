@@ -332,15 +332,32 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         # combinación es una decisión de negocio pendiente.
         pedido = attrs['pedido'] if 'pedido' in attrs else getattr(self.instance, 'pedido', None)
         if pedido is not None:
-            errores = [
+            errores = {}
+            errores_renglones = [
                 {'pedido_detalle': ['El renglón no pertenece al pedido de la orden de producción.']}
                 if renglon.get('pedido_detalle') is not None
                 and renglon['pedido_detalle'].pedido_id != pedido.pk
                 else {}
                 for renglon in attrs.get('orden_produccion_detalle', [])
             ]
-            if any(errores):
-                raise serializers.ValidationError({'orden_produccion_detalle': errores})
+            if any(errores_renglones):
+                errores['orden_produccion_detalle'] = errores_renglones
+            # Al fijar o cambiar el ``pedido`` de una OP existente, los
+            # renglones YA guardados entran en la misma regla: sin esto bastaba
+            # crear la OP sin pedido y ligarla después para evadirla.
+            if (
+                self.instance is not None
+                and self.instance.pedido_id != pedido.pk
+                and self.instance.orden_produccion_detalle
+                .filter(pedido_detalle__isnull=False)
+                .exclude(pedido_detalle__pedido=pedido)
+                .exists()
+            ):
+                errores['pedido'] = [
+                    'La orden de producción tiene renglones ligados a líneas de otro pedido.'
+                ]
+            if errores:
+                raise serializers.ValidationError(errores)
 
         return attrs
 

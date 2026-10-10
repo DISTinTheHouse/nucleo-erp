@@ -5573,6 +5573,77 @@ class OrdenProduccionDetalleTenantTests(_BomTenantBase, TestCase):
         ajena.refresh_from_db()
         self.assertEqual(ajena.prioridad, 1)
 
+    # --- cambio de ``pedido`` con renglones ya guardados ---
+
+    def _op_con_renglon(self, pedido=None, pedido_detalle=None):
+        op = self._op(pedido)
+        OrdenProduccionDetalle.objects.create(
+            op=op, bom=self.bom, cantidad=1, unidad=self.unidad,
+            producto_variante=self.variante, pedido_detalle=pedido_detalle,
+        )
+        return op
+
+    def test_patch_de_pedido_rechaza_si_un_renglon_guardado_es_de_otro_pedido(self):
+        # Evasión en dos pasos: OP sin pedido con renglón de ``pedido`` y luego
+        # PATCH que la liga a ``otro_pedido``.
+        op = self._op_con_renglon(pedido_detalle=self.linea)
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedido": self.otro_pedido.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pedido", resp.data)
+        op.refresh_from_db()
+        self.assertIsNone(op.pedido_id)
+
+    def test_patch_que_cambia_de_pedido_rechaza_renglones_del_pedido_anterior(self):
+        op = self._op_con_renglon(pedido=self.pedido, pedido_detalle=self.linea)
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedido": self.otro_pedido.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pedido", resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.pedido_id, self.pedido.pk)
+
+    def test_put_de_pedido_rechaza_si_un_renglon_guardado_es_de_otro_pedido(self):
+        op = self._op_con_renglon(pedido_detalle=self.linea)
+        resp = self._client().put(f"{self.URL}{op.pk}/", self._body(self.otro_pedido), format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pedido", resp.data)
+        op.refresh_from_db()
+        self.assertIsNone(op.pedido_id)
+
+    def test_patch_de_pedido_valido_con_renglones_de_ese_pedido(self):
+        op = self._op_con_renglon(pedido_detalle=self.linea)
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedido": self.pedido.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.pedido_id, self.pedido.pk)
+
+    def test_patch_de_pedido_ignora_renglones_sin_pedido_detalle(self):
+        op = self._op_con_renglon()
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedido": self.otro_pedido.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_patch_que_quita_el_pedido_no_exige_nada_a_los_renglones(self):
+        op = self._op_con_renglon(pedido=self.pedido, pedido_detalle=self.linea)
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedido": None}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        op.refresh_from_db()
+        self.assertIsNone(op.pedido_id)
+
+    def test_patch_sin_cambiar_el_pedido_no_revisa_renglones_guardados(self):
+        # Sólo se revisa al fijar o cambiar ``pedido``: un PATCH de otro campo
+        # no se bloquea por renglones heredados.
+        op = self._op_con_renglon(pedido=self.pedido, pedido_detalle=self.linea_otro_pedido)
+        resp = self._client().patch(
+            f"{self.URL}{op.pk}/", {"pedido": self.pedido.pk, "prioridad": 3}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+
     # --- ruta_produccion (FK de encabezado con empresa propia) ---
 
     def test_ruta_produccion_de_otra_empresa_se_rechaza_en_create_y_patch(self):
