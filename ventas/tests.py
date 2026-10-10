@@ -18,7 +18,7 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import Color, Producto, ProductoVariante, Talla
+from catalogo.models import Color, Producto, ProductoVariante, Talla, VarianteProductoProduccion
 from inventarios.models import MovimientoInventario
 from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
 from inventarios.models import (
@@ -1999,6 +1999,110 @@ class PedidoProgramarTests(TestCase):
                 .values_list("pk", "cantidad")
             ),
             tallas_antes,
+        )
+
+
+class PedidoVincularSkuMuestraTests(TestCase):
+    """``POST /pedidos/{id}/vincular-sku-muestra/``: copia el SKU de
+    producción de una muestra a la talla del pedido y, si hay cotización de
+    origen, a su talla espejo."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme2", razon_social="ACME2 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY2", nombre="Matriz")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(
+            empresa=cls.empresa, nombre="Cliente", razon_social="Cliente SA"
+        )
+        cls.talla = Talla.objects.create(nombre="M")
+        cls.color = Color.objects.create(nombre="Azul", codigo="AZL", codigo_hex="#00F")
+        cls.mesa = Usuario.objects.create(
+            username="mesa2", email="mesa2@acme2.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(
+            username="vend2", email="vend2@acme2.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+
+        cls.cotizacion = Cotizacion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente,
+            moneda=cls.moneda, vendedor=cls.vendedor,
+        )
+        cot_det = CotizacionDetalle.objects.create(
+            cotizacion=cls.cotizacion, producto_nombre_externo="Gorra muestra", color=cls.color,
+        )
+        cls.cot_talla = CotizacionDetalleTalla.objects.create(
+            cotizacion_detalle=cot_det, talla=cls.talla, cantidad=5,
+        )
+
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente,
+            cotizacion=cls.cotizacion, moneda=cls.moneda, folio="P-900001",
+            persona_pagos="Pagos", correo_facturas="pagos@acme2.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        ped_det = PedidoDetalle.objects.create(
+            pedido=cls.pedido, producto_nombre_externo="Gorra muestra", color=cls.color,
+        )
+        cls.ped_talla = PedidoDetalleTalla.objects.create(
+            pedido_detalle=ped_det, talla=cls.talla, cantidad=5,
+        )
+
+        cls.variante = VarianteProductoProduccion.objects.create(
+            empresa=cls.empresa, pedido_detalle=ped_det, talla=cls.talla,
+            color=cls.color, nombre="Gorra muestra", sku="MP1-AZL-M",
+        )
+
+    def _url(self, pedido=None):
+        return f"{PEDIDOS_URL}{(pedido or self.pedido).pk}/vincular-sku-muestra/"
+
+    def _post(self, user, talla_id=None):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.post(
+            self._url(), {"pedido_detalle_talla_id": talla_id or self.ped_talla.pk}, format="json"
+        )
+
+    def test_copia_sku_al_pedido_y_a_la_cotizacion_sin_tocar_muestra(self):
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 200, resp.json())
+        self.assertEqual(resp.json()["sku_muestra"], "MP1-AZL-M")
+
+        self.ped_talla.refresh_from_db()
+        self.assertEqual(self.ped_talla.sku_muestra, "MP1-AZL-M")
+        self.assertEqual(self.ped_talla.pedido_detalle.producto_nombre_externo, "Gorra muestra")
+
+        self.cot_talla.refresh_from_db()
+        self.assertEqual(self.cot_talla.sku_muestra, "MP1-AZL-M")
+
+    def test_sin_variante_generada_responde_400(self):
+        PedidoDetalleTalla.objects.filter(pk=self.ped_talla.pk).update(sku_muestra=None)
+        self.variante.delete()
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 400, resp.json())
+
+    def test_requiere_mesa_control(self):
+        resp = self._post(self.vendedor)
+        self.assertEqual(resp.status_code, 400, resp.json())
+        self.assertIn("permiso", resp.json())
+
+    def test_talla_de_otro_pedido_responde_400(self):
+        otro_pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, folio="P-900002",
+            persona_pagos="Pagos", correo_facturas="pagos@acme2.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        resp = self.client_post_otro(otro_pedido)
+        self.assertEqual(resp.status_code, 400, resp.json())
+
+    def client_post_otro(self, otro_pedido):
+        client = APIClient()
+        client.force_authenticate(user=self.mesa)
+        return client.post(
+            self._url(otro_pedido), {"pedido_detalle_talla_id": self.ped_talla.pk}, format="json"
         )
 
 

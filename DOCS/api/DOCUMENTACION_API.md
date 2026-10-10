@@ -4700,6 +4700,14 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
 - Dos altas simultáneas de la misma línea se serializan (la línea se bloquea durante el alta): la segunda recibe ese mismo `400`, no un `500`.
 - Tras esto, el `GET` del detalle refleja `sku_produccion` en cada talla sin consultas extra.
 
+**Vincular SKU de muestra al pedido (mesa de control, un clic)**: `POST /api/v1/ventas/pedidos/{id}/vincular-sku-muestra/`
+
+- Gateado a mesa de control. Body: `{"pedido_detalle_talla_id": 456}`.
+- Copia el `sku` de la `VarianteProductoProduccion` ya generada (por `variante-onboarding`) a `PedidoDetalleTalla.sku_muestra` — **no** crea nada nuevo, no toca `producto_nombre_externo` (sigue siendo muestra). Si hay cotización de origen, refleja el mismo SKU en la `CotizacionDetalleTalla` equivalente (match por producto/color/talla; best-effort, sin bloquear si no encuentra una).
+- Sin SKU de producción generado todavía para esa talla: `400 {"pedido_detalle_talla_id": "Esta talla no tiene SKU de producción generado todavía."}`.
+- `sku_muestra` ya viaja en `PedidoDetalleTallaSerializer`/`CotizacionDetalleTallaSerializer` (son `fields='__all__'`) — no hace falta un GET aparte para leerlo tras vincular.
+- Respuesta (`200`): `{"pedido_detalle_talla_id": 456, "sku_muestra": "MP123-AZL-M"}`.
+
 ---
 
 ## 📦 WMS - Picking
