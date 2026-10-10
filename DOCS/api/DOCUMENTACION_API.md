@@ -1124,6 +1124,7 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
 ### KPIs de Clientes (EC-422)
 
 - **Endpoint**: `GET /api/v1/terceros/clientes/kpis/`. Sin query params.
+- Facturas, pedidos y CxC cuentan solo si son de la **misma empresa que su cliente**; un documento de otra empresa que apunte al cliente no entra.
 - Alcance = mismo que el listado de clientes (`clientes_visibles`): un vendedor normal solo ve KPIs de **sus propios clientes** (M2M `vendedores`); Mesa de Control/`is_admin_empresa`/superuser ven toda la empresa.
 - Solo **3 de 4 KPIs son reales**. `reclamos_devoluciones` viene `"disponible": false` — `Devolucion`/`Entrega` no registran cantidad de piezas, solo los FKs.
 

@@ -202,7 +202,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
         from finanzas.models import Factura
 
         filas = list(
-            Factura.objects.filter(cliente__in=clientes_qs, activo=True)
+            Factura.objects.filter(cliente__in=clientes_qs, empresa=F("cliente__empresa"), activo=True)
             .exclude(estatus=Factura.FacturaStatus.CANCELADA)
             .values("cliente_id", "cliente__nombre")
             .annotate(monto=Sum("total"))
@@ -236,7 +236,9 @@ class ClienteViewSet(viewsets.ModelViewSet):
         desde = timezone.now() - timedelta(days=90)
         total = clientes_qs.count()
         activos = (
-            Pedido.objects.filter(cliente__in=clientes_qs, activo=True, created_at__gte=desde)
+            Pedido.objects.filter(
+                cliente__in=clientes_qs, empresa=F("cliente__empresa"), activo=True, created_at__gte=desde,
+            )
             .values("cliente_id")
             .distinct()
             .count()
@@ -257,8 +259,11 @@ class ClienteViewSet(viewsets.ModelViewSet):
         hoy = timezone.localdate()
         hace_30 = hoy - timedelta(days=30)
         hace_60 = hoy - timedelta(days=60)
+        # Solo documentos de la empresa del cliente: uno de otra empresa que lo
+        # apunte no entra (mismo criterio que ``_resumen_comercial``).
         vencidas = CuentaPorCobrar.objects.filter(
             cliente__in=clientes_qs,
+            empresa=F("cliente__empresa"),
             estatus__in=[CuentaPorCobrar.EstatusCxC.PENDIENTE, CuentaPorCobrar.EstatusCxC.PARCIAL],
             fecha_vencimiento__isnull=False,
             fecha_vencimiento__lt=hoy,
