@@ -1222,8 +1222,10 @@ class RecepcionKpisTests(TestCase):
         )
         cls.almacen = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM", nombre="Almacen")
         cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Insumo Test")
+        # Ve montos (admin de empresa): estos tests fijan los cálculos.
         cls.usuario = Usuario.objects.create(
             username="u@acme.test", email="u@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
         )
         cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
 
@@ -1298,6 +1300,22 @@ class RecepcionKpisTests(TestCase):
         client.force_authenticate(user=user or self.usuario)
         return client.get(self.URL)
 
+    def _sin_contabilidad(self):
+        return Usuario.objects.create(
+            username="almacen@acme.test", email="almacen@acme.test", empresa=self.empresa,
+            sucursal_default=self.sucursal,
+        )
+
+    def test_sin_permiso_de_contabilidad_no_ve_montos(self):
+        """#377: mismos campos ocultos que el listado de OC."""
+        data = self._get(self._sin_contabilidad()).json()
+
+        self.assertEqual(data["diferencia_precio"], {"disponible": False, "motivo": "Sin permiso de contabilidad."})
+        self.assertNotIn("valor_rechazado", data["material_rechazado"])
+        self.assertTrue(all("valor_linea" not in f for f in data["material_rechazado"]["drill_down"]))
+        self.assertIn("cantidad_rechazada", data["material_rechazado"])
+        self.assertIn("pct", data["cumplimiento_cantidad"])
+
     def test_cumplimiento_cantidad(self):
         resp = self._get()
 
@@ -1370,8 +1388,10 @@ class OrdenCompraKpisTests(TestCase):
             sat_forma_pago=forma, sat_metodo_pago=metodo, codigo="PROV-1", razon_social="Prov SA",
             telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000", email="p@acme.test",
         )
+        # Ve montos (admin de empresa): estos tests fijan los cálculos.
         cls.usuario = Usuario.objects.create(
             username="u@acme.test", email="u@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
         )
         cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
 
@@ -1421,6 +1441,21 @@ class OrdenCompraKpisTests(TestCase):
         client = APIClient()
         client.force_authenticate(user=user or self.usuario)
         return client.get(self.URL)
+
+    def _sin_contabilidad(self):
+        return Usuario.objects.create(
+            username="almacen@acme.test", email="almacen@acme.test", empresa=self.empresa,
+            sucursal_default=self.sucursal,
+        )
+
+    def test_sin_permiso_de_contabilidad_no_ve_montos(self):
+        """#373: mismos campos ocultos que el listado de OC."""
+        data = self._get(self._sin_contabilidad()).json()
+
+        self.assertNotIn("monto", data["ocs_abiertas"])
+        self.assertTrue(all("monto" not in f for f in data["ocs_abiertas"]["por_estatus"]))
+        self.assertIn("total", data["ocs_abiertas"])
+        self.assertEqual(data["gasto_por_categoria"], {"disponible": False, "motivo": "Sin permiso de contabilidad."})
 
     def test_ocs_abiertas(self):
         resp = self._get()
