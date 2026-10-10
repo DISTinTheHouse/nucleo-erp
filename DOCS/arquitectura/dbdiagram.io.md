@@ -185,6 +185,16 @@ Table variantes_producto {
   id_talla int
 }
 
+Table variantes_producto_produccion {
+  id_variante_produccion int [pk]
+  id_empresa int
+  id_op int                // orden de producción
+  id_producto_base int     // opcional: referencia a producto catálogo si existe
+  id_color int
+  id_talla int
+  // check box de catalogo 
+}
+
 
 
 // =========================
