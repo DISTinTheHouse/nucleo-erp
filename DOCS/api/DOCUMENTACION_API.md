@@ -3634,6 +3634,12 @@ Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró
 }
 ```
 
+### 6.0.1) Consumos de producción
+
+- **Endpoints**: `GET /api/v1/produccion/consumo/`, `GET /api/v1/produccion/consumo/{id}/`, `POST /api/v1/produccion/consumo/` (body `{"op": 10}`), `POST /api/v1/produccion/consumo/{id}/confirmar/` y `/anular/` (stubs, solo responden `{"msg": ...}`). No hay `PUT`/`PATCH`/`DELETE` (`405`).
+- **Respuesta**: `consumo_produccion_id`, `op`, `detalles[]` (`id`, `producto`, `producto_nombre`, `cantidad`). El `POST` solo crea el encabezado: no mueve inventario ni toca la OP (el consumo real lo registra el alta de la OP).
+- **Aislamiento multi-empresa**: siempre la empresa del usuario (superusuario incluido). Listado solo con consumos de OPs propias; detalle y acciones de un consumo ajeno → `404`. `op` de otra empresa en el `POST` → `400 {"op": [...]}` con el mismo mensaje que un id inexistente. Usuario sin empresa: lista vacía y `400` al crear.
+
 ### 6.1) Ruta Crítica de Orden de Producción
 
 Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos, trazo, corte, producción). Compras queda pendiente hasta nuevo aviso. Es un renglón por OP (no por línea/variante), en tabla separada de `OrdenProduccion` para que el `GET`/`PATCH` sea barato — no toca el serializer pesado con BOM/detalles anidados.

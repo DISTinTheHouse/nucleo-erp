@@ -761,12 +761,16 @@ class ConsumoProduccionViewSet(viewsets.ModelViewSet):
             return ConsumoProduccion.objects.none()
         return self.queryset.filter(op__empresa=empresa)
 
+    # ``confirmar``/``anular`` siguen siendo stubs, pero resuelven el registro
+    # por ``get_queryset``: un consumo ajeno (o inexistente) responde 404.
     @action(detail=True, methods=['post'])
     def confirmar(self, request, pk=None):
+        self.get_object()
         return Response({'msg': 'ConsumoProduccionViewSet.confirmar'}, status=status.HTTP_200_OK)
-    
+
     @action(detail=True, methods=['post'])
     def anular(self, request, pk=None):
+        self.get_object()
         return Response({'msg': 'ConsumoProduccionViewSet.anular'}, status=status.HTTP_200_OK)
 
 class ProductoTerminadoEntradasViewSet(viewsets.ModelViewSet):

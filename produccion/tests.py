@@ -26,12 +26,19 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
 from catalogo.models import Color, Producto, ProductoVariante, Talla, VarianteProductoProduccion
-from inventarios.models import Almacen, Existencia, MovimientoInventarioDetalle, Ubicacion
+from inventarios.models import (
+    Almacen,
+    Existencia,
+    MovimientoInventario,
+    MovimientoInventarioDetalle,
+    Ubicacion,
+)
 from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal, UnidadMedida
 from produccion.models import (
     BomDetalle,
     BordadoAvances,
     BordadoIncidencias,
+    ConsumoProduccion,
     ListaMaterialBom,
     OrdenBordadoDetalle,
     OrdenesBordado,
@@ -5594,3 +5601,133 @@ class OrdenProduccionDetalleTenantTests(_BomTenantBase, TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         op.refresh_from_db()
         self.assertEqual(op.ruta_produccion_id, ruta.pk)
+
+
+class _RegistrosDeOPTenantBase(_BomTenantBase):
+    """Fixture para los recursos que cuelgan de una OP (``consumo`` y
+    ``producto-terminado-entradas``): una OP, un almacén y una ubicación por
+    empresa, más una existencia propia para vigilar efectos secundarios."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.op = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-TI-PROPIA",
+        )
+        cls.op_ajena = OrdenProduccion.objects.create(
+            empresa=cls.otra_empresa, sucursal=cls.otra_sucursal, folio_op="OP-TI-AJENA",
+        )
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM-TI", nombre="Principal",
+        )
+        cls.ubicacion = Ubicacion.objects.create(almacen=cls.almacen, pasillo="1")
+        cls.almacen_ajeno = Almacen.objects.create(
+            empresa=cls.otra_empresa, sucursal=cls.otra_sucursal, codigo="ALM-AJ", nombre="Ajeno",
+        )
+        cls.ubicacion_ajena = Ubicacion.objects.create(almacen=cls.almacen_ajeno, pasillo="9")
+        cls.existencia = Existencia.objects.create(
+            almacen=cls.almacen, producto=cls.componente, cantidad=100,
+        )
+        cls.sin_empresa = Usuario.objects.create(username="ti-se2", email="ti-se2@nowhere.test")
+        cls.root = Usuario.objects.create(
+            username="ti-root5", email="ti-root5@acme-ti.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_superuser=True, is_staff=True,
+        )
+
+    def _sin_efectos_secundarios(self):
+        """Un request rechazado no mueve inventario ni toca las OPs."""
+        self.existencia.refresh_from_db()
+        self.assertEqual(self.existencia.cantidad, 100)
+        self.assertFalse(MovimientoInventario.objects.exists())
+        for op in (self.op, self.op_ajena):
+            antes = (op.estatus_op, op.cerrar_orden, op.activo, op.fecha_fin)
+            op.refresh_from_db()
+            self.assertEqual((op.estatus_op, op.cerrar_orden, op.activo, op.fecha_fin), antes)
+
+    def _mismo_mensaje_que_inexistente(self, campo, pk_ajeno, body_con):
+        inexistente_pk = pk_ajeno + 999
+        ajeno = self._client().post(self.URL, body_con(pk_ajeno), format="json")
+        inexistente = self._client().post(self.URL, body_con(inexistente_pk), format="json")
+        self.assertEqual((ajeno.status_code, inexistente.status_code), (400, 400))
+        self.assertEqual(
+            str(ajeno.data[campo][0]).replace(str(pk_ajeno), "X"),
+            str(inexistente.data[campo][0]).replace(str(inexistente_pk), "X"),
+        )
+
+
+class ConsumoProduccionTenantTests(_RegistrosDeOPTenantBase, TestCase):
+    """``/produccion/consumo/`` (sólo GET y POST): ``op`` debe ser de la empresa
+    del usuario y todo registro ajeno responde 404, acciones incluidas."""
+
+    URL = "/api/v1/produccion/consumo/"
+
+    def setUp(self):
+        self.consumo = ConsumoProduccion.objects.create(op=self.op)
+        self.consumo_ajeno = ConsumoProduccion.objects.create(op=self.op_ajena)
+
+    def test_create_con_op_propia_conserva_el_shape(self):
+        resp = self._client().post(self.URL, {"op": self.op.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(set(resp.data), {"consumo_produccion_id", "op", "detalles"})
+        self.assertEqual((resp.data["op"], resp.data["detalles"]), (self.op.pk, []))
+
+    def test_create_rechaza_op_de_otra_empresa(self):
+        resp = self._client().post(self.URL, {"op": self.op_ajena.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("op", resp.data)
+        self.assertEqual(ConsumoProduccion.objects.count(), 2)
+        self._sin_efectos_secundarios()
+
+    def test_op_ajena_e_inexistente_responden_igual(self):
+        self._mismo_mensaje_que_inexistente("op", self.op_ajena.pk, lambda pk: {"op": pk})
+
+    def test_list_excluye_registros_de_otra_empresa(self):
+        resp = self._client().get(self.URL)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([fila["consumo_produccion_id"] for fila in resp.data], [self.consumo.pk])
+
+    def test_retrieve_propio_200_y_ajeno_404(self):
+        self.assertEqual(self._client().get(f"{self.URL}{self.consumo.pk}/").status_code, 200)
+        self.assertEqual(self._client().get(f"{self.URL}{self.consumo_ajeno.pk}/").status_code, 404)
+
+    def test_acciones_sobre_registro_ajeno_responden_404(self):
+        for accion in ("confirmar", "anular"):
+            propio = self._client().post(f"{self.URL}{self.consumo.pk}/{accion}/")
+            ajeno = self._client().post(f"{self.URL}{self.consumo_ajeno.pk}/{accion}/")
+            self.assertEqual(propio.status_code, 200, accion)
+            self.assertEqual(set(propio.data), {"msg"})
+            self.assertEqual(ajeno.status_code, 404, accion)
+
+    def test_put_patch_y_delete_no_existen_y_no_modifican(self):
+        # ``http_method_names = ['get', 'post']``: no hay ruta de update/delete
+        # por la que reasignar ``op``, ni para lo propio ni para lo ajeno.
+        for consumo in (self.consumo, self.consumo_ajeno):
+            url = f"{self.URL}{consumo.pk}/"
+            op_antes = consumo.op_id
+            self.assertEqual(self._client().put(url, {"op": self.op_ajena.pk}, format="json").status_code, 405)
+            self.assertEqual(self._client().patch(url, {"op": self.op_ajena.pk}, format="json").status_code, 405)
+            self.assertEqual(self._client().delete(url).status_code, 405)
+            consumo.refresh_from_db()
+            self.assertEqual(consumo.op_id, op_antes)
+
+    def test_usuario_sin_empresa_lista_vacia_y_400_al_crear(self):
+        client = self._client(self.sin_empresa)
+
+        self.assertEqual(client.get(self.URL).data, [])
+        resp = client.post(self.URL, {"op": self.op.pk}, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(ConsumoProduccion.objects.count(), 2)
+
+    def test_superusuario_queda_acotado_a_su_empresa(self):
+        client = self._client(self.root)
+
+        self.assertEqual(
+            [fila["consumo_produccion_id"] for fila in client.get(self.URL).data], [self.consumo.pk]
+        )
+        self.assertEqual(client.get(f"{self.URL}{self.consumo_ajeno.pk}/").status_code, 404)
+        resp = client.post(self.URL, {"op": self.op_ajena.pk}, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("op", resp.data)
