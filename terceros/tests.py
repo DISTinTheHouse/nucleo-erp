@@ -281,6 +281,13 @@ class ProveedorKpisTests(TestCase):
             resultado="rechazo", motivo_rechazo="Fuera de especificación",
         )
 
+        # Proveedor sin fecha prometida en su OC: no se puede saber si llegó tarde (#387).
+        cls.sin_fecha = _proveedor("PROV-SF", "Proveedor Sin Fecha")
+        _oc_con_recepcion(
+            cls.sin_fecha, "RC-SF-1", date(2026, 1, 1), None, date(2026, 1, 8),
+            precio_facturado=D("5.00"),
+        )
+
         cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
 
     def _get(self, user=None):
@@ -316,6 +323,15 @@ class ProveedorKpisTests(TestCase):
         # Promedio de los 4 factores: a_tiempo(0) + calidad(57.1) + cumplimiento(70) + precio(60).
         self.assertAlmostEqual(fila["scorecard"]["puntaje"], 46.8, places=1)
         self.assertEqual(fila["scorecard"]["semaforo"], "rojo")
+
+    def test_recepcion_sin_fecha_prometida_no_cuenta_como_tarde(self):
+        fila = self._fila(self._get(), self.sin_fecha.pk)
+
+        self.assertIsNone(fila["entrega_a_tiempo"]["pct"])
+        self.assertEqual(fila["entrega_a_tiempo"]["recepciones_total"], 1)
+        self.assertEqual(fila["entrega_a_tiempo"]["recepciones_con_compromiso"], 0)
+        # El scorecard no penaliza el factor sin dato: cumplimiento 100 y precio 100.
+        self.assertEqual(fila["scorecard"]["puntaje"], 100.0)
 
     def test_bueno_sale_mejor_rankeado_que_malo(self):
         resp = self._get()
