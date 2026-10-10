@@ -455,6 +455,36 @@ class ClienteKpisTests(TestCase):
         self.assertEqual(cartera["buckets"]["31_60"], {"total": 1, "monto": Decimal("700.00")})
         self.assertEqual(cartera["buckets"]["60_mas"], {"total": 1, "monto": Decimal("200.00")})
 
+    def test_documentos_de_otra_empresa_no_entran(self):
+        """#366: pedido, factura y CxC de otra empresa que apuntan a un cliente visible."""
+        from finanzas.models import CuentaPorCobrar, Factura
+        from nucleo.models import Sucursal
+        from ventas.models import Pedido
+
+        otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        sucursal = Sucursal.objects.create(empresa=otra, codigo="GDL", nombre="GDL")
+        Pedido.objects.create(
+            empresa=otra, sucursal=sucursal, cliente=self.cliente_b, moneda=self.moneda,
+            persona_pagos="Pagos", correo_facturas="p@globex.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        factura = Factura.objects.create(
+            empresa=otra, sucursal=sucursal, cliente=self.cliente_b, moneda=self.moneda,
+            total=Decimal("5000.00"), estatus=Factura.FacturaStatus.EMITIDA,
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=otra, cliente=self.cliente_b, factura=factura, total=Decimal("999.00"),
+            saldo=Decimal("999.00"), estatus=CuentaPorCobrar.EstatusCxC.PENDIENTE,
+            fecha_vencimiento=timezone.localdate() - timedelta(days=10),
+        )
+
+        data = self._get(self.admin_empresa).data
+
+        self.assertEqual(data["ventas_por_cliente"]["total_facturado"], Decimal("3000.00"))
+        self.assertEqual(data["clientes_activos"]["activos"], 1)
+        self.assertEqual(data["cartera_antiguedad"]["saldo_total_vencido"], Decimal("1200.00"))
+        self.assertNotIn(cxc.pk, [f["id"] for f in data["cartera_antiguedad"]["drill_down"]])
+
     def test_cartera_acotada_por_vendedor(self):
         resp = self._get(self.vendedor_a)
 
