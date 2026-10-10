@@ -39,10 +39,12 @@ from produccion.models import (
     OrdenesCorteManga,
     OrdenesReflejante,
     OrdenProduccion,
+    OrdenProduccionDetalle,
     OrdenProduccionRutaCritica,
     OrdenReflejanteDetalle,
     ReflejanteAvances,
     ReflejanteIncidencias,
+    RutaProduccion,
 )
 from produccion.services.common import config_como_dict
 from produccion.services.orden_produccion_service import OrdenProduccionService
@@ -5332,3 +5334,263 @@ class BomDetalleTenantTests(_BomTenantBase, TestCase):
             (detalle.bom.empresa_id, detalle.componente_id, detalle.variante_produccion_id),
             (self.empresa.pk, self.componente.pk, variante.pk),
         )
+
+
+class OrdenProduccionDetalleTenantTests(_BomTenantBase, TestCase):
+    """Renglones de ``/orden-produccion/``: ``pedido_detalle`` y
+    ``producto_variante_id`` deben ser de la empresa del usuario y, si la OP
+    tiene ``pedido``, el ``pedido_detalle`` debe ser de ESE pedido. Sin
+    ``pedido`` en la OP sólo se exige la empresa."""
+
+    URL = "/api/v1/produccion/orden-produccion/"
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal,
+            tipo_documento="ORDEN_PRODUCCION", serie="OP",
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente TI")
+        cls.cliente_ajeno = Cliente.objects.create(empresa=cls.otra_empresa, nombre="Cliente ajeno")
+
+        cls.bom = ListaMaterialBom.objects.create(empresa=cls.empresa, producto_variante=cls.variante)
+        BomDetalle.objects.create(bom=cls.bom, componente=cls.componente, cantidad=1, unidad=cls.unidad)
+        # BOM "legado" de la propia empresa colgado de una variante AJENA: es el
+        # caso en que el lookup de BOM por empresa NO frena la variante ajena.
+        bom_legado = ListaMaterialBom.objects.create(empresa=cls.empresa, producto_variante=cls.variante_ajena)
+        BomDetalle.objects.create(bom=bom_legado, componente=cls.componente, cantidad=1, unidad=cls.unidad)
+        almacen = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM-TI", nombre="Principal",
+        )
+        cls.existencia = Existencia.objects.create(almacen=almacen, producto=cls.componente, cantidad=100)
+
+        cls.pedido, cls.linea = cls._pedido_muestra(cls.empresa, cls.sucursal, cls.cliente)
+        cls.otro_pedido, cls.linea_otro_pedido = cls._pedido_muestra(cls.empresa, cls.sucursal, cls.cliente)
+        cls.pedido_ajeno, cls.linea_ajena = cls._pedido_muestra(
+            cls.otra_empresa, cls.otra_sucursal, cls.cliente_ajeno
+        )
+
+    @classmethod
+    def _pedido_muestra(cls, empresa, sucursal, cliente):
+        pedido = Pedido.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=cls.moneda,
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            clasificacion="B", fecha_confirmacion=timezone.now(),
+        )
+        return pedido, PedidoDetalle.objects.create(pedido=pedido, producto_nombre_externo="Muestra")
+
+    def _body(self, pedido=None, **linea):
+        body = {
+            "orden_produccion_detalle": [
+                {
+                    "producto_variante_id": self.variante.pk, "cantidad": "3.00",
+                    "unidad": self.unidad.pk, **linea,
+                }
+            ],
+        }
+        if pedido is not None:
+            body["pedido"] = pedido.pk
+        return body
+
+    def _error_linea(self, resp, campo):
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn(campo, resp.data["orden_produccion_detalle"][0])
+        return resp.data["orden_produccion_detalle"][0][campo]
+
+    def _sin_efectos(self):
+        self.assertFalse(OrdenProduccion.objects.exists())
+        self.existencia.refresh_from_db()
+        self.assertEqual(self.existencia.cantidad, 100)
+
+    def _op(self, pedido=None):
+        return OrdenProduccion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=pedido, folio_op=f"OP-TI-{pedido}",
+        )
+
+    # --- create ---
+
+    def test_create_sin_pedido_detalle_conserva_el_shape(self):
+        resp = self._client().post(self.URL, self._body(), format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(
+            set(resp.data),
+            {"msg", "op_id", "folio_op", "consumo_produccion_id", "movimiento_inventario_id", "movimiento_id"},
+        )
+
+    def test_create_con_pedido_y_su_propio_renglon(self):
+        resp = self._client().post(
+            self.URL, self._body(self.pedido, pedido_detalle=self.linea.pk), format="json"
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        detalle = OrdenProduccionDetalle.objects.get(op_id=resp.data["op_id"])
+        self.assertEqual(detalle.pedido_detalle_id, self.linea.pk)
+
+    def test_create_sin_pedido_acepta_renglon_de_la_propia_empresa(self):
+        # OP sin ``pedido`` + línea con ``pedido_detalle``: sólo se exige la
+        # empresa; rechazar o no esa combinación es decisión de negocio pendiente.
+        resp = self._client().post(self.URL, self._body(pedido_detalle=self.linea.pk), format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        detalle = OrdenProduccionDetalle.objects.get(op_id=resp.data["op_id"])
+        self.assertEqual(detalle.pedido_detalle_id, self.linea.pk)
+
+    def test_create_sin_pedido_rechaza_renglon_de_otra_empresa(self):
+        resp = self._client().post(self.URL, self._body(pedido_detalle=self.linea_ajena.pk), format="json")
+
+        self._error_linea(resp, "pedido_detalle")
+        self._sin_efectos()
+
+    def test_create_con_pedido_rechaza_renglon_de_otra_empresa(self):
+        resp = self._client().post(
+            self.URL, self._body(self.pedido, pedido_detalle=self.linea_ajena.pk), format="json"
+        )
+
+        self._error_linea(resp, "pedido_detalle")
+        self._sin_efectos()
+
+    def test_create_con_pedido_rechaza_renglon_de_otro_pedido(self):
+        resp = self._client().post(
+            self.URL, self._body(self.pedido, pedido_detalle=self.linea_otro_pedido.pk), format="json"
+        )
+
+        self._error_linea(resp, "pedido_detalle")
+        self._sin_efectos()
+
+    def test_pedido_detalle_ajeno_e_inexistente_responden_igual(self):
+        inexistente_pk = self.linea_ajena.pk + 999
+        ajeno = self._client().post(self.URL, self._body(pedido_detalle=self.linea_ajena.pk), format="json")
+        inexistente = self._client().post(self.URL, self._body(pedido_detalle=inexistente_pk), format="json")
+
+        self.assertEqual(
+            str(self._error_linea(ajeno, "pedido_detalle")[0]).replace(str(self.linea_ajena.pk), "X"),
+            str(self._error_linea(inexistente, "pedido_detalle")[0]).replace(str(inexistente_pk), "X"),
+        )
+
+    def test_create_rechaza_producto_variante_de_otra_empresa(self):
+        # Pasa el lookup de BOM (hay un BOM propio colgado de la variante
+        # ajena): la validación explícita es la única barrera.
+        resp = self._client().post(
+            self.URL, self._body(producto_variante_id=self.variante_ajena.pk), format="json"
+        )
+
+        self._error_linea(resp, "producto_variante_id")
+        self._sin_efectos()
+
+    def test_onboarding_post_aplica_las_mismas_reglas(self):
+        url = f"{self.URL}onboarding/"
+        ajeno = self._client().post(url, self._body(pedido_detalle=self.linea_ajena.pk), format="json")
+        variante = self._client().post(
+            url, self._body(producto_variante_id=self.variante_ajena.pk), format="json"
+        )
+
+        self._error_linea(ajeno, "pedido_detalle")
+        self._error_linea(variante, "producto_variante_id")
+        self._sin_efectos()
+
+    def test_superusuario_tampoco_referencia_fks_de_otra_empresa(self):
+        root = Usuario.objects.create(
+            username="ti-root4", email="ti-root4@acme-ti.test", empresa=self.empresa,
+            sucursal_default=self.sucursal, is_superuser=True, is_staff=True,
+        )
+        ajeno = self._client(root).post(self.URL, self._body(pedido_detalle=self.linea_ajena.pk), format="json")
+        variante = self._client(root).post(
+            self.URL, self._body(producto_variante_id=self.variante_ajena.pk), format="json"
+        )
+
+        self._error_linea(ajeno, "pedido_detalle")
+        self._error_linea(variante, "producto_variante_id")
+        self._sin_efectos()
+
+    # --- update ---
+
+    def test_patch_rechaza_renglon_de_otra_empresa(self):
+        op = self._op()
+        resp = self._client().patch(
+            f"{self.URL}{op.pk}/", self._body(pedido_detalle=self.linea_ajena.pk), format="json"
+        )
+
+        self._error_linea(resp, "pedido_detalle")
+        self.assertFalse(OrdenProduccionDetalle.objects.filter(op=op).exists())
+
+    def test_patch_rechaza_producto_variante_de_otra_empresa(self):
+        op = self._op()
+        resp = self._client().patch(
+            f"{self.URL}{op.pk}/", self._body(producto_variante_id=self.variante_ajena.pk), format="json"
+        )
+
+        self._error_linea(resp, "producto_variante_id")
+        self.assertFalse(OrdenProduccionDetalle.objects.filter(op=op).exists())
+
+    def test_put_rechaza_renglon_de_otra_empresa(self):
+        op = self._op()
+        resp = self._client().put(
+            f"{self.URL}{op.pk}/", self._body(pedido_detalle=self.linea_ajena.pk), format="json"
+        )
+
+        self._error_linea(resp, "pedido_detalle")
+        self.assertFalse(OrdenProduccionDetalle.objects.filter(op=op).exists())
+
+    def test_patch_rechaza_renglon_de_otro_pedido_usando_el_pedido_de_la_op(self):
+        # El ``pedido`` no viene en el PATCH: se compara contra el de la instancia.
+        op = self._op(self.pedido)
+        resp = self._client().patch(
+            f"{self.URL}{op.pk}/", self._body(pedido_detalle=self.linea_otro_pedido.pk), format="json"
+        )
+
+        self._error_linea(resp, "pedido_detalle")
+        self.assertFalse(OrdenProduccionDetalle.objects.filter(op=op).exists())
+
+    def test_patch_de_encabezado_en_la_propia_empresa_sigue_funcionando(self):
+        op = self._op(self.pedido)
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"prioridad": 4}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual((resp.data["prioridad"], resp.data["pedido"]), (4, self.pedido.pk))
+        self.assertEqual(resp.data["empresa"], self.empresa.pk)
+
+    def test_op_de_otra_empresa_responde_404(self):
+        ajena = OrdenProduccion.objects.create(
+            empresa=self.otra_empresa, sucursal=self.otra_sucursal, folio_op="OP-TI-AJENA",
+        )
+        url = f"{self.URL}{ajena.pk}/"
+
+        self.assertEqual(self._client().get(url).status_code, 404)
+        self.assertEqual(self._client().patch(url, {"prioridad": 9}, format="json").status_code, 404)
+        self.assertEqual(self._client().delete(url).status_code, 404)
+        ajena.refresh_from_db()
+        self.assertEqual(ajena.prioridad, 1)
+
+    # --- ruta_produccion (FK de encabezado con empresa propia) ---
+
+    def test_ruta_produccion_de_otra_empresa_se_rechaza_en_create_y_patch(self):
+        ruta_ajena = RutaProduccion.objects.create(empresa=self.otra_empresa, producto=self.producto_ajeno)
+        op = self._op()
+
+        create = self._client().post(
+            self.URL, {**self._body(), "ruta_produccion": ruta_ajena.pk}, format="json"
+        )
+        patch = self._client().patch(
+            f"{self.URL}{op.pk}/", {"ruta_produccion": ruta_ajena.pk}, format="json"
+        )
+
+        for resp in (create, patch):
+            self.assertEqual(resp.status_code, 400, resp.data)
+            self.assertIn("ruta_produccion", resp.data)
+        op.refresh_from_db()
+        self.assertIsNone(op.ruta_produccion_id)
+        self.assertEqual(OrdenProduccion.objects.count(), 1)
+
+    def test_ruta_produccion_de_la_propia_empresa_se_acepta(self):
+        ruta = RutaProduccion.objects.create(empresa=self.empresa, producto=self.producto)
+        op = self._op()
+
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"ruta_produccion": ruta.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.ruta_produccion_id, ruta.pk)
