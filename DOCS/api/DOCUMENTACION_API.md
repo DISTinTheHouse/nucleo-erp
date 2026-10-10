@@ -4689,7 +4689,7 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
   - Línea **con** color: se puede omitir o mandar el mismo; uno distinto responde `400 {"color": ...}` y no crea nada.
   - Un `color` inexistente, inactivo o sin `codigo` responde `400` en `color`.
   - Tras el alta, el `GET` del detalle muestra ese color en `color_nombre` de la línea.
-- El `nombre` de cada variante es `producto_nombre_externo` de la línea, **recortado a 150 caracteres** (el largo del campo) si es más largo; el texto de la línea no se modifica.
+- El `nombre` de cada variante es `producto_nombre_externo` de la línea, copiado tal cual si cabe en el campo. Si excede el `max_length` de `VarianteProductoProduccion.nombre` (hoy 150; el código lo lee del modelo), se recorta a ese largo y se quitan los espacios y separadores (`- _ , ; : . / |`) que el corte deje al final. El texto de la línea no se modifica.
 - Si la línea ya tiene algún SKU generado, responde `400` sin tocar nada (no hay merge; es alta única).
 - Tras esto, el `GET` del detalle refleja `sku_produccion` en cada talla sin consultas extra.
 
