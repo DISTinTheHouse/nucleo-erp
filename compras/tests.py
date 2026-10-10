@@ -1327,6 +1327,39 @@ class RecepcionKpisTests(TestCase):
         self.assertEqual(kpi["costo_pactado_oc"], Decimal("30.00"))  # 6 * 5.00
         self.assertEqual(kpi["diferencia"], Decimal("6.00"))
         self.assertEqual(len(kpi["drill_down"]), 1)
+        self.assertEqual(kpi["lineas_evaluadas"], 1)
+
+    def _factura_extra(self, **kwargs):
+        factura = FacturaProveedor.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, proveedor=self.proveedor, oc=self.oc1,
+            recepcion=self.rec1, moneda=self.moneda, **kwargs,
+        )
+        FacturaProveedorDetalle.objects.create(
+            factura_proveedor=factura, oc_detalle=self.oc1_det, recepcion_detalle=self.rec1_det,
+            producto=self.producto, cantidad=6, precio_unitario=Decimal("100.00"),
+        )
+        return factura
+
+    def test_diferencia_precio_ignora_borradores_e_inactivas(self):
+        """#379: solo facturas Registradas y activas."""
+        self._factura_extra(estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR)
+        self._factura_extra(estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA, activo=False)
+
+        kpi = self._get().data["diferencia_precio"]
+
+        self.assertEqual(kpi["costo_facturado"], Decimal("36.00"))
+        self.assertEqual(kpi["lineas_evaluadas"], 1)
+
+    def test_diferencia_precio_sin_lineas_se_distingue_de_diferencia_cero(self):
+        """#383: ``lineas_evaluadas`` = 0 cuando no hubo nada que evaluar."""
+        FacturaProveedor.objects.filter(empresa=self.empresa).update(
+            estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR
+        )
+
+        kpi = self._get().data["diferencia_precio"]
+
+        self.assertEqual(kpi["lineas_evaluadas"], 0)
+        self.assertEqual(kpi["diferencia"], Decimal("0"))
 
     def test_material_rechazado(self):
         resp = self._get()

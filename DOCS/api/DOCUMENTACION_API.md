@@ -2672,11 +2672,11 @@ Distintos de `/dashboard/` de arriba: cada uno es la tarjeta de KPIs de **una pa
   "generado_en": "2026-10-08T12:00:00Z",
   "cumplimiento_cantidad": { "disponible": true, "cantidad_ordenada": "500.00", "cantidad_recibida": "430.00", "pct": 86.0, "drill_down": [{ "oc_id": 12, "folio": "OC-000012", "cantidad_ordenada": "50", "cantidad_recibida": "20", "pct": 40.0 }] },
   "recepciones_parciales": { "disponible": true, "ocs_parciales": 4, "ocs_recibidas_o_parciales": 15, "pct": 26.7 },
-  "diferencia_precio": { "disponible": true, "costo_facturado": "52000.00", "costo_pactado_oc": "50000.00", "diferencia": "2000.00", "pct": 4.0, "drill_down": [...] },
+  "diferencia_precio": { "disponible": true, "lineas_evaluadas": 14, "costo_facturado": "52000.00", "costo_pactado_oc": "50000.00", "diferencia": "2000.00", "pct": 4.0, "drill_down": [...] },
   "material_rechazado": { "disponible": true, "cantidad_rechazada": "12.00", "valor_rechazado": "1800.00", "drill_down": [{ "id": 5, "recepcion_detalle__recepcion__folio": "RC-000005", "recepcion_detalle__producto__nombre": "Tela Azul", "cantidad_rechazada": "5.00", "valor_linea": "750.00", "motivo_rechazo": "Fuera de tono" }] }
 }
 ```
-`diferencia_precio` compara `FacturaProveedorDetalle.precio_unitario` contra `OrdenCompraDetalle.precio` de la misma línea. `material_rechazado` viene de `CalidadInspeccionDetalle.cantidad_rechazada`, valorizado al precio pactado en la OC.
+`diferencia_precio` compara `FacturaProveedorDetalle.precio_unitario` contra `OrdenCompraDetalle.precio` de la misma línea. Solo facturas `Registrada` y activas, de OC activas en estatus 3/4/5. `lineas_evaluadas: 0` = no hubo líneas que evaluar (distinto de diferencia 0). `material_rechazado` viene de `CalidadInspeccionDetalle.cantidad_rechazada`, valorizado al precio pactado en la OC.
 
 ### Proveedores — `GET /api/v1/terceros/proveedores/kpis/`
 
