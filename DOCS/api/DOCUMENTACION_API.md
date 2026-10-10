@@ -3619,6 +3619,7 @@ Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró
 - **Aislamiento multi-empresa de los renglones** (`orden_produccion_detalle[i]`, `400` por campo, no crea nada):
   - `producto_variante_id` debe ser de la empresa del usuario (validación explícita, ya no depende del lookup de BOM).
   - `pedido_detalle` (opcional) debe ser de la empresa del usuario y, si la OP tiene `pedido`, ser un renglón de **ese** pedido: `400 {"orden_produccion_detalle": [{"pedido_detalle": ["El renglón no pertenece al pedido de la orden de producción."]}]}`. Si la OP no tiene `pedido`, solo se exige la empresa.
+  - Al fijar o cambiar el `pedido` de una OP existente (`PUT`/`PATCH`), los renglones **ya guardados** con `pedido_detalle` también deben ser de ese pedido: `400 {"pedido": ["La orden de producción tiene renglones ligados a líneas de otro pedido."]}`. Quitar el pedido (`"pedido": null`) no exige nada.
   - `ruta_produccion` (encabezado, opcional) debe ser de la empresa del usuario.
   - Un id de otra empresa responde con el mismo mensaje que un id inexistente. Aplica igual al superusuario y a `PUT`/`PATCH`.
 
