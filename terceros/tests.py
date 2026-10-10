@@ -411,7 +411,9 @@ class ClienteKpisTests(TestCase):
         _pedido(cls.cliente_b, hace_dias=200)
         factura_b1 = _factura(cls.cliente_b, "2000.00")
         _cxc(cls.cliente_b, factura_b1, "700.00", hace_dias_vencida=45)  # bucket 31-60
-        _cxc(cls.cliente_b, factura_b1, "200.00", hace_dias_vencida=90)  # bucket 60+
+        # Una CxC por factura (``uq_cxc_factura``): la de 60+ va en su propia factura.
+        factura_b2 = _factura(cls.cliente_b, "0.00")
+        _cxc(cls.cliente_b, factura_b2, "200.00", hace_dias_vencida=90)  # bucket 60+
 
     def _get(self, user):
         client = APIClient()

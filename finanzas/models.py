@@ -475,10 +475,9 @@ class CuentaPorCobrar(models.Model):
         db_table = "cuentas_por_cobrar"
         verbose_name = "Cuenta Por Cobrar"
         verbose_name_plural = "Cuentas Por Cobrar"
-
-    constraints = [
-        models.UniqueConstraint(fields=["factura"], name="uq_cxc_factura"),
-    ]
+        constraints = [
+            models.UniqueConstraint(fields=["factura"], name="uq_cxc_factura"),
+        ]
 
     def __str__(self):
         return str(self.id)
