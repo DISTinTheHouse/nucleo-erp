@@ -778,12 +778,25 @@ class ProductoTerminadoEntradasViewSet(viewsets.ModelViewSet):
     serializer_class = ProductoTerminadoEntradasSerializer
     http_method_names = ['get', 'post']
 
+    def get_queryset(self):
+        # La entrada no tiene ``empresa`` propia: su empresa es la de su OP
+        # (mismo criterio que ``ConsumoProduccionViewSet``). Siempre
+        # ``user.empresa``, superusuario incluido; sin empresa no se ve nada.
+        empresa = getattr(self.request.user, 'empresa', None)
+        if empresa is None:
+            return ProductoTerminadoEntradas.objects.none()
+        return self.queryset.filter(op__empresa=empresa)
+
+    # ``confirmar``/``anular`` siguen siendo stubs, pero resuelven el registro
+    # por ``get_queryset``: una entrada ajena (o inexistente) responde 404.
     @action(detail=True, methods=['post'])
     def confirmar(self, request, pk=None):
+        self.get_object()
         return Response({'msg': 'ProductoTerminadoEntradasViewSet.confirmar'}, status=status.HTTP_200_OK)
-    
+
     @action(detail=True, methods=['post'])
     def anular(self, request, pk=None):
+        self.get_object()
         return Response({'msg': 'ProductoTerminadoEntradasViewSet.anular'}, status=status.HTTP_200_OK)
 
 class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, mixins.DestroyModelMixin, GenericViewSet):
