@@ -28,6 +28,7 @@ from produccion.models import (
 
 from catalogo.api.serializers import ProductoVarianteSerializer
 from catalogo.models import ProductoVariante, VarianteProductoProduccion
+from inventarios.models import Ubicacion
 from produccion.services.common import config_como_dict, revisar_empresa
 
 
@@ -67,22 +68,34 @@ def _pedido_en_alcance(serializer, pedido, etiqueta_orden, destino):
     return pedido
 
 
-def _fk_de_la_empresa_del_usuario(serializer, campo, obj, empresa_id):
+#: Centinela de ``_fk_de_la_empresa_del_usuario``: "la empresa es la del propio objeto".
+_EL_PROPIO_OBJETO = object()
+
+
+def _fk_de_la_empresa_del_usuario(serializer, campo, obj, con_empresa=_EL_PROPIO_OBJETO):
     """FK escribible de BOM/OP, acotada a la empresa del usuario autenticado.
 
-    ``empresa_id`` es la empresa de ``obj`` (FK directa o vía su relación).
-    Se compara SIEMPRE contra ``user.empresa``, superusuario incluido: es el
-    mismo alcance que el ``get_queryset`` de ``lista-material``, ``bom-detalle``
-    y ``orden-produccion``, que tampoco le dan vista global. Sin ``request`` en
-    el contexto o sin empresa se rechaza (falla cerrado).
+    ``con_empresa`` es el objeto que lleva ``empresa_id``: por defecto el propio
+    ``obj``; los casos indirectos pasan su relación (``pedido_detalle.pedido``,
+    ``ubicacion.almacen``) y, si esa relación viene vacía, se rechaza.
+
+    La comparación es la de ``revisar_empresa``: SIEMPRE contra
+    ``user.empresa``, superusuario incluido -- el mismo alcance que el
+    ``get_queryset`` de ``lista-material``, ``bom-detalle`` y
+    ``orden-produccion``, que tampoco le dan vista global. Sin ``request`` en el
+    contexto o sin empresa se rechaza (falla cerrado).
     """
     if obj is None:
         return obj
+    if con_empresa is _EL_PROPIO_OBJETO:
+        con_empresa = obj
+    elif con_empresa is None:
+        con_empresa = SimpleNamespace(empresa_id=None)
     user = getattr(serializer.context.get("request"), "user", None)
-    empresa_usuario_id = getattr(user, "empresa_id", None)
-    if empresa_usuario_id is None:
+    resultado = revisar_empresa(user, con_empresa)
+    if resultado == "sin_empresa":
         raise serializers.ValidationError("El usuario no tiene una empresa asignada.")
-    if empresa_id != empresa_usuario_id:
+    if resultado == "otra_empresa":
         # Mismo mensaje que un pk inexistente: no revela que existe en otra empresa.
         raise serializers.ValidationError(
             serializer.fields[campo].error_messages["does_not_exist"].format(pk_value=obj.pk)
@@ -103,14 +116,10 @@ class BomDetalleSerializer(serializers.ModelSerializer):
     # Aislamiento multi-tenant: aplica a todos los consumidores del serializer
     # (anidado en ``lista-material``, ``bom-detalle`` y ``variante-onboarding``).
     def validate_componente(self, componente):
-        return _fk_de_la_empresa_del_usuario(
-            self, 'componente', componente, getattr(componente, 'empresa_id', None)
-        )
+        return _fk_de_la_empresa_del_usuario(self, 'componente', componente)
 
     def validate_variante_produccion(self, variante_produccion):
-        return _fk_de_la_empresa_del_usuario(
-            self, 'variante_produccion', variante_produccion, getattr(variante_produccion, 'empresa_id', None)
-        )
+        return _fk_de_la_empresa_del_usuario(self, 'variante_produccion', variante_produccion)
 
     class Meta:
         model = BomDetalle
@@ -134,14 +143,10 @@ class ListaMaterialBomSerializer(serializers.ModelSerializer):
         read_only_fields = ['activo', 'bom_id', 'empresa']
 
     def validate_producto_variante(self, producto_variante):
-        return _fk_de_la_empresa_del_usuario(
-            self, 'producto_variante', producto_variante, getattr(producto_variante, 'empresa_id', None)
-        )
+        return _fk_de_la_empresa_del_usuario(self, 'producto_variante', producto_variante)
 
     def validate_variante_produccion(self, variante_produccion):
-        return _fk_de_la_empresa_del_usuario(
-            self, 'variante_produccion', variante_produccion, getattr(variante_produccion, 'empresa_id', None)
-        )
+        return _fk_de_la_empresa_del_usuario(self, 'variante_produccion', variante_produccion)
 
     def create(self, validated_data):
         detalles_data = validated_data.pop('materia_prima_detalle')
@@ -226,13 +231,12 @@ class OrdenProduccionDetalleSerializer(serializers.ModelSerializer):
     # ``pedido_detalle`` no se validaba. Que el renglón sea del ``pedido`` de la
     # OP lo revisa ``OrdenProduccionSerializer.validate`` (necesita el encabezado).
     def validate_producto_variante_id(self, producto_variante):
-        return _fk_de_la_empresa_del_usuario(
-            self, 'producto_variante_id', producto_variante, getattr(producto_variante, 'empresa_id', None)
-        )
+        return _fk_de_la_empresa_del_usuario(self, 'producto_variante_id', producto_variante)
 
     def validate_pedido_detalle(self, pedido_detalle):
-        empresa_id = pedido_detalle.pedido.empresa_id if pedido_detalle is not None else None
-        return _fk_de_la_empresa_del_usuario(self, 'pedido_detalle', pedido_detalle, empresa_id)
+        return _fk_de_la_empresa_del_usuario(
+            self, 'pedido_detalle', pedido_detalle, getattr(pedido_detalle, 'pedido', None)
+        )
 
     class Meta:
         model = OrdenProduccionDetalle
@@ -240,6 +244,11 @@ class OrdenProduccionDetalleSerializer(serializers.ModelSerializer):
         # 'bom' ya no es parte del contrato del cliente: se resuelve en el
         # servidor a partir del BOM activo de cada producto_variante.
         read_only_fields = ['activo', 'op', 'bom']
+        # ``select_related``: ``validate_pedido_detalle`` lee la empresa del
+        # pedido; sin esto era una consulta extra a ``pedidos`` por renglón.
+        extra_kwargs = {
+            'pedido_detalle': {'queryset': PedidoDetalle.objects.select_related('pedido')},
+        }
 
 class OrdenProduccionListSerializer(serializers.ModelSerializer):
     """Serializer minimalista para el LISTADO de OP.
@@ -309,9 +318,7 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         return pedido
 
     def validate_ruta_produccion(self, ruta_produccion):
-        return _fk_de_la_empresa_del_usuario(
-            self, 'ruta_produccion', ruta_produccion, getattr(ruta_produccion, 'empresa_id', None)
-        )
+        return _fk_de_la_empresa_del_usuario(self, 'ruta_produccion', ruta_produccion)
 
     def validate(self, attrs):
         # ``empresa``/``sucursal`` son read-only (ver ``Meta``): nunca llegan
@@ -427,7 +434,7 @@ class ConsumoProduccionSerializer(serializers.ModelSerializer):
         fields = ['consumo_produccion_id', 'op', 'detalles']
 
     def validate_op(self, op):
-        return _fk_de_la_empresa_del_usuario(self, 'op', op, getattr(op, 'empresa_id', None))
+        return _fk_de_la_empresa_del_usuario(self, 'op', op)
 
     def get_detalles(self, obj):
         detalles = getattr(obj, 'detalles', None)
@@ -447,19 +454,22 @@ class ProductoTerminadoEntradasSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductoTerminadoEntradas
         fields = '__all__'
+        # ``select_related``: ``validate_ubicacion`` lee la empresa del almacén.
+        extra_kwargs = {
+            'ubicacion': {'queryset': Ubicacion.objects.select_related('almacen')},
+        }
 
     # Aislamiento multi-tenant de las tres FKs escribibles. ``Almacen.empresa``
     # y ``Ubicacion.almacen`` son nullable: sin empresa determinable se rechaza.
     def validate_op(self, op):
-        return _fk_de_la_empresa_del_usuario(self, 'op', op, getattr(op, 'empresa_id', None))
+        return _fk_de_la_empresa_del_usuario(self, 'op', op)
 
     def validate_almacen(self, almacen):
-        return _fk_de_la_empresa_del_usuario(self, 'almacen', almacen, getattr(almacen, 'empresa_id', None))
+        return _fk_de_la_empresa_del_usuario(self, 'almacen', almacen)
 
     def validate_ubicacion(self, ubicacion):
-        almacen = getattr(ubicacion, 'almacen', None)
         return _fk_de_la_empresa_del_usuario(
-            self, 'ubicacion', ubicacion, getattr(almacen, 'empresa_id', None)
+            self, 'ubicacion', ubicacion, getattr(ubicacion, 'almacen', None)
         )
 
     def validate(self, attrs):

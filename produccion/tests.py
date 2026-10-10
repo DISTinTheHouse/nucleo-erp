@@ -16,6 +16,7 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
 import json
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest import mock
 
 from django.db import IntegrityError, connection, transaction
@@ -53,6 +54,11 @@ from produccion.models import (
     ReflejanteAvances,
     ReflejanteIncidencias,
     RutaProduccion,
+)
+from produccion.api.serializers import (
+    BomDetalleSerializer,
+    OrdenProduccionSerializer,
+    ProductoTerminadoEntradasSerializer,
 )
 from produccion.services.common import config_como_dict
 from produccion.services.orden_produccion_service import OrdenProduccionService
@@ -5573,6 +5579,24 @@ class OrdenProduccionDetalleTenantTests(_BomTenantBase, TestCase):
         ajena.refresh_from_db()
         self.assertEqual(ajena.prioridad, 1)
 
+    def test_validar_renglones_no_consulta_el_pedido_por_renglon(self):
+        # Por renglón: variante, unidad y ``pedido_detalle`` (con su pedido en
+        # el mismo JOIN). Antes eran 4: la empresa del pedido salía de una
+        # consulta perezosa adicional por renglón.
+        self.usuario.empresa  # ya cargada, como en un request real
+        renglon = self._body(pedido_detalle=self.linea.pk)["orden_produccion_detalle"][0]
+
+        def consultas(n):
+            serializer = OrdenProduccionSerializer(
+                data={"orden_produccion_detalle": [renglon] * n},
+                context={"request": SimpleNamespace(user=self.usuario)},
+            )
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertTrue(serializer.is_valid(), serializer.errors)
+            return len(ctx)
+
+        self.assertEqual(consultas(4) - consultas(1), 3 * 3)
+
     # --- cambio de ``pedido`` con renglones ya guardados ---
 
     def _op_con_renglon(self, pedido=None, pedido_detalle=None):
@@ -5870,6 +5894,15 @@ class ProductoTerminadoEntradasTenantTests(_RegistrosDeOPTenantBase, TestCase):
             self.URL, self._body(almacen=otro_almacen.pk, ubicacion=ubicacion_de_otro.pk), format="json"
         )
         self.assertEqual(ok.status_code, 201, ok.data)
+
+    def test_validar_no_consulta_el_almacen_de_la_ubicacion_aparte(self):
+        # Una consulta por FK (op, almacén y ubicación con su almacén en JOIN).
+        self.usuario.empresa
+        serializer = ProductoTerminadoEntradasSerializer(
+            data=self._body(), context={"request": SimpleNamespace(user=self.usuario)}
+        )
+        with self.assertNumQueries(3):
+            self.assertTrue(serializer.is_valid(), serializer.errors)
 
     def test_create_rechaza_almacen_y_ubicacion_sin_empresa(self):
         # ``Almacen.empresa`` y ``Ubicacion.almacen`` son nullable: sin empresa
