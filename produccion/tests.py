@@ -5995,3 +5995,143 @@ class ProductoTerminadoEntradasTenantTests(_RegistrosDeOPTenantBase, TestCase):
         resp = client.post(self.URL, self._body(almacen=self.almacen_ajeno.pk), format="json")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("almacen", resp.data)
+
+
+class VarianteOnboardingColorTests(_BomTenantBase, TestCase):
+    """``variante-onboarding`` acepta ``color`` en el body: obligatorio si la
+    línea de muestra no tiene color (se guarda en la línea, en la misma
+    transacción que variantes y BOM) y, si ya lo tiene, sólo puede coincidir."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.admin = Usuario.objects.create(
+            username="vc-admin", email="vc-admin@acme-ti.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.otro_color = Color.objects.create(nombre="Rojo", codigo="ROJ", codigo_hex="#ff0000")
+        cls.color_inactivo = Color.objects.create(
+            nombre="Viejo", codigo="VIE", codigo_hex="#111111", activo=False
+        )
+        cls.color_sin_codigo = Color.objects.create(nombre="Sin código", codigo="", codigo_hex="#222222")
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente VC")
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=moneda,
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            clasificacion="B", fecha_confirmacion=timezone.now(),
+        )
+        cls.url = f"/api/v1/produccion/pedidos-especiales/{cls.pedido.pk}/variante-onboarding/"
+
+    def _linea(self, color=None):
+        linea = PedidoDetalle.objects.create(
+            pedido=self.pedido, producto_nombre_externo="Muestra especial", color=color,
+        )
+        PedidoDetalleTalla.objects.create(pedido_detalle=linea, talla=self.talla, cantidad=5)
+        return linea
+
+    def _post(self, linea, **extra):
+        body = {"pedido_detalle_id": linea.pk, "materia_prima_detalle": [self._insumo()], **extra}
+        return self._client(self.admin).post(self.url, body, format="json")
+
+    def _nada_creado(self, linea, color_id=None):
+        linea.refresh_from_db()
+        self.assertEqual(linea.color_id, color_id)
+        self.assertFalse(VarianteProductoProduccion.objects.filter(pedido_detalle=linea).exists())
+        self.assertFalse(ListaMaterialBom.objects.exists())
+        self.assertFalse(BomDetalle.objects.exists())
+
+    def test_linea_sin_color_con_color_en_el_body(self):
+        linea = self._linea()
+        resp = self._post(linea, color=self.otro_color.pk)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(
+            set(resp.data[0]), {"id", "sku", "nombre", "talla_nombre", "aplica_catalogo", "pedido_detalle"}
+        )
+        self.assertEqual(resp.data[0]["sku"], f"MP{linea.pk}-ROJ-M")
+        linea.refresh_from_db()
+        self.assertEqual(linea.color_id, self.otro_color.pk)
+        variante = VarianteProductoProduccion.objects.get(pedido_detalle=linea)
+        self.assertEqual(variante.color_id, self.otro_color.pk)
+        self.assertEqual(BomDetalle.objects.filter(bom__variante_produccion=variante).count(), 1)
+
+    def test_linea_sin_color_y_sin_color_en_el_body(self):
+        linea = self._linea()
+        for extra in ({}, {"color": None}):
+            resp = self._post(linea, **extra)
+            self.assertEqual(resp.status_code, 400, resp.data)
+            self.assertEqual(set(resp.data), {"color"})
+        self._nada_creado(linea)
+
+    def test_linea_con_color_omitiendo_el_del_body(self):
+        linea = self._linea(self.color)
+        resp = self._post(linea)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data[0]["sku"], f"MP{linea.pk}-NEG-M")
+        linea.refresh_from_db()
+        self.assertEqual(linea.color_id, self.color.pk)
+
+    def test_linea_con_color_y_el_mismo_en_el_body(self):
+        linea = self._linea(self.color)
+        resp = self._post(linea, color=self.color.pk)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data[0]["sku"], f"MP{linea.pk}-NEG-M")
+
+    def test_linea_con_color_y_otro_distinto_en_el_body(self):
+        linea = self._linea(self.color)
+        resp = self._post(linea, color=self.otro_color.pk)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(set(resp.data), {"color"})
+        self._nada_creado(linea, self.color.pk)
+
+    def test_color_inexistente_inactivo_o_sin_codigo(self):
+        linea = self._linea()
+        inexistente = Color.objects.order_by("-pk").first().pk + 999
+        for color in (inexistente, self.color_inactivo.pk, self.color_sin_codigo.pk, "abc"):
+            with self.subTest(color=color):
+                resp = self._post(linea, color=color)
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertEqual(set(resp.data), {"color"})
+        self._nada_creado(linea)
+
+    def test_componente_invalido_no_guarda_el_color(self):
+        linea = self._linea()
+        body = {
+            "pedido_detalle_id": linea.pk, "color": self.otro_color.pk,
+            "materia_prima_detalle": [self._insumo(componente=self.componente_ajeno.pk)],
+        }
+        resp = self._client(self.admin).post(self.url, body, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self._nada_creado(linea)
+
+    def test_fallo_a_media_transaccion_revierte_el_color(self):
+        # Falla DESPUÉS de validar y de guardar el color (dentro del atomic).
+        linea = self._linea()
+        client = self._client(self.admin)
+        client.raise_request_exception = False
+        with mock.patch(
+            "produccion.api.views.BomDetalle.objects.bulk_create", side_effect=RuntimeError("boom")
+        ):
+            resp = client.post(
+                self.url,
+                {"pedido_detalle_id": linea.pk, "color": self.otro_color.pk,
+                 "materia_prima_detalle": [self._insumo()]},
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, 500)
+        self._nada_creado(linea)
+
+    def test_linea_que_ya_tiene_sku_no_cambia_de_color(self):
+        linea = self._linea()
+        self.assertEqual(self._post(linea, color=self.otro_color.pk).status_code, 201)
+        resp = self._post(linea, color=self.otro_color.pk)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(VarianteProductoProduccion.objects.filter(pedido_detalle=linea).count(), 1)

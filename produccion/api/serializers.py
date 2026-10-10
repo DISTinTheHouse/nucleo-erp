@@ -27,7 +27,7 @@ from produccion.models import (
 )
 
 from catalogo.api.serializers import ProductoVarianteSerializer
-from catalogo.models import ProductoVariante, VarianteProductoProduccion
+from catalogo.models import Color, ProductoVariante, VarianteProductoProduccion
 from inventarios.models import Ubicacion
 from produccion.services.common import config_como_dict, revisar_empresa
 
@@ -2370,6 +2370,12 @@ class VarianteProduccionOnboardingSerializer(serializers.Serializer):
     especial + el detalle de materiales que se replica en el BOM de cada
     talla que se de alta."""
     pedido_detalle_id = serializers.IntegerField()
+    # Opcional en el contrato; la vista lo exige si la línea no tiene color.
+    # ``Color`` es catálogo global (sin empresa): sólo se acota a los activos,
+    # igual que ``_save_pedido_detalle`` al capturar el color de un renglón.
+    color = serializers.PrimaryKeyRelatedField(
+        queryset=Color.objects.filter(activo=True), required=False, allow_null=True
+    )
     materia_prima_detalle = BomDetalleSerializer(many=True)
 
     def validate_materia_prima_detalle(self, value):
