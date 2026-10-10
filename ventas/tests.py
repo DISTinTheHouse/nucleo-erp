@@ -2126,6 +2126,7 @@ class PedidoMovimientoInventarioVarianteTests(TestCase):
         cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="APV", nombre="acme-pv")
         cls.almacen = Almacen.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM", nombre="Almacen",
+            permite_salida=True,  # la venta solo descuenta de almacenes con salida (#421)
         )
         cls.ub1 = Ubicacion.objects.create(almacen=cls.almacen, pasillo="1")
         cls.ub2 = Ubicacion.objects.create(almacen=cls.almacen, pasillo="2")
@@ -3729,3 +3730,49 @@ class AceptarCambiosConDependenciasTests(TestCase):
 
         self._assert_bloqueado(self._aceptar())
         self.assertTrue(OrdenBordadoDetalle.objects.filter(pk=obd.pk).exists())
+
+
+class DescuentoVentaAlmacenesConSalidaTests(TestCase):
+    """#421: autorizar / aceptar-cambios descuentan solo de almacenes ACTIVOS con
+    ``permite_salida`` (misma regla que el picking de WMS), nunca de materia prima."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-ds", razon_social="acme-ds SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ADS", nombre="acme-ds")
+        cls.mp = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="MP", nombre="CORTE")
+        cls.pt = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="PT", nombre="PRODUCTO TERMINADO",
+            tipo_almacen="PT", permite_salida=True,
+        )
+        cls.pt_inactivo = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="PT2", nombre="PT viejo",
+            tipo_almacen="PT", permite_salida=True, estatus="INACTIVO",
+        )
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+
+    def setUp(self):
+        self.ex_mp = Existencia.objects.create(producto=self.producto, almacen=self.mp, cantidad=Decimal("100"))
+        self.ex_pt = Existencia.objects.create(producto=self.producto, almacen=self.pt, cantidad=Decimal("5"))
+        self.ex_inactivo = Existencia.objects.create(producto=self.producto, almacen=self.pt_inactivo, cantidad=Decimal("50"))
+
+    def _descontar(self, cantidad):
+        plan = [{"producto": self.producto, "producto_id": self.producto.pk,
+                 "producto_variante_id": None, "cantidad": Decimal(cantidad)}]
+        return CotizacionViewSet()._discount_existencias_pedido(plan=plan, empresa=self.empresa, sucursal=self.sucursal)
+
+    def _cantidades(self):
+        return [Existencia.objects.get(pk=e.pk).cantidad for e in (self.ex_mp, self.ex_pt, self.ex_inactivo)]
+
+    def test_descuenta_solo_del_almacen_con_salida(self):
+        consumos = self._descontar("3")
+
+        self.assertEqual([c["almacen_id"] for c in consumos], [self.pt.pk])
+        self.assertEqual(self._cantidades(), [Decimal("100"), Decimal("2"), Decimal("50")])
+
+    def test_no_toma_materia_prima_ni_inactivos_aunque_alcancen(self):
+        with self.assertRaises(DRFValidationError) as ctx:
+            self._descontar("10")
+
+        self.assertIn("salida permitida", str(ctx.exception.detail["inventario"]))
+        self.assertEqual(self._cantidades(), [Decimal("100"), Decimal("5"), Decimal("50")])
