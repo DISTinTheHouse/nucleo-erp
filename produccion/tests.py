@@ -5305,6 +5305,36 @@ class BomDetalleTenantTests(_BomTenantBase, TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("componente", resp.data)
 
+    # --- sin ``request`` en el contexto ---
+
+    def test_sin_request_en_el_contexto_rechaza_toda_fk_de_empresa(self):
+        # Es la garantía en la que se apoya ``variante-onboarding``: si un
+        # llamador olvida pasar el contexto, el serializer falla cerrado en vez
+        # de aceptar la FK sin validarla. Los datos son de la PROPIA empresa.
+        con_request = {"request": SimpleNamespace(user=self.usuario)}
+        casos = {
+            "componente": self._insumo(),
+            "variante_produccion": self._insumo(
+                componente=None, variante_produccion=self.variante_produccion.pk
+            ),
+        }
+        for campo, data in casos.items():
+            with self.subTest(campo=campo):
+                self.assertTrue(BomDetalleSerializer(data=data, context=con_request).is_valid())
+                for contexto in ({}, {"request": None}):
+                    serializer = BomDetalleSerializer(data=data, context=contexto)
+                    self.assertFalse(serializer.is_valid())
+                    self.assertEqual(set(serializer.errors), {campo})
+
+    def test_sin_request_en_el_contexto_rechaza_tambien_el_update(self):
+        detalle = self._bom().materia_prima_detalle.get()
+        serializer = BomDetalleSerializer(
+            detalle, data={"componente": self.componente_2.pk}, partial=True
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertEqual(set(serializer.errors), {"componente"})
+
     # --- variante-onboarding de pedidos especiales ---
 
     def _body_onboarding(self, **insumo):
