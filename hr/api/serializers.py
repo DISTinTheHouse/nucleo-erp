@@ -517,8 +517,25 @@ class NominaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer
         # contra la guardada.
         if periodo_inicio and periodo_fin and periodo_fin < periodo_inicio:
             raise serializers.ValidationError({'periodo_fin': 'El periodo fin no puede ser anterior al inicio.'})
+        self._validar_coherencia(data)
         self._validar_periodo_unico(data)
         return data
+
+    def _validar_coherencia(self, data):
+        """Empresa, sucursal y empleado de la misma empresa, y la sucursal es la
+        del empleado. Con los valores finales y también para el superusuario."""
+        empresa = self._final(data, 'empresa')
+        sucursal = self._final(data, 'sucursal')
+        empleado = self._final(data, 'empleado')
+        errores = {}
+        if empresa and sucursal and sucursal.empresa_id != empresa.pk:
+            errores['sucursal'] = 'La sucursal no pertenece a la empresa de la nómina.'
+        if empresa and empleado and empleado.empresa_id != empresa.pk:
+            errores['empleado'] = 'El empleado no pertenece a la empresa de la nómina.'
+        if not errores and sucursal and empleado and empleado.sucursal_id != sucursal.pk:
+            errores['sucursal'] = 'La sucursal no es la del empleado.'
+        if errores:
+            raise serializers.ValidationError(errores)
 
     def _final(self, data, campo):
         """Valor con el que QUEDARÁ ``campo`` tras guardar.
