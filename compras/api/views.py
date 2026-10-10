@@ -1836,19 +1836,25 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     def _kpi_diferencia_precio(self, empresa):
         # Costo facturado (FacturaProveedorDetalle.precio_unitario) vs. costo
         # pactado en la OC (OrdenCompraDetalle.precio), línea por línea vía
-        # el FK ``oc_detalle``. Excluye facturas canceladas.
+        # el FK ``oc_detalle``. Solo facturas Registradas y activas, de OC
+        # vigentes (mismos estatus que ``cumplimiento_cantidad``).
         money = DecimalField(max_digits=18, decimal_places=2)
         lineas = (
             FacturaProveedorDetalle.objects.filter(
                 factura_proveedor__empresa=empresa,
+                factura_proveedor__activo=True,
+                factura_proveedor__estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA,
+                oc_detalle__orden_compra__activo=True,
+                oc_detalle__orden_compra__estatus__in=self.ESTATUS_OC_CON_RECEPCION_ESPERADA,
             )
-            .exclude(factura_proveedor__estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA)
             .annotate(
                 facturado_linea=ExpressionWrapper(F("precio_unitario") * F("cantidad"), output_field=money),
                 pactado_linea=ExpressionWrapper(F("oc_detalle__precio") * F("cantidad"), output_field=money),
             )
         )
-        agg = lineas.aggregate(facturado=Sum("facturado_linea"), pactado=Sum("pactado_linea"))
+        agg = lineas.aggregate(
+            facturado=Sum("facturado_linea"), pactado=Sum("pactado_linea"), lineas=Count("id"),
+        )
         facturado = agg["facturado"] or Decimal("0")
         pactado = agg["pactado"] or Decimal("0")
         diferencia = facturado - pactado
@@ -1870,6 +1876,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return {
             "disponible": True,
+            # 0 = no hubo líneas que evaluar (distinto de diferencia 0).
+            "lineas_evaluadas": agg["lineas"],
             "costo_facturado": facturado,
             "costo_pactado_oc": pactado,
             "diferencia": diferencia,
