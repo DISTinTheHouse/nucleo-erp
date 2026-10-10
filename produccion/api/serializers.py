@@ -462,6 +462,16 @@ class ProductoTerminadoEntradasSerializer(serializers.ModelSerializer):
             self, 'ubicacion', ubicacion, getattr(almacen, 'empresa_id', None)
         )
 
+    def validate(self, attrs):
+        # Ambos son requeridos (FK NOT NULL y el endpoint no tiene update), así
+        # que siempre llegan juntos: la ubicación debe ser de ESE almacén.
+        almacen, ubicacion = attrs.get('almacen'), attrs.get('ubicacion')
+        if almacen is not None and ubicacion is not None and ubicacion.almacen_id != almacen.pk:
+            raise serializers.ValidationError(
+                {'ubicacion': ['La ubicación no pertenece al almacén indicado.']}
+            )
+        return attrs
+
 class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)

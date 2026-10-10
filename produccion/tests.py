@@ -5853,6 +5853,24 @@ class ProductoTerminadoEntradasTenantTests(_RegistrosDeOPTenantBase, TestCase):
             with self.subTest(campo=campo):
                 self._mismo_mensaje_que_inexistente(campo, pk, lambda valor, campo=campo: self._body(**{campo: valor}))
 
+    def test_create_rechaza_ubicacion_de_otro_almacen_de_la_misma_empresa(self):
+        otro_almacen = Almacen.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, codigo="ALM-TI2", nombre="Secundario",
+        )
+        ubicacion_de_otro = Ubicacion.objects.create(almacen=otro_almacen, pasillo="2")
+
+        resp = self._client().post(self.URL, self._body(ubicacion=ubicacion_de_otro.pk), format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(set(resp.data), {"ubicacion"})
+        self.assertEqual(ProductoTerminadoEntradas.objects.count(), 2)
+        self._sin_efectos_secundarios()
+
+        ok = self._client().post(
+            self.URL, self._body(almacen=otro_almacen.pk, ubicacion=ubicacion_de_otro.pk), format="json"
+        )
+        self.assertEqual(ok.status_code, 201, ok.data)
+
     def test_create_rechaza_almacen_y_ubicacion_sin_empresa(self):
         # ``Almacen.empresa`` y ``Ubicacion.almacen`` son nullable: sin empresa
         # determinable no se puede afirmar que sean del usuario (falla cerrado).
