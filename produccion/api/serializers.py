@@ -100,6 +100,18 @@ class BomDetalleSerializer(serializers.ModelSerializer):
     def get_unidad_clave(self, obj):
         return obj.unidad.clave if obj.unidad else None
 
+    # Aislamiento multi-tenant: aplica a todos los consumidores del serializer
+    # (anidado en ``lista-material``, ``bom-detalle`` y ``variante-onboarding``).
+    def validate_componente(self, componente):
+        return _fk_de_la_empresa_del_usuario(
+            self, 'componente', componente, getattr(componente, 'empresa_id', None)
+        )
+
+    def validate_variante_produccion(self, variante_produccion):
+        return _fk_de_la_empresa_del_usuario(
+            self, 'variante_produccion', variante_produccion, getattr(variante_produccion, 'empresa_id', None)
+        )
+
     class Meta:
         model = BomDetalle
         fields = '__all__'
