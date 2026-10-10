@@ -1775,6 +1775,13 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         if not tallas:
             raise ValidationError({'pedido_detalle_id': 'La línea no tiene tallas con cantidad.'})
 
+        # ``producto_nombre_externo`` admite más caracteres que ``nombre`` de la
+        # variante y Postgres no trunca solo (DataError -> 500): se recorta al
+        # ``max_length`` del campo, sin dejar espacios ni separadores colgando.
+        # El nombre no lleva sufijo de talla/color; eso lo distingue el SKU.
+        max_nombre = VarianteProductoProduccion._meta.get_field('nombre').max_length
+        nombre = (detalle.producto_nombre_externo or '')[:max_nombre].rstrip(' -_,;:./|')
+
         creadas = []
         with transaction.atomic():
             if asignar_color:
@@ -1793,7 +1800,7 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                     pedido_detalle=detalle,
                     color=color,
                     talla=dt.talla,
-                    nombre=detalle.producto_nombre_externo,
+                    nombre=nombre,
                     sku=sku,
                 )
                 bom = ListaMaterialBom.objects.create(empresa=pedido.empresa, variante_produccion=variante)
