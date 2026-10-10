@@ -442,7 +442,7 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         def _bucket(pid, nombre):
             return por_proveedor.setdefault(pid, {
                 "proveedor_id": pid, "proveedor_nombre": nombre,
-                "recepciones_total": 0, "recepciones_a_tiempo": 0,
+                "recepciones_total": 0, "recepciones_con_compromiso": 0, "recepciones_a_tiempo": 0,
                 "dias_reales": [], "dias_pactados": [],
                 "cantidad_rechazada": Decimal("0"), "cantidad_inspeccionada": Decimal("0"),
                 "cantidad_ordenada": Decimal("0"), "cantidad_recibida": Decimal("0"),
@@ -467,8 +467,11 @@ class ProveedorViewSet(viewsets.ModelViewSet):
             fecha_recepcion = row["fecha_recepcion"].date() if row["fecha_recepcion"] else None
             fecha_compromiso = row["orden_compra__fecha_entrega_estimada"]
             fecha_oc = row["orden_compra__fecha_oc"]
-            if fecha_recepcion and fecha_compromiso and fecha_recepcion <= fecha_compromiso:
-                b["recepciones_a_tiempo"] += 1
+            # Sin fecha prometida no se puede saber si llegó tarde: no cuenta (#387).
+            if fecha_compromiso:
+                b["recepciones_con_compromiso"] += 1
+                if fecha_recepcion and fecha_recepcion <= fecha_compromiso:
+                    b["recepciones_a_tiempo"] += 1
             if fecha_recepcion and fecha_oc:
                 b["dias_reales"].append((fecha_recepcion - fecha_oc).days)
             if fecha_compromiso and fecha_oc:
@@ -547,8 +550,8 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         proveedores = []
         for b in por_proveedor.values():
             pct_a_tiempo = (
-                round(b["recepciones_a_tiempo"] / b["recepciones_total"] * 100, 1)
-                if b["recepciones_total"] else None
+                round(b["recepciones_a_tiempo"] / b["recepciones_con_compromiso"] * 100, 1)
+                if b["recepciones_con_compromiso"] else None
             )
             dias_real_prom = round(sum(b["dias_reales"]) / len(b["dias_reales"]), 1) if b["dias_reales"] else None
             dias_pactado_prom = (
@@ -585,6 +588,7 @@ class ProveedorViewSet(viewsets.ModelViewSet):
                     "pct": pct_a_tiempo,
                     "recepciones_a_tiempo": b["recepciones_a_tiempo"],
                     "recepciones_total": b["recepciones_total"],
+                    "recepciones_con_compromiso": b["recepciones_con_compromiso"],
                 },
                 "calidad": {
                     "pct_rechazado": pct_rechazo,

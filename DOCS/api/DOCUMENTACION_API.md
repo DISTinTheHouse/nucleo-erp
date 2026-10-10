@@ -2688,7 +2688,7 @@ Shape distinto: es una **lista de proveedores** (scorecard), no un solo agregado
   "proveedores": [
     {
       "proveedor_id": 7, "proveedor_nombre": "Textiles ACME",
-      "entrega_a_tiempo": { "pct": 92.0, "recepciones_a_tiempo": 23, "recepciones_total": 25 },
+      "entrega_a_tiempo": { "pct": 92.0, "recepciones_a_tiempo": 23, "recepciones_total": 25, "recepciones_con_compromiso": 25 },
       "calidad": { "pct_rechazado": 2.1, "cantidad_rechazada": "8.00", "cantidad_inspeccionada": "380.00" },
       "lead_time": { "dias_promedio_real": 11.2, "dias_promedio_pactado": 10.0 },
       "cumplimiento_cantidad": { "pct": 97.5, "cantidad_ordenada": "400.00", "cantidad_recibida": "390.00" },
@@ -2698,6 +2698,8 @@ Shape distinto: es una **lista de proveedores** (scorecard), no un solo agregado
   ]
 }
 ```
+
+`entrega_a_tiempo.pct` = a tiempo / `recepciones_con_compromiso`: una recepción cuya OC no tiene `fecha_entrega_estimada` no cuenta como tarde; sin ninguna con fecha, `pct` es `null` y no entra al `scorecard`.
 `scorecard.puntaje` es el **promedio simple** de los 4 factores de arriba (entrega a tiempo, 100-%rechazo, cumplimiento, 100-|%diferencia precio|) — si a un proveedor le falta un factor (p. ej. nunca se le ha facturado), se promedia solo entre los que sí tiene, no se inventa el que falta. Semáforo: verde ≥80, amarillo ≥70, rojo <70. Tope de 50 proveedores por respuesta.
 
 ---
