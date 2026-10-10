@@ -517,9 +517,41 @@ class NominaSerializer(EmpresaScopedSerializerMixin, serializers.ModelSerializer
         # contra la guardada.
         if periodo_inicio and periodo_fin and periodo_fin < periodo_inicio:
             raise serializers.ValidationError({'periodo_fin': 'El periodo fin no puede ser anterior al inicio.'})
+        self._validar_estado(data)
         self._validar_coherencia(data)
         self._validar_periodo_unico(data)
         return data
+
+    TRANSICIONES = {'pendiente': {'pagada', 'cancelada'}}
+
+    def _validar_estado(self, data):
+        """Nace pendiente; solo pendiente→pagada|cancelada; pagada y cancelada son
+        terminales. Pagar exige ``fecha_pago`` ≤ hoy y neto > 0."""
+        if self.instance is None:
+            if data.get('estado', 'pendiente') != 'pendiente':
+                raise serializers.ValidationError({'estado': 'Una nómina nace pendiente.'})
+            return
+        actual = self.instance.estado
+        if actual not in self.TRANSICIONES:
+            raise serializers.ValidationError({'estado': f'Una nómina {actual} ya no se modifica.'})
+        nuevo = data.get('estado', actual)
+        if nuevo == actual:
+            return
+        if nuevo not in self.TRANSICIONES[actual]:
+            raise serializers.ValidationError({'estado': f'No se puede pasar de {actual} a {nuevo}.'})
+        if nuevo == 'pagada':
+            fecha_pago = self._final(data, 'fecha_pago')
+            if fecha_pago is None or fecha_pago > timezone.localdate():
+                raise serializers.ValidationError({'fecha_pago': 'Para pagar se requiere fecha_pago hasta hoy.'})
+            if self._neto_final(data) <= 0:
+                raise serializers.ValidationError({'estado': 'No se puede pagar una nómina con neto cero o negativo.'})
+
+    def _neto_final(self, data):
+        if 'detalles' in data:
+            lineas = [(d['tipo'], d['monto']) for d in data['detalles']]
+        else:
+            lineas = list(self.instance.detalles.values_list('tipo', 'monto'))
+        return sum(m for t, m in lineas if t == 'percepcion') - sum(m for t, m in lineas if t == 'deduccion')
 
     def _validar_coherencia(self, data):
         """Empresa, sucursal y empleado de la misma empresa, y la sucursal es la

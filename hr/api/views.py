@@ -8,14 +8,15 @@ from decimal import Decimal
 from rest_framework import filters, mixins, serializers as drf_serializers, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
+
+from nucleo.permisos import permisos_efectivos
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.viewsets import GenericViewSet
 from django_filters.rest_framework import DjangoFilterBackend
 
 from hr.models import (
-    CONTRATO_VIGENTE,
     NOMINA_VIGENTE,
     fecha_local,
     Puesto,
@@ -840,6 +841,30 @@ def _fecha_param(nombre, valor):
         raise drf_serializers.ValidationError({nombre: exc.detail})
 
 
+class PermisoNomina(BasePermission):
+    """R-RH consulta; E-RH crea, edita y genera; D-RH borra (y paga/cancela, ver
+    ``perform_update``). Superusuario y admin de empresa pasan siempre."""
+
+    def has_permission(self, request, view):
+        if request.method in SAFE_METHODS:
+            clave = 'R-RH'
+        elif getattr(view, 'action', None) == 'destroy':
+            clave = 'D-RH'
+        else:
+            clave = 'E-RH'
+        return clave in permisos_efectivos(request.user)
+
+
+def _contrato_del_periodo(empleado, inicio, fin):
+    """Contrato activo cuyas fechas cubren algún día de ``[inicio, fin]``."""
+    return (
+        empleado.contratos.filter(activo=True, fecha_inicio__lte=fin)
+        .filter(Q(fecha_fin__isnull=True) | Q(fecha_fin__gte=inicio))
+        .order_by('-fecha_inicio')
+        .first()
+    )
+
+
 class NominaViewSet(
     SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
@@ -851,6 +876,7 @@ class NominaViewSet(
 ):
     queryset = Nomina.objects.all()
     serializer_class = NominaSerializer
+    permission_classes = [IsAuthenticated, PermisoNomina]
     filter_backends = FILTER_BACKENDS
     filterset_fields = {
         'empleado': ['exact'],
@@ -875,6 +901,18 @@ class NominaViewSet(
         if not empresa:
             return qs.none()
         return qs.filter(empresa=empresa)
+
+    def perform_update(self, serializer):
+        nuevo = serializer.validated_data.get('estado')
+        if nuevo in ('pagada', 'cancelada') and nuevo != serializer.instance.estado:
+            if 'D-RH' not in permisos_efectivos(self.request.user):
+                raise PermissionDenied('Pagar o cancelar una nómina requiere el permiso D-RH.')
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance.estado != 'pendiente':
+            raise ValidationError({'estado': f'Solo se elimina una nómina pendiente (esta está {instance.estado}).'})
+        super().perform_destroy(instance)
 
     @action(detail=True, methods=['POST'])
     def calcular_totales(self, request, pk=None):
@@ -933,8 +971,10 @@ class NominaViewSet(
 
         # La empresa sale de la sucursal, también para el superusuario: cada
         # nómina queda en la empresa y la sucursal que se pidieron.
+        # Entra quien trabajó algún día del periodo, aunque ya esté dado de baja (#402).
         empleados = list(
-            Empleado.objects.filter(activo=True, empresa_id=sucursal.empresa_id, sucursal=sucursal)
+            Empleado.objects.filter(empresa_id=sucursal.empresa_id, sucursal=sucursal, fecha_ingreso__lte=pf)
+            .filter(Q(activo=True, fecha_baja__isnull=True) | Q(fecha_baja__gte=pi))
             .select_related('puesto')
         )
 
@@ -950,10 +990,14 @@ class NominaViewSet(
             # Todo o nada: una falla a media generación no deja medio periodo.
             with transaction.atomic():
                 for empleado in empleados:
+                    # Días reales trabajados dentro del periodo (#402/#403).
+                    inicio = max(pi, empleado.fecha_ingreso)
+                    fin = min(pf, empleado.fecha_baja) if empleado.fecha_baja else pf
+                    dias = (fin - inicio).days + 1
                     salario_base = empleado.puesto.salario_base if (empleado.puesto and empleado.puesto.salario_base) else None
-                    contrato_activo = empleado.contratos.filter(CONTRATO_VIGENTE).first()
-                    if contrato_activo and contrato_activo.salario:
-                        salario_base = contrato_activo.salario
+                    contrato = _contrato_del_periodo(empleado, inicio, fin)
+                    if contrato and contrato.salario:
+                        salario_base = contrato.salario
 
                     nomina = Nomina.objects.create(
                         empresa_id=sucursal.empresa_id,
@@ -964,11 +1008,11 @@ class NominaViewSet(
                         fecha_pago=fpago,
                         estado='pendiente',
                         salario_base=salario_base,
-                        dias_pagados=15,
+                        dias_pagados=dias,
                         creado_por=request.user,
                     )
                     if salario_base:
-                        percepcion_monto = (salario_base / Decimal('30.0')) * Decimal('15')
+                        percepcion_monto = (salario_base / Decimal('30.0')) * Decimal(dias)
                         NominaDetalle.objects.create(
                             nomina=nomina,
                             codigo='PER001',
@@ -995,15 +1039,15 @@ class NominaViewSet(
         }, status=status.HTTP_201_CREATED)
 
     def _empleados_con_nomina_vigente(self, empleados, periodo_inicio, periodo_fin):
-        """Cuántos de ``empleados`` ya tienen nómina vigente de ese periodo exacto."""
+        """Cuántos de ``empleados`` ya tienen nómina vigente que se traslapa con el periodo."""
         if not empleados:
             return 0
         return (
             Nomina.objects.filter(
                 NOMINA_VIGENTE,
                 empleado__in=empleados,
-                periodo_inicio=periodo_inicio,
-                periodo_fin=periodo_fin,
+                periodo_inicio__lte=periodo_fin,
+                periodo_fin__gte=periodo_inicio,
             )
             .values('empleado')
             .distinct()
