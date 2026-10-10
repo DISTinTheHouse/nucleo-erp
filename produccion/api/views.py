@@ -1715,6 +1715,11 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
 
         Falla completa si la línea ya tiene algún SKU generado (idempotencia
         simple: no hay merge, se reintenta desde cero o no se reintenta).
+
+        El color del SKU es el de la línea. Las muestras suelen llegar sin
+        color, así que el body puede traer ``color``: obligatorio si la línea
+        no tiene (se guarda en la línea, en la misma transacción) y, si ya
+        tiene, sólo se acepta el mismo.
         """
         pedido = self.get_object()
         _require_produccion(request.user)
@@ -1739,10 +1744,23 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                 'pedido_detalle_id': 'No es una línea de producción especial de este pedido.'
             })
 
+        color_body = serializer.validated_data.get('color')
         color = detalle.color
-        if color is None or not color.codigo:
+        asignar_color = color is None
+        if asignar_color:
+            if color_body is None:
+                raise ValidationError({
+                    'color': 'La línea no tiene color: envía `color` para generar el SKU.'
+                })
+            color = color_body
+        elif color_body is not None and color_body.pk != color.pk:
             raise ValidationError({
-                'pedido_detalle_id': 'La línea no tiene color (o el color no tiene código) para generar el SKU.'
+                'color': 'La línea ya tiene otro color; omite `color` o envía el mismo.'
+            })
+        if not color.codigo:
+            raise ValidationError({
+                'color' if asignar_color else 'pedido_detalle_id':
+                    'El color no tiene código para generar el SKU.'
             })
 
         if VarianteProductoProduccion.objects.filter(pedido_detalle=detalle).exists():
@@ -1759,6 +1777,9 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
 
         creadas = []
         with transaction.atomic():
+            if asignar_color:
+                detalle.color = color
+                detalle.save(update_fields=['color'])
             for dt in tallas:
                 # Sin ``producto.codigo`` real que usar (es una muestra sin
                 # catálogo): el prefijo sale del propio ``pedido_detalle_id``,

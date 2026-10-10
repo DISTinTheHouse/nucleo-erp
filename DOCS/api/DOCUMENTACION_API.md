@@ -4682,8 +4682,13 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
 **Alta de SKU + BOM en un solo paso**: `POST /api/v1/produccion/pedidos-especiales/{id}/variante-onboarding/`
 
 - Gateado a departamento Producción (o superuser/admin_empresa) — mismo patrón que la ruta crítica de OP.
-- Body: `{"pedido_detalle_id": 123, "materia_prima_detalle": [{"componente": 45, "cantidad": "1.50", "unidad": 3, "desperdicio": "5.00", "obligatorio": true}]}`. La lista de materiales se captura **una sola vez** y se replica en el BOM de cada talla. Cada `componente` debe ser de la empresa del usuario: uno de otra empresa responde `400` en `materia_prima_detalle[i].componente` (mismo mensaje que un id inexistente) y no se crea nada.
+- Body: `{"pedido_detalle_id": 123, "color": 7, "materia_prima_detalle": [{"componente": 45, "cantidad": "1.50", "unidad": 3, "desperdicio": "5.00", "obligatorio": true}]}`. La lista de materiales se captura **una sola vez** y se replica en el BOM de cada talla. Cada `componente` debe ser de la empresa del usuario: uno de otra empresa responde `400` en `materia_prima_detalle[i].componente` (mismo mensaje que un id inexistente) y no se crea nada.
 - Crea una `catalogo.VarianteProductoProduccion` (SKU server-generado, formato `MP{pedido_detalle_id}-{color.codigo}-{talla.nombre}`) **por cada talla con cantidad** de esa línea, cada una con su propia `ListaMaterialBom`. Vive en tabla separada del catálogo real (`productos`/`variantes_producto`) — no aparece en listados ni búsquedas de catálogo. Campo `aplica_catalogo` (bool, default `false`): flag para una futura promoción a catálogo real desde mesa de control, todavía sin función que lo consuma.
+- **`color`** (id de `Color` activo, opcional en el contrato): el SKU usa el color de la línea (`PedidoDetalle.color`).
+  - Línea **sin** color: `color` es obligatorio (`400 {"color": ...}` si falta). Se guarda en la línea en la misma transacción que los SKU y BOM; si algo falla, la línea queda sin color.
+  - Línea **con** color: se puede omitir o mandar el mismo; uno distinto responde `400 {"color": ...}` y no crea nada.
+  - Un `color` inexistente, inactivo o sin `codigo` responde `400` en `color`.
+  - Tras el alta, el `GET` del detalle muestra ese color en `color_nombre` de la línea.
 - Si la línea ya tiene algún SKU generado, responde `400` sin tocar nada (no hay merge; es alta única).
 - Tras esto, el `GET` del detalle refleja `sku_produccion` en cada talla sin consultas extra.
 
