@@ -91,6 +91,8 @@ def get_queryset(self):
 
 Expected behavior: list returns `200 []` when out of scope; detail returns `404` (not 403) for another company's existing record. **When adding any tenant-scoped endpoint, replicate this — a missing `get_queryset` override is a cross-tenant data leak.**
 
+**Documented exception — `produccion` scopes superusers too.** Per decision #361, `orden-produccion` (list/detail and `kpis`), `lista-material`, `bom-detalle`, `consumo`, `producto-terminado-entradas` and `pedidos-especiales` always use `user.empresa`, superuser included: no `if user.is_superuser: return qs` branch, empty lists and `400` on writes without an empresa, and writable FKs validated against `user.empresa` (`_fk_de_la_empresa_del_usuario` in `produccion/api/serializers.py`). This is deliberate, not a deviation to fix. Bordado/reflejante/corte de manga keep the canonical global-superuser shape (`produccion/scope.py`).
+
 ### RBAC + overrides
 `Usuario.tiene_permiso(clave)` resolves effective permissions with strict precedence: superuser → `is_admin_empresa` → explicit **DENY** override → role grants → explicit **GRANT** override. Permission keys live in `seguridad.Permiso.clave` (the catalog lives **only in the DB** — there is no fixture or seed).
 
