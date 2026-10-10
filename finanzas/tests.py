@@ -5590,11 +5590,11 @@ class FacturaListadoLigeroTests(FinanzasBase):
     def test_filtro_saldo_pendiente_no_duplica_piezas(self):
         factura_id = self._facturar(cantidad=2)
         factura = Factura.objects.get(pk=factura_id)
-        for _ in range(2):
-            CuentaPorCobrar.objects.create(
-                empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
-                total=Decimal("100.00"), saldo=Decimal("100.00"),
-            )
+        # Una sola CxC por factura (``uq_cxc_factura``, #369).
+        CuentaPorCobrar.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
         data = self._listar(params={"saldo_pendiente": "true"})
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]["cantidad"], 2)
@@ -6135,3 +6135,20 @@ class PlanContableTests(FinanzasBase):
             empresa=empresa, concepto=ConceptoContable.CLIENTES, activo=True
         )
         self.assertEqual(fila.cuenta_contable_id, mia.pk)
+
+
+class CuentaPorCobrarUnicaPorFacturaTests(FinanzasBase):
+    """#369: ``uq_cxc_factura`` existe en la BD."""
+
+    def test_segunda_cxc_de_la_misma_factura_se_rechaza(self):
+        from django.db import IntegrityError, transaction
+
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        datos = dict(empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+                     total=Decimal("10.00"), saldo=Decimal("10.00"))
+        CuentaPorCobrar.objects.create(**datos)
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            CuentaPorCobrar.objects.create(**datos)
