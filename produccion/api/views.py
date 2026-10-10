@@ -1723,6 +1723,13 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         """
         pedido = self.get_object()
         _require_produccion(request.user)
+        # El alta escribe en la línea de venta (color) además de crear SKU y
+        # BOM: no aplica a un pedido cancelado. Mismo criterio y clave que
+        # facturación y picking; el GET sigue mostrando el pedido.
+        if pedido.estatus == Pedido.ESTATUS_CANCELADO:
+            raise ValidationError({
+                'pedido': 'El pedido está CANCELADO; no se pueden generar SKU de producción.'
+            })
 
         # Con contexto: ``BomDetalleSerializer`` valida ``componente`` contra la
         # empresa de ``request.user`` y sin ``request`` rechaza todo.

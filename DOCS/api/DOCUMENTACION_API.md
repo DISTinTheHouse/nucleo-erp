@@ -4682,6 +4682,7 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
 **Alta de SKU + BOM en un solo paso**: `POST /api/v1/produccion/pedidos-especiales/{id}/variante-onboarding/`
 
 - Gateado a departamento Producción (o superuser/admin_empresa) — mismo patrón que la ruta crítica de OP.
+- Pedido **cancelado** (`estatus = 5`): `400 {"pedido": "El pedido está CANCELADO; no se pueden generar SKU de producción."}`, sin escribir nada. El pedido sigue apareciendo en los `GET`.
 - Body: `{"pedido_detalle_id": 123, "color": 7, "materia_prima_detalle": [{"componente": 45, "cantidad": "1.50", "unidad": 3, "desperdicio": "5.00", "obligatorio": true}]}`. La lista de materiales se captura **una sola vez** y se replica en el BOM de cada talla. Cada `componente` debe ser de la empresa del usuario: uno de otra empresa responde `400` en `materia_prima_detalle[i].componente` (mismo mensaje que un id inexistente) y no se crea nada.
 - Crea una `catalogo.VarianteProductoProduccion` (SKU server-generado, formato `MP{pedido_detalle_id}-{color.codigo}-{talla.nombre}`) **por cada talla con cantidad** de esa línea, cada una con su propia `ListaMaterialBom`. Vive en tabla separada del catálogo real (`productos`/`variantes_producto`) — no aparece en listados ni búsquedas de catálogo. Campo `aplica_catalogo` (bool, default `false`): flag para una futura promoción a catálogo real desde mesa de control, todavía sin función que lo consuma.
 - **`color`** (id de `Color` activo, opcional en el contrato): el SKU usa el color de la línea (`PedidoDetalle.color`).
