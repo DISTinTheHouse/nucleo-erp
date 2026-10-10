@@ -675,9 +675,13 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         producto_variante_id=None,
         for_update=False,
     ):
+        # La venta solo sale de almacenes activos con salida permitida: misma regla
+        # que el picking de WMS (#421). Antes tomaba cualquiera, materia prima incluida.
         queryset = Existencia.objects.filter(
             almacen__empresa_id=empresa.pk,
             almacen__sucursal_id=sucursal.pk,
+            almacen__estatus="ACTIVO",
+            almacen__permite_salida=True,
         )
         if for_update:
             queryset = queryset.select_for_update()
@@ -781,8 +785,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 raise ValidationError(
                     {
                         "inventario": (
-                            f"Existencia insuficiente para {producto.nombre}. "
-                            f"Requerido: {cantidad_requerida}, disponible: {disponible}."
+                            f"Existencia insuficiente para {producto.nombre} en almacenes con salida "
+                            f"permitida. Requerido: {cantidad_requerida}, disponible: {disponible}."
                         )
                     }
                 )
