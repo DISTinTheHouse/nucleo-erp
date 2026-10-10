@@ -49,6 +49,7 @@ from produccion.models import (
     OrdenProduccionDetalle,
     OrdenProduccionRutaCritica,
     OrdenReflejanteDetalle,
+    ProductoTerminadoEntradas,
     ReflejanteAvances,
     ReflejanteIncidencias,
     RutaProduccion,
@@ -5731,3 +5732,114 @@ class ConsumoProduccionTenantTests(_RegistrosDeOPTenantBase, TestCase):
         resp = client.post(self.URL, {"op": self.op_ajena.pk}, format="json")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("op", resp.data)
+
+
+class ProductoTerminadoEntradasTenantTests(_RegistrosDeOPTenantBase, TestCase):
+    """``/produccion/producto-terminado-entradas/`` (sólo GET y POST): el
+    queryset se acota por la empresa de la OP y ``op``/``almacen``/``ubicacion``
+    deben ser de la empresa del usuario."""
+
+    URL = "/api/v1/produccion/producto-terminado-entradas/"
+
+    def setUp(self):
+        self.entrada = ProductoTerminadoEntradas.objects.create(
+            op=self.op, almacen=self.almacen, ubicacion=self.ubicacion,
+        )
+        self.entrada_ajena = ProductoTerminadoEntradas.objects.create(
+            op=self.op_ajena, almacen=self.almacen_ajeno, ubicacion=self.ubicacion_ajena,
+        )
+
+    def _body(self, **extra):
+        return {"op": self.op.pk, "almacen": self.almacen.pk, "ubicacion": self.ubicacion.pk, **extra}
+
+    def test_create_en_la_propia_empresa_conserva_el_shape(self):
+        resp = self._client().post(self.URL, self._body(), format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(set(resp.data), {"pt_entrada_id", "op", "almacen", "ubicacion"})
+        self.assertEqual(
+            (resp.data["op"], resp.data["almacen"], resp.data["ubicacion"]),
+            (self.op.pk, self.almacen.pk, self.ubicacion.pk),
+        )
+
+    def test_create_rechaza_cada_fk_de_otra_empresa(self):
+        ajenas = {
+            "op": self.op_ajena.pk, "almacen": self.almacen_ajeno.pk, "ubicacion": self.ubicacion_ajena.pk,
+        }
+        for campo, pk in ajenas.items():
+            with self.subTest(campo=campo):
+                resp = self._client().post(self.URL, self._body(**{campo: pk}), format="json")
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertEqual(set(resp.data), {campo})
+        self.assertEqual(ProductoTerminadoEntradas.objects.count(), 2)
+        self._sin_efectos_secundarios()
+
+    def test_fk_ajena_e_inexistente_responden_igual(self):
+        ajenas = {
+            "op": self.op_ajena.pk, "almacen": self.almacen_ajeno.pk, "ubicacion": self.ubicacion_ajena.pk,
+        }
+        for campo, pk in ajenas.items():
+            with self.subTest(campo=campo):
+                self._mismo_mensaje_que_inexistente(campo, pk, lambda valor, campo=campo: self._body(**{campo: valor}))
+
+    def test_create_rechaza_almacen_y_ubicacion_sin_empresa(self):
+        # ``Almacen.empresa`` y ``Ubicacion.almacen`` son nullable: sin empresa
+        # determinable no se puede afirmar que sean del usuario (falla cerrado).
+        almacen_huerfano = Almacen.objects.create(codigo="ALM-H", nombre="Sin empresa")
+        ubicacion_huerfana = Ubicacion.objects.create(pasillo="0")
+
+        almacen = self._client().post(self.URL, self._body(almacen=almacen_huerfano.pk), format="json")
+        ubicacion = self._client().post(self.URL, self._body(ubicacion=ubicacion_huerfana.pk), format="json")
+
+        self.assertEqual((almacen.status_code, ubicacion.status_code), (400, 400))
+        self.assertIn("almacen", almacen.data)
+        self.assertIn("ubicacion", ubicacion.data)
+        self.assertEqual(ProductoTerminadoEntradas.objects.count(), 2)
+
+    def test_list_excluye_registros_de_otra_empresa(self):
+        resp = self._client().get(self.URL)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([fila["pt_entrada_id"] for fila in resp.data], [self.entrada.pk])
+
+    def test_retrieve_propio_200_y_ajeno_404(self):
+        self.assertEqual(self._client().get(f"{self.URL}{self.entrada.pk}/").status_code, 200)
+        self.assertEqual(self._client().get(f"{self.URL}{self.entrada_ajena.pk}/").status_code, 404)
+
+    def test_acciones_sobre_registro_ajeno_responden_404(self):
+        for accion in ("confirmar", "anular"):
+            propio = self._client().post(f"{self.URL}{self.entrada.pk}/{accion}/")
+            ajeno = self._client().post(f"{self.URL}{self.entrada_ajena.pk}/{accion}/")
+            self.assertEqual(propio.status_code, 200, accion)
+            self.assertEqual(set(propio.data), {"msg"})
+            self.assertEqual(ajeno.status_code, 404, accion)
+
+    def test_put_patch_y_delete_no_existen_y_no_modifican(self):
+        # ``http_method_names = ['get', 'post']``: no hay ruta de update/delete.
+        for entrada in (self.entrada, self.entrada_ajena):
+            url = f"{self.URL}{entrada.pk}/"
+            antes = (entrada.op_id, entrada.almacen_id, entrada.ubicacion_id)
+            body = {"op": self.op_ajena.pk, "almacen": self.almacen_ajeno.pk, "ubicacion": self.ubicacion_ajena.pk}
+            self.assertEqual(self._client().put(url, body, format="json").status_code, 405)
+            self.assertEqual(self._client().patch(url, body, format="json").status_code, 405)
+            self.assertEqual(self._client().delete(url).status_code, 405)
+            entrada.refresh_from_db()
+            self.assertEqual((entrada.op_id, entrada.almacen_id, entrada.ubicacion_id), antes)
+
+    def test_usuario_sin_empresa_lista_vacia_y_400_al_crear(self):
+        client = self._client(self.sin_empresa)
+
+        self.assertEqual(client.get(self.URL).data, [])
+        self.assertEqual(client.get(f"{self.URL}{self.entrada.pk}/").status_code, 404)
+        resp = client.post(self.URL, self._body(), format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(ProductoTerminadoEntradas.objects.count(), 2)
+
+    def test_superusuario_queda_acotado_a_su_empresa(self):
+        client = self._client(self.root)
+
+        self.assertEqual([fila["pt_entrada_id"] for fila in client.get(self.URL).data], [self.entrada.pk])
+        self.assertEqual(client.get(f"{self.URL}{self.entrada_ajena.pk}/").status_code, 404)
+        resp = client.post(self.URL, self._body(almacen=self.almacen_ajeno.pk), format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("almacen", resp.data)

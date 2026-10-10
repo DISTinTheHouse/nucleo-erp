@@ -431,6 +431,20 @@ class ProductoTerminadoEntradasSerializer(serializers.ModelSerializer):
         model = ProductoTerminadoEntradas
         fields = '__all__'
 
+    # Aislamiento multi-tenant de las tres FKs escribibles. ``Almacen.empresa``
+    # y ``Ubicacion.almacen`` son nullable: sin empresa determinable se rechaza.
+    def validate_op(self, op):
+        return _fk_de_la_empresa_del_usuario(self, 'op', op, getattr(op, 'empresa_id', None))
+
+    def validate_almacen(self, almacen):
+        return _fk_de_la_empresa_del_usuario(self, 'almacen', almacen, getattr(almacen, 'empresa_id', None))
+
+    def validate_ubicacion(self, ubicacion):
+        almacen = getattr(ubicacion, 'almacen', None)
+        return _fk_de_la_empresa_del_usuario(
+            self, 'ubicacion', ubicacion, getattr(almacen, 'empresa_id', None)
+        )
+
 class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
