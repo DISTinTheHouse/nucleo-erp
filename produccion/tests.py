@@ -6189,3 +6189,49 @@ class VarianteOnboardingColorTests(_BomTenantBase, TestCase):
                 _, variantes = self._onboarding_con_nombre(nombre)
                 for variante in variantes:
                     self.assertEqual(variante.nombre, nombre)
+
+    # --- orden de validaciones y carrera entre dos altas ---
+
+    def test_reintento_con_otro_color_responde_primero_que_ya_tiene_sku(self):
+        linea = self._linea()
+        self.assertEqual(self._post(linea, color=self.otro_color.pk).status_code, 201)
+        resp = self._post(linea, color=self.color.pk)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(set(resp.data), {"pedido_detalle_id"})
+        self.assertIn("ya tiene SKU", str(resp.data["pedido_detalle_id"]))
+
+    def _post_con_integrity_error(self, linea, mensaje):
+        client = self._client(self.admin)
+        client.raise_request_exception = False
+        with mock.patch(
+            "produccion.api.views.VarianteProductoProduccion.objects.create",
+            side_effect=IntegrityError(mensaje),
+        ):
+            return client.post(
+                self.url,
+                {"pedido_detalle_id": linea.pk, "color": self.otro_color.pk,
+                 "materia_prima_detalle": [self._insumo()]},
+                format="json",
+            )
+
+    def test_choque_de_unicidad_de_la_variante_responde_400_como_ya_tiene_sku(self):
+        # Lo que vería la alta que pierde una carrera si el candado de fila no
+        # bastara: el índice único (pedido_detalle, talla) rechaza su INSERT.
+        linea = self._linea()
+        resp = self._post_con_integrity_error(
+            linea,
+            'duplicate key value violates unique constraint "uq_variante_produccion_pedido_detalle_talla"',
+        )
+
+        self.assertEqual(resp.status_code, 400, getattr(resp, "data", None))
+        self.assertEqual(set(resp.data), {"pedido_detalle_id"})
+        self.assertIn("ya tiene SKU", str(resp.data["pedido_detalle_id"]))
+        self._nada_creado(linea)
+
+    def test_otro_error_de_integridad_no_se_disfraza_de_400(self):
+        linea = self._linea()
+        resp = self._post_con_integrity_error(linea, 'null value in column "empresa_id"')
+
+        self.assertEqual(resp.status_code, 500)
+        self._nada_creado(linea)

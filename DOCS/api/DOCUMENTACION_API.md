@@ -4690,7 +4690,8 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
   - Un `color` inexistente, inactivo o sin `codigo` responde `400` en `color`.
   - Tras el alta, el `GET` del detalle muestra ese color en `color_nombre` de la línea.
 - El `nombre` de cada variante es `producto_nombre_externo` de la línea, copiado tal cual si cabe en el campo. Si excede el `max_length` de `VarianteProductoProduccion.nombre` (hoy 150; el código lo lee del modelo), se recorta a ese largo y se quitan los espacios y separadores (`- _ , ; : . / |`) que el corte deje al final. El texto de la línea no se modifica.
-- Si la línea ya tiene algún SKU generado, responde `400` sin tocar nada (no hay merge; es alta única).
+- Si la línea ya tiene algún SKU generado, responde `400 {"pedido_detalle_id": "Esta línea ya tiene SKU(s) de producción generados."}` sin tocar nada (no hay merge; es alta única). Este chequeo va **antes** que cualquier validación de `color`: un reintento con otro color recibe este error, no el de color.
+- Dos altas simultáneas de la misma línea se serializan (la línea se bloquea durante el alta): la segunda recibe ese mismo `400`, no un `500`.
 - Tras esto, el `GET` del detalle refleja `sku_produccion` en cada talla sin consultas extra.
 
 ---
