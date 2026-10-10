@@ -25,7 +25,7 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
-from catalogo.models import Color, Producto, ProductoVariante, Talla
+from catalogo.models import Color, Producto, ProductoVariante, Talla, VarianteProductoProduccion
 from inventarios.models import Almacen, Existencia, MovimientoInventarioDetalle, Ubicacion
 from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal, UnidadMedida
 from produccion.models import (
@@ -4828,3 +4828,269 @@ class OrdenProduccionKpisTests(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data["cumplimiento_a_tiempo"]["disponible"])
+
+
+class _BomTenantBase:
+    """Fixture de dos empresas para el aislamiento multi-tenant de BOM y OP.
+
+    ``usuario`` pertenece a ``empresa``; todo lo ``*_ajen*`` es de
+    ``otra_empresa`` y nunca debe poder referenciarse desde un request suyo.
+    """
+
+    URL_BOM = "/api/v1/produccion/lista-material/"
+    URL_BOM_DETALLE = "/api/v1/produccion/bom-detalle/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-ti", razon_social="acme-ti SA")
+        cls.otra_empresa = Empresa.objects.create(codigo="otra-ti", razon_social="otra-ti SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Matriz")
+        cls.otra_sucursal = Sucursal.objects.create(empresa=cls.otra_empresa, codigo="GDL", nombre="GDL")
+        cls.usuario = Usuario.objects.create(
+            username="ti-user", email="ti-user@acme-ti.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+        )
+        cls.unidad = UnidadMedida.objects.create(clave="PZA", nombre="Pieza")
+        cls.color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        cls.talla = Talla.objects.create(nombre="M")
+
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.variante = ProductoVariante.objects.create(
+            producto=cls.producto, empresa=cls.empresa, color=cls.color, sku="TI-PLA-NEG", precio_base="100",
+        )
+        cls.variante_2 = ProductoVariante.objects.create(
+            producto=cls.producto, empresa=cls.empresa, color=cls.color, talla=cls.talla,
+            sku="TI-PLA-NEG-M", precio_base="100",
+        )
+        cls.componente = Producto.objects.create(empresa=cls.empresa, nombre="Tela")
+        cls.componente_2 = Producto.objects.create(empresa=cls.empresa, nombre="Hilo")
+        cls.variante_produccion = VarianteProductoProduccion.objects.create(
+            empresa=cls.empresa, nombre="Muestra propia", sku="MP-TI-1",
+        )
+
+        cls.producto_ajeno = Producto.objects.create(empresa=cls.otra_empresa, nombre="Playera ajena")
+        cls.variante_ajena = ProductoVariante.objects.create(
+            producto=cls.producto_ajeno, empresa=cls.otra_empresa, color=cls.color,
+            sku="TI-AJ-NEG", precio_base="100",
+        )
+        cls.componente_ajeno = Producto.objects.create(empresa=cls.otra_empresa, nombre="Tela ajena")
+        cls.variante_produccion_ajena = VarianteProductoProduccion.objects.create(
+            empresa=cls.otra_empresa, nombre="Muestra ajena", sku="MP-TI-AJ",
+        )
+
+    def _client(self, usuario=None):
+        client = APIClient()
+        client.force_authenticate(user=usuario or self.usuario)
+        return client
+
+    def _insumo(self, **extra):
+        return {
+            "componente": self.componente.pk, "cantidad": "2.50", "unidad": self.unidad.pk,
+            "desperdicio": "0.00", "obligatorio": True, **extra,
+        }
+
+    def _body_bom(self, **extra):
+        return {
+            "producto_variante": self.variante.pk, "version": 1,
+            "materia_prima_detalle": [self._insumo()], **extra,
+        }
+
+    def _bom(self, empresa=None, variante=None, componente=None):
+        bom = ListaMaterialBom.objects.create(
+            empresa=empresa or self.empresa, producto_variante=variante or self.variante,
+        )
+        BomDetalle.objects.create(
+            bom=bom, componente=componente or self.componente, cantidad=1, unidad=self.unidad,
+        )
+        return bom
+
+    def _bom_ajeno(self):
+        return self._bom(
+            empresa=self.otra_empresa, variante=self.variante_ajena, componente=self.componente_ajeno
+        )
+
+
+class ListaMaterialEmpresaTenantTests(_BomTenantBase, TestCase):
+    """``/lista-material/``: ``empresa`` la fija el servidor (``user.empresa``,
+    superusuario incluido) y ``producto_variante``/``variante_produccion`` deben
+    ser de esa empresa, en create y en update."""
+
+    CAMPOS_BOM = {
+        "bom_id", "empresa", "producto_variante", "variante_produccion", "version",
+        "activo", "observaciones", "materia_prima_detalle",
+    }
+
+    def test_create_misma_empresa_conserva_el_shape(self):
+        resp = self._client().post(self.URL_BOM, self._body_bom(empresa=self.empresa.pk), format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(set(resp.data), self.CAMPOS_BOM)
+        self.assertEqual(resp.data["empresa"], self.empresa.pk)
+        self.assertEqual(resp.data["producto_variante"], self.variante.pk)
+        self.assertEqual(len(resp.data["materia_prima_detalle"]), 1)
+
+    def test_create_sin_empresa_en_el_body_usa_la_del_usuario(self):
+        resp = self._client().post(self.URL_BOM, self._body_bom(), format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(ListaMaterialBom.objects.get(pk=resp.data["bom_id"]).empresa_id, self.empresa.pk)
+
+    def test_create_ignora_la_empresa_ajena_del_body(self):
+        resp = self._client().post(
+            self.URL_BOM, self._body_bom(empresa=self.otra_empresa.pk), format="json"
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["empresa"], self.empresa.pk)
+        self.assertFalse(ListaMaterialBom.objects.filter(empresa=self.otra_empresa).exists())
+
+    def test_create_rechaza_producto_variante_de_otra_empresa(self):
+        resp = self._client().post(
+            self.URL_BOM, self._body_bom(producto_variante=self.variante_ajena.pk), format="json"
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("producto_variante", resp.data)
+        self.assertFalse(ListaMaterialBom.objects.exists())
+
+    def test_create_rechaza_variante_produccion_de_otra_empresa(self):
+        body = self._body_bom(producto_variante=None, variante_produccion=self.variante_produccion_ajena.pk)
+        resp = self._client().post(self.URL_BOM, body, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("variante_produccion", resp.data)
+        self.assertFalse(ListaMaterialBom.objects.exists())
+
+    def test_create_acepta_variante_produccion_propia(self):
+        body = self._body_bom(producto_variante=None, variante_produccion=self.variante_produccion.pk)
+        resp = self._client().post(self.URL_BOM, body, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["variante_produccion"], self.variante_produccion.pk)
+
+    def test_fk_ajena_e_inexistente_responden_igual(self):
+        ajena = self._client().post(
+            self.URL_BOM, self._body_bom(producto_variante=self.variante_ajena.pk), format="json"
+        )
+        inexistente_pk = self.variante_ajena.pk + 999
+        inexistente = self._client().post(
+            self.URL_BOM, self._body_bom(producto_variante=inexistente_pk), format="json"
+        )
+
+        self.assertEqual(ajena.status_code, 400)
+        self.assertEqual(
+            str(ajena.data["producto_variante"][0]).replace(str(self.variante_ajena.pk), "X"),
+            str(inexistente.data["producto_variante"][0]).replace(str(inexistente_pk), "X"),
+        )
+
+    def test_patch_no_reasigna_la_empresa(self):
+        bom = self._bom()
+        resp = self._client().patch(
+            f"{self.URL_BOM}{bom.pk}/", {"empresa": self.otra_empresa.pk, "version": 2}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(set(resp.data), self.CAMPOS_BOM)
+        bom.refresh_from_db()
+        self.assertEqual((bom.empresa_id, bom.version), (self.empresa.pk, 2))
+
+    def test_put_no_reasigna_la_empresa(self):
+        bom = self._bom()
+        resp = self._client().put(
+            f"{self.URL_BOM}{bom.pk}/", self._body_bom(empresa=self.otra_empresa.pk, version=3), format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        bom.refresh_from_db()
+        self.assertEqual((bom.empresa_id, bom.version), (self.empresa.pk, 3))
+
+    def test_patch_rechaza_producto_variante_de_otra_empresa(self):
+        bom = self._bom()
+        resp = self._client().patch(
+            f"{self.URL_BOM}{bom.pk}/", {"producto_variante": self.variante_ajena.pk}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("producto_variante", resp.data)
+        bom.refresh_from_db()
+        self.assertEqual(bom.producto_variante_id, self.variante.pk)
+
+    def test_patch_rechaza_variante_produccion_de_otra_empresa(self):
+        bom = self._bom()
+        resp = self._client().patch(
+            f"{self.URL_BOM}{bom.pk}/",
+            {"variante_produccion": self.variante_produccion_ajena.pk}, format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("variante_produccion", resp.data)
+        bom.refresh_from_db()
+        self.assertIsNone(bom.variante_produccion_id)
+
+    def test_patch_acepta_variantes_de_la_propia_empresa(self):
+        bom = self._bom()
+        resp = self._client().patch(
+            f"{self.URL_BOM}{bom.pk}/",
+            {"producto_variante": self.variante_2.pk, "variante_produccion": self.variante_produccion.pk},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        bom.refresh_from_db()
+        self.assertEqual(
+            (bom.producto_variante_id, bom.variante_produccion_id),
+            (self.variante_2.pk, self.variante_produccion.pk),
+        )
+
+    def test_bom_de_otra_empresa_responde_404_en_lectura_y_escritura(self):
+        ajeno = self._bom_ajeno()
+        url = f"{self.URL_BOM}{ajeno.pk}/"
+
+        self.assertEqual(self._client().get(url).status_code, 404)
+        self.assertEqual(self._client().patch(url, {"version": 9}, format="json").status_code, 404)
+        self.assertEqual(self._client().delete(url).status_code, 404)
+        ajeno.refresh_from_db()
+        self.assertEqual(ajeno.version, 1)
+
+    def test_bulk_solo_devuelve_bom_de_la_propia_empresa(self):
+        propio = self._bom()
+        self._bom_ajeno()
+
+        resp = self._client().get(
+            f"{self.URL_BOM}bulk/",
+            {"producto_variante_ids": f"{self.variante.pk},{self.variante_ajena.pk}"},
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual([fila["bom_id"] for fila in resp.data], [propio.pk])
+
+    def test_usuario_sin_empresa_no_puede_crear(self):
+        sin_empresa = Usuario.objects.create(username="ti-se", email="ti-se@nowhere.test")
+        resp = self._client(sin_empresa).post(self.URL_BOM, self._body_bom(), format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(ListaMaterialBom.objects.exists())
+
+    def test_superusuario_crea_en_su_propia_empresa(self):
+        root = Usuario.objects.create(
+            username="ti-root", email="ti-root@acme-ti.test", empresa=self.empresa,
+            is_superuser=True, is_staff=True,
+        )
+        resp = self._client(root).post(
+            self.URL_BOM, self._body_bom(empresa=self.otra_empresa.pk), format="json"
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["empresa"], self.empresa.pk)
+
+    def test_superusuario_no_referencia_variantes_de_otra_empresa(self):
+        root = Usuario.objects.create(
+            username="ti-root2", email="ti-root2@acme-ti.test", empresa=self.empresa,
+            is_superuser=True, is_staff=True,
+        )
+        resp = self._client(root).post(
+            self.URL_BOM, self._body_bom(producto_variante=self.variante_ajena.pk), format="json"
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("producto_variante", resp.data)

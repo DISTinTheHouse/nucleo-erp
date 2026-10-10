@@ -312,6 +312,15 @@ class ListaMaterialBomViewSet(viewsets.ModelViewSet):
 
         return queryset
 
+    def perform_create(self, serializer):
+        # ``empresa`` es de solo lectura en el serializer: sale siempre del
+        # usuario autenticado (superusuario incluido), igual que el alcance de
+        # ``get_queryset``. Mismo patrón que ``_crear_op_desde_request``.
+        empresa = getattr(self.request.user, 'empresa', None)
+        if empresa is None:
+            raise ValidationError({'empresa': 'El usuario no tiene una empresa asignada.'})
+        serializer.save(empresa=empresa)
+
     @action(detail=False, methods=['get'], url_path='bulk')
     def bulk(self, request):
         raw = request.query_params.get('producto_variante_ids', '').strip()

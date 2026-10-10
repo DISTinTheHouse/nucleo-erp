@@ -67,6 +67,29 @@ def _pedido_en_alcance(serializer, pedido, etiqueta_orden, destino):
     return pedido
 
 
+def _fk_de_la_empresa_del_usuario(serializer, campo, obj, empresa_id):
+    """FK escribible de BOM/OP, acotada a la empresa del usuario autenticado.
+
+    ``empresa_id`` es la empresa de ``obj`` (FK directa o vía su relación).
+    Se compara SIEMPRE contra ``user.empresa``, superusuario incluido: es el
+    mismo alcance que el ``get_queryset`` de ``lista-material``, ``bom-detalle``
+    y ``orden-produccion``, que tampoco le dan vista global. Sin ``request`` en
+    el contexto o sin empresa se rechaza (falla cerrado).
+    """
+    if obj is None:
+        return obj
+    user = getattr(serializer.context.get("request"), "user", None)
+    empresa_usuario_id = getattr(user, "empresa_id", None)
+    if empresa_usuario_id is None:
+        raise serializers.ValidationError("El usuario no tiene una empresa asignada.")
+    if empresa_id != empresa_usuario_id:
+        # Mismo mensaje que un pk inexistente: no revela que existe en otra empresa.
+        raise serializers.ValidationError(
+            serializer.fields[campo].error_messages["does_not_exist"].format(pk_value=obj.pk)
+        )
+    return obj
+
+
 class BomDetalleSerializer(serializers.ModelSerializer):
     componente_nombre = serializers.SerializerMethodField()
     unidad_clave = serializers.SerializerMethodField()
@@ -93,8 +116,21 @@ class ListaMaterialBomSerializer(serializers.ModelSerializer):
     class Meta:
         model = ListaMaterialBom
         fields = '__all__'
-        read_only_fields = ['activo', 'bom_id']
-    
+        # ``empresa`` no se confía al body: en create la inyecta
+        # ``ListaMaterialBomViewSet.perform_create`` desde el usuario
+        # autenticado y en update no se reasigna. Sigue saliendo en la respuesta.
+        read_only_fields = ['activo', 'bom_id', 'empresa']
+
+    def validate_producto_variante(self, producto_variante):
+        return _fk_de_la_empresa_del_usuario(
+            self, 'producto_variante', producto_variante, getattr(producto_variante, 'empresa_id', None)
+        )
+
+    def validate_variante_produccion(self, variante_produccion):
+        return _fk_de_la_empresa_del_usuario(
+            self, 'variante_produccion', variante_produccion, getattr(variante_produccion, 'empresa_id', None)
+        )
+
     def create(self, validated_data):
         detalles_data = validated_data.pop('materia_prima_detalle')
         producto_variante = validated_data.get('producto_variante')
