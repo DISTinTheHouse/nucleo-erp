@@ -1832,6 +1832,7 @@ En qué paso va el pedido, cuánto lleva y si va a tiempo. Todo se calcula en el
     - el backend descuenta inventario adicional cuando el nuevo pedido aumenta cantidades
     - el backend regresa inventario cuando el nuevo pedido reduce cantidades
     - cada ajuste genera su `MovimientoInventario` (`SALIDA` o `ENTRADA`) y auditoría correspondiente
+  - **Bloqueo (#420)**: los renglones del pedido se borran y recrean, así que si ya tienen algo ligado (factura, picking, órdenes de trabajo/producción, reservas, entregas…) responde `409 {"detail", "dependencias": [...]}` **sin tocar nada** (ni pedido ni inventario). Hay que cancelar/eliminar eso primero.
 - Rechazar cambios:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar-cambios/`
   - Efecto: se **revierte** la cotización al `aprobado_snapshot` (incluye detalle y `servicios_extras`) y vuelve a `Autorizada (3)`; el `Pedido` no se modifica.

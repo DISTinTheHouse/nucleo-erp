@@ -3638,3 +3638,94 @@ class PedidoDetalleSkuBaseTests(TestCase):
         with self.assertNumQueries(0):
             sku_base = PedidoDetalleReadSerializer().get_sku_base(detalle)
         self.assertEqual(sku_base, "6003703")
+
+
+class AceptarCambiosConDependenciasTests(TestCase):
+    """#420: aceptar-cambios borraba y recreaba los renglones del pedido; con
+    factura daba 500 y sin ella borraba en cascada picking, órdenes, reservas.
+    Ahora responde 409 sin tocar nada si los renglones tienen algo ligado."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from inventarios.models import Almacen
+
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme-ac", razon_social="acme-ac SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="AAC", nombre="acme-ac")
+        SerieFolio.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="PEDIDO", serie="P")
+        cls.admin = Usuario.objects.create(
+            username="admin@acme-ac.test", email="admin@acme-ac.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.talla = Talla.objects.create(nombre="CH")
+        cls.almacen = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="A1", nombre="A1")
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+        self.cotizacion = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.admin, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, estatus=2, persona_pagos="Pagos", correo_facturas="p@acme-ac.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.pedido = Pedido.objects.get(pk=resp.data["pedido"]["id"])
+        # Renglón de muestra (sin producto): aceptar no mueve inventario por él,
+        # así la prueba aísla el borrado de renglones.
+        self.detalle = PedidoDetalle.objects.create(pedido=self.pedido, producto_nombre_externo="Muestra")
+        self.talla_pedido = PedidoDetalleTalla.objects.create(pedido_detalle=self.detalle, talla=self.talla, cantidad=5)
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=5)
+
+    def _aceptar(self):
+        return self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/aceptar-cambios/")
+
+    def _assert_bloqueado(self, resp):
+        self.assertEqual(resp.status_code, 409, resp.content)
+        self.assertTrue(resp.json()["dependencias"])
+        self.assertTrue(PedidoDetalle.objects.filter(pk=self.detalle.pk).exists())
+        self.assertTrue(PedidoDetalleTalla.objects.filter(pk=self.talla_pedido.pk).exists())
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 5)
+
+    def test_sin_dependencias_funciona_como_antes(self):
+        resp = self._aceptar()
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 3)
+
+    def test_con_factura_responde_409_no_500(self):
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda, pedido=self.pedido,
+        )
+        fd = FacturaDetalle.objects.create(
+            factura=factura, pedido_detalle=self.detalle, pedido_detalle_talla=self.talla_pedido, producto=self.producto,
+        )
+
+        self._assert_bloqueado(self._aceptar())
+        self.assertTrue(FacturaDetalle.objects.filter(pk=fd.pk).exists())
+
+    def test_con_picking_no_lo_borra_en_cascada(self):
+        picking = Picking.objects.create(
+            folio="PK-1", empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            operador=self.admin, usuario=self.admin, almacen=self.almacen,
+        )
+        pd = PickingDetalle.objects.create(
+            picking=picking, pedido_detalle=self.detalle, pedido_detalle_talla=self.talla_pedido, cantidad_solicitada=5,
+        )
+
+        self._assert_bloqueado(self._aceptar())
+        self.assertTrue(PickingDetalle.objects.filter(pk=pd.pk).exists())
+
+    def test_con_orden_de_bordado_no_la_borra_en_cascada(self):
+        from produccion.models import OrdenBordadoDetalle
+
+        ob = OrdenesBordado.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido, folio_bordado="OB-1",
+        )
+        obd = OrdenBordadoDetalle.objects.create(ob=ob, pedido_detalle=self.detalle, producto=self.producto, cantidad=5)
+
+        self._assert_bloqueado(self._aceptar())
+        self.assertTrue(OrdenBordadoDetalle.objects.filter(pk=obd.pk).exists())
