@@ -3551,6 +3551,7 @@ Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró
 - Si en `PATCH` no se envía `materia_prima_detalle`, se conserva el detalle existente.
 - **Aislamiento multi-empresa**: `empresa` es de **solo lectura** en la entrada. En el alta la fija el servidor con la empresa del usuario autenticado (superusuario incluido) y en `PUT`/`PATCH` no se reasigna; si el body la trae, se ignora. Sigue saliendo en la respuesta. Un usuario sin empresa recibe `400`.
 - `producto_variante` y `variante_produccion` deben ser de la empresa del usuario: un id de otra empresa responde `400` en ese campo, con el mismo mensaje que un id inexistente.
+- Lo mismo aplica a `componente` y `variante_produccion` de cada renglón de `materia_prima_detalle`, también en `/api/v1/produccion/bom-detalle/` (`400` en `materia_prima_detalle[i].componente` o en `componente`, según el endpoint).
 
 ### 5) Orden de Producción (Onboarding)
 
@@ -4663,7 +4664,7 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
 **Alta de SKU + BOM en un solo paso**: `POST /api/v1/produccion/pedidos-especiales/{id}/variante-onboarding/`
 
 - Gateado a departamento Producción (o superuser/admin_empresa) — mismo patrón que la ruta crítica de OP.
-- Body: `{"pedido_detalle_id": 123, "materia_prima_detalle": [{"componente": 45, "cantidad": "1.50", "unidad": 3, "desperdicio": "5.00", "obligatorio": true}]}`. La lista de materiales se captura **una sola vez** y se replica en el BOM de cada talla.
+- Body: `{"pedido_detalle_id": 123, "materia_prima_detalle": [{"componente": 45, "cantidad": "1.50", "unidad": 3, "desperdicio": "5.00", "obligatorio": true}]}`. La lista de materiales se captura **una sola vez** y se replica en el BOM de cada talla. Cada `componente` debe ser de la empresa del usuario: uno de otra empresa responde `400` en `materia_prima_detalle[i].componente` (mismo mensaje que un id inexistente) y no se crea nada.
 - Crea una `catalogo.VarianteProductoProduccion` (SKU server-generado, formato `MP{pedido_detalle_id}-{color.codigo}-{talla.nombre}`) **por cada talla con cantidad** de esa línea, cada una con su propia `ListaMaterialBom`. Vive en tabla separada del catálogo real (`productos`/`variantes_producto`) — no aparece en listados ni búsquedas de catálogo. Campo `aplica_catalogo` (bool, default `false`): flag para una futura promoción a catálogo real desde mesa de control, todavía sin función que lo consuma.
 - Si la línea ya tiene algún SKU generado, responde `400` sin tocar nada (no hay merge; es alta única).
 - Tras esto, el `GET` del detalle refleja `sku_produccion` en cada talla sin consultas extra.

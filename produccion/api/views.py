@@ -1702,7 +1702,11 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         pedido = self.get_object()
         _require_produccion(request.user)
 
-        serializer = VarianteProduccionOnboardingSerializer(data=request.data)
+        # Con contexto: ``BomDetalleSerializer`` valida ``componente`` contra la
+        # empresa de ``request.user`` y sin ``request`` rechaza todo.
+        serializer = VarianteProduccionOnboardingSerializer(
+            data=request.data, context=self.get_serializer_context()
+        )
         serializer.is_valid(raise_exception=True)
         pedido_detalle_id = serializer.validated_data['pedido_detalle_id']
         detalles_bom = serializer.validated_data['materia_prima_detalle']

@@ -5094,3 +5094,241 @@ class ListaMaterialEmpresaTenantTests(_BomTenantBase, TestCase):
 
         self.assertEqual(resp.status_code, 400)
         self.assertIn("producto_variante", resp.data)
+
+
+class BomDetalleTenantTests(_BomTenantBase, TestCase):
+    """``BomDetalleSerializer``: ``componente`` y ``variante_produccion`` deben
+    ser de la empresa del usuario en todos sus consumidores -- anidado en
+    ``/lista-material/``, directo en ``/bom-detalle/`` y en el
+    ``variante-onboarding`` de pedidos especiales."""
+
+    CAMPOS_DETALLE = {
+        "bom_detalle_id", "bom", "variante_produccion", "componente", "cantidad", "unidad",
+        "desperdicio", "obligatorio", "observaciones", "activo", "componente_nombre", "unidad_clave",
+    }
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.admin = Usuario.objects.create(
+            username="ti-admin", email="ti-admin@acme-ti.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente TI")
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=moneda,
+            persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            clasificacion="B", fecha_confirmacion=timezone.now(),
+        )
+        cls.linea_muestra = PedidoDetalle.objects.create(
+            pedido=cls.pedido, producto_nombre_externo="Muestra especial", color=cls.color,
+        )
+        PedidoDetalleTalla.objects.create(pedido_detalle=cls.linea_muestra, talla=cls.talla, cantidad=5)
+        cls.url_onboarding = (
+            f"/api/v1/produccion/pedidos-especiales/{cls.pedido.pk}/variante-onboarding/"
+        )
+
+    # --- anidado en /lista-material/ ---
+
+    def test_bom_create_rechaza_componente_de_otra_empresa(self):
+        body = self._body_bom(materia_prima_detalle=[self._insumo(componente=self.componente_ajeno.pk)])
+        resp = self._client().post(self.URL_BOM, body, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("componente", resp.data["materia_prima_detalle"][0])
+        self.assertFalse(ListaMaterialBom.objects.exists())
+        self.assertFalse(BomDetalle.objects.exists())
+
+    def test_bom_create_rechaza_variante_produccion_ajena_en_el_insumo(self):
+        body = self._body_bom(
+            materia_prima_detalle=[self._insumo(variante_produccion=self.variante_produccion_ajena.pk)]
+        )
+        resp = self._client().post(self.URL_BOM, body, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("variante_produccion", resp.data["materia_prima_detalle"][0])
+        self.assertFalse(BomDetalle.objects.exists())
+
+    def test_bom_create_acepta_insumos_de_la_propia_empresa(self):
+        body = self._body_bom(
+            materia_prima_detalle=[
+                self._insumo(variante_produccion=self.variante_produccion.pk),
+                self._insumo(componente=self.componente_2.pk),
+            ]
+        )
+        resp = self._client().post(self.URL_BOM, body, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        detalles = resp.data["materia_prima_detalle"]
+        self.assertEqual(set(detalles[0]), self.CAMPOS_DETALLE)
+        self.assertEqual(
+            {d["componente"] for d in detalles}, {self.componente.pk, self.componente_2.pk}
+        )
+
+    def test_bom_create_sobre_bom_existente_rechaza_componente_ajeno(self):
+        # Segundo POST de la misma variante: rama de fusión de ``create``.
+        bom = self._bom()
+        body = self._body_bom(materia_prima_detalle=[self._insumo(componente=self.componente_ajeno.pk)])
+        resp = self._client().post(self.URL_BOM, body, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            list(bom.materia_prima_detalle.values_list("componente_id", flat=True)), [self.componente.pk]
+        )
+
+    def test_bom_update_rechaza_componente_de_otra_empresa(self):
+        bom = self._bom()
+        url = f"{self.URL_BOM}{bom.pk}/"
+        ajeno = [self._insumo(componente=self.componente_ajeno.pk)]
+
+        patch = self._client().patch(url, {"materia_prima_detalle": ajeno}, format="json")
+        put = self._client().put(url, self._body_bom(materia_prima_detalle=ajeno), format="json")
+
+        for resp in (patch, put):
+            self.assertEqual(resp.status_code, 400)
+            self.assertIn("componente", resp.data["materia_prima_detalle"][0])
+        self.assertEqual(
+            list(bom.materia_prima_detalle.values_list("componente_id", flat=True)), [self.componente.pk]
+        )
+
+    def test_bom_update_acepta_componente_de_la_propia_empresa(self):
+        bom = self._bom()
+        resp = self._client().patch(
+            f"{self.URL_BOM}{bom.pk}/",
+            {"materia_prima_detalle": [self._insumo(componente=self.componente_2.pk)]}, format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(
+            list(bom.materia_prima_detalle.values_list("componente_id", flat=True)), [self.componente_2.pk]
+        )
+
+    # --- /bom-detalle/ ---
+
+    def test_bom_detalle_create_rechaza_componente_de_otra_empresa(self):
+        resp = self._client().post(
+            self.URL_BOM_DETALLE, self._insumo(componente=self.componente_ajeno.pk), format="json"
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("componente", resp.data)
+        self.assertFalse(BomDetalle.objects.exists())
+
+    def test_bom_detalle_update_rechaza_componente_de_otra_empresa(self):
+        detalle = self._bom().materia_prima_detalle.get()
+        url = f"{self.URL_BOM_DETALLE}{detalle.pk}/"
+
+        patch = self._client().patch(url, {"componente": self.componente_ajeno.pk}, format="json")
+        put = self._client().put(url, self._insumo(componente=self.componente_ajeno.pk), format="json")
+
+        for resp in (patch, put):
+            self.assertEqual(resp.status_code, 400)
+            self.assertIn("componente", resp.data)
+        detalle.refresh_from_db()
+        self.assertEqual(detalle.componente_id, self.componente.pk)
+
+    def test_bom_detalle_update_rechaza_variante_produccion_de_otra_empresa(self):
+        detalle = self._bom().materia_prima_detalle.get()
+        resp = self._client().patch(
+            f"{self.URL_BOM_DETALLE}{detalle.pk}/",
+            {"variante_produccion": self.variante_produccion_ajena.pk}, format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("variante_produccion", resp.data)
+        detalle.refresh_from_db()
+        self.assertIsNone(detalle.variante_produccion_id)
+
+    def test_bom_detalle_update_acepta_fks_de_la_propia_empresa(self):
+        detalle = self._bom().materia_prima_detalle.get()
+        url = f"{self.URL_BOM_DETALLE}{detalle.pk}/"
+
+        patch = self._client().patch(
+            url,
+            {"componente": self.componente_2.pk, "variante_produccion": self.variante_produccion.pk},
+            format="json",
+        )
+        self.assertEqual(patch.status_code, 200, patch.data)
+        self.assertEqual(set(patch.data), self.CAMPOS_DETALLE)
+        detalle.refresh_from_db()
+        self.assertEqual(
+            (detalle.componente_id, detalle.variante_produccion_id),
+            (self.componente_2.pk, self.variante_produccion.pk),
+        )
+
+        put = self._client().put(url, self._insumo(cantidad="4.00"), format="json")
+        self.assertEqual(put.status_code, 200, put.data)
+        detalle.refresh_from_db()
+        self.assertEqual((detalle.componente_id, detalle.cantidad), (self.componente.pk, Decimal("4.00")))
+
+    def test_bom_detalle_de_otra_empresa_responde_404(self):
+        detalle = self._bom_ajeno().materia_prima_detalle.get()
+        url = f"{self.URL_BOM_DETALLE}{detalle.pk}/"
+
+        self.assertEqual(self._client().get(url).status_code, 404)
+        self.assertEqual(
+            self._client().patch(url, {"componente": self.componente.pk}, format="json").status_code, 404
+        )
+        self.assertEqual(self._client().delete(url).status_code, 404)
+        detalle.refresh_from_db()
+        self.assertEqual(detalle.componente_id, self.componente_ajeno.pk)
+        self.assertEqual(self._client().get(self.URL_BOM_DETALLE).data, [])
+
+    def test_superusuario_tampoco_referencia_componentes_de_otra_empresa(self):
+        root = Usuario.objects.create(
+            username="ti-root3", email="ti-root3@acme-ti.test", empresa=self.empresa,
+            is_superuser=True, is_staff=True,
+        )
+        detalle = self._bom().materia_prima_detalle.get()
+        resp = self._client(root).patch(
+            f"{self.URL_BOM_DETALLE}{detalle.pk}/", {"componente": self.componente_ajeno.pk}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("componente", resp.data)
+
+    # --- variante-onboarding de pedidos especiales ---
+
+    def _body_onboarding(self, **insumo):
+        return {
+            "pedido_detalle_id": self.linea_muestra.pk,
+            "materia_prima_detalle": [self._insumo(**insumo)],
+        }
+
+    def test_variante_onboarding_rechaza_componente_de_otra_empresa(self):
+        resp = self._client(self.admin).post(
+            self.url_onboarding, self._body_onboarding(componente=self.componente_ajeno.pk), format="json"
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("componente", resp.data["materia_prima_detalle"][0])
+        self.assertFalse(VarianteProductoProduccion.objects.filter(pedido_detalle=self.linea_muestra).exists())
+        self.assertFalse(BomDetalle.objects.exists())
+
+    def test_variante_onboarding_rechaza_variante_produccion_ajena_en_el_insumo(self):
+        resp = self._client(self.admin).post(
+            self.url_onboarding,
+            self._body_onboarding(variante_produccion=self.variante_produccion_ajena.pk), format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("variante_produccion", resp.data["materia_prima_detalle"][0])
+        self.assertFalse(VarianteProductoProduccion.objects.filter(pedido_detalle=self.linea_muestra).exists())
+
+    def test_variante_onboarding_con_componente_propio_conserva_el_shape(self):
+        resp = self._client(self.admin).post(self.url_onboarding, self._body_onboarding(), format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(
+            set(resp.data[0]), {"id", "sku", "nombre", "talla_nombre", "aplica_catalogo", "pedido_detalle"}
+        )
+        variante = VarianteProductoProduccion.objects.get(pk=resp.data[0]["id"])
+        self.assertEqual(variante.empresa_id, self.empresa.pk)
+        detalle = BomDetalle.objects.get(bom__variante_produccion=variante)
+        self.assertEqual(
+            (detalle.bom.empresa_id, detalle.componente_id, detalle.variante_produccion_id),
+            (self.empresa.pk, self.componente.pk, variante.pk),
+        )
