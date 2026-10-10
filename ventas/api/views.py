@@ -2,14 +2,15 @@ import json
 import logging
 from decimal import Decimal, ROUND_HALF_UP
 from django.core.serializers.json import DjangoJSONEncoder
-from django.db import transaction
+from django.db import router, transaction
+from django.db.models.deletion import Collector, ProtectedError, RestrictedError
 from django.db.models import Count, F, OuterRef, Prefetch, Q, Subquery, Sum
 from django.db.models.functions import Coalesce
 from datetime import timedelta
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
 from django.conf import settings
@@ -187,6 +188,55 @@ def _pedido_servicios_extras_prefetch():
         "servicios_extras",
         queryset=PedidoServicioExtra.objects.order_by("id"),
     )
+
+
+class PedidoConDependencias(APIException):
+    status_code = 409
+    default_code = "pedido_con_dependencias"
+
+    def __init__(self, dependencias):
+        super().__init__({
+            "detail": (
+                "No se pueden aplicar los cambios: los renglones del pedido ya tienen "
+                f"{', '.join(dependencias)}. Cancélalos o elimínalos primero."
+            ),
+            "dependencias": dependencias,
+        })
+
+
+def _objetos_bloqueantes(exc):
+    return getattr(exc, "protected_objects", None) or getattr(exc, "restricted_objects", None) or ()
+
+
+def _etiquetas(objetos_o_modelos):
+    modelos = {o if isinstance(o, type) else type(o) for o in objetos_o_modelos}
+    return sorted(str(m._meta.verbose_name_plural) for m in modelos)
+
+
+def _exigir_renglones_sin_dependencias(pedido):
+    """409 si borrar los renglones del pedido tocaría algo fuera de ellos mismos.
+
+    Lo decide el ``Collector`` de Django (el mismo que usa ``delete()``): cubre
+    cualquier relación, incluidas las que se agreguen después, sin listarlas aquí.
+    """
+    renglones = list(PedidoDetalle.objects.filter(pedido=pedido))
+    if not renglones:
+        return
+    collector = Collector(using=router.db_for_write(PedidoDetalle))
+    try:
+        collector.collect(renglones)
+    except (ProtectedError, RestrictedError) as exc:
+        raise PedidoConDependencias(_etiquetas(_objetos_bloqueantes(exc))) from exc
+    propios = {PedidoDetalle, PedidoDetalleTalla}
+    afectados = {m for m, objs in collector.data.items() if objs and m not in propios}
+    afectados |= {qs.model for qs in collector.fast_deletes if qs.model not in propios and qs.exists()}
+    afectados |= {
+        campo.model
+        for (campo, _valor), lotes in collector.field_updates.items()
+        if any(lote.exists() if hasattr(lote, "exists") else lote for lote in lotes)
+    }
+    if afectados:
+        raise PedidoConDependencias(_etiquetas(afectados))
 
 
 class CotizacionViewSet(viewsets.ModelViewSet):
@@ -1926,7 +1976,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         pedido.gran_total = cotizacion.gran_total
         pedido.save()
 
-        PedidoDetalle.objects.filter(pedido=pedido).delete()
+        try:
+            PedidoDetalle.objects.filter(pedido=pedido).delete()
+        except (ProtectedError, RestrictedError) as exc:
+            raise PedidoConDependencias(_etiquetas(_objetos_bloqueantes(exc))) from exc
         PedidoServicioExtra.objects.filter(pedido=pedido).delete()
         detalles = (
             CotizacionDetalle.objects.filter(cotizacion=cotizacion)
@@ -2181,6 +2234,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 raise ValidationError(
                     {"cotizacion": "No existe pedido para aplicar cambios."}
                 )
+            # Aplicar los cambios borra y recrea los renglones del pedido: con algo
+            # ligado a ellos (factura, picking, órdenes, reservas...) eso daba 500 o
+            # lo borraba en cascada sin avisar (#420). Se rechaza antes de escribir.
+            _exigir_renglones_sin_dependencias(pedido)
             self._ajustar_existencias_cambios_pedido(
                 cotizacion=cotizacion,
                 pedido=pedido,
