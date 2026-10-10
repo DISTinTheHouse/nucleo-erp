@@ -6135,3 +6135,49 @@ class VarianteOnboardingColorTests(_BomTenantBase, TestCase):
 
         self.assertEqual(resp.status_code, 400, resp.data)
         self.assertEqual(VarianteProductoProduccion.objects.filter(pedido_detalle=linea).count(), 1)
+
+    # --- largo de ``VarianteProductoProduccion.nombre`` ---
+    # SQLite no aplica el max_length; Postgres sí (DataError -> 500). Por eso
+    # los largos se afirman explícitamente.
+
+    MAX_NOMBRE = VarianteProductoProduccion._meta.get_field("nombre").max_length
+
+    def _onboarding_con_nombre(self, nombre):
+        linea = self._linea(self.color)
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=linea, talla=Talla.objects.create(nombre="G"), cantidad=2
+        )
+        PedidoDetalle.objects.filter(pk=linea.pk).update(producto_nombre_externo=nombre)
+        resp = self._post(linea)
+        self.assertEqual(resp.status_code, 201, resp.data)
+        variantes = list(VarianteProductoProduccion.objects.filter(pedido_detalle=linea).order_by("pk"))
+        self.assertEqual(len(variantes), 2)
+        self.assertEqual([v["nombre"] for v in resp.data], [v.nombre for v in variantes])
+        return linea, variantes
+
+    def test_nombre_externo_mas_largo_que_el_campo_se_trunca(self):
+        nombre = "A" * (self.MAX_NOMBRE + 80)
+        linea, variantes = self._onboarding_con_nombre(nombre)
+
+        for variante in variantes:
+            self.assertEqual(len(variante.nombre), self.MAX_NOMBRE)
+            self.assertEqual(variante.nombre, nombre[: self.MAX_NOMBRE])
+        # El nombre no lleva sufijo de talla: lo que distingue a cada variante
+        # es su SKU, que no se toca.
+        self.assertEqual({v.sku for v in variantes}, {f"MP{linea.pk}-NEG-M", f"MP{linea.pk}-NEG-G"})
+        linea.refresh_from_db()
+        self.assertEqual(linea.producto_nombre_externo, nombre)
+
+    def test_truncado_no_deja_espacios_ni_separadores_colgando(self):
+        base = "B" * (self.MAX_NOMBRE - 3)
+        _, variantes = self._onboarding_con_nombre(base + " - CON REFLEJANTE PLATA")
+
+        for variante in variantes:
+            self.assertEqual(variante.nombre, base)
+
+    def test_nombre_externo_en_el_limite_o_corto_no_cambia(self):
+        for nombre in ("C" * self.MAX_NOMBRE, "Gorra bordada muestra"):
+            with self.subTest(largo=len(nombre)):
+                _, variantes = self._onboarding_con_nombre(nombre)
+                for variante in variantes:
+                    self.assertEqual(variante.nombre, nombre)
