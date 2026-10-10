@@ -686,7 +686,7 @@ class Nomina(models.Model):
             # garantía real: la validación del serializer y el chequeo previo de
             # ``generar_periodo`` sólo le ponen mensaje, y esto cubre también la
             # carrera entre dos peticiones. Una cancelada queda fuera del índice.
-            # Periodos que se traslapan sin ser idénticos no se detectan aquí.
+            # Los traslapes no idénticos los rechaza ``hay_otra_vigente`` (#403).
             models.UniqueConstraint(
                 fields=['empleado', 'periodo_inicio', 'periodo_fin'],
                 condition=NOMINA_VIGENTE,
@@ -700,7 +700,7 @@ class Nomina(models.Model):
 
     @classmethod
     def hay_otra_vigente(cls, empleado_id, periodo_inicio, periodo_fin, *, estado, excluir_pk=None):
-        """¿Chocaría con otra vigente una nómina que quede así?
+        """¿Se traslaparía con otra vigente del mismo empleado una nómina que quede así?
 
         Recibe los valores con los que la nómina QUEDARÁ, no los que tenía: así
         reactivar una cancelada o mover sus fechas también se revisa. Mismo
@@ -711,8 +711,8 @@ class Nomina(models.Model):
         otras = cls.objects.filter(
             NOMINA_VIGENTE,
             empleado_id=empleado_id,
-            periodo_inicio=periodo_inicio,
-            periodo_fin=periodo_fin,
+            periodo_inicio__lte=periodo_fin,
+            periodo_fin__gte=periodo_inicio,
         )
         if excluir_pk is not None:
             otras = otras.exclude(pk=excluir_pk)

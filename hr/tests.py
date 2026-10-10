@@ -23,6 +23,7 @@ from hr.models import (
     Asistencia, Contrato, Empleado, Nomina, NominaDetalle, PermisoAusencia, Puesto, Turno, Vacaciones,
 )
 from nucleo.models import Departamento, Empresa, Sucursal
+from seguridad.models import Permiso, Rol, RolPermiso, UsuarioRol
 from usuarios.models import Usuario
 
 CONTRATOS_URL = "/api/v1/hr/contratos/"
@@ -43,6 +44,7 @@ class HrBase(TestCase):
         usuario = Usuario.objects.create(
             username=email, email=email, empresa=empresa, sucursal_default=sucursal,
         )
+        cls._dar_permisos(usuario, empresa, "R-RH", "E-RH", "D-RH")
         return {
             "empresa": empresa,
             "sucursal": sucursal,
@@ -50,6 +52,14 @@ class HrBase(TestCase):
             "puesto": puesto,
             "usuario": usuario,
         }
+
+    @staticmethod
+    def _dar_permisos(usuario, empresa, *claves):
+        rol = Rol.objects.create(empresa=empresa, codigo=f"rh-{usuario.username}", nombre="RH", estatus=Rol.Estatus.ACTIVO)
+        for clave in claves:
+            permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
+            RolPermiso.objects.create(rol=rol, permiso=permiso)
+        UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=empresa)
 
     @classmethod
     def _empleado(cls, tenant, numero):
@@ -485,25 +495,33 @@ class NominaUnicaPorPeriodoApiTests(NominaBase):
         self.assertEqual(resp.status_code, 201, resp.content)
         self.assertEqual(self._vigentes(), 1)
 
-    def test_un_alta_cancelada_no_choca_con_la_vigente(self):
-        self._nomina()
-
+    def test_un_alta_no_nace_cancelada(self):
+        """#400: toda nómina nace pendiente."""
         resp = self._post(self._payload(estado="cancelada"))
 
-        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("estado", resp.json())
 
     def test_otro_periodo_u_otro_empleado_no_choca(self):
         self._nomina()
         otro = self._empleado(self.a, "E-002")
 
         for extra in (
-            {"periodo_fin": "2026-07-14"},
-            {"periodo_inicio": "2026-07-02"},
+            {"periodo_inicio": "2026-07-16", "periodo_fin": "2026-07-31"},
             {"empleado": otro.pk},
         ):
             with self.subTest(**extra):
                 resp = self._post(self._payload(**extra))
                 self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_un_periodo_que_se_traslapa_choca(self):
+        """#403: no solo el periodo idéntico; cualquier traslape."""
+        self._nomina()
+
+        for extra in ({"periodo_fin": "2026-07-14"}, {"periodo_inicio": "2026-07-02"},
+                      {"periodo_inicio": "2026-07-10", "periodo_fin": "2026-07-20"}):
+            with self.subTest(**extra):
+                self._assert_rechazo_por_duplicada(self._post(self._payload(**extra)))
 
     def test_patch_de_una_sola_fecha_que_choca_devuelve_400(self):
         self._nomina()
@@ -532,13 +550,14 @@ class NominaUnicaPorPeriodoApiTests(NominaBase):
 
         self._assert_rechazo_por_duplicada(resp)
 
-    def test_reactivar_una_cancelada_que_choca_devuelve_400(self):
-        self._nomina()
+    def test_una_cancelada_no_se_reactiva(self):
+        """#400: cancelada es terminal."""
         cancelada = self._nomina(estado="cancelada")
 
         resp = self._patch(cancelada, {"estado": "pendiente"})
 
-        self._assert_rechazo_por_duplicada(resp)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("estado", resp.json())
         cancelada.refresh_from_db()
         self.assertEqual(cancelada.estado, "cancelada")
 
@@ -858,7 +877,7 @@ class GenerarPeriodoIntegridadTests(NominaBase):
 
     def test_la_nomina_de_otra_sucursal_u_otro_periodo_no_bloquea(self):
         self._nomina(empleado=self.empleado_gdl)
-        self._nomina(periodo_fin=date(2026, 7, 14))
+        self._nomina(periodo_inicio=date(2026, 7, 16), periodo_fin=date(2026, 7, 31))
 
         resp = self._generar()
 
@@ -1821,3 +1840,115 @@ class NominaCoherenciaYFechasTests(NominaBase):
 
                 self.assertEqual(resp.status_code, 400, resp.content)
                 self.assertIn(campo, resp.json())
+
+
+class NominaReglasTests(NominaBase):
+    """#400 ciclo de vida, #401 permisos, #402 ingreso/baja y contrato, #403 días reales."""
+
+    def _sin_permisos(self, *claves):
+        user = Usuario.objects.create(username=f"u-{len(claves)}-{'-'.join(claves) or 'nada'}",
+                                      email=f"{'-'.join(claves) or 'nada'}@acme.test", empresa=self.a["empresa"])
+        if claves:
+            self._dar_permisos(user, self.a["empresa"], *claves)
+        return user
+
+    def _con_percepcion(self, monto="1000.00", **kwargs):
+        nomina = self._nomina(**kwargs)
+        NominaDetalle.objects.create(nomina=nomina, codigo="PER001", concepto="Salario", tipo="percepcion", monto=Decimal(monto))
+        nomina._recalcular_totales()
+        return nomina
+
+    # --- #401 -------------------------------------------------------------
+
+    def test_permisos_por_accion(self):
+        nomina = self._con_percepcion()
+        nada, lectura, edicion = self._sin_permisos(), self._sin_permisos("R-RH"), self._sin_permisos("R-RH", "E-RH")
+
+        self.assertEqual(self._client(nada).get(NOMINAS_URL).status_code, 403)
+        self.assertEqual(self._client(lectura).get(NOMINAS_URL).status_code, 200)
+        self.assertEqual(self._post(self._payload(periodo_inicio="2026-08-01", periodo_fin="2026-08-15"), user=lectura).status_code, 403)
+        self.assertEqual(self._patch(nomina, {"observaciones": "ok"}, user=edicion).status_code, 200)
+        # Pagar, cancelar y borrar requieren D-RH.
+        self.assertEqual(self._patch(nomina, {"estado": "cancelada"}, user=edicion).status_code, 403)
+        self.assertEqual(self._client(edicion).delete(f"{NOMINAS_URL}{nomina.pk}/").status_code, 403)
+        nomina.refresh_from_db()
+        self.assertEqual(nomina.estado, "pendiente")
+
+    # --- #400 -------------------------------------------------------------
+
+    def test_pagar_exige_fecha_pago_y_neto_positivo(self):
+        sin_fecha = self._con_percepcion()
+        self.assertIn("fecha_pago", self._patch(sin_fecha, {"estado": "pagada"}).json())
+
+        en_cero = self._nomina(empleado=self._empleado(self.a, "E-0"))
+        resp = self._patch(en_cero, {"estado": "pagada", "fecha_pago": INICIO.isoformat()})
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+        resp = self._patch(sin_fecha, {"estado": "pagada", "fecha_pago": FIN.isoformat()})
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_pagada_es_terminal(self):
+        pagada = self._con_percepcion(estado="pagada", fecha_pago=FIN)
+
+        for body in ({"estado": "pendiente"}, {"observaciones": "x"}, {"detalles": [_linea(monto="5.00")]}):
+            with self.subTest(body=list(body)):
+                self.assertEqual(self._patch(pagada, body).status_code, 400)
+        self.assertEqual(self._client().delete(f"{NOMINAS_URL}{pagada.pk}/").status_code, 400)
+        self.assertTrue(Nomina.objects.filter(pk=pagada.pk, estado="pagada").exists())
+
+    # --- #402 / #403 -----------------------------------------------------------
+
+    def _generar(self, inicio="2026-09-01", fin="2026-09-15"):
+        resp = self._client().post(
+            GENERAR_PERIODO_URL, {"periodo_inicio": inicio, "periodo_fin": fin, "sucursal_id": self.a["sucursal"].pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        return {n.empleado_id: n for n in Nomina.objects.filter(pk__in=resp.json()["ids"])}
+
+    def test_generar_periodo_paga_dias_reales_y_proporcionales(self):
+        Contrato.objects.create(empleado=self.empleado, fecha_inicio=date(2026, 1, 1), salario=Decimal("3000.00"))
+        ingreso = self._empleado(self.a, "E-ING")
+        Empleado.objects.filter(pk=ingreso.pk).update(fecha_ingreso=date(2026, 9, 11))
+        Contrato.objects.create(empleado=ingreso, fecha_inicio=date(2026, 9, 11), salario=Decimal("3000.00"))
+        baja = self._empleado(self.a, "E-BAJA")
+        Empleado.objects.filter(pk=baja.pk).update(activo=False, fecha_baja=date(2026, 9, 10))
+        Contrato.objects.create(empleado=baja, fecha_inicio=date(2026, 1, 1), salario=Decimal("3000.00"))
+        futuro = self._empleado(self.a, "E-FUT")
+        Empleado.objects.filter(pk=futuro.pk).update(fecha_ingreso=date(2027, 1, 1))
+
+        nominas = self._generar()
+
+        self.assertNotIn(futuro.pk, nominas)
+        self.assertEqual(nominas[self.empleado.pk].dias_pagados, 15)
+        self.assertEqual(nominas[ingreso.pk].dias_pagados, 5)
+        self.assertEqual(nominas[baja.pk].dias_pagados, 10)
+        # 3000 / 30 = 100 por día.
+        self.assertEqual(nominas[baja.pk].total_percepciones, Decimal("1000.00"))
+
+    def test_generar_periodo_usa_el_contrato_que_cubre_el_periodo(self):
+        Contrato.objects.create(empleado=self.empleado, fecha_inicio=date(2026, 12, 1), salario=Decimal("9000.00"))
+
+        nomina = self._generar()[self.empleado.pk]
+
+        self.assertNotEqual(nomina.salario_base, Decimal("9000.00"))
+
+    def test_generar_periodo_de_un_mes_paga_sus_dias(self):
+        Contrato.objects.create(empleado=self.empleado, fecha_inicio=date(2026, 1, 1), salario=Decimal("3000.00"))
+
+        nomina = self._generar("2026-09-01", "2026-09-30")[self.empleado.pk]
+
+        self.assertEqual(nomina.dias_pagados, 30)
+        self.assertEqual(nomina.total_percepciones, Decimal("3000.00"))
+
+    def test_generar_periodo_rechaza_traslape(self):
+        self._nomina(periodo_inicio=date(2026, 9, 10), periodo_fin=date(2026, 9, 20))
+
+        resp = self._client().post(
+            GENERAR_PERIODO_URL,
+            {"periodo_inicio": "2026-09-01", "periodo_fin": "2026-09-15", "sucursal_id": self.a["sucursal"].pk},
+            format="json",
+        )
+
+        # Mismo 409 que el periodo duplicado de generar_periodo.
+        self.assertEqual(resp.status_code, 409, resp.content)

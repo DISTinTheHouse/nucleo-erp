@@ -6927,6 +6927,9 @@ Bitácora de eventos: retardos acumulados, faltas, problemas de conducta, recono
 - **CRUD**: `POST /api/v1/hr/nominas/`, `GET /{id}/`, `PUT/PATCH /{id}/`, `DELETE /{id}/` (soft)
 - `creado_por = request.user` y `fecha_generacion = now()` (auto). No mandar.
 - `empresa`, `sucursal` y `empleado` deben ser de la misma empresa, y `sucursal` la del empleado (alta y edición, también superusuario) → si no, `400` por campo.
+- **Permisos**: `R-RH` consultar; `E-RH` crear, editar, `calcular_totales` y `generar_periodo`; `D-RH` pagar, cancelar y borrar. Superusuario y admin de empresa pasan siempre. Sin la clave → `403`.
+- **Estado** (mismo PATCH): nace `pendiente`; solo `pendiente`→`pagada` (exige `fecha_pago` ≤ hoy y `neto` > 0) o `pendiente`→`cancelada`. `pagada` y `cancelada` son terminales: cualquier PATCH → `400`. `DELETE` solo en `pendiente`.
+- **Traslapes**: una nómina vigente del mismo empleado que se cruce con el periodo (no solo el idéntico) → `400 {"empleado"}` (`409` en `generar_periodo`).
 
 **Estados nómina**: `pendiente` / `autorizada` / `pagada` / `cancelada`.
 
@@ -7034,6 +7037,8 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 - **Endpoint**: `POST /api/v1/hr/nominas/generar_periodo/`
 - **Propósito**: crear nómina para TODOS los empleados activos de la empresa (o de una sucursal específica).
 - Fechas (`periodo_inicio`, `periodo_fin`, `fecha_pago`) como string `YYYY-MM-DD`; cualquier otro valor → `400` con el campo.
+- Cualquier rango. Incluye a quien trabajó algún día del periodo (`fecha_ingreso` ≤ fin y `fecha_baja` vacía o ≥ inicio), aunque ya esté inactivo.
+- `dias_pagados` = días trabajados dentro del periodo; percepción = salario / 30 × días. Salario del contrato activo que cubra esos días; si no hay, el del puesto.
 
 **Body**
 
