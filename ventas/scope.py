@@ -15,7 +15,7 @@ Ninguna aplica filtros de UI (``?q=``, ``estatus``, ``mis_pedidos``), anotacione
 orden: eso sigue siendo responsabilidad del ViewSet.
 """
 
-from ventas.models import Cotizacion, Pedido
+from ventas.models import Cotizacion, Oportunidad, Pedido
 
 
 def pedidos_base():
@@ -68,4 +68,25 @@ def alcance_cotizaciones(qs, user):
 def cotizaciones_visibles(qs, user):
     """Sólo el queryset de ``alcance_cotizaciones``, para quien no necesita el flag."""
     qs, _ = alcance_cotizaciones(qs, user)
+    return qs
+
+
+def oportunidades_base():
+    """Filas existentes de ``ventas.Oportunidad``: excluye las dadas de baja."""
+    return Oportunidad.objects.filter(activo=True)
+
+
+def oportunidades_visibles(qs, user):
+    """Alcance de ``ventas.Oportunidad``: el vendedor ve las suyas, el admin de empresa todas.
+
+    El superusuario ve todo; sin empresa no se ve nada (se falla cerrado).
+    """
+    if getattr(user, "is_superuser", False):
+        return qs
+    empresa = getattr(user, "empresa", None)
+    if not empresa:
+        return qs.none()
+    qs = qs.filter(empresa=empresa)
+    if not getattr(user, "is_admin_empresa", False):
+        qs = qs.filter(vendedor=user)
     return qs
