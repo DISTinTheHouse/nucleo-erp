@@ -1191,7 +1191,8 @@ class ParametrosContabilidadViewSet(FinanzasBaseViewSet):
 
 
 class PolizaViewSet(FinanzasBaseViewSet):
-    queryset = Poliza.objects.all()
+    # Las líneas se leen una vez para todo el listado (el serializer las suma).
+    queryset = Poliza.objects.prefetch_related("poliza_detalles")
     serializer_class = PolizaSerializer
 
     def get_queryset(self):
@@ -1292,8 +1293,11 @@ class PolizaViewSet(FinanzasBaseViewSet):
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         poliza = self.get_object()
-        PolizaService.cancelar(poliza)
-        return Response(PolizaSerializer(poliza).data)
+        contrapoliza = PolizaService.cancelar(poliza, request.user)
+        poliza.refresh_from_db()
+        data = PolizaSerializer(poliza).data
+        data["contrapoliza_id"] = contrapoliza.pk if contrapoliza else None
+        return Response(data)
 
     @action(detail=True, methods=["post"], url_path="validar-cuadre")
     def validar_cuadre(self, request, pk=None):

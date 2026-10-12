@@ -227,6 +227,10 @@ class Poliza(models.Model):
     poliza_reversa_de = models.ForeignKey(
         "self", on_delete=models.PROTECT, related_name="reversas", null=True, blank=True
     )
+    # Documento que originó la póliza automática (p. ej. "Factura", 15). Con
+    # el único de abajo, un documento no puede tener dos pólizas.
+    origen_tipo = models.CharField(max_length=30, null=True, blank=True)
+    origen_id = models.PositiveIntegerField(null=True, blank=True)
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
@@ -235,7 +239,13 @@ class Poliza(models.Model):
         db_table = "polizas"
         verbose_name = "Poliza"
         verbose_name_plural = "Polizas"
+        indexes = [models.Index(fields=["empresa", "fecha"], name="ix_poliza_empresa_fecha")]
         constraints = [
+            models.UniqueConstraint(
+                fields=("origen_tipo", "origen_id"),
+                condition=models.Q(origen_tipo__isnull=False, poliza_reversa_de__isnull=True),
+                name="uq_poliza_origen",
+            ),
             models.UniqueConstraint(
                 fields=("poliza_reversa_de",),
                 condition=models.Q(poliza_reversa_de__isnull=False),
