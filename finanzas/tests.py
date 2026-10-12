@@ -3841,6 +3841,70 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         self.assertFalse(FacturaProveedor.objects.filter(pk=factura.pk).exists())
         self.assertFalse(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
 
+    # -- F0: transiciones de estatus del pago --------------------------------
+
+    def _saldo_banco(self, pago):
+        pago.cuenta_bancaria.refresh_from_db()
+        return pago.cuenta_bancaria.saldo_actual
+
+    def test_patch_a_cancelado_revierte_saldos_y_banco_del_pago(self):
+        proveedor, _, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "400.00")
+        saldo_banco_aplicado = self._saldo_banco(pago)
+
+        resp = self._patch(f"{PAGOS_URL}{pago.pk}/", {"estatus": Pago.Estatus.CANCELADO.value})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        pago.refresh_from_db()
+        cxp.refresh_from_db()
+        self.assertEqual(pago.estatus, Pago.Estatus.CANCELADO)
+        self.assertEqual(cxp.saldo, Decimal("1000.00"))
+        self.assertEqual(self._saldo_banco(pago), saldo_banco_aplicado + Decimal("400.00"))
+        self.assertEqual(
+            pago.movimientos_bancarios.get().estatus, MovimientoBancario.Estatus.CANCELADO
+        )
+
+    def test_pago_aplicado_no_puede_regresar_a_borrador(self):
+        proveedor, _, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "400.00")
+
+        resp = self._patch(f"{PAGOS_URL}{pago.pk}/", {"estatus": Pago.Estatus.BORRADOR.value})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("estatus", resp.data)
+        pago.refresh_from_db()
+        cxp.refresh_from_db()
+        self.assertEqual(pago.estatus, Pago.Estatus.APLICADO)
+        self.assertEqual(cxp.saldo, Decimal("600.00"))
+
+    def test_cancelar_un_pago_en_borrador_no_toca_saldos_ni_banco(self):
+        proveedor, _, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "400.00", estatus=Pago.Estatus.BORRADOR.value)
+        saldo_banco = self._saldo_banco(pago)
+
+        resp = self._client(self.a["usuario"]).post(f"{PAGOS_URL}{pago.pk}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        pago.refresh_from_db()
+        cxp.refresh_from_db()
+        self.assertEqual(pago.estatus, Pago.Estatus.CANCELADO)
+        self.assertEqual(cxp.saldo, Decimal("1000.00"))
+        self.assertEqual(self._saldo_banco(pago), saldo_banco)
+
+    def test_borrar_un_pago_aplicado_lo_cancela_y_lo_saca_del_listado(self):
+        proveedor, _, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "400.00")
+
+        resp = self._client(self.a["usuario"]).delete(f"{PAGOS_URL}{pago.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        pago.refresh_from_db()
+        cxp.refresh_from_db()
+        self.assertEqual(pago.estatus, Pago.Estatus.CANCELADO)
+        self.assertFalse(pago.activo)
+        self.assertEqual(cxp.saldo, Decimal("1000.00"))
+        self.assertEqual(self._client(self.a["usuario"]).get(f"{PAGOS_URL}{pago.pk}/").status_code, 404)
+
     # -- Migración 0013 ---------------------------------------------------------
 
     def test_migration_remaps_vencida_by_balance_and_is_a_noop_without_rows(self):
@@ -6152,3 +6216,213 @@ class CuentaPorCobrarUnicaPorFacturaTests(FinanzasBase):
 
         with self.assertRaises(IntegrityError), transaction.atomic():
             CuentaPorCobrar.objects.create(**datos)
+
+
+class F0CobroEstatusYGuardsTests(FinanzasBase):
+    """F0 del plan de pólizas: un cobro solo avanza, revierte de verdad al cancelarse
+    y no admite CxC ni facturas canceladas. La póliza se cuelga de estos hechos."""
+
+    def _cxc(self, total="100.00", *, estatus=None, factura_estatus=None):
+        empresa = self.a["empresa"]
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"], cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        if factura_estatus is not None:
+            Factura.objects.filter(pk=factura.pk).update(estatus=factura_estatus)
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=empresa, cliente=self.a["cliente"], factura=factura,
+            total=Decimal(total), saldo=Decimal(total),
+        )
+        if estatus is not None:
+            CuentaPorCobrar.objects.filter(pk=cxc.pk).update(estatus=estatus)
+        return cxc
+
+    def _cobrar(self, cxc, importe="100.00", *, cuenta=None, **extra):
+        cuenta = cuenta or self._crear_cuenta_bancaria(self.a["empresa"])
+        payload = {
+            "cliente": self.a["cliente"].pk,
+            "cuenta_bancaria": cuenta.pk,
+            "total_cobrado": importe,
+            "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": importe}],
+            **extra,
+        }
+        return self._client(self.a["usuario"]).post(COBROS_URL, payload, format="json")
+
+    def _patch(self, cobro, data):
+        return self._client(self.a["usuario"]).patch(f"{COBROS_URL}{cobro.pk}/", data, format="json")
+
+    def _banco(self, cobro):
+        cobro.cuenta_bancaria.refresh_from_db()
+        return cobro.cuenta_bancaria.saldo_actual
+
+    def test_no_se_puede_cobrar_una_cxc_cancelada(self):
+        cxc = self._cxc(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA)
+
+        resp = self._cobrar(cxc)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cobro_detalles", resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.CANCELADA)
+
+    def test_no_se_puede_cobrar_una_factura_cancelada(self):
+        cxc = self._cxc(factura_estatus=Factura.FacturaStatus.CANCELADA)
+
+        resp = self._cobrar(cxc)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cobro_detalles", resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+
+    def test_no_se_puede_cobrar_dos_veces_una_cxc_liquidada(self):
+        cxc = self._cxc()
+        self.assertEqual(self._cobrar(cxc).status_code, 201)
+
+        resp = self._cobrar(cxc)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("0.00"))
+
+    def test_patch_a_cancelado_revierte_saldo_y_banco(self):
+        cxc = self._cxc()
+        resp = self._cobrar(cxc, "60.00")
+        cobro = Cobro.objects.get(pk=resp.data["id"])
+        banco_aplicado = self._banco(cobro)
+
+        resp = self._patch(cobro, {"estatus": Cobro.Estatus.CANCELADO.value})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cobro.refresh_from_db()
+        cxc.refresh_from_db()
+        self.assertEqual(cobro.estatus, Cobro.Estatus.CANCELADO)
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
+        self.assertEqual(self._banco(cobro), banco_aplicado - Decimal("60.00"))
+        self.assertEqual(
+            cobro.movimientos_bancarios.get().estatus, MovimientoBancario.Estatus.CANCELADO
+        )
+
+    def test_cobro_aplicado_no_puede_regresar_a_borrador(self):
+        cxc = self._cxc()
+        cobro = Cobro.objects.get(pk=self._cobrar(cxc, "60.00").data["id"])
+
+        resp = self._patch(cobro, {"estatus": Cobro.Estatus.BORRADOR.value})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("estatus", resp.data)
+        cobro.refresh_from_db()
+        cxc.refresh_from_db()
+        self.assertEqual(cobro.estatus, Cobro.Estatus.APLICADO)
+        self.assertEqual(cxc.saldo, Decimal("40.00"))
+
+    def test_un_borrador_se_aplica_una_sola_vez(self):
+        cxc = self._cxc()
+        resp = self._cobrar(cxc, "60.00", estatus=Cobro.Estatus.BORRADOR.value)
+        cobro = Cobro.objects.get(pk=resp.data["id"])
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+
+        self.assertEqual(self._patch(cobro, {"estatus": "Aplicado"}).status_code, 200)
+        self.assertEqual(self._patch(cobro, {"estatus": "Borrador"}).status_code, 400)
+        self.assertEqual(self._patch(cobro, {"estatus": "Aplicado"}).status_code, 200)
+
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("40.00"))
+
+    def test_cancelar_un_borrador_no_toca_saldos_ni_banco(self):
+        cxc = self._cxc()
+        resp = self._cobrar(cxc, "60.00", estatus=Cobro.Estatus.BORRADOR.value)
+        cobro = Cobro.objects.get(pk=resp.data["id"])
+        banco = self._banco(cobro)
+
+        resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cobro.refresh_from_db()
+        cxc.refresh_from_db()
+        self.assertEqual(cobro.estatus, Cobro.Estatus.CANCELADO)
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+        self.assertEqual(self._banco(cobro), banco)
+
+    def test_borrar_un_cobro_aplicado_lo_cancela_y_lo_saca_del_listado(self):
+        cxc = self._cxc()
+        cobro = Cobro.objects.get(pk=self._cobrar(cxc, "60.00").data["id"])
+
+        resp = self._client(self.a["usuario"]).delete(f"{COBROS_URL}{cobro.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        cobro.refresh_from_db()
+        cxc.refresh_from_db()
+        self.assertEqual(cobro.estatus, Cobro.Estatus.CANCELADO)
+        self.assertFalse(cobro.activo)
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+        self.assertEqual(self._client(self.a["usuario"]).get(f"{COBROS_URL}{cobro.pk}/").status_code, 404)
+
+
+class F0CuentaPorCobrarSoloLecturaTests(FinanzasBase):
+    """Saldo y estatus de la CxC los mueven los servicios, no el cliente HTTP."""
+
+    def _cxc(self):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        return CuentaPorCobrar.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+
+    def test_no_hay_alta_manual_de_cxc(self):
+        resp = self._client(self.a["usuario"]).post(CXC_URL, {"total": "100.00"}, format="json")
+
+        self.assertEqual(resp.status_code, 405)
+
+    def test_patch_no_cambia_saldo_ni_estatus(self):
+        cxc = self._cxc()
+
+        resp = self._client(self.a["usuario"]).patch(
+            f"{CXC_URL}{cxc.pk}/", {"saldo": "0.00", "estatus": "Pagada"}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
+
+    def test_patch_rechaza_cambiar_el_total(self):
+        cxc = self._cxc()
+
+        resp = self._client(self.a["usuario"]).patch(f"{CXC_URL}{cxc.pk}/", {"total": "5.00"}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("total", resp.data)
+
+
+class F0PolizaDetalleCargoXorAbonoTests(FinanzasBase):
+    """El constraint vivía fuera de ``Meta`` y no se aplicaba."""
+
+    def setUp(self):
+        empresa = self.a["empresa"]
+        self.cuenta, _, centro = self._crear_cuentas_contables(empresa)
+        self.poliza = Poliza.objects.create(empresa=empresa, sucursal=self.a["sucursal"], centro_costo=centro)
+
+    def _linea(self, **montos):
+        return PolizaDetalle(poliza=self.poliza, cuenta_contable=self.cuenta, **montos)
+
+    def test_acepta_solo_cargo_o_solo_abono(self):
+        self._linea(cargo=Decimal("10.00"), abono=Decimal("0.00")).save()
+        self._linea(cargo=Decimal("0.00"), abono=Decimal("10.00")).save()
+
+    def test_rechaza_cargo_y_abono_a_la_vez(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self._linea(cargo=Decimal("10.00"), abono=Decimal("5.00")).save()
+
+    def test_rechaza_renglon_en_ceros(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self._linea(cargo=Decimal("0.00"), abono=Decimal("0.00")).save()
+
+    def test_rechaza_importes_negativos(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self._linea(cargo=Decimal("-10.00"), abono=Decimal("0.00")).save()

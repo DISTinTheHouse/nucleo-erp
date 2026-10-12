@@ -149,6 +149,15 @@ class PagoService:
     def cancelar_pago(pago: Pago):
         if pago.estatus == Pago.Estatus.CANCELADO:
             return
+        if pago.estatus != Pago.Estatus.APLICADO:
+            # Un Borrador nunca descontó saldos ni tocó el banco: revertirlos
+            # inflaría la CxP y el saldo bancario con dinero que no salió.
+            pago.estatus = Pago.Estatus.CANCELADO
+            pago.save()
+            MovimientoBancario.objects.filter(pago=pago).update(
+                estatus=MovimientoBancario.Estatus.CANCELADO
+            )
+            return
         detalles = list(PagoDetalle.objects.filter(pago=pago).select_related("cxp").all())
         cxp_ids = [d.cxp_id for d in detalles]
         cxps = {

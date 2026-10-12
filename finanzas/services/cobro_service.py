@@ -9,6 +9,7 @@ from finanzas.models import (
     CobroDetalle,
     CuentaBancaria,
     CuentaPorCobrar,
+    Factura,
     MovimientoBancario,
 )
 
@@ -41,6 +42,19 @@ class CobroService:
             if cxc is None:
                 raise ErrorDeNegocio(
                     {"cobro_detalles": f"CxC {det.cxc_id} no encontrada."}
+                )
+            if cxc.estatus == CuentaPorCobrar.EstatusCxC.CANCELADA:
+                raise ErrorDeNegocio(
+                    {"cobro_detalles": f"La CxC {cxc.pk} está cancelada y no admite cobros."}
+                )
+            factura_estatus = (
+                Factura.objects.filter(pk=cxc.factura_id).values_list("estatus", flat=True).first()
+                if cxc.factura_id
+                else None
+            )
+            if factura_estatus == Factura.FacturaStatus.CANCELADA:
+                raise ErrorDeNegocio(
+                    {"cobro_detalles": f"La factura de la CxC {cxc.pk} está cancelada y no admite cobros."}
                 )
             if det.cxc.empresa_id and cobro.empresa_id and det.cxc.empresa_id != cobro.empresa_id:
                 raise ErrorDeNegocio(
@@ -121,6 +135,15 @@ class CobroService:
     @transaction.atomic
     def cancelar_cobro(cobro: Cobro):
         if cobro.estatus == Cobro.Estatus.CANCELADO:
+            return
+        if cobro.estatus != Cobro.Estatus.APLICADO:
+            # Un Borrador nunca descontó saldos ni tocó el banco: revertirlos
+            # inflaría la CxC y el saldo bancario con dinero que no entró.
+            cobro.estatus = Cobro.Estatus.CANCELADO
+            cobro.save()
+            MovimientoBancario.objects.filter(cobro=cobro).update(
+                estatus=MovimientoBancario.Estatus.CANCELADO
+            )
             return
         detalles = list(CobroDetalle.objects.filter(cobro=cobro).select_related("cxc").all())
         cxc_ids = [d.cxc_id for d in detalles]

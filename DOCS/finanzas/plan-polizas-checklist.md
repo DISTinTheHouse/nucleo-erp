@@ -30,11 +30,11 @@ Marca `[x]` conforme se complete cada punto. Contexto, decisiones y detalle téc
 - [ ] Alertas de vencidas a 30 / 60 / 90 / 120 días, según el plazo de cada cliente
 
 ## F0 Cimientos y bugs
-- [ ] Constraint cargo XOR abono dentro de `Meta` en `PolizaDetalle` + migración (revisar datos existentes antes)
-- [ ] Cobro/Pago: arreglar cancelación por PATCH y `/cancelar/` sobre Borrador
-- [ ] Cobro: no cobrar CxC/factura cancelada; no reaplicar un cobro
-- [ ] Cerrar edición de saldo/estatus de CxC (serializer y alta manual)
-- [ ] Sucursal en Cobro/Pago/CuentaBancaria (o derivarla del documento)
+- [x] Constraint cargo XOR abono dentro de `Meta` en `PolizaDetalle` + migración 0028 (con verificación previa de datos)
+- [x] Cobro/Pago: arreglar cancelación por PATCH y `/cancelar/` sobre Borrador (y DELETE de aplicados, que daba 500)
+- [x] Cobro: no cobrar CxC/factura cancelada; no reaplicar un cobro/pago (transiciones Borrador→Aplicado→Cancelado)
+- [x] Cerrar edición de saldo/estatus/total de CxC y quitar el alta manual (POST)
+- [ ] Sucursal en Cobro/Pago/CuentaBancaria: se deriva de la factura/CxC en F1/F3 (pospuesto)
 
 ## F1 Motor
 - [ ] Campos de origen en `Poliza` (`origen_tipo`/`origen_id`) + unicidad (origen, es_reversa)
