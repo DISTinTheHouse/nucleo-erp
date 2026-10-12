@@ -32,3 +32,18 @@ API: `POST /api/v1/finanzas/polizas/{id}/cancelar/` responde la póliza original
 ## Listado
 
 `GET /polizas/` lee todas las líneas en una consulta (`prefetch_related`). Los totales se calculan en memoria. Las consultas no crecen con el número de pólizas.
+
+## Factura de venta
+
+`FacturaPolizaService` (`finanzas/services/factura_poliza_service.py`). `registrar-pendiente-cobro` la llama al crear la factura.
+
+| Cuenta (concepto) | Cargo | Abono |
+|---|---|---|
+| Clientes | total | |
+| Ingresos por ventas | | subtotal - descuento |
+| IVA trasladado | | impuestos |
+
+- Fecha de la póliza = `fecha_emision` de la factura.
+- Con la contabilización apagada la respuesta trae `poliza: null` y la factura se registra igual.
+- Ya no exige un centro de costo activo ni usa "la primera cuenta por tipo": las cuentas salen de `ConfiguracionContable`.
+- `GET /facturas/{id}/previsualizar-poliza/` muestra el asiento sin guardarlo, aunque el interruptor esté apagado.

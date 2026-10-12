@@ -56,10 +56,59 @@ class PolizaMotorService:
             return existente
 
     @staticmethod
-    def _crear(empresa_id, sucursal_id, origen_tipo, origen_id, fecha, tipo, concepto, lineas, usuario):
+    def resolver(empresa_id, lineas):
+        """Resuelve y valida las cuentas de las líneas, sin guardar nada.
+
+        Regresa ``[(linea, cuenta, centro_costo, cargo, abono)]`` sin los
+        renglones en ceros (p. ej. IVA en una factura sin impuestos) y el
+        centro de costo por omisión de la empresa.
+        """
         pares = {(l["concepto"], l.get("clave", "")) for l in lineas if "concepto" in l}
         mapa = PlanContableService.exigir(empresa_id, pares) if pares else {}
         centro_default = PlanContableService.centro_costo_default(empresa_id)
+
+        resueltas = []
+        for linea in lineas:
+            cargo = Decimal(str(linea.get("cargo") or 0)).quantize(CENTAVO)
+            abono = Decimal(str(linea.get("abono") or 0)).quantize(CENTAVO)
+            if cargo == 0 and abono == 0:
+                continue
+            if "cuenta" in linea:
+                cuenta, centro = linea["cuenta"], centro_default
+            else:
+                config = mapa[(linea["concepto"], linea.get("clave", ""))]
+                cuenta, centro = config.cuenta_contable, config.centro_costo or centro_default
+            PlanContableService.validar_cuenta(cuenta, empresa_id)
+            resueltas.append((linea, cuenta, centro, cargo, abono))
+        return resueltas, centro_default
+
+    @staticmethod
+    def previsualizar(empresa_id, lineas):
+        """El asiento que se generaría, sin guardar y sin importar el interruptor."""
+        resueltas, _ = PolizaMotorService.resolver(empresa_id, lineas)
+        renglones = [
+            {
+                "cuenta_contable_id": cuenta.pk,
+                "cuenta_codigo": cuenta.codigo,
+                "cuenta_nombre": cuenta.nombre,
+                "cargo": str(cargo),
+                "abono": str(abono),
+                "referencia": linea.get("referencia"),
+            }
+            for linea, cuenta, _, cargo, abono in resueltas
+        ]
+        total_cargos = sum((r[3] for r in resueltas), Decimal("0.00"))
+        total_abonos = sum((r[4] for r in resueltas), Decimal("0.00"))
+        return {
+            "renglones": renglones,
+            "total_cargos": str(total_cargos),
+            "total_abonos": str(total_abonos),
+            "cuadre_correcto": abs(total_cargos - total_abonos) <= CENTAVO,
+        }
+
+    @staticmethod
+    def _crear(empresa_id, sucursal_id, origen_tipo, origen_id, fecha, tipo, concepto, lineas, usuario):
+        resueltas, centro_default = PolizaMotorService.resolver(empresa_id, lineas)
 
         folio, consecutivo = generate_poliza_folio(empresa_id, sucursal_id)
         poliza = Poliza.objects.create(
@@ -76,35 +125,22 @@ class PolizaMotorService:
             origen_tipo=origen_tipo,
             origen_id=origen_id,
         )
-
-        detalles = []
-        for linea in lineas:
-            cargo = Decimal(str(linea.get("cargo") or 0)).quantize(CENTAVO)
-            abono = Decimal(str(linea.get("abono") or 0)).quantize(CENTAVO)
-            if cargo == 0 and abono == 0:
-                continue  # p. ej. IVA en una factura sin impuestos
-            if "cuenta" in linea:
-                cuenta, centro = linea["cuenta"], centro_default
-            else:
-                config = mapa[(linea["concepto"], linea.get("clave", ""))]
-                cuenta, centro = config.cuenta_contable, config.centro_costo or centro_default
-            PlanContableService.validar_cuenta(cuenta, empresa_id)
-            detalles.append(
-                PolizaDetalle(
-                    poliza=poliza,
-                    cuenta_contable=cuenta,
-                    centro_costo=centro,
-                    cargo=cargo,
-                    abono=abono,
-                    referencia=linea.get("referencia"),
-                    observaciones=linea.get("observaciones"),
-                    orden=len(detalles) + 1,
-                    **{k: linea[k] for k in (
-                        "factura", "factura_proveedor", "pago", "cobro", "movimiento_bancario"
-                    ) if k in linea},
-                )
+        detalles = [
+            PolizaDetalle(
+                poliza=poliza,
+                cuenta_contable=cuenta,
+                centro_costo=centro,
+                cargo=cargo,
+                abono=abono,
+                referencia=linea.get("referencia"),
+                observaciones=linea.get("observaciones"),
+                orden=orden,
+                **{k: linea[k] for k in (
+                    "factura", "factura_proveedor", "pago", "cobro", "movimiento_bancario"
+                ) if k in linea},
             )
-
+            for orden, (linea, cuenta, centro, cargo, abono) in enumerate(resueltas, start=1)
+        ]
         PolizaService.validar_suma_cero(poliza, detalles)
         PolizaDetalle.objects.bulk_create(detalles)
         return poliza

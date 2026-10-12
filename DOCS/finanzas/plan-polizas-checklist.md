@@ -46,8 +46,8 @@ Marca `[x]` conforme se complete cada punto. Contexto, decisiones y detalle téc
 Detalle: `DOCS/finanzas/motor-polizas.md`.
 
 ## F2 Factura de venta
-- [ ] Póliza nace Contabilizada con plan contable y folio atómico
-- [ ] `GET /facturas/{id}/previsualizar-poliza/`
+- [x] Póliza nace Contabilizada con plan contable y folio atómico (`FacturaPolizaService`)
+- [x] `GET /facturas/{id}/previsualizar-poliza/`
 
 ## F3 Cobro y pago
 - [ ] Póliza de cobro y su contrapóliza al cancelar
