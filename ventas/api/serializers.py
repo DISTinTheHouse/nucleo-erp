@@ -813,11 +813,23 @@ class PedidoDetalleTallaSerializer(serializers.ModelSerializer):
         _exigir_empresa_del_padre(
             self, attrs, "pedido_detalle", pedido_detalle.pedido.empresa_id, ("variante",)
         )
+        # La talla de una fila existente no se reasigna: arrastraría el
+        # ``sku_muestra`` de la talla anterior.
+        if (
+            self.instance is not None
+            and "talla" in attrs
+            and attrs["talla"].pk != self.instance.talla_id
+        ):
+            raise serializers.ValidationError(
+                {"talla": "No se puede cambiar la talla de un renglón existente."}
+            )
         return attrs
 
     class Meta:
         model = PedidoDetalleTalla
         fields = '__all__'
+        # Sólo ``vincular-sku-muestra`` (mesa de control) escribe el SKU de muestra.
+        read_only_fields = ('sku_muestra',)
 
 class PedidoDetalleWithTallasSerializer(serializers.ModelSerializer):
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)

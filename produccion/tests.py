@@ -6201,6 +6201,21 @@ class VarianteOnboardingColorTests(_BomTenantBase, TestCase):
         self.assertEqual(set(resp.data), {"pedido_detalle_id"})
         self.assertIn("ya tiene SKU", str(resp.data["pedido_detalle_id"]))
 
+    def test_reintento_genera_sku_solo_de_las_tallas_que_faltan(self):
+        linea = self._linea()
+        self.assertEqual(self._post(linea, color=self.color.pk).status_code, 201)
+        nueva = Talla.objects.create(nombre="XG-inc")
+        PedidoDetalleTalla.objects.create(pedido_detalle=linea, talla=nueva, cantidad=3)
+
+        resp = self._post(linea)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(
+            VarianteProductoProduccion.objects.filter(pedido_detalle=linea).count(), 2
+        )
+        self.assertEqual(self._post(linea).status_code, 400)
+
     def _post_con_integrity_error(self, linea, mensaje):
         client = self._client(self.admin)
         client.raise_request_exception = False

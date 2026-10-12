@@ -1674,6 +1674,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     cambio_talla_config=t.cambio_talla_config,
                     requiere_produccion=t.requiere_produccion,
                     variante=t.variante,
+                    sku_muestra=t.sku_muestra,
                 )
 
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id"):
@@ -2027,6 +2028,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     cambio_talla_config=t.cambio_talla_config,
                     requiere_produccion=t.requiere_produccion,
                     variante=t.variante,
+                    sku_muestra=t.sku_muestra,
                 )
         for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by(
             "id"
@@ -2380,6 +2382,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
                         cambio_talla_config=t.get("cambio_talla_config"),
                         sku=t.get("sku"),
+                        sku_muestra=t.get("sku_muestra"),
                         # Mismo hueco que producto_nombre_externo: el snapshot
                         # los trae (fields='__all__') pero no se restauraban.
                         variante_id=t.get("variante"),
@@ -2912,6 +2915,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
             self._require_mesa_control(self.request.user)
         self._validar_cambio_estatus(serializer.instance, serializer.validated_data.get("estatus"))
         serializer.save()
+        # ``UpdateModelMixin.update`` vacía el prefetch de ``serializer.instance``
+        # después de este método y la respuesta recargaba renglones y tallas uno
+        # por uno (N+1, y sin el orden por ``id`` del GET). Se serializa una
+        # instancia recargada con el mismo prefetch que el detalle.
+        serializer.instance = self.get_queryset().get(pk=serializer.instance.pk)
 
     def _validar_cambio_estatus(self, pedido, nuevo):
         """CANCELADO es terminal y solo lo pone mesa de control, sin avance vivo."""
