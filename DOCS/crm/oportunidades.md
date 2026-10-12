@@ -33,3 +33,48 @@ El vendedor ve las suyas. El admin de empresa ve todas las de su empresa. Otra e
 
 ## Rendimiento
 El listado y el embudo hacen un número fijo de consultas (estado con dos `EXISTS`). Índices: (empresa, vendedor, etapa) y (empresa, vendedor, proximo_contacto).
+
+## Seguimientos y recordatorios (nuevo; no cambia lo anterior)
+
+Todo lo de arriba sigue igual. Lo siguiente es adicional.
+
+El sistema **no avisa solo**: quien captura pone la fecha y el frontend consulta qué toca.
+
+### Seguimientos: `/api/v1/ventas/oportunidad-seguimientos/`
+
+Una nota, llamada, correo, visita o tarea de una oportunidad, con recordatorio opcional.
+
+| Método | Ruta | Qué hace |
+|---|---|---|
+| POST | `/` | Crea. Manda `oportunidad`, `detalle`, y opcional `tipo` (`Nota`, `Llamada`, `Correo`, `Visita`, `Tarea`; por omisión `Nota`) y `fecha_recordatorio`. El vendedor lo pone el servidor. |
+| GET | `/` | Lista. Filtros: `oportunidad`, `tipo`, `pendientes=true`, `hasta=AAAA-MM-DD` o `hasta=hoy`. |
+| PATCH | `/{id}/` | Edita `detalle`, `tipo`, `fecha_recordatorio` (reprogramar) o `completado`. |
+| POST | `/{id}/completar/` | Lo marca completado. |
+| DELETE | `/{id}/` | Lo borra. |
+
+- **Qué toca hoy:** `GET /?pendientes=true&hasta=hoy`. Con `pendientes=true` salen solo los no completados, de oportunidades no perdidas, ordenados por `fecha_recordatorio` (los sin fecha al final). Con `hasta` solo los que tienen fecha igual o anterior (los vencidos incluidos).
+- Campos: `id`, `oportunidad`, `vendedor`, `tipo`, `detalle`, `fecha_recordatorio`, `completado`, `completado_at`, `created_at`.
+- Sin `?limit=` regresa la lista completa; con `?limit=` y `?offset=` pagina.
+- No se puede cambiar un seguimiento a otra oportunidad.
+- Visibilidad igual que las oportunidades: el vendedor ve los de las suyas, el admin los de su empresa; si no, 404.
+
+### Transferir: `POST /oportunidades/{id}/transferir/`
+Body `{"vendedor": id}`. Solo admin de empresa (otro usuario recibe 403). El vendedor debe ser de la misma empresa y estar activo. Quien la tenía deja de verla.
+
+### Onboarding: `GET /oportunidades/{id}/onboarding/`
+Toda la pantalla de una oportunidad en una llamada:
+
+```json
+{
+  "oportunidad": { "...los mismos campos de siempre..." },
+  "seguimientos": [ "...los 50 más recientes..." ],
+  "pendientes": 2,
+  "proximo_recordatorio": "2026-11-03",
+  "cotizaciones": [{ "id": 12, "estatus": 3, "estatus_display": "AUTORIZADA", "created_at": "...", "autorizada_at": "...", "pedido_id": 7, "pedido_folio": "PED-001" }],
+  "cartera": [{ "moneda": "MXN", "saldo_total": "0.00", "por_vencer": "0.00", "vencido_1_30": "0.00", "...": "..." }]
+}
+```
+
+`cartera` sale vacía si la oportunidad no tiene cliente. `pedido_id` y `pedido_folio` son `null` hasta que mesa de control crea el pedido.
+
+Rendimiento: el onboarding y los pendientes hacen un número fijo de consultas.

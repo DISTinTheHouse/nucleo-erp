@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework import routers
-from ventas.api.oportunidades import OportunidadViewSet
+from ventas.api.oportunidades import OportunidadViewSet, SeguimientoViewSet
 from ventas.api.views import (
     CotizacionViewSet, 
     CotizacionDetalleViewSet, 
@@ -12,6 +12,7 @@ from ventas.api.views import (
 
 router = routers.DefaultRouter()
 router.register(r'oportunidades', OportunidadViewSet, basename='oportunidades')
+router.register(r'oportunidad-seguimientos', SeguimientoViewSet, basename='oportunidad-seguimientos')
 router.register(r'cotizaciones', CotizacionViewSet, basename='cotizaciones')
 router.register(r'mesa-control', MesaControlViewSet, basename='mesa-control')
 router.register(r'cotizacion-detalle', CotizacionDetalleViewSet, basename='cotizaciondetalle')
