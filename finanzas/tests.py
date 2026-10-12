@@ -7534,6 +7534,64 @@ class F5CancelarFacturaTests(MotorPolizasBase):
         factura.refresh_from_db()
         self.assertEqual(factura.estatus, Factura.FacturaStatus.EMITIDA)
 
+    def _factura_con_piezas(self, cantidad="3", descontado="3"):
+        """Factura emitida de ``cantidad`` piezas; el pedido descontó ``descontado`` de una ubicación."""
+        from auditoria.models import AuditoriaEvento
+        from inventarios.models import Existencia, Ubicacion
+
+        factura, _ = self._emitida()
+        pedido = self.a["pedido"]
+        factura.pedido = pedido
+        factura.save(update_fields=["pedido"])
+        FacturaDetalle.objects.create(
+            factura=factura, pedido_detalle=self.a["detalle"], pedido_detalle_talla=self.a["talla_pedido"],
+            producto=self.a["detalle"].producto, cantidad=Decimal(cantidad),
+        )
+        almacen = Almacen.objects.create(empresa=self.empresa, sucursal=self.sucursal, codigo="PT", nombre="PT")
+        ubicacion = Ubicacion.objects.create(almacen=almacen)
+        existencia = Existencia.objects.create(
+            producto=self.a["detalle"].producto, producto_variante=self.a["talla_pedido"].variante,
+            almacen=almacen, ubicacion=ubicacion, cantidad=Decimal("10"), stock=10,
+        )
+        item = {
+            "producto_id": existencia.producto_id, "producto_variante_id": existencia.producto_variante_id,
+            "almacen_id": almacen.pk, "ubicacion_id": ubicacion.pk, "delta": f"-{descontado}",
+        }
+        AuditoriaEvento.objects.create(
+            empresa=self.empresa, modulo="inventarios", accion="SALIDA", tabla="existencias",
+            id_registro=str(pedido.pk), despues_json={"items": [item]},
+        )
+        return factura, existencia
+
+    def test_cancelar_devuelve_las_piezas_facturadas_a_existencia(self):
+        from inventarios.models import MovimientoInventario
+
+        factura, existencia = self._factura_con_piezas()
+
+        self.assertEqual(self._cancelar(factura).status_code, 200)
+
+        existencia.refresh_from_db()
+        self.assertEqual(existencia.cantidad, Decimal("13"))
+        mov = MovimientoInventario.objects.get(pedido=self.a["pedido"], tipo_movimiento="ENTRADA")
+        self.assertEqual(mov.detalles.get().cantidad, Decimal("3"))
+
+    def test_cancelar_no_devuelve_mas_de_lo_que_el_pedido_descontó(self):
+        factura, existencia = self._factura_con_piezas(cantidad="3", descontado="1")
+
+        self._cancelar(factura)
+
+        existencia.refresh_from_db()
+        self.assertEqual(existencia.cantidad, Decimal("11"))
+
+    def test_cancelar_dos_veces_no_devuelve_dos_veces(self):
+        factura, existencia = self._factura_con_piezas()
+
+        self._cancelar(factura)
+        self._cancelar(factura)
+
+        existencia.refresh_from_db()
+        self.assertEqual(existencia.cantidad, Decimal("13"))
+
     def test_un_borrador_se_cancela_sin_poliza(self):
         factura = Factura.objects.create(
             empresa=self.empresa, sucursal=self.sucursal, cliente=self.a["cliente"], moneda=self.moneda,

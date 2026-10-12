@@ -4,6 +4,7 @@ from django.db import transaction
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import CuentaPorCobrar, Factura, NotaCredito
+from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.services.factura_poliza_service import FacturaPolizaService
 
 
@@ -14,7 +15,8 @@ class FacturaCancelacionService:
         """Regresa la contrapóliza, o ``None`` si no hubo (Borrador, ya cancelada o sin póliza).
 
         Los cobros aplicados no se tocan: su póliza sigue y en Clientes queda el
-        importe cobrado como saldo a favor.
+        importe cobrado como saldo a favor. Las piezas facturadas regresan a existencia
+        (solo lo que el pedido descontó y no se ha reintegrado).
         """
         bloqueada = Factura.objects.select_for_update().get(pk=factura.pk)
         if bloqueada.estatus == Factura.FacturaStatus.CANCELADA:
@@ -34,4 +36,6 @@ class FacturaCancelacionService:
         CuentaPorCobrar.objects.filter(factura=bloqueada).update(
             estatus=CuentaPorCobrar.EstatusCxC.CANCELADA
         )
+        if era_emitida:
+            FacturaInventarioService.reintegrar(bloqueada, usuario)
         return FacturaPolizaService.cancelar(bloqueada, usuario) if era_emitida else None
