@@ -1,54 +1,51 @@
 # Plan del CRM (ventas)
 
-Objetivo: embudo de ventas, seguimiento de clientes y cobranza con contexto. Lo usa solo ventas.
+El flujo cotización → mesa de control → pedido **no cambia**. El CRM es solo lo que pasa antes de la cotización:
 
-## Lo que ya existe
-- `Prospecto` y `Oportunidad` en `ventas/models.py:17-37`, **vacíos** (solo la FK a empresa y a prospecto). Sin API.
-- `Cotizacion.oportunidad`: FK ya lista (`ventas/models.py:76`).
-- `Cliente.vendedores` (M2M) define quién ve cada cliente. El scope está en `terceros/scope.py` y `ventas/scope.py`.
-- `Cotizacion` guarda el origen del cliente en booleanos (recompra, google, recomendación, etc.).
-- Permisos `R-CRM`, `R-CRM-CLIENTES`, `R-CRM-COTIZACIONES`, `R-CRM-PEDIDOS` solo se usan en la búsqueda global.
-- No hay: seguimiento, notas, tareas, recordatorios, scheduler ni Celery. `Notificacion` es una bandeja inmediata, sin fecha programada.
-- `Cliente` no tiene `dias_credito` ni `limite_credito` (sí `Proveedor`).
+```
+Oportunidad → Cotización (ya existe) → Mesa de control → Pedido
+```
 
-## Modelo
-Los modelos se quedan en `ventas` (la FK de `Cotizacion` ya apunta ahí). Código nuevo en archivos propios, no en el `views.py` de 3,500 líneas.
+## Qué se agrega
+Una sola tabla nueva: `Oportunidad` (ya existe vacía en `ventas/models.py:28`, con la FK desde `Cotizacion.oportunidad` lista).
 
-| Modelo | Campos clave |
+| Campo | Para qué |
 |---|---|
-| `Prospecto` | empresa, vendedor, nombre, contacto, teléfono, correo, origen, estatus (Nuevo, Contactado, Calificado, Descartado, Convertido), cliente (al convertir) |
-| `Oportunidad` | empresa, vendedor, prospecto o cliente, título, etapa, monto estimado, fecha de cierre estimada, motivo de pérdida |
-| `Actividad` | empresa, vendedor, tipo (Nota, Llamada, Correo, Visita, Tarea), asunto, detalle, fecha, fecha de vencimiento, completada, y FK a prospecto, oportunidad o cliente (al menos una) |
-| `Cliente` (+campos) | `dias_credito`, `limite_credito` (los usa también la alerta de mora de finanzas) |
+| empresa, vendedor | Dueño. Vendedor ve lo suyo, admin de empresa ve todo. |
+| cliente (opcional) | Si ya es cliente. Si no, se usan los datos de contacto. |
+| nombre_contacto, telefono, correo | Prospecto sin crear otro modelo. |
+| titulo, monto_estimado | Qué se vende y cuánto. |
+| etapa | `Nueva`, `Contactada`, `Perdida` (las pone el vendedor). |
+| motivo_perdida | Obligatorio al marcar Perdida. |
+| proximo_contacto, notas | Seguimiento sin tabla de actividades. |
 
-## Reglas
-- Vendedor ve lo suyo; admin de empresa ve todo (mismo patrón que `alcance_cotizaciones`). Detalle de otra empresa o de otro vendedor: 404.
-- Una oportunidad Ganada exige cliente. Convertir un prospecto crea el `Cliente` y lo asigna al vendedor.
-- Una oportunidad Perdida exige motivo.
-- Recordatorios: sin scheduler. Una tarea con `fecha_vencimiento` aparece en `GET /actividades/pendientes/` y el frontend la consulta. Se decide Celery solo si hace falta avisar sin que el usuario abra el sistema.
+- **Cotizada y Ganada no se guardan, se calculan.** Cotizada = tiene cotizaciones ligadas. Ganada = alguna cotización está Autorizada. Así no se toca ningún paso del flujo actual.
+- **Historial:** `HistoricalRecords` (ya usado en el repo) deja el rastro de cambios sin código extra.
+- **No se crea:** Prospecto activo, Actividad, tareas, recordatorios programados, Celery ni integración de correo o WhatsApp.
+
+## API (`/api/v1/ventas/oportunidades/`)
+- CRUD con scope por empresa y vendedor (patrón de `alcance_cotizaciones`).
+- `POST /{id}/cotizar/`: crea una cotización en Borrador con vendedor, cliente y oportunidad ya puestos. Desde ahí sigue el flujo de siempre.
+- `GET /embudo/`: cantidad y monto por etapa en una sola consulta.
+- `GET /?proximo_contacto_hasta=hoy`: lo que toca contactar hoy o ya vencido.
+
+## Cliente
+- `Cliente.dias_credito` y `limite_credito` (los usa también la alerta de mora de finanzas).
+- `GET /clientes/{id}/resumen/`: cotizaciones y pedidos recientes y saldo vencido a 30/60/90/120 días. Ya existe `resumen_comercial` en `terceros/api/views.py:42`; se amplía, no se crea otro.
 
 ## Rendimiento
-- Índices: (empresa, vendedor, etapa), (empresa, vendedor, completada, fecha_vencimiento) y los de búsqueda por texto.
-- Embudo y KPIs: una consulta con agregados, no un conteo por etapa.
-- Listados paginados con `select_related`.
-- Ficha 360 del cliente: número fijo de consultas, con prueba `assertNumQueries`.
+- Índice (empresa, vendedor, etapa) y (empresa, vendedor, proximo_contacto).
+- Listados paginados con `select_related`; embudo con agregados.
+- Prueba `assertNumQueries` en listado y resumen del cliente.
 
 ## Fases
-- [ ] C0 Modelos, migración, scope y permisos `R-CRM-*`
+- [ ] C0 Campos de `Oportunidad` + migración + scope + permisos `R-CRM-*`
 - [ ] C0 `Cliente.dias_credito` y `limite_credito`
-- [ ] C1 API de prospectos (CRUD, convertir a cliente)
-- [ ] C1 API de oportunidades (CRUD, cambiar etapa, ganar, perder)
-- [ ] C1 `GET /oportunidades/embudo/` (cantidad y monto por etapa)
-- [ ] C1 Crear cotización desde una oportunidad
-- [ ] C2 Actividades: notas, llamadas, tareas
-- [ ] C2 `GET /actividades/pendientes/` (hoy, vencidas)
-- [ ] C2 Notificar al vendedor cuando le asignan un prospecto
-- [ ] C3 `GET /clientes/{id}/ficha-360/`: datos, vendedor, cotizaciones y pedidos recientes, actividad
-- [ ] C3 Cobranza en la ficha: saldo, vencido a 30/60/90/120 días, cobros recientes
-- [ ] C4 Prospecto y oportunidad en la búsqueda global
-- [ ] C4 KPIs: conversión, monto por etapa, tareas vencidas
+- [ ] C1 API de oportunidades (CRUD, perder con motivo)
+- [ ] C1 `cotizar/` (crea cotización Borrador ligada)
+- [ ] C1 `embudo/` y filtro de próximo contacto
+- [ ] C2 Resumen del cliente con cobranza
+- [ ] C2 Oportunidad en la búsqueda global
 
 ## Por definir con ventas
-- [ ] Etapas del embudo (propuesta: Nueva, Contactada, Cotizada, Negociación, Ganada, Perdida)
-- [ ] ¿Ganar una oportunidad crea el pedido o solo marca la etapa?
-- [ ] ¿Correo o WhatsApp desde el CRM? Hoy no hay integración de WhatsApp; el correo existe solo vía Gmail en la app `ia`.
+- [ ] ¿Les alcanzan las etapas Nueva, Contactada y Perdida (más las calculadas Cotizada y Ganada)?
