@@ -6,7 +6,7 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test ventas --settings=sqlite_settings
 """
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -48,6 +48,7 @@ from ventas.models import (
     CotizacionServicioExtra,
     CotizacionDetalleTalla,
     Oportunidad,
+    OportunidadSeguimiento,
     Pedido,
     PedidoDetalle,
     PedidoDetalleTalla,
@@ -4121,8 +4122,8 @@ class DescuentoVentaAlmacenesConSalidaTests(TestCase):
 OPORTUNIDADES_URL = "/api/v1/ventas/oportunidades/"
 
 
-class OportunidadesTests(TestCase):
-    """CRM mínimo: oportunidades antes de la cotización."""
+class OportunidadesBase(TestCase):
+    """Empresa, usuarios y ayudas comunes de las pruebas del CRM."""
 
     @classmethod
     def setUpTestData(cls):
@@ -4150,6 +4151,10 @@ class OportunidadesTests(TestCase):
         return Oportunidad.objects.create(
             empresa=empresa or self.empresa, vendedor=vendedor or self.ana, titulo="Uniformes", **extra
         )
+
+
+class OportunidadesTests(OportunidadesBase):
+    """CRM mínimo: oportunidades antes de la cotización."""
 
     # -- scope ---------------------------------------------------------------
 
@@ -4316,6 +4321,215 @@ class OportunidadesTests(TestCase):
             Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op)
         with CaptureQueriesContext(connection) as muchas:
             cliente.get(OPORTUNIDADES_URL)
+
+        self.assertEqual(len(pocas), len(muchas))
+
+
+SEGUIMIENTOS_URL = "/api/v1/ventas/oportunidad-seguimientos/"
+
+
+class OportunidadSeguimientosTests(OportunidadesBase):
+    """Seguimientos con recordatorio, transferir y onboarding. Aditivo: no cambia lo anterior."""
+
+    def _seg(self, oportunidad, **extra):
+        datos = {"oportunidad": oportunidad, "vendedor": self.ana, "detalle": "Llamar", **extra}
+        return OportunidadSeguimiento.objects.create(**datos)
+
+    # -- lo que ya existía no cambia ----------------------------------------
+
+    def test_la_respuesta_de_oportunidades_conserva_sus_campos(self):
+        op = self._op(self.ana)
+
+        data = self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/").data
+
+        self.assertEqual(set(data), {
+            "id", "cliente", "cliente_nombre", "vendedor", "vendedor_nombre", "nombre_contacto",
+            "telefono", "correo", "titulo", "monto_estimado", "etapa", "estado", "motivo_perdida",
+            "proximo_contacto", "notas", "created_at", "updated_at",
+        })
+
+    # -- seguimientos --------------------------------------------------------
+
+    def test_crea_un_seguimiento_con_recordatorio(self):
+        op = self._op(self.ana)
+
+        resp = self._client(self.ana).post(SEGUIMIENTOS_URL, {
+            "oportunidad": op.pk, "tipo": "Llamada", "detalle": "Confirmar muestra",
+            "fecha_recordatorio": "2026-11-05", "vendedor": self.beto.pk,
+        }, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        seg = OportunidadSeguimiento.objects.get(pk=resp.data["id"])
+        self.assertEqual((seg.vendedor_id, seg.tipo, seg.fecha_recordatorio, seg.completado),
+                         (self.ana.pk, "Llamada", date(2026, 11, 5), False))
+
+    def test_no_se_agrega_seguimiento_a_oportunidad_ajena(self):
+        de_beto = self._op(self.beto)
+
+        resp = self._client(self.ana).post(
+            SEGUIMIENTOS_URL, {"oportunidad": de_beto.pk, "detalle": "x"}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("oportunidad", resp.data)
+
+    def test_cada_quien_ve_los_seguimientos_de_sus_oportunidades(self):
+        mia, de_beto = self._op(self.ana), self._op(self.beto)
+        s_mio, s_beto = self._seg(mia), self._seg(de_beto, vendedor=self.beto)
+
+        ids = lambda user: {s["id"] for s in self._client(user).get(SEGUIMIENTOS_URL).data}
+
+        self.assertEqual(ids(self.ana), {s_mio.pk})
+        self.assertEqual(ids(self.jefe), {s_mio.pk, s_beto.pk})
+        self.assertEqual(ids(self.ajeno), set())
+        self.assertEqual(self._client(self.ana).get(f"{SEGUIMIENTOS_URL}{s_beto.pk}/").status_code, 404)
+
+    def test_pendientes_por_fecha_de_recordatorio(self):
+        op = self._op(self.ana)
+        manana = self._seg(op, fecha_recordatorio=date(2026, 11, 2))
+        ayer = self._seg(op, fecha_recordatorio=date(2026, 10, 30))
+        sin_fecha = self._seg(op)
+        self._seg(op, fecha_recordatorio=date(2026, 10, 1), completado=True)
+        cliente = self._client(self.ana)
+
+        todos = [s["id"] for s in cliente.get(SEGUIMIENTOS_URL, {"pendientes": "true"}).data]
+        vencidos = [s["id"] for s in cliente.get(SEGUIMIENTOS_URL, {"pendientes": "true", "hasta": "2026-11-01"}).data]
+
+        self.assertEqual(todos, [ayer.pk, manana.pk, sin_fecha.pk])
+        self.assertEqual(vencidos, [ayer.pk])
+
+    def test_hasta_hoy_y_fecha_invalida(self):
+        op = self._op(self.ana)
+        hoy = self._seg(op, fecha_recordatorio=timezone.localdate())
+        self._seg(op, fecha_recordatorio=timezone.localdate() + timedelta(days=1))
+        cliente = self._client(self.ana)
+
+        resp = cliente.get(SEGUIMIENTOS_URL, {"pendientes": "true", "hasta": "hoy"})
+
+        self.assertEqual([s["id"] for s in resp.data], [hoy.pk])
+        self.assertEqual(cliente.get(SEGUIMIENTOS_URL, {"hasta": "ayer"}).status_code, 400)
+
+    def test_los_pendientes_ignoran_oportunidades_perdidas(self):
+        perdida = self._op(self.ana, etapa="Perdida", motivo_perdida="Precio")
+        self._seg(perdida, fecha_recordatorio=date(2026, 10, 1))
+
+        resp = self._client(self.ana).get(SEGUIMIENTOS_URL, {"pendientes": "true"})
+
+        self.assertEqual(resp.data, [])
+
+    def test_completar_y_reabrir(self):
+        seg = self._seg(self._op(self.ana), fecha_recordatorio=date(2026, 11, 1))
+        cliente = self._client(self.ana)
+
+        resp = cliente.post(f"{SEGUIMIENTOS_URL}{seg.pk}/completar/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        seg.refresh_from_db()
+        self.assertTrue(seg.completado)
+        self.assertIsNotNone(seg.completado_at)
+
+        resp = cliente.patch(f"{SEGUIMIENTOS_URL}{seg.pk}/", {"completado": False}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        seg.refresh_from_db()
+        self.assertFalse(seg.completado)
+        self.assertIsNone(seg.completado_at)
+
+    def test_reprogramar_el_recordatorio_y_borrar(self):
+        seg = self._seg(self._op(self.ana), fecha_recordatorio=date(2026, 11, 1))
+        cliente = self._client(self.ana)
+
+        resp = cliente.patch(f"{SEGUIMIENTOS_URL}{seg.pk}/", {"fecha_recordatorio": "2026-12-01"}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        seg.refresh_from_db()
+        self.assertEqual(seg.fecha_recordatorio, date(2026, 12, 1))
+        self.assertEqual(cliente.delete(f"{SEGUIMIENTOS_URL}{seg.pk}/").status_code, 204)
+        self.assertFalse(OportunidadSeguimiento.objects.exists())
+
+    def test_no_se_puede_mover_un_seguimiento_a_otra_oportunidad(self):
+        seg = self._seg(self._op(self.ana))
+        otra = self._op(self.ana)
+
+        resp = self._client(self.ana).patch(f"{SEGUIMIENTOS_URL}{seg.pk}/", {"oportunidad": otra.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    # -- transferir ----------------------------------------------------------
+
+    def test_el_admin_transfiere_la_oportunidad(self):
+        op = self._op(self.ana)
+
+        resp = self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", {"vendedor": self.beto.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.vendedor_id, self.beto.pk)
+        self.assertEqual(self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/").status_code, 404)
+        self.assertEqual(self._client(self.beto).get(f"{OPORTUNIDADES_URL}{op.pk}/").status_code, 200)
+
+    def test_un_vendedor_no_puede_transferir(self):
+        op = self._op(self.ana)
+
+        resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", {"vendedor": self.beto.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 403)
+        op.refresh_from_db()
+        self.assertEqual(op.vendedor_id, self.ana.pk)
+
+    def test_no_se_transfiere_a_un_usuario_de_otra_empresa_ni_inexistente(self):
+        op = self._op(self.ana)
+        url = f"{OPORTUNIDADES_URL}{op.pk}/transferir/"
+
+        self.assertEqual(self._client(self.jefe).post(url, {"vendedor": self.ajeno.pk}, format="json").status_code, 400)
+        self.assertEqual(self._client(self.jefe).post(url, {"vendedor": 99999}, format="json").status_code, 400)
+        self.assertEqual(self._client(self.jefe).post(url, {}, format="json").status_code, 400)
+
+    # -- onboarding ----------------------------------------------------------
+
+    def test_onboarding_trae_todo_en_una_llamada(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        self._seg(op, fecha_recordatorio=date(2026, 11, 9))
+        self._seg(op, fecha_recordatorio=date(2026, 11, 3))
+        self._seg(op, completado=True, fecha_recordatorio=date(2026, 10, 1))
+        cot = Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op, estatus=3)
+
+        resp = self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["oportunidad"]["estado"], "Ganada")
+        self.assertEqual(len(resp.data["seguimientos"]), 3)
+        self.assertEqual(resp.data["pendientes"], 2)
+        self.assertEqual(resp.data["proximo_recordatorio"], date(2026, 11, 3))
+        self.assertEqual([c["id"] for c in resp.data["cotizaciones"]], [cot.pk])
+        self.assertEqual(resp.data["cotizaciones"][0]["estatus_display"], "AUTORIZADA")
+        self.assertIsNone(resp.data["cotizaciones"][0]["pedido_id"])
+        self.assertEqual(resp.data["cartera"], [])
+
+    def test_onboarding_de_otro_vendedor_responde_404(self):
+        de_beto = self._op(self.beto)
+
+        self.assertEqual(self._client(self.ana).get(f"{OPORTUNIDADES_URL}{de_beto.pk}/onboarding/").status_code, 404)
+
+    def test_onboarding_sin_cliente_trae_cartera_vacia(self):
+        op = self._op(self.ana)
+
+        resp = self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
+
+        self.assertEqual((resp.data["seguimientos"], resp.data["pendientes"], resp.data["proximo_recordatorio"]), ([], 0, None))
+
+    def test_onboarding_y_pendientes_hacen_consultas_fijas(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        cliente = self._client(self.ana)
+        cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
+
+        with CaptureQueriesContext(connection) as pocas:
+            cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
+            cliente.get(SEGUIMIENTOS_URL, {"pendientes": "true"})
+        for _ in range(10):
+            self._seg(op, fecha_recordatorio=date(2026, 11, 1))
+            Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op)
+        with CaptureQueriesContext(connection) as muchas:
+            cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
+            cliente.get(SEGUIMIENTOS_URL, {"pendientes": "true"})
 
         self.assertEqual(len(pocas), len(muchas))
 

@@ -5,15 +5,18 @@ Cotizada y Ganada no se guardan, se calculan de las cotizaciones ligadas.
 
 from decimal import Decimal
 
-from django.db.models import Case, CharField, Count, Exists, F, OuterRef, Q, Sum, Value, When
+from django.db.models import Case, CharField, Count, Exists, F, Min, OuterRef, Q, Subquery, Sum, Value, When
+from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 
-from ventas.models import Cotizacion, Oportunidad
+from terceros.cartera import cartera_de_cliente
+from usuarios.models import Usuario
+from ventas.models import Cotizacion, Oportunidad, OportunidadSeguimiento, Pedido
 from ventas.scope import oportunidades_base, oportunidades_visibles
 
 ESTATUS_BORRADOR = 1
@@ -153,6 +156,53 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         })
 
     @action(detail=True, methods=["post"])
+    def transferir(self, request, pk=None):
+        """Pasa la oportunidad a otro vendedor de la misma empresa. Solo admin de empresa."""
+        user = request.user
+        if not (user.is_superuser or user.is_admin_empresa):
+            raise PermissionDenied("Solo el administrador de la empresa puede transferir oportunidades.")
+        oportunidad = self.get_object()
+        vendedor = Usuario.objects.filter(
+            pk=request.data.get("vendedor") or 0, empresa_id=oportunidad.empresa_id, is_active=True
+        ).first()
+        if vendedor is None:
+            raise ValidationError({"vendedor": "Vendedor no encontrado en la empresa."})
+        oportunidad.vendedor = vendedor
+        oportunidad.save(update_fields=["vendedor", "updated_at"])
+        return Response(self.get_serializer(oportunidad).data)
+
+    @action(detail=True, methods=["get"])
+    def onboarding(self, request, pk=None):
+        """Todo lo de la pantalla de una oportunidad en una llamada: datos, seguimientos,
+        cotizaciones (con su pedido) y cartera del cliente."""
+        oportunidad = self.get_object()
+        seguimientos = OportunidadSeguimiento.objects.filter(oportunidad=oportunidad)
+        pendientes = seguimientos.filter(completado=False)
+        pedido = Pedido.objects.filter(cotizacion=OuterRef("pk")).order_by("-id")
+        cotizaciones = (
+            Cotizacion.objects.filter(oportunidad=oportunidad)
+            .annotate(pedido_id_=Subquery(pedido.values("id")[:1]), pedido_folio=Subquery(pedido.values("folio")[:1]))
+            .order_by("-id")
+            .values("id", "estatus", "created_at", "autorizada_at", "pedido_id_", "pedido_folio")
+        )
+        estatus = dict(Cotizacion.CHOICES_ESTATUS)
+        return Response({
+            "oportunidad": self.get_serializer(oportunidad).data,
+            "seguimientos": SeguimientoSerializer(seguimientos[:50], many=True).data,
+            "pendientes": pendientes.count(),
+            "proximo_recordatorio": pendientes.aggregate(m=Min("fecha_recordatorio"))["m"],
+            "cotizaciones": [
+                {
+                    "id": c["id"], "estatus": c["estatus"], "estatus_display": estatus.get(c["estatus"]),
+                    "created_at": c["created_at"], "autorizada_at": c["autorizada_at"],
+                    "pedido_id": c["pedido_id_"], "pedido_folio": c["pedido_folio"],
+                }
+                for c in cotizaciones
+            ],
+            "cartera": cartera_de_cliente(oportunidad.cliente) if oportunidad.cliente_id else [],
+        })
+
+    @action(detail=True, methods=["post"])
     def cotizar(self, request, pk=None):
         """Crea una cotización en Borrador ligada a la oportunidad. Desde ahí sigue el flujo de siempre."""
         oportunidad = self.get_object()
@@ -167,3 +217,76 @@ class OportunidadViewSet(viewsets.ModelViewSet):
             estatus=ESTATUS_BORRADOR,
         )
         return Response({"cotizacion_id": cotizacion.pk}, status=201)
+
+
+class SeguimientoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OportunidadSeguimiento
+        fields = [
+            "id", "oportunidad", "vendedor", "tipo", "detalle", "fecha_recordatorio",
+            "completado", "completado_at", "created_at",
+        ]
+        read_only_fields = ["vendedor", "completado_at", "created_at"]
+
+    def validate_oportunidad(self, oportunidad):
+        if self.instance is not None and oportunidad.pk != self.instance.oportunidad_id:
+            raise serializers.ValidationError("No se puede cambiar la oportunidad de un seguimiento.")
+        visibles = oportunidades_visibles(oportunidades_base(), self.context["request"].user)
+        if not visibles.filter(pk=oportunidad.pk).exists():
+            raise serializers.ValidationError("Oportunidad no encontrada.")
+        return oportunidad
+
+
+class SeguimientoViewSet(viewsets.ModelViewSet):
+    """Seguimientos (nota, llamada, correo, visita, tarea) con fecha de recordatorio.
+
+    ``?pendientes=true`` lista los no completados, por fecha de recordatorio; con ``?hasta=AAAA-MM-DD``
+    solo los que tocan en esa fecha o antes (``?hasta=hoy`` usa el día de hoy).
+    """
+
+    queryset = OportunidadSeguimiento.objects.all()
+    serializer_class = SeguimientoSerializer
+    http_method_names = ["get", "post", "patch", "delete"]
+    pagination_class = LimitOffsetPagination
+
+    def get_queryset(self):
+        visibles = oportunidades_visibles(oportunidades_base(), self.request.user).values("pk")
+        qs = super().get_queryset().filter(oportunidad_id__in=visibles)
+        if self.action != "list":
+            return qs
+        params = self.request.query_params
+        if params.get("oportunidad"):
+            qs = qs.filter(oportunidad_id=params["oportunidad"])
+        if params.get("tipo"):
+            qs = qs.filter(tipo=params["tipo"])
+        pendientes = (params.get("pendientes") or "").lower() in ("1", "true", "si", "sí")
+        if pendientes:
+            qs = qs.filter(completado=False).exclude(oportunidad__etapa=Oportunidad.Etapa.PERDIDA)
+        hasta = params.get("hasta")
+        if hasta:
+            fecha = timezone.localdate() if hasta == "hoy" else parse_date(hasta)
+            if fecha is None:
+                raise ValidationError({"hasta": "Fecha inválida (AAAA-MM-DD o 'hoy')."})
+            qs = qs.filter(fecha_recordatorio__isnull=False, fecha_recordatorio__lte=fecha)
+        if pendientes:
+            return qs.order_by(F("fecha_recordatorio").asc(nulls_last=True), "id")
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(vendedor=self.request.user)
+
+    def perform_update(self, serializer):
+        completado = serializer.validated_data.get("completado")
+        extra = {}
+        if completado is not None and completado != serializer.instance.completado:
+            extra["completado_at"] = timezone.now() if completado else None
+        serializer.save(**extra)
+
+    @action(detail=True, methods=["post"])
+    def completar(self, request, pk=None):
+        seguimiento = self.get_object()
+        if not seguimiento.completado:
+            seguimiento.completado, seguimiento.completado_at = True, timezone.now()
+            seguimiento.save(update_fields=["completado", "completado_at"])
+        return Response(self.get_serializer(seguimiento).data)
+

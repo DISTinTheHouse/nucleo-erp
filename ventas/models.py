@@ -66,6 +66,42 @@ class Oportunidad(StatusLifecycleModel):
     def __str__(self):
         return self.titulo or str(self.id)
 
+class OportunidadSeguimiento(models.Model):
+    """Una nota, llamada, correo, visita o tarea de una oportunidad, con recordatorio opcional.
+
+    Las fechas las pone quien captura: el sistema no avisa solo, el frontend consulta los pendientes.
+    """
+
+    class Tipo(models.TextChoices):
+        NOTA = "Nota", "Nota"
+        LLAMADA = "Llamada", "Llamada"
+        CORREO = "Correo", "Correo"
+        VISITA = "Visita", "Visita"
+        TAREA = "Tarea", "Tarea"
+
+    oportunidad = models.ForeignKey(Oportunidad, on_delete=models.CASCADE, related_name="seguimientos")
+    vendedor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="seguimientos_oportunidad", null=True, blank=True)
+    tipo = models.CharField(max_length=20, choices=Tipo.choices, default=Tipo.NOTA)
+    detalle = models.TextField()
+    fecha_recordatorio = models.DateField(null=True, blank=True)
+    completado = models.BooleanField(default=False)
+    completado_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "oportunidad_seguimientos"
+        verbose_name = "Seguimiento de oportunidad"
+        verbose_name_plural = "Seguimientos de oportunidad"
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["oportunidad", "completado"], name="ix_seg_oport_completado"),
+            models.Index(fields=["completado", "fecha_recordatorio"], name="ix_seg_pendientes"),
+        ]
+
+    def __str__(self):
+        return f"{self.tipo} - {self.oportunidad_id}"
+
+
 class Cotizacion(models.Model):
     class FormaPago(models.TextChoices):
         EFECTIVO = '01', '01 - EFECTIVO'
