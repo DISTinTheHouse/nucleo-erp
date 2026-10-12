@@ -1746,7 +1746,7 @@ class CobroViewSet(FinanzasBaseViewSet):
                     )
             CobroDetalle.objects.create(cobro=cobro, **d)
         if cobro.estatus == Cobro.Estatus.APLICADO:
-            CobroService.aplicar_cobro(cobro)
+            CobroService.aplicar_cobro(cobro, user)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -1767,9 +1767,9 @@ class CobroViewSet(FinanzasBaseViewSet):
             serializer.validated_data["estatus"] = anterior_estatus
         cobro = serializer.save()
         if nuevo_estatus == Cobro.Estatus.CANCELADO:
-            CobroService.cancelar_cobro(cobro)
+            CobroService.cancelar_cobro(cobro, self.request.user)
         elif nuevo_estatus == Cobro.Estatus.APLICADO and anterior_estatus != Cobro.Estatus.APLICADO:
-            CobroService.aplicar_cobro(cobro)
+            CobroService.aplicar_cobro(cobro, self.request.user)
 
     def perform_destroy(self, instance):
         user = self.request.user
@@ -1779,7 +1779,7 @@ class CobroViewSet(FinanzasBaseViewSet):
                 raise PermissionDenied()
         with transaction.atomic():
             if instance.estatus == Cobro.Estatus.APLICADO:
-                CobroService.cancelar_cobro(instance)
+                CobroService.cancelar_cobro(instance, self.request.user)
             if instance.movimientos_bancarios.exists():
                 # El movimiento bancario es la huella del documento (FK PROTECT):
                 # borrar de verdad daba 500. Queda cancelado y fuera del listado.
@@ -1792,7 +1792,7 @@ class CobroViewSet(FinanzasBaseViewSet):
     def cancelar(self, request, pk=None):
         cobro = self.get_object()
         with transaction.atomic():
-            CobroService.cancelar_cobro(cobro)
+            CobroService.cancelar_cobro(cobro, request.user)
         return Response(CobroSerializer(cobro).data)
 
 
@@ -1856,7 +1856,7 @@ class PagoViewSet(FinanzasBaseViewSet):
                     )
             PagoDetalle.objects.create(pago=pago, **d)
         if pago.estatus == Pago.Estatus.APLICADO:
-            PagoService.aplicar_pago(pago)
+            PagoService.aplicar_pago(pago, user)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -1875,9 +1875,9 @@ class PagoViewSet(FinanzasBaseViewSet):
             serializer.validated_data["estatus"] = anterior_estatus
         pago = serializer.save()
         if nuevo_estatus == Pago.Estatus.CANCELADO:
-            PagoService.cancelar_pago(pago)
+            PagoService.cancelar_pago(pago, self.request.user)
         elif nuevo_estatus == Pago.Estatus.APLICADO and anterior_estatus != Pago.Estatus.APLICADO:
-            PagoService.aplicar_pago(pago)
+            PagoService.aplicar_pago(pago, self.request.user)
 
     def perform_destroy(self, instance):
         user = self.request.user
@@ -1887,7 +1887,7 @@ class PagoViewSet(FinanzasBaseViewSet):
                 raise PermissionDenied()
         with transaction.atomic():
             if instance.estatus == Pago.Estatus.APLICADO:
-                PagoService.cancelar_pago(instance)
+                PagoService.cancelar_pago(instance, self.request.user)
             if instance.movimientos_bancarios.exists():
                 # El movimiento bancario es la huella del documento (FK PROTECT):
                 # borrar de verdad daba 500. Queda cancelado y fuera del listado.
@@ -1900,7 +1900,7 @@ class PagoViewSet(FinanzasBaseViewSet):
     def cancelar(self, request, pk=None):
         pago = self.get_object()
         with transaction.atomic():
-            PagoService.cancelar_pago(pago)
+            PagoService.cancelar_pago(pago, request.user)
         return Response(PagoSerializer(pago).data)
 
 
