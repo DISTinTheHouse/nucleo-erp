@@ -30,6 +30,7 @@ from finanzas.models import (
     Poliza,
     PolizaDetalle,
 )
+from finanzas.services.poliza_service import PolizaService
 from finanzas.services.cuenta_por_pagar_service import (
     CuentaPorPagarService,
     DUPLICATE_INVOICE_MESSAGE,
@@ -698,18 +699,21 @@ class PolizaSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixi
         model = Poliza
         fields = "__all__"
 
+    def _sumas(self, obj):
+        # Una sola lectura de las líneas (prefetch en el listado) en vez de tres agregados.
+        if not hasattr(obj, "_sumas_cache"):
+            obj._sumas_cache = PolizaService.calcular_sumas(obj, list(obj.poliza_detalles.all()))
+        return obj._sumas_cache
+
     def get_total_cargos(self, obj):
-        s = obj.poliza_detalles.aggregate(s=Sum("cargo"))["s"] or 0
-        return str(Decimal(str(s)).quantize(Decimal("0.01")))
+        return str(self._sumas(obj)[0])
 
     def get_total_abonos(self, obj):
-        s = obj.poliza_detalles.aggregate(s=Sum("abono"))["s"] or 0
-        return str(Decimal(str(s)).quantize(Decimal("0.01")))
+        return str(self._sumas(obj)[1])
 
     def get_cuadre_correcto(self, obj):
-        c = Decimal(str(obj.poliza_detalles.aggregate(s=Sum("cargo"))["s"] or 0))
-        a = Decimal(str(obj.poliza_detalles.aggregate(s=Sum("abono"))["s"] or 0))
-        return abs(c - a) <= Decimal("0.01")
+        cargos, abonos = self._sumas(obj)
+        return abs(cargos - abonos) <= Decimal("0.01")
 
     def validate(self, attrs):
         req = self.context.get("request")

@@ -19,10 +19,11 @@ from unittest.mock import MagicMock, patch
 from django.apps import apps as django_apps
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import IntegrityError, OperationalError, transaction
+from django.db import IntegrityError, OperationalError, connection, transaction
 from django.db.models import ProtectedError
 from django.db.models.signals import post_delete
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from drf_spectacular.generators import SchemaGenerator
 from rest_framework.test import APIClient
@@ -70,6 +71,7 @@ from finanzas.models import (
 )
 from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
 from finanzas.services.plan_contable_service import PlanContableService
+from finanzas.services.poliza_motor_service import PolizaMotorService
 from finanzas.services.poliza_service import PolizaService
 from inventarios.models import Almacen
 from nucleo.models import (
@@ -6426,3 +6428,193 @@ class F0PolizaDetalleCargoXorAbonoTests(FinanzasBase):
     def test_rechaza_importes_negativos(self):
         with self.assertRaises(IntegrityError), transaction.atomic():
             self._linea(cargo=Decimal("-10.00"), abono=Decimal("0.00")).save()
+
+
+class F1MotorDePolizasTests(FinanzasBase):
+    """Motor de pólizas automáticas y contrapóliza."""
+
+    def setUp(self):
+        self.empresa = self.a["empresa"]
+        self.sucursal = self.a["sucursal"]
+        self.clientes = self._cuenta("1120", CuentaContable.CuentaTipo.ACTIVO)
+        self.ventas = self._cuenta("4100", CuentaContable.CuentaTipo.INGRESO)
+        self.iva = self._cuenta("2170", CuentaContable.CuentaTipo.PASIVO)
+        self._config(ConceptoContable.CLIENTES, self.clientes)
+        self._config(ConceptoContable.INGRESO_VENTAS, self.ventas)
+        self._config(ConceptoContable.IVA_TRASLADADO, self.iva)
+        self.factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        self._encender()
+
+    def _cuenta(self, codigo, tipo):
+        return CuentaContable.objects.create(
+            empresa=self.empresa, codigo=codigo, nombre=f"Cuenta {codigo}", tipo=tipo
+        )
+
+    def _config(self, concepto, cuenta):
+        return ConfiguracionContable.objects.create(
+            empresa=self.empresa, concepto=concepto, cuenta_contable=cuenta
+        )
+
+    def _encender(self, **extra):
+        ParametrosContabilidad.objects.update_or_create(
+            empresa=self.empresa, defaults={"contabilizacion_automatica": True, **extra}
+        )
+
+    def _lineas(self, total="116.00", neto="100.00", iva="16.00"):
+        return [
+            {"concepto": ConceptoContable.CLIENTES, "cargo": total, "factura": self.factura},
+            {"concepto": ConceptoContable.INGRESO_VENTAS, "abono": neto, "factura": self.factura},
+            {"concepto": ConceptoContable.IVA_TRASLADADO, "abono": iva, "factura": self.factura},
+        ]
+
+    def _generar(self, origen_id=None, fecha=None, lineas=None):
+        return PolizaMotorService.generar(
+            empresa_id=self.empresa.pk,
+            sucursal_id=self.sucursal.pk,
+            origen_tipo="Factura",
+            origen_id=origen_id or self.factura.pk,
+            fecha=fecha or date(2026, 3, 1),
+            tipo=Poliza.PolizaTipo.INGRESO,
+            concepto="Factura de prueba",
+            lineas=lineas or self._lineas(),
+            usuario=self.a["usuario"],
+        )
+
+    # -- generar -----------------------------------------------------------
+
+    def test_genera_una_poliza_contabilizada_y_cuadrada(self):
+        poliza = self._generar()
+
+        self.assertEqual(poliza.estatus, Poliza.PolizaStatus.CONTABILIZADA)
+        self.assertEqual(poliza.fecha, date(2026, 3, 1))
+        self.assertTrue(poliza.folio)
+        self.assertEqual(PolizaService.calcular_sumas(poliza), (Decimal("116.00"), Decimal("116.00")))
+        cuentas = list(poliza.poliza_detalles.order_by("orden").values_list("cuenta_contable_id", flat=True))
+        self.assertEqual(cuentas, [self.clientes.pk, self.ventas.pk, self.iva.pk])
+        self.assertEqual(poliza.poliza_detalles.first().factura_id, self.factura.pk)
+
+    def test_no_genera_renglones_en_ceros(self):
+        poliza = self._generar(lineas=self._lineas("100.00", "100.00", "0.00"))
+
+        self.assertEqual(poliza.poliza_detalles.count(), 2)
+
+    def test_es_idempotente_por_documento(self):
+        primera = self._generar()
+        segunda = self._generar()
+
+        self.assertEqual(primera.pk, segunda.pk)
+        self.assertEqual(Poliza.objects.filter(origen_tipo="Factura").count(), 1)
+
+    def test_con_el_interruptor_apagado_no_genera(self):
+        self._encender(contabilizacion_automatica=False)
+
+        self.assertIsNone(self._generar())
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_respeta_la_fecha_de_inicio(self):
+        self._encender(fecha_inicio_contabilizacion=date(2026, 6, 1))
+
+        self.assertIsNone(self._generar(fecha=date(2026, 5, 31)))
+        self.assertIsNotNone(self._generar(fecha=date(2026, 6, 1)))
+
+    def test_cuenta_faltante_reporta_todos_los_conceptos_y_no_deja_nada(self):
+        ConfiguracionContable.objects.filter(
+            concepto__in=[ConceptoContable.INGRESO_VENTAS, ConceptoContable.IVA_TRASLADADO]
+        ).delete()
+
+        with self.assertRaises(ErrorDeNegocio) as ctx:
+            self._generar()
+
+        mensaje = str(ctx.exception.message_dict)
+        self.assertIn("Ingresos por ventas", mensaje)
+        self.assertIn("IVA trasladado", mensaje)
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_rechaza_una_cuenta_de_agrupacion(self):
+        CuentaContable.objects.filter(pk=self.ventas.pk).update(acepta_movimientos=False)
+
+        with self.assertRaises(ErrorDeNegocio):
+            self._generar()
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_rechaza_un_asiento_descuadrado_y_no_deja_nada(self):
+        with self.assertRaises(ErrorDeNegocio):
+            self._generar(lineas=self._lineas(total="116.00", neto="100.00", iva="10.00"))
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_costo_fijo_de_consultas_por_poliza(self):
+        self._generar()  # abre la serie de folios
+        with self.assertNumQueries(15):
+            self._generar(origen_id=self.factura.pk + 1000)
+
+    # -- contrapóliza ------------------------------------------------------
+
+    def test_contrapoliza_invierte_cada_renglon_y_cancela_la_original(self):
+        original = self._generar()
+
+        reversa = PolizaService.cancelar(original, self.a["usuario"])
+
+        original.refresh_from_db()
+        self.assertEqual(original.estatus, Poliza.PolizaStatus.CANCELADA)
+        self.assertEqual(reversa.estatus, Poliza.PolizaStatus.CONTABILIZADA)
+        self.assertEqual(reversa.poliza_reversa_de_id, original.pk)
+        self.assertEqual(reversa.fecha, timezone.localdate())
+        invertidas = {
+            (d.cuenta_contable_id, d.cargo, d.abono) for d in reversa.poliza_detalles.all()
+        }
+        esperadas = {
+            (d.cuenta_contable_id, d.abono, d.cargo) for d in original.poliza_detalles.all()
+        }
+        self.assertEqual(invertidas, esperadas)
+        self.assertEqual(reversa.poliza_detalles.first().factura_id, self.factura.pk)
+
+    def test_cancelar_dos_veces_no_duplica_la_contrapoliza(self):
+        original = self._generar()
+
+        primera = PolizaService.cancelar(original, self.a["usuario"])
+        segunda = PolizaService.cancelar(original, self.a["usuario"])
+
+        self.assertEqual(primera.pk, segunda.pk)
+        self.assertEqual(Poliza.objects.filter(poliza_reversa_de=original).count(), 1)
+
+    def test_el_documento_cancelado_puede_volver_a_contabilizarse(self):
+        original = self._generar()
+        PolizaService.cancelar(original, self.a["usuario"])
+
+        self.assertEqual(self._generar().pk, original.pk)
+
+    def test_cancelar_un_borrador_no_genera_contrapoliza(self):
+        borrador = Poliza.objects.create(empresa=self.empresa, sucursal=self.sucursal)
+
+        self.assertIsNone(PolizaService.cancelar(borrador))
+
+        borrador.refresh_from_db()
+        self.assertEqual(borrador.estatus, Poliza.PolizaStatus.CANCELADA)
+        self.assertEqual(Poliza.objects.count(), 1)
+
+    def test_endpoint_cancelar_devuelve_la_contrapoliza(self):
+        original = self._generar()
+
+        resp = self._client(self.a["usuario"]).post(f"{POLIZAS_URL}{original.pk}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["estatus"], Poliza.PolizaStatus.CANCELADA)
+        reversa = Poliza.objects.get(poliza_reversa_de=original)
+        self.assertEqual(resp.data["contrapoliza_id"], reversa.pk)
+
+    def test_listado_lee_las_lineas_con_consultas_fijas(self):
+        for i in range(5):
+            self._generar(origen_id=self.factura.pk + i + 1)
+        cliente = self._client(self.a["usuario"])
+        cliente.get(POLIZAS_URL)  # calienta sesión y permisos
+
+        with CaptureQueriesContext(connection) as pocas:
+            self.assertEqual(cliente.get(POLIZAS_URL).status_code, 200)
+        for i in range(10):
+            self._generar(origen_id=self.factura.pk + i + 100)
+        with CaptureQueriesContext(connection) as muchas:
+            self.assertEqual(cliente.get(POLIZAS_URL).status_code, 200)
+
+        self.assertEqual(len(pocas), len(muchas))

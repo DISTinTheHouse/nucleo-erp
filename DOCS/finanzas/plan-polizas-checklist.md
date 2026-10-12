@@ -37,10 +37,13 @@ Marca `[x]` conforme se complete cada punto. Contexto, decisiones y detalle téc
 - [ ] Sucursal en Cobro/Pago/CuentaBancaria: se deriva de la factura/CxC en F1/F3 (pospuesto)
 
 ## F1 Motor
-- [ ] Campos de origen en `Poliza` (`origen_tipo`/`origen_id`) + unicidad (origen, es_reversa)
-- [ ] `generar(documento)` reutilizando `PlanContableService` y `generate_poliza_folio`
-- [ ] `PolizaService.contrapoliza()`
-- [ ] Respeta `ParametrosContabilidad` (interruptor y fecha de inicio)
+- [x] Campos de origen en `Poliza` (`origen_tipo`/`origen_id`) + unicidad (migración 0029)
+- [x] `PolizaMotorService.generar()` reutilizando `PlanContableService` y `generate_poliza_folio`
+- [x] `PolizaService.contrapoliza()` y `cancelar()` (la original queda Cancelada)
+- [x] Respeta `ParametrosContabilidad` (interruptor y fecha de inicio)
+- [x] Listado de pólizas sin consultas por renglón
+
+Detalle: `DOCS/finanzas/motor-polizas.md`.
 
 ## F2 Factura de venta
 - [ ] Póliza nace Contabilizada con plan contable y folio atómico
