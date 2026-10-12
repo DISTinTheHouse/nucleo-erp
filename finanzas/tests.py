@@ -46,6 +46,7 @@ from finanzas.exceptions import (
     ErrorDeNegocio,
 )
 from finanzas.models import (
+    AlertaMora,
     Banco,
     CentroCosto,
     Cobro,
@@ -69,6 +70,7 @@ from finanzas.models import (
     Poliza,
     PolizaDetalle,
 )
+from finanzas.services.alerta_mora_service import AlertaMoraService
 from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
 from finanzas.services.plan_contable_service import PlanContableService
 from finanzas.services.factura_poliza_service import FacturaPolizaService
@@ -7055,6 +7057,167 @@ class F4PolizaDeNotaFacturaProveedorYMovimientoTests(MotorPolizasBase):
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertEqual(Poliza.objects.count(), 1)
         self.assertEqual(Poliza.objects.get().origen_tipo, "Cobro")
+
+
+class F7AlertasDeMoraTests(FinanzasBase):
+    """Una alerta por cuenta, en los hitos de 30, 60, 90 y 120 días vencida."""
+
+    HOY = date(2026, 6, 30)
+
+    def _cxc(self, dias_vencida, saldo="100.00", estatus=None, empresa=None):
+        empresa = empresa or self.a
+        factura = Factura.objects.create(
+            empresa=empresa["empresa"], sucursal=empresa["sucursal"], cliente=empresa["cliente"],
+            moneda=self.moneda,
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=empresa["empresa"], cliente=empresa["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal(saldo),
+            fecha_vencimiento=self.HOY - timedelta(days=dias_vencida),
+        )
+        if estatus:
+            CuentaPorCobrar.objects.filter(pk=cxc.pk).update(estatus=estatus)
+        return cxc
+
+    def _generar(self, empresa=None):
+        return AlertaMoraService.generar_alertas(empresa=empresa, fecha_hoy=self.HOY)
+
+    def _nivel(self, cxc):
+        alerta = AlertaMora.objects.filter(cuenta_por_cobrar=cxc).first()
+        return alerta and alerta.nivel
+
+    def test_los_hitos_son_30_60_90_y_120_dias(self):
+        casos = {29: None, 30: "Leve", 59: "Leve", 60: "Moderada", 89: "Moderada",
+                 90: "Grave", 119: "Grave", 120: "Critica", 400: "Critica"}
+        cuentas = {dias: self._cxc(dias) for dias in casos}
+
+        self._generar()
+
+        for dias, esperado in casos.items():
+            with self.subTest(dias=dias):
+                self.assertEqual(self._nivel(cuentas[dias]), esperado)
+
+    def test_guarda_los_dias_de_mora(self):
+        cxc = self._cxc(45)
+
+        self._generar()
+
+        self.assertEqual(AlertaMora.objects.get(cuenta_por_cobrar=cxc).dias_mora, 45)
+
+    def test_pagadas_canceladas_y_sin_saldo_no_alertan(self):
+        self._cxc(100, estatus="Pagada")
+        self._cxc(100, estatus="Cancelada")
+        self._cxc(100, saldo="0.00")
+
+        self.assertEqual(self._generar(), 0)
+
+    def test_tambien_alerta_las_cuentas_por_pagar(self):
+        proveedor, _, _, _, _, _, factura = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"]
+        )
+        cxp = CuentaPorPagar.objects.create(
+            empresa=self.a["empresa"], proveedor=proveedor, factura_proveedor=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+            fecha_vencimiento=self.HOY - timedelta(days=95),
+        )
+
+        self._generar()
+
+        alerta = AlertaMora.objects.get(cuenta_por_pagar=cxp)
+        self.assertEqual((alerta.tipo_cuenta, alerta.nivel), ("Pagar", "Grave"))
+
+    def test_correr_dos_veces_o_sin_empresa_no_duplica(self):
+        cxc = self._cxc(40)
+
+        self._generar()
+        self._generar(self.a["empresa"])
+        total = self._generar()
+
+        self.assertEqual(total, 1)
+        self.assertEqual(AlertaMora.objects.filter(cuenta_por_cobrar=cxc).count(), 1)
+
+    def test_conserva_notificado_y_lo_reinicia_al_subir_de_nivel(self):
+        cxc = self._cxc(40)
+        self._generar()
+        AlertaMora.objects.update(notificado=True, fecha_notificado=timezone.now())
+
+        self._generar()  # mismo nivel
+        self.assertTrue(AlertaMora.objects.get().notificado)
+
+        CuentaPorCobrar.objects.filter(pk=cxc.pk).update(fecha_vencimiento=self.HOY - timedelta(days=65))
+        self._generar()  # sube a Moderada
+        alerta = AlertaMora.objects.get()
+        self.assertEqual(alerta.nivel, "Moderada")
+        self.assertFalse(alerta.notificado)
+        self.assertIsNone(alerta.fecha_notificado)
+
+    def test_borra_la_alerta_de_una_cuenta_que_ya_se_pago(self):
+        cxc = self._cxc(40)
+        self._generar()
+
+        CuentaPorCobrar.objects.filter(pk=cxc.pk).update(saldo=Decimal("0.00"), estatus="Pagada")
+        self.assertEqual(self._generar(), 0)
+
+    def test_con_empresa_solo_toca_esa_empresa(self):
+        propia, ajena = self._cxc(40), self._cxc(40, empresa=self.b)
+        self._generar()
+
+        CuentaPorCobrar.objects.filter(pk__in=[propia.pk, ajena.pk]).update(saldo=Decimal("0.00"))
+        self._generar(self.a["empresa"])
+
+        self.assertEqual(list(AlertaMora.objects.values_list("cuenta_por_cobrar_id", flat=True)), [ajena.pk])
+
+    def test_la_base_impide_dos_alertas_para_la_misma_cuenta(self):
+        cxc = self._cxc(40)
+        datos = dict(empresa=self.a["empresa"], tipo_cuenta="Cobrar", cuenta_por_cobrar=cxc,
+                     dias_mora=40, nivel="Leve")
+        AlertaMora.objects.create(**datos)
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            AlertaMora.objects.create(**datos)
+
+    def test_numero_fijo_de_consultas(self):
+        for dias in (40, 70):
+            self._cxc(dias)
+        self._generar()
+        with CaptureQueriesContext(connection) as pocas:
+            self._generar()
+        for dias in range(31, 51):
+            self._cxc(dias)
+        with CaptureQueriesContext(connection) as muchas:
+            self._generar()
+        # Las nuevas se insertan en un solo lote: las consultas no crecen con las cuentas.
+        self.assertLessEqual(len(muchas), len(pocas) + 1)
+
+    # -- plazo de crédito del cliente ----------------------------------------
+
+    def _facturar(self, **extra):
+        return self._client(self.a["usuario"]).post(PENDIENTE_COBRO_URL, {
+            "cliente": self.a["cliente"].pk, "moneda": self.moneda.pk, "folio": "F-900",
+            "subtotal": "100.00", "descuento": "0.00", "impuestos": "0.00", "total": "100.00", **extra,
+        }, format="json")
+
+    def test_sin_vencimiento_usa_los_dias_de_credito_del_cliente(self):
+        Cliente.objects.filter(pk=self.a["cliente"].pk).update(dias_credito=30)
+
+        resp = self._facturar()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        esperado = timezone.localdate() + timedelta(days=30)
+        self.assertEqual(Factura.objects.get().fecha_vencimiento, esperado)
+        self.assertEqual(CuentaPorCobrar.objects.get().fecha_vencimiento, esperado)
+
+    def test_un_vencimiento_explicito_manda_sobre_el_plazo_del_cliente(self):
+        Cliente.objects.filter(pk=self.a["cliente"].pk).update(dias_credito=30)
+
+        self._facturar(fecha_vencimiento="2026-12-01")
+
+        self.assertEqual(CuentaPorCobrar.objects.get().fecha_vencimiento, date(2026, 12, 1))
+
+    def test_sin_dias_de_credito_ni_vencimiento_queda_sin_fecha(self):
+        self._facturar()
+
+        self.assertIsNone(CuentaPorCobrar.objects.get().fecha_vencimiento)
 
 
 class F5CancelarFacturaTests(MotorPolizasBase):

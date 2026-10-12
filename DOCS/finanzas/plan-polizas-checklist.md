@@ -27,7 +27,7 @@ Marca `[x]` conforme se complete cada punto. Contexto, decisiones y detalle téc
 - [ ] Una factura con cobros aplicados se puede cancelar
 - [ ] Notas de crédito incluidas
 - [ ] Facturas PPD llevan complemento de pago
-- [ ] Alertas de vencidas a 30 / 60 / 90 / 120 días, según el plazo de cada cliente
+- [x] Alertas de vencidas a 30 / 60 / 90 / 120 días, según el plazo de cada cliente
 
 ## F0 Cimientos y bugs
 - [x] Constraint cargo XOR abono dentro de `Meta` en `PolizaDetalle` + migración 0028 (con verificación previa de datos)
@@ -67,9 +67,9 @@ Detalle: `DOCS/finanzas/motor-polizas.md`.
 - [ ] Emisión por parcialidad con CxC y póliza
 
 ## F7 Alertas
-- [ ] Días de crédito por cliente
-- [ ] Umbrales 30/60/90/120
-- [ ] Evitar alertas duplicadas al correr sin `--empresa`
+- [x] Días de crédito por cliente (sin vencimiento explícito, la factura vence a `dias_credito`)
+- [x] Umbrales 30/60/90/120
+- [x] Evitar alertas duplicadas al correr sin `--empresa` (una alerta por cuenta + único en base)
 
 ## F8 PPD
 - [ ] IVA por trasladar/acreditar (cuentas y conceptos nuevos)
