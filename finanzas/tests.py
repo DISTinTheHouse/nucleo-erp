@@ -71,6 +71,7 @@ from finanzas.models import (
 )
 from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
 from finanzas.services.plan_contable_service import PlanContableService
+from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.poliza_motor_service import PolizaMotorService
 from finanzas.services.poliza_service import PolizaService
 from inventarios.models import Almacen
@@ -737,6 +738,16 @@ class Defecto2PolizaDetalleSerializer(FinanzasBase):
         ``registrar-pendiente-cobro`` (que siempre genera póliza)."""
         empresa = self.a["empresa"]
         self._crear_cuentas(empresa)
+        for concepto, codigo in (
+            (ConceptoContable.CLIENTES, "1050"),
+            (ConceptoContable.INGRESO_VENTAS, "4000"),
+            (ConceptoContable.IVA_TRASLADADO, "2080"),
+        ):
+            ConfiguracionContable.objects.create(
+                empresa=empresa, concepto=concepto,
+                cuenta_contable=CuentaContable.objects.get(empresa=empresa, codigo=codigo),
+            )
+        ParametrosContabilidad.objects.create(empresa=empresa, contabilizacion_automatica=True)
         client = self._client(self.a["usuario"])
 
         creada = client.post(
@@ -4651,9 +4662,8 @@ class CentroCostoBajaLogicaTests(FinanzasBase):
         ajeno.refresh_from_db()
         self.assertTrue(ajeno.activo)
 
-    def test_sin_centro_activo_la_factura_pendiente_de_cobro_devuelve_400(self):
-        # Efecto colateral conocido: ``_crear_poliza_factura_pendiente`` exige un
-        # centro de costo activo.
+    def test_sin_centro_activo_la_factura_pendiente_de_cobro_se_registra(self):
+        # El centro de costo es opcional en la póliza: no bloquea la factura.
         _, _, centro = self._crear_cuentas_contables(self.a["empresa"])
         self.assertEqual(self._delete(centro).status_code, 204)
 
@@ -4671,8 +4681,7 @@ class CentroCostoBajaLogicaTests(FinanzasBase):
             format="json",
         )
 
-        self.assertEqual(resp.status_code, 400, resp.data)
-        self.assertIn("centro_costo", resp.data)
+        self.assertEqual(resp.status_code, 201, resp.data)
 
 
 class CentroCostoCodigoUnicoTests(FinanzasBase):
@@ -6430,8 +6439,8 @@ class F0PolizaDetalleCargoXorAbonoTests(FinanzasBase):
             self._linea(cargo=Decimal("-10.00"), abono=Decimal("0.00")).save()
 
 
-class F1MotorDePolizasTests(FinanzasBase):
-    """Motor de pólizas automáticas y contrapóliza."""
+class MotorPolizasBase(FinanzasBase):
+    """Plan contable mínimo y contabilización encendida para probar el motor."""
 
     def setUp(self):
         self.empresa = self.a["empresa"]
@@ -6481,6 +6490,10 @@ class F1MotorDePolizasTests(FinanzasBase):
             lineas=lineas or self._lineas(),
             usuario=self.a["usuario"],
         )
+
+
+class F1MotorDePolizasTests(MotorPolizasBase):
+    """Motor de pólizas automáticas y contrapóliza."""
 
     # -- generar -----------------------------------------------------------
 
@@ -6618,3 +6631,76 @@ class F1MotorDePolizasTests(FinanzasBase):
             self.assertEqual(cliente.get(POLIZAS_URL).status_code, 200)
 
         self.assertEqual(len(pocas), len(muchas))
+
+
+class F2PolizaDeFacturaTests(MotorPolizasBase):
+    """La factura de venta contabiliza con el motor: Clientes / Ventas / IVA."""
+
+    def _factura(self, **extra):
+        datos = dict(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.a["cliente"], moneda=self.moneda,
+            folio="F-100", subtotal=Decimal("100.00"), descuento=Decimal("0.00"),
+            impuestos=Decimal("16.00"), total=Decimal("116.00"),
+        )
+        datos.update(extra)
+        return Factura.objects.create(**datos)
+
+    def test_genera_cargo_a_clientes_y_abonos_a_ventas_e_iva(self):
+        factura = self._factura()
+
+        poliza = FacturaPolizaService.generar(factura, self.a["usuario"])
+
+        self.assertEqual(poliza.tipo, Poliza.PolizaTipo.INGRESO)
+        self.assertEqual(poliza.fecha, factura.fecha_emision)
+        self.assertEqual(poliza.origen_id, factura.pk)
+        renglones = {
+            d.cuenta_contable_id: (d.cargo, d.abono) for d in poliza.poliza_detalles.all()
+        }
+        self.assertEqual(renglones, {
+            self.clientes.pk: (Decimal("116.00"), Decimal("0.00")),
+            self.ventas.pk: (Decimal("0.00"), Decimal("100.00")),
+            self.iva.pk: (Decimal("0.00"), Decimal("16.00")),
+        })
+
+    def test_el_descuento_baja_el_ingreso_neto(self):
+        factura = self._factura(
+            subtotal=Decimal("100.00"), descuento=Decimal("10.00"),
+            impuestos=Decimal("14.40"), total=Decimal("104.40"),
+        )
+
+        poliza = FacturaPolizaService.generar(factura)
+
+        self.assertEqual(
+            poliza.poliza_detalles.get(cuenta_contable=self.ventas).abono, Decimal("90.00")
+        )
+
+    def test_sin_impuestos_no_hay_renglon_de_iva(self):
+        factura = self._factura(impuestos=Decimal("0.00"), total=Decimal("100.00"))
+
+        poliza = FacturaPolizaService.generar(factura)
+
+        self.assertEqual(poliza.poliza_detalles.count(), 2)
+
+    def test_con_el_interruptor_apagado_no_genera(self):
+        self._encender(contabilizacion_automatica=False)
+
+        self.assertIsNone(FacturaPolizaService.generar(self._factura()))
+
+    def test_previsualizar_no_guarda_y_funciona_con_el_interruptor_apagado(self):
+        self._encender(contabilizacion_automatica=False)
+        factura = self._factura()
+
+        resp = self._client(self.a["usuario"]).get(f"/api/v1/finanzas/facturas/{factura.pk}/previsualizar-poliza/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(resp.data["cuadre_correcto"])
+        self.assertEqual(resp.data["total_cargos"], "116.00")
+        self.assertEqual([r["cuenta_codigo"] for r in resp.data["renglones"]], ["1120", "4100", "2170"])
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_previsualizar_de_otra_empresa_responde_404(self):
+        factura = self._factura()
+
+        resp = self._client(self.b["usuario"]).get(f"/api/v1/finanzas/facturas/{factura.pk}/previsualizar-poliza/")
+
+        self.assertEqual(resp.status_code, 404)
