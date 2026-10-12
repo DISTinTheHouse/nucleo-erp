@@ -77,8 +77,8 @@ Detalle: `DOCS/finanzas/motor-polizas.md`.
 - [ ] Complemento de pago (REP)
 
 ## F9 Trazabilidad y reportes
-- [ ] Filtro `?origen=` y endpoint de rastro por documento
-- [ ] Libro diario, auxiliar y balanza de comprobación
+- [x] Rastro por documento: `GET /polizas/?origen_tipo=&origen_id=`
+- [x] Libro diario, auxiliar de cuenta y balanza de comprobación (`DOCS/finanzas/reportes-contables.md`)
 
 ## Preguntas abiertas para contabilidad
 - [ ] Factura cancelada con cobros: ¿saldo a favor del cliente o se cancelan también los cobros?

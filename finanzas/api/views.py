@@ -1,4 +1,5 @@
 from datetime import timedelta
+from django.utils.dateparse import parse_date
 from decimal import Decimal
 from django.db import OperationalError, transaction
 from django.db.models import DecimalField, Max, Min, OuterRef, Q, Subquery, Sum
@@ -96,8 +97,9 @@ from finanzas.services.factura_cancelacion_service import FacturaCancelacionServ
 from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
+from finanzas.services.reporte_contable_service import LIMITE_OMISION, ReporteContableService
 from finanzas.utils.folios import generate_factura_folio
-from nucleo.models import Moneda, Sucursal
+from nucleo.models import Empresa, Moneda, Sucursal
 from ventas.models import Pedido, PedidoDetalleTalla
 from terceros.models import Cliente
 from terceros.api.serializers import ClienteSerializer
@@ -1127,6 +1129,13 @@ class PolizaViewSet(FinanzasBaseViewSet):
             qs = qs.filter(sucursal_id=sucursal)
         if centro_costo:
             qs = qs.filter(centro_costo_id=centro_costo)
+        # Rastro de un documento: sus pólizas, con la contrapóliza si se canceló.
+        origen_tipo = (qp.get("origen_tipo") or "").strip()
+        origen_id = qp.get("origen_id")
+        if origen_tipo:
+            qs = qs.filter(origen_tipo=origen_tipo)
+        if origen_id:
+            qs = qs.filter(origen_id=origen_id)
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha")
         return _aplicar_ordering(qs, qp, ["-fecha", "-folio_consecutivo", "-id"])
 
@@ -2412,6 +2421,70 @@ class DashboardFinancieroViewSet(FinanzasBaseSimpleViewSet):
                 moneda_id=moneda,
             )
         )
+
+class ReporteContableViewSet(FinanzasBaseSimpleViewSet):
+    """Libro diario, auxiliar de cuenta y balanza de comprobación sobre las pólizas."""
+
+    http_method_names = ["get"]
+
+    def _empresa(self, request):
+        user, qp = request.user, request.query_params
+        if _puede_ver_todo(user):
+            empresa_id = qp.get("empresa") or qp.get("empresa_id")
+            if not empresa_id:
+                raise ValidationError({"empresa": "Superusuario debe especificar ?empresa=ID."})
+            if not Empresa.objects.filter(pk=empresa_id).exists():
+                raise ValidationError({"empresa": "Empresa no encontrada."})
+            return int(empresa_id)
+        empresa = getattr(user, "empresa", None)
+        if empresa is None:
+            raise PermissionDenied("Usuario sin empresa.")
+        return empresa.pk
+
+    def _fechas(self, request):
+        qp = request.query_params
+        fechas = {}
+        for campo in ("fecha_inicio", "fecha_fin"):
+            valor = parse_date(qp.get(campo) or "")
+            if valor is None:
+                raise ValidationError({campo: "Requerida, con formato AAAA-MM-DD."})
+            fechas[campo] = valor
+        if fechas["fecha_inicio"] > fechas["fecha_fin"]:
+            raise ValidationError({"fecha_fin": "No puede ser anterior a fecha_inicio."})
+        return fechas["fecha_inicio"], fechas["fecha_fin"]
+
+    @staticmethod
+    def _pagina(qp):
+        try:
+            return int(qp.get("limit", LIMITE_OMISION)), int(qp.get("offset", 0))
+        except ValueError:
+            raise ValidationError({"limit": "limit y offset deben ser enteros."})
+
+    @action(detail=False, methods=["get"], url_path="libro-diario")
+    def libro_diario(self, request):
+        empresa_id, (inicio, fin) = self._empresa(request), self._fechas(request)
+        limit, offset = self._pagina(request.query_params)
+        return Response(ReporteContableService.libro_diario(
+            empresa_id, inicio, fin, sucursal=request.query_params.get("sucursal"),
+            tipo=request.query_params.get("tipo"), limit=limit, offset=offset,
+        ))
+
+    @action(detail=False, methods=["get"], url_path="auxiliar")
+    def auxiliar(self, request):
+        empresa_id, (inicio, fin) = self._empresa(request), self._fechas(request)
+        cuenta = CuentaContable.objects.filter(
+            pk=request.query_params.get("cuenta") or 0, empresa_id=empresa_id
+        ).first()
+        if cuenta is None:
+            raise ValidationError({"cuenta": "Requerida; cuenta no encontrada en la empresa."})
+        limit, offset = self._pagina(request.query_params)
+        return Response(ReporteContableService.auxiliar(empresa_id, cuenta, inicio, fin, limit=limit, offset=offset))
+
+    @action(detail=False, methods=["get"], url_path="balanza")
+    def balanza(self, request):
+        empresa_id, (inicio, fin) = self._empresa(request), self._fechas(request)
+        return Response(ReporteContableService.balanza(empresa_id, inicio, fin))
+
 
 class PuedeUsarFacturama(BasePermission):
     """Candado de la cuenta única de Facturama (ver ``facturama/acceso.py``).
