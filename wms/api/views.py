@@ -15,6 +15,7 @@ from wms.api.serializers import (
     TransferenciaRetrieveSerializer,
     TransferenciaSerializer,
     PickingCreateSerializer,
+    PickingTrasladoSerializer,
     PickingSerializer,
     PackingSerializer,
 )
@@ -219,6 +220,21 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
         response_data = PickingSerializer(picking).data
         response_data["ordenes_trabajo_generadas"] = ordenes_trabajo
         return Response(response_data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="trasladar", url_name="trasladar")
+    def trasladar(self, request, pk=None):
+        """Mueve el picking a otro almacén (p. ej. de bordados a APARTADOS)."""
+        picking = self.get_object()
+        serializer = PickingTrasladoSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        picking = PickingService.trasladar(
+            picking,
+            serializer.validated_data["almacen"],
+            request.user,
+            serializer.validated_data.get("observaciones"),
+        )
+        picking = self.get_queryset().get(pk=picking.pk)
+        return Response(PickingSerializer(picking).data)
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)

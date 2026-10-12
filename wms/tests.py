@@ -782,3 +782,72 @@ class PickingGeneraTransferenciaTests(TestCase):
                 transferencia=picking.transferencia
             ).exists()
         )
+
+class PickingTrasladoTests(TestCase):
+    """``POST /pickings/{id}/trasladar/``: mover un picking a otro almacén."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from inventarios.models import Almacen
+        from nucleo.models import Moneda
+        from terceros.models import Cliente
+        from ventas.models import Pedido
+        from wms.models import Picking
+
+        cls.empresa = Empresa.objects.create(codigo="trs", razon_social="Traslado SA")
+        cls.otra_empresa = Empresa.objects.create(codigo="trs2", razon_social="Otra SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTZ", nombre="Matriz")
+        cls.admin = Usuario.objects.create(
+            username="trs-admin", email="trs-admin@example.com", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        kw = dict(empresa=cls.empresa, sucursal=cls.sucursal, permite_salida=True, permite_entrada=True)
+        cls.bordados = Almacen.objects.create(codigo="BOR", nombre="Bordados", **kw)
+        cls.apartados = Almacen.objects.create(codigo="APA", nombre="Apartados", **kw)
+        cls.ajeno = Almacen.objects.create(
+            codigo="X", nombre="Ajeno", empresa=cls.otra_empresa, permite_salida=True
+        )
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=moneda
+        )
+        cls.picking = Picking.objects.create(
+            folio="PK-1", empresa=cls.empresa, sucursal=cls.sucursal, pedido=pedido,
+            operador=cls.admin, almacen=cls.bordados, almacen_destino=cls.apartados,
+            usuario=cls.admin,
+        )
+
+    def _post(self, almacen, user=None):
+        client = APIClient()
+        client.force_authenticate(user or self.admin)
+        return client.post(
+            f"/api/v1/wms/pickings/{self.picking.pk}/trasladar/",
+            {"almacen": almacen.pk, "observaciones": "Bordado terminado"},
+            format="json",
+        )
+
+    def test_traslada_y_limpia_destino_si_coincide(self):
+        resp = self._post(self.apartados)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.picking.refresh_from_db()
+        self.assertEqual(self.picking.almacen_id, self.apartados.pk)
+        self.assertIsNone(self.picking.almacen_destino_id)
+        self.assertIn("Bordado terminado", self.picking.observaciones)
+
+    def test_mismo_almacen_rechazado(self):
+        self.assertEqual(self._post(self.bordados).status_code, 400)
+
+    def test_almacen_de_otra_empresa_rechazado(self):
+        self.assertEqual(self._post(self.ajeno).status_code, 400)
+
+    def test_picking_completado_no_se_traslada(self):
+        from wms.models import Picking
+        Picking.objects.filter(pk=self.picking.pk).update(estado=Picking.Estado.COMPLETADO)
+        self.assertEqual(self._post(self.apartados).status_code, 400)
+
+    def test_otra_empresa_recibe_404(self):
+        intruso = Usuario.objects.create(
+            username="trs-x", email="trs-x@example.com", empresa=self.otra_empresa
+        )
+        self.assertEqual(self._post(self.apartados, intruso).status_code, 404)

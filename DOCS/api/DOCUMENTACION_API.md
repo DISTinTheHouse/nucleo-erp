@@ -5024,6 +5024,14 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 - Si frontend necesita mostrar el surtido creado, puede usar la respuesta del `POST` o consultar el `GET` de detalle.
 - `ordenes_trabajo_generadas` siempre devuelve `[]` en este endpoint. Las OT se vinculan desde sus endpoints de Producción.
 
+### Trasladar un Picking a otro almacén
+
+- **Endpoint**: `POST /api/v1/wms/pickings/{id}/trasladar/`
+- **Body**: `{"almacen": <id>, "observaciones": "opcional"}`
+- Cambia el almacén desde el que se surte el picking (p. ej. de Bordados a Apartados). No mueve inventario ni crea transferencias (el picking es un tracker).
+- Solo estados Pendiente/Asignado/En proceso/Pausado/Parcial. El almacén debe ser de la misma empresa y sucursal y permitir salidas; distinto al actual. Si coincide con `almacen_destino`, este queda en `null`. Se limpian las `ubicacion` de línea de otro almacén y se registra en observaciones y en auditoría (`TRASLADO_PICKING`).
+- Respuesta `200` con el picking actualizado; `400` si no cumple; `404` si es de otra empresa/sucursal.
+
 ### 3) Listar Pickings
 
 - **Endpoint**: `GET /api/v1/wms/pickings/`

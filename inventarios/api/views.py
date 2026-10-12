@@ -1614,6 +1614,84 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = self.get_serializer(queryset[:limit], many=True)
         return Response(serializer.data)
 
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path=r"formal/(?P<movimiento_id>[0-9]+)/detalles",
+    )
+    def detalles_formal(self, request, movimiento_id=None):
+        """Detalle de un ``MovimientoInventario`` (el ``movimiento_inventario_id``
+        que devuelve ``reporte-movimientos-periodo``).
+
+        ``{id}/detalles/`` busca por ``AuditoriaEvento.id_evento``: mandarle el id
+        de un movimiento formal no lo encuentra (400) o, peor, abre otro evento.
+        Mismo scope que ``MovimientoInventarioViewSet`` (empresa + sucursal).
+        """
+        user = request.user
+        qs = MovimientoInventario.objects.filter(activo=True).select_related(
+            "empresa", "sucursal", "usuario", "pedido", "recepcion",
+            "transferencia", "op", "ajuste_inventario",
+        )
+        if not user.is_superuser:
+            empresa_ids = self._empresa_ids_permitidas(user)
+            sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+            qs = qs.filter(empresa_id__in=empresa_ids, sucursal_id__in=sucursal_ids)
+        mov = qs.filter(pk=movimiento_id).first()
+        if not mov:
+            return Response(
+                {"movimiento": "Movimiento no encontrado."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        detalle = []
+        for d in mov.detalles.select_related(
+            "producto", "producto_variante", "ubicacion_origen__almacen",
+            "ubicacion_destino__almacen",
+        ):
+            origen, destino = d.ubicacion_origen, d.ubicacion_destino
+            detalle.append(
+                {
+                    "id": d.pk,
+                    "producto_id": d.producto_id,
+                    "producto_variante_id": d.producto_variante_id,
+                    "producto_nombre": (
+                        getattr(d.producto_variante, "nombre", None)
+                        or getattr(d.producto, "nombre", None)
+                    ),
+                    "ubicacion_origen_id": d.ubicacion_origen_id,
+                    "ubicacion_origen_nombre": str(origen) if origen else None,
+                    "almacen_origen_id": getattr(origen, "almacen_id", None),
+                    "ubicacion_destino_id": d.ubicacion_destino_id,
+                    "ubicacion_destino_nombre": str(destino) if destino else None,
+                    "almacen_destino_id": getattr(destino, "almacen_id", None),
+                    "cantidad": str(d.cantidad),
+                    "costo_unitario": str(d.costo_unitario),
+                }
+            )
+
+        usuario = mov.usuario
+        return Response(
+            {
+                "id": mov.pk,
+                "tipo_movimiento": mov.tipo_movimiento,
+                "fecha": mov.fecha_movimiento,
+                "usuario": usuario.pk,
+                "usuario_nombre": usuario.get_full_name().strip() or usuario.email,
+                "sucursal_id": mov.sucursal_id,
+                "sucursal_nombre": mov.sucursal.nombre,
+                "empresa_id": mov.empresa_id,
+                "empresa_nombre": mov.empresa.razon_social,
+                "pedido_id": mov.pedido_id,
+                "recepcion_id": mov.recepcion_id,
+                "transferencia_id": mov.transferencia_id,
+                "op_id": mov.op_id,
+                "ajuste_inventario_id": mov.ajuste_inventario_id,
+                "observaciones": mov.observaciones,
+                "detalle_count": len(detalle),
+                "detalle": detalle,
+            }
+        )
+
     @action(detail=True, methods=["get"], url_path="detalles")
     def detalles(self, request, pk=None):
         movimiento = self.get_queryset().filter(id_evento=pk).first()
