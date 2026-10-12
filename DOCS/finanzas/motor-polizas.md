@@ -61,3 +61,18 @@ API: `POST /api/v1/finanzas/polizas/{id}/cancelar/` responde la póliza original
 - **Sucursal:** Cobro y Pago no tienen. Se toma la de la factura de la primera CxC o CxP; si no, la del usuario; si no, la primera activa de la empresa.
 - **Cancelar** un cobro o pago aplicado (por `/cancelar/`, `PATCH estatus` o `DELETE`) crea la contrapóliza y deja la original Cancelada. Un Borrador no genera nada. Sin póliza del documento, no hace nada.
 - **Límite:** no hay conversión de moneda. Una cuenta bancaria en moneda distinta de la base se asienta al mismo importe.
+
+## Nota de crédito, factura de proveedor y movimiento bancario
+
+| Documento | Cargo | Abono | Fecha | Tipo |
+|---|---|---|---|---|
+| Nota de crédito (Emitida) | Devoluciones y rebajas (subtotal) + IVA trasladado | Clientes (total) | `fecha_emision` | Diario |
+| Factura de proveedor (Registrada) | Compras/inventario (subtotal - descuento) + IVA acreditable | Proveedores (total) | `fecha_emision` | Diario |
+| Movimiento bancario, retiro | Contrapartida | Banco | `fecha` | Egreso |
+| Movimiento bancario, depósito | Banco | Contrapartida | `fecha` | Ingreso |
+
+- **Nota de crédito:** se genera al emitirla. Cancelar una nota Emitida crea la contrapóliza; una en Borrador no genera nada.
+- **Factura de proveedor:** se genera al quedar Registrada (al crearla así o al pasar de Borrador). Compras va al concepto `ComprasInventario`; si contabilidad decide gasto, se reconfigura ese concepto.
+- **Movimiento bancario:** solo los manuales (sin cobro ni pago; esos salen en su documento). La contrapartida es `cuenta_contable_contrapartida` del movimiento o, si no trae, el concepto `ContrapartidaMovimientoCargo` / `ContrapartidaMovimientoAbono`. Cancelarlo crea la contrapóliza.
+- **Sucursal:** la de la factura (nota y factura de proveedor); en el movimiento, la del usuario o la primera activa de la empresa.
+- Con la contabilización apagada ninguno genera póliza. Sin cuenta configurada el documento responde 400 y no se guarda.

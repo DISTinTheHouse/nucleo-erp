@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import CuentaBancaria, MovimientoBancario
+from finanzas.services.movimiento_bancario_poliza_service import MovimientoBancarioPolizaService
 
 
 class MovimientoBancarioService:
@@ -17,7 +18,7 @@ class MovimientoBancarioService:
 
     @staticmethod
     @transaction.atomic
-    def registrar_movimiento(movimiento: MovimientoBancario, empresa_id=None):
+    def registrar_movimiento(movimiento: MovimientoBancario, empresa_id=None, usuario=None):
         if movimiento.cobro_id or movimiento.pago_id:
             return
         cuenta = CuentaBancaria.objects.select_for_update().get(
@@ -40,10 +41,11 @@ class MovimientoBancarioService:
         movimiento.saldo = nuevo_saldo
         cuenta.saldo_actual = nuevo_saldo
         cuenta.save()
+        MovimientoBancarioPolizaService.generar(movimiento, usuario)
 
     @staticmethod
     @transaction.atomic
-    def revertir_movimiento(movimiento: MovimientoBancario):
+    def revertir_movimiento(movimiento: MovimientoBancario, usuario=None):
         if movimiento.estatus == MovimientoBancario.Estatus.CANCELADO:
             return
         if movimiento.cobro_id or movimiento.pago_id:
@@ -70,6 +72,7 @@ class MovimientoBancarioService:
         cuenta.save()
         movimiento.estatus = MovimientoBancario.Estatus.CANCELADO
         movimiento.save()
+        MovimientoBancarioPolizaService.cancelar(movimiento, usuario)
 
     @staticmethod
     def resumen_cuenta(cuenta: CuentaBancaria):
