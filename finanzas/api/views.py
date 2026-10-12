@@ -92,6 +92,7 @@ from finanzas.services.nota_credito_service import NotaCreditoService
 from finanzas.services.pago_service import PagoService
 from finanzas.services.plan_contable_service import PlanContableService
 from finanzas.services.factura_poliza_service import FacturaPolizaService
+from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
 from finanzas.utils.folios import generate_factura_folio
 from nucleo.models import Moneda, Sucursal
@@ -1275,6 +1276,7 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
         # Crear la factura directamente como Registrada también la registra.
         if factura_proveedor.estatus == FacturaProveedor.FacturaProveedorStatus.REGISTRADA:
             CuentaPorPagarService.generate_for_invoice(factura_proveedor)
+            FacturaProveedorPolizaService.generar(factura_proveedor, self.request.user)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -1334,6 +1336,7 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
             and previous_status != FacturaProveedor.FacturaProveedorStatus.REGISTRADA
         ):
             CuentaPorPagarService.generate_for_invoice(factura_proveedor)
+            FacturaProveedorPolizaService.generar(factura_proveedor, self.request.user)
 
     @transaction.atomic
     def perform_destroy(self, instance):
@@ -1349,6 +1352,7 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
         if locked is None:
             raise NotFound("La factura de proveedor ya no existe.")
         CuentaPorPagarService.ensure_invoice_deletable(locked)
+        FacturaProveedorPolizaService.cancelar(locked, user)
         locked.delete()
 
     @action(detail=True, methods=["post"], url_path="adjuntar-pdf", parser_classes=[MultiPartParser])
@@ -1962,7 +1966,7 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
                 raise PermissionDenied("Usuario sin empresa.")
         movimiento = serializer.save()
         MovimientoBancarioService.registrar_movimiento(
-            movimiento, empresa_id=getattr(empresa, "pk", None)
+            movimiento, empresa_id=getattr(empresa, "pk", None), usuario=user
         )
 
     @transaction.atomic
@@ -1987,14 +1991,14 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
                 cta = getattr(instance, "cuenta_bancaria", None)
                 if cta and getattr(cta, "empresa_id", None) and cta.empresa_id != empresa.pk:
                     raise PermissionDenied()
-        MovimientoBancarioService.revertir_movimiento(instance)
+        MovimientoBancarioService.revertir_movimiento(instance, user)
         instance.delete()
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         mb = self.get_object()
         with transaction.atomic():
-            MovimientoBancarioService.revertir_movimiento(mb)
+            MovimientoBancarioService.revertir_movimiento(mb, request.user)
         return Response(MovimientoBancarioSerializer(mb).data)
 
 
@@ -2222,7 +2226,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
                 raise ValidationError({"factura_detalle": "Detalle de factura no corresponde a la factura de la nota."})
             NotaCreditoDetalle.objects.create(nota_credito=nota, **detalle_data)
         if nota.estatus == NotaCredito.Estatus.EMITIDA:
-            NotaCreditoService.aplicar_nota_credito(nota)
+            NotaCreditoService.aplicar_nota_credito(nota, self.request.user)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -2269,7 +2273,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
             )
         nota = serializer.save()
         if nota.estatus == NotaCredito.Estatus.EMITIDA and anterior != NotaCredito.Estatus.EMITIDA:
-            NotaCreditoService.aplicar_nota_credito(nota)
+            NotaCreditoService.aplicar_nota_credito(nota, user)
 
     @transaction.atomic
     def perform_destroy(self, instance):
@@ -2299,7 +2303,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
         nota = self.get_object()
         try:
             with transaction.atomic():
-                NotaCreditoService.cancelar_nota_credito(nota)
+                NotaCreditoService.cancelar_nota_credito(nota, request.user)
         except NotaCredito.DoesNotExist:
             # Borrada entre get_object() y el lock del servicio.
             raise NotFound("La nota de crédito ya no existe.")

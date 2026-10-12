@@ -55,9 +55,9 @@ Detalle: `DOCS/finanzas/motor-polizas.md`.
 - [ ] Conversión de moneda: hoy una cuenta bancaria en moneda distinta de la base se asienta al mismo importe
 
 ## F4 Otros documentos
-- [ ] Nota de crédito (y su cancelación)
-- [ ] Factura de proveedor
-- [ ] Movimiento bancario
+- [x] Nota de crédito (y su cancelación)
+- [x] Factura de proveedor
+- [x] Movimiento bancario
 
 ## F5 Cancelación de factura
 - [ ] Acción `cancelar` en facturas (estatus, CxC, contrapóliza mismo día)

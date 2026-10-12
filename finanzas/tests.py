@@ -6857,3 +6857,202 @@ class F3PolizaDeCobroYPagoTests(MotorPolizasBase):
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertFalse(Poliza.objects.exists())
 
+
+MOVIMIENTOS_URL = "/api/v1/finanzas/movimientos-bancarios/"
+
+
+class F4PolizaDeNotaFacturaProveedorYMovimientoTests(MotorPolizasBase):
+    """Nota de crédito, factura de proveedor y movimiento bancario manual."""
+
+    def setUp(self):
+        super().setUp()
+        self.devoluciones = self._cuenta("4150", CuentaContable.CuentaTipo.INGRESO)
+        self.compras = self._cuenta("1150", CuentaContable.CuentaTipo.ACTIVO)
+        self.iva_acreditable = self._cuenta("1190", CuentaContable.CuentaTipo.ACTIVO)
+        self.proveedores = self._cuenta("2110", CuentaContable.CuentaTipo.PASIVO)
+        self.banco_contable = self._cuenta("1020", CuentaContable.CuentaTipo.ACTIVO)
+        for concepto, cuenta in (
+            (ConceptoContable.DEVOLUCIONES_VENTAS, self.devoluciones),
+            (ConceptoContable.COMPRAS_INVENTARIO, self.compras),
+            (ConceptoContable.IVA_ACREDITABLE, self.iva_acreditable),
+            (ConceptoContable.PROVEEDORES, self.proveedores),
+        ):
+            self._config(concepto, cuenta)
+        self.cuenta_bancaria = self._crear_cuenta_bancaria(self.empresa)
+        self.cuenta_bancaria.cuenta_contable = self.banco_contable
+        self.cuenta_bancaria.save()
+
+    def _renglones(self, poliza):
+        return {d.cuenta_contable_id: (d.cargo, d.abono) for d in poliza.poliza_detalles.all()}
+
+    # -- nota de crédito -----------------------------------------------------
+
+    def _nota(self, estatus="Emitida"):
+        Factura.objects.filter(pk=self.factura.pk).update(total=Decimal("116.00"))
+        CuentaPorCobrar.objects.create(
+            empresa=self.empresa, cliente=self.a["cliente"], factura=self.factura,
+            total=Decimal("116.00"), saldo=Decimal("116.00"),
+        )
+        return self._client(self.a["usuario"]).post(NOTAS_CREDITO_URL, {
+            "factura": self.factura.pk, "cliente": self.a["cliente"].pk, "estatus": estatus,
+            "subtotal": "100.00", "impuestos": "16.00", "total": "116.00",
+        }, format="json")
+
+    def test_la_nota_emitida_asienta_devolucion_e_iva_contra_clientes(self):
+        resp = self._nota()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(origen_tipo="NotaCredito", origen_id=resp.data["id"])
+        self.assertEqual(poliza.tipo, Poliza.PolizaTipo.DIARIO)
+        self.assertEqual(poliza.sucursal_id, self.sucursal.pk)
+        self.assertEqual(self._renglones(poliza), {
+            self.devoluciones.pk: (Decimal("100.00"), Decimal("0.00")),
+            self.iva.pk: (Decimal("16.00"), Decimal("0.00")),
+            self.clientes.pk: (Decimal("0.00"), Decimal("116.00")),
+        })
+
+    def test_la_nota_en_borrador_no_genera_poliza(self):
+        self.assertEqual(self._nota("Borrador").status_code, 201)
+
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_cancelar_la_nota_genera_la_contrapoliza(self):
+        nota_id = self._nota().data["id"]
+        original = Poliza.objects.get(origen_tipo="NotaCredito", origen_id=nota_id)
+
+        resp = self._client(self.a["usuario"]).post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        original.refresh_from_db()
+        self.assertEqual(original.estatus, Poliza.PolizaStatus.CANCELADA)
+        self.assertEqual(Poliza.objects.filter(poliza_reversa_de=original).count(), 1)
+
+    def test_nota_sin_cuenta_de_devoluciones_da_400_y_no_deja_nada(self):
+        ConfiguracionContable.objects.filter(concepto=ConceptoContable.DEVOLUCIONES_VENTAS).delete()
+
+        resp = self._nota()
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(NotaCredito.objects.exists())
+        self.assertFalse(Poliza.objects.exists())
+
+    # -- factura de proveedor ------------------------------------------------
+
+    def _factura_proveedor(self, **extra):
+        proveedor, producto, oc, oc_detalle, recepcion, recepcion_detalle, _ = (
+            self._crear_oc_recepcion_y_factura_proveedor(self.empresa, self.sucursal, self.a["usuario"])
+        )
+        payload = {
+            "proveedor": proveedor.pk, "sucursal": self.sucursal.pk, "oc": oc.pk,
+            "recepcion": recepcion.pk, "moneda": self.moneda.pk, "estatus": "Registrada",
+            "subtotal": "500.00", "descuento": "0.00", "impuestos": "80.00", "total": "580.00",
+            "factura_proveedor_detalles": [{
+                "oc_detalle": oc_detalle.pk, "recepcion_detalle": recepcion_detalle.pk,
+                "producto": producto.pk, "cantidad": "10", "precio_unitario": "50.00", "total": "500.00",
+            }],
+            **extra,
+        }
+        return self._client(self.a["usuario"]).post(FACTURAS_PROVEEDOR_URL, payload, format="json")
+
+    def test_la_factura_de_proveedor_registrada_asienta_compra_e_iva_contra_proveedores(self):
+        resp = self._factura_proveedor()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(origen_tipo="FacturaProveedor", origen_id=resp.data["id"])
+        self.assertEqual(self._renglones(poliza), {
+            self.compras.pk: (Decimal("500.00"), Decimal("0.00")),
+            self.iva_acreditable.pk: (Decimal("80.00"), Decimal("0.00")),
+            self.proveedores.pk: (Decimal("0.00"), Decimal("580.00")),
+        })
+        self.assertEqual(poliza.poliza_detalles.first().factura_proveedor_id, resp.data["id"])
+
+    def test_la_factura_de_proveedor_en_borrador_no_genera_y_al_registrarla_si(self):
+        resp = self._factura_proveedor(estatus="Borrador")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertFalse(Poliza.objects.exists())
+
+        resp = self._client(self.a["usuario"]).patch(
+            f"{FACTURAS_PROVEEDOR_URL}{resp.data['id']}/", {"estatus": "Registrada"}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(Poliza.objects.filter(origen_tipo="FacturaProveedor").count(), 1)
+
+    def test_factura_de_proveedor_con_interruptor_apagado_no_genera(self):
+        self._encender(contabilizacion_automatica=False)
+
+        self.assertEqual(self._factura_proveedor().status_code, 201)
+
+        self.assertFalse(Poliza.objects.exists())
+
+    # -- movimiento bancario manual -----------------------------------------
+
+    def _movimiento(self, tipo, importe="250.00", **extra):
+        return self._client(self.a["usuario"]).post(MOVIMIENTOS_URL, {
+            "cuenta_bancaria": self.cuenta_bancaria.pk, "tipo_movimiento": tipo, "importe": importe,
+            "fecha": "2026-03-07", "concepto": "Comisión", **extra,
+        }, format="json")
+
+    def test_un_retiro_asienta_contrapartida_contra_banco(self):
+        gastos = self._cuenta("6200", CuentaContable.CuentaTipo.GASTO)
+
+        resp = self._movimiento("Cargo", cuenta_contable_contrapartida=gastos.pk)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(origen_tipo="MovimientoBancario", origen_id=resp.data["id"])
+        self.assertEqual(poliza.tipo, Poliza.PolizaTipo.EGRESO)
+        self.assertEqual(poliza.fecha, date(2026, 3, 7))
+        self.assertEqual(self._renglones(poliza), {
+            gastos.pk: (Decimal("250.00"), Decimal("0.00")),
+            self.banco_contable.pk: (Decimal("0.00"), Decimal("250.00")),
+        })
+
+    def test_un_deposito_usa_el_concepto_de_contrapartida_si_no_trae_cuenta(self):
+        por_identificar = self._cuenta("2180", CuentaContable.CuentaTipo.PASIVO)
+        self._config(ConceptoContable.CONTRAPARTIDA_MB_ABONO, por_identificar)
+
+        resp = self._movimiento("Abono")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(origen_tipo="MovimientoBancario", origen_id=resp.data["id"])
+        self.assertEqual(poliza.tipo, Poliza.PolizaTipo.INGRESO)
+        self.assertEqual(self._renglones(poliza), {
+            self.banco_contable.pk: (Decimal("250.00"), Decimal("0.00")),
+            por_identificar.pk: (Decimal("0.00"), Decimal("250.00")),
+        })
+
+    def test_movimiento_sin_contrapartida_configurada_da_400_y_no_deja_nada(self):
+        resp = self._movimiento("Cargo")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(MovimientoBancario.objects.exists())
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_cancelar_el_movimiento_genera_la_contrapoliza(self):
+        gastos = self._cuenta("6200", CuentaContable.CuentaTipo.GASTO)
+        movimiento_id = self._movimiento("Cargo", cuenta_contable_contrapartida=gastos.pk).data["id"]
+        original = Poliza.objects.get(origen_tipo="MovimientoBancario", origen_id=movimiento_id)
+
+        resp = self._client(self.a["usuario"]).post(f"{MOVIMIENTOS_URL}{movimiento_id}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        original.refresh_from_db()
+        self.assertEqual(original.estatus, Poliza.PolizaStatus.CANCELADA)
+        self.assertEqual(Poliza.objects.filter(poliza_reversa_de=original).count(), 1)
+
+    def test_el_movimiento_de_un_cobro_no_duplica_la_poliza(self):
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=self.empresa, cliente=self.a["cliente"], factura=self.factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+
+        resp = self._client(self.a["usuario"]).post(COBROS_URL, {
+            "cliente": self.a["cliente"].pk, "cuenta_bancaria": self.cuenta_bancaria.pk,
+            "total_cobrado": "100.00",
+            "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "100.00"}],
+        }, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(Poliza.objects.count(), 1)
+        self.assertEqual(Poliza.objects.get().origen_tipo, "Cobro")
+
