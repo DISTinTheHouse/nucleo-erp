@@ -47,3 +47,17 @@ API: `POST /api/v1/finanzas/polizas/{id}/cancelar/` responde la póliza original
 - Con la contabilización apagada la respuesta trae `poliza: null` y la factura se registra igual.
 - Ya no exige un centro de costo activo ni usa "la primera cuenta por tipo": las cuentas salen de `ConfiguracionContable`.
 - `GET /facturas/{id}/previsualizar-poliza/` muestra el asiento sin guardarlo, aunque el interruptor esté apagado.
+
+## Cobro y pago
+
+`CobroPolizaService` y `PagoPolizaService`. Se generan al aplicar el documento, en la misma transacción.
+
+| Documento | Cargo | Abono | Fecha |
+|---|---|---|---|
+| Cobro (tipo Ingreso) | Banco | Clientes | `fecha_cobro` |
+| Pago (tipo Egreso) | Proveedores | Banco | `fecha_pago` |
+
+- **Banco:** la cuenta contable de la cuenta bancaria (`CuentaBancaria.cuenta_contable`); si no tiene, el concepto Bancos. Si ninguna existe, el cobro o pago responde 400 y no se guarda.
+- **Sucursal:** Cobro y Pago no tienen. Se toma la de la factura de la primera CxC o CxP; si no, la del usuario; si no, la primera activa de la empresa.
+- **Cancelar** un cobro o pago aplicado (por `/cancelar/`, `PATCH estatus` o `DELETE`) crea la contrapóliza y deja la original Cancelada. Un Borrador no genera nada. Sin póliza del documento, no hace nada.
+- **Límite:** no hay conversión de moneda. Una cuenta bancaria en moneda distinta de la base se asienta al mismo importe.

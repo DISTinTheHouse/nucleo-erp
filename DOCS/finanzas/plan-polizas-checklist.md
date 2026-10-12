@@ -50,8 +50,9 @@ Detalle: `DOCS/finanzas/motor-polizas.md`.
 - [x] `GET /facturas/{id}/previsualizar-poliza/`
 
 ## F3 Cobro y pago
-- [ ] Póliza de cobro y su contrapóliza al cancelar
-- [ ] Póliza de pago y su contrapóliza al cancelar
+- [x] Póliza de cobro y su contrapóliza al cancelar
+- [x] Póliza de pago y su contrapóliza al cancelar
+- [ ] Conversión de moneda: hoy una cuenta bancaria en moneda distinta de la base se asienta al mismo importe
 
 ## F4 Otros documentos
 - [ ] Nota de crédito (y su cancelación)

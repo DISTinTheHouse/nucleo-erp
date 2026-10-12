@@ -10,10 +10,12 @@ from decimal import Decimal
 
 from django.db import IntegrityError, transaction
 
+from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import Poliza, PolizaDetalle
 from finanzas.services.plan_contable_service import PlanContableService
 from finanzas.services.poliza_service import CENTAVO, PolizaService
 from finanzas.utils.folios import generate_poliza_folio
+from nucleo.models import Sucursal
 
 
 def _origen(origen_tipo, origen_id):
@@ -144,3 +146,27 @@ class PolizaMotorService:
         PolizaService.validar_suma_cero(poliza, detalles)
         PolizaDetalle.objects.bulk_create(detalles)
         return poliza
+
+    @staticmethod
+    def sucursal_id(empresa_id, sucursal_id=None, usuario=None):
+        """La sucursal del documento; si no tiene, la del usuario o la primera activa de la empresa."""
+        if sucursal_id:
+            return sucursal_id
+        por_omision = getattr(usuario, "sucursal_default_id", None)
+        if por_omision:
+            return por_omision
+        primera = (
+            Sucursal.objects.filter(empresa_id=empresa_id, activo=True)
+            .order_by("codigo").values_list("pk", flat=True).first()
+        )
+        if primera is None:
+            raise ErrorDeNegocio({"sucursal": "La empresa no tiene una sucursal activa para asentar la póliza."})
+        return primera
+
+    @staticmethod
+    def cancelar_de(origen_tipo, origen_id, usuario=None):
+        """Contrapóliza de la póliza del documento. Sin póliza no hace nada."""
+        poliza = _origen(origen_tipo, origen_id)
+        if poliza is None:
+            return None
+        return PolizaService.cancelar(poliza, usuario)

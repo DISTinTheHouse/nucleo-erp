@@ -4,6 +4,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from finanzas.exceptions import ErrorDeNegocio
+from finanzas.services.cobro_poliza_service import CobroPolizaService
 from finanzas.models import (
     Cobro,
     CobroDetalle,
@@ -17,7 +18,7 @@ from finanzas.models import (
 class CobroService:
     @staticmethod
     @transaction.atomic
-    def aplicar_cobro(cobro: Cobro):
+    def aplicar_cobro(cobro: Cobro, usuario=None):
         detalles = list(
             CobroDetalle.objects.select_for_update()
             .select_related("cxc")
@@ -131,9 +132,11 @@ class CobroService:
             mb.tipo_movimiento = MovimientoBancario.TipoMovimiento.ABONO
             mb.save()
 
+        CobroPolizaService.generar(cobro, usuario)
+
     @staticmethod
     @transaction.atomic
-    def cancelar_cobro(cobro: Cobro):
+    def cancelar_cobro(cobro: Cobro, usuario=None):
         if cobro.estatus == Cobro.Estatus.CANCELADO:
             return
         if cobro.estatus != Cobro.Estatus.APLICADO:
@@ -178,3 +181,4 @@ class CobroService:
         if mb:
             mb.estatus = MovimientoBancario.Estatus.CANCELADO
             mb.save()
+        CobroPolizaService.cancelar(cobro, usuario)
