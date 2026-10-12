@@ -46,17 +46,18 @@ Marca `[x]` conforme se complete cada punto. Contexto, decisiones y detalle téc
 Detalle: `DOCS/finanzas/motor-polizas.md`.
 
 ## F2 Factura de venta
-- [ ] Póliza nace Contabilizada con plan contable y folio atómico
-- [ ] `GET /facturas/{id}/previsualizar-poliza/`
+- [x] Póliza nace Contabilizada con plan contable y folio atómico (`FacturaPolizaService`)
+- [x] `GET /facturas/{id}/previsualizar-poliza/`
 
 ## F3 Cobro y pago
-- [ ] Póliza de cobro y su contrapóliza al cancelar
-- [ ] Póliza de pago y su contrapóliza al cancelar
+- [x] Póliza de cobro y su contrapóliza al cancelar
+- [x] Póliza de pago y su contrapóliza al cancelar
+- [ ] Conversión de moneda: hoy una cuenta bancaria en moneda distinta de la base se asienta al mismo importe
 
 ## F4 Otros documentos
-- [ ] Nota de crédito (y su cancelación)
-- [ ] Factura de proveedor
-- [ ] Movimiento bancario
+- [x] Nota de crédito (y su cancelación)
+- [x] Factura de proveedor
+- [x] Movimiento bancario
 
 ## F5 Cancelación de factura
 - [ ] Acción `cancelar` en facturas (estatus, CxC, contrapóliza mismo día)

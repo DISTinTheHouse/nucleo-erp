@@ -32,3 +32,47 @@ API: `POST /api/v1/finanzas/polizas/{id}/cancelar/` responde la póliza original
 ## Listado
 
 `GET /polizas/` lee todas las líneas en una consulta (`prefetch_related`). Los totales se calculan en memoria. Las consultas no crecen con el número de pólizas.
+
+## Factura de venta
+
+`FacturaPolizaService` (`finanzas/services/factura_poliza_service.py`). `registrar-pendiente-cobro` la llama al crear la factura.
+
+| Cuenta (concepto) | Cargo | Abono |
+|---|---|---|
+| Clientes | total | |
+| Ingresos por ventas | | subtotal - descuento |
+| IVA trasladado | | impuestos |
+
+- Fecha de la póliza = `fecha_emision` de la factura.
+- Con la contabilización apagada la respuesta trae `poliza: null` y la factura se registra igual.
+- Ya no exige un centro de costo activo ni usa "la primera cuenta por tipo": las cuentas salen de `ConfiguracionContable`.
+- `GET /facturas/{id}/previsualizar-poliza/` muestra el asiento sin guardarlo, aunque el interruptor esté apagado.
+
+## Cobro y pago
+
+`CobroPolizaService` y `PagoPolizaService`. Se generan al aplicar el documento, en la misma transacción.
+
+| Documento | Cargo | Abono | Fecha |
+|---|---|---|---|
+| Cobro (tipo Ingreso) | Banco | Clientes | `fecha_cobro` |
+| Pago (tipo Egreso) | Proveedores | Banco | `fecha_pago` |
+
+- **Banco:** la cuenta contable de la cuenta bancaria (`CuentaBancaria.cuenta_contable`); si no tiene, el concepto Bancos. Si ninguna existe, el cobro o pago responde 400 y no se guarda.
+- **Sucursal:** Cobro y Pago no tienen. Se toma la de la factura de la primera CxC o CxP; si no, la del usuario; si no, la primera activa de la empresa.
+- **Cancelar** un cobro o pago aplicado (por `/cancelar/`, `PATCH estatus` o `DELETE`) crea la contrapóliza y deja la original Cancelada. Un Borrador no genera nada. Sin póliza del documento, no hace nada.
+- **Límite:** no hay conversión de moneda. Una cuenta bancaria en moneda distinta de la base se asienta al mismo importe.
+
+## Nota de crédito, factura de proveedor y movimiento bancario
+
+| Documento | Cargo | Abono | Fecha | Tipo |
+|---|---|---|---|---|
+| Nota de crédito (Emitida) | Devoluciones y rebajas (subtotal) + IVA trasladado | Clientes (total) | `fecha_emision` | Diario |
+| Factura de proveedor (Registrada) | Compras/inventario (subtotal - descuento) + IVA acreditable | Proveedores (total) | `fecha_emision` | Diario |
+| Movimiento bancario, retiro | Contrapartida | Banco | `fecha` | Egreso |
+| Movimiento bancario, depósito | Banco | Contrapartida | `fecha` | Ingreso |
+
+- **Nota de crédito:** se genera al emitirla. Cancelar una nota Emitida crea la contrapóliza; una en Borrador no genera nada.
+- **Factura de proveedor:** se genera al quedar Registrada (al crearla así o al pasar de Borrador). Compras va al concepto `ComprasInventario`; si contabilidad decide gasto, se reconfigura ese concepto.
+- **Movimiento bancario:** solo los manuales (sin cobro ni pago; esos salen en su documento). La contrapartida es `cuenta_contable_contrapartida` del movimiento o, si no trae, el concepto `ContrapartidaMovimientoCargo` / `ContrapartidaMovimientoAbono`. Cancelarlo crea la contrapóliza.
+- **Sucursal:** la de la factura (nota y factura de proveedor); en el movimiento, la del usuario o la primera activa de la empresa.
+- Con la contabilización apagada ninguno genera póliza. Sin cuenta configurada el documento responde 400 y no se guarda.

@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.db import transaction
 
 from finanzas.exceptions import ErrorDeNegocio
+from finanzas.services.nota_credito_poliza_service import NotaCreditoPolizaService
 from finanzas.models import (
     CuentaPorCobrar,
     NotaCredito,
@@ -12,7 +13,7 @@ from finanzas.models import (
 class NotaCreditoService:
     @staticmethod
     @transaction.atomic
-    def aplicar_nota_credito(nota: NotaCredito):
+    def aplicar_nota_credito(nota: NotaCredito, usuario=None):
         # Orden de bloqueo de todo el módulo: primero la nota, después la CxC.
         # El estatus se relee de la fila ya bloqueada porque el objeto que llega
         # pudo cargarse antes de que otra petición emitiera la misma nota.
@@ -57,10 +58,11 @@ class NotaCreditoService:
         else:
             cxc.estatus = CuentaPorCobrar.EstatusCxC.PARCIAL
         cxc.save()
+        NotaCreditoPolizaService.generar(bloqueada, usuario)
 
     @staticmethod
     @transaction.atomic
-    def cancelar_nota_credito(nota: NotaCredito):
+    def cancelar_nota_credito(nota: NotaCredito, usuario=None):
         """Inverso de ``aplicar_nota_credito``: devuelve a la CxC lo acreditado.
 
         Cancelar sólo revertía el estatus de la nota, así que el saldo de la CxC
@@ -101,5 +103,8 @@ class NotaCreditoService:
                 else:
                     cxc.estatus = CuentaPorCobrar.EstatusCxC.PARCIAL
                 cxc.save()
+        era_emitida = nota.estatus == NotaCredito.Estatus.EMITIDA
         nota.estatus = NotaCredito.Estatus.CANCELADA
         nota.save()
+        if era_emitida:
+            NotaCreditoPolizaService.cancelar(nota, usuario)
