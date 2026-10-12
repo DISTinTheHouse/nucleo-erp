@@ -15,6 +15,7 @@ from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 
 from terceros.cartera import cartera_de_cliente
+from terceros.scope import clientes_base, clientes_visibles
 from usuarios.models import Usuario
 from ventas.models import Cotizacion, Oportunidad, OportunidadSeguimiento, Pedido
 from ventas.scope import oportunidades_base, oportunidades_visibles
@@ -22,6 +23,17 @@ from ventas.scope import oportunidades_base, oportunidades_visibles
 ESTATUS_BORRADOR = 1
 ESTATUS_AUTORIZADA = 3
 ESTADOS = ["Nueva", "Contactada", "Cotizada", "Ganada", "Perdida"]
+
+
+def _entero(params, nombre):
+    """Parámetro numérico del query string; si no es número responde 400, no 500."""
+    valor = params.get(nombre)
+    if not valor:
+        return None
+    try:
+        return int(valor)
+    except ValueError:
+        raise ValidationError({nombre: "Debe ser un número entero."})
 
 
 def con_estado(qs):
@@ -68,7 +80,10 @@ class OportunidadSerializer(serializers.ModelSerializer):
     def validate_cliente(self, cliente):
         user = self.context["request"].user
         empresa_id = getattr(getattr(user, "empresa", None), "pk", None)
-        if cliente is not None and cliente.empresa_id != empresa_id:
+        if cliente is None:
+            return cliente
+        visible = clientes_visibles(clientes_base(), user).filter(pk=cliente.pk).exists()
+        if cliente.empresa_id != empresa_id or not visible:
             raise serializers.ValidationError("Cliente no encontrado.")
         return cliente
 
@@ -105,10 +120,10 @@ class OportunidadViewSet(viewsets.ModelViewSet):
             if estado not in ESTADOS:
                 raise ValidationError({"estado": f"Estado inválido. Usa uno de: {', '.join(ESTADOS)}."})
             qs = qs.filter(estado=estado)
-        if params.get("cliente"):
-            qs = qs.filter(cliente_id=params["cliente"])
-        if params.get("vendedor"):
-            qs = qs.filter(vendedor_id=params["vendedor"])
+        if _entero(params, "cliente") is not None:
+            qs = qs.filter(cliente_id=_entero(params, "cliente"))
+        if _entero(params, "vendedor") is not None:
+            qs = qs.filter(vendedor_id=_entero(params, "vendedor"))
         buscar = (params.get("q") or "").strip()
         if buscar:
             qs = qs.filter(Q(titulo__icontains=buscar) | Q(nombre_contacto__icontains=buscar))
@@ -162,14 +177,25 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         if not (user.is_superuser or user.is_admin_empresa):
             raise PermissionDenied("Solo el administrador de la empresa puede transferir oportunidades.")
         oportunidad = self.get_object()
+        try:
+            vendedor_id = int(request.data.get("vendedor") or 0)
+        except (TypeError, ValueError):
+            raise ValidationError({"vendedor": "Debe ser un número entero."})
         vendedor = Usuario.objects.filter(
-            pk=request.data.get("vendedor") or 0, empresa_id=oportunidad.empresa_id, is_active=True
+            pk=vendedor_id, empresa_id=oportunidad.empresa_id, is_active=True
         ).first()
         if vendedor is None:
             raise ValidationError({"vendedor": "Vendedor no encontrado en la empresa."})
         oportunidad.vendedor = vendedor
         oportunidad.save(update_fields=["vendedor", "updated_at"])
         return Response(self.get_serializer(oportunidad).data)
+
+    def _cartera(self, oportunidad):
+        """Cartera del cliente, solo si el usuario puede ver a ese cliente."""
+        if not oportunidad.cliente_id:
+            return []
+        visible = clientes_visibles(clientes_base(), self.request.user).filter(pk=oportunidad.cliente_id).exists()
+        return cartera_de_cliente(oportunidad.cliente) if visible else []
 
     @action(detail=True, methods=["get"])
     def onboarding(self, request, pk=None):
@@ -199,7 +225,7 @@ class OportunidadViewSet(viewsets.ModelViewSet):
                 }
                 for c in cotizaciones
             ],
-            "cartera": cartera_de_cliente(oportunidad.cliente) if oportunidad.cliente_id else [],
+            "cartera": self._cartera(oportunidad),
         })
 
     @action(detail=True, methods=["post"])
@@ -208,10 +234,13 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         oportunidad = self.get_object()
         if oportunidad.etapa == Oportunidad.Etapa.PERDIDA:
             raise ValidationError({"etapa": "No se cotiza una oportunidad perdida."})
+        sucursal = getattr(request.user, "sucursal_default", None)
+        if sucursal is not None and sucursal.empresa_id != oportunidad.empresa_id:
+            raise ValidationError({"sucursal": "Tu sucursal no pertenece a la empresa de la oportunidad."})
         cotizacion = Cotizacion.objects.create(
             empresa_id=oportunidad.empresa_id,
             vendedor=request.user,
-            sucursal=getattr(request.user, "sucursal_default", None),
+            sucursal=sucursal,
             cliente_id=oportunidad.cliente_id,
             oportunidad=oportunidad,
             estatus=ESTATUS_BORRADOR,
@@ -255,8 +284,8 @@ class SeguimientoViewSet(viewsets.ModelViewSet):
         if self.action != "list":
             return qs
         params = self.request.query_params
-        if params.get("oportunidad"):
-            qs = qs.filter(oportunidad_id=params["oportunidad"])
+        if _entero(params, "oportunidad") is not None:
+            qs = qs.filter(oportunidad_id=_entero(params, "oportunidad"))
         if params.get("tipo"):
             qs = qs.filter(tipo=params["tipo"])
         pendientes = (params.get("pendientes") or "").lower() in ("1", "true", "si", "sí")
