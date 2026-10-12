@@ -2,7 +2,7 @@ from datetime import timedelta
 from django.utils.dateparse import parse_date
 from decimal import Decimal
 from django.db import OperationalError, transaction
-from django.db.models import DecimalField, Max, Min, OuterRef, Q, Subquery, Sum
+from django.db.models import BooleanField, Case, DecimalField, Max, Min, OuterRef, Q, Subquery, Sum, Value, When
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -1236,7 +1236,22 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset()
+        # List/retrieve = OC + recepción + factura en una sola respuesta: todo se
+        # resuelve con JOINs/prefetch (sin N+1) y el PDF binario nunca viaja en
+        # la consulta; ``tiene_pdf_adjunto`` sale de un CASE en SQL.
+        qs = (
+            super().get_queryset()
+            .select_related("proveedor", "moneda", "oc", "recepcion")
+            .prefetch_related("factura_proveedor_detalles")
+            .defer("pdf_adjunto")
+            .annotate(
+                _tiene_pdf=Case(
+                    When(pdf_adjunto__isnull=False, then=Value(True)),
+                    default=Value(False),
+                    output_field=BooleanField(),
+                )
+            )
+        )
         if _puede_ver_todo(user):
             pass
         else:

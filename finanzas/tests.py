@@ -5230,6 +5230,29 @@ class PdfFusionFacturaProveedorTests(FinanzasBase):
         # OC (1 página) + Recepción (1 página) + factura adjunta (1 página).
         self.assertEqual(len(lector.pages), 3)
 
+    def test_listado_trae_oc_recepcion_y_no_hace_n_mas_1(self):
+        factura = self._factura()
+        client = self._client(self.a["usuario"])
+        client.post(
+            f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/adjuntar-pdf/", {"archivo": self._pdf_falso()}, format="multipart",
+        )
+        with CaptureQueriesContext(connection) as una:
+            resp = client.get(FACTURAS_PROVEEDOR_URL)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        fila = next(f for f in resp.data["results"] if f["id"] == factura.pk) if "results" in resp.data \
+            else next(f for f in resp.data if f["id"] == factura.pk)
+        self.assertEqual(fila["oc_folio"], factura.oc.folio)
+        self.assertEqual(fila["recepcion_folio"], factura.recepcion.folio)
+        self.assertTrue(fila["tiene_pdf_adjunto"])
+        self.assertNotIn("pdf_adjunto", fila)
+
+        self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"],
+        )
+        with CaptureQueriesContext(connection) as dos:
+            client.get(FACTURAS_PROVEEDOR_URL)
+        self.assertEqual(len(una), len(dos))
+
 
 class FacturamaAccesoTests(TestCase):
     """Candado de la cuenta única de Facturama (``facturama/acceso.py``).

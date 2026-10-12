@@ -751,6 +751,8 @@ class FacturaProveedorSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnSe
     factura_proveedor_detalles = FacturaProveedorDetalleSerializer(many=True, required=False)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     moneda_codigo = serializers.CharField(source="moneda.codigo_iso", read_only=True)
+    oc_folio = serializers.CharField(source="oc.folio", read_only=True)
+    recepcion_folio = serializers.CharField(source="recepcion.folio", read_only=True)
     tiene_pdf_adjunto = serializers.SerializerMethodField()
 
     class Meta:
@@ -762,7 +764,8 @@ class FacturaProveedorSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnSe
         exclude = ["pdf_adjunto"]
 
     def get_tiene_pdf_adjunto(self, obj):
-        return bool(obj.pdf_adjunto)
+        anotado = getattr(obj, "_tiene_pdf", None)
+        return anotado if anotado is not None else bool(obj.pdf_adjunto)
 
     def validate(self, attrs):
         req = self.context.get("request")
