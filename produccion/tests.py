@@ -6324,3 +6324,136 @@ class VarianteOnboardingColorTests(_BomTenantBase, TestCase):
                 Pedido.objects.filter(pk=self.pedido.pk).update(estatus=estatus)
                 resp = self._post(self._linea(), color=self.otro_color.pk)
                 self.assertEqual(resp.status_code, 201, resp.data)
+
+
+class RecalculoConsumoTelaTests(TestCase):
+    """``POST /ordenes-produccion/{id}/recalcular-consumos/``: ajusta los
+    consumos a las piezas realmente cortadas, solo por diferencia y sin
+    pólizas."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-rc", razon_social="acme-rc SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ARC", nombre="acme-rc")
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM", nombre="Almacen",
+        )
+        cls.usuario = Usuario.objects.create(
+            username="a@acme-rc.test", email="a@acme-rc.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.op = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-RC-1",
+        )
+        um = UnidadMedida.objects.create(clave="MTR", nombre="Metro")
+        bom = ListaMaterialBom.objects.create(empresa=cls.empresa)
+        OrdenProduccionDetalle.objects.create(op=cls.op, bom=bom, cantidad=Decimal("90"), unidad=um)
+        cls.tela = Producto.objects.create(empresa=cls.empresa, nombre="Algodon")
+        cls.hilo = Producto.objects.create(empresa=cls.empresa, nombre="Hilo")
+
+    def setUp(self):
+        self.existencia = Existencia.objects.create(
+            producto=self.tela, almacen=self.almacen, cantidad=Decimal("500"),
+        )
+        self.ex_hilo = Existencia.objects.create(producto=self.hilo, almacen=self.almacen, cantidad=Decimal("50"))
+        consumos = OrdenProduccionService._discount_existencias(
+            [
+                {"producto": self.tela, "cantidad": Decimal("90")},
+                {"producto": self.hilo, "cantidad": Decimal("9")},
+            ],
+            self.empresa, self.sucursal,
+        )
+        OrdenProduccionService._registrar_consumo(self.op, consumos)
+        OrdenProduccionService._registrar_movimiento_inventario(self.op, self.usuario, consumos)
+        self.client = APIClient()
+        self.client.force_authenticate(self.usuario)
+
+    def _post(self, cantidad=None, productos=None, op=None):
+        body = {}
+        if cantidad is not None:
+            body["cantidad_real_corte"] = cantidad
+        if productos is not None:
+            body["productos"] = [p.pk for p in productos]
+        return self.client.post(
+            f"/api/v1/produccion/orden-produccion/{(op or self.op).pk}/recalcular-consumos/",
+            body, format="json",
+        )
+
+    def _total(self, producto):
+        from django.db.models import Sum
+        from produccion.models import ConsumoProduccionDetalle
+        return ConsumoProduccionDetalle.objects.filter(
+            consumo_produccion__op=self.op, producto=producto
+        ).aggregate(t=Sum("cantidad"))["t"]
+
+    def test_mas_piezas_escala_el_consumo_y_descuenta_la_diferencia(self):
+        resp = self._post(100)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.existencia.refresh_from_db()
+        self.ex_hilo.refresh_from_db()
+        self.assertEqual(self.existencia.cantidad, Decimal("400"))
+        self.assertEqual(self._total(self.tela), Decimal("100"))
+        self.assertEqual(self.ex_hilo.cantidad, Decimal("40"))
+        mov = MovimientoInventario.objects.filter(op=self.op).order_by("-id").first()
+        self.assertEqual(mov.tipo_movimiento, "SALIDA")
+        self.assertEqual(sorted(mov.detalles.values_list("cantidad", flat=True)), [Decimal("1"), Decimal("10")])
+        self.assertEqual(
+            OrdenProduccionRutaCritica.objects.get(op=self.op).cantidad_real_corte, Decimal("100")
+        )
+
+    def test_solo_los_productos_indicados(self):
+        self.assertEqual(self._post(100, productos=[self.tela]).status_code, 200)
+        self.assertEqual(self._total(self.tela), Decimal("100"))
+        self.assertEqual(self._total(self.hilo), Decimal("9"))
+
+    def test_producto_fuera_del_consumo_se_rechaza(self):
+        otro = Producto.objects.create(empresa=self.empresa, nombre="Boton")
+        self.assertEqual(self._post(100, productos=[otro]).status_code, 400)
+
+    def test_sin_cantidad_usa_la_de_ruta_critica(self):
+        OrdenProduccionRutaCritica.objects.create(op=self.op, cantidad_real_corte=Decimal("100"))
+        self.assertEqual(self._post().status_code, 200)
+        self.assertEqual(self._total(self.tela), Decimal("100"))
+
+    def test_sin_cantidad_en_ningun_lado_es_400(self):
+        self.assertEqual(self._post().status_code, 400)
+
+    def test_repetir_con_el_mismo_valor_no_hace_nada(self):
+        self._post(100)
+        n = MovimientoInventario.objects.filter(op=self.op).count()
+        self.assertEqual(self._post(100).status_code, 200)
+        self.assertEqual(MovimientoInventario.objects.filter(op=self.op).count(), n)
+
+    def test_segundo_recalculo_hacia_abajo_regresa_a_inventario(self):
+        self._post(100)
+        self.assertEqual(self._post(95, productos=[self.tela]).status_code, 200)
+        self.existencia.refresh_from_db()
+        self.assertEqual(self.existencia.cantidad, Decimal("405"))
+        self.assertEqual(self._total(self.tela), Decimal("95"))
+
+    def test_menos_de_lo_planeado_se_rechaza(self):
+        self.assertEqual(self._post(80).status_code, 400)
+        self.existencia.refresh_from_db()
+        self.assertEqual(self.existencia.cantidad, Decimal("410"))
+
+    def test_sin_existencia_suficiente_no_cambia_nada(self):
+        self.assertEqual(self._post(1000).status_code, 400)
+        self.assertEqual(self._total(self.tela), Decimal("90"))
+        self.assertFalse(OrdenProduccionRutaCritica.objects.filter(op=self.op).exists())
+
+    def test_op_cerrada_se_rechaza(self):
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO
+        )
+        self.assertEqual(self._post(100).status_code, 400)
+
+    def test_op_de_otra_empresa_es_404(self):
+        otra = Empresa.objects.create(codigo="otra-rc", razon_social="otra SA")
+        suc = Sucursal.objects.create(empresa=otra, codigo="ORC", nombre="otra")
+        op = OrdenProduccion.objects.create(empresa=otra, sucursal=suc, folio_op="OP-RC-X")
+        self.assertEqual(self._post(100, op=op).status_code, 404)
+
+    def test_no_genera_polizas(self):
+        from finanzas.models import Poliza
+        antes = Poliza.objects.count()
+        self._post(100)
+        self.assertEqual(Poliza.objects.count(), antes)
