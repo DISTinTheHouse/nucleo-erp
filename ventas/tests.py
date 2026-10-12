@@ -1170,6 +1170,29 @@ class PedidoMesaControlUpdateTests(TestCase):
         cot_talla = self.cotizacion.cotizaciondetalle.get().tallas.get()
         self.assertTrue(cot_talla.requiere_produccion)
 
+    def test_edicion_mesa_control_responde_sku_produccion_por_talla(self):
+        """``sku_produccion`` viaja también en el ``pedido`` de esta respuesta,
+        no sólo en el ``GET`` del detalle."""
+        detalle = self.pedido.detalles.get()
+        PedidoDetalle.objects.filter(pk=detalle.pk).update(
+            producto=None, producto_nombre_externo="Muestra especial cliente"
+        )
+        VarianteProductoProduccion.objects.create(
+            empresa=self.empresa, pedido_detalle=detalle, talla=self.talla_m,
+            nombre="Muestra especial cliente", sku=f"MP{detalle.pk}-NEG-M",
+        )
+        payload = self._payload()
+        payload["detalle"][0].pop("producto", None)
+        payload["detalle"][0]["producto_nombre_externo"] = "Muestra especial cliente"
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk),
+            payload,
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        talla = response.json()["pedido"]["detalles"][0]["tallas"][0]
+        self.assertEqual(talla["sku_produccion"], f"MP{detalle.pk}-NEG-M")
+
     def test_bloquea_edicion_si_hay_factura_emitida_ligada(self):
         factura = Factura.objects.create(
             empresa=self.empresa,
@@ -2104,6 +2127,108 @@ class PedidoVincularSkuMuestraTests(TestCase):
         return client.post(
             self._url(otro_pedido), {"pedido_detalle_talla_id": self.ped_talla.pk}, format="json"
         )
+
+
+class PedidoDetalleSkuProduccionTests(TestCase):
+    """``sku_produccion`` de cada talla en ``GET /pedidos/{id}/``.
+
+    Es el ``sku`` de la ``VarianteProductoProduccion`` activa de esa
+    (línea, talla) -- el mismo que copiaría ``vincular-sku-muestra`` -- y
+    ``None`` si la línea no es muestra, no hay variante activa o no tiene SKU.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme3", razon_social="ACME3 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY3", nombre="Matriz")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(
+            empresa=cls.empresa, nombre="Cliente", razon_social="Cliente SA"
+        )
+        cls.talla_m = Talla.objects.create(nombre="M")
+        cls.talla_l = Talla.objects.create(nombre="L")
+        cls.color = Color.objects.create(nombre="Azul", codigo="AZL", codigo_hex="#00F")
+        cls.admin = Usuario.objects.create(
+            username="mesa3", email="mesa3@acme3.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente,
+            moneda=cls.moneda, folio="P-900101",
+            persona_pagos="Pagos", correo_facturas="pagos@acme3.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+
+    def _linea(self, nombre="Gorra muestra", tallas=None):
+        detalle = PedidoDetalle.objects.create(
+            pedido=self.pedido, producto_nombre_externo=nombre, color=self.color
+        )
+        for talla in tallas or (self.talla_m,):
+            PedidoDetalleTalla.objects.create(pedido_detalle=detalle, talla=talla, cantidad=5)
+        return detalle
+
+    def _variante(self, detalle, talla=None, **campos):
+        talla = talla or self.talla_m
+        campos.setdefault("sku", f"MP{detalle.pk}-AZL-{talla.nombre}")
+        return VarianteProductoProduccion.objects.create(
+            empresa=self.empresa, pedido_detalle=detalle, talla=talla,
+            color=self.color, nombre="Gorra muestra", **campos,
+        )
+
+    def _get(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        resp = client.get(f"{PEDIDOS_URL}{self.pedido.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        return resp
+
+    def _skus(self, detalle):
+        """``{talla_nombre: sku_produccion}`` de la línea en el detalle del pedido."""
+        linea = next(d for d in self._get().json()["detalles"] if d["id"] == detalle.pk)
+        for talla in linea["tallas"]:
+            self.assertIn("sku_produccion", talla)
+        return {talla["talla_nombre"]: talla["sku_produccion"] for talla in linea["tallas"]}
+
+    def test_muestra_con_variante_activa(self):
+        detalle = self._linea()
+        variante = self._variante(detalle)
+        self.assertEqual(self._skus(detalle), {"M": variante.sku})
+
+    def test_talla_sin_variante_es_none(self):
+        detalle = self._linea(tallas=(self.talla_m, self.talla_l))
+        variante = self._variante(detalle, self.talla_m)
+        self.assertEqual(self._skus(detalle), {"M": variante.sku, "L": None})
+
+    def test_variante_inactiva_es_none(self):
+        detalle = self._linea()
+        self._variante(detalle, activo=False)
+        self.assertEqual(self._skus(detalle), {"M": None})
+
+    def test_variante_sin_sku_es_none(self):
+        for sku in ("", None):
+            with self.subTest(sku=sku):
+                detalle = self._linea()
+                self._variante(detalle, sku=sku)
+                self.assertEqual(self._skus(detalle), {"M": None})
+
+    def test_linea_que_no_es_muestra_es_none_aunque_tenga_variante(self):
+        for nombre in (None, "", "   "):
+            with self.subTest(nombre=nombre):
+                detalle = self._linea(nombre=nombre)
+                self._variante(detalle)
+                self.assertEqual(self._skus(detalle), {"M": None})
+
+    def test_queries_constantes_sin_importar_lineas_ni_tallas(self):
+        self._variante(self._linea())
+        with CaptureQueriesContext(connection) as chico:
+            self._get()
+        for _ in range(4):
+            detalle = self._linea(tallas=(self.talla_m, self.talla_l))
+            self._variante(detalle, self.talla_m)
+            self._variante(detalle, self.talla_l)
+        with CaptureQueriesContext(connection) as grande:
+            self._get()
+        self.assertEqual(len(chico), len(grande))
 
 
 class PedidoDestinosAplicablesTests(TestCase):

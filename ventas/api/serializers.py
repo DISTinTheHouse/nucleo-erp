@@ -10,6 +10,7 @@ from ventas.models import (
     PedidoDetalleTalla,
     PedidoServicioExtra,
 )
+from ventas.services.sku_produccion_service import skus_produccion_por_talla
 
 
 # --- Aislamiento multi-tenant de las FKs en ESCRITURA (#249) -------------------
@@ -362,6 +363,12 @@ class PedidoDetalleTallaReadSerializer(serializers.ModelSerializer):
     ``variante_nombre``/``variante_sku`` quedan en ``null``. Como
     ``ProductoVariante.nombre`` puede venir vacío, ``variante_nombre`` cae al
     ``sku`` (que es único y siempre existe).
+
+    ``sku_produccion`` es el SKU que producción ya generó para esa talla de una
+    línea de MUESTRA (``catalogo.VarianteProductoProduccion``) — el que copiaría
+    ``vincular-sku-muestra`` a ``sku_muestra``. ``None`` si la línea no es
+    muestra o la talla aún no tiene SKU. Lo resuelve el renglón padre
+    (``PedidoDetalleReadSerializer.get_tallas``) y llega por contexto.
     """
 
     talla_nombre = serializers.CharField(source="talla.nombre", read_only=True)
@@ -369,10 +376,14 @@ class PedidoDetalleTallaReadSerializer(serializers.ModelSerializer):
     variante_sku = serializers.CharField(source="variante.sku", read_only=True, default=None)
     cantidad_asignada_picking = serializers.SerializerMethodField()
     cantidad_surtida_picking = serializers.SerializerMethodField()
+    sku_produccion = serializers.SerializerMethodField()
 
     class Meta:
         model = PedidoDetalleTalla
         fields = "__all__"
+
+    def get_sku_produccion(self, obj):
+        return (self.context.get("_skus_produccion_por_talla") or {}).get(obj.talla_id)
 
     def get_variante_nombre(self, obj):
         if not obj.variante_id:
@@ -451,6 +462,9 @@ class PedidoDetalleReadSerializer(serializers.ModelSerializer):
         # ``_result_cache`` y re-ejecutaba la consulta UNA VEZ POR RENGLÓN
         # (N+1), tirando a la basura el prefetch del viewset.
         ctx_safe = dict(self.context or {})
+        # ``{talla_id: sku}`` de ESTE renglón, sobre las variantes de producción
+        # que ``_pedido_detalles_prefetch()`` ya trajo: 0 queries por talla.
+        ctx_safe["_skus_produccion_por_talla"] = skus_produccion_por_talla(obj)
         child = PedidoDetalleTallaReadSerializer(
             instance=obj.tallas.all(),
             many=True,

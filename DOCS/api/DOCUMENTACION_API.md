@@ -1577,6 +1577,11 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
     |---|---|---|
     | `cantidad_asignada_picking` | `str` | Cuántas de esas prendas ya tienen folio picking (suma de todas las líneas activas, sin filtro de almacén). |
     | `cantidad_surtida_picking` | `str` | Cuántas ya están marcadas como surtidas en sus líneas de picking correspondientes. |
+  - **Nuevo (SKU de producción de muestras)**: cada talla de `detalles[].tallas[]` trae `sku_produccion` (`string | null`, solo lectura): el `sku` de la `VarianteProductoProduccion` activa de esa línea + talla (la que genera `variante-onboarding` en producción) — es decir, el SKU que copiaría `POST /pedidos/{id}/vincular-sku-muestra/`.
+    - `null` si la línea no es muestra (`producto_nombre_externo` vacío o solo espacios), si la talla aún no tiene variante activa, o si la variante no tiene `sku`.
+    - Junto con `sku_muestra` (mismo objeto) da los tres estados sin llamar a producción: `sku_produccion` con valor y `sku_muestra` `null` → hay SKU listo para vincular; iguales → vinculado; distintos → `sku_muestra` quedó desfasado.
+    - Mismo criterio que usa `vincular-sku-muestra` para buscar la variante (activa, por línea + talla, con `sku`), con una diferencia: ese endpoint **no** exige que la línea siga siendo muestra.
+    - Viaja en todas las respuestas que devuelven el pedido completo (`GET`/`POST`/`PATCH` de `/pedidos/`, `pedido` de `editar-mesa-control` y de autorizar cotización). No está en el listado ni en `/pedido-detalle-talla/`. Sin consultas por talla.
   - **Ya existente**: `documentos[]` — lista de todos los documentos ligados al pedido (1 solo query por relación, prefetch optimizado).
     - **Shape de cada entrada**:
       ```ts
@@ -4706,6 +4711,7 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
 - Copia el `sku` de la `VarianteProductoProduccion` ya generada (por `variante-onboarding`) a `PedidoDetalleTalla.sku_muestra` — **no** crea nada nuevo, no toca `producto_nombre_externo` (sigue siendo muestra). Si hay cotización de origen, refleja el mismo SKU en la `CotizacionDetalleTalla` equivalente (match por producto/color/talla; best-effort, sin bloquear si no encuentra una).
 - Sin SKU de producción generado todavía para esa talla: `400 {"pedido_detalle_talla_id": "Esta talla no tiene SKU de producción generado todavía."}`.
 - `sku_muestra` ya viaja en `PedidoDetalleTallaSerializer`/`CotizacionDetalleTallaSerializer` (son `fields='__all__'`) — no hace falta un GET aparte para leerlo tras vincular.
+- Para saber **antes** del clic qué tallas ya tienen SKU de producción: `detalles[].tallas[].sku_produccion` en `GET /api/v1/ventas/pedidos/{id}/` (ver ese endpoint).
 - Respuesta (`200`): `{"pedido_detalle_talla_id": 456, "sku_muestra": "MP123-AZL-M"}`.
 
 ---
