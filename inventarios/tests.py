@@ -864,3 +864,48 @@ class ReporteExistenciasProduccionComprasTests(TestCase):
     def test_superusuario_ve_ambas_empresas(self):
         ids = {r["producto_id"] for r in self._get(self.superuser)}
         self.assertEqual(ids, {self.a["producto"].pk, self.b["producto"].pk})
+
+
+class DetallesMovimientoFormalTests(TestCase):
+    """``movimientos/formal/{id}/detalles/``: el id que da el reporte por periodo."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="det-for", razon_social="Det SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="DET", nombre="Det"
+        )
+        cls.otra = Empresa.objects.create(codigo="det-otra", razon_social="Otra SA")
+        cls.otra_suc = Sucursal.objects.create(
+            empresa=cls.otra, codigo="OTR", nombre="Otra"
+        )
+        cls.user = Usuario.objects.create(
+            username="det@x.test", email="det@x.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.user.sucursales.add(cls.sucursal)
+        cls.mov = MovimientoInventario.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, usuario=cls.user,
+            tipo_movimiento="ENTRADA",
+        )
+        MovimientoInventarioDetalle.objects.create(
+            movimiento_inventario=cls.mov, cantidad=Decimal("3"),
+        )
+        cls.ajeno = MovimientoInventario.objects.create(
+            empresa=cls.otra, sucursal=cls.otra_suc, usuario=cls.user,
+            tipo_movimiento="ENTRADA",
+        )
+
+    def _get(self, pk):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        return client.get(f"{MOVIMIENTOS_URL}formal/{pk}/detalles/")
+
+    def test_devuelve_el_detalle(self):
+        resp = self._get(self.mov.pk)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["detalle_count"], 1)
+        self.assertEqual(resp.json()["detalle"][0]["cantidad"], "3.00000000")
+
+    def test_movimiento_de_otra_empresa_es_404(self):
+        self.assertEqual(self._get(self.ajeno.pk).status_code, 404)
