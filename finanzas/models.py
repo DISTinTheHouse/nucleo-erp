@@ -823,6 +823,18 @@ class AlertaMora(models.Model):
         db_table = "alertas_mora"
         verbose_name = "Alerta de Mora"
         verbose_name_plural = "Alertas de Mora"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("cuenta_por_cobrar",),
+                condition=models.Q(cuenta_por_cobrar__isnull=False),
+                name="uq_alerta_mora_cxc",
+            ),
+            models.UniqueConstraint(
+                fields=("cuenta_por_pagar",),
+                condition=models.Q(cuenta_por_pagar__isnull=False),
+                name="uq_alerta_mora_cxp",
+            ),
+        ]
 
     def __str__(self):
         cuenta = self.cuenta_por_cobrar or self.cuenta_por_pagar

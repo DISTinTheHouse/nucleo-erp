@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 from django.db import OperationalError, transaction
 from django.db.models import DecimalField, Max, Min, OuterRef, Q, Subquery, Sum
@@ -628,6 +629,10 @@ class FacturaViewSet(FinanzasBaseViewSet):
                         'pedido': 'El pedido ya tiene una factura activa; no puede facturarse más de una vez.'
                     })
 
+            # Sin vencimiento explícito, vence según el plazo de crédito del cliente.
+            fecha_vencimiento = data.get('fecha_vencimiento')
+            if fecha_vencimiento is None and cliente.dias_credito:
+                fecha_vencimiento = timezone.localdate() + timedelta(days=cliente.dias_credito)
             factura = Factura.objects.create(
                 empresa=empresa,
                 sucursal=sucursal,
@@ -635,7 +640,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
                 pedido=pedido,
                 moneda=moneda,
                 folio=folio,
-                fecha_vencimiento=data.get('fecha_vencimiento'),
+                fecha_vencimiento=fecha_vencimiento,
                 subtotal=data['subtotal'],
                 descuento=data['descuento'],
                 impuestos=data['impuestos'],
@@ -647,7 +652,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
                 empresa=empresa,
                 cliente=cliente,
                 factura=factura,
-                fecha_vencimiento=data.get('fecha_vencimiento'),
+                fecha_vencimiento=fecha_vencimiento,
                 total=data['total'],
                 saldo=data['total'],
                 estatus=CuentaPorCobrar.EstatusCxC.PENDIENTE,
