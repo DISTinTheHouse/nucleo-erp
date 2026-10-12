@@ -23,7 +23,6 @@ from inventarios.models import (
     TipoMovimiento,
     inventario_reservas,
 )
-from catalogo.models import VarianteProductoProduccion
 from finanzas.models import Factura, FacturaDetalle, NotaCreditoDetalle
 from ventas.models import (
     Cotizacion,
@@ -81,6 +80,10 @@ from ventas.utils.helpers import (
     _save_servicios_extras,
     _save_pedido_detalle,
     _save_pedido_servicios_extras,
+)
+from ventas.services.sku_produccion_service import (
+    variante_produccion_de_talla,
+    variantes_produccion_prefetch,
 )
 from ventas.services.pedido_field_filter_service import (
     filtrar_campos_contabilidad_pedido,
@@ -170,7 +173,9 @@ def _pedido_detalles_prefetch():
                 queryset=PedidoDetalleTalla.objects.select_related(
                     "talla", "variante"
                 ).order_by("id"),
-            )
+            ),
+            # ``sku_produccion`` de cada talla (``PedidoDetalleTallaReadSerializer``).
+            variantes_produccion_prefetch(),
         )
         .order_by("id"),
     )
@@ -3144,10 +3149,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
         if dt is None:
             raise ValidationError({"pedido_detalle_talla_id": "No pertenece a este pedido."})
 
-        variante = VarianteProductoProduccion.objects.filter(
-            pedido_detalle_id=dt.pedido_detalle_id, talla_id=dt.talla_id, activo=True
-        ).first()
-        if variante is None or not variante.sku:
+        variante = variante_produccion_de_talla(dt.pedido_detalle_id, dt.talla_id)
+        if variante is None:
             raise ValidationError({
                 "pedido_detalle_talla_id": "Esta talla no tiene SKU de producción generado todavía."
             })
