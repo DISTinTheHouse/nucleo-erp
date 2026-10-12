@@ -7,6 +7,7 @@ from rest_framework.exceptions import ValidationError
 from ventas.models import PedidoDetalleTalla
 from wms.models import Picking, PickingDetalle
 from wms.services.existencia_service import ExistenciaService
+from wms.services.transferencia_service import TransferenciaService
 from wms.services.picking_pipeline.catalogs import (
     armar_header_preview,
     armar_payload_vacio,
@@ -35,9 +36,9 @@ class PickingService:
     Modelo **Tracker de prendas por pedido** (v2 rediseño):
     - ``onboarding_payload``: catálogos + selector origen/destino +
       existencia + ``header.tracker`` con los KPIs de surtido del pedido.
-    - ``handle_store``: **solo crea el documento** ``Picking`` +
-      ``PickingDetalle`` + folio. No mueve inventario, no crea
-      transferencias, no crea reservas.
+    - ``handle_store``: crea el documento ``Picking`` + ``PickingDetalle`` +
+      folio y genera la ``Transferencia`` (folio TR) origen → destino que
+      mueve el inventario. No crea reservas.
     - El almacén destino es **seleccionable libremente** por el usuario
       (sugerencia default a APARTADOS, sin obligatoriedad).
     - Los campos ``cantidad_asignada / cantidad_surtida`` de
@@ -50,11 +51,9 @@ class PickingService:
       3. **La operación física (tomar prendas del origen y moverlas al destino)
       queda fuera del create del picking**, en pasos posteriores.
 
-    No crea reservas, no crea transferencias ni órdenes de producción
-    dentro de este endpoint:
-    - Reservas, transferencias y órdenes de trabajo quedan en sus propios
-      endpoints/services de otros módulos (Produccion, Transferencias) cuando el
-      flujo de negocio lo necesite.
+    No crea reservas ni órdenes de producción dentro de este endpoint:
+    - Reservas y órdenes de trabajo quedan en sus propios endpoints/services de
+      otros módulos (Produccion) cuando el flujo de negocio lo necesite.
     """
 
     # ------------------------------------------------------------------
@@ -257,9 +256,9 @@ class PickingService:
         """Crea el documento Picking (parcial o total) con sus detalles.
 
         Modelo **Tracker de prendas por pedido** (v2): este endpoint
-        **solo registra la ruta y las cantidades asignadas** de un
-        picking. No mueve inventario, no crea transferencias, no
-        genera reservas, no crea órdenes de trabajo.
+        registra la ruta y las cantidades asignadas de un picking y genera
+        la transferencia (folio TR) que mueve el inventario origen → destino.
+        No genera reservas ni órdenes de trabajo.
 
         El almacén destino lo elige el usuario (selector libre). Si no
         envía ninguno, se sugiere APARTADOS como convención, pero ya no
@@ -297,7 +296,26 @@ class PickingService:
         # 3. Folio picking
         folio = generate_folio(pedido.empresa, pedido.sucursal, "Picking")
 
-        # 4. Crear encabezado Picking
+        # 4. Traspaso (folio TR): mueve las prendas del almacén origen al
+        #    destino y deja el movimiento en el ledger de inventario.
+        transferencia = TransferenciaService.handle_store(
+            {
+                "almacen_origen": almacen,
+                "almacen_destino": almacen_destino,
+                "observaciones": f"Traspaso del picking {folio}",
+                "transferencia_detalle": [
+                    {
+                        "producto": item["talla"].pedido_detalle.producto,
+                        "producto_variante": item["talla"].variante,
+                        "cantidad": item["cantidad"],
+                    }
+                    for item in requested_items
+                ],
+            },
+            user,
+        )
+
+        # 5. Crear encabezado Picking
         picking = Picking.objects.create(
             folio=folio,
             empresa=pedido.empresa,
@@ -307,12 +325,13 @@ class PickingService:
             almacen=almacen,
             almacen_destino=almacen_destino,
             usuario=user,
+            transferencia=transferencia,
             total_lineas=len(requested_items),
             total_lineas_completas=0,
             **data,
         )
 
-        # 5. bulk_create PickingDetalle + contar líneas completas
+        # 6. bulk_create PickingDetalle + contar líneas completas
         picking_rows = []
         lineas_completas = 0
         for item in requested_items:
@@ -340,7 +359,7 @@ class PickingService:
         picking.total_lineas_completas = lineas_completas
         picking.save(update_fields=["total_lineas_completas", "updated_at"])
 
-        # 6. Return: ordenes_trabajo_generadas vacío (low-noise: las OT van por
+        # 7. Return: ordenes_trabajo_generadas vacío (low-noise: las OT van por
         #    módulo Produccion endpoints dedicados).
         ordenes_trabajo_generadas = []
         return picking, ordenes_trabajo_generadas

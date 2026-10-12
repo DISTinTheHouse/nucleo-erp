@@ -669,3 +669,116 @@ class ScannerRFIDSeguridadTests(TestCase):
 
     def test_stats_exige_admin(self):
         self.assertEqual(self._api(self.usuario_a).get(self.STATS_URL).status_code, 403)
+
+
+class PickingGeneraTransferenciaTests(TestCase):
+    """El picking genera el traspaso (folio TR) origen → destino y mueve el stock."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from decimal import Decimal
+
+        from inventarios.models import Almacen, Existencia, MovimientoInventario
+        from nucleo.models import Moneda, SerieFolio
+        from terceros.models import Cliente
+        from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+        from catalogo.models import Talla
+
+        cls.Decimal = Decimal
+        cls.Existencia = Existencia
+        cls.MovimientoInventario = MovimientoInventario
+        cls.empresa = Empresa.objects.create(codigo="tr-pick", razon_social="TR SA")
+        cls.sucursal = Sucursal.objects.create(
+            empresa=cls.empresa, codigo="MTZ", nombre="Matriz"
+        )
+        cls.usuario = Usuario.objects.create(
+            username="tr@example.com",
+            email="tr@example.com",
+            empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+            is_admin_empresa=True,
+        )
+        for tipo, prefijo in (("Picking", "PK"), ("Transferencia", "TR")):
+            SerieFolio.objects.create(
+                empresa=cls.empresa,
+                sucursal=cls.sucursal,
+                tipo_documento=tipo,
+                serie="A",
+                prefijo=prefijo,
+            )
+        cls.origen = Almacen.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            codigo="PT",
+            nombre="Terminado",
+            permite_salida=True,
+            permite_entrada=True,
+        )
+        cls.destino = Almacen.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            codigo="APA",
+            nombre="Apartados",
+            permite_entrada=True,
+            permite_salida=True,
+        )
+        cls.producto = Producto.objects.create(
+            empresa=cls.empresa, nombre="Playera", codigo="PL01"
+        )
+        Existencia.objects.create(
+            producto=cls.producto,
+            almacen=cls.origen,
+            stock=10,
+            cantidad=Decimal("10"),
+        )
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa,
+            sucursal=cls.sucursal,
+            cliente=cliente,
+            moneda=moneda,
+            folio="P-1",
+            persona_pagos="Pagos",
+            correo_facturas="tr@example.com",
+            telefono_pagos="8100000000",
+            forma_pago="03",
+            metodo_pago="PUE",
+            uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=cls.pedido, producto=cls.producto)
+        cls.talla_row = PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=Talla.objects.create(nombre="M"), cantidad=4
+        )
+
+    def _data(self, cantidad):
+        return {
+            "pedido": self.pedido,
+            "almacen": self.origen,
+            "almacen_destino": self.destino,
+            "operador": self.usuario,
+            "picking_detalle": [
+                {"pedido_detalle_talla": self.talla_row.pk, "cantidad_asignada": cantidad}
+            ],
+        }
+
+    def test_picking_crea_transferencia_con_folio_tr_y_mueve_stock(self):
+        from wms.services.picking_service import PickingService
+
+        picking, _ = PickingService.handle_store(self._data(self.Decimal("3")), self.usuario)
+
+        self.assertIsNotNone(picking.transferencia_id)
+        self.assertTrue(picking.transferencia.folio.startswith("TR"))
+        self.assertEqual(picking.transferencia.almacen_origen, self.origen)
+        self.assertEqual(picking.transferencia.almacen_destino, self.destino)
+        self.assertEqual(
+            self.Existencia.objects.get(almacen=self.origen).cantidad, self.Decimal("7")
+        )
+        self.assertEqual(
+            self.Existencia.objects.get(almacen=self.destino).cantidad, self.Decimal("3")
+        )
+        self.assertTrue(
+            self.MovimientoInventario.objects.filter(
+                transferencia=picking.transferencia
+            ).exists()
+        )
