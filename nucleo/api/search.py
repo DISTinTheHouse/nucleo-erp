@@ -109,9 +109,12 @@ from produccion.scope import (
     ordenes_reflejante_visibles,
 )
 from terceros.scope import clientes_base, clientes_visibles
+from ventas.api.oportunidades import con_estado as oportunidades_con_estado
 from ventas.scope import (
     cotizaciones_base,
     cotizaciones_visibles,
+    oportunidades_base,
+    oportunidades_visibles,
     pedidos_base,
     pedidos_visibles,
 )
@@ -297,6 +300,24 @@ def _fila_cotizacion(cotizacion) -> dict:
         ),
         "subtitulo": _texto(cotizacion.oc),
         "estatus": cotizacion.get_estatus_display(),
+    }
+
+
+def _fila_oportunidad(oportunidad) -> dict:
+    # ``estado`` viene anotado (``con_estado``): Cotizada y Ganada se calculan de las
+    # cotizaciones ligadas, no se guardan.
+    cliente = oportunidad.cliente
+    return {
+        "tipo": "oportunidad",
+        "id": oportunidad.pk,
+        "codigo": None,
+        "titulo": _texto(oportunidad.titulo) or _texto(oportunidad.nombre_contacto),
+        "subtitulo": (
+            _texto(oportunidad.nombre_contacto)
+            or _texto(getattr(cliente, "razon_social", None))
+            or _texto(getattr(cliente, "nombre", None))
+        ),
+        "estatus": oportunidad.estado,
     }
 
 
@@ -578,6 +599,25 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         # no lo abre.
         permisos_visibilidad=("R-CONTABILIDAD-FACTURACION",),
         orden=("-fecha_emision", "-id"),
+    ),
+    EntidadBuscable(
+        tipo="oportunidad",
+        etiqueta="Oportunidades",
+        # Alcance de ``OportunidadViewSet`` (``ventas.scope``): el vendedor ve las
+        # suyas, el admin de empresa las de su empresa. ``estado`` (Cotizada/Ganada)
+        # se anota con dos EXISTS que solo corren para las filas que se devuelven.
+        alcance=lambda user: oportunidades_con_estado(
+            oportunidades_visibles(oportunidades_base().select_related("cliente"), user)
+        ),
+        fila=_fila_oportunidad,
+        # Subcadena en título y contacto; los sirven los GIN ``UPPER(col)`` de
+        # ``ventas.Oportunidad``.
+        campos_nombre=("titulo", "nombre_contacto"),
+        campos_only=("titulo", "nombre_contacto", "etapa", "cliente__nombre", "cliente__razon_social"),
+        # La clave de la sección de oportunidades más el módulo ``R-CRM`` de respaldo:
+        # en este catálogo son cadenas planas y quien ya entra al módulo la ve.
+        permisos_visibilidad=("R-CRM-OPORTUNIDADES", "R-CRM"),
+        orden=ORDEN_RECIENTE,
     ),
 )
 
