@@ -25,16 +25,46 @@ class Prospecto(models.Model):
     def __str__(self):
         return str(self.id)
 
-class Oportunidad(models.Model):
-    prospecto = models.ForeignKey(Prospecto, on_delete=models.CASCADE, related_name="oportunidades")
+class Oportunidad(StatusLifecycleModel):
+    """Un posible negocio, antes de la cotización.
+
+    Cotizada y Ganada no se guardan: se calculan de las cotizaciones ligadas
+    (con cotización = Cotizada, alguna Autorizada = Ganada). Así el flujo
+    cotización -> mesa de control -> pedido no se toca.
+    """
+
+    class Etapa(models.TextChoices):
+        NUEVA = "Nueva", "Nueva"
+        CONTACTADA = "Contactada", "Contactada"
+        PERDIDA = "Perdida", "Perdida"
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="oportunidades")
+    vendedor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="oportunidades", null=True, blank=True)
+    cliente = models.ForeignKey(Cliente, on_delete=models.PROTECT, related_name="oportunidades", null=True, blank=True)
+    nombre_contacto = models.CharField(max_length=120, blank=True, default="")
+    telefono = models.CharField(max_length=30, blank=True, default="")
+    correo = models.EmailField(max_length=120, blank=True, default="")
+    titulo = models.CharField(max_length=150, default="")
+    monto_estimado = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    etapa = models.CharField(max_length=20, choices=Etapa.choices, default=Etapa.NUEVA)
+    motivo_perdida = models.CharField(max_length=255, blank=True, default="")
+    proximo_contacto = models.DateField(null=True, blank=True)
+    notas = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True)
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "oportunidades"
         verbose_name = "Oportunidad"
         verbose_name_plural = "Oportunidades"
-    
+        indexes = [
+            models.Index(fields=["empresa", "vendedor", "etapa"], name="ix_oport_emp_vend_etapa"),
+            models.Index(fields=["empresa", "vendedor", "proximo_contacto"], name="ix_oport_emp_vend_contacto"),
+        ]
+
     def __str__(self):
-        return str(self.id)
+        return self.titulo or str(self.id)
 
 class Cotizacion(models.Model):
     class FormaPago(models.TextChoices):
@@ -73,7 +103,7 @@ class Cotizacion(models.Model):
     vendedor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="cotizaciones", null=True, blank=True, db_index=True)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="cotizacion", null=True, blank=True)
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="cotizacion", null=True, blank=True)
-    oportunidad = models.ForeignKey(Oportunidad, on_delete=models.CASCADE, related_name="cotizacion", null=True)
+    oportunidad = models.ForeignKey(Oportunidad, on_delete=models.SET_NULL, related_name="cotizacion", null=True, blank=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="cotizacion", null=True, blank=True)
     tipo_pedido = models.SmallIntegerField(default=1, choices=TIPO_PEDIDO_CHOICES)
     estatus = models.SmallIntegerField(default=1, choices=CHOICES_ESTATUS, db_index=True)

@@ -39,6 +39,8 @@ class Cliente(StatusLifecycleModel):
     web = models.URLField(max_length=255, blank=True, null=True)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="clientes", null=True, blank=True)
 
+    dias_credito = models.PositiveIntegerField(default=0)
+    limite_credito = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     history = HistoricalRecords()
 
     class Meta:

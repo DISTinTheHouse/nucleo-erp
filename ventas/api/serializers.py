@@ -46,8 +46,7 @@ def _moneda_de_la_empresa(moneda, empresa_id):
 
 
 def _oportunidad_de_la_empresa(oportunidad, empresa_id):
-    # ``Oportunidad`` no tiene empresa propia: cuelga de ``Prospecto.empresa``.
-    return empresa_id is not None and oportunidad.prospecto.empresa_id == empresa_id
+    return _de_la_empresa(oportunidad, empresa_id)
 
 
 def _error_pk_inexistente(serializer, campo, obj):

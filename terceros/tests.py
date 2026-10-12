@@ -500,3 +500,69 @@ class ClienteKpisTests(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data["ventas_por_cliente"]["disponible"])
+
+
+class ClienteCarteraTests(TestCase):
+    """``resumen_comercial.cartera``: saldo por cobrar por moneda y antigüedad (30/60/90/120)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from nucleo.models import Moneda, Sucursal
+
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.mxn = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.admin = Usuario.objects.create(
+            username="admin", email="admin@acme.test", empresa=cls.empresa, is_admin_empresa=True
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente A")
+
+    def _cxc(self, saldo, dias_vencida=None, estatus=None):
+        from finanzas.models import CuentaPorCobrar, Factura
+
+        hoy = timezone.localdate()
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.mxn
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=self.empresa, cliente=self.cliente, factura=factura,
+            total=Decimal(saldo), saldo=Decimal(saldo),
+            fecha_vencimiento=None if dias_vencida is None else hoy - timedelta(days=dias_vencida),
+        )
+        if estatus:
+            CuentaPorCobrar.objects.filter(pk=cxc.pk).update(estatus=estatus)
+
+    def _cartera(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        resp = client.get(f"/api/v1/terceros/clientes/{self.cliente.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        return resp.data["resumen_comercial"]["cartera"]
+
+    def test_reparte_el_saldo_por_antiguedad(self):
+        self._cxc("10.00")            # sin vencimiento: por vencer
+        self._cxc("20.00", -5)        # vence en 5 días: por vencer
+        self._cxc("30.00", 1)
+        self._cxc("40.00", 30)
+        self._cxc("50.00", 31)
+        self._cxc("60.00", 90)
+        self._cxc("70.00", 91)
+        self._cxc("80.00", 121)
+
+        (mxn,) = self._cartera()
+
+        self.assertEqual(mxn["moneda"], "MXN")
+        self.assertEqual(mxn["por_vencer"], "30.00")
+        self.assertEqual(mxn["vencido_1_30"], "70.00")
+        self.assertEqual(mxn["vencido_31_60"], "50.00")
+        self.assertEqual(mxn["vencido_61_90"], "60.00")
+        self.assertEqual(mxn["vencido_91_120"], "70.00")
+        self.assertEqual(mxn["vencido_mas_120"], "80.00")
+        self.assertEqual(mxn["saldo_total"], "360.00")
+
+    def test_ignora_canceladas_y_saldadas(self):
+        self._cxc("100.00", 10, estatus="Cancelada")
+        self._cxc("0.00", 10)
+
+        self.assertEqual(self._cartera(), [])
+

@@ -52,7 +52,6 @@ from ventas.models import (
     PedidoDetalle,
     PedidoDetalleTalla,
     PedidoServicioExtra,
-    Prospecto,
 )
 from ventas.servicios_bordado import TipoServicioBordado, validar_tipos_servicio_array
 from ventas.utils.helpers import _save_cotizacion_detalle
@@ -2804,9 +2803,7 @@ class FkCrossTenantEscrituraTests(TestCase):
         moneda_privada = Moneda.objects.create(
             empresa=empresa, codigo_iso="USD", nombre=f"Dolar {codigo}"
         )
-        oportunidad = Oportunidad.objects.create(
-            prospecto=Prospecto.objects.create(empresa=empresa)
-        )
+        oportunidad = Oportunidad.objects.create(empresa=empresa, titulo="Oportunidad")
         producto = Producto.objects.create(empresa=empresa, nombre=f"Prod {codigo}")
         variante = ProductoVariante.objects.create(
             producto=producto,
@@ -4119,3 +4116,206 @@ class DescuentoVentaAlmacenesConSalidaTests(TestCase):
 
         self.assertIn("salida permitida", str(ctx.exception.detail["inventario"]))
         self.assertEqual(self._cantidades(), [Decimal("100"), Decimal("5"), Decimal("50")])
+
+
+OPORTUNIDADES_URL = "/api/v1/ventas/oportunidades/"
+
+
+class OportunidadesTests(TestCase):
+    """CRM mínimo: oportunidades antes de la cotización."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="Acme SA")
+        cls.otra = Empresa.objects.create(codigo="globex", razon_social="Globex SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.ana = Usuario.objects.create(
+            username="ana", email="ana@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal
+        )
+        cls.beto = Usuario.objects.create(username="beto", email="beto@acme.test", empresa=cls.empresa)
+        cls.jefe = Usuario.objects.create(
+            username="jefe", email="jefe@acme.test", empresa=cls.empresa, is_admin_empresa=True
+        )
+        cls.ajeno = Usuario.objects.create(username="ajeno", email="x@globex.test", empresa=cls.otra)
+        cls.sin_empresa = Usuario.objects.create(username="nadie", email="n@x.test")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente Acme")
+        cls.cliente_ajeno = Cliente.objects.create(empresa=cls.otra, nombre="Cliente Globex")
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _op(self, vendedor=None, empresa=None, **extra):
+        return Oportunidad.objects.create(
+            empresa=empresa or self.empresa, vendedor=vendedor or self.ana, titulo="Uniformes", **extra
+        )
+
+    # -- scope ---------------------------------------------------------------
+
+    def test_el_vendedor_ve_solo_las_suyas_y_el_admin_todas(self):
+        mia = self._op(self.ana)
+        ajena = self._op(self.beto)
+
+        ids = lambda user: {o["id"] for o in self._client(user).get(OPORTUNIDADES_URL).data}
+        self.assertEqual(ids(self.ana), {mia.pk})
+        self.assertEqual(ids(self.jefe), {mia.pk, ajena.pk})
+        self.assertEqual(ids(self.ajeno), set())
+        self.assertEqual(ids(self.sin_empresa), set())
+
+    def test_detalle_de_otro_vendedor_o_empresa_responde_404(self):
+        de_beto = self._op(self.beto)
+        de_otra_empresa = self._op(self.ajeno, empresa=self.otra)
+
+        self.assertEqual(self._client(self.ana).get(f"{OPORTUNIDADES_URL}{de_beto.pk}/").status_code, 404)
+        self.assertEqual(self._client(self.jefe).get(f"{OPORTUNIDADES_URL}{de_otra_empresa.pk}/").status_code, 404)
+
+    # -- alta y edición ------------------------------------------------------
+
+    def test_alta_fija_empresa_y_vendedor_del_servidor(self):
+        resp = self._client(self.ana).post(
+            OPORTUNIDADES_URL,
+            {"titulo": "Playeras", "nombre_contacto": "Luis", "monto_estimado": "5000.00",
+             "vendedor": self.beto.pk, "empresa": self.otra.pk},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        op = Oportunidad.objects.get(pk=resp.data["id"])
+        self.assertEqual((op.empresa_id, op.vendedor_id), (self.empresa.pk, self.ana.pk))
+        self.assertEqual(resp.data["estado"], "Nueva")
+
+    def test_rechaza_un_cliente_de_otra_empresa(self):
+        resp = self._client(self.ana).post(
+            OPORTUNIDADES_URL, {"titulo": "X", "cliente": self.cliente_ajeno.pk}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cliente", resp.data)
+
+    def test_perdida_exige_motivo(self):
+        op = self._op()
+        url = f"{OPORTUNIDADES_URL}{op.pk}/"
+
+        sin_motivo = self._client(self.ana).patch(url, {"etapa": "Perdida"}, format="json")
+        con_motivo = self._client(self.ana).patch(
+            url, {"etapa": "Perdida", "motivo_perdida": "Precio"}, format="json"
+        )
+
+        self.assertEqual(sin_motivo.status_code, 400)
+        self.assertIn("motivo_perdida", sin_motivo.data)
+        self.assertEqual(con_motivo.status_code, 200, con_motivo.data)
+        self.assertEqual(con_motivo.data["estado"], "Perdida")
+
+    def test_borrar_da_de_baja_y_conserva_el_registro(self):
+        op = self._op()
+
+        self.assertEqual(self._client(self.ana).delete(f"{OPORTUNIDADES_URL}{op.pk}/").status_code, 204)
+
+        op.refresh_from_db()
+        self.assertFalse(op.activo)
+        self.assertEqual(self._client(self.ana).get(OPORTUNIDADES_URL).data, [])
+
+    # -- cotizar y estado calculado -----------------------------------------
+
+    def test_cotizar_crea_cotizacion_borrador_ligada(self):
+        op = self._op(cliente=self.cliente)
+
+        resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        cotizacion = Cotizacion.objects.get(pk=resp.data["cotizacion_id"])
+        self.assertEqual(
+            (cotizacion.oportunidad_id, cotizacion.vendedor_id, cotizacion.cliente_id, cotizacion.estatus),
+            (op.pk, self.ana.pk, self.cliente.pk, 1),
+        )
+        self.assertEqual(self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/").data["estado"], "Cotizada")
+
+    def test_no_se_cotiza_una_perdida(self):
+        op = self._op(etapa="Perdida", motivo_perdida="Precio")
+
+        self.assertEqual(self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/").status_code, 400)
+
+    def test_con_cotizacion_autorizada_esta_ganada_y_ya_no_se_pierde(self):
+        op = self._op()
+        Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op, estatus=3)
+
+        detalle = self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/")
+        perder = self._client(self.ana).patch(
+            f"{OPORTUNIDADES_URL}{op.pk}/", {"etapa": "Perdida", "motivo_perdida": "x"}, format="json"
+        )
+
+        self.assertEqual(detalle.data["estado"], "Ganada")
+        self.assertEqual(perder.status_code, 400)
+
+    def test_borrar_la_oportunidad_no_borra_la_cotizacion(self):
+        op = self._op()
+        cotizacion = Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op)
+
+        op.delete()
+
+        cotizacion.refresh_from_db()
+        self.assertIsNone(cotizacion.oportunidad_id)
+
+    # -- embudo, filtros y rendimiento --------------------------------------
+
+    def test_embudo_cuenta_y_suma_por_estado(self):
+        self._op(monto_estimado=Decimal("100.00"))
+        self._op(etapa="Contactada", monto_estimado=Decimal("200.00"))
+        self._op(etapa="Perdida", motivo_perdida="x", monto_estimado=Decimal("50.00"))
+        cotizada = self._op(monto_estimado=Decimal("300.00"))
+        Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=cotizada)
+        ganada = self._op(monto_estimado=Decimal("400.00"))
+        Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=ganada, estatus=3)
+        self._op(self.beto, monto_estimado=Decimal("999.00"))  # de otro vendedor: no cuenta
+
+        resp = self._client(self.ana).get(f"{OPORTUNIDADES_URL}embudo/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        por_estado = {e["estado"]: (e["cantidad"], e["monto"]) for e in resp.data["estados"]}
+        self.assertEqual(por_estado, {
+            "Nueva": (1, "100.00"), "Contactada": (1, "200.00"), "Cotizada": (1, "300.00"),
+            "Ganada": (1, "400.00"), "Perdida": (1, "50.00"),
+        })
+        self.assertEqual(resp.data["total"], {"cantidad": 5, "monto": "1050.00"})
+
+    def test_filtro_proximo_contacto_deja_solo_las_abiertas_vencidas(self):
+        hoy = timezone.localdate()
+        toca = self._op(proximo_contacto=hoy)
+        self._op(proximo_contacto=hoy + timedelta(days=3))
+        self._op(proximo_contacto=hoy - timedelta(days=1), etapa="Perdida", motivo_perdida="x")
+        self._op()
+
+        resp = self._client(self.ana).get(OPORTUNIDADES_URL, {"proximo_contacto_hasta": hoy.isoformat()})
+
+        self.assertEqual([o["id"] for o in resp.data], [toca.pk])
+
+    def test_filtros_invalidos_responden_400(self):
+        cliente = self._client(self.ana)
+
+        self.assertEqual(cliente.get(OPORTUNIDADES_URL, {"estado": "Rara"}).status_code, 400)
+        self.assertEqual(cliente.get(OPORTUNIDADES_URL, {"proximo_contacto_hasta": "ayer"}).status_code, 400)
+
+    def test_limit_pagina_y_sin_limit_regresa_la_lista(self):
+        for _ in range(3):
+            self._op()
+        cliente = self._client(self.ana)
+
+        self.assertEqual(len(cliente.get(OPORTUNIDADES_URL).data), 3)
+        self.assertEqual(len(cliente.get(OPORTUNIDADES_URL, {"limit": 2}).data["results"]), 2)
+
+    def test_el_listado_no_hace_consultas_por_fila(self):
+        self._op(cliente=self.cliente)
+        cliente = self._client(self.ana)
+        cliente.get(OPORTUNIDADES_URL)
+
+        with CaptureQueriesContext(connection) as pocas:
+            cliente.get(OPORTUNIDADES_URL)
+        for _ in range(10):
+            op = self._op(cliente=self.cliente)
+            Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op)
+        with CaptureQueriesContext(connection) as muchas:
+            cliente.get(OPORTUNIDADES_URL)
+
+        self.assertEqual(len(pocas), len(muchas))
+

@@ -26,12 +26,12 @@ class ProspectoAdmin(admin.ModelAdmin):
 
 @admin.register(Oportunidad)
 class OportunidadAdmin(admin.ModelAdmin):
-    list_display = ("id", "prospecto")
-    list_filter = ("prospecto__empresa",)
-    search_fields = ("id", "prospecto__id", "prospecto__empresa__codigo", "prospecto__empresa__razon_social")
+    list_display = ("id", "titulo", "empresa", "vendedor", "etapa")
+    list_filter = ("empresa", "etapa")
+    search_fields = ("titulo", "nombre_contacto", "empresa__codigo")
     ordering = ("-id",)
-    autocomplete_fields = ("prospecto",)
-    list_select_related = ("prospecto", "prospecto__empresa")
+    autocomplete_fields = ("empresa", "vendedor", "cliente")
+    list_select_related = ("empresa", "vendedor")
 
 
 @admin.register(Cotizacion)
