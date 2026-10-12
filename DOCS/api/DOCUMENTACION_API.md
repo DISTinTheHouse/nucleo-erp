@@ -1579,9 +1579,17 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
     | `cantidad_surtida_picking` | `str` | Cuántas ya están marcadas como surtidas en sus líneas de picking correspondientes. |
   - **Nuevo (SKU de producción de muestras)**: cada talla de `detalles[].tallas[]` trae `sku_produccion` (`string | null`, solo lectura): el `sku` de la `VarianteProductoProduccion` activa de esa línea + talla (la que genera `variante-onboarding` en producción) — es decir, el SKU que copiaría `POST /pedidos/{id}/vincular-sku-muestra/`.
     - `null` si la línea no es muestra (`producto_nombre_externo` `null` o `""`; un nombre de solo espacios **sí** cuenta como muestra, mismo criterio que `pedidos-especiales` en producción), si la talla aún no tiene variante activa, o si la variante no tiene `sku`.
-    - Junto con `sku_muestra` (mismo objeto) da los tres estados sin llamar a producción: `sku_produccion` con valor y `sku_muestra` `null` → hay SKU listo para vincular; iguales → vinculado; distintos → `sku_muestra` quedó desfasado.
-    - Mismo criterio que usa `vincular-sku-muestra` para buscar la variante (activa, por línea + talla, con `sku`), con una diferencia: ese endpoint **no** exige que la línea siga siendo muestra.
-    - Viaja en todas las respuestas que devuelven el pedido completo (`GET`/`POST`/`PATCH` de `/pedidos/`, `pedido` de `editar-mesa-control` y de autorizar cotización). No está en el listado ni en `/pedido-detalle-talla/`. Sin consultas por talla.
+    - Junto con `sku_muestra` (mismo objeto) da los estados sin llamar a producción:
+      | `sku_produccion` | `sku_muestra` | Estado |
+      |---|---|---|
+      | `null` | `null` | Sin SKU de producción todavía (o la línea no es muestra). |
+      | valor | `null` | Hay SKU listo para vincular. |
+      | valor | mismo valor | Vinculado. |
+      | valor | otro valor | `sku_muestra` quedó desfasado. |
+      | `null` | valor | Vinculado, pero ya no hay SKU de producción visible para esa talla: la línea se convirtió a producto de catálogo, o se cambió la `talla` (o el propio `sku_muestra`) por el `PATCH` genérico de `/pedido-detalle-talla/`. |
+    - Mismo criterio que usa `vincular-sku-muestra` para buscar la variante (activa, por línea + talla, con `sku`), con una excepción conocida: ese endpoint **no** exige que la línea siga siendo muestra, así que en una línea convertida a catálogo el campo va en `null` aunque el endpoint todavía la vincule.
+    - Viaja en todas las respuestas que devuelven el pedido completo (`GET`/`POST`/`PATCH`/`PUT` de `/pedidos/`, `pedido` de `editar-mesa-control` y de autorizar cotización). No está en el listado ni en `/pedido-detalle-talla/`.
+    - Costo: **una** consulta por petición para todo el pedido, nunca por línea ni por talla. En `GET`, `editar-mesa-control` y autorizar va en el prefetch del pedido (corre aunque no haya muestras); en la respuesta de `PATCH`/`PUT` se suma una más, y solo si el pedido tiene alguna línea de muestra.
   - **Ya existente**: `documentos[]` — lista de todos los documentos ligados al pedido (1 solo query por relación, prefetch optimizado).
     - **Shape de cada entrada**:
       ```ts

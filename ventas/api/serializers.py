@@ -10,7 +10,10 @@ from ventas.models import (
     PedidoDetalleTalla,
     PedidoServicioExtra,
 )
-from ventas.services.sku_produccion_service import skus_produccion_por_talla
+from ventas.services.sku_produccion_service import (
+    cargar_variantes_produccion,
+    skus_produccion_por_talla,
+)
 
 
 # --- Aislamiento multi-tenant de las FKs en ESCRITURA (#249) -------------------
@@ -368,7 +371,8 @@ class PedidoDetalleTallaReadSerializer(serializers.ModelSerializer):
     línea de MUESTRA (``catalogo.VarianteProductoProduccion``) — el que copiaría
     ``vincular-sku-muestra`` a ``sku_muestra``. ``None`` si la línea no es
     muestra o la talla aún no tiene SKU. Lo resuelve el renglón padre
-    (``PedidoDetalleReadSerializer.get_tallas``) y llega por contexto.
+    (``PedidoDetalleReadSerializer.get_tallas``) y llega por contexto; usado
+    sin ese contexto lo calcula él mismo, una vez por renglón.
     """
 
     talla_nombre = serializers.CharField(source="talla.nombre", read_only=True)
@@ -383,7 +387,14 @@ class PedidoDetalleTallaReadSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def get_sku_produccion(self, obj):
-        return (self.context.get("_skus_produccion_por_talla") or {}).get(obj.talla_id)
+        skus = self.context.get("_skus_produccion_por_talla")
+        if skus is None:
+            # Fuera de ``get_tallas``: mismo helper, cacheado por renglón.
+            cache = self.__dict__.setdefault("_skus_produccion_cache", {})
+            if obj.pedido_detalle_id not in cache:
+                cache[obj.pedido_detalle_id] = skus_produccion_por_talla(obj.pedido_detalle)
+            skus = cache[obj.pedido_detalle_id]
+        return skus.get(obj.talla_id)
 
     def get_variante_nombre(self, obj):
         if not obj.variante_id:
@@ -698,8 +709,15 @@ class PedidoSerializer(serializers.ModelSerializer):
         # que había aquí clonaba el queryset, descartaba ``_result_cache`` y
         # re-ejecutaba tanto la consulta de ``detalles`` como su prefetch anidado
         # de ``tallas``.
+        #
+        # ``list(...)`` reutiliza ese mismo caché cuando hay prefetch. Cuando no
+        # lo hay (respuesta de un PATCH o del alta), ``cargar_variantes_produccion``
+        # trae las variantes de ``sku_produccion`` de TODO el pedido en una
+        # consulta, en vez de una por renglón de muestra.
+        detalles = list(obj.detalles.all())
+        cargar_variantes_produccion(detalles)
         child = PedidoDetalleReadSerializer(
-            instance=obj.detalles.all(),
+            instance=detalles,
             many=True,
             context=ctx_safe,
         )

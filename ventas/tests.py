@@ -2158,6 +2158,9 @@ class PedidoDetalleSkuProduccionTests(TestCase):
             persona_pagos="Pagos", correo_facturas="pagos@acme3.test",
             telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
         )
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="PEDIDO", serie="P"
+        )
 
     def _linea(self, nombre="Gorra muestra", tallas=None):
         detalle = PedidoDetalle.objects.create(
@@ -2236,6 +2239,110 @@ class PedidoDetalleSkuProduccionTests(TestCase):
         with CaptureQueriesContext(connection) as grande:
             self._get()
         self.assertEqual(len(chico), len(grande))
+
+    # --- respuestas que no pasan por el prefetch del viewset ------------------
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        return client
+
+    def _patch(self):
+        """PATCH del pedido -> (respuesta, nº de consultas sobre las variantes)."""
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self._client().patch(
+                f"{PEDIDOS_URL}{self.pedido.pk}/", {"observaciones": "x"}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp, sum("variantes_producto_produccion" in q["sql"] for q in ctx)
+
+    def test_patch_responde_sku_sin_consultas_por_linea(self):
+        """DRF vacía el prefetch tras guardar: el PATCH responde con una sola
+        consulta de variantes para todo el pedido, no una por línea."""
+        self._variante(self._linea())
+        _, chico = self._patch()
+        esperado = {}
+        for _ in range(4):
+            detalle = self._linea(tallas=(self.talla_m, self.talla_l))
+            variante = self._variante(detalle, self.talla_m)
+            esperado[detalle.pk] = {"M": variante.sku, "L": None}
+        resp, grande = self._patch()
+        self.assertEqual(chico, grande)
+        lineas = {d["id"]: d for d in resp.json()["detalles"]}
+        for detalle_id, skus in esperado.items():
+            self.assertEqual(
+                {t["talla_nombre"]: t["sku_produccion"] for t in lineas[detalle_id]["tallas"]},
+                skus,
+            )
+
+    def test_alta_de_pedido_responde_sin_renglones(self):
+        """El alta no escribe renglones (``detalles`` es de sólo lectura): no
+        hay talla que lleve el campo, y tampoco debe tronar sin prefetch."""
+        resp = self._client().post(
+            PEDIDOS_URL,
+            {
+                "sucursal": self.sucursal.pk, "cliente": self.cliente.pk, "moneda": self.moneda.pk,
+                "persona_pagos": "Pagos", "correo_facturas": "pagos@acme3.test",
+                "telefono_pagos": "8100000000", "forma_pago": "03", "metodo_pago": "PUE",
+                "uso_cfdi": "G03",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()["detalles"], [])
+
+    def test_autorizar_cotizacion_responde_sku_produccion_none(self):
+        """El pedido recién creado aún no pasó por producción: el campo viaja en ``null``."""
+        cotizacion = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.admin, sucursal=self.sucursal,
+            cliente=self.cliente, moneda=self.moneda, estatus=2,
+            persona_pagos="Pagos", correo_facturas="pagos@acme3.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        cot_det = CotizacionDetalle.objects.create(
+            cotizacion=cotizacion, producto_nombre_externo="Gorra muestra", color=self.color,
+        )
+        CotizacionDetalleTalla.objects.create(cotizacion_detalle=cot_det, talla=self.talla_m, cantidad=5)
+        resp = self._client().post(f"{COTIZACIONES_URL}{cotizacion.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        tallas = resp.json()["pedido"]["detalles"][0]["tallas"]
+        self.assertEqual([t["sku_produccion"] for t in tallas], [None])
+
+    def test_sin_prefetch_una_consulta_para_todo_el_pedido(self):
+        from ventas.services.sku_produccion_service import (
+            cargar_variantes_produccion,
+            skus_produccion_por_talla,
+        )
+
+        esperado = {}
+        for _ in range(3):
+            detalle = self._linea(tallas=(self.talla_m, self.talla_l))
+            esperado[detalle.pk] = {self.talla_m.pk: self._variante(detalle, self.talla_m).sku}
+        detalles = list(PedidoDetalle.objects.filter(pedido=self.pedido))
+        with self.assertNumQueries(1):
+            cargar_variantes_produccion(detalles)
+        with self.assertNumQueries(0):
+            self.assertEqual({d.pk: skus_produccion_por_talla(d) for d in detalles}, esperado)
+
+    def test_sin_prefetch_una_linea_suelta_hace_una_consulta(self):
+        from ventas.services.sku_produccion_service import skus_produccion_por_talla
+
+        detalle = self._linea(tallas=(self.talla_m, self.talla_l))
+        variante = self._variante(detalle, self.talla_l)
+        detalle = PedidoDetalle.objects.get(pk=detalle.pk)
+        with self.assertNumQueries(1):
+            self.assertEqual(skus_produccion_por_talla(detalle), {self.talla_l.pk: variante.sku})
+
+    def test_serializer_de_talla_sin_contexto_resuelve_el_sku(self):
+        """Usado fuera de ``get_tallas`` (sin la llave de contexto) no devuelve
+        un ``None`` indistinguible de "no hay SKU"."""
+        from ventas.api.serializers import PedidoDetalleTallaReadSerializer
+
+        detalle = self._linea(tallas=(self.talla_m, self.talla_l))
+        variante = self._variante(detalle, self.talla_m)
+        tallas = PedidoDetalleTalla.objects.filter(pedido_detalle=detalle).order_by("id")
+        data = PedidoDetalleTallaReadSerializer(tallas, many=True).data
+        self.assertEqual([t["sku_produccion"] for t in data], [variante.sku, None])
 
 
 class PedidoDestinosAplicablesTests(TestCase):
