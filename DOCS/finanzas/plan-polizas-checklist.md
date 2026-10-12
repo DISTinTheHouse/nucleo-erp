@@ -60,8 +60,8 @@ Detalle: `DOCS/finanzas/motor-polizas.md`.
 - [x] Movimiento bancario
 
 ## F5 Cancelación de factura
-- [ ] Acción `cancelar` en facturas (estatus, CxC, contrapóliza mismo día)
-- [ ] Guardar UUID del CFDI y cancelarlo en Facturama
+- [x] Acción `cancelar` en facturas (estatus, CxC, contrapóliza mismo día)
+- [ ] Guardar UUID del CFDI y cancelarlo en Facturama (hoy `Factura` no lo guarda y la emisión del CFDI es un endpoint aparte)
 
 ## F6 Factura parcial
 - [ ] Emisión por parcialidad con CxC y póliza

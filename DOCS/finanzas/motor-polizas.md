@@ -76,3 +76,19 @@ API: `POST /api/v1/finanzas/polizas/{id}/cancelar/` responde la póliza original
 - **Movimiento bancario:** solo los manuales (sin cobro ni pago; esos salen en su documento). La contrapartida es `cuenta_contable_contrapartida` del movimiento o, si no trae, el concepto `ContrapartidaMovimientoCargo` / `ContrapartidaMovimientoAbono`. Cancelarlo crea la contrapóliza.
 - **Sucursal:** la de la factura (nota y factura de proveedor); en el movimiento, la del usuario o la primera activa de la empresa.
 - Con la contabilización apagada ninguno genera póliza. Sin cuenta configurada el documento responde 400 y no se guarda.
+
+## Cancelar una factura de venta
+
+`POST /api/v1/finanzas/facturas/{id}/cancelar/` con `motivo` opcional (se agrega a `observaciones`). Responde la factura con `contrapoliza_id`.
+
+| Factura | Qué pasa |
+|---|---|
+| Emitida | Pasa a Cancelada, su CxC a Cancelada y se crea la contrapóliza, fechada hoy. |
+| Borrador | Pasa a Cancelada. No hay CxC ni póliza. |
+| Cancelada | No hace nada. No duplica la contrapóliza. |
+
+- **Con cobros aplicados se puede cancelar.** Los cobros y su póliza no se tocan: en la cuenta Clientes queda el importe cobrado como saldo a favor.
+- **Con notas de crédito Emitidas responde 400.** Hay que cancelar las notas primero.
+- Después de cancelar no se puede cobrar la factura, el pedido puede volver a facturarse y la alerta de mora la excluye.
+- Con la contabilización apagada cancela sin póliza.
+- **Pendiente:** cancelar el CFDI en Facturama. `Factura` no guarda el UUID y la emisión del CFDI es un endpoint aparte, sin liga a la factura.

@@ -56,3 +56,8 @@ class FacturaPolizaService:
             lineas=FacturaPolizaService.lineas(factura),
             usuario=usuario,
         )
+
+    @staticmethod
+    def cancelar(factura, usuario=None):
+        """Contrapóliza de la factura, fechada hoy. Sin póliza no hace nada."""
+        return PolizaMotorService.cancelar_de(ORIGEN, factura.pk, usuario)
