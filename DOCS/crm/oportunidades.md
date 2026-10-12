@@ -78,3 +78,11 @@ Toda la pantalla de una oportunidad en una llamada:
 `cartera` sale vacía si la oportunidad no tiene cliente. `pedido_id` y `pedido_folio` son `null` hasta que mesa de control crea el pedido.
 
 Rendimiento: el onboarding y los pendientes hacen un número fijo de consultas.
+
+## Buscador global
+
+Las oportunidades salen en `GET /api/v1/search/?q=` como el grupo `oportunidad` (al final de `grupos`).
+
+- Se busca por subcadena en `titulo` y `nombre_contacto`, con 3 o más caracteres.
+- Cada fila: `tipo`, `id`, `codigo` (siempre `null`), `titulo`, `subtitulo` (contacto o cliente) y `estatus` (el estado calculado).
+- El grupo aparece con la clave `R-CRM-OPORTUNIDADES` o con `R-CRM`. El vendedor solo ve las suyas; el admin de empresa, las de su empresa.

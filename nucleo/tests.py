@@ -28,7 +28,9 @@ from produccion.models import OrdenesBordado, OrdenesCorteManga, OrdenesReflejan
 from seguridad.models import Permiso, Rol, RolPermiso, UsuarioPermiso, UsuarioRol
 from terceros.models import Cliente
 from usuarios.models import Usuario
-from ventas.models import Cotizacion, Pedido
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+from ventas.models import Cotizacion, Oportunidad, Pedido
 
 SEARCH_URL = "/api/v1/search/"
 COTIZACIONES_URL = "/api/v1/ventas/cotizaciones/"
@@ -37,7 +39,7 @@ COTIZACIONES_URL = "/api/v1/ventas/cotizaciones/"
 #: orden del ``REGISTRO``.
 TODOS_LOS_TIPOS = [
     "pedido", "orden_bordado", "orden_reflejante", "orden_corte_manga",
-    "cliente", "cotizacion", "producto", "factura",
+    "cliente", "cotizacion", "producto", "factura", "oportunidad",
 ]
 
 
@@ -1538,3 +1540,79 @@ class HealthChecksTests(TestCase):
         self.assertFalse(body["ok"])
         self.assertFalse(body["checks"]["database"]["ok"])
         self.assertIn("conexión rechazada", body["checks"]["database"]["error"])
+
+
+class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
+    """El buscador global incluye las oportunidades del CRM."""
+
+    def _oportunidad(self, tenant, vendedor, titulo="Uniformes escolares", **extra):
+        return Oportunidad.objects.create(
+            empresa=tenant["empresa"], vendedor=vendedor, titulo=titulo, **extra
+        )
+
+    def test_encuentra_por_titulo_y_por_contacto(self):
+        por_titulo = self._oportunidad(self.a, self.a["admin"], "Playeras Bordadas")
+        por_contacto = self._oportunidad(self.a, self.a["admin"], "Otro", nombre_contacto="Luis Playero")
+
+        ids = self._ids(self._buscar(self.a["admin"], "playe"), "oportunidad")
+
+        self.assertCountEqual(ids, [por_titulo.pk, por_contacto.pk])
+
+    def test_la_fila_trae_titulo_contacto_y_estado(self):
+        op = self._oportunidad(self.a, self.a["admin"], "Chamarras", nombre_contacto="Ana")
+        Cotizacion.objects.create(
+            empresa=self.a["empresa"], vendedor=self.a["admin"], oportunidad=op, estatus=3
+        )
+
+        grupo = next(
+            g for g in self._buscar(self.a["admin"], "chamarras")["grupos"] if g["tipo"] == "oportunidad"
+        )
+
+        self.assertEqual(grupo["resultados"][0], {
+            "tipo": "oportunidad", "id": op.pk, "codigo": None,
+            "titulo": "Chamarras", "subtitulo": "Ana", "estatus": "Ganada",
+        })
+
+    def test_el_vendedor_solo_ve_las_suyas_y_otra_empresa_ninguna(self):
+        mia = self._oportunidad(self.a, self.vendedor_a)
+        self._oportunidad(self.a, self.a["admin"])          # de otro vendedor
+        self._oportunidad(self.b, self.b["admin"])          # de otra empresa
+        rol = self._rol_con(self.a["empresa"], "oportunidades-test", ["R-CRM-OPORTUNIDADES"])
+        UsuarioRol.objects.create(usuario=self.vendedor_a, rol=rol, empresa=self.a["empresa"])
+
+        vendedor = self._ids(self._buscar(self.vendedor_a, "uniformes"), "oportunidad")
+        admin = self._ids(self._buscar(self.a["admin"], "uniformes"), "oportunidad")
+
+        self.assertEqual(vendedor, [mia.pk])
+        self.assertEqual(len(admin), 2)
+
+    def test_las_dadas_de_baja_no_salen(self):
+        self._oportunidad(self.a, self.a["admin"], activo=False)
+
+        self.assertEqual(self._ids(self._buscar(self.a["admin"], "uniformes"), "oportunidad"), [])
+
+    def test_el_grupo_se_omite_sin_permiso_y_aparece_con_r_crm(self):
+        self._oportunidad(self.a, self.vendedor_a)
+
+        sin_permiso = [g["tipo"] for g in self._buscar(self.vendedor_a, "uniformes")["grupos"]]
+        rol = self._rol_con(self.a["empresa"], "crm-modulo-test", ["R-CRM"])
+        UsuarioRol.objects.create(usuario=self.vendedor_a, rol=rol, empresa=self.a["empresa"])
+        con_modulo = [g["tipo"] for g in self._buscar(self.vendedor_a, "uniformes")["grupos"]]
+
+        self.assertNotIn("oportunidad", sin_permiso)
+        self.assertIn("oportunidad", con_modulo)
+
+    def test_las_consultas_no_crecen_con_los_resultados(self):
+        self._oportunidad(self.a, self.a["admin"])
+        self._buscar(self.a["admin"], "uniformes")
+
+        with CaptureQueriesContext(connection) as pocas:
+            self._buscar(self.a["admin"], "uniformes")
+        for i in range(20):
+            op = self._oportunidad(self.a, self.a["admin"], f"Uniformes {i}", cliente=self.a["cliente"])
+            Cotizacion.objects.create(empresa=self.a["empresa"], vendedor=self.a["admin"], oportunidad=op)
+        with CaptureQueriesContext(connection) as muchas:
+            self._buscar(self.a["admin"], "uniformes")
+
+        self.assertEqual(len(pocas), len(muchas))
+

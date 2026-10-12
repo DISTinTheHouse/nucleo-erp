@@ -59,6 +59,13 @@ class Oportunidad(StatusLifecycleModel):
         verbose_name = "Oportunidad"
         verbose_name_plural = "Oportunidades"
         indexes = [
+            # Búsqueda del buscador global (``icontains``): ver ``terceros.Cliente``.
+            GinIndexSoloPostgres(
+                OpClass(Upper("titulo"), name="gin_trgm_ops"), name="oport_titulo_upper_trgm"
+            ),
+            GinIndexSoloPostgres(
+                OpClass(Upper("nombre_contacto"), name="gin_trgm_ops"), name="oport_contacto_upper_trgm"
+            ),
             models.Index(fields=["empresa", "vendedor", "etapa"], name="ix_oport_emp_vend_etapa"),
             models.Index(fields=["empresa", "vendedor", "proximo_contacto"], name="ix_oport_emp_vend_contacto"),
         ]
