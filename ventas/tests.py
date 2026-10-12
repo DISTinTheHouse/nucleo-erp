@@ -2212,11 +2212,18 @@ class PedidoDetalleSkuProduccionTests(TestCase):
                 self.assertEqual(self._skus(detalle), {"M": None})
 
     def test_linea_que_no_es_muestra_es_none_aunque_tenga_variante(self):
-        for nombre in (None, "", "   "):
+        for nombre in (None, ""):
             with self.subTest(nombre=nombre):
                 detalle = self._linea(nombre=nombre)
                 self._variante(detalle)
                 self.assertEqual(self._skus(detalle), {"M": None})
+
+    def test_nombre_externo_de_solo_espacios_cuenta_como_muestra(self):
+        """Mismo criterio que producción (``_detalles_especiales_qs``): esa
+        línea aparece en ``pedidos-especiales`` y puede recibir SKU."""
+        detalle = self._linea(nombre="   ")
+        variante = self._variante(detalle)
+        self.assertEqual(self._skus(detalle), {"M": variante.sku})
 
     def test_queries_constantes_sin_importar_lineas_ni_tallas(self):
         self._variante(self._linea())

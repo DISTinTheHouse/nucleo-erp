@@ -48,7 +48,10 @@ def skus_produccion_por_talla(pedido_detalle):
     Lee lo que dejó ``variantes_produccion_prefetch()``; sin ese prefetch cae a
     una consulta por línea (nunca por talla).
     """
-    if not (pedido_detalle.producto_nombre_externo or "").strip():
+    # Mismo criterio de "muestra" que producción (fuente de verdad:
+    # ``produccion.api.views._detalles_especiales_qs``): null y ``""`` no
+    # cuentan; un nombre con sólo espacios sí.
+    if not pedido_detalle.producto_nombre_externo:
         return {}
     variantes = getattr(pedido_detalle, VARIANTES_PRODUCCION_ATTR, None)
     if variantes is None:
