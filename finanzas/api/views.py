@@ -91,6 +91,7 @@ from finanzas.services.movimiento_bancario_service import MovimientoBancarioServ
 from finanzas.services.nota_credito_service import NotaCreditoService
 from finanzas.services.pago_service import PagoService
 from finanzas.services.plan_contable_service import PlanContableService
+from finanzas.services.factura_cancelacion_service import FacturaCancelacionService
 from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
@@ -777,6 +778,16 @@ class FacturaViewSet(FinanzasBaseViewSet):
             FacturaSerializer(factura).data,
             status=status.HTTP_201_CREATED,
         )
+
+    @action(detail=True, methods=['post'], url_path='cancelar', url_name='cancelar')
+    def cancelar(self, request, pk=None):
+        """Cancela la factura y su CxC y crea la contrapóliza del día. Los cobros aplicados no se tocan."""
+        factura = self.get_object()
+        motivo = (request.data.get('motivo') or '').strip()[:200]
+        contrapoliza = FacturaCancelacionService.cancelar(factura, request.user, motivo)
+        data = dict(FacturaSerializer(factura).data)
+        data['contrapoliza_id'] = contrapoliza.pk if contrapoliza else None
+        return Response(data)
 
     @action(detail=True, methods=['get'], url_path='previsualizar-poliza', url_name='previsualizar-poliza')
     def previsualizar_poliza(self, request, pk=None):
