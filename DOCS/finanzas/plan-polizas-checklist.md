@@ -79,7 +79,6 @@ Detalle: `DOCS/finanzas/motor-polizas.md`.
 ## F9 Trazabilidad y reportes
 - [x] Rastro por documento: `GET /polizas/?origen_tipo=&origen_id=`
 - [x] Libro diario, auxiliar de cuenta y balanza de comprobación (`DOCS/finanzas/reportes-contables.md`)
-- [ ] Libro diario, auxiliar y balanza de comprobación
 
 ## Preguntas abiertas para contabilidad
 - [ ] Factura cancelada con cobros: ¿saldo a favor del cliente o se cancelan también los cobros?
