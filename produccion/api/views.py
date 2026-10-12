@@ -1759,9 +1759,20 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                     'pedido_detalle_id': 'No es una línea de producción especial de este pedido.'
                 })
 
-            # Antes que cualquier validación de color: en un reintento lo que
-            # importa es que la línea ya no admite otra alta.
-            if VarianteProductoProduccion.objects.filter(pedido_detalle=detalle).exists():
+            # El alta es incremental: un reintento sólo genera SKU para las
+            # tallas con cantidad que aún no tienen variante (talla en 0 durante
+            # el primer alta o agregada después con editar-mesa-control). Antes
+            # que cualquier validación de color: si no falta ninguna, la línea
+            # ya no admite otra alta.
+            tallas_con_variante = set(
+                VarianteProductoProduccion.objects.filter(pedido_detalle=detalle)
+                .values_list('talla_id', flat=True)
+            )
+            if tallas_con_variante and not (
+                PedidoDetalleTalla.objects.filter(pedido_detalle=detalle, cantidad__gt=0)
+                .exclude(talla_id__in=tallas_con_variante)
+                .exists()
+            ):
                 raise ValidationError(YA_TIENE_SKU)
 
             color_body = serializer.validated_data.get('color')
@@ -1797,6 +1808,7 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
 
             tallas = list(
                 PedidoDetalleTalla.objects.filter(pedido_detalle=detalle, cantidad__gt=0)
+                .exclude(talla_id__in=tallas_con_variante)
                 .select_related("talla")
             )
             if not tallas:

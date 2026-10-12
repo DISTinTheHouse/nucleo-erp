@@ -105,6 +105,16 @@ def _merge_detalle(rows):
     return list(agrupado.values())
 
 def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
+    # Las líneas se recrean: el ``sku_muestra`` (lo escribe sólo
+    # ``vincular-sku-muestra``) se arrastra por (nombre externo, color, talla)
+    # para que no se pierda en cada edición.
+    sku_muestra_previo = {
+        (t.cotizacion_detalle.producto_nombre_externo, t.cotizacion_detalle.color_id, t.talla_id): t.sku_muestra
+        for t in CotizacionDetalleTalla.objects.filter(
+            cotizacion_detalle__cotizacion=cotizacion_obj,
+            cotizacion_detalle__producto__isnull=True,
+        ).exclude(sku_muestra__isnull=True).exclude(sku_muestra="").select_related("cotizacion_detalle")
+    }
     CotizacionDetalle.objects.filter(cotizacion=cotizacion_obj).delete()
     rows = _merge_detalle(rows)
     for item in rows:
@@ -247,13 +257,6 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                     }
                 )
 
-            codigo_producto = (getattr(producto, "codigo", None) or "").strip() if producto else ""
-            codigo_color = (getattr(color_obj, "codigo", None) or "").strip()
-            codigo_talla = (getattr(talla, "nombre", None) or "").strip()
-            sku_snapshot = f"{codigo_producto}{codigo_color}{codigo_talla}".replace(
-                " ", ""
-            ).upper()
-
             variante_obj = None
             if producto:
                 variante_obj = ProductoVariante.objects.filter(
@@ -262,6 +265,20 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                     talla=talla,
                     empresa=cotizacion_obj.empresa
                 ).first()
+
+            # Sólo hay SKU con producto de catálogo: una línea de muestra no
+            # tiene (``None``) y el de producción vive en ``sku_muestra``. Con
+            # variante manda ``variante.sku``; sin ella, el armado por códigos.
+            sku_snapshot = None
+            if producto:
+                sku_snapshot = getattr(variante_obj, "sku", None)
+                if not sku_snapshot:
+                    codigo_producto = (getattr(producto, "codigo", None) or "").strip()
+                    codigo_color = (getattr(color_obj, "codigo", None) or "").strip()
+                    codigo_talla = (getattr(talla, "nombre", None) or "").strip()
+                    sku_snapshot = f"{codigo_producto}{codigo_color}{codigo_talla}".replace(
+                        " ", ""
+                    ).upper()
 
             CotizacionDetalleTalla.objects.create(
                 cotizacion_detalle=cot_det,
@@ -278,6 +295,9 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                 lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
                 cambio_talla_config=t.get("cambio_talla_config"),
                 sku=sku_snapshot or None,
+                sku_muestra=sku_muestra_previo.get(
+                    (producto_nombre_externo, getattr(color_obj, "pk", None), talla.pk)
+                ) if not producto else None,
                 requiere_produccion=bool(producto_nombre_externo),
                 variante=variante_obj
             )
@@ -487,6 +507,9 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
             talla_existente.cambio_talla_config = t.get("cambio_talla_config")
             talla_existente.requiere_produccion = bool(producto_nombre_externo)
             talla_existente.variante = variante_obj
+            if producto:
+                # La línea ya es de catálogo: el SKU de muestra no aplica.
+                talla_existente.sku_muestra = None
             talla_existente.save()
             tallas_usadas.add(talla_existente.pk)
 

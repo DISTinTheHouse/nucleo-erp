@@ -2670,6 +2670,10 @@ class RechazarCambiosCotizacionTests(TestCase):
         )
         cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
         cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        # ``autorizar`` exige una Serie/Folio activa de PEDIDO en la sucursal.
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="PEDIDO", serie="P"
+        )
 
     def setUp(self):
         self.client = APIClient()
@@ -4596,3 +4600,101 @@ class OportunidadesValidacionesTests(OportunidadesBase):
             with self.subTest(campo=campo):
                 resp = self._client(self.jefe).get(OPORTUNIDADES_URL, {"ordering": campo})
                 self.assertIn(resp.status_code, (200, 400))
+
+
+class SkuMuestraCotizacionTests(TestCase):
+    """#449/#437/#438/#441: SKU de muestras en cotización, ``sku_muestra`` y
+    respuestas de escritura del pedido."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-sku", razon_social="ACME SKU SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="SKU", nombre="Matriz")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.talla = Talla.objects.create(nombre="CH")
+        cls.otra_talla = Talla.objects.create(nombre="GR")
+        cls.color = Color.objects.create(nombre="Azul", codigo="802", codigo_hex="#00F")
+        cls.admin = Usuario.objects.create(
+            username="admin@acme-sku.test", email="admin@acme-sku.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(
+            username="vend@acme-sku.test", email="vend@acme-sku.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.cotizacion = Cotizacion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente,
+            moneda=cls.moneda, vendedor=cls.admin,
+        )
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente,
+            moneda=cls.moneda, folio="P-SKU01",
+            persona_pagos="Pagos", correo_facturas="p@acme-sku.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+
+    def _rows(self):
+        return [{
+            "producto_nombre_externo": "Gorra muestra",
+            "color": self.color.pk,
+            "precio_unitario": "10",
+            "tallas": [{"talla": self.talla.pk, "cantidad": 2, "precio_unitario": "10"}],
+        }]
+
+    def _tallas_cotizacion(self):
+        return CotizacionDetalleTalla.objects.filter(cotizacion_detalle__cotizacion=self.cotizacion)
+
+    def test_linea_de_muestra_no_guarda_sku_de_concatenacion(self):
+        _save_cotizacion_detalle(self.cotizacion, self._rows(), self.empresa, self.admin)
+        self.assertEqual([t.sku for t in self._tallas_cotizacion()], [None])
+
+    def test_editar_cotizacion_conserva_sku_muestra(self):
+        _save_cotizacion_detalle(self.cotizacion, self._rows(), self.empresa, self.admin)
+        self._tallas_cotizacion().update(sku_muestra="MP1-802-CH")
+        _save_cotizacion_detalle(self.cotizacion, self._rows(), self.empresa, self.admin)
+        self.assertEqual([t.sku_muestra for t in self._tallas_cotizacion()], ["MP1-802-CH"])
+
+    def test_pedido_detalle_talla_patch_no_escribe_sku_muestra_ni_cambia_talla(self):
+        det = PedidoDetalle.objects.create(
+            pedido=self.pedido, producto_nombre_externo="Gorra muestra", color=self.color
+        )
+        dt = PedidoDetalleTalla.objects.create(
+            pedido_detalle=det, talla=self.talla, cantidad=2, sku_muestra="MP1-802-CH"
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.vendedor)
+        url = f"{PEDIDO_DETALLE_TALLA_URL}{dt.pk}/"
+        resp = client.patch(url, {"sku_muestra": "LO-QUE-SEA", "cantidad": 3}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        dt.refresh_from_db()
+        self.assertEqual((dt.sku_muestra, dt.cantidad), ("MP1-802-CH", 3))
+        resp = client.patch(url, {"talla": self.otra_talla.pk}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_patch_pedido_no_crece_con_los_renglones(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        url = f"{PEDIDOS_URL}{self.pedido.pk}/"
+
+        def consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                resp = client.patch(url, {"observaciones": "x"}, format="json")
+            self.assertEqual(resp.status_code, 200, resp.content)
+            return len(ctx), resp
+
+        for _ in range(1):
+            det = PedidoDetalle.objects.create(
+                pedido=self.pedido, producto_nombre_externo="Uno", color=self.color
+            )
+            PedidoDetalleTalla.objects.create(pedido_detalle=det, talla=self.talla, cantidad=1)
+        base, _ = consultas()
+        for i in range(4):
+            det = PedidoDetalle.objects.create(
+                pedido=self.pedido, producto_nombre_externo=f"Otro {i}", color=self.color
+            )
+            PedidoDetalleTalla.objects.create(pedido_detalle=det, talla=self.talla, cantidad=1)
+        mas, resp = consultas()
+        self.assertEqual(base, mas)
+        ids = [d["id"] for d in resp.data["detalles"]]
+        self.assertEqual(ids, sorted(ids))
