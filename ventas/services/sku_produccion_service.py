@@ -3,7 +3,11 @@
 Única definición de "esta talla ya tiene SKU de producción" en ventas: variante
 ACTIVA de esa (``pedido_detalle``, ``talla``) y con ``sku`` no vacío. La usan el
 campo ``sku_produccion`` del detalle del pedido y ``vincular-sku-muestra``, para
-que lo que el detalle anuncia como vinculable sea exactamente lo que el clic copia.
+que busquen la variante con el mismo criterio.
+
+Excepción conocida: el campo además exige que la línea siga siendo MUESTRA y
+``vincular-sku-muestra`` no. En una línea que dejó de serlo (convertida a producto
+de catálogo) el campo va en ``None`` aunque el endpoint todavía la vincule.
 """
 
 from django.db.models import Prefetch
@@ -42,16 +46,41 @@ def variante_produccion_de_talla(pedido_detalle_id, talla_id):
     return variante
 
 
-def skus_produccion_por_talla(pedido_detalle):
-    """``{talla_id: sku}`` de una línea de MUESTRA; ``{}`` si no lo es.
-
-    Lee lo que dejó ``variantes_produccion_prefetch()``; sin ese prefetch cae a
-    una consulta por línea (nunca por talla).
-    """
+def _es_muestra(pedido_detalle):
     # Mismo criterio de "muestra" que producción (fuente de verdad:
     # ``produccion.api.views._detalles_especiales_qs``): null y ``""`` no
     # cuentan; un nombre con sólo espacios sí.
-    if not pedido_detalle.producto_nombre_externo:
+    return bool(pedido_detalle.producto_nombre_externo)
+
+
+def cargar_variantes_produccion(pedido_detalles):
+    """Deja en cada línea de muestra lo mismo que ``variantes_produccion_prefetch()``.
+
+    Para renglones que llegan SIN ese prefetch (DRF lo vacía tras un PATCH; el
+    alta no lo trae): UNA consulta para todos, en vez de una por línea. Con el
+    prefetch presente no consulta nada.
+    """
+    pendientes = {
+        detalle.pk: detalle
+        for detalle in pedido_detalles
+        if _es_muestra(detalle) and not hasattr(detalle, VARIANTES_PRODUCCION_ATTR)
+    }
+    if not pendientes:
+        return
+    for detalle in pendientes.values():
+        setattr(detalle, VARIANTES_PRODUCCION_ATTR, [])
+    for variante in variantes_produccion_activas().filter(pedido_detalle_id__in=pendientes):
+        getattr(pendientes[variante.pedido_detalle_id], VARIANTES_PRODUCCION_ATTR).append(variante)
+
+
+def skus_produccion_por_talla(pedido_detalle):
+    """``{talla_id: sku}`` de una línea de MUESTRA; ``{}`` si no lo es.
+
+    Lee lo que dejó ``variantes_produccion_prefetch()`` o
+    ``cargar_variantes_produccion()``; sin ninguno de los dos cae a una consulta
+    por línea (nunca por talla).
+    """
+    if not _es_muestra(pedido_detalle):
         return {}
     variantes = getattr(pedido_detalle, VARIANTES_PRODUCCION_ATTR, None)
     if variantes is None:
