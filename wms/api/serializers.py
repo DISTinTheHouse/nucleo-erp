@@ -3,6 +3,7 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from catalogo.models import Producto, ProductoVariante
+from inventarios.models import Almacen
 from logistica.models import Envio
 from wms.models import (
     Despacho,
@@ -346,6 +347,13 @@ class PickingSerializer(serializers.ModelSerializer):
 
     def get_lote_nombre(self, obj):
         return str(obj.lote) if obj.lote_id else None
+
+
+class PickingTrasladoSerializer(serializers.Serializer):
+    """Entrada de ``POST /pickings/{id}/trasladar/``: almacén al que se mueve."""
+
+    almacen = serializers.PrimaryKeyRelatedField(queryset=Almacen.objects.all())
+    observaciones = serializers.CharField(required=False, allow_blank=True)
 
 
 class PickingCreateSerializer(serializers.ModelSerializer):
