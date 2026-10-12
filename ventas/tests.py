@@ -4533,3 +4533,66 @@ class OportunidadSeguimientosTests(OportunidadesBase):
 
         self.assertEqual(len(pocas), len(muchas))
 
+
+
+class OportunidadesValidacionesTests(OportunidadesBase):
+    """Cliente visible, sucursal de la empresa y parámetros inválidos (400, no 500)."""
+
+    def test_no_se_liga_un_cliente_que_el_vendedor_no_ve(self):
+        resp = self._client(self.ana).post(OPORTUNIDADES_URL, {"titulo": "X", "cliente": self.cliente.pk})
+        self.assertEqual(resp.status_code, 400)
+
+        self.cliente.vendedores.add(self.ana)
+        resp = self._client(self.ana).post(OPORTUNIDADES_URL, {"titulo": "X", "cliente": self.cliente.pk})
+        self.assertEqual(resp.status_code, 201)
+
+    def test_no_se_liga_un_cliente_dado_de_baja(self):
+        self.cliente.vendedores.add(self.ana)
+        self.cliente.soft_delete()
+
+        resp = self._client(self.ana).post(OPORTUNIDADES_URL, {"titulo": "X", "cliente": self.cliente.pk})
+
+        self.assertEqual(resp.status_code, 400)
+
+    def test_onboarding_no_muestra_cartera_de_un_cliente_no_visible(self):
+        op = self._op(self.ana, cliente=self.cliente)
+
+        resp = self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
+
+        self.assertEqual(resp.data["cartera"], [])
+
+    def test_cotizar_rechaza_sucursal_de_otra_empresa(self):
+        otra_sucursal = Sucursal.objects.create(empresa=self.otra, codigo="GDL", nombre="GDL")
+        self.ana.sucursal_default = otra_sucursal
+        self.ana.save()
+        op = self._op(self.ana)
+
+        resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Cotizacion.objects.filter(oportunidad=op).exists())
+
+    def test_parametros_no_numericos_responden_400(self):
+        c = self._client(self.jefe)
+        for url, params in (
+            (OPORTUNIDADES_URL, {"cliente": "abc"}),
+            (OPORTUNIDADES_URL, {"vendedor": "abc"}),
+            (f"{OPORTUNIDADES_URL}embudo/", {"cliente": "abc"}),
+            (SEGUIMIENTOS_URL, {"oportunidad": "abc"}),
+        ):
+            with self.subTest(url=url, params=params):
+                self.assertEqual(c.get(url, params).status_code, 400)
+
+    def test_transferir_con_vendedor_no_numerico_es_400(self):
+        op = self._op(self.ana)
+
+        resp = self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", {"vendedor": "abc"})
+
+        self.assertEqual(resp.status_code, 400)
+
+    def test_ordering_invalido_no_truena(self):
+        self._op(self.ana)
+        for campo in ("zzz", "estado", "-cliente_nombre", "vendedor__password"):
+            with self.subTest(campo=campo):
+                resp = self._client(self.jefe).get(OPORTUNIDADES_URL, {"ordering": campo})
+                self.assertIn(resp.status_code, (200, 400))
