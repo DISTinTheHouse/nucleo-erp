@@ -371,7 +371,10 @@ ClienteViewSet = ClienteViewSetContabilidad
 
 class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
     serializer_class = CuentaPorCobrarSerializer
-    http_method_names = ['get', 'post', 'put', 'patch']
+    # Sin POST: una CxC nace de la factura (``uq_cxc_factura``). El alta manual daba
+    # 500 -- el serializer no recibe ``factura`` y la columna es NOT NULL-- y de
+    # funcionar habría creado saldos que ninguna póliza respalda.
+    http_method_names = ['get', 'put', 'patch']
 
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -1769,13 +1772,31 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
         instance.delete()
 
 
+def _validar_transicion_estatus_cobro_pago(Estatus, anterior, nuevo, documento):
+    """Un cobro/pago solo avanza: Borrador -> Aplicado/Cancelado y Aplicado -> Cancelado.
+
+    Regresar de Aplicado a Borrador dejaba los saldos descontados sin documento
+    que los respaldara, y un segundo Borrador -> Aplicado los descontaba de nuevo.
+    """
+    if nuevo == anterior:
+        return
+    permitidas = {
+        Estatus.BORRADOR: {Estatus.APLICADO, Estatus.CANCELADO},
+        Estatus.APLICADO: {Estatus.CANCELADO},
+    }
+    if nuevo not in permitidas.get(anterior, set()):
+        raise ValidationError(
+            {"estatus": f"No se puede pasar el {documento} de {anterior} a {nuevo}."}
+        )
+
+
 class CobroViewSet(FinanzasBaseViewSet):
     queryset = Cobro.objects.all()
     serializer_class = CobroSerializer
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset()
+        qs = super().get_queryset().filter(activo=True)
         if _puede_ver_todo(user):
             pass
         else:
@@ -1844,9 +1865,15 @@ class CobroViewSet(FinanzasBaseViewSet):
         if serializer.instance.estatus == Cobro.Estatus.CANCELADO:
             raise ValidationError("No se puede editar un cobro cancelado.")
         anterior_estatus = serializer.instance.estatus
+        nuevo_estatus = serializer.validated_data.get("estatus", anterior_estatus)
+        _validar_transicion_estatus_cobro_pago(Cobro.Estatus, anterior_estatus, nuevo_estatus, "cobro")
+        if nuevo_estatus == Cobro.Estatus.CANCELADO:
+            # El servicio decide qué revertir según el estatus PREVIO: si el
+            # ``save()`` ya lo hubiera cambiado, ``cancelar_cobro`` saldría por su
+            # guard de idempotencia sin devolver saldos ni banco.
+            serializer.validated_data["estatus"] = anterior_estatus
         cobro = serializer.save()
-        nuevo_estatus = cobro.estatus
-        if nuevo_estatus == Cobro.Estatus.CANCELADO and anterior_estatus != Cobro.Estatus.CANCELADO:
+        if nuevo_estatus == Cobro.Estatus.CANCELADO:
             CobroService.cancelar_cobro(cobro)
         elif nuevo_estatus == Cobro.Estatus.APLICADO and anterior_estatus != Cobro.Estatus.APLICADO:
             CobroService.aplicar_cobro(cobro)
@@ -1860,7 +1887,13 @@ class CobroViewSet(FinanzasBaseViewSet):
         with transaction.atomic():
             if instance.estatus == Cobro.Estatus.APLICADO:
                 CobroService.cancelar_cobro(instance)
-            instance.delete()
+            if instance.movimientos_bancarios.exists():
+                # El movimiento bancario es la huella del documento (FK PROTECT):
+                # borrar de verdad daba 500. Queda cancelado y fuera del listado.
+                instance.activo = False
+                instance.save(update_fields=["activo", "updated_at"])
+            else:
+                instance.delete()
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
@@ -1876,7 +1909,7 @@ class PagoViewSet(FinanzasBaseViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset()
+        qs = super().get_queryset().filter(activo=True)
         if _puede_ver_todo(user):
             pass
         else:
@@ -1942,9 +1975,13 @@ class PagoViewSet(FinanzasBaseViewSet):
         if serializer.instance.estatus == Pago.Estatus.CANCELADO:
             raise ValidationError("No se puede editar un pago cancelado.")
         anterior_estatus = serializer.instance.estatus
+        nuevo_estatus = serializer.validated_data.get("estatus", anterior_estatus)
+        _validar_transicion_estatus_cobro_pago(Pago.Estatus, anterior_estatus, nuevo_estatus, "pago")
+        if nuevo_estatus == Pago.Estatus.CANCELADO:
+            # Ver ``CobroViewSet.perform_update``: el servicio necesita el estatus previo.
+            serializer.validated_data["estatus"] = anterior_estatus
         pago = serializer.save()
-        nuevo_estatus = pago.estatus
-        if nuevo_estatus == Pago.Estatus.CANCELADO and anterior_estatus != Pago.Estatus.CANCELADO:
+        if nuevo_estatus == Pago.Estatus.CANCELADO:
             PagoService.cancelar_pago(pago)
         elif nuevo_estatus == Pago.Estatus.APLICADO and anterior_estatus != Pago.Estatus.APLICADO:
             PagoService.aplicar_pago(pago)
@@ -1958,7 +1995,13 @@ class PagoViewSet(FinanzasBaseViewSet):
         with transaction.atomic():
             if instance.estatus == Pago.Estatus.APLICADO:
                 PagoService.cancelar_pago(instance)
-            instance.delete()
+            if instance.movimientos_bancarios.exists():
+                # El movimiento bancario es la huella del documento (FK PROTECT):
+                # borrar de verdad daba 500. Queda cancelado y fuera del listado.
+                instance.activo = False
+                instance.save(update_fields=["activo", "updated_at"])
+            else:
+                instance.delete()
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):

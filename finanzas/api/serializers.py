@@ -182,6 +182,15 @@ class CuentaPorCobrarSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+        # Saldo y estatus los mueve solo el servicio de cobros/notas de crédito:
+        # editables aquí, una CxC podía quedar con un saldo que ninguna póliza respalda.
+        read_only_fields = ["fecha_emision", "saldo", "estatus", "fecha_ultimo_pago"]
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if self.instance is not None and "total" in attrs and attrs["total"] != self.instance.total:
+            raise serializers.ValidationError({"total": "El total de una CxC existente no se puede editar."})
+        return attrs
 
 
 class PolizaDetalleRelacionadoSerializer(serializers.ModelSerializer):

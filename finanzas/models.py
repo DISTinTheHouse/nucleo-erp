@@ -685,15 +685,14 @@ class PolizaDetalle(models.Model):
         db_table = "poliza_detalle"
         verbose_name = "Poliza Detalle"
         verbose_name_plural = "Polizas Detalle"
-
-    constraints = [
-        models.CheckConstraint(  # `condition=` en Django 5.1+, `check=` antes
-            condition=models.Q(cargo__gte=0, abono__gte=0)
-            & (models.Q(cargo=0) | models.Q(abono=0))
-            & ~models.Q(cargo=0, abono=0),
-            name="ck_poliza_detalle_cargo_xor_abono",
-        ),
-    ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(cargo__gte=0, abono__gte=0)
+                & (models.Q(cargo=0) | models.Q(abono=0))
+                & ~models.Q(cargo=0, abono=0),
+                name="ck_poliza_detalle_cargo_xor_abono",
+            ),
+        ]
 
     def __str__(self):
         return str(self.id)
