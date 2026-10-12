@@ -14,6 +14,7 @@ from .views import (
     CuentaPorCobrarViewSet,
     CuentaPorPagarViewSet,
     DashboardFinancieroViewSet,
+    ReporteContableViewSet,
     FacturaProveedorViewSet,
     FacturaViewSet,
     MovimientoBancarioViewSet,
@@ -46,6 +47,7 @@ router.register(r'conciliaciones-bancarias', ConciliacionBancariaViewSet, basena
 router.register(r'notas-credito', NotaCreditoViewSet, basename='nota-credito')
 router.register(r'alertas-mora', AlertaMoraViewSet, basename='alerta-mora')
 router.register(r'dashboard', DashboardFinancieroViewSet, basename='finanzas-dashboard')
+router.register(r'reportes-contables', ReporteContableViewSet, basename='reportes-contables')
 router.register(r'facturama/productos', FacturamaProductsViewSet, basename='facturama-productos')
 router.register(r'facturama/cfdi', FacturamaCfdiEmisionViewSet, basename='facturama-cfdi')
 router.register(r'syncfy/sessions', SyncfySessionViewSet, basename='syncfy-sessions')

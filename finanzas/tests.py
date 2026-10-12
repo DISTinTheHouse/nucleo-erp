@@ -7370,3 +7370,176 @@ class F5CancelarFacturaTests(MotorPolizasBase):
 
         self.assertEqual(resp.status_code, 201, resp.data)
 
+
+REPORTES_URL = "/api/v1/finanzas/reportes-contables/"
+
+
+class F9ReportesContablesTests(MotorPolizasBase):
+    """Libro diario, auxiliar, balanza y rastro, sobre pólizas generadas por el motor."""
+
+    def setUp(self):
+        super().setUp()
+        self.banco = self._cuenta("1020", CuentaContable.CuentaTipo.ACTIVO)
+        self.cuenta_bancaria = self._crear_cuenta_bancaria(self.empresa)
+        self.cuenta_bancaria.cuenta_contable = self.banco
+        self.cuenta_bancaria.save()
+
+    def _factura_en(self, fecha, folio, neto="100.00", iva="16.00"):
+        total = str(Decimal(neto) + Decimal(iva))
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.a["cliente"], moneda=self.moneda,
+            folio=folio, subtotal=Decimal(neto), impuestos=Decimal(iva), total=Decimal(total),
+            fecha_emision=fecha,
+        )
+        return FacturaPolizaService.generar(factura, self.a["usuario"]), factura
+
+    def _get(self, ruta, user=None, **params):
+        return self._client(user or self.a["usuario"]).get(f"{REPORTES_URL}{ruta}/", params)
+
+    PERIODO = {"fecha_inicio": "2026-03-01", "fecha_fin": "2026-03-31"}
+
+    # -- libro diario --------------------------------------------------------
+
+    def test_libro_diario_lista_los_renglones_del_periodo_con_totales(self):
+        self._factura_en(date(2026, 3, 5), "F-1")
+        self._factura_en(date(2026, 4, 5), "F-2")  # fuera del periodo
+
+        resp = self._get("libro-diario", **self.PERIODO)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(len(resp.data["renglones"]), 3)
+        self.assertEqual((resp.data["total_cargos"], resp.data["total_abonos"]), ("116.00", "116.00"))
+        primero = resp.data["renglones"][0]
+        self.assertEqual((primero["cuenta_codigo"], primero["cargo"], primero["origen_tipo"]), ("1120", "116.00", "Factura"))
+
+    def test_libro_diario_incluye_la_cancelada_y_su_contrapoliza_pero_no_borradores(self):
+        poliza, _ = self._factura_en(date(2026, 3, 5), "F-1")
+        PolizaService.cancelar(poliza, self.a["usuario"])
+        Poliza.objects.create(empresa=self.empresa, sucursal=self.sucursal, fecha=date(2026, 3, 6))
+
+        resp = self._get("libro-diario", fecha_inicio="2026-03-01", fecha_fin=str(timezone.localdate()))
+
+        self.assertEqual(len(resp.data["renglones"]), 6)  # 3 de la original + 3 de la contrapóliza
+        self.assertEqual({r["estatus"] for r in resp.data["renglones"]}, {"Cancelada", "Contabilizada"})
+        self.assertEqual(resp.data["total_cargos"], resp.data["total_abonos"])
+
+    def test_libro_diario_filtra_por_tipo_y_pagina(self):
+        self._factura_en(date(2026, 3, 5), "F-1")
+
+        solo_egreso = self._get("libro-diario", tipo="Egreso", **self.PERIODO)
+        pagina = self._get("libro-diario", limit=2, offset=1, **self.PERIODO)
+
+        self.assertEqual(solo_egreso.data["renglones"], [])
+        self.assertEqual(len(pagina.data["renglones"]), 2)
+        self.assertEqual(pagina.data["total_cargos"], "116.00")  # el total es del periodo, no de la página
+
+    # -- auxiliar ------------------------------------------------------------
+
+    def test_auxiliar_da_saldo_inicial_movimientos_y_saldo_corrido(self):
+        self._factura_en(date(2026, 2, 10), "F-0", neto="200.00", iva="32.00")   # saldo inicial 232
+        self._factura_en(date(2026, 3, 5), "F-1")
+        self._factura_en(date(2026, 3, 20), "F-2", neto="50.00", iva="8.00")
+
+        resp = self._get("auxiliar", cuenta=self.clientes.pk, **self.PERIODO)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["cuenta"]["naturaleza"], "Deudora")
+        self.assertEqual(resp.data["saldo_inicial"], "232.00")
+        self.assertEqual([m["saldo"] for m in resp.data["movimientos"]], ["348.00", "406.00"])
+        self.assertEqual((resp.data["total_cargos"], resp.data["saldo_final"]), ("174.00", "406.00"))
+
+    def test_auxiliar_de_cuenta_acreedora_invierte_el_signo(self):
+        self._factura_en(date(2026, 3, 5), "F-1")
+
+        resp = self._get("auxiliar", cuenta=self.ventas.pk, **self.PERIODO)
+
+        self.assertEqual(resp.data["cuenta"]["naturaleza"], "Acreedora")
+        self.assertEqual((resp.data["saldo_inicial"], resp.data["saldo_final"]), ("0.00", "100.00"))
+        self.assertEqual(resp.data["movimientos"][0]["saldo"], "100.00")
+
+    def test_auxiliar_exige_cuenta_de_la_empresa(self):
+        ajena = CuentaContable.objects.create(
+            empresa=self.b["empresa"], codigo="9999", nombre="Ajena", tipo=CuentaContable.CuentaTipo.ACTIVO
+        )
+
+        self.assertEqual(self._get("auxiliar", **self.PERIODO).status_code, 400)
+        self.assertEqual(self._get("auxiliar", cuenta=ajena.pk, **self.PERIODO).status_code, 400)
+
+    # -- balanza -------------------------------------------------------------
+
+    def test_balanza_por_cuenta_y_cuadra(self):
+        self._factura_en(date(2026, 2, 10), "F-0", neto="200.00", iva="32.00")
+        self._factura_en(date(2026, 3, 5), "F-1")
+
+        resp = self._get("balanza", **self.PERIODO)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        por_codigo = {c["codigo"]: c for c in resp.data["cuentas"]}
+        self.assertEqual(list(por_codigo), ["1120", "2170", "4100"])
+        clientes = por_codigo["1120"]
+        self.assertEqual((clientes["saldo_inicial"], clientes["cargos"], clientes["abonos"], clientes["saldo_final"]),
+                         ("232.00", "116.00", "0.00", "348.00"))
+        ventas = por_codigo["4100"]
+        self.assertEqual((ventas["naturaleza"], ventas["saldo_inicial"], ventas["saldo_final"]),
+                         ("Acreedora", "200.00", "300.00"))
+        self.assertEqual((resp.data["total_cargos"], resp.data["total_abonos"]), ("116.00", "116.00"))
+        self.assertTrue(resp.data["cuadre_correcto"])
+
+    def test_la_cancelacion_deja_el_saldo_en_cero(self):
+        poliza, _ = self._factura_en(date(2026, 3, 5), "F-1")
+        PolizaService.cancelar(poliza, self.a["usuario"])
+
+        resp = self._get("balanza", fecha_inicio="2026-03-01", fecha_fin=str(timezone.localdate()))
+
+        self.assertEqual({c["saldo_final"] for c in resp.data["cuentas"]}, {"0.00"})
+
+    # -- validación, aislamiento y rastro -----------------------------------
+
+    def test_fechas_requeridas_y_validas(self):
+        self.assertEqual(self._get("balanza").status_code, 400)
+        self.assertEqual(self._get("balanza", fecha_inicio="ayer", fecha_fin="2026-03-31").status_code, 400)
+        self.assertEqual(self._get("balanza", fecha_inicio="2026-04-01", fecha_fin="2026-03-31").status_code, 400)
+
+    def test_cada_empresa_ve_solo_lo_suyo_y_el_superusuario_pide_empresa(self):
+        self._factura_en(date(2026, 3, 5), "F-1")
+
+        ajena = self._get("libro-diario", user=self.b["usuario"], **self.PERIODO)
+        root = Usuario.objects.create(username="root-f9", email="root@f9.test", is_superuser=True)
+        sin_empresa = self._get("libro-diario", user=root, **self.PERIODO)
+        con_empresa = self._get("libro-diario", user=root, empresa=self.empresa.pk, **self.PERIODO)
+
+        self.assertEqual(ajena.data["renglones"], [])
+        self.assertEqual(sin_empresa.status_code, 400)
+        self.assertEqual(len(con_empresa.data["renglones"]), 3)
+
+    def test_rastro_de_un_documento_trae_su_poliza_y_la_contrapoliza(self):
+        poliza, factura = self._factura_en(date(2026, 3, 5), "F-1")
+        PolizaService.cancelar(poliza, self.a["usuario"])
+        self._factura_en(date(2026, 3, 6), "F-2")
+
+        resp = self._client(self.a["usuario"]).get(POLIZAS_URL, {"origen_tipo": "Factura", "origen_id": factura.pk})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(len(resp.data), 2)
+        self.assertEqual({p["estatus"] for p in resp.data}, {"Cancelada", "Contabilizada"})
+        self.assertEqual({p["poliza_reversa_de"] for p in resp.data}, {None, poliza.pk})
+
+    def test_las_consultas_no_crecen_con_las_polizas(self):
+        self._factura_en(date(2026, 3, 5), "F-1")
+        cliente = self._client(self.a["usuario"])
+        cuenta = self.clientes.pk
+
+        def consultas():
+            with CaptureQueriesContext(connection) as c:
+                cliente.get(f"{REPORTES_URL}libro-diario/", self.PERIODO)
+                cliente.get(f"{REPORTES_URL}balanza/", self.PERIODO)
+                cliente.get(f"{REPORTES_URL}auxiliar/", {"cuenta": cuenta, **self.PERIODO})
+            return len(c)
+
+        consultas()
+        pocas = consultas()
+        for i in range(15):
+            self._factura_en(date(2026, 3, 6), f"F-{i + 10}")
+
+        self.assertEqual(pocas, consultas())
+

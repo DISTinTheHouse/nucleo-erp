@@ -77,7 +77,8 @@ Detalle: `DOCS/finanzas/motor-polizas.md`.
 - [ ] Complemento de pago (REP)
 
 ## F9 Trazabilidad y reportes
-- [ ] Filtro `?origen=` y endpoint de rastro por documento
+- [x] Rastro por documento: `GET /polizas/?origen_tipo=&origen_id=`
+- [x] Libro diario, auxiliar de cuenta y balanza de comprobación (`DOCS/finanzas/reportes-contables.md`)
 - [ ] Libro diario, auxiliar y balanza de comprobación
 
 ## Preguntas abiertas para contabilidad
