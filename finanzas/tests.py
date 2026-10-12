@@ -7056,3 +7056,154 @@ class F4PolizaDeNotaFacturaProveedorYMovimientoTests(MotorPolizasBase):
         self.assertEqual(Poliza.objects.count(), 1)
         self.assertEqual(Poliza.objects.get().origen_tipo, "Cobro")
 
+
+class F5CancelarFacturaTests(MotorPolizasBase):
+    """``POST /facturas/{id}/cancelar/``: factura y CxC canceladas, contrapóliza del día."""
+
+    def setUp(self):
+        super().setUp()
+        self.banco_contable = self._cuenta("1020", CuentaContable.CuentaTipo.ACTIVO)
+        self.cuenta_bancaria = self._crear_cuenta_bancaria(self.empresa)
+        self.cuenta_bancaria.cuenta_contable = self.banco_contable
+        self.cuenta_bancaria.save()
+
+    def _emitida(self, folio="F-500"):
+        resp = self._client(self.a["usuario"]).post(PENDIENTE_COBRO_URL, {
+            "cliente": self.a["cliente"].pk, "moneda": self.moneda.pk, "folio": folio,
+            "subtotal": "100.00", "descuento": "0.00", "impuestos": "16.00", "total": "116.00",
+        }, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return Factura.objects.get(pk=resp.data["factura"]["id"]), resp.data["poliza"]
+
+    def _cancelar(self, factura, user=None, **datos):
+        return self._client(user or self.a["usuario"]).post(
+            f"/api/v1/finanzas/facturas/{factura.pk}/cancelar/", datos, format="json"
+        )
+
+    def test_cancelar_una_emitida_cancela_factura_cxc_y_crea_la_contrapoliza_de_hoy(self):
+        factura, _ = self._emitida()
+        original = Poliza.objects.get(origen_tipo="Factura", origen_id=factura.pk)
+
+        resp = self._cancelar(factura, motivo="Error de captura")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
+        self.assertIn("Error de captura", factura.observaciones)
+        self.assertEqual(
+            CuentaPorCobrar.objects.get(factura=factura).estatus, CuentaPorCobrar.EstatusCxC.CANCELADA
+        )
+        original.refresh_from_db()
+        self.assertEqual(original.estatus, Poliza.PolizaStatus.CANCELADA)
+        reversa = Poliza.objects.get(poliza_reversa_de=original)
+        self.assertEqual(resp.data["contrapoliza_id"], reversa.pk)
+        self.assertEqual(reversa.fecha, timezone.localdate())
+        self.assertEqual(
+            {d.cuenta_contable_id: (d.cargo, d.abono) for d in reversa.poliza_detalles.all()},
+            {
+                self.clientes.pk: (Decimal("0.00"), Decimal("116.00")),
+                self.ventas.pk: (Decimal("100.00"), Decimal("0.00")),
+                self.iva.pk: (Decimal("16.00"), Decimal("0.00")),
+            },
+        )
+
+    def test_con_cobros_aplicados_se_puede_cancelar_y_el_cobro_no_se_toca(self):
+        factura, _ = self._emitida()
+        cxc = CuentaPorCobrar.objects.get(factura=factura)
+        cobro = self._client(self.a["usuario"]).post(COBROS_URL, {
+            "cliente": self.a["cliente"].pk, "cuenta_bancaria": self.cuenta_bancaria.pk,
+            "total_cobrado": "50.00", "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "50.00"}],
+        }, format="json")
+        self.assertEqual(cobro.status_code, 201, cobro.data)
+
+        resp = self._cancelar(factura)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(Cobro.objects.get(pk=cobro.data["id"]).estatus, Cobro.Estatus.APLICADO)
+        self.assertEqual(
+            Poliza.objects.get(origen_tipo="Cobro", origen_id=cobro.data["id"]).estatus,
+            Poliza.PolizaStatus.CONTABILIZADA,
+        )
+        # Clientes: +116 de la factura, -50 del cobro, -116 de la contrapóliza = saldo a favor de 50.
+        saldo_clientes = sum(
+            d.cargo - d.abono for d in PolizaDetalle.objects.filter(cuenta_contable=self.clientes)
+        )
+        self.assertEqual(saldo_clientes, Decimal("-50.00"))
+
+    def test_no_se_puede_cobrar_una_factura_cancelada(self):
+        factura, _ = self._emitida()
+        cxc = CuentaPorCobrar.objects.get(factura=factura)
+        self._cancelar(factura)
+
+        resp = self._client(self.a["usuario"]).post(COBROS_URL, {
+            "cliente": self.a["cliente"].pk, "cuenta_bancaria": self.cuenta_bancaria.pk,
+            "total_cobrado": "10.00", "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "10.00"}],
+        }, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_con_nota_de_credito_emitida_responde_400(self):
+        factura, _ = self._emitida()
+        NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"], estatus=NotaCredito.Estatus.EMITIDA,
+            subtotal=Decimal("10.00"), total=Decimal("10.00"),
+        )
+
+        resp = self._cancelar(factura)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.EMITIDA)
+
+    def test_un_borrador_se_cancela_sin_poliza(self):
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.a["cliente"], moneda=self.moneda,
+        )
+
+        resp = self._cancelar(factura)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIsNone(resp.data["contrapoliza_id"])
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_cancelar_dos_veces_no_duplica_la_contrapoliza(self):
+        factura, _ = self._emitida()
+
+        self.assertEqual(self._cancelar(factura).status_code, 200)
+        segunda = self._cancelar(factura)
+
+        self.assertEqual(segunda.status_code, 200, segunda.data)
+        self.assertEqual(Poliza.objects.filter(poliza_reversa_de__isnull=False).count(), 1)
+
+    def test_con_el_interruptor_apagado_cancela_sin_poliza(self):
+        self._encender(contabilizacion_automatica=False)
+        factura, poliza = self._emitida()
+        self.assertIsNone(poliza)
+
+        resp = self._cancelar(factura)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_factura_de_otra_empresa_responde_404(self):
+        factura, _ = self._emitida()
+
+        self.assertEqual(self._cancelar(factura, self.b["usuario"]).status_code, 404)
+
+    def test_el_pedido_puede_volver_a_facturarse_tras_cancelar(self):
+        factura, _ = self._emitida()
+        Factura.objects.filter(pk=factura.pk).update(pedido=self.a["pedido"])
+        self._cancelar(factura)
+
+        resp = self._client(self.a["usuario"]).post(PENDIENTE_COBRO_URL, {
+            "cliente": self.a["cliente"].pk, "moneda": self.moneda.pk, "folio": "F-501",
+            "pedido": self.a["pedido"].pk, "subtotal": "100.00", "descuento": "0.00",
+            "impuestos": "16.00", "total": "116.00",
+        }, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+
