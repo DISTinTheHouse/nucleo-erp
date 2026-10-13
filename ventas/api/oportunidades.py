@@ -225,7 +225,9 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         estatus = dict(Cotizacion.CHOICES_ESTATUS)
         return Response({
             "oportunidad": self.get_serializer(oportunidad).data,
-            "seguimientos": SeguimientoSerializer(seguimientos[:50], many=True).data,
+            "seguimientos": SeguimientoSerializer(
+                seguimientos[:50], many=True, context=self.get_serializer_context()
+            ).data,
             "pendientes": pendientes.count(),
             "proximo_recordatorio": pendientes.aggregate(m=Min("fecha_recordatorio"))["m"],
             "cotizaciones": [
@@ -261,10 +263,11 @@ class OportunidadViewSet(viewsets.ModelViewSet):
 
 class SeguimientoSerializer(serializers.ModelSerializer):
     # Contexto para pintar la fila de la agenda sin pedir cada oportunidad. Los nombres
-    # salen igual que en ``OportunidadSerializer``.
+    # salen igual que en ``OportunidadSerializer``, salvo el del cliente, que aquí solo
+    # sale si el usuario puede ver a ese cliente.
     oportunidad_titulo = serializers.CharField(source="oportunidad.titulo", read_only=True)
     oportunidad_nombre_contacto = serializers.CharField(source="oportunidad.nombre_contacto", read_only=True)
-    oportunidad_cliente_nombre = serializers.CharField(source="oportunidad.cliente.nombre", read_only=True, default=None)
+    oportunidad_cliente_nombre = serializers.SerializerMethodField()
     vendedor_nombre = serializers.CharField(source="vendedor.get_full_name", read_only=True, default=None)
 
     class Meta:
@@ -275,6 +278,26 @@ class SeguimientoSerializer(serializers.ModelSerializer):
             "fecha_recordatorio", "completado", "completado_at", "created_at",
         ]
         read_only_fields = ["vendedor", "completado_at", "created_at"]
+
+    def get_oportunidad_cliente_nombre(self, obj):
+        cliente = obj.oportunidad.cliente
+        if cliente is None or cliente.pk not in self._clientes_visibles():
+            return None
+        return cliente.nombre
+
+    def _clientes_visibles(self):
+        """Ids de los clientes que ve el usuario (misma regla que la cartera del onboarding).
+
+        Una consulta por petición, no por fila: se guarda en el ``request``.
+        """
+        request = self.context.get("request")
+        if request is None:
+            return frozenset()
+        if not hasattr(request, "_crm_clientes_visibles"):
+            request._crm_clientes_visibles = frozenset(
+                clientes_visibles(clientes_base(), request.user).values_list("pk", flat=True)
+            )
+        return request._crm_clientes_visibles
 
     def validate_oportunidad(self, oportunidad):
         if self.instance is not None and oportunidad.pk != self.instance.oportunidad_id:

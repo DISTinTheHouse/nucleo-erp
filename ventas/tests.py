@@ -4523,6 +4523,9 @@ class OportunidadSeguimientosTests(OportunidadesBase):
 
     def test_onboarding_y_pendientes_hacen_consultas_fijas(self):
         op = self._op(self.ana, cliente=self.cliente)
+        # Con al menos una fila: la visibilidad del cliente se resuelve una vez por
+        # petición, y solo si hay algún seguimiento con cliente que mostrar.
+        self._seg(op)
         cliente = self._client(self.ana)
         cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
 
@@ -4550,6 +4553,7 @@ class OportunidadSeguimientosTests(OportunidadesBase):
             username="lola", email="lola@acme.test", empresa=self.empresa, first_name="Lola", last_name="Paz"
         )
         op = self._op(lola, cliente=self.cliente, nombre_contacto="Luis")
+        self.cliente.vendedores.add(lola)  # el nombre del cliente solo sale si lo puede ver
         seg = self._seg(op, vendedor=lola)
         cliente = self._client(lola)
         url = f"{SEGUIMIENTOS_URL}{seg.pk}/"
@@ -4580,24 +4584,71 @@ class OportunidadSeguimientosTests(OportunidadesBase):
         self.assertEqual(self._contexto(filas[sin_autor.pk]), ("Uniformes", "", None, None))
         # Misma derivación que la oportunidad: el frontend ve el mismo valor en los dos lados.
         self.assertEqual(filas[de_ana.pk]["oportunidad_cliente_nombre"], oportunidad["cliente_nombre"])
-        self.assertEqual(filas[de_ana.pk]["vendedor_nombre"], oportunidad["vendedor_nombre"])
+
+    def test_vendedor_nombre_es_el_autor_no_el_duenio_de_la_oportunidad(self):
+        lola = Usuario.objects.create(
+            username="lola", email="lola@acme.test", empresa=self.empresa, first_name="Lola", last_name="Paz"
+        )
+        raul = Usuario.objects.create(
+            username="raul", email="raul@acme.test", empresa=self.empresa, first_name="Raul", last_name="Sol",
+            is_admin_empresa=True,
+        )
+        op = self._op(lola)
+        seg = self._seg(op, vendedor=raul)
+        cliente = self._client(lola)
+
+        onboarding = cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/").data
+
+        self.assertEqual(cliente.get(f"{SEGUIMIENTOS_URL}{seg.pk}/").data["vendedor_nombre"], "Raul Sol")
+        self.assertEqual(onboarding["seguimientos"][0]["vendedor_nombre"], "Raul Sol")
+        self.assertEqual(onboarding["oportunidad"]["vendedor_nombre"], "Lola Paz")
+
+    def test_el_nombre_del_cliente_solo_sale_si_el_usuario_puede_verlo(self):
+        op = self._op(self.ana, cliente=self.cliente)  # ana no tiene asignado a ese cliente
+        seg = self._seg(op)
+
+        def nombres(user):
+            cliente = self._client(user)
+            return (
+                cliente.get(SEGUIMIENTOS_URL).data[0]["oportunidad_cliente_nombre"],
+                cliente.get(f"{SEGUIMIENTOS_URL}{seg.pk}/").data["oportunidad_cliente_nombre"],
+                cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/").data["seguimientos"][0][
+                    "oportunidad_cliente_nombre"
+                ],
+            )
+
+        self.assertEqual(nombres(self.ana), (None, None, None))
+        self.assertEqual(nombres(self.jefe), ("Cliente Acme",) * 3)
+        self.cliente.vendedores.add(self.ana)
+        self.assertEqual(nombres(self.ana), ("Cliente Acme",) * 3)
+        self.cliente.soft_delete()  # dado de baja: nadie lo ve, igual que en /terceros/clientes/
+        self.assertEqual(nombres(self.jefe), (None, None, None))
 
     def test_el_listado_con_contexto_no_hace_consultas_por_fila(self):
+        self.cliente.vendedores.add(self.ana)
         self._seg(self._op(self.ana, cliente=self.cliente))
-        cliente = self._client(self.jefe)
-        cliente.get(SEGUIMIENTOS_URL)
+        clientes = {"admin": self._client(self.jefe), "vendedor": self._client(self.ana)}
 
-        with CaptureQueriesContext(connection) as pocas:
-            cliente.get(SEGUIMIENTOS_URL)
+        def medir():
+            consultas, filas = {}, {}
+            for quien, cliente in clientes.items():
+                with CaptureQueriesContext(connection) as ctx:
+                    filas[quien] = len(cliente.get(SEGUIMIENTOS_URL).data)
+                consultas[quien] = len(ctx)
+            return consultas, filas
+
+        medir()
+        pocas, _ = medir()
         for i in range(10):
             autor = Usuario.objects.create(username=f"v{i}", email=f"v{i}@acme.test", empresa=self.empresa)
             otro_cliente = Cliente.objects.create(empresa=self.empresa, nombre=f"Cliente {i}")
+            otro_cliente.vendedores.add(self.ana)
             self._seg(self._op(autor, cliente=otro_cliente), vendedor=autor)
-        with CaptureQueriesContext(connection) as muchas:
-            filas = cliente.get(SEGUIMIENTOS_URL).data
+            self._seg(self._op(self.ana, cliente=otro_cliente))
+        muchas, filas = medir()
 
-        self.assertEqual(len(filas), 11)
-        self.assertEqual(len(pocas), len(muchas))
+        self.assertEqual(filas, {"admin": 21, "vendedor": 11})
+        self.assertEqual(pocas, muchas)
 
     # -- filtro por dueño de la oportunidad ---------------------------------
 
