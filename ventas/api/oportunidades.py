@@ -186,12 +186,11 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         if not (user.is_superuser or user.is_admin_empresa):
             raise PermissionDenied("Solo el administrador de la empresa puede transferir oportunidades.")
         oportunidad = self.get_object()
-        try:
-            vendedor_id = int(request.data.get("vendedor") or 0)
-        except (TypeError, ValueError):
-            raise ValidationError({"vendedor": "Debe ser un número entero."})
+        # Misma validación que los parámetros del query string; el id llega como número o texto.
+        dato = request.data.get("vendedor")
+        vendedor_id = _entero({"vendedor": "" if dato is None else str(dato)}, "vendedor")
         vendedor = Usuario.objects.filter(
-            pk=vendedor_id, empresa_id=oportunidad.empresa_id, is_active=True
+            pk=vendedor_id or 0, empresa_id=oportunidad.empresa_id, is_active=True
         ).first()
         if vendedor is None:
             raise ValidationError({"vendedor": "Vendedor no encontrado en la empresa."})

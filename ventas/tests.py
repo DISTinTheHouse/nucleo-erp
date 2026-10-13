@@ -4781,6 +4781,22 @@ class OportunidadesValidacionesTests(OportunidadesBase):
 
         self.assertEqual(resp.status_code, 400)
 
+    def test_transferir_solo_acepta_un_id_valido(self):
+        op = self._op(self.ana)
+        url = f"{OPORTUNIDADES_URL}{op.pk}/transferir/"
+        c = self._client(self.jefe)
+
+        for valor in ("99999999999999999999999", 99999999999999999999999, " 1", "1_0", "-1", -1, 1.5, True, [1]):
+            with self.subTest(valor=valor):
+                resp = c.post(url, {"vendedor": valor}, format="json")
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("vendedor", resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.vendedor_id, self.ana.pk)
+        # Sigue aceptando el id como número o como texto.
+        self.assertEqual(c.post(url, {"vendedor": self.beto.pk}, format="json").status_code, 200)
+        self.assertEqual(c.post(url, {"vendedor": str(self.ana.pk)}, format="json").status_code, 200)
+
     def test_parametros_numericos_solo_aceptan_digitos_y_dentro_de_rango(self):
         c = self._client(self.jefe)
         casos = (
