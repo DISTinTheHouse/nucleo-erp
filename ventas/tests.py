@@ -4851,3 +4851,96 @@ class CotizacionOnboardingRendimientoTests(TestCase):
         self.assertLessEqual(q_edit, 28)
         self.assertEqual(len(data2["detalles"]), self.N_PRODUCTOS)
         self.assertEqual(sum(len(d["tallas"]) for d in data2["detalles"]), self.N_PRODUCTOS * self.N_TALLAS)
+
+
+class AutorizarCotizacionRendimientoTests(TestCase):
+    """``POST /cotizaciones/{id}/autorizar/`` (aceptar pedido).
+
+    El número de queries NO debe crecer con renglones × tallas: la copia a
+    pedido, el descuento de inventario, el snapshot y la respuesta se resuelven
+    en lote.
+    """
+
+    N_PRODUCTOS = 6
+    N_TALLAS = 5
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="perf-au", razon_social="Perf SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="PAU", nombre="perf")
+        SerieFolio.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="PEDIDO", serie="P")
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="PT", nombre="PT",
+            tipo_almacen="PT", permite_salida=True,
+        )
+        cls.usuario = Usuario.objects.create(
+            username="perf-au@perf.test", email="perf-au@perf.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente", razon_social="Cliente SA")
+        cls.tallas = [Talla.objects.create(nombre=n) for n in ["CH", "M", "G", "XG", "2XG"][: cls.N_TALLAS]]
+        cls.color = Color.objects.create(nombre="Rojo", codigo="ROJ", codigo_hex="#f00")
+        cls.cotizacion = Cotizacion.objects.create(
+            empresa=cls.empresa, vendedor=cls.usuario, sucursal=cls.sucursal,
+            cliente=cls.cliente, moneda=cls.moneda, estatus=2,
+            persona_pagos="Pagos", correo_facturas="p@perf.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            subtotal="100.00", gran_total="116.00",
+        )
+        for i in range(cls.N_PRODUCTOS):
+            p = Producto.objects.create(empresa=cls.empresa, nombre=f"Prod {i}", codigo=f"P{i}")
+            det = CotizacionDetalle.objects.create(
+                cotizacion=cls.cotizacion, producto=p, color=cls.color,
+                precio_unitario="10.00", subtotal_linea="30.00",
+            )
+            for t in cls.tallas:
+                v = ProductoVariante.objects.create(
+                    producto=p, empresa=cls.empresa, color=cls.color, talla=t,
+                    sku=f"P{i}-ROJ-{t.nombre}", precio_base=100,
+                )
+                CotizacionDetalleTalla.objects.create(
+                    cotizacion_detalle=det, talla=t, cantidad=3, variante=v,
+                    precio_unitario="10.00", subtotal_talla="30.00",
+                )
+                Existencia.objects.create(
+                    producto=p, producto_variante=v, almacen=cls.almacen, cantidad=Decimal("50"),
+                )
+        for i in range(3):
+            CotizacionServicioExtra.objects.create(
+                cotizacion=cls.cotizacion, nombre=f"Extra {i}", monto="5.00", cantidad=1,
+            )
+
+    def test_autorizar_rendimiento(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        url = f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/"
+        with CaptureQueriesContext(connection) as ctx:
+            t0 = time.perf_counter()
+            resp = client.post(url)
+            elapsed = (time.perf_counter() - t0) * 1000
+        self.assertEqual(resp.status_code, 201, resp.content)
+        print(
+            f"\n[PERF autorizar] {self.N_PRODUCTOS}x{self.N_TALLAS} tallas: "
+            f"{len(ctx)} queries {elapsed:.0f}ms"
+        )
+        # Resultado intacto: renglones, tallas, servicios y descuento de inventario.
+        pedido = Pedido.objects.get(pk=resp.data["pedido"]["id"])
+        self.assertEqual(pedido.detalles.count(), self.N_PRODUCTOS)
+        self.assertEqual(
+            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido).count(),
+            self.N_PRODUCTOS * self.N_TALLAS,
+        )
+        self.assertEqual(pedido.servicios_extras.count(), 3)
+        self.assertEqual(
+            sum(Existencia.objects.values_list("cantidad", flat=True)),
+            Decimal("50") * self.N_PRODUCTOS * self.N_TALLAS - 3 * self.N_PRODUCTOS * self.N_TALLAS,
+        )
+        mov = MovimientoInventario.objects.get(pedido=pedido)
+        self.assertEqual(mov.detalles.count(), self.N_PRODUCTOS * self.N_TALLAS)
+        self.assertEqual(
+            AuditoriaEvento.objects.filter(modulo="inventarios", id_registro=str(pedido.pk)).count(), 1
+        )
+        # Techo holgado (hoy 59): antes eran 261 y crecían con renglones × tallas.
+        self.assertLessEqual(len(ctx), 70)
+
