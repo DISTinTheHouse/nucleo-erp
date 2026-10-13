@@ -6,6 +6,7 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test ventas --settings=sqlite_settings
 """
 
+import time
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -4760,3 +4761,93 @@ class RechazoCotizacionComentarioTests(TestCase):
         resp = self._como(self.vendedor).post(self.url + "enviar-revision/")
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(self.cotizacion.comentarios.count(), 1)
+
+
+class CotizacionOnboardingRendimientoTests(TestCase):
+    """``POST /cotizaciones/onboarding/`` (guardar cotización, alta y edición).
+
+    El número de queries NO debe crecer con renglones × tallas: catálogos y
+    variantes se resuelven en lote y los renglones se insertan con ``bulk_create``.
+    """
+
+    N_PRODUCTOS = 6
+    N_TALLAS = 5
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="perf", razon_social="Perf SA")
+        cls.usuario = Usuario.objects.create(
+            username="perf@perf.test", email="perf@perf.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente", razon_social="Cliente SA")
+        cls.direccion = DireccionCliente.objects.create(
+            empresa=cls.empresa, cliente=cls.cliente, destinatario="X", direccion_envio="Calle 1"
+        )
+        cls.tallas = [Talla.objects.create(nombre=n) for n in ["CH", "M", "G", "XG", "2XG"][: cls.N_TALLAS]]
+        cls.color = Color.objects.create(nombre="Rojo", codigo="ROJ", codigo_hex="#f00")
+        cls.productos = []
+        for i in range(cls.N_PRODUCTOS):
+            p = Producto.objects.create(empresa=cls.empresa, nombre=f"Prod {i}", codigo=f"P{i}")
+            cls.productos.append(p)
+            # Sólo algunas combinaciones con variante (el resto cae al SKU armado).
+            if i % 2 == 0:
+                for t in cls.tallas:
+                    ProductoVariante.objects.create(
+                        producto=p, empresa=cls.empresa, color=cls.color, talla=t,
+                        sku=f"P{i}-ROJ-{t.nombre}", precio_base=100,
+                    )
+
+    def _payload(self, cotizacion_id=None):
+        detalle = [
+            {
+                "producto": p.pk,
+                "color": self.color.pk,
+                "direccion_envio_cliente": self.direccion.pk,
+                "precio_unitario": "10.00",
+                "tallas": [
+                    {
+                        "talla": t.pk,
+                        "cantidad": 3,
+                        "lleva_bordado": j == 0,
+                        "bordado_config": {"posicion": "pecho"} if j == 0 else None,
+                    }
+                    for j, t in enumerate(self.tallas)
+                ],
+            }
+            for p in self.productos
+        ]
+        payload = {
+            "cotizacion": {"cliente": self.cliente.pk, "subtotal": "100.00", "gran_total": "116.00"},
+            "detalle": detalle,
+            "servicios_extras": [
+                {"nombre": f"Extra {i}", "monto": "5.00", "cantidad": 1} for i in range(3)
+            ],
+        }
+        if cotizacion_id:
+            payload["cotizacion_id"] = cotizacion_id
+        return payload
+
+    def _post(self, payload):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        with CaptureQueriesContext(connection) as ctx:
+            t0 = time.perf_counter()
+            resp = client.post(COTIZACION_ONBOARDING_URL, payload, format="json")
+            elapsed = (time.perf_counter() - t0) * 1000
+        self.assertEqual(resp.status_code, 201, resp.content)
+        return resp.json(), len(ctx), elapsed
+
+    def test_guardar_cotizacion_rendimiento(self):
+        data, q_alta, ms_alta = self._post(self._payload())
+        cot_id = data["cotizacion"]["id"]
+        data2, q_edit, ms_edit = self._post(self._payload(cot_id))
+        print(
+            f"\n[PERF onboarding] {self.N_PRODUCTOS}x{self.N_TALLAS} tallas: "
+            f"alta={q_alta} queries {ms_alta:.0f}ms | edición={q_edit} queries {ms_edit:.0f}ms"
+        )
+        # Techo holgado (hoy 19/22): antes eran ~177/181 y crecían con el tamaño.
+        self.assertLessEqual(q_alta, 25)
+        self.assertLessEqual(q_edit, 28)
+        self.assertEqual(len(data2["detalles"]), self.N_PRODUCTOS)
+        self.assertEqual(sum(len(d["tallas"]) for d in data2["detalles"]), self.N_PRODUCTOS * self.N_TALLAS)

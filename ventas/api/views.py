@@ -1507,10 +1507,18 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             _save_cotizacion_detalle(cotizacion, detalle_data, empresa, user)
             _save_servicios_extras(cotizacion, servicios_extras_data)
             
-            cotizacion = Cotizacion.objects.filter(pk=cotizacion.pk).first()
-            detalles_qs = CotizacionDetalle.objects.filter(
-                cotizacion=cotizacion
-            ).prefetch_related("tallas")
+            # ``select_related``/``prefetch`` cubren los ``*_nombre`` del
+            # serializer: sin ellos eran 3-4 queries por renglón y 1 por talla.
+            detalles_qs = (
+                CotizacionDetalle.objects.filter(cotizacion=cotizacion)
+                .select_related("producto", "color", "categoria_producto")
+                .prefetch_related(
+                    Prefetch(
+                        "tallas",
+                        queryset=CotizacionDetalleTalla.objects.select_related("talla"),
+                    )
+                )
+            )
             servicios_extras_qs = CotizacionServicioExtra.objects.filter(
                 cotizacion=cotizacion
             ).order_by("id")
