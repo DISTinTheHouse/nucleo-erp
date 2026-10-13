@@ -75,8 +75,8 @@ class RecalculoConsumoTelaService:
         """Escala el consumo de la OP a las piezas realmente cortadas.
 
         ``cantidad_real``: piezas reales (>= las planeadas de la OP).
-        ``productos``: ids de insumos a recalcular, o ``None`` para todos los
-        del consumo (el catálogo no distingue telas; el usuario elige)."""
+        ``productos``: ids de las telas a recalcular (el catálogo no las
+        distingue; las elige el usuario). Los demás insumos no se tocan."""
         op = OrdenProduccion.objects.select_for_update().filter(pk=op_id, empresa=empresa).first()
         if op is None:
             return None
@@ -98,11 +98,10 @@ class RecalculoConsumoTelaService:
 
         base = ConsumoProduccionDetalle.objects.filter(consumo_produccion__op=op)
         ids = set(base.values_list("producto_id", flat=True))
-        if productos is not None:
-            ajenos = set(productos) - ids
-            if ajenos:
-                raise ValidationError({"productos": f"No forman parte del consumo de la OP: {sorted(ajenos)}."})
-            ids &= set(productos)
+        ajenos = set(productos) - ids
+        if ajenos:
+            raise ValidationError({"productos": f"No forman parte del consumo de la OP: {sorted(ajenos)}."})
+        ids &= set(productos)
         if not ids:
             raise ValidationError({"productos": "La OP no tiene consumos que recalcular."})
 

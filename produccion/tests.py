@@ -6371,8 +6371,7 @@ class RecalculoConsumoTelaTests(TestCase):
         body = {}
         if cantidad is not None:
             body["cantidad_real_corte"] = cantidad
-        if productos is not None:
-            body["productos"] = [p.pk for p in productos]
+        body["productos"] = [p.pk for p in (productos if productos is not None else [self.tela])]
         return self.client.post(
             f"/api/v1/produccion/orden-produccion/{(op or self.op).pk}/recalcular-consumos/",
             body, format="json",
@@ -6385,25 +6384,39 @@ class RecalculoConsumoTelaTests(TestCase):
             consumo_produccion__op=self.op, producto=producto
         ).aggregate(t=Sum("cantidad"))["t"]
 
-    def test_mas_piezas_escala_el_consumo_y_descuenta_la_diferencia(self):
+    def test_mas_piezas_escala_la_tela_y_descuenta_la_diferencia(self):
         resp = self._post(100)
         self.assertEqual(resp.status_code, 200, resp.data)
         self.existencia.refresh_from_db()
         self.ex_hilo.refresh_from_db()
         self.assertEqual(self.existencia.cantidad, Decimal("400"))
         self.assertEqual(self._total(self.tela), Decimal("100"))
-        self.assertEqual(self.ex_hilo.cantidad, Decimal("40"))
+        # El hilo no es tela: no se toca.
+        self.assertEqual(self._total(self.hilo), Decimal("9"))
+        self.assertEqual(self.ex_hilo.cantidad, Decimal("41"))
         mov = MovimientoInventario.objects.filter(op=self.op).order_by("-id").first()
         self.assertEqual(mov.tipo_movimiento, "SALIDA")
-        self.assertEqual(sorted(mov.detalles.values_list("cantidad", flat=True)), [Decimal("1"), Decimal("10")])
+        self.assertEqual(list(mov.detalles.values_list("cantidad", flat=True)), [Decimal("10")])
         self.assertEqual(
             OrdenProduccionRutaCritica.objects.get(op=self.op).cantidad_real_corte, Decimal("100")
         )
 
-    def test_solo_los_productos_indicados(self):
-        self.assertEqual(self._post(100, productos=[self.tela]).status_code, 200)
+    def test_sin_telas_es_400(self):
+        resp = self.client.post(
+            f"/api/v1/produccion/orden-produccion/{self.op.pk}/recalcular-consumos/",
+            {"cantidad_real_corte": 100}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        resp = self.client.post(
+            f"/api/v1/produccion/orden-produccion/{self.op.pk}/recalcular-consumos/",
+            {"cantidad_real_corte": 100, "productos": []}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_varias_telas(self):
+        self.assertEqual(self._post(100, productos=[self.tela, self.hilo]).status_code, 200)
         self.assertEqual(self._total(self.tela), Decimal("100"))
-        self.assertEqual(self._total(self.hilo), Decimal("9"))
+        self.assertEqual(self._total(self.hilo), Decimal("10"))
 
     def test_producto_fuera_del_consumo_se_rechaza(self):
         otro = Producto.objects.create(empresa=self.empresa, nombre="Boton")
@@ -6425,7 +6438,7 @@ class RecalculoConsumoTelaTests(TestCase):
 
     def test_segundo_recalculo_hacia_abajo_regresa_a_inventario(self):
         self._post(100)
-        self.assertEqual(self._post(95, productos=[self.tela]).status_code, 200)
+        self.assertEqual(self._post(95).status_code, 200)
         self.existencia.refresh_from_db()
         self.assertEqual(self.existencia.cantidad, Decimal("405"))
         self.assertEqual(self._total(self.tela), Decimal("95"))

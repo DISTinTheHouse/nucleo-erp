@@ -538,10 +538,11 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
     def recalcular_consumos(self, request, pk=None):
         """Ajusta los consumos de la OP a las piezas realmente cortadas.
 
-        Body: ``{"cantidad_real_corte": 100, "productos": [ids]?}``. Sin
+        Body: ``{"cantidad_real_corte": 100, "productos": [ids]}``. Sin
         ``cantidad_real_corte`` usa la ya capturada en la ruta crítica; con
-        ella, también la guarda ahí. ``productos`` (opcional) limita el
-        recálculo a esos insumos (p. ej. solo la tela); sin él, todos.
+        ella, también la guarda ahí. ``productos`` (obligatorio) son las
+        telas a recalcular: el catálogo no distingue telas, así que las
+        elige el usuario y el resto de los insumos no se toca.
         Registra solo la diferencia (movimiento de inventario + consumo
         nuevo, sin pólizas). No acepta menos piezas que las planeadas; se
         puede repetir. Mismo gate y 404 por empresa que la ruta crítica.
@@ -567,11 +568,12 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             raise ValidationError({'cantidad_real_corte': 'Debe ser un número entero de piezas mayor a 0.'})
 
         productos = request.data.get('productos', None)
-        if productos is not None:
-            try:
-                productos = [int(x) for x in productos]
-            except (TypeError, ValueError):
-                raise ValidationError({'productos': 'Lista de ids de producto.'})
+        try:
+            productos = [int(x) for x in productos]
+        except (TypeError, ValueError):
+            raise ValidationError({'productos': 'Lista de ids de las telas a recalcular.'})
+        if not productos:
+            raise ValidationError({'productos': 'Selecciona al menos una tela.'})
 
         with transaction.atomic():
             resultado = RecalculoConsumoTelaService.recalcular(
