@@ -211,10 +211,12 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         """Todo lo de la pantalla de una oportunidad en una llamada: datos, seguimientos,
         cotizaciones (con su pedido) y cartera del cliente."""
         oportunidad = self.get_object()
-        seguimientos = OportunidadSeguimiento.objects.filter(oportunidad=oportunidad).select_related(
-            "oportunidad__cliente", "vendedor"
-        )
+        seguimientos = OportunidadSeguimiento.objects.filter(oportunidad=oportunidad).select_related("vendedor")
         pendientes = seguimientos.filter(completado=False)
+        # Todos son de esta oportunidad: se reusa la ya cargada en vez de reconstruirla por fila.
+        recientes = list(seguimientos[:50])
+        for seguimiento in recientes:
+            seguimiento.oportunidad = oportunidad
         pedido = Pedido.objects.filter(cotizacion=OuterRef("pk")).order_by("-id")
         cotizaciones = (
             Cotizacion.objects.filter(oportunidad=oportunidad)
@@ -226,7 +228,7 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         return Response({
             "oportunidad": self.get_serializer(oportunidad).data,
             "seguimientos": SeguimientoSerializer(
-                seguimientos[:50], many=True, context=self.get_serializer_context()
+                recientes, many=True, context=self.get_serializer_context()
             ).data,
             "pendientes": pendientes.count(),
             "proximo_recordatorio": pendientes.aggregate(m=Min("fecha_recordatorio"))["m"],
