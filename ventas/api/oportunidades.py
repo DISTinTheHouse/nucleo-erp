@@ -15,7 +15,7 @@ from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 
 from terceros.cartera import cartera_de_cliente
-from terceros.scope import clientes_base, clientes_visibles
+from terceros.scope import clientes_base, clientes_visibles, ve_clientes_sin_asignacion
 from usuarios.models import Usuario
 from ventas.models import Cotizacion, Oportunidad, OportunidadSeguimiento, Pedido
 from ventas.scope import oportunidades_base, oportunidades_visibles
@@ -23,17 +23,30 @@ from ventas.scope import oportunidades_base, oportunidades_visibles
 ESTATUS_BORRADOR = 1
 ESTATUS_AUTORIZADA = 3
 ESTADOS = ["Nueva", "Contactada", "Cotizada", "Ganada", "Perdida"]
+ID_MAXIMO = 2**63 - 1  # tope de un BigAutoField
+
+
+def _id_valido(valor, nombre):
+    """Id que llega en un query string o en un body; si no lo es responde 400, no 500.
+
+    Acepta un entero o un texto de solo dígitos ASCII, dentro del rango de un id. ``int()``
+    también acepta ``True``, decimales, espacios, signo, ``1_0`` y dígitos de otros
+    alfabetos, y un valor enorme truena en la consulta.
+    """
+    if isinstance(valor, bool) or not isinstance(valor, (int, str)):
+        raise ValidationError({nombre: "Debe ser un número entero."})
+    texto = str(valor)
+    if not (texto.isascii() and texto.isdigit()) or len(texto) > 19 or int(texto) > ID_MAXIMO:
+        raise ValidationError({nombre: "Debe ser un número entero."})
+    return int(texto)
 
 
 def _entero(params, nombre):
-    """Parámetro numérico del query string; si no es número responde 400, no 500."""
+    """Parámetro numérico del query string; ``None`` si no viene."""
     valor = params.get(nombre)
     if not valor:
         return None
-    try:
-        return int(valor)
-    except ValueError:
-        raise ValidationError({nombre: "Debe ser un número entero."})
+    return _id_valido(valor, nombre)
 
 
 def con_estado(qs):
@@ -105,6 +118,13 @@ class OportunidadViewSet(viewsets.ModelViewSet):
     serializer_class = OportunidadSerializer
     http_method_names = ["get", "post", "patch", "delete"]
     pagination_class = LimitOffsetPagination  # sin ?limit= regresa la lista completa
+    # Explícitos: sin esto DRF acepta en ``?ordering=`` los ``source`` del serializer, y
+    # ``vendedor__get_full_name`` no es una columna (500). Son los que ya se aceptaban.
+    ordering_fields = [
+        "id", "cliente", "cliente__nombre", "vendedor", "nombre_contacto", "telefono", "correo",
+        "titulo", "monto_estimado", "etapa", "motivo_perdida", "proximo_contacto", "notas",
+        "created_at", "updated_at",
+    ]
 
     def get_queryset(self):
         qs = oportunidades_visibles(super().get_queryset(), self.request.user)
@@ -177,10 +197,9 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         if not (user.is_superuser or user.is_admin_empresa):
             raise PermissionDenied("Solo el administrador de la empresa puede transferir oportunidades.")
         oportunidad = self.get_object()
-        try:
-            vendedor_id = int(request.data.get("vendedor") or 0)
-        except (TypeError, ValueError):
-            raise ValidationError({"vendedor": "Debe ser un número entero."})
+        # Misma validación que los parámetros del query string; el id llega como número o texto.
+        dato = request.data.get("vendedor")
+        vendedor_id = 0 if dato in (None, "") else _id_valido(dato, "vendedor")
         vendedor = Usuario.objects.filter(
             pk=vendedor_id, empresa_id=oportunidad.empresa_id, is_active=True
         ).first()
@@ -202,8 +221,12 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         """Todo lo de la pantalla de una oportunidad en una llamada: datos, seguimientos,
         cotizaciones (con su pedido) y cartera del cliente."""
         oportunidad = self.get_object()
-        seguimientos = OportunidadSeguimiento.objects.filter(oportunidad=oportunidad)
+        seguimientos = OportunidadSeguimiento.objects.filter(oportunidad=oportunidad).select_related("vendedor")
         pendientes = seguimientos.filter(completado=False)
+        # Todos son de esta oportunidad: se reusa la ya cargada en vez de reconstruirla por fila.
+        recientes = list(seguimientos[:50])
+        for seguimiento in recientes:
+            seguimiento.oportunidad = oportunidad
         pedido = Pedido.objects.filter(cotizacion=OuterRef("pk")).order_by("-id")
         cotizaciones = (
             Cotizacion.objects.filter(oportunidad=oportunidad)
@@ -214,7 +237,9 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         estatus = dict(Cotizacion.CHOICES_ESTATUS)
         return Response({
             "oportunidad": self.get_serializer(oportunidad).data,
-            "seguimientos": SeguimientoSerializer(seguimientos[:50], many=True).data,
+            "seguimientos": SeguimientoSerializer(
+                recientes, many=True, context=self.get_serializer_context()
+            ).data,
             "pendientes": pendientes.count(),
             "proximo_recordatorio": pendientes.aggregate(m=Min("fecha_recordatorio"))["m"],
             "cotizaciones": [
@@ -249,13 +274,56 @@ class OportunidadViewSet(viewsets.ModelViewSet):
 
 
 class SeguimientoSerializer(serializers.ModelSerializer):
+    # Contexto para pintar la fila de la agenda sin pedir cada oportunidad. Los nombres
+    # salen igual que en ``OportunidadSerializer``, salvo el del cliente, que aquí solo
+    # sale si el usuario puede ver a ese cliente.
+    oportunidad_titulo = serializers.CharField(source="oportunidad.titulo", read_only=True)
+    oportunidad_nombre_contacto = serializers.CharField(source="oportunidad.nombre_contacto", read_only=True)
+    oportunidad_cliente_nombre = serializers.SerializerMethodField()
+    vendedor_nombre = serializers.CharField(source="vendedor.get_full_name", read_only=True, default=None)
+
     class Meta:
         model = OportunidadSeguimiento
         fields = [
-            "id", "oportunidad", "vendedor", "tipo", "detalle", "fecha_recordatorio",
-            "completado", "completado_at", "created_at",
+            "id", "oportunidad", "oportunidad_titulo", "oportunidad_nombre_contacto",
+            "oportunidad_cliente_nombre", "vendedor", "vendedor_nombre", "tipo", "detalle",
+            "fecha_recordatorio", "completado", "completado_at", "created_at",
         ]
         read_only_fields = ["vendedor", "completado_at", "created_at"]
+
+    def get_oportunidad_cliente_nombre(self, obj) -> str | None:
+        cliente = obj.oportunidad.cliente
+        if cliente is None:
+            return None
+        visibles = self._clientes_visibles(obj)
+        if visibles is not None and cliente.pk not in visibles:
+            return None
+        return cliente.nombre
+
+    def _clientes_visibles(self, obj):
+        """Ids de los clientes que ve el usuario, o ``None`` si no hay que filtrar.
+
+        El superusuario y el admin de empresa ven el nombre siempre, también el de un
+        cliente dado de baja, y no cuestan consulta. Al resto se le aplica la regla de la
+        cartera del onboarding, solo sobre los clientes de las filas que se serializan:
+        una consulta por respuesta, no por fila (se guarda en el serializer de la lista).
+        """
+        request = self.context.get("request")
+        if request is None:
+            return frozenset()
+        if ve_clientes_sin_asignacion(request.user):
+            return None
+        lista = self.parent if isinstance(self.parent, serializers.ListSerializer) else None
+        if lista is not None and hasattr(lista, "_clientes_visibles_ids"):
+            return lista._clientes_visibles_ids
+        filas = lista.instance if lista is not None else [obj]
+        ids = {fila.oportunidad.cliente_id for fila in filas} - {None}
+        visibles = frozenset(
+            clientes_visibles(clientes_base(), request.user).filter(pk__in=ids).values_list("pk", flat=True)
+        )
+        if lista is not None:
+            lista._clientes_visibles_ids = visibles
+        return visibles
 
     def validate_oportunidad(self, oportunidad):
         if self.instance is not None and oportunidad.pk != self.instance.oportunidad_id:
@@ -271,12 +339,19 @@ class SeguimientoViewSet(viewsets.ModelViewSet):
 
     ``?pendientes=true`` lista los no completados, por fecha de recordatorio; con ``?hasta=AAAA-MM-DD``
     solo los que tocan en esa fecha o antes (``?hasta=hoy`` usa el día de hoy).
+    ``?oportunidad_vendedor=<id>`` deja solo los de las oportunidades de ese vendedor.
     """
 
-    queryset = OportunidadSeguimiento.objects.all()
+    queryset = OportunidadSeguimiento.objects.select_related("oportunidad__cliente", "vendedor")
     serializer_class = SeguimientoSerializer
     http_method_names = ["get", "post", "patch", "delete"]
     pagination_class = LimitOffsetPagination
+    # Explícitos: sin esto DRF acepta en ``?ordering=`` los ``source`` del serializer, y
+    # ``vendedor__get_full_name`` no es una columna (500).
+    ordering_fields = [
+        "id", "oportunidad", "vendedor", "tipo", "detalle", "fecha_recordatorio",
+        "completado", "completado_at", "created_at",
+    ]
 
     def get_queryset(self):
         visibles = oportunidades_visibles(oportunidades_base(), self.request.user).values("pk")
@@ -286,6 +361,10 @@ class SeguimientoViewSet(viewsets.ModelViewSet):
         params = self.request.query_params
         if _entero(params, "oportunidad") is not None:
             qs = qs.filter(oportunidad_id=_entero(params, "oportunidad"))
+        # Dueño de la oportunidad, no autor del seguimiento. Filtra sobre lo ya visible:
+        # nunca amplía el alcance.
+        if _entero(params, "oportunidad_vendedor") is not None:
+            qs = qs.filter(oportunidad__vendedor_id=_entero(params, "oportunidad_vendedor"))
         if params.get("tipo"):
             qs = qs.filter(tipo=params["tipo"])
         pendientes = (params.get("pendientes") or "").lower() in ("1", "true", "si", "sí")

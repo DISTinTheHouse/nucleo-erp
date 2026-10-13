@@ -4523,6 +4523,9 @@ class OportunidadSeguimientosTests(OportunidadesBase):
 
     def test_onboarding_y_pendientes_hacen_consultas_fijas(self):
         op = self._op(self.ana, cliente=self.cliente)
+        # Con al menos una fila: la visibilidad del cliente se resuelve una vez por
+        # petición, y solo si hay algún seguimiento con cliente que mostrar.
+        self._seg(op)
         cliente = self._client(self.ana)
         cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
 
@@ -4538,6 +4541,204 @@ class OportunidadSeguimientosTests(OportunidadesBase):
 
         self.assertEqual(len(pocas), len(muchas))
 
+    # -- contexto para la agenda --------------------------------------------
+
+    CONTEXTO = ("oportunidad_titulo", "oportunidad_nombre_contacto", "oportunidad_cliente_nombre", "vendedor_nombre")
+
+    def _contexto(self, fila):
+        return tuple(fila[campo] for campo in self.CONTEXTO)
+
+    def test_el_seguimiento_trae_el_contexto_de_su_oportunidad(self):
+        lola = Usuario.objects.create(
+            username="lola", email="lola@acme.test", empresa=self.empresa, first_name="Lola", last_name="Paz"
+        )
+        op = self._op(lola, cliente=self.cliente, nombre_contacto="Luis")
+        self.cliente.vendedores.add(lola)  # el nombre del cliente solo sale si lo puede ver
+        seg = self._seg(op, vendedor=lola)
+        cliente = self._client(lola)
+        url = f"{SEGUIMIENTOS_URL}{seg.pk}/"
+
+        respuestas = {
+            "lista": cliente.get(SEGUIMIENTOS_URL).data[0],
+            "detalle": cliente.get(url).data,
+            "alta": cliente.post(SEGUIMIENTOS_URL, {"oportunidad": op.pk, "detalle": "x"}, format="json").data,
+            "edicion": cliente.patch(url, {"detalle": "y"}, format="json").data,
+            "completar": cliente.post(f"{url}completar/").data,
+            "onboarding": cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/").data["seguimientos"][0],
+        }
+
+        for origen, fila in respuestas.items():
+            with self.subTest(origen=origen):
+                self.assertEqual(self._contexto(fila), ("Uniformes", "Luis", "Cliente Acme", "Lola Paz"))
+
+    def test_el_contexto_sin_cliente_ni_autor_no_truena(self):
+        op = self._op(self.ana)  # sin cliente ni contacto; ana no tiene nombre capturado
+        de_ana = self._seg(op)
+        sin_autor = self._seg(op, vendedor=None)
+        cliente = self._client(self.ana)
+
+        filas = {s["id"]: s for s in cliente.get(SEGUIMIENTOS_URL).data}
+        oportunidad = cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/").data
+
+        self.assertEqual(self._contexto(filas[de_ana.pk]), ("Uniformes", "", None, ""))
+        self.assertEqual(self._contexto(filas[sin_autor.pk]), ("Uniformes", "", None, None))
+        # Misma derivación que la oportunidad: el frontend ve el mismo valor en los dos lados.
+        self.assertEqual(filas[de_ana.pk]["oportunidad_cliente_nombre"], oportunidad["cliente_nombre"])
+
+    def test_vendedor_nombre_es_el_autor_no_el_duenio_de_la_oportunidad(self):
+        lola = Usuario.objects.create(
+            username="lola", email="lola@acme.test", empresa=self.empresa, first_name="Lola", last_name="Paz"
+        )
+        raul = Usuario.objects.create(
+            username="raul", email="raul@acme.test", empresa=self.empresa, first_name="Raul", last_name="Sol",
+            is_admin_empresa=True,
+        )
+        op = self._op(lola)
+        seg = self._seg(op, vendedor=raul)
+        cliente = self._client(lola)
+
+        onboarding = cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/").data
+
+        self.assertEqual(cliente.get(f"{SEGUIMIENTOS_URL}{seg.pk}/").data["vendedor_nombre"], "Raul Sol")
+        self.assertEqual(onboarding["seguimientos"][0]["vendedor_nombre"], "Raul Sol")
+        self.assertEqual(onboarding["oportunidad"]["vendedor_nombre"], "Lola Paz")
+
+    def test_el_nombre_del_cliente_solo_sale_si_el_usuario_puede_verlo(self):
+        op = self._op(self.ana, cliente=self.cliente)  # ana no tiene asignado a ese cliente
+        seg = self._seg(op)
+
+        def nombres(user):
+            cliente = self._client(user)
+            return (
+                cliente.get(SEGUIMIENTOS_URL).data[0]["oportunidad_cliente_nombre"],
+                cliente.get(f"{SEGUIMIENTOS_URL}{seg.pk}/").data["oportunidad_cliente_nombre"],
+                cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/").data["seguimientos"][0][
+                    "oportunidad_cliente_nombre"
+                ],
+            )
+
+        self.assertEqual(nombres(self.ana), (None, None, None))
+        self.assertEqual(nombres(self.jefe), ("Cliente Acme",) * 3)
+        self.cliente.vendedores.add(self.ana)
+        self.assertEqual(nombres(self.ana), ("Cliente Acme",) * 3)
+        self.cliente.soft_delete()  # dado de baja: el vendedor deja de verlo; el admin, no
+        self.assertEqual(nombres(self.ana), (None, None, None))
+        self.assertEqual(nombres(self.jefe), ("Cliente Acme",) * 3)
+        superusuario = Usuario.objects.create(username="root", email="root@x.test", is_superuser=True)
+        self.assertEqual(nombres(superusuario), ("Cliente Acme",) * 3)
+
+    def test_el_listado_con_contexto_no_hace_consultas_por_fila(self):
+        self.cliente.vendedores.add(self.ana)
+        self._seg(self._op(self.ana, cliente=self.cliente))
+        # Mesa de Control ve todos los clientes de la empresa sin tenerlos asignados.
+        mesa = Usuario.objects.create(username="mesa", email="mesa@acme.test", empresa=self.empresa)
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="MESACONTROL-0002", nombre="Mesa-de-control", estatus=Rol.Estatus.ACTIVO
+        )
+        UsuarioRol.objects.create(usuario=mesa, rol=rol, empresa=self.empresa)
+        self._seg(self._op(mesa, cliente=self.cliente), vendedor=mesa)
+        clientes = {
+            "admin": self._client(self.jefe), "vendedor": self._client(self.ana), "mesa": self._client(mesa),
+        }
+
+        def medir():
+            consultas, filas = {}, {}
+            for quien, cliente in clientes.items():
+                with CaptureQueriesContext(connection) as ctx:
+                    filas[quien] = len(cliente.get(SEGUIMIENTOS_URL).data)
+                consultas[quien] = len(ctx)
+            return consultas, filas
+
+        medir()
+        pocas, _ = medir()
+        for i in range(10):
+            autor = Usuario.objects.create(username=f"v{i}", email=f"v{i}@acme.test", empresa=self.empresa)
+            otro_cliente = Cliente.objects.create(empresa=self.empresa, nombre=f"Cliente {i}")
+            otro_cliente.vendedores.add(self.ana)
+            self._seg(self._op(autor, cliente=otro_cliente), vendedor=autor)
+            self._seg(self._op(self.ana, cliente=otro_cliente))
+            self._seg(self._op(mesa, cliente=Cliente.objects.create(empresa=self.empresa, nombre=f"Sin asignar {i}")))
+        muchas, filas = medir()
+
+        self.assertEqual(filas, {"admin": 32, "vendedor": 11, "mesa": 11})
+        self.assertEqual(pocas, muchas)
+        nombres = [s["oportunidad_cliente_nombre"] for s in clientes["mesa"].get(SEGUIMIENTOS_URL).data]
+        self.assertNotIn(None, nombres)
+
+    # -- filtro por dueño de la oportunidad ---------------------------------
+
+    def _ids(self, user, **params):
+        resp = self._client(user).get(SEGUIMIENTOS_URL, params)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return [s["id"] for s in resp.data]
+
+    def test_oportunidad_vendedor_filtra_por_el_duenio_de_la_oportunidad(self):
+        op_ana = self._op(self.ana)
+        de_ana = self._seg(op_ana)
+        del_jefe_en_la_de_ana = self._seg(op_ana, vendedor=self.jefe)
+        de_beto = self._seg(self._op(self.beto), vendedor=self.beto)
+
+        self.assertCountEqual(
+            self._ids(self.jefe, oportunidad_vendedor=self.ana.pk), [de_ana.pk, del_jefe_en_la_de_ana.pk]
+        )
+        self.assertEqual(self._ids(self.jefe, oportunidad_vendedor=self.beto.pk), [de_beto.pk])
+        self.assertEqual(self._ids(self.jefe, oportunidad_vendedor=self.jefe.pk), [])
+        self.assertCountEqual(
+            self._ids(self.ana, oportunidad_vendedor=self.ana.pk), [de_ana.pk, del_jefe_en_la_de_ana.pk]
+        )
+        # Sin el filtro todo sigue igual.
+        self.assertEqual(len(self._ids(self.jefe)), 3)
+
+    def test_oportunidad_vendedor_se_combina_con_los_pendientes_de_hoy(self):
+        hoy = timezone.localdate()
+        op_ana = self._op(self.ana)
+        vencido = self._seg(op_ana, fecha_recordatorio=hoy - timedelta(days=2))
+        de_hoy = self._seg(op_ana, vendedor=self.jefe, fecha_recordatorio=hoy)
+        self._seg(op_ana, fecha_recordatorio=hoy + timedelta(days=3))
+        self._seg(op_ana, fecha_recordatorio=hoy - timedelta(days=1), completado=True)
+        self._seg(self._op(self.beto), vendedor=self.beto, fecha_recordatorio=hoy - timedelta(days=5))
+
+        agenda = {"pendientes": "true", "hasta": "hoy"}
+
+        self.assertEqual(self._ids(self.jefe, oportunidad_vendedor=self.ana.pk, **agenda), [vencido.pk, de_hoy.pk])
+        self.assertEqual(self._ids(self.ana, oportunidad_vendedor=self.ana.pk, **agenda), [vencido.pk, de_hoy.pk])
+        self.assertEqual(len(self._ids(self.jefe, **agenda)), 3)
+
+    def test_oportunidad_vendedor_no_amplia_el_alcance(self):
+        self._seg(self._op(self.ana))
+        self._seg(self._op(self.beto), vendedor=self.beto)
+
+        # Un vendedor no ve lo de otro por pedirlo, ni otra empresa lo de ésta.
+        self.assertEqual(self._ids(self.ana, oportunidad_vendedor=self.beto.pk), [])
+        for user in (self.ajeno, self.sin_empresa):
+            with self.subTest(user=user.username):
+                self.assertEqual(self._ids(user), [])
+                self.assertEqual(self._ids(user, oportunidad_vendedor=self.ana.pk), [])
+                self.assertEqual(self._ids(user, oportunidad_vendedor=user.pk), [])
+
+    def test_oportunidad_vendedor_no_numerico_es_400(self):
+        resp = self._client(self.jefe).get(SEGUIMIENTOS_URL, {"oportunidad_vendedor": "abc"})
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("oportunidad_vendedor", resp.data)
+
+    def test_ordering_no_acepta_los_campos_de_contexto(self):
+        primero = self._seg(self._op(self.ana, nombre_contacto="Abel"))
+        segundo = self._seg(self._op(self.ana, nombre_contacto="Zoe", cliente=self.cliente))
+        por_omision = [segundo.pk, primero.pk]
+
+        for campo in (
+            "vendedor__get_full_name", "-vendedor__get_full_name", "vendedor_nombre",
+            "oportunidad__titulo", "oportunidad_titulo", "oportunidad__nombre_contacto",
+            "oportunidad_nombre_contacto", "oportunidad__cliente__nombre", "oportunidad_cliente_nombre",
+        ):
+            with self.subTest(campo=campo):
+                self.assertEqual(self._ids(self.ana, ordering=campo), por_omision)
+        # Los de siempre siguen ordenando.
+        self.assertEqual(self._ids(self.ana, ordering="id"), [primero.pk, segundo.pk])
+        for campo in ("fecha_recordatorio", "-created_at", "completado", "tipo", "vendedor", "oportunidad"):
+            with self.subTest(campo=campo):
+                self._ids(self.ana, ordering=campo)
 
 
 class OportunidadesValidacionesTests(OportunidadesBase):
@@ -4595,12 +4796,70 @@ class OportunidadesValidacionesTests(OportunidadesBase):
 
         self.assertEqual(resp.status_code, 400)
 
+    def test_transferir_solo_acepta_un_id_valido(self):
+        op = self._op(self.ana)
+        url = f"{OPORTUNIDADES_URL}{op.pk}/transferir/"
+        c = self._client(self.jefe)
+
+        for valor in ("99999999999999999999999", 99999999999999999999999, " 1", "1_0", "-1", -1, 1.5, True, [1]):
+            with self.subTest(valor=valor):
+                resp = c.post(url, {"vendedor": valor}, format="json")
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("vendedor", resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.vendedor_id, self.ana.pk)
+        # Sigue aceptando el id como número o como texto.
+        self.assertEqual(c.post(url, {"vendedor": self.beto.pk}, format="json").status_code, 200)
+        self.assertEqual(c.post(url, {"vendedor": str(self.ana.pk)}, format="json").status_code, 200)
+
+    def test_parametros_numericos_solo_aceptan_digitos_y_dentro_de_rango(self):
+        c = self._client(self.jefe)
+        casos = (
+            (OPORTUNIDADES_URL, "cliente"),
+            (OPORTUNIDADES_URL, "vendedor"),
+            (SEGUIMIENTOS_URL, "oportunidad"),
+            (SEGUIMIENTOS_URL, "oportunidad_vendedor"),
+        )
+        invalidos = ("99999999999999999999999", "9" * 5000, " 1", "1 ", "1_0", "-1", "+1", "1.0", "١٢")
+        for url, nombre in casos:
+            for valor in invalidos:
+                with self.subTest(url=url, nombre=nombre, valor=valor[:25]):
+                    resp = c.get(url, {nombre: valor})
+                    self.assertEqual(resp.status_code, 400)
+                    self.assertIn(nombre, resp.data)
+            for valor in ("0", "1", str(2**63 - 1)):
+                with self.subTest(url=url, nombre=nombre, valor=valor):
+                    self.assertEqual(c.get(url, {nombre: valor}).status_code, 200)
+
     def test_ordering_invalido_no_truena(self):
         self._op(self.ana)
         for campo in ("zzz", "estado", "-cliente_nombre", "vendedor__password"):
             with self.subTest(campo=campo):
                 resp = self._client(self.jefe).get(OPORTUNIDADES_URL, {"ordering": campo})
                 self.assertIn(resp.status_code, (200, 400))
+
+    def test_ordering_por_nombre_de_vendedor_se_ignora_y_los_campos_reales_siguen(self):
+        cara = self._op(self.ana, monto_estimado=Decimal("200.00"))
+        barata = self._op(self.ana, monto_estimado=Decimal("100.00"))
+        cliente = self._client(self.ana)
+
+        def ids(campo):
+            resp = cliente.get(OPORTUNIDADES_URL, {"ordering": campo})
+            self.assertEqual(resp.status_code, 200, campo)
+            return [o["id"] for o in resp.data]
+
+        for campo in ("vendedor__get_full_name", "-vendedor__get_full_name", "vendedor_nombre"):
+            with self.subTest(campo=campo):
+                self.assertEqual(ids(campo), [barata.pk, cara.pk])  # el orden por omisión (-id)
+        self.assertEqual(ids("monto_estimado"), [barata.pk, cara.pk])
+        self.assertEqual(ids("-monto_estimado"), [cara.pk, barata.pk])
+        self.assertEqual(ids("id"), [cara.pk, barata.pk])
+        for campo in (
+            "titulo", "proximo_contacto", "created_at", "updated_at", "etapa", "cliente", "cliente__nombre",
+            "vendedor", "nombre_contacto", "telefono", "correo", "motivo_perdida", "notas",
+        ):
+            with self.subTest(campo=campo):
+                ids(campo)
 
 
 class SkuMuestraCotizacionTests(TestCase):
