@@ -105,6 +105,13 @@ class OportunidadViewSet(viewsets.ModelViewSet):
     serializer_class = OportunidadSerializer
     http_method_names = ["get", "post", "patch", "delete"]
     pagination_class = LimitOffsetPagination  # sin ?limit= regresa la lista completa
+    # Explícitos: sin esto DRF acepta en ``?ordering=`` los ``source`` del serializer, y
+    # ``vendedor__get_full_name`` no es una columna (500). Son los que ya se aceptaban.
+    ordering_fields = [
+        "id", "cliente", "cliente__nombre", "vendedor", "nombre_contacto", "telefono", "correo",
+        "titulo", "monto_estimado", "etapa", "motivo_perdida", "proximo_contacto", "notas",
+        "created_at", "updated_at",
+    ]
 
     def get_queryset(self):
         qs = oportunidades_visibles(super().get_queryset(), self.request.user)

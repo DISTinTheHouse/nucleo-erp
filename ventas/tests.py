@@ -4737,6 +4737,29 @@ class OportunidadesValidacionesTests(OportunidadesBase):
                 resp = self._client(self.jefe).get(OPORTUNIDADES_URL, {"ordering": campo})
                 self.assertIn(resp.status_code, (200, 400))
 
+    def test_ordering_por_nombre_de_vendedor_se_ignora_y_los_campos_reales_siguen(self):
+        cara = self._op(self.ana, monto_estimado=Decimal("200.00"))
+        barata = self._op(self.ana, monto_estimado=Decimal("100.00"))
+        cliente = self._client(self.ana)
+
+        def ids(campo):
+            resp = cliente.get(OPORTUNIDADES_URL, {"ordering": campo})
+            self.assertEqual(resp.status_code, 200, campo)
+            return [o["id"] for o in resp.data]
+
+        for campo in ("vendedor__get_full_name", "-vendedor__get_full_name", "vendedor_nombre"):
+            with self.subTest(campo=campo):
+                self.assertEqual(ids(campo), [barata.pk, cara.pk])  # el orden por omisión (-id)
+        self.assertEqual(ids("monto_estimado"), [barata.pk, cara.pk])
+        self.assertEqual(ids("-monto_estimado"), [cara.pk, barata.pk])
+        self.assertEqual(ids("id"), [cara.pk, barata.pk])
+        for campo in (
+            "titulo", "proximo_contacto", "created_at", "updated_at", "etapa", "cliente", "cliente__nombre",
+            "vendedor", "nombre_contacto", "telefono", "correo", "motivo_perdida", "notas",
+        ):
+            with self.subTest(campo=campo):
+                ids(campo)
+
 
 class SkuMuestraCotizacionTests(TestCase):
     """#449/#437/#438/#441: SKU de muestras en cotización, ``sku_muestra`` y
