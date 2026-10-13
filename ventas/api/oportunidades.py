@@ -281,6 +281,7 @@ class SeguimientoViewSet(viewsets.ModelViewSet):
 
     ``?pendientes=true`` lista los no completados, por fecha de recordatorio; con ``?hasta=AAAA-MM-DD``
     solo los que tocan en esa fecha o antes (``?hasta=hoy`` usa el día de hoy).
+    ``?oportunidad_vendedor=<id>`` deja solo los de las oportunidades de ese vendedor.
     """
 
     queryset = OportunidadSeguimiento.objects.select_related("oportunidad__cliente", "vendedor")
@@ -296,6 +297,10 @@ class SeguimientoViewSet(viewsets.ModelViewSet):
         params = self.request.query_params
         if _entero(params, "oportunidad") is not None:
             qs = qs.filter(oportunidad_id=_entero(params, "oportunidad"))
+        # Dueño de la oportunidad, no autor del seguimiento. Filtra sobre lo ya visible:
+        # nunca amplía el alcance.
+        if _entero(params, "oportunidad_vendedor") is not None:
+            qs = qs.filter(oportunidad__vendedor_id=_entero(params, "oportunidad_vendedor"))
         if params.get("tipo"):
             qs = qs.filter(tipo=params["tipo"])
         pendientes = (params.get("pendientes") or "").lower() in ("1", "true", "si", "sí")

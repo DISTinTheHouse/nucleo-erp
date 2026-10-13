@@ -4599,6 +4599,63 @@ class OportunidadSeguimientosTests(OportunidadesBase):
         self.assertEqual(len(filas), 11)
         self.assertEqual(len(pocas), len(muchas))
 
+    # -- filtro por dueño de la oportunidad ---------------------------------
+
+    def _ids(self, user, **params):
+        resp = self._client(user).get(SEGUIMIENTOS_URL, params)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return [s["id"] for s in resp.data]
+
+    def test_oportunidad_vendedor_filtra_por_el_duenio_de_la_oportunidad(self):
+        op_ana = self._op(self.ana)
+        de_ana = self._seg(op_ana)
+        del_jefe_en_la_de_ana = self._seg(op_ana, vendedor=self.jefe)
+        de_beto = self._seg(self._op(self.beto), vendedor=self.beto)
+
+        self.assertCountEqual(
+            self._ids(self.jefe, oportunidad_vendedor=self.ana.pk), [de_ana.pk, del_jefe_en_la_de_ana.pk]
+        )
+        self.assertEqual(self._ids(self.jefe, oportunidad_vendedor=self.beto.pk), [de_beto.pk])
+        self.assertEqual(self._ids(self.jefe, oportunidad_vendedor=self.jefe.pk), [])
+        self.assertCountEqual(
+            self._ids(self.ana, oportunidad_vendedor=self.ana.pk), [de_ana.pk, del_jefe_en_la_de_ana.pk]
+        )
+        # Sin el filtro todo sigue igual.
+        self.assertEqual(len(self._ids(self.jefe)), 3)
+
+    def test_oportunidad_vendedor_se_combina_con_los_pendientes_de_hoy(self):
+        hoy = timezone.localdate()
+        op_ana = self._op(self.ana)
+        vencido = self._seg(op_ana, fecha_recordatorio=hoy - timedelta(days=2))
+        de_hoy = self._seg(op_ana, vendedor=self.jefe, fecha_recordatorio=hoy)
+        self._seg(op_ana, fecha_recordatorio=hoy + timedelta(days=3))
+        self._seg(op_ana, fecha_recordatorio=hoy - timedelta(days=1), completado=True)
+        self._seg(self._op(self.beto), vendedor=self.beto, fecha_recordatorio=hoy - timedelta(days=5))
+
+        agenda = {"pendientes": "true", "hasta": "hoy"}
+
+        self.assertEqual(self._ids(self.jefe, oportunidad_vendedor=self.ana.pk, **agenda), [vencido.pk, de_hoy.pk])
+        self.assertEqual(self._ids(self.ana, oportunidad_vendedor=self.ana.pk, **agenda), [vencido.pk, de_hoy.pk])
+        self.assertEqual(len(self._ids(self.jefe, **agenda)), 3)
+
+    def test_oportunidad_vendedor_no_amplia_el_alcance(self):
+        self._seg(self._op(self.ana))
+        self._seg(self._op(self.beto), vendedor=self.beto)
+
+        # Un vendedor no ve lo de otro por pedirlo, ni otra empresa lo de ésta.
+        self.assertEqual(self._ids(self.ana, oportunidad_vendedor=self.beto.pk), [])
+        for user in (self.ajeno, self.sin_empresa):
+            with self.subTest(user=user.username):
+                self.assertEqual(self._ids(user), [])
+                self.assertEqual(self._ids(user, oportunidad_vendedor=self.ana.pk), [])
+                self.assertEqual(self._ids(user, oportunidad_vendedor=user.pk), [])
+
+    def test_oportunidad_vendedor_no_numerico_es_400(self):
+        resp = self._client(self.jefe).get(SEGUIMIENTOS_URL, {"oportunidad_vendedor": "abc"})
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("oportunidad_vendedor", resp.data)
+
 
 class OportunidadesValidacionesTests(OportunidadesBase):
     """Cliente visible, sucursal de la empresa y parámetros inválidos (400, no 500)."""
