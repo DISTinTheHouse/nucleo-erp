@@ -104,6 +104,19 @@ def _merge_detalle(rows):
 
     return list(agrupado.values())
 
+def _ids_validos(valores):
+    """``int`` de cada valor que lo admite; el resto se ignora (lo rechaza la validación)."""
+    ids = set()
+    for v in valores:
+        if v in (None, "", 0):
+            continue
+        try:
+            ids.add(int(v))
+        except (TypeError, ValueError):
+            pass
+    return ids
+
+
 def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
     # Las líneas se recrean: el ``sku_muestra`` (lo escribe sólo
     # ``vincular-sku-muestra``) se arrastra por (nombre externo, color, talla)
@@ -117,6 +130,56 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
     }
     CotizacionDetalle.objects.filter(cotizacion=cotizacion_obj).delete()
     rows = _merge_detalle(rows)
+
+    from catalogo.models import CategoriaProducto as CategoriaProductoModel
+    from catalogo.models import Color as ColorModel
+    from terceros.models import DireccionCliente as DirModel
+
+    # Los catálogos que referencian los renglones se resuelven UNA vez cada uno
+    # (y no una consulta por renglón/talla): el costo del guardado ya no crece con
+    # renglones × tallas. Las validaciones y sus mensajes son los de siempre, en
+    # el mismo orden por renglón.
+    es_superuser = getattr(user, "is_superuser", False)
+    productos_qs = Producto.objects.filter(
+        pk__in=_ids_validos(
+            r.get("producto") for r in rows if not r.get("producto_nombre_externo")
+        ),
+        activo=True,
+    )
+    if not es_superuser and empresa:
+        productos_qs = productos_qs.filter(empresa=empresa)
+    productos = productos_qs.in_bulk()
+    colores = ColorModel.objects.filter(
+        pk__in=_ids_validos(r.get("color") for r in rows), activo=True
+    ).in_bulk()
+    categorias = CategoriaProductoModel.objects.filter(
+        pk__in=_ids_validos(
+            r.get("categoria_producto") or r.get("categoria_producto_id") for r in rows
+        ),
+        activo=True,
+    ).in_bulk()
+    direcciones = DirModel.objects.filter(
+        pk__in=_ids_validos(r.get("direccion_envio_cliente") for r in rows),
+        activo=True,
+        empresa_id=cotizacion_obj.empresa_id,
+        cliente_id=getattr(cotizacion_obj, "cliente_id", None),
+    ).in_bulk()
+    tallas_catalogo = Talla.objects.filter(
+        pk__in=_ids_validos(
+            t.get("talla") for r in rows for t in (r.get("tallas") or [])
+        ),
+        activo=True,
+    ).in_bulk()
+    variantes = {}
+    if productos:
+        # ``.first()`` de antes (orden por pk): la primera variante de cada llave gana.
+        for v in ProductoVariante.objects.filter(
+            producto__in=productos, empresa_id=cotizacion_obj.empresa_id
+        ).order_by("pk"):
+            variantes.setdefault((v.producto_id, v.color_id, v.talla_id), v)
+
+    detalles = []
+    tallas_por_detalle = []
     for item in rows:
         producto = None
         producto_nombre_externo = item.get("producto_nombre_externo")
@@ -128,11 +191,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
             except Exception:
                 producto_id = None
             if producto_id:
-                producto = Producto.objects.filter(pk=producto_id, activo=True).first()
-                if not getattr(user, "is_superuser", False) and empresa:
-                    producto = Producto.objects.filter(
-                        pk=producto_id, empresa=empresa, activo=True
-                    ).first()
+                producto = productos.get(producto_id)
                 if not producto:
                     raise ValidationError({"detalle": f"Producto inválido: {producto_id}"})
 
@@ -143,11 +202,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
         color_id = item.get("color")
         if color_id not in (None, "", 0):
             try:
-                from catalogo.models import Color as ColorModel
-
-                color_obj = ColorModel.objects.filter(
-                    pk=int(color_id), activo=True
-                ).first()
+                color_obj = colores.get(int(color_id))
             except Exception:
                 color_obj = None
             if not color_obj:
@@ -157,11 +212,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
         categoria_producto_id = item.get("categoria_producto") or item.get("categoria_producto_id")
         if categoria_producto_id not in (None, "", 0):
             try:
-                from catalogo.models import CategoriaProducto as CategoriaProductoModel
-
-                categoria_producto_obj = CategoriaProductoModel.objects.filter(
-                    pk=int(categoria_producto_id), activo=True
-                ).first()
+                categoria_producto_obj = categorias.get(int(categoria_producto_id))
             except Exception:
                 categoria_producto_obj = None
             if not categoria_producto_obj:
@@ -173,14 +224,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
         direccion_id = item.get("direccion_envio_cliente")
         if direccion_id not in (None, "", 0):
             try:
-                from terceros.models import DireccionCliente as DirModel
-
-                direccion_obj = DirModel.objects.filter(
-                    pk=int(direccion_id),
-                    activo=True,
-                    empresa=cotizacion_obj.empresa,
-                    cliente_id=getattr(cotizacion_obj, "cliente_id", None),
-                ).first()
+                direccion_obj = direcciones.get(int(direccion_id))
             except Exception:
                 direccion_obj = None
             if not direccion_obj:
@@ -196,20 +240,27 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
         if precio_lista is None:
             precio_lista = getattr(producto, "precio_base", None) or 0
 
-        cot_det = CotizacionDetalle.objects.create(
-            cotizacion=cotizacion_obj,
-            producto=producto,
-            producto_nombre_externo=producto_nombre_externo,
-            color=color_obj,
-            categoria_producto=categoria_producto_obj,
-            direccion_envio_cliente=direccion_obj,
-            precio_lista=precio_lista,
-            precio_unitario=precio_unitario,
-            costo_unitario=item.get("costo_unitario"),
-            subtotal_linea=0,
+        detalles.append(
+            CotizacionDetalle(
+                cotizacion=cotizacion_obj,
+                producto=producto,
+                producto_nombre_externo=producto_nombre_externo,
+                color=color_obj,
+                categoria_producto=categoria_producto_obj,
+                direccion_envio_cliente=direccion_obj,
+                precio_lista=precio_lista,
+                precio_unitario=precio_unitario,
+                costo_unitario=item.get("costo_unitario"),
+                subtotal_linea=0,
+            )
         )
+        tallas_nuevas = []
+        tallas_por_detalle.append(tallas_nuevas)
         for t in item.get("tallas") or []:
-            talla = Talla.objects.filter(pk=t["talla"], activo=True).first()
+            try:
+                talla = tallas_catalogo.get(int(t["talla"]))
+            except (TypeError, ValueError):
+                talla = None
             if not talla:
                 raise ValidationError({"detalle": f"Talla inválida: {t['talla']}"})
             if t.get("lleva_bordado") and t.get("bordado_config") is None:
@@ -259,12 +310,9 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
 
             variante_obj = None
             if producto:
-                variante_obj = ProductoVariante.objects.filter(
-                    producto=producto,
-                    color=color_obj,
-                    talla=talla,
-                    empresa=cotizacion_obj.empresa
-                ).first()
+                variante_obj = variantes.get(
+                    (producto.pk, getattr(color_obj, "pk", None), talla.pk)
+                )
 
             # Sólo hay SKU con producto de catálogo: una línea de muestra no
             # tiene (``None``) y el de producción vive en ``sku_muestra``. Con
@@ -280,38 +328,52 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                         " ", ""
                     ).upper()
 
-            CotizacionDetalleTalla.objects.create(
-                cotizacion_detalle=cot_det,
-                talla=talla,
-                cantidad=t["cantidad"],
-                precio_unitario=precio_unitario,
-                subtotal_talla=0,
-                lleva_bordado=bool(t.get("lleva_bordado")),
-                bordado_config=t.get("bordado_config"),
-                lleva_reflejante=lleva_reflejante,
-                reflejante_config=reflejante_config,
-                lleva_corte_manga=bool(t.get("lleva_corte_manga")),
-                corte_manga_config=t.get("corte_manga_config"),
-                lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
-                cambio_talla_config=t.get("cambio_talla_config"),
-                sku=sku_snapshot or None,
-                sku_muestra=sku_muestra_previo.get(
-                    (producto_nombre_externo, getattr(color_obj, "pk", None), talla.pk)
-                ) if not producto else None,
-                requiere_produccion=bool(producto_nombre_externo),
-                variante=variante_obj
+            tallas_nuevas.append(
+                CotizacionDetalleTalla(
+                    talla=talla,
+                    cantidad=t["cantidad"],
+                    precio_unitario=precio_unitario,
+                    subtotal_talla=0,
+                    lleva_bordado=bool(t.get("lleva_bordado")),
+                    bordado_config=t.get("bordado_config"),
+                    lleva_reflejante=lleva_reflejante,
+                    reflejante_config=reflejante_config,
+                    lleva_corte_manga=bool(t.get("lleva_corte_manga")),
+                    corte_manga_config=t.get("corte_manga_config"),
+                    lleva_cambio_talla=bool(t.get("lleva_cambio_talla")),
+                    cambio_talla_config=t.get("cambio_talla_config"),
+                    sku=sku_snapshot or None,
+                    sku_muestra=sku_muestra_previo.get(
+                        (producto_nombre_externo, getattr(color_obj, "pk", None), talla.pk)
+                    ) if not producto else None,
+                    requiere_produccion=bool(producto_nombre_externo),
+                    variante=variante_obj,
+                )
             )
+
+    # Dos INSERT en lote (renglones, luego tallas) en vez de uno por fila.
+    CotizacionDetalle.objects.bulk_create(detalles)
+    todas = []
+    for detalle, tallas_nuevas in zip(detalles, tallas_por_detalle):
+        for t in tallas_nuevas:
+            t.cotizacion_detalle = detalle
+            todas.append(t)
+    CotizacionDetalleTalla.objects.bulk_create(todas)
 
 def _save_servicios_extras(cotizacion_obj, rows):
     CotizacionServicioExtra.objects.filter(cotizacion=cotizacion_obj).delete()
-    for row in rows or []:
-        CotizacionServicioExtra.objects.create(
-            cotizacion=cotizacion_obj,
-            nombre=row.get("nombre") or "",
-            monto=row.get("monto") or 0,
-            cantidad=row.get("cantidad") or 1,
-            visible_en_factura=bool(row.get("visible_en_factura", True)),
-        )
+    CotizacionServicioExtra.objects.bulk_create(
+        [
+            CotizacionServicioExtra(
+                cotizacion=cotizacion_obj,
+                nombre=row.get("nombre") or "",
+                monto=row.get("monto") or 0,
+                cantidad=row.get("cantidad") or 1,
+                visible_en_factura=bool(row.get("visible_en_factura", True)),
+            )
+            for row in rows or []
+        ]
+    )
 
 
 def _save_pedido_detalle(pedido_obj, rows, empresa, user):
