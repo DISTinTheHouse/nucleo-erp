@@ -72,6 +72,33 @@ def crear_notificacion_por_rol(
     return len(notifs)
 
 
+def crear_notificacion_usuario(
+    empresa,
+    usuario_id: int | None,
+    titulo: str,
+    mensaje: str,
+    modulo: str,
+    tipo: str,
+    data: dict | None = None,
+) -> Notificacion | None:
+    """Notifica a un único usuario con un solo INSERT (sin resolver roles).
+
+    Pensada para llamarse dentro de la transacción del endpoint: si éste hace
+    rollback, la notificación tampoco se guarda. Sin destinatario no hace nada.
+    """
+    if not usuario_id:
+        return None
+    return Notificacion.objects.create(
+        empresa=empresa,
+        usuario_id=usuario_id,
+        titulo=titulo,
+        mensaje=mensaje,
+        modulo=modulo,
+        tipo=tipo,
+        data=data,
+    )
+
+
 @transaction.atomic
 def marcar_leida(notificacion: Notificacion, user) -> Notificacion:
     from rest_framework.exceptions import PermissionDenied
