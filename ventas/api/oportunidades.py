@@ -288,9 +288,15 @@ class SeguimientoViewSet(viewsets.ModelViewSet):
     serializer_class = SeguimientoSerializer
     http_method_names = ["get", "post", "patch", "delete"]
     pagination_class = LimitOffsetPagination
+    # Explícitos: sin esto DRF acepta en ``?ordering=`` los ``source`` del serializer, y
+    # ``vendedor__get_full_name`` no es una columna (500).
+    ordering_fields = [
+        "id", "oportunidad", "vendedor", "tipo", "detalle", "fecha_recordatorio",
+        "completado", "completado_at", "created_at",
+    ]
 
     def get_queryset(self):
-        visibles = oportunidades_visibles(oportunidades_base(), self.request.user).values("pk")
+        visibles =oportunidades_visibles(oportunidades_base(), self.request.user).values("pk")
         qs = super().get_queryset().filter(oportunidad_id__in=visibles)
         if self.action != "list":
             return qs

@@ -4656,6 +4656,24 @@ class OportunidadSeguimientosTests(OportunidadesBase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("oportunidad_vendedor", resp.data)
 
+    def test_ordering_no_acepta_los_campos_de_contexto(self):
+        primero = self._seg(self._op(self.ana, nombre_contacto="Abel"))
+        segundo = self._seg(self._op(self.ana, nombre_contacto="Zoe", cliente=self.cliente))
+        por_omision = [segundo.pk, primero.pk]
+
+        for campo in (
+            "vendedor__get_full_name", "-vendedor__get_full_name", "vendedor_nombre",
+            "oportunidad__titulo", "oportunidad_titulo", "oportunidad__nombre_contacto",
+            "oportunidad_nombre_contacto", "oportunidad__cliente__nombre", "oportunidad_cliente_nombre",
+        ):
+            with self.subTest(campo=campo):
+                self.assertEqual(self._ids(self.ana, ordering=campo), por_omision)
+        # Los de siempre siguen ordenando.
+        self.assertEqual(self._ids(self.ana, ordering="id"), [primero.pk, segundo.pk])
+        for campo in ("fecha_recordatorio", "-created_at", "completado", "tipo", "vendedor", "oportunidad"):
+            with self.subTest(campo=campo):
+                self._ids(self.ana, ordering=campo)
+
 
 class OportunidadesValidacionesTests(OportunidadesBase):
     """Cliente visible, sucursal de la empresa y parámetros inválidos (400, no 500)."""
