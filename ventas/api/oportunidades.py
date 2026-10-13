@@ -26,16 +26,27 @@ ESTADOS = ["Nueva", "Contactada", "Cotizada", "Ganada", "Perdida"]
 ID_MAXIMO = 2**63 - 1  # tope de un BigAutoField
 
 
+def _id_valido(valor, nombre):
+    """Id que llega en un query string o en un body; si no lo es responde 400, no 500.
+
+    Acepta un entero o un texto de solo dígitos ASCII, dentro del rango de un id. ``int()``
+    también acepta ``True``, decimales, espacios, signo, ``1_0`` y dígitos de otros
+    alfabetos, y un valor enorme truena en la consulta.
+    """
+    if isinstance(valor, bool) or not isinstance(valor, (int, str)):
+        raise ValidationError({nombre: "Debe ser un número entero."})
+    texto = str(valor)
+    if not (texto.isascii() and texto.isdigit()) or len(texto) > 19 or int(texto) > ID_MAXIMO:
+        raise ValidationError({nombre: "Debe ser un número entero."})
+    return int(texto)
+
+
 def _entero(params, nombre):
-    """Parámetro numérico del query string; si no es número responde 400, no 500."""
+    """Parámetro numérico del query string; ``None`` si no viene."""
     valor = params.get(nombre)
     if not valor:
         return None
-    # Solo dígitos ASCII y dentro del rango de un id: ``int()`` también acepta espacios,
-    # signo, ``1_0`` y dígitos de otros alfabetos, y un valor enorme truena en la consulta.
-    if not (valor.isascii() and valor.isdigit()) or len(valor) > 19 or int(valor) > ID_MAXIMO:
-        raise ValidationError({nombre: "Debe ser un número entero."})
-    return int(valor)
+    return _id_valido(valor, nombre)
 
 
 def con_estado(qs):
@@ -188,9 +199,9 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         oportunidad = self.get_object()
         # Misma validación que los parámetros del query string; el id llega como número o texto.
         dato = request.data.get("vendedor")
-        vendedor_id = _entero({"vendedor": "" if dato is None else str(dato)}, "vendedor")
+        vendedor_id = 0 if dato in (None, "") else _id_valido(dato, "vendedor")
         vendedor = Usuario.objects.filter(
-            pk=vendedor_id or 0, empresa_id=oportunidad.empresa_id, is_active=True
+            pk=vendedor_id, empresa_id=oportunidad.empresa_id, is_active=True
         ).first()
         if vendedor is None:
             raise ValidationError({"vendedor": "Vendedor no encontrado en la empresa."})
