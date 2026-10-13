@@ -23,6 +23,7 @@ from ventas.scope import oportunidades_base, oportunidades_visibles
 ESTATUS_BORRADOR = 1
 ESTATUS_AUTORIZADA = 3
 ESTADOS = ["Nueva", "Contactada", "Cotizada", "Ganada", "Perdida"]
+ID_MAXIMO = 2**63 - 1  # tope de un BigAutoField
 
 
 def _entero(params, nombre):
@@ -30,10 +31,11 @@ def _entero(params, nombre):
     valor = params.get(nombre)
     if not valor:
         return None
-    try:
-        return int(valor)
-    except ValueError:
+    # Solo dígitos ASCII y dentro del rango de un id: ``int()`` también acepta espacios,
+    # signo, ``1_0`` y dígitos de otros alfabetos, y un valor enorme truena en la consulta.
+    if not (valor.isascii() and valor.isdigit()) or len(valor) > 19 or int(valor) > ID_MAXIMO:
         raise ValidationError({nombre: "Debe ser un número entero."})
+    return int(valor)
 
 
 def con_estado(qs):

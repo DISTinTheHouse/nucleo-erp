@@ -4730,6 +4730,25 @@ class OportunidadesValidacionesTests(OportunidadesBase):
 
         self.assertEqual(resp.status_code, 400)
 
+    def test_parametros_numericos_solo_aceptan_digitos_y_dentro_de_rango(self):
+        c = self._client(self.jefe)
+        casos = (
+            (OPORTUNIDADES_URL, "cliente"),
+            (OPORTUNIDADES_URL, "vendedor"),
+            (SEGUIMIENTOS_URL, "oportunidad"),
+            (SEGUIMIENTOS_URL, "oportunidad_vendedor"),
+        )
+        invalidos = ("99999999999999999999999", "9" * 5000, " 1", "1 ", "1_0", "-1", "+1", "1.0", "١٢")
+        for url, nombre in casos:
+            for valor in invalidos:
+                with self.subTest(url=url, nombre=nombre, valor=valor[:25]):
+                    resp = c.get(url, {nombre: valor})
+                    self.assertEqual(resp.status_code, 400)
+                    self.assertIn(nombre, resp.data)
+            for valor in ("0", "1", str(2**63 - 1)):
+                with self.subTest(url=url, nombre=nombre, valor=valor):
+                    self.assertEqual(c.get(url, {nombre: valor}).status_code, 200)
+
     def test_ordering_invalido_no_truena(self):
         self._op(self.ana)
         for campo in ("zzz", "estado", "-cliente_nombre", "vendedor__password"):
