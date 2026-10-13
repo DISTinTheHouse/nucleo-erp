@@ -282,18 +282,27 @@ class SeguimientoSerializer(serializers.ModelSerializer):
 
     def get_oportunidad_cliente_nombre(self, obj):
         cliente = obj.oportunidad.cliente
-        if cliente is None or cliente.pk not in self._clientes_visibles():
+        if cliente is None:
+            return None
+        visibles = self._clientes_visibles()
+        if visibles is not None and cliente.pk not in visibles:
             return None
         return cliente.nombre
 
     def _clientes_visibles(self):
-        """Ids de los clientes que ve el usuario (misma regla que la cartera del onboarding).
+        """Ids de los clientes que ve el usuario, o ``None`` si no hay que filtrar.
 
-        Una consulta por petición, no por fila: se guarda en el ``request``.
+        El superusuario y el admin de empresa ven el nombre siempre, también el de un
+        cliente dado de baja, y no cuestan consulta. Al resto se le aplica la regla de la
+        cartera del onboarding: una consulta por petición, no por fila (se guarda en el
+        ``request``).
         """
         request = self.context.get("request")
         if request is None:
             return frozenset()
+        user = request.user
+        if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
+            return None
         if not hasattr(request, "_crm_clientes_visibles"):
             request._crm_clientes_visibles = frozenset(
                 clientes_visibles(clientes_base(), request.user).values_list("pk", flat=True)

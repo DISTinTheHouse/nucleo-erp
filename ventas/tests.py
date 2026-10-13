@@ -4621,8 +4621,11 @@ class OportunidadSeguimientosTests(OportunidadesBase):
         self.assertEqual(nombres(self.jefe), ("Cliente Acme",) * 3)
         self.cliente.vendedores.add(self.ana)
         self.assertEqual(nombres(self.ana), ("Cliente Acme",) * 3)
-        self.cliente.soft_delete()  # dado de baja: nadie lo ve, igual que en /terceros/clientes/
-        self.assertEqual(nombres(self.jefe), (None, None, None))
+        self.cliente.soft_delete()  # dado de baja: el vendedor deja de verlo; el admin, no
+        self.assertEqual(nombres(self.ana), (None, None, None))
+        self.assertEqual(nombres(self.jefe), ("Cliente Acme",) * 3)
+        superusuario = Usuario.objects.create(username="root", email="root@x.test", is_superuser=True)
+        self.assertEqual(nombres(superusuario), ("Cliente Acme",) * 3)
 
     def test_el_listado_con_contexto_no_hace_consultas_por_fila(self):
         self.cliente.vendedores.add(self.ana)
