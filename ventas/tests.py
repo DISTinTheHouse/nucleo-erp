@@ -4743,6 +4743,16 @@ class RechazoCotizacionComentarioTests(TestCase):
         self.assertEqual(detalle.data["estatus"], 4)
         self.assertEqual(detalle.data["motivo_rechazo"], "Falta el RFC del cliente")
 
+    def test_rechazar_notifica_al_vendedor(self):
+        from notificaciones.models import Notificacion
+
+        self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Precio mal"}, format="json")
+        n = Notificacion.objects.get(usuario=self.vendedor, tipo="cotizacion_rechazada")
+        self.assertIn(f"#{self.cotizacion.id}", n.mensaje)
+        self.assertEqual(n.data["cotizacion_id"], self.cotizacion.id)
+        self.assertEqual(n.data["motivo"], "Precio mal")
+        self.assertFalse(Notificacion.objects.filter(usuario=self.mesa).exists())
+
     def test_vendedor_reenvia_y_queda_historial(self):
         self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Precio mal"}, format="json")
         resp = self._como(self.vendedor).post(
@@ -4944,3 +4954,41 @@ class AutorizarCotizacionRendimientoTests(TestCase):
         # Techo holgado (hoy 59): antes eran 261 y crecían con renglones × tallas.
         self.assertLessEqual(len(ctx), 70)
 
+
+
+class AutorizarCotizacionNotificaVendedorTests(TestCase):
+    """Al autorizar, el vendedor recibe cotización # y folio del pedido (P-xxxx)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme-nv", razon_social="acme-nv SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ANV", nombre="acme-nv")
+        SerieFolio.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="PEDIDO", serie="P")
+        cls.mesa = Usuario.objects.create(
+            username="mesa@acme-nv.test", email="mesa@acme-nv.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(
+            username="vend@acme-nv.test", email="vend@acme-nv.test", empresa=cls.empresa,
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+
+    def test_autorizar_notifica_al_vendedor_con_folio(self):
+        from notificaciones.models import Notificacion
+
+        cot = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.vendedor, sucursal=self.sucursal,
+            cliente=self.cliente, moneda=self.moneda, estatus=2,
+            persona_pagos="Pagos", correo_facturas="p@acme-nv.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        c = APIClient()
+        c.force_authenticate(user=self.mesa)
+        resp = c.post(f"/api/v1/ventas/cotizaciones/{cot.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        folio = resp.data["pedido"]["folio"]
+        n = Notificacion.objects.get(usuario=self.vendedor, tipo="cotizacion_autorizada")
+        self.assertIn(f"#{cot.id}", n.mensaje)
+        self.assertIn(folio, n.mensaje)
+        self.assertEqual(n.data, {"cotizacion_id": cot.id, "pedido_id": resp.data["pedido"]["id"], "pedido_folio": folio})

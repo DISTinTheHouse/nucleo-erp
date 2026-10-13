@@ -6282,6 +6282,19 @@ Notas:
 
 ---
 
+### Notificaciones al vendedor: cotización autorizada / rechazada
+
+Cuando Mesa de Control **autoriza** (`POST /api/v1/ventas/cotizaciones/{id}/autorizar/`) o **rechaza** (`.../rechazar/`) una cotización, el **vendedor de la cotización** recibe una `Notificacion` (un solo INSERT dentro de la misma transacción; llega por el SSE `nueva` y aparece en el listado). Se filtra con `?modulo=ventas`. No hay endpoint nuevo.
+
+| `tipo` | `titulo` | `mensaje` (ejemplo) | `data` |
+| --- | --- | --- | --- |
+| `cotizacion_autorizada` | Cotización autorizada | Tu cotización #123 fue autorizada y generó el pedido P-000045. | `{cotizacion_id, pedido_id, pedido_folio}` |
+| `cotizacion_rechazada` | Cotización rechazada | Tu cotización #123 fue rechazada: <motivo> | `{cotizacion_id, motivo}` |
+
+Sugerencia para el frontend: navegar con `data.pedido_id` / `data.cotizacion_id`.
+
+---
+
 ### Ejemplos copiar/pegar (TypeScript / fetch)
 
 ```ts

@@ -55,6 +55,7 @@ from ventas.api.serializers import (
 )
 
 from nucleo.models import SerieFolio, Empresa
+from notificaciones.services.notificacion_service import crear_notificacion_usuario
 from produccion.models import (
     OrdenProduccionDetalle,
     OrdenesBordado,
@@ -2217,6 +2218,23 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     "updated_at",
                 ]
             )
+            # Aviso instantáneo (1 INSERT) al vendedor: cotización #N -> pedido P-xxxx.
+            crear_notificacion_usuario(
+                empresa=cotizacion.empresa,
+                usuario_id=cotizacion.vendedor_id,
+                titulo="Cotización autorizada",
+                mensaje=(
+                    f"Tu cotización #{cotizacion.id} fue autorizada y generó "
+                    f"el pedido {pedido.folio or pedido.pk}."
+                ),
+                modulo="ventas",
+                tipo="cotizacion_autorizada",
+                data={
+                    "cotizacion_id": cotizacion.id,
+                    "pedido_id": pedido.pk,
+                    "pedido_folio": pedido.folio,
+                },
+            )
 
         pedido = (
             Pedido.objects.filter(pk=pedido.pk)
@@ -2260,6 +2278,15 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 autor=user,
                 tipo=CotizacionComentario.Tipo.RECHAZO,
                 comentario=motivo,
+            )
+            crear_notificacion_usuario(
+                empresa=cotizacion.empresa,
+                usuario_id=cotizacion.vendedor_id,
+                titulo="Cotización rechazada",
+                mensaje=f"Tu cotización #{cotizacion.id} fue rechazada: {motivo}",
+                modulo="ventas",
+                tipo="cotizacion_rechazada",
+                data={"cotizacion_id": cotizacion.id, "motivo": motivo},
             )
         return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
 
