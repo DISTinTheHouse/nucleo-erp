@@ -364,6 +364,7 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         qs = (
             OrdenCompra.objects.filter(proveedor=proveedor, empresa=empresa, activo=True)
             .select_related("empresa", "sucursal", "moneda", "usuario", "pedido", "proveedor")
+            .prefetch_related("pedidos")
         ) if empresa is not None else OrdenCompra.objects.none()
 
         estatus = (request.query_params.get("estatus") or "").strip()

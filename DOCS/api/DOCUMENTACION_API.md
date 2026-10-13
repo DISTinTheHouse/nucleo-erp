@@ -2279,6 +2279,30 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 - `fecha_oc` (fecha de generación) **ya no se acepta en el body**, ni en `POST .../onboarding/` ni en `PUT`: el servidor la fija una sola vez al crear la OC con el día local (`timezone.localdate()`, America/Mexico_City) y nunca se vuelve a tocar. Si la mandas en el body, se ignora en silencio (no es error).
 - `fecha_vencimiento` sí es editable: agrégala al objeto `orden_compra` del body (`POST .../onboarding/` o `PUT`) como `"fecha_vencimiento": "YYYY-MM-DD"`. El campo ya existía en el modelo pero no estaba expuesto en el onboarding; ahora sí.
 
+### Referencia opcional, varios pedidos y tipo de compra (serie de folio)
+
+Campos nuevos/cambiados en el objeto `orden_compra` de `POST .../onboarding/` y `PUT .../ordenes/{id}/` (todos opcionales; lo que no mandes no se toca, así el flujo actual sigue igual):
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `referencia` | string \| null | **Ya no es obligatoria** en el API (nunca lo fue; el "La referencia es requerida" era validación del formulario). `""`/`null` se guardan como `null`. Máx. 50 caracteres (`400` si excede). |
+| `pedidos` | `int[]` \| null | Pedidos que surte la OC. Reemplaza la lista completa; `[]`/`null` desvincula. Todos deben ser de la empresa de la OC, si no `400 {"pedidos": ...}`. |
+| `pedido` | int \| null | Forma legada de un solo pedido; equivale a `pedidos: [id]`. Si mandas ambos, manda `pedidos`. |
+| `tipo_compra` | `"MP"` \| `"PT"` | `MP` = materia prima (default), `PT` = producto terminado. Define la serie del folio al aceptar. Una vez que la OC tiene folio ya no se puede cambiar (`400`). |
+
+Respuesta (`GET` lista/detalle, y `orden_compra` de onboarding/PUT/aceptar) añade:
+
+```json
+{ "pedido": 12, "pedido_folio": "PED-000012",
+  "pedidos": [12, 15],
+  "pedidos_vinculados": [ {"id": 12, "folio": "PED-000012"}, {"id": 15, "folio": "PED-000015"} ],
+  "tipo_compra": "PT", "tipo_compra_label": "Producto terminado" }
+```
+
+- `pedido` / `pedido_folio` / `pedido_vinculado` **se conservan** y reflejan el primer pedido de `pedidos` (o `null`): ninguna integración existente se rompe. Una OC creada antes (o desde el admin) con solo `pedido` aparece también en `pedidos`.
+- **Folios**: `aceptar` toma la serie activa de la sucursal por `tipo_compra`: `MP` → `SerieFolio.tipo_documento = ORDEN_COMPRA` (serie `OC`, la de siempre), `PT` → `ORDEN_COMPRA_PT` (serie `O`). Si no hay serie configurada se usa el folio de respaldo `OC-{empresa}-{id}` / `O-{empresa}-{id}`.
+- Rendimiento: crear/editar/aceptar una OC ya no hace consultas por renglón (alta de 10 renglones: 47 → 15 consultas; edición: 62 → 30; aceptar: 16 → 11). Los renglones se insertan en lote conservando su historial.
+
 ### Cancelar una orden de compra
 
 Cancelar = la orden al proveedor queda anulada **pero se conserva y sigue visible**. Para borrar una OC capturada por error, ver "Eliminar" abajo.

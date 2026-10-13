@@ -51,6 +51,23 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
     moneda_codigo = serializers.CharField(source='moneda.codigo_iso', read_only=True)
     moneda_simbolo = serializers.CharField(source='moneda.simbolo', read_only=True, allow_null=True)
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True, allow_null=True)
+    tipo_compra_label = serializers.CharField(source='get_tipo_compra_display', read_only=True)
+    pedidos = serializers.SerializerMethodField()
+    pedidos_vinculados = serializers.SerializerMethodField()
+
+    def _pedidos_de(self, obj):
+        # ``pedidos.all()`` aprovecha el prefetch del viewset. Si la OC solo
+        # trae el FK legado ``pedido`` (alta desde el admin), cuenta como uno.
+        pedidos = list(obj.pedidos.all())
+        if not pedidos and obj.pedido_id:
+            pedidos = [obj.pedido]
+        return pedidos
+
+    def get_pedidos(self, obj):
+        return [p.pk for p in self._pedidos_de(obj)]
+
+    def get_pedidos_vinculados(self, obj):
+        return [{'id': p.pk, 'folio': p.folio} for p in self._pedidos_de(obj)]
 
     class Meta:
         model = OrdenCompra
@@ -71,6 +88,10 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'usuario_nombre',
             'pedido',
             'pedido_folio',
+            'pedidos',
+            'pedidos_vinculados',
+            'tipo_compra',
+            'tipo_compra_label',
             'folio',
             'referencia',
             'fecha_oc',
@@ -239,8 +260,15 @@ class OrdenCompraOnboardingHeaderSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
     )
-    referencia = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    referencia = serializers.CharField(required=False, allow_null=True, allow_blank=True, max_length=50)
     observaciones = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    # ``pedidos`` (lista) manda sobre ``pedido`` (uno, legado). ``[]``/``null``
+    # desvincula. Solo se tocan si vienen en el body.
+    pedido = serializers.IntegerField(required=False, allow_null=True)
+    pedidos = serializers.ListField(
+        child=serializers.IntegerField(), required=False, allow_null=True, allow_empty=True,
+    )
+    tipo_compra = serializers.ChoiceField(choices=OrdenCompra.TipoCompra.choices, required=False)
 
 
 class OrdenCompraOnboardingDetalleInputSerializer(serializers.Serializer):
