@@ -291,7 +291,7 @@ class SeguimientoSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["vendedor", "completado_at", "created_at"]
 
-    def get_oportunidad_cliente_nombre(self, obj):
+    def get_oportunidad_cliente_nombre(self, obj) -> str | None:
         cliente = obj.oportunidad.cliente
         if cliente is None:
             return None
