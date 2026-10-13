@@ -354,7 +354,7 @@ class SeguimientoViewSet(viewsets.ModelViewSet):
     ]
 
     def get_queryset(self):
-        visibles =oportunidades_visibles(oportunidades_base(), self.request.user).values("pk")
+        visibles = oportunidades_visibles(oportunidades_base(), self.request.user).values("pk")
         qs = super().get_queryset().filter(oportunidad_id__in=visibles)
         if self.action != "list":
             return qs
