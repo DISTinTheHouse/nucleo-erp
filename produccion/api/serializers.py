@@ -371,7 +371,7 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrdenProduccion
         fields = '__all__'
-        read_only_fields = ['folio_op', 'activo', 'usuario_asignado', 'empresa', 'sucursal']
+        read_only_fields = ['folio_op', 'activo', 'usuario_asignado', 'empresa', 'sucursal', 'estatus_op']
 
 
 class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):

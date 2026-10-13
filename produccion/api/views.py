@@ -80,6 +80,7 @@ from catalogo.models import VarianteProductoProduccion
 from produccion.services.orden_bordado_service import OrdenBordadoService
 from produccion.services.orden_reflejante_service import OrdenReflejanteService
 from produccion.services.orden_produccion_service import OrdenProduccionService
+from produccion.services import estatus_op_service
 from produccion.services.orden_corte_manga_service import OrdenCorteMangaService
 
 
@@ -605,6 +606,49 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
+
+    @action(detail=True, methods=['get', 'post'], url_path='estatus')
+    def estatus(self, request, pk=None):
+        """GET: estatus actual y siguientes estatus posibles. POST: cambia el
+        estatus. Fuera de ``get_queryset()`` (sin el prefetch de BOM) para que
+        abrir el menú de estatus cueste 1-2 queries; el alcance es el mismo
+        que list/detail (``ordenes_produccion_visibles``). 404 si la OP es de
+        otra empresa/sucursal."""
+        visibles = ordenes_produccion_visibles(OrdenProduccion.objects.all(), request.user)
+
+        if request.method == 'GET':
+            op = visibles.only('op_id', 'folio_op', 'estatus_op').filter(pk=pk).first()
+            if op is None:
+                return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+            ruta = OrdenProduccionRutaCritica.objects.filter(op_id=op.pk).first()
+            return Response({
+                'op_id': op.pk,
+                'folio_op': op.folio_op,
+                'estatus_op': op.estatus_op,
+                'estatus_op_display': op.get_estatus_op_display(),
+                'opciones': estatus_op_service.opciones(op, ruta, request.user),
+            })
+
+        self._require_produccion(request.user)
+        estatus_destino = request.data.get('estatus_op')
+        if isinstance(estatus_destino, bool) or not isinstance(estatus_destino, int):
+            raise ValidationError({'estatus_op': 'Requerido: entero con el estatus destino.'})
+        try:
+            op = estatus_op_service.cambiar_estatus(
+                pk, visibles, request.user, estatus_destino,
+                motivo=request.data.get('motivo') or '',
+                forzar=request.data.get('forzar') is True,
+                request=request,
+            )
+        except estatus_op_service.EstatusOpError as exc:
+            return Response(exc.detalle, status=exc.codigo)
+        return Response({
+            'msg': 'Estatus actualizado',
+            'op_id': op.pk,
+            'estatus_op': op.estatus_op,
+            'estatus_op_display': op.get_estatus_op_display(),
+            'fecha_fin': op.fecha_fin,
+        })
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-412): el
     # dashboard siempre es "todas las OP de mi empresa/sucursales", nunca una
