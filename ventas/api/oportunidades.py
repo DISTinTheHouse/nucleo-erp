@@ -202,7 +202,9 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         """Todo lo de la pantalla de una oportunidad en una llamada: datos, seguimientos,
         cotizaciones (con su pedido) y cartera del cliente."""
         oportunidad = self.get_object()
-        seguimientos = OportunidadSeguimiento.objects.filter(oportunidad=oportunidad)
+        seguimientos = OportunidadSeguimiento.objects.filter(oportunidad=oportunidad).select_related(
+            "oportunidad__cliente", "vendedor"
+        )
         pendientes = seguimientos.filter(completado=False)
         pedido = Pedido.objects.filter(cotizacion=OuterRef("pk")).order_by("-id")
         cotizaciones = (
@@ -249,11 +251,19 @@ class OportunidadViewSet(viewsets.ModelViewSet):
 
 
 class SeguimientoSerializer(serializers.ModelSerializer):
+    # Contexto para pintar la fila de la agenda sin pedir cada oportunidad. Los nombres
+    # salen igual que en ``OportunidadSerializer``.
+    oportunidad_titulo = serializers.CharField(source="oportunidad.titulo", read_only=True)
+    oportunidad_nombre_contacto = serializers.CharField(source="oportunidad.nombre_contacto", read_only=True)
+    oportunidad_cliente_nombre = serializers.CharField(source="oportunidad.cliente.nombre", read_only=True, default=None)
+    vendedor_nombre = serializers.CharField(source="vendedor.get_full_name", read_only=True, default=None)
+
     class Meta:
         model = OportunidadSeguimiento
         fields = [
-            "id", "oportunidad", "vendedor", "tipo", "detalle", "fecha_recordatorio",
-            "completado", "completado_at", "created_at",
+            "id", "oportunidad", "oportunidad_titulo", "oportunidad_nombre_contacto",
+            "oportunidad_cliente_nombre", "vendedor", "vendedor_nombre", "tipo", "detalle",
+            "fecha_recordatorio", "completado", "completado_at", "created_at",
         ]
         read_only_fields = ["vendedor", "completado_at", "created_at"]
 
@@ -273,7 +283,7 @@ class SeguimientoViewSet(viewsets.ModelViewSet):
     solo los que tocan en esa fecha o antes (``?hasta=hoy`` usa el día de hoy).
     """
 
-    queryset = OportunidadSeguimiento.objects.all()
+    queryset = OportunidadSeguimiento.objects.select_related("oportunidad__cliente", "vendedor")
     serializer_class = SeguimientoSerializer
     http_method_names = ["get", "post", "patch", "delete"]
     pagination_class = LimitOffsetPagination

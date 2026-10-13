@@ -4538,6 +4538,66 @@ class OportunidadSeguimientosTests(OportunidadesBase):
 
         self.assertEqual(len(pocas), len(muchas))
 
+    # -- contexto para la agenda --------------------------------------------
+
+    CONTEXTO = ("oportunidad_titulo", "oportunidad_nombre_contacto", "oportunidad_cliente_nombre", "vendedor_nombre")
+
+    def _contexto(self, fila):
+        return tuple(fila[campo] for campo in self.CONTEXTO)
+
+    def test_el_seguimiento_trae_el_contexto_de_su_oportunidad(self):
+        lola = Usuario.objects.create(
+            username="lola", email="lola@acme.test", empresa=self.empresa, first_name="Lola", last_name="Paz"
+        )
+        op = self._op(lola, cliente=self.cliente, nombre_contacto="Luis")
+        seg = self._seg(op, vendedor=lola)
+        cliente = self._client(lola)
+        url = f"{SEGUIMIENTOS_URL}{seg.pk}/"
+
+        respuestas = {
+            "lista": cliente.get(SEGUIMIENTOS_URL).data[0],
+            "detalle": cliente.get(url).data,
+            "alta": cliente.post(SEGUIMIENTOS_URL, {"oportunidad": op.pk, "detalle": "x"}, format="json").data,
+            "edicion": cliente.patch(url, {"detalle": "y"}, format="json").data,
+            "completar": cliente.post(f"{url}completar/").data,
+            "onboarding": cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/").data["seguimientos"][0],
+        }
+
+        for origen, fila in respuestas.items():
+            with self.subTest(origen=origen):
+                self.assertEqual(self._contexto(fila), ("Uniformes", "Luis", "Cliente Acme", "Lola Paz"))
+
+    def test_el_contexto_sin_cliente_ni_autor_no_truena(self):
+        op = self._op(self.ana)  # sin cliente ni contacto; ana no tiene nombre capturado
+        de_ana = self._seg(op)
+        sin_autor = self._seg(op, vendedor=None)
+        cliente = self._client(self.ana)
+
+        filas = {s["id"]: s for s in cliente.get(SEGUIMIENTOS_URL).data}
+        oportunidad = cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/").data
+
+        self.assertEqual(self._contexto(filas[de_ana.pk]), ("Uniformes", "", None, ""))
+        self.assertEqual(self._contexto(filas[sin_autor.pk]), ("Uniformes", "", None, None))
+        # Misma derivación que la oportunidad: el frontend ve el mismo valor en los dos lados.
+        self.assertEqual(filas[de_ana.pk]["oportunidad_cliente_nombre"], oportunidad["cliente_nombre"])
+        self.assertEqual(filas[de_ana.pk]["vendedor_nombre"], oportunidad["vendedor_nombre"])
+
+    def test_el_listado_con_contexto_no_hace_consultas_por_fila(self):
+        self._seg(self._op(self.ana, cliente=self.cliente))
+        cliente = self._client(self.jefe)
+        cliente.get(SEGUIMIENTOS_URL)
+
+        with CaptureQueriesContext(connection) as pocas:
+            cliente.get(SEGUIMIENTOS_URL)
+        for i in range(10):
+            autor = Usuario.objects.create(username=f"v{i}", email=f"v{i}@acme.test", empresa=self.empresa)
+            otro_cliente = Cliente.objects.create(empresa=self.empresa, nombre=f"Cliente {i}")
+            self._seg(self._op(autor, cliente=otro_cliente), vendedor=autor)
+        with CaptureQueriesContext(connection) as muchas:
+            filas = cliente.get(SEGUIMIENTOS_URL).data
+
+        self.assertEqual(len(filas), 11)
+        self.assertEqual(len(pocas), len(muchas))
 
 
 class OportunidadesValidacionesTests(OportunidadesBase):
