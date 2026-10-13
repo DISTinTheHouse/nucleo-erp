@@ -110,6 +110,12 @@ class OrdenCompra(StatusLifecycleModel):
         RECIBIDA = 5, 'Recibida'
         CANCELADA = 6, 'Cancelada'
 
+    class TipoCompra(models.TextChoices):
+        # Decide la serie de folio al aceptar: MP -> ``ORDEN_COMPRA`` (serie OC),
+        # PT -> ``ORDEN_COMPRA_PT`` (serie O).
+        MATERIA_PRIMA = 'MP', 'Materia prima'
+        PRODUCTO_TERMINADO = 'PT', 'Producto terminado'
+
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
     proveedor = models.ForeignKey(Proveedor, on_delete=models.SET_NULL, null=True, blank=True)
@@ -117,9 +123,13 @@ class OrdenCompra(StatusLifecycleModel):
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE)
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     pedido = models.ForeignKey(Pedido, on_delete=models.SET_NULL, related_name='ordenes_compra', null=True, blank=True)
+    # Una OC puede surtir varios pedidos. ``pedido`` (FK) se conserva por
+    # compatibilidad y siempre refleja el primero de ``pedidos``.
+    pedidos = models.ManyToManyField(Pedido, related_name='ordenes_compra_vinculadas', blank=True)
+    tipo_compra = models.CharField(max_length=2, choices=TipoCompra.choices, default=TipoCompra.MATERIA_PRIMA)
 
     folio = models.CharField(max_length=30, unique=True, null=True, blank=True)
-    referencia = models.CharField(max_length=50, null=True)
+    referencia = models.CharField(max_length=50, null=True, blank=True)
 
     fecha_oc = models.DateField()
     fecha_entrega_estimada = models.DateField(null=True)

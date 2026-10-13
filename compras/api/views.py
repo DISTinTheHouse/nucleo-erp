@@ -12,6 +12,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from simple_history.utils import bulk_create_with_history
 
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Producto, ProductoVariante
@@ -59,6 +60,7 @@ from inventarios.models import (
 )
 from nucleo.middleware import get_client_ip
 from nucleo.models import Moneda, SerieFolio, Sucursal
+from ventas.models import Pedido
 from produccion.models import OrdenProduccion, OrdenProduccionDetalle
 from terceros.models import Proveedor, Transportista
 
@@ -131,6 +133,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             return qs.none()
         if self.action == 'retrieve':
             qs = self._con_prefetch_retrieve(qs)
+        elif self.action not in ('cancelar', 'aceptar'):
+            # list y las acciones de listado (historial, etc.) serializan ``pedidos``.
+            qs = qs.prefetch_related('pedidos')
         # Listado más reciente primero; ``-id`` como desempate estable. Es el
         # orden de las órdenes de compra en sí: el ``order_by`` de arriba es del
         # Prefetch de recepciones anidadas y solo aplica en ``retrieve``.
@@ -185,6 +190,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             ),
             Prefetch("recepcion_set", queryset=recepciones_qs),
             "facturas_proveedores",
+            "pedidos",
         ]
         return qs.prefetch_related(*prefetch_list)
     def get_serializer_class(self):
@@ -296,13 +302,23 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         data = filtrar_campos_contabilidad_orden_compra(self.get_serializer(instance).data, request.user)
         return Response(data, status=status.HTTP_200_OK)
 
+    # tipo_documento de ``SerieFolio`` por tipo de compra. MP conserva el
+    # histórico ``ORDEN_COMPRA`` (serie OC); PT usa ``ORDEN_COMPRA_PT`` (serie O).
+    TIPO_DOCUMENTO_FOLIO = {
+        OrdenCompra.TipoCompra.MATERIA_PRIMA: ("ORDEN_COMPRA", "OC"),
+        OrdenCompra.TipoCompra.PRODUCTO_TERMINADO: ("ORDEN_COMPRA_PT", "O"),
+    }
+
     def _asignar_folio_oc(self, instance, empresa):
-        serie_folio = SerieFolio.objects.filter(
-            empresa=empresa,
-            sucursal=instance.sucursal,
-            tipo_documento__iexact="ORDEN_COMPRA",
-            activo=True,
-        ).order_by("id_serie_folio").first()
+        """Pone ``instance.folio`` sin guardar: quien llama lo incluye en su ``save``.
+
+        Corre dentro de la transacción de ``aceptar``, así que la serie se lee con
+        ``select_for_update`` y dos aceptaciones simultáneas no repiten consecutivo.
+        """
+        tipo_documento, prefijo_respaldo = self.TIPO_DOCUMENTO_FOLIO.get(
+            instance.tipo_compra, self.TIPO_DOCUMENTO_FOLIO[OrdenCompra.TipoCompra.MATERIA_PRIMA]
+        )
+        serie_folio = SerieFolio.resolve(empresa.pk, instance.sucursal_id, tipo_documento, lock=True)
 
         if serie_folio:
             try:
@@ -311,14 +327,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 serie_folio.ultimo_anio = anio_actual
                 serie_folio.save(update_fields=["folio_actual", "ultimo_anio"])
                 instance.folio = folio_formateado
-                instance.save(update_fields=["folio"])
                 return
             except Exception:
                 pass
 
-        count = OrdenCompra.objects.filter(empresa=empresa).count()
-        instance.folio = f"OC-{empresa.pk}-{instance.id or count+1}"
-        instance.save(update_fields=["folio"])
+        instance.folio = f"{prefijo_respaldo}-{empresa.pk}-{instance.id}"
 
     def _get_default_sucursal(self, user, empresa):
         suc = getattr(user, "sucursal_default", None)
@@ -378,33 +391,89 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                     {"detalle": f"El producto del renglón #{idx + 1} no pertenece a la empresa de la orden."}
                 )
 
-    def _recalcular_totales(self, oc: OrdenCompra):
-        detalles_qs = OrdenCompraDetalle.objects.filter(orden_compra=oc).only(
-            "cantidad", "importe"
-        )
-        subtotal = Decimal("0")
-        piezas = 0
-        for d in detalles_qs:
-            subtotal += Decimal(str(getattr(d, "importe", 0) or 0))
-            piezas += int(getattr(d, "piezas", 0) or getattr(d, "cantidad", 0) or 0)
+    def _armar_renglones(self, oc, detalle):
+        """Renglones de la OC (sin guardar) a partir del body, y sus totales."""
+        renglones = []
+        for it in detalle:
+            cantidad = int(it.get("cantidad") or 0)
+            precio = it.get("precio")
+            precio = Decimal("0") if precio in (None, "") else Decimal(str(precio))
+            descuento = Decimal("0")
+            renglones.append(
+                OrdenCompraDetalle(
+                    orden_compra=oc,
+                    producto_id=it.get("producto"),
+                    solicitud_compra_detalle=None,
+                    requisicion_detalle=None,
+                    descripcion=(it.get("descripcion") or None),
+                    cantidad=cantidad,
+                    precio=precio,
+                    descuento=descuento,
+                    importe=(Decimal(cantidad) * precio) - descuento,
+                    sucursal_id=oc.sucursal_id,
+                    piezas=cantidad,
+                )
+            )
+        return renglones
 
-        porcentaje_iva = Decimal(str(getattr(oc, "porcentaje_iva", 0) or 0))
-        total_iva = (subtotal * porcentaje_iva / Decimal("100")).quantize(
-            Decimal("0.01")
+    def _aplicar_totales(self, oc: OrdenCompra, renglones):
+        """Totales de la OC calculados en memoria (mismas reglas que antes)."""
+        subtotal = sum((r.importe for r in renglones), Decimal("0"))
+        piezas = sum(int(r.piezas or r.cantidad or 0) for r in renglones)
+        porcentaje_iva = Decimal(str(oc.porcentaje_iva or 0))
+        total_iva = (subtotal * porcentaje_iva / Decimal("100")).quantize(Decimal("0.01"))
+        oc.subtotal = subtotal
+        oc.gran_total = subtotal + total_iva
+        oc.total = subtotal
+        oc.total_piezas = piezas
+        oc.impuestos = total_iva
+        oc.total_iva = total_iva
+        oc.porcentaje_iva = porcentaje_iva
+
+    def _reemplazar_renglones(self, oc: OrdenCompra, renglones):
+        OrdenCompraDetalle.objects.filter(orden_compra=oc).delete()
+        if renglones:
+            # ``bulk_create_with_history`` conserva el historial por renglón.
+            bulk_create_with_history(renglones, OrdenCompraDetalle)
+
+    def _validar_pedidos_empresa(self, empresa, header):
+        """Ids de pedidos a vincular (``None`` si el body no los toca).
+
+        ``pedidos`` manda sobre ``pedido``. Todos deben ser de la empresa de la orden.
+        """
+        if "pedidos" in header:
+            ids = header.get("pedidos") or []
+        elif "pedido" in header:
+            ids = [header["pedido"]] if header.get("pedido") else []
+        else:
+            return None
+        ids = list(dict.fromkeys(i for i in ids if i))
+        empresa_id = getattr(empresa, "pk", None)
+        if ids and (
+            empresa_id is None
+            or Pedido.objects.filter(pk__in=ids, empresa_id=empresa_id).count() != len(ids)
+        ):
+            raise ValidationError({"pedidos": "Algún pedido no pertenece a la empresa de la orden."})
+        return ids
+
+    def _oc_para_respuesta(self, pk):
+        return (
+            OrdenCompra.objects.select_related(
+                "proveedor", "pedido", "solicitud_compra", "empresa", "sucursal", "moneda", "usuario",
+            )
+            .prefetch_related("pedidos")
+            .get(pk=pk)
         )
-        gran_total = subtotal + total_iva
-        updates = {
-            "subtotal": subtotal,
-            "gran_total": gran_total,
-            "total": subtotal,
-            "total_piezas": piezas,
-            "impuestos": total_iva,
-            "total_iva": total_iva,
-            "porcentaje_iva": porcentaje_iva,
-        }
-        for k, v in updates.items():
-            setattr(oc, k, v)
-        oc.save(update_fields=list(updates.keys()) + ["updated_at"])
+
+    def _respuesta_oc(self, oc):
+        detalles_qs = OrdenCompraDetalle.objects.filter(orden_compra=oc).order_by("id")
+        return Response(
+            {
+                "orden_compra": OrdenCompraSerializer(self._oc_para_respuesta(oc.pk)).data,
+                "detalle": OrdenCompraDetalleSerializer(detalles_qs, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     def handle_get_onboarding(self, request):
         user = self.request.user
@@ -546,6 +615,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 empresa, sucursal_id=sucursal_id, proveedor_id=proveedor_id, moneda_id=moneda_id,
             )
             self._validar_renglones_empresa(empresa, detalle)
+            pedidos_ids = self._validar_pedidos_empresa(empresa, header)
 
             oc.empresa = empresa
             oc.usuario = user
@@ -568,46 +638,25 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 oc.referencia = header.get("referencia") or None
             if "observaciones" in header:
                 oc.observaciones = header.get("observaciones") or None
+            if "tipo_compra" in header:
+                oc.tipo_compra = header["tipo_compra"]
+            if pedidos_ids is not None:
+                oc.pedido_id = pedidos_ids[0] if pedidos_ids else None
             oc.folio = None
             if not oc.pk:
                 oc.estatus = OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR
+            renglones = None
+            if detalle is not None:
+                renglones = self._armar_renglones(oc, detalle)
+                self._aplicar_totales(oc, renglones)
             oc.save()
 
-            if detalle is not None:
-                OrdenCompraDetalle.objects.filter(orden_compra=oc).delete()
-                for it in detalle:
-                    producto_id = it.get("producto")
-                    cantidad = int(it.get("cantidad") or 0)
-                    precio = it.get("precio")
-                    if precio in (None, ""):
-                        precio = Decimal("0")
-                    else:
-                        precio = Decimal(str(precio))
-                    descuento = Decimal("0")
-                    importe = (Decimal(cantidad) * precio) - descuento
-                    OrdenCompraDetalle.objects.create(
-                        orden_compra=oc,
-                        producto_id=producto_id,
-                        solicitud_compra_detalle=None,
-                        requisicion_detalle=None,
-                        descripcion=(it.get("descripcion") or None),
-                        cantidad=cantidad,
-                        precio=precio,
-                        descuento=descuento,
-                        importe=importe,
-                        sucursal_id=oc.sucursal_id,
-                        piezas=cantidad,
-                    )
-                self._recalcular_totales(oc)
+            if pedidos_ids is not None:
+                oc.pedidos.set(pedidos_ids)
+            if renglones is not None:
+                self._reemplazar_renglones(oc, renglones)
 
-        detalles_qs = OrdenCompraDetalle.objects.filter(orden_compra=oc).order_by("id")
-        return Response(
-            {
-                "orden_compra": OrdenCompraSerializer(oc).data,
-                "detalle": OrdenCompraDetalleSerializer(detalles_qs, many=True).data,
-            },
-            status=status.HTTP_200_OK,
-        )
+        return self._respuesta_oc(oc)
 
     @action(detail=True, methods=["post"], url_path="aceptar")
     def aceptar(self, request, pk=None):
@@ -647,9 +696,12 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 self._asignar_folio_oc(oc, oc.empresa)
             oc.estatus = OrdenCompra.EstatusOrdenCompra.AUTORIZADA
             oc.fecha_autorizacion = timezone.now()
-            oc.save(update_fields=["proveedor", "estatus", "fecha_autorizacion", "updated_at"])
+            oc.save(update_fields=["proveedor", "folio", "estatus", "fecha_autorizacion", "updated_at"])
 
-        return Response({"orden_compra": OrdenCompraSerializer(oc).data}, status=status.HTTP_200_OK)
+        return Response(
+            {"orden_compra": OrdenCompraSerializer(self._oc_para_respuesta(oc.pk)).data},
+            status=status.HTTP_200_OK,
+        )
 
     def update(self, request, pk=None, *args, **kwargs):
         user = request.user
@@ -729,6 +781,17 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 moneda_id=moneda_id if has_moneda else None,
             )
             self._validar_renglones_empresa(oc.empresa, detalle)
+            pedidos_ids = self._validar_pedidos_empresa(oc.empresa, header)
+            # El folio sale de la serie del tipo de compra: con folio ya asignado
+            # el tipo no puede cambiar (quedaría un OC-... en una compra de PT).
+            if (
+                oc.folio
+                and header.get("tipo_compra")
+                and header["tipo_compra"] != oc.tipo_compra
+            ):
+                raise ValidationError(
+                    {"tipo_compra": "La orden ya tiene folio y no puede cambiar de tipo de compra."}
+                )
 
             oc.usuario = user
             if has_sucursal and sucursal_id:
@@ -747,45 +810,24 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 oc.referencia = header.get("referencia") or None
             if "observaciones" in header:
                 oc.observaciones = header.get("observaciones") or None
+            if "tipo_compra" in header:
+                oc.tipo_compra = header["tipo_compra"]
+            if pedidos_ids is not None:
+                oc.pedido_id = pedidos_ids[0] if pedidos_ids else None
 
             oc.estatus = OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR
+            renglones = None
+            if detalle is not None:
+                renglones = self._armar_renglones(oc, detalle)
+                self._aplicar_totales(oc, renglones)
             oc.save()
 
-            if detalle is not None:
-                OrdenCompraDetalle.objects.filter(orden_compra=oc).delete()
-                for it in detalle:
-                    producto_id = it.get("producto")
-                    cantidad = int(it.get("cantidad") or 0)
-                    precio = it.get("precio")
-                    if precio in (None, ""):
-                        precio = Decimal("0")
-                    else:
-                        precio = Decimal(str(precio))
-                    descuento = Decimal("0")
-                    importe = (Decimal(cantidad) * precio) - descuento
-                    OrdenCompraDetalle.objects.create(
-                        orden_compra=oc,
-                        producto_id=producto_id,
-                        solicitud_compra_detalle=None,
-                        requisicion_detalle=None,
-                        descripcion=(it.get("descripcion") or None),
-                        cantidad=cantidad,
-                        precio=precio,
-                        descuento=descuento,
-                        importe=importe,
-                        sucursal_id=oc.sucursal_id,
-                        piezas=cantidad,
-                    )
-                self._recalcular_totales(oc)
+            if pedidos_ids is not None:
+                oc.pedidos.set(pedidos_ids)
+            if renglones is not None:
+                self._reemplazar_renglones(oc, renglones)
 
-        detalles_qs = OrdenCompraDetalle.objects.filter(orden_compra=oc).order_by("id")
-        return Response(
-            {
-                "orden_compra": OrdenCompraSerializer(oc).data,
-                "detalle": OrdenCompraDetalleSerializer(detalles_qs, many=True).data,
-            },
-            status=status.HTTP_200_OK,
-        )
+        return self._respuesta_oc(oc)
 
     def destroy(self, request, pk=None, *args, **kwargs):
         user = request.user
