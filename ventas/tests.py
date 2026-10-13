@@ -4630,7 +4630,16 @@ class OportunidadSeguimientosTests(OportunidadesBase):
     def test_el_listado_con_contexto_no_hace_consultas_por_fila(self):
         self.cliente.vendedores.add(self.ana)
         self._seg(self._op(self.ana, cliente=self.cliente))
-        clientes = {"admin": self._client(self.jefe), "vendedor": self._client(self.ana)}
+        # Mesa de Control ve todos los clientes de la empresa sin tenerlos asignados.
+        mesa = Usuario.objects.create(username="mesa", email="mesa@acme.test", empresa=self.empresa)
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="MESACONTROL-0002", nombre="Mesa-de-control", estatus=Rol.Estatus.ACTIVO
+        )
+        UsuarioRol.objects.create(usuario=mesa, rol=rol, empresa=self.empresa)
+        self._seg(self._op(mesa, cliente=self.cliente), vendedor=mesa)
+        clientes = {
+            "admin": self._client(self.jefe), "vendedor": self._client(self.ana), "mesa": self._client(mesa),
+        }
 
         def medir():
             consultas, filas = {}, {}
@@ -4648,10 +4657,13 @@ class OportunidadSeguimientosTests(OportunidadesBase):
             otro_cliente.vendedores.add(self.ana)
             self._seg(self._op(autor, cliente=otro_cliente), vendedor=autor)
             self._seg(self._op(self.ana, cliente=otro_cliente))
+            self._seg(self._op(mesa, cliente=Cliente.objects.create(empresa=self.empresa, nombre=f"Sin asignar {i}")))
         muchas, filas = medir()
 
-        self.assertEqual(filas, {"admin": 21, "vendedor": 11})
+        self.assertEqual(filas, {"admin": 32, "vendedor": 11, "mesa": 11})
         self.assertEqual(pocas, muchas)
+        nombres = [s["oportunidad_cliente_nombre"] for s in clientes["mesa"].get(SEGUIMIENTOS_URL).data]
+        self.assertNotIn(None, nombres)
 
     # -- filtro por dueño de la oportunidad ---------------------------------
 

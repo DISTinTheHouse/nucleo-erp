@@ -295,18 +295,18 @@ class SeguimientoSerializer(serializers.ModelSerializer):
         cliente = obj.oportunidad.cliente
         if cliente is None:
             return None
-        visibles = self._clientes_visibles()
+        visibles = self._clientes_visibles(obj)
         if visibles is not None and cliente.pk not in visibles:
             return None
         return cliente.nombre
 
-    def _clientes_visibles(self):
+    def _clientes_visibles(self, obj):
         """Ids de los clientes que ve el usuario, o ``None`` si no hay que filtrar.
 
         El superusuario y el admin de empresa ven el nombre siempre, también el de un
         cliente dado de baja, y no cuestan consulta. Al resto se le aplica la regla de la
-        cartera del onboarding: una consulta por petición, no por fila (se guarda en el
-        ``request``).
+        cartera del onboarding, solo sobre los clientes de las filas que se serializan:
+        una consulta por respuesta, no por fila (se guarda en el serializer de la lista).
         """
         request = self.context.get("request")
         if request is None:
@@ -314,11 +314,17 @@ class SeguimientoSerializer(serializers.ModelSerializer):
         user = request.user
         if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
             return None
-        if not hasattr(request, "_crm_clientes_visibles"):
-            request._crm_clientes_visibles = frozenset(
-                clientes_visibles(clientes_base(), request.user).values_list("pk", flat=True)
-            )
-        return request._crm_clientes_visibles
+        lista = self.parent if isinstance(self.parent, serializers.ListSerializer) else None
+        if lista is not None and hasattr(lista, "_clientes_visibles_ids"):
+            return lista._clientes_visibles_ids
+        filas = lista.instance if lista is not None else [obj]
+        ids = {fila.oportunidad.cliente_id for fila in filas} - {None}
+        visibles = frozenset(
+            clientes_visibles(clientes_base(), request.user).filter(pk__in=ids).values_list("pk", flat=True)
+        )
+        if lista is not None:
+            lista._clientes_visibles_ids = visibles
+        return visibles
 
     def validate_oportunidad(self, oportunidad):
         if self.instance is not None and oportunidad.pk != self.instance.oportunidad_id:
