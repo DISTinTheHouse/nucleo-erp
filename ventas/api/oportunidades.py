@@ -15,7 +15,7 @@ from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 
 from terceros.cartera import cartera_de_cliente
-from terceros.scope import clientes_base, clientes_visibles
+from terceros.scope import clientes_base, clientes_visibles, ve_clientes_sin_asignacion
 from usuarios.models import Usuario
 from ventas.models import Cotizacion, Oportunidad, OportunidadSeguimiento, Pedido
 from ventas.scope import oportunidades_base, oportunidades_visibles
@@ -311,8 +311,7 @@ class SeguimientoSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         if request is None:
             return frozenset()
-        user = request.user
-        if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
+        if ve_clientes_sin_asignacion(request.user):
             return None
         lista = self.parent if isinstance(self.parent, serializers.ListSerializer) else None
         if lista is not None and hasattr(lista, "_clientes_visibles_ids"):
