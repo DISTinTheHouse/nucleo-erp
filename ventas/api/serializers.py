@@ -2,6 +2,7 @@ from decimal import Decimal, InvalidOperation
 from rest_framework import serializers
 from ventas.models import (
     Cotizacion,
+    CotizacionComentario,
     CotizacionDetalle,
     CotizacionDetalleTalla,
     CotizacionServicioExtra,
@@ -142,7 +143,7 @@ class CotizacionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Cotizacion
-        read_only_fields = ['empresa']
+        read_only_fields = ['empresa', 'motivo_rechazo']
         fields = '__all__'
         extra_kwargs = {
             'oc': {'required': False, 'allow_null': True},
@@ -155,6 +156,21 @@ class CotizacionSerializer(serializers.ModelSerializer):
             'metodo_pago': {'required': False, 'allow_null': True, 'allow_blank': True},
             'uso_cfdi': {'required': False, 'allow_null': True, 'allow_blank': True},
         }
+
+class CotizacionComentarioSerializer(serializers.ModelSerializer):
+    autor_nombre = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CotizacionComentario
+        fields = ["id", "tipo", "comentario", "autor", "autor_nombre", "created_at"]
+        read_only_fields = fields
+
+    def get_autor_nombre(self, obj):
+        autor = obj.autor
+        if not autor:
+            return None
+        return autor.get_full_name() or getattr(autor, "email", None)
+
 
 class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
     estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)

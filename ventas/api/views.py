@@ -26,6 +26,7 @@ from inventarios.models import (
 from finanzas.models import Factura, FacturaDetalle, NotaCreditoDetalle
 from ventas.models import (
     Cotizacion,
+    CotizacionComentario,
     CotizacionDetalle,
     CotizacionDetalleTalla,
     CotizacionServicioExtra,
@@ -37,6 +38,7 @@ from ventas.models import (
 )
 
 from ventas.api.serializers import (
+    CotizacionComentarioSerializer,
     CotizacionSerializer,
     CotizacionDashboardItemSerializer,
     CotizacionDetalleSerializer,
@@ -2066,7 +2068,15 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 {"estatus": "La cotización ya está en revisión o autorizada."}
             )
 
+        comentario = str(request.data.get("comentario") or "").strip()
         with transaction.atomic():
+            if cotizacion.estatus == 4 and comentario:
+                CotizacionComentario.objects.create(
+                    cotizacion=cotizacion,
+                    autor=user,
+                    tipo=CotizacionComentario.Tipo.REENVIO,
+                    comentario=comentario,
+                )
             cotizacion.estatus = 2
             cotizacion.save(update_fields=["estatus", "updated_at"])
 
@@ -2211,6 +2221,11 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         user = request.user
         self._require_mesa_control(user)
         cotizacion = self.get_object()
+        motivo = str(request.data.get("comentario") or "").strip()
+        if not motivo:
+            raise ValidationError(
+                {"comentario": "Indica el motivo del rechazo para que el vendedor lo vea."}
+            )
         with transaction.atomic():
             cotizacion = (
                 Cotizacion.objects.select_for_update().filter(pk=cotizacion.pk).first()
@@ -2220,8 +2235,21 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     {"cotizacion": "La cotización ya está autorizada."}
                 )
             cotizacion.estatus = 4
-            cotizacion.save(update_fields=["estatus", "updated_at"])
+            cotizacion.motivo_rechazo = motivo
+            cotizacion.save(update_fields=["estatus", "motivo_rechazo", "updated_at"])
+            CotizacionComentario.objects.create(
+                cotizacion=cotizacion,
+                autor=user,
+                tipo=CotizacionComentario.Tipo.RECHAZO,
+                comentario=motivo,
+            )
         return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
+
+    @action(detail=True, methods=["get"], url_path="comentarios")
+    def comentarios(self, request, pk=None):
+        cotizacion = self.get_object()
+        qs = cotizacion.comentarios.select_related("autor")
+        return Response(CotizacionComentarioSerializer(qs, many=True).data)
 
     @action(detail=True, methods=["post"], url_path="aceptar-cambios")
     def aceptar_cambios(self, request, pk=None):

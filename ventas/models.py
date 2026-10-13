@@ -151,6 +151,9 @@ class Cotizacion(models.Model):
     tipo_pedido = models.SmallIntegerField(default=1, choices=TIPO_PEDIDO_CHOICES)
     estatus = models.SmallIntegerField(default=1, choices=CHOICES_ESTATUS, db_index=True)
     autorizada_at = models.DateTimeField(null=True, blank=True)
+    # Último motivo con el que mesa de control rechazó la cotización; el
+    # historial completo vive en ``CotizacionComentario``.
+    motivo_rechazo = models.TextField(null=True, blank=True)
     cambios_solicitados_at = models.DateTimeField(null=True, blank=True)
     aprobado_snapshot = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True, db_index=True)
@@ -242,6 +245,29 @@ class Cotizacion(models.Model):
     
     def __str__(self):
         return str(self.id)
+
+class CotizacionComentario(models.Model):
+    """Historial de comentarios del ciclo rechazo -> corrección -> reenvío."""
+
+    class Tipo(models.TextChoices):
+        RECHAZO = "RECHAZO", "Rechazo de mesa de control"
+        REENVIO = "REENVIO", "Reenvío del vendedor a revisión"
+
+    cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="comentarios")
+    autor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    tipo = models.CharField(max_length=10, choices=Tipo.choices)
+    comentario = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "cotizacion_comentarios"
+        verbose_name = "Comentario de Cotización"
+        verbose_name_plural = "Comentarios de Cotización"
+        ordering = ["created_at", "id"]
+
+    def __str__(self):
+        return f"{self.tipo} #{self.cotizacion_id}"
+
 
 class CotizacionDetalle(models.Model):
     cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="cotizaciondetalle")

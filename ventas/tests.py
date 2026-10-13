@@ -4698,3 +4698,65 @@ class SkuMuestraCotizacionTests(TestCase):
         self.assertEqual(base, mas)
         ids = [d["id"] for d in resp.data["detalles"]]
         self.assertEqual(ids, sorted(ids))
+
+
+class RechazoCotizacionComentarioTests(TestCase):
+    """Mesa de control debe dar un motivo al rechazar; el vendedor lo ve y reenvía."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-mc", razon_social="acme-mc SA")
+        cls.mesa = Usuario.objects.create(
+            username="mesa@acme-mc.test", email="mesa@acme-mc.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(
+            username="vend@acme-mc.test", email="vend@acme-mc.test", empresa=cls.empresa,
+        )
+
+    def setUp(self):
+        self.cotizacion = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.vendedor, estatus=2,
+        )
+        self.url = f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/"
+
+    def _como(self, user):
+        c = APIClient()
+        c.force_authenticate(user=user)
+        return c
+
+    def test_rechazar_sin_comentario_falla(self):
+        for body in ({}, {"comentario": "   "}):
+            resp = self._como(self.mesa).post(self.url + "rechazar/", body, format="json")
+            self.assertEqual(resp.status_code, 400, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 2)
+
+    def test_rechazar_guarda_motivo_y_lo_ve_el_vendedor(self):
+        resp = self._como(self.mesa).post(
+            self.url + "rechazar/", {"comentario": "Falta el RFC del cliente"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.data["cotizacion"]["motivo_rechazo"], "Falta el RFC del cliente")
+        detalle = self._como(self.vendedor).get(self.url)
+        self.assertEqual(detalle.data["estatus"], 4)
+        self.assertEqual(detalle.data["motivo_rechazo"], "Falta el RFC del cliente")
+
+    def test_vendedor_reenvia_y_queda_historial(self):
+        self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Precio mal"}, format="json")
+        resp = self._como(self.vendedor).post(
+            self.url + "enviar-revision/", {"comentario": "Ya corregí el precio"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 2)
+        hist = self._como(self.vendedor).get(self.url + "comentarios/")
+        self.assertEqual(hist.status_code, 200)
+        self.assertEqual([c["tipo"] for c in hist.data], ["RECHAZO", "REENVIO"])
+        self.assertEqual([c["comentario"] for c in hist.data], ["Precio mal", "Ya corregí el precio"])
+
+    def test_reenviar_sin_comentario_sigue_permitido(self):
+        self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Precio mal"}, format="json")
+        resp = self._como(self.vendedor).post(self.url + "enviar-revision/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(self.cotizacion.comentarios.count(), 1)
