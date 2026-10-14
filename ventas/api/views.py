@@ -85,6 +85,7 @@ from ventas.utils.helpers import (
     _save_pedido_servicios_extras,
 )
 from ventas.services.sku_produccion_service import (
+    es_muestra,
     variante_produccion_de_talla,
     variantes_produccion_prefetch,
 )
@@ -3243,9 +3244,16 @@ class PedidoViewSet(viewsets.ModelViewSet):
         self._require_mesa_control(user)
         pedido = self.get_object()
 
+        if pedido.estatus == Pedido.ESTATUS_CANCELADO:
+            raise ValidationError({"pedido": "El pedido está cancelado."})
+
         talla_id = request.data.get("pedido_detalle_talla_id")
         if not talla_id:
             raise ValidationError({"pedido_detalle_talla_id": "Este campo es requerido."})
+        try:
+            talla_id = int(talla_id)
+        except (TypeError, ValueError):
+            raise ValidationError({"pedido_detalle_talla_id": "Debe ser un número entero."})
 
         dt = (
             PedidoDetalleTalla.objects.filter(pk=talla_id, pedido_detalle__pedido=pedido)
@@ -3255,28 +3263,47 @@ class PedidoViewSet(viewsets.ModelViewSet):
         if dt is None:
             raise ValidationError({"pedido_detalle_talla_id": "No pertenece a este pedido."})
 
+        if not es_muestra(dt.pedido_detalle):
+            raise ValidationError({"pedido_detalle_talla_id": "La línea ya no es una muestra."})
+
         variante = variante_produccion_de_talla(dt.pedido_detalle_id, dt.talla_id)
         if variante is None:
             raise ValidationError({
                 "pedido_detalle_talla_id": "Esta talla no tiene SKU de producción generado todavía."
             })
 
-        dt.sku_muestra = variante.sku
-        dt.save(update_fields=["sku_muestra"])
+        with transaction.atomic():
+            dt.sku_muestra = variante.sku
+            dt.save(update_fields=["sku_muestra"])
+            reflejado = self._reflejar_sku_muestra_en_cotizacion(pedido, dt, variante.sku)
 
-        # Reflejo best-effort en la cotización de origen: match por
-        # producto_nombre_externo + color + talla, mismo criterio que agrupa
-        # líneas en ``_merge_detalle``. Sin cotización o sin match, el pedido
-        # ya quedó actualizado -- eso es lo que pidió el clic.
-        if pedido.cotizacion_id:
-            CotizacionDetalleTalla.objects.filter(
-                cotizacion_detalle__cotizacion_id=pedido.cotizacion_id,
-                cotizacion_detalle__producto_nombre_externo=dt.pedido_detalle.producto_nombre_externo,
-                cotizacion_detalle__color_id=dt.pedido_detalle.color_id,
-                talla_id=dt.talla_id,
-            ).update(sku_muestra=variante.sku)
+        return Response({
+            "pedido_detalle_talla_id": dt.pk,
+            "sku_muestra": dt.sku_muestra,
+            "cotizacion_actualizada": reflejado,
+        })
 
-        return Response({"pedido_detalle_talla_id": dt.pk, "sku_muestra": dt.sku_muestra})
+    @staticmethod
+    def _reflejar_sku_muestra_en_cotizacion(pedido, dt, sku):
+        """Copia el SKU a la talla espejo de la cotización de origen; ``True`` si la halló.
+
+        Match por producto_nombre_externo + talla y el color del pedido o, si la
+        cotización se capturó sin color (el caso habitual: el color se asigna después en
+        el pedido, #436), sin color. Sin cotización o sin match no falla: el pedido ya
+        quedó actualizado, que es lo que pidió el clic.
+        """
+        if not pedido.cotizacion_id:
+            return False
+        tallas = CotizacionDetalleTalla.objects.filter(
+            cotizacion_detalle__cotizacion_id=pedido.cotizacion_id,
+            cotizacion_detalle__producto_nombre_externo=dt.pedido_detalle.producto_nombre_externo,
+            talla_id=dt.talla_id,
+        )
+        color_id = dt.pedido_detalle.color_id
+        actualizadas = tallas.filter(cotizacion_detalle__color_id=color_id).update(sku_muestra=sku)
+        if not actualizadas and color_id is not None:
+            actualizadas = tallas.filter(cotizacion_detalle__color__isnull=True).update(sku_muestra=sku)
+        return bool(actualizadas)
 
     @action(detail=True, methods=["post"], url_path="recomprar")
     def recomprar(self, request, pk=None):

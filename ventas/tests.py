@@ -2122,6 +2122,38 @@ class PedidoVincularSkuMuestraTests(TestCase):
         resp = self.client_post_otro(otro_pedido)
         self.assertEqual(resp.status_code, 400, resp.json())
 
+    def test_cotizacion_sin_color_tambien_recibe_el_sku(self):
+        # #436: la muestra se cotiza sin color; el color lo asigna producción en el pedido.
+        CotizacionDetalle.objects.filter(pk=self.cot_talla.cotizacion_detalle_id).update(color=None)
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 200, resp.json())
+        self.assertTrue(resp.json()["cotizacion_actualizada"])
+        self.cot_talla.refresh_from_db()
+        self.assertEqual(self.cot_talla.sku_muestra, "MP1-AZL-M")
+
+    def test_avisa_si_no_hubo_linea_en_la_cotizacion(self):
+        CotizacionDetalleTalla.objects.filter(pk=self.cot_talla.pk).delete()
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 200, resp.json())
+        self.assertFalse(resp.json()["cotizacion_actualizada"])
+
+    def test_id_no_numerico_responde_400(self):
+        for valor in ("abc", [1, 2]):
+            resp = self._post(self.mesa, talla_id=valor)
+            self.assertEqual(resp.status_code, 400, resp.json())
+
+    def test_pedido_cancelado_responde_400(self):
+        Pedido.objects.filter(pk=self.pedido.pk).update(estatus=Pedido.ESTATUS_CANCELADO)
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 400, resp.json())
+        self.ped_talla.refresh_from_db()
+        self.assertIsNone(self.ped_talla.sku_muestra)
+
+    def test_linea_que_ya_no_es_muestra_responde_400(self):
+        PedidoDetalle.objects.filter(pk=self.ped_talla.pedido_detalle_id).update(producto_nombre_externo=None)
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 400, resp.json())
+
     def client_post_otro(self, otro_pedido):
         client = APIClient()
         client.force_authenticate(user=self.mesa)
