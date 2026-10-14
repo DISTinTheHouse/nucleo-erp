@@ -87,7 +87,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from django.core.exceptions import ImproperlyConfigured
-from django.db.models import F, Q
+from django.db.models import BooleanField, Exists, F, OuterRef, Q, Value
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import permissions
@@ -108,7 +108,7 @@ from produccion.scope import (
     ordenes_reflejante_base,
     ordenes_reflejante_visibles,
 )
-from terceros.scope import clientes_base, clientes_visibles, clientes_visibles_entre
+from terceros.scope import clientes_base, clientes_visibles, ve_clientes_sin_asignacion
 from ventas.api.oportunidades import con_estado as oportunidades_con_estado
 from ventas.scope import (
     cotizaciones_base,
@@ -153,6 +153,11 @@ class EntidadBuscable:
     objetos de la página, para la entidad que necesita resolver algo una vez por
     respuesta (p. ej. qué clientes puede ver el usuario) en vez de una vez por fila.
 
+    ``condiciones_nombre`` son condiciones extra de nombre que no caben en
+    ``campos_nombre`` (p. ej. comparar contra una columna solo si el usuario la puede
+    ver): cada una recibe ``q`` y devuelve un ``Q`` que puede usar las anotaciones
+    del ``alcance``. Se combinan con OR y con el mismo mínimo de caracteres.
+
     ``campos_only`` son las columnas que ``fila()`` necesita. Se aplican con
     ``.only()`` para no arrastrar filas completas —``Pedido`` tiene ~70 columnas,
     varias de ellas ``TextField``— en un endpoint que se dispara por pulsación.
@@ -172,6 +177,7 @@ class EntidadBuscable:
     filas: Callable[[Any, list], list[dict]] | None = None
     campos_codigo: tuple[str, ...] = ()
     campos_nombre: tuple[str, ...] = ()
+    condiciones_nombre: tuple[Callable[[str], Q], ...] = ()
     campos_only: tuple[str, ...] = ()
     permisos_visibilidad: tuple[str, ...] = ()
     orden: tuple[Any, ...] = ()
@@ -206,6 +212,9 @@ class EntidadBuscable:
         if len(q) >= LONGITUD_MINIMA_NOMBRE:
             for campo in self.campos_nombre:
                 condicion |= Q(**{f"{campo}__icontains": q})
+                aplicado = True
+            for condicion_nombre in self.condiciones_nombre:
+                condicion |= condicion_nombre(q)
                 aplicado = True
         return condicion if aplicado else None
 
@@ -333,15 +342,30 @@ def _nombre_oportunidad(oportunidad, cliente_visible: bool) -> tuple[str, str | 
     return titulo, subtitulo
 
 
+def _oportunidades_buscables(user):
+    """Alcance de ``OportunidadViewSet`` con ``estado`` y ``cliente_visible`` anotados.
+
+    ``cliente_visible`` sigue la regla de los seguimientos
+    (``terceros.scope.clientes_visibles_entre``): el superusuario y el admin de empresa
+    ven todos los clientes, también los dados de baja; el resto, ``clientes_visibles``.
+    Va como subconsulta dentro de la misma consulta: sirve para buscar por el nombre
+    del cliente y para nombrar la fila, sin consultas aparte.
+    """
+    qs = oportunidades_con_estado(
+        oportunidades_visibles(oportunidades_base().select_related("cliente"), user)
+    )
+    if ve_clientes_sin_asignacion(user):
+        visible = Value(True, output_field=BooleanField())
+    else:
+        visible = Exists(clientes_visibles(clientes_base(), user).filter(pk=OuterRef("cliente_id")))
+    return qs.annotate(cliente_visible=visible)
+
+
 def _filas_oportunidad(user, oportunidades) -> list[dict]:
-    # ``estado`` viene anotado (``con_estado``): Cotizada y Ganada se calculan de las
-    # cotizaciones ligadas, no se guardan. Qué clientes ve el usuario se resuelve una
-    # vez para toda la página, con la misma regla que los seguimientos.
-    visibles = clientes_visibles_entre(user, {op.cliente_id for op in oportunidades})
+    # ``estado`` y ``cliente_visible`` vienen anotados (``_oportunidades_buscables``).
     filas = []
     for oportunidad in oportunidades:
-        cliente_visible = visibles is None or oportunidad.cliente_id in visibles
-        titulo, subtitulo = _nombre_oportunidad(oportunidad, cliente_visible)
+        titulo, subtitulo = _nombre_oportunidad(oportunidad, oportunidad.cliente_visible)
         filas.append({
             "tipo": "oportunidad",
             "id": oportunidad.pk,
@@ -638,13 +662,13 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         # Alcance de ``OportunidadViewSet`` (``ventas.scope``): el vendedor ve las
         # suyas, el admin de empresa las de su empresa. ``estado`` (Cotizada/Ganada)
         # se anota con dos EXISTS que solo corren para las filas que se devuelven.
-        alcance=lambda user: oportunidades_con_estado(
-            oportunidades_visibles(oportunidades_base().select_related("cliente"), user)
-        ),
+        alcance=_oportunidades_buscables,
         filas=_filas_oportunidad,
         # Subcadena en título y contacto; los sirven los GIN ``UPPER(col)`` de
-        # ``ventas.Oportunidad``.
+        # ``ventas.Oportunidad``. Y en el nombre del cliente, solo si el usuario lo ve:
+        # buscar por un cliente oculto revelaría que existe.
         campos_nombre=("titulo", "nombre_contacto"),
+        condiciones_nombre=(lambda q: Q(cliente__nombre__icontains=q, cliente_visible=True),),
         campos_only=("titulo", "nombre_contacto", "etapa", "cliente__nombre"),
         # La clave de la sección de oportunidades más el módulo ``R-CRM`` de respaldo:
         # en este catálogo son cadenas planas y quien ya entra al módulo la ve.

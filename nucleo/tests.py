@@ -1719,3 +1719,65 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
         self.assertEqual(len(titulos), 21)
         self.assertEqual(sum(t.startswith("Cliente ") or t == "Comercial Acme Norte" for t in titulos), 11)
 
+    # -- búsqueda por el nombre del cliente, solo si el usuario lo ve -------------
+
+    def test_se_encuentra_por_el_nombre_del_cliente_solo_si_lo_ve(self):
+        self._dar_permiso_crm(self.vendedor_a)
+        cliente = self.a["cliente"]  # "Comercial Acme Norte"; vendedor_a NO lo tiene asignado
+        op = self._oportunidad(self.a, self.vendedor_a, "", cliente=cliente, nombre_contacto="Luis")
+        del_admin = self._oportunidad(self.a, self.a["admin"], "", cliente=cliente)
+
+        self.assertEqual(self._ids(self._buscar(self.vendedor_a, "norte"), "oportunidad"), [])
+        self.assertCountEqual(self._ids(self._buscar(self.a["admin"], "norte"), "oportunidad"), [op.pk, del_admin.pk])
+        self.assertCountEqual(self._ids(self._buscar(self.superuser, "norte"), "oportunidad"), [op.pk, del_admin.pk])
+        # Por el contacto sí la encuentra, nombrada por el contacto.
+        self.assertEqual(self._fila(self.vendedor_a, "luis", op), ("Luis", None))
+
+        cliente.vendedores.add(self.vendedor_a)
+        self.assertEqual(self._ids(self._buscar(self.vendedor_a, "norte"), "oportunidad"), [op.pk])
+        self.assertEqual(self._fila(self.vendedor_a, "norte", op), ("Comercial Acme Norte", "Luis"))
+
+        # Dado de baja: el vendedor ya no lo ve; el admin sí, igual que en el nombre.
+        cliente.soft_delete()
+        self.assertEqual(self._ids(self._buscar(self.vendedor_a, "norte"), "oportunidad"), [])
+        self.assertCountEqual(self._ids(self._buscar(self.a["admin"], "norte"), "oportunidad"), [op.pk, del_admin.pk])
+
+    def test_buscar_por_cliente_no_cruza_empresas_ni_crece_las_consultas(self):
+        self._dar_permiso_crm(self.vendedor_a)
+        visibles = set()
+        for i in range(2):
+            propio = Cliente.objects.create(empresa=self.a["empresa"], nombre=f"Textil Propio {i}")
+            propio.vendedores.add(self.vendedor_a)
+            visibles.add(propio.nombre)
+            self._oportunidad(self.a, self.vendedor_a, "", cliente=propio)
+        self._oportunidad(self.b, self.b["admin"], "", cliente=Cliente.objects.create(
+            empresa=self.b["empresa"], nombre="Textil De Otra Empresa"
+        ))
+
+        def medir():
+            resultado = {}
+            for user in (self.a["admin"], self.vendedor_a):
+                with CaptureQueriesContext(connection) as ctx:
+                    payload = self._buscar(user, "textil", limit=25)
+                titulos = {
+                    f["titulo"] for g in payload["grupos"] if g["tipo"] == "oportunidad" for f in g["resultados"]
+                }
+                resultado[user.username] = (len(ctx), titulos)
+            return resultado
+
+        medir()
+        pocas = medir()
+        for i in range(2, 12):
+            propio = Cliente.objects.create(empresa=self.a["empresa"], nombre=f"Textil Propio {i}")
+            propio.vendedores.add(self.vendedor_a)
+            visibles.add(propio.nombre)
+            self._oportunidad(self.a, self.vendedor_a, "", cliente=propio)
+            ajeno = Cliente.objects.create(empresa=self.a["empresa"], nombre=f"Textil Ajeno {i}")
+            self._oportunidad(self.a, self.vendedor_a, "", cliente=ajeno)
+        muchas = medir()
+
+        self.assertEqual({u: n for u, (n, _) in pocas.items()}, {u: n for u, (n, _) in muchas.items()})
+        self.assertEqual(muchas[self.vendedor_a.username][1], visibles)
+        self.assertNotIn("Textil De Otra Empresa", muchas[self.a["admin"].username][1])
+        self.assertEqual(len(muchas[self.a["admin"].username][1]), 22)
+
