@@ -2873,6 +2873,35 @@ class CategoriaProductoCotizacionTests(TestCase):
             self.assertEqual(resp.status_code, 400, resp.content)
         det.refresh_from_db()
         self.assertIsNone(det.categoria_producto_id)
+    def test_categoria_desactivada_ya_guardada_no_impide_volver_a_guardar(self):
+        CotizacionDetalle.objects.create(
+            cotizacion=self.cotizacion, producto_nombre_externo="Muestra", categoria_producto=self.propia,
+            precio_unitario="10.00", subtotal_linea="10.00",
+        )
+        CategoriaProducto.objects.filter(pk=self.propia.pk).update(activo=False)
+
+        _save_cotizacion_detalle(self.cotizacion, [self._fila(self.propia)], self.empresa, self.admin)
+        self.assertEqual(
+            CotizacionDetalle.objects.get(cotizacion=self.cotizacion).categoria_producto_id, self.propia.pk
+        )
+
+    def test_categoria_desactivada_nueva_se_rechaza(self):
+        CategoriaProducto.objects.filter(pk=self.propia.pk).update(activo=False)
+        with self.assertRaises(DRFValidationError):
+            _save_cotizacion_detalle(self.cotizacion, [self._fila(self.propia)], self.empresa, self.admin)
+
+    def test_cotizacion_detalle_acepta_la_inactiva_que_ya_tenia(self):
+        det = CotizacionDetalle.objects.create(
+            cotizacion=self.cotizacion, producto_nombre_externo="Muestra", categoria_producto=self.propia,
+            precio_unitario="10.00", subtotal_linea="10.00",
+        )
+        CategoriaProducto.objects.filter(pk=self.propia.pk).update(activo=False)
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        url = f"/api/v1/ventas/cotizacion-detalle/{det.pk}/"
+        self.assertEqual(client.patch(url, {"categoria_producto": self.propia.pk}, format="json").status_code, 200)
+        otra = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Off", codigo="OFF", activo=False)
+        self.assertEqual(client.patch(url, {"categoria_producto": otra.pk}, format="json").status_code, 400)
 
 
 # Pk que no existe en ninguna tabla del test: el rechazo de una FK de OTRA empresa

@@ -286,7 +286,12 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
         return _exigir_empresa_del_usuario(self, "direccion_envio_cliente", direccion)
 
     def validate_categoria_producto(self, categoria):
-        return _exigir_empresa_del_usuario(self, "categoria_producto", categoria)
+        categoria = _exigir_empresa_del_usuario(self, "categoria_producto", categoria)
+        # Una asignación nueva exige categoría activa; la que la línea ya tenía se tolera (#429).
+        actual = self.instance.categoria_producto_id if self.instance is not None else None
+        if categoria is not None and not categoria.activo and categoria.pk != actual:
+            raise serializers.ValidationError("La categoría de producto está inactiva.")
+        return categoria
 
     def validate(self, attrs):
         cotizacion = attrs.get("cotizacion") or self.instance.cotizacion
