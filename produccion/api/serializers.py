@@ -2302,7 +2302,7 @@ class OrdenesCorteMangaRetrieveSerializer(OrdenesCorteMangaSerializer):
 
 # --- Pedidos con produccion especial (muestras) para el modulo de produccion ---
 # Una linea es especial si trae producto_nombre_externo (muestra sin SKU de
-# catalogo); la seleccion vive en ``produccion.api.views._detalles_especiales_qs``.
+# catalogo); la seleccion vive en ``ventas.services.sku_produccion_service.detalles_de_muestra``.
 # Aqui solo se serializa lo que la vista ya filtro.
 
 class PedidoEspecialListSerializer(serializers.ModelSerializer):
@@ -2322,7 +2322,8 @@ class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
 
     def get_sku_produccion(self, obj):
         variante = getattr(obj, "variante_produccion", None)
-        return variante.sku if variante else None
+        # ``sku`` vacío = sin SKU, igual que el ``sku_produccion`` del detalle de ventas.
+        return (variante.sku or None) if variante else None
 
     class Meta:
         model = PedidoDetalleTalla

@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+from ventas.services.sku_produccion_service import detalles_de_muestra, variantes_produccion_activas
 from usuarios.models import Usuario
 from seguridad.role_identity import (
     CLAVE_DEPARTAMENTO_PRODUCCION,
@@ -1710,9 +1711,7 @@ def _detalles_especiales_qs():
     autorizar, aceptar-cambios y recomprar lo copian tal cual desde la
     cotizacion, y los PATCH genericos/admin no lo recalculan.
     """
-    return PedidoDetalle.objects.exclude(producto_nombre_externo__isnull=True).exclude(
-        producto_nombre_externo=""
-    )
+    return detalles_de_muestra()
 
 
 def _require_produccion(user):
@@ -1782,8 +1781,8 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         # las variantes de producción ya generadas para estas líneas, y se
         # cuelgan por (pedido_detalle_id, talla_id) sobre cada ``dt`` -- lo
         # que lee ``PedidoDetalleTallaEspecialSerializer.get_sku_produccion``.
-        variantes = VarianteProductoProduccion.objects.filter(
-            pedido_detalle_id__in=[d.id for d in detalles], activo=True
+        variantes = variantes_produccion_activas().filter(
+            pedido_detalle_id__in=[d.id for d in detalles]
         ).only("id", "sku", "pedido_detalle_id", "talla_id")
         variantes_por_talla = {(v.pedido_detalle_id, v.talla_id): v for v in variantes}
         for det in detalles:

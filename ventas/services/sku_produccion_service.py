@@ -9,9 +9,10 @@ El campo y ``vincular-sku-muestra`` exigen además que la línea siga siendo MUE
 (``es_muestra``): en una línea convertida a producto de catálogo no hay SKU que vincular.
 """
 
-from django.db.models import Prefetch
+from django.db.models import Prefetch, Q
 
 from catalogo.models import VarianteProductoProduccion
+from ventas.models import PedidoDetalle
 
 # ``to_attr`` del prefetch sobre ``PedidoDetalle``; no pisa el manager inverso
 # ``variantes_produccion``.
@@ -45,11 +46,31 @@ def variante_produccion_de_talla(pedido_detalle_id, talla_id):
     return variante
 
 
+def nombre_es_muestra(producto_nombre_externo):
+    """Única definición de línea de MUESTRA: trae ``producto_nombre_externo``.
+
+    Null y ``""`` no cuentan; un nombre con sólo espacios sí. Se lee el nombre y no el
+    flag ``requiere_produccion`` porque ese se desincroniza. Producción, ``programar``
+    y el derivado de ``requiere_produccion`` usan esta misma regla.
+    """
+    return bool(producto_nombre_externo)
+
+
 def es_muestra(pedido_detalle):
-    # Mismo criterio de "muestra" que producción (fuente de verdad:
-    # ``produccion.api.views._detalles_especiales_qs``): null y ``""`` no
-    # cuentan; un nombre con sólo espacios sí.
-    return bool(pedido_detalle.producto_nombre_externo)
+    return nombre_es_muestra(pedido_detalle.producto_nombre_externo)
+
+
+def detalles_de_muestra():
+    """``PedidoDetalle`` de muestra (misma regla que ``nombre_es_muestra``, en consulta)."""
+    return PedidoDetalle.objects.exclude(producto_nombre_externo__isnull=True).exclude(
+        producto_nombre_externo=""
+    )
+
+
+# Complemento sobre ``PedidoDetalleTalla``: tallas cuya línea NO es muestra.
+TALLAS_DE_LINEA_NO_MUESTRA_Q = Q(pedido_detalle__producto_nombre_externo__isnull=True) | Q(
+    pedido_detalle__producto_nombre_externo__exact=""
+)
 
 
 def cargar_variantes_produccion(pedido_detalles):

@@ -1,5 +1,6 @@
 from django.db.models import Q
 from catalogo.models import Talla, Producto, ProductoVariante
+from ventas.services.sku_produccion_service import nombre_es_muestra
 from ventas.models import (
     CotizacionServicioExtra,
     CotizacionDetalle,
@@ -372,7 +373,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                     sku_muestra=sku_muestra_previo.get(
                         (producto_nombre_externo, getattr(color_obj, "pk", None), talla.pk)
                     ) if not producto else None,
-                    requiere_produccion=bool(producto_nombre_externo),
+                    requiere_produccion=nombre_es_muestra(producto_nombre_externo),
                     variante=variante_obj,
                 )
             )
@@ -593,7 +594,7 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
             talla_existente.corte_manga_config = t.get("corte_manga_config")
             talla_existente.lleva_cambio_talla = bool(t.get("lleva_cambio_talla"))
             talla_existente.cambio_talla_config = t.get("cambio_talla_config")
-            talla_existente.requiere_produccion = bool(producto_nombre_externo)
+            talla_existente.requiere_produccion = nombre_es_muestra(producto_nombre_externo)
             talla_existente.variante = variante_obj
             if producto:
                 # La línea ya es de catálogo: el SKU de muestra no aplica.
