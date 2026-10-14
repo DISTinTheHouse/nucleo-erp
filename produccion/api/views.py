@@ -1,4 +1,5 @@
 import math
+from decimal import Decimal
 
 from django.db.models import Sum, Count, Exists, F, OuterRef, Prefetch, Q, prefetch_related_objects
 from django.db import IntegrityError, transaction
@@ -81,6 +82,7 @@ from inventarios.models import Existencia
 from produccion.services.orden_bordado_service import OrdenBordadoService
 from produccion.services.orden_reflejante_service import OrdenReflejanteService
 from produccion.services.orden_produccion_service import OrdenProduccionService
+from produccion.services.recalculo_consumo_service import RecalculoConsumoTelaService
 from produccion.services.orden_corte_manga_service import OrdenCorteMangaService
 
 
@@ -559,6 +561,64 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
 
     def _require_produccion(self, user):
         _require_produccion(user)
+
+    @action(detail=True, methods=['post'], url_path='recalcular-consumos')
+    def recalcular_consumos(self, request, pk=None):
+        """Ajusta los consumos de la OP a las piezas realmente cortadas.
+
+        Body: ``{"cantidad_real_corte": 100, "productos": [ids]}``. Sin
+        ``cantidad_real_corte`` usa la ya capturada en la ruta crítica; con
+        ella, también la guarda ahí. ``productos`` (obligatorio) son las
+        telas a recalcular: el catálogo no distingue telas, así que las
+        elige el usuario y el resto de los insumos no se toca.
+        Registra solo la diferencia (movimiento de inventario + consumo
+        nuevo, sin pólizas). No acepta menos piezas que las planeadas; se
+        puede repetir. Mismo gate y 404 por empresa que la ruta crítica.
+        """
+        self._require_produccion(request.user)
+        empresa = getattr(request.user, 'empresa', None)
+        op = (
+            OrdenProduccion.objects.filter(pk=pk, empresa=empresa).first()
+            if empresa is not None else None
+        )
+        if op is None:
+            return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+
+        ruta = OrdenProduccionRutaCritica.objects.filter(op=op).first()
+        cantidad = request.data.get('cantidad_real_corte', None)
+        if cantidad is None and ruta is not None:
+            cantidad = ruta.cantidad_real_corte
+        try:
+            cantidad = Decimal(str(cantidad))
+        except (TypeError, ValueError, ArithmeticError):
+            raise ValidationError({'cantidad_real_corte': 'Captura la cantidad real cortada.'})
+        if not cantidad.is_finite() or cantidad <= 0 or cantidad != cantidad.to_integral_value():
+            raise ValidationError({'cantidad_real_corte': 'Debe ser un número entero de piezas mayor a 0.'})
+
+        productos = request.data.get('productos', None)
+        try:
+            productos = [int(x) for x in productos]
+        except (TypeError, ValueError):
+            raise ValidationError({'productos': 'Lista de ids de las telas a recalcular.'})
+        if not productos:
+            raise ValidationError({'productos': 'Selecciona al menos una tela.'})
+
+        with transaction.atomic():
+            resultado = RecalculoConsumoTelaService.recalcular(
+                pk, empresa, cantidad, productos, request.user, request=request
+            )
+            if resultado is None:
+                return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+            if 'cantidad_real_corte' in request.data:
+                ruta, _ = OrdenProduccionRutaCritica.objects.get_or_create(op=op)
+                ruta.cantidad_real_corte = cantidad
+                ruta.save(update_fields=['cantidad_real_corte', 'updated_at'])
+        return Response({
+            'op': op.pk,
+            'cantidad_real_corte': str(cantidad),
+            'consumo_produccion': getattr(resultado['consumo_produccion'], 'pk', None),
+            'cambios': resultado['cambios'],
+        })
 
     MAX_OPS_RUTA_CRITICA = 200
 
