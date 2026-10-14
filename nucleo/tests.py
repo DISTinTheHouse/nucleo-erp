@@ -1665,13 +1665,27 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
         self.assertEqual(self._fila(self.a["admin"], "playero", op), ("Luis Playero", None))
 
     def test_sin_nada_se_nombra_por_el_id(self):
-        # No se encuentra por texto (no tiene título ni contacto): se prueba el armado de filas.
-        op = self._oportunidad(self.a, self.a["admin"], "")
-        entidad = next(e for e in REGISTRO if e.tipo == "oportunidad")
+        # Sin título, contacto ni cliente no hay texto con qué encontrarla, así que no se
+        # puede pasar por ``buscar()``: se arma la página con el mismo queryset que usa
+        # (alcance, ``.only()`` y orden) y se comprueba que nombrar no consulta nada.
+        self._dar_permiso_crm(self.vendedor_a)
+        self.a["cliente"].vendedores.add(self.vendedor_a)
+        for user in (self.a["admin"], self.vendedor_a):
+            with self.subTest(user=user.username):
+                sin_nada = self._oportunidad(self.a, user, "")
+                con_cliente = self._oportunidad(self.a, user, "", cliente=self.a["cliente"])
+                entidad = next(e for e in REGISTRO if e.tipo == "oportunidad")
+                pagina = list(
+                    entidad.alcance(user).only(*entidad.campos_only).order_by(*entidad.orden)
+                    .filter(pk__in=[sin_nada.pk, con_cliente.pk])
+                )
 
-        (fila,) = entidad.filas(self.a["admin"], list(entidad.alcance(self.a["admin"]).filter(pk=op.pk)))
+                with CaptureQueriesContext(connection) as ctx:
+                    filas = {f["id"]: (f["titulo"], f["subtitulo"]) for f in entidad.filas(user, pagina)}
 
-        self.assertEqual((fila["titulo"], fila["subtitulo"]), (f"Oportunidad #{op.pk}", None))
+                self.assertEqual(len(ctx), 0)
+                self.assertEqual(filas[sin_nada.pk], (f"Oportunidad #{sin_nada.pk}", None))
+                self.assertEqual(filas[con_cliente.pk], ("Comercial Acme Norte", None))
 
     def test_el_subtitulo_nunca_repite_el_titulo(self):
         # Título igual al nombre del cliente: el subtítulo pasa al contacto, y si no hay, queda vacío.
@@ -1693,6 +1707,9 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
         self.a["cliente"].vendedores.add(self.vendedor_a)
         for user in (self.a["admin"], self.vendedor_a):
             self._oportunidad(self.a, user, "", cliente=self.a["cliente"], nombre_contacto="Contacto Uniformes")
+        # Títulos que debe ver vendedor_a: el nombre de cada cliente asignado y el contacto
+        # de las oportunidades con cliente ajeno.
+        esperados = [self.a["cliente"].nombre]
 
         def consultas(user):
             with CaptureQueriesContext(connection) as ctx:
@@ -1708,6 +1725,7 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
             ajeno = Cliente.objects.create(empresa=self.a["empresa"], nombre=f"Ajeno {i}")
             self._oportunidad(self.a, self.vendedor_a, "", cliente=otro, nombre_contacto=f"Contacto Uniformes {i}")
             self._oportunidad(self.a, self.vendedor_a, "", cliente=ajeno, nombre_contacto=f"Otro Uniformes {i}")
+            esperados += [otro.nombre, f"Otro Uniformes {i}"]
         muchas = {u.username: consultas(u) for u in (self.a["admin"], self.vendedor_a)}
 
         self.assertEqual(pocas, muchas)
@@ -1716,8 +1734,7 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
             for g in self._buscar(self.vendedor_a, "uniformes", limit=50)["grupos"] if g["tipo"] == "oportunidad"
             for f in g["resultados"]
         ]
-        self.assertEqual(len(titulos), 21)
-        self.assertEqual(sum(t.startswith("Cliente ") or t == "Comercial Acme Norte" for t in titulos), 11)
+        self.assertCountEqual(titulos, esperados)
 
     # -- búsqueda por el nombre del cliente, solo si el usuario lo ve -------------
 
