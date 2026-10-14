@@ -14,7 +14,7 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
 """
 
 import json
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock
@@ -6533,3 +6533,62 @@ class SkuProduccionVacioTests(TestCase):
         self.assertFalse(nombre_es_muestra(""))
         self.assertTrue(nombre_es_muestra("Gorra"))
         self.assertTrue(nombre_es_muestra("  "))
+
+
+class RutaCriticaFechasSelladasTests(TestCase):
+    """#425: la fecha acompaña al checkbox en el modelo, no solo en el serializer."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-rcf", razon_social="acme-rcf SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="RCF", nombre="acme-rcf")
+        cls.usuario = Usuario.objects.create(
+            username="a@acme-rcf.test", email="a@acme-rcf.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.op = OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-RCF-1")
+
+    def _patch(self, **datos):
+        client = APIClient()
+        client.force_authenticate(self.usuario)
+        return client.patch(
+            f"/api/v1/produccion/orden-produccion/{self.op.pk}/ruta-critica/", datos, format="json"
+        )
+
+    def test_kit_completo_sella_limpia_y_no_cambia_al_reenviar(self):
+        resp = self._patch(kit_completo=True)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        sellada = OrdenProduccionRutaCritica.objects.get(op=self.op).fecha_kit_completo
+        self.assertIsNotNone(sellada)
+
+        self._patch(kit_completo=True)
+        self.assertEqual(OrdenProduccionRutaCritica.objects.get(op=self.op).fecha_kit_completo, sellada)
+
+        self._patch(kit_completo=False)
+        self.assertIsNone(OrdenProduccionRutaCritica.objects.get(op=self.op).fecha_kit_completo)
+
+    def test_fecha_enviada_por_el_cliente_se_ignora(self):
+        self._patch(fecha_kit_completo="2020-01-01T00:00:00Z")
+        self.assertIsNone(OrdenProduccionRutaCritica.objects.get(op=self.op).fecha_kit_completo)
+
+    def test_fecha_llegada_centro_confeccion_se_lee_escribe_y_limpia(self):
+        resp = self._patch(fecha_llegada_centro_confeccion="2026-10-20")
+        self.assertEqual(resp.data["fecha_llegada_centro_confeccion"], "2026-10-20")
+        resp = self._patch(fecha_llegada_centro_confeccion=None)
+        self.assertIsNone(resp.data["fecha_llegada_centro_confeccion"])
+
+    def test_escritura_por_orm_tambien_sella(self):
+        ruta = OrdenProduccionRutaCritica.objects.create(op=self.op, kit_completo=True)
+        self.assertIsNotNone(ruta.fecha_kit_completo)
+
+    def test_renglon_anterior_sin_fecha_no_se_sella_en_silencio(self):
+        OrdenProduccionRutaCritica.objects.bulk_create([OrdenProduccionRutaCritica(op=self.op, kit_completo=True)])
+        ruta = OrdenProduccionRutaCritica.objects.get(op=self.op)
+        ruta.fecha_trazo = date(2026, 10, 1)
+        ruta.save()
+        self.assertIsNone(OrdenProduccionRutaCritica.objects.get(op=self.op).fecha_kit_completo)
+
+    def test_op_cerrada_responde_409_con_mensaje_neutro(self):
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO)
+        resp = self._patch(kit_completo=True)
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("estatus «Completado»", resp.data["msg"])

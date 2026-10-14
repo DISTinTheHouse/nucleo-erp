@@ -686,13 +686,16 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
         ):
             return Response(
-                {'msg': f'La OP está {op.get_estatus_op_display().lower()}: su ruta crítica ya no se puede editar.'},
+                {'msg': f'La OP tiene estatus «{op.get_estatus_op_display()}»: su ruta crítica ya no se puede editar.'},
                 status=status.HTTP_409_CONFLICT,
             )
-        instance, _created = OrdenProduccionRutaCritica.objects.get_or_create(op=op)
-        serializer = OrdenProduccionRutaCriticaSerializer(instance, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+        # Bloqueo de fila: dos PATCH simultáneos no se pisan el sellado de fechas.
+        with transaction.atomic():
+            OrdenProduccionRutaCritica.objects.get_or_create(op=op)
+            instance = OrdenProduccionRutaCritica.objects.select_for_update().get(op=op)
+            serializer = OrdenProduccionRutaCriticaSerializer(instance, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
         return Response(serializer.data)
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-412): el

@@ -3547,6 +3547,7 @@ Regla validada en el backend: con `PaymentMethod = "PPD"`, `PaymentForm` debe se
 
 ### Otras piezas que usan la cuenta de Facturama
 
+- **Crédito del cliente** (`dias_credito` 0-365, `limite_credito` >= 0): cambiarlos exige el permiso `E-CRM-CLIENTES-CREDITO` (superusuario y admin de empresa lo tienen). Sin él, `POST`/`PATCH` de `/api/v1/terceros/clientes/` responde `400 {"dias_credito": ...}` solo si el valor mandado difiere del actual (en alta, de 0); reenviar el mismo valor o no mandarlo no falla. La clave debe existir en el catálogo `permisos`; viaja en la lista de permisos del login.
 - **Alta de cliente** (`POST /api/v1/terceros/clientes/`): después de guardar el cliente, el backend lo da de alta también en Facturama (`/Client`). **Solo** se hace para clientes de la empresa dueña de la cuenta; los de otras empresas ya no se suben.
 - **Páginas del Core** `/core/terceros/validar-rfc/` y `/core/terceros/crear-cliente/`: consultan y crean clientes en Facturama. **Solo superusuario.**
 
@@ -3716,7 +3717,7 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
 - **Varias OPs**: `GET /api/v1/produccion/orden-produccion/ruta-critica/?op_id=1,2,3` → arreglo, una fila por OP (con `op_id`). Máx. 200 ids; ids de otra empresa o inexistentes se omiten; `op_id` faltante o no numérico → `400`.
 - **PATCH**: solo usuarios del departamento **Producción** (o superuser/admin_empresa). `400 {"permiso": "..."}` para el resto. OP Completada (5) o Cancelada (7) → `409 {"msg": "..."}`.
 - Acepta `PATCH` parcial — solo manda los campos que cambian.
-- Los campos `fecha_existencia_*` y `fecha_kit_completo` son de solo lectura: el backend los sella con la fecha/hora actual al **marcar** su checkbox y los limpia (`null`) al **desmarcarlo**. Reenviar el mismo valor no los toca.
+- Los campos `fecha_existencia_*` y `fecha_kit_completo` son de solo lectura: el backend los sella con la fecha/hora actual al **marcar** su checkbox y los limpia (`null`) al **desmarcarlo**. Reenviar el mismo valor no los toca. La regla vive en el modelo, así que aplica también a escrituras fuera de la API; un renglón anterior con `kit_completo=true` y `fecha_kit_completo=null` se queda así hasta que se desmarque y vuelva a marcar. El PATCH bloquea la fila, y en OP completada/cancelada responde `409 {"msg": "La OP tiene estatus «Completado»: su ruta crítica ya no se puede editar."}`.
 - Toda respuesta incluye `op_id`.
 
 **Campos**

@@ -2825,6 +2825,52 @@ class RechazarCambiosCotizacionTests(TestCase):
         self.assertIsNone(CotizacionDetalle.objects.get(cotizacion=self.cotizacion).categoria_producto_id)
 
 
+class PermisoCreditoClienteTests(TestCase):
+    """#462: dias_credito y limite_credito exigen ``E-CRM-CLIENTES-CREDITO``."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        cls.empresa = Empresa.objects.create(codigo="acme-pc", razon_social="acme-pc SA")
+        cls.vendedor = Usuario.objects.create(username="v@pc.test", email="v@pc.test", empresa=cls.empresa)
+        cls.finanzas = Usuario.objects.create(username="f@pc.test", email="f@pc.test", empresa=cls.empresa)
+        permiso = Permiso.objects.create(clave="E-CRM-CLIENTES-CREDITO", nombre="Crédito de clientes")
+        UsuarioPermiso.objects.create(usuario=cls.finanzas, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT)
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.cliente.vendedores.add(cls.vendedor, cls.finanzas)
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _patch(self, user, **datos):
+        return self._client(user).patch(f"/api/v1/terceros/clientes/{self.cliente.pk}/", datos, format="json")
+
+    def test_sin_permiso_no_puede_cambiar_el_credito(self):
+        resp = self._patch(self.vendedor, dias_credito=30)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("dias_credito", resp.json())
+        self.assertEqual(self._patch(self.vendedor, limite_credito="100.00").status_code, 400)
+
+    def test_sin_permiso_puede_editar_lo_demas_y_reenviar_el_credito_igual(self):
+        resp = self._patch(self.vendedor, nombre="Otro", dias_credito=0, limite_credito="0.00")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_sin_permiso_no_puede_dar_de_alta_con_credito(self):
+        resp = self._client(self.vendedor).post(
+            "/api/v1/terceros/clientes/", {"nombre": "Nuevo", "dias_credito": 90}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_con_permiso_puede_cambiarlo(self):
+        resp = self._patch(self.finanzas, dias_credito=30, limite_credito="1000.00")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.cliente.refresh_from_db()
+        self.assertEqual(self.cliente.dias_credito, 30)
+
+
 class RangosCreditoYMontoTests(TestCase):
     """#461: ``dias_credito`` 0-365, ``limite_credito`` y ``monto_estimado`` no negativos."""
 
