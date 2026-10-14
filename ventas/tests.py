@@ -2793,6 +2793,40 @@ class RechazarCambiosCotizacionTests(TestCase):
         self.assertIsNone(CotizacionDetalle.objects.get(cotizacion=self.cotizacion).categoria_producto_id)
 
 
+class RangosCreditoYMontoTests(TestCase):
+    """#461: ``dias_credito`` 0-365, ``limite_credito`` y ``monto_estimado`` no negativos."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-rg", razon_social="acme-rg SA")
+        cls.admin = Usuario.objects.create(
+            username="a@acme-rg.test", email="a@acme-rg.test", empresa=cls.empresa, is_admin_empresa=True
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def _patch(self, **datos):
+        return self.client.patch(f"/api/v1/terceros/clientes/{self.cliente.pk}/", datos, format="json")
+
+    def test_dias_credito_fuera_de_0_365_es_400(self):
+        self.assertEqual(self._patch(dias_credito=366).status_code, 400)
+        self.assertEqual(self._patch(dias_credito=5000000).status_code, 400)
+        self.assertEqual(self._patch(dias_credito=365).status_code, 200)
+
+    def test_limite_credito_negativo_es_400(self):
+        self.assertEqual(self._patch(limite_credito="-1.00").status_code, 400)
+        self.assertEqual(self._patch(limite_credito="0.00").status_code, 200)
+
+    def test_monto_estimado_negativo_es_400(self):
+        resp = self.client.post("/api/v1/ventas/oportunidades/", {"titulo": "N", "monto_estimado": "-5.00"}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        resp = self.client.post("/api/v1/ventas/oportunidades/", {"titulo": "N", "monto_estimado": "5.00"}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+
 # Pk que no existe en ninguna tabla del test: el rechazo de una FK de OTRA empresa
 # debe ser byte a byte el mismo que DRF da para este pk (salvo el número).
 PK_INEXISTENTE = 999999
