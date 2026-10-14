@@ -143,7 +143,13 @@ class CotizacionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Cotizacion
-        read_only_fields = ['empresa', 'motivo_rechazo']
+        # El estatus y sus marcas de flujo solo cambian por las acciones
+        # (enviar-revision / autorizar / rechazar / ...), que exigen mesa de control
+        # y dejan motivo, pedido y notificaciones.
+        read_only_fields = [
+            'empresa', 'motivo_rechazo', 'estatus', 'autorizada_at',
+            'cambios_solicitados_at', 'aprobado_snapshot',
+        ]
         fields = '__all__'
         extra_kwargs = {
             'oc': {'required': False, 'allow_null': True},
@@ -247,11 +253,13 @@ class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
             "piezas",
             "autorizada_at",
             "cambios_solicitados_at",
+            "motivo_rechazo",
             "created_at",
             "updated_at",
             "pedido_id",
             "pedido_folio",
         ]
+        read_only_fields = ["motivo_rechazo"]
 
 class CotizacionDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)

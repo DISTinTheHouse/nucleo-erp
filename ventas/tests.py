@@ -5251,3 +5251,85 @@ class AutorizarCotizacionNotificaVendedorTests(TestCase):
         self.assertIn(f"#{cot.id}", n.mensaje)
         self.assertIn(folio, n.mensaje)
         self.assertEqual(n.data, {"cotizacion_id": cot.id, "pedido_id": resp.data["pedido"]["id"], "pedido_folio": folio})
+
+
+class CotizacionFlujoEndurecidoTests(TestCase):
+    """#479/#480/#481: PATCH sin campos de flujo, motivo en el listado, comentario validado."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-fl", razon_social="acme-fl SA")
+        cls.mesa = Usuario.objects.create(
+            username="mesa@acme-fl.test", email="mesa@acme-fl.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(
+            username="vend@acme-fl.test", email="vend@acme-fl.test", empresa=cls.empresa,
+        )
+
+    def setUp(self):
+        self.cotizacion = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.vendedor, estatus=2,
+        )
+        self.url = f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/"
+
+    def _como(self, user):
+        c = APIClient()
+        c.force_authenticate(user=user)
+        return c
+
+    def test_patch_ignora_estatus_y_campos_de_flujo(self):
+        for payload in (
+            {"estatus": 3}, {"estatus": 4}, {"estatus": 5},
+            {"autorizada_at": "2026-01-01T00:00:00Z"},
+            {"cambios_solicitados_at": "2026-01-01T00:00:00Z"},
+            {"aprobado_snapshot": {"x": 1}},
+        ):
+            with self.subTest(payload=payload):
+                resp = self._como(self.vendedor).patch(self.url, payload, format="json")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.cotizacion.refresh_from_db()
+                self.assertEqual(self.cotizacion.estatus, 2)
+                self.assertIsNone(self.cotizacion.autorizada_at)
+                self.assertIsNone(self.cotizacion.cambios_solicitados_at)
+                self.assertIsNone(self.cotizacion.aprobado_snapshot)
+
+    def test_vendedor_no_autoriza_por_patch_y_si_por_accion_de_mesa(self):
+        self._como(self.vendedor).patch(self.url, {"estatus": 3}, format="json")
+        resp = self._como(self.mesa).post(
+            self.url + "rechazar/", {"comentario": "Falta RFC"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_listado_incluye_motivo_rechazo(self):
+        self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Falta RFC"}, format="json")
+        resp = self._como(self.vendedor).get("/api/v1/ventas/cotizaciones/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        filas = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+        fila = next(f for f in filas if f["id"] == self.cotizacion.pk)
+        self.assertEqual(fila["motivo_rechazo"], "Falta RFC")
+
+    def test_comentario_invalido_es_400_en_rechazar_y_enviar_revision(self):
+        self.assertEqual(
+            self._como(self.mesa).post(self.url + "rechazar/", ["x"], format="json").status_code, 400
+        )
+        for valor in (123, True, ["a"], {"a": 1}):
+            with self.subTest(valor=valor):
+                resp = self._como(self.mesa).post(
+                    self.url + "rechazar/", {"comentario": valor}, format="json"
+                )
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertIn("comentario", resp.data)
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=4)
+        self.assertEqual(
+            self._como(self.vendedor).post(self.url + "enviar-revision/", ["x"], format="json").status_code, 400
+        )
+        for valor in (123, True, ["a"], {"a": 1}):
+            with self.subTest(valor=valor):
+                resp = self._como(self.vendedor).post(
+                    self.url + "enviar-revision/", {"comentario": valor}, format="json"
+                )
+                self.assertEqual(resp.status_code, 400, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 4)
+        self.assertEqual(self.cotizacion.comentarios.count(), 0)
