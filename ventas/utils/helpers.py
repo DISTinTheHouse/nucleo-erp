@@ -1,3 +1,4 @@
+from django.db.models import Q
 from catalogo.models import Talla, Producto, ProductoVariante
 from ventas.models import (
     CotizacionServicioExtra,
@@ -174,12 +175,14 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
     colores = ColorModel.objects.filter(
         pk__in=_ids_validos(r.get("color") for r in rows), activo=True
     ).in_bulk()
+    # Siempre de la empresa de la cotización (también para superusuario, #426). Una
+    # categoría desactivada solo se admite si la cotización ya la tenía (#429).
     categorias = CategoriaProductoModel.objects.filter(
+        Q(activo=True) | Q(pk__in=set(categoria_previa.values())),
         pk__in=_ids_validos(
             r.get("categoria_producto") or r.get("categoria_producto_id") for r in rows
-        )
-        | set(categoria_previa.values()),
-        activo=True,
+        ),
+        empresa_id=cotizacion_obj.empresa_id,
     ).in_bulk()
     direcciones = DirModel.objects.filter(
         pk__in=_ids_validos(r.get("direccion_envio_cliente") for r in rows),
