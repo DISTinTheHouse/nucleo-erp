@@ -1,4 +1,5 @@
 from django.contrib.postgres.indexes import OpClass
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.db.models.functions import Upper
 from nucleo.indices import GinIndexSoloPostgres, IndexSoloPostgres
@@ -45,7 +46,7 @@ class Oportunidad(StatusLifecycleModel):
     telefono = models.CharField(max_length=30, blank=True, default="")
     correo = models.EmailField(max_length=120, blank=True, default="")
     titulo = models.CharField(max_length=150, default="")
-    monto_estimado = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    monto_estimado = models.DecimalField(max_digits=14, decimal_places=2, default=0, validators=[MinValueValidator(0)])
     etapa = models.CharField(max_length=20, choices=Etapa.choices, default=Etapa.NUEVA)
     motivo_perdida = models.CharField(max_length=255, blank=True, default="")
     proximo_contacto = models.DateField(null=True, blank=True)

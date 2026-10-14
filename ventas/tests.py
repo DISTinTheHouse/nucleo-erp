@@ -19,7 +19,7 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import Color, Producto, ProductoVariante, Talla, VarianteProductoProduccion
+from catalogo.models import CategoriaProducto, Color, Producto, ProductoVariante, Talla, VarianteProductoProduccion
 from inventarios.models import MovimientoInventario
 from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
 from inventarios.models import (
@@ -2752,6 +2752,79 @@ class RechazarCambiosCotizacionTests(TestCase):
         muestra = CotizacionDetalle.objects.get(cotizacion=self.cotizacion, producto__isnull=True)
         self.assertNotEqual(muestra.pk, self.muestra.pk)
         self.assertEqual(muestra.producto_nombre_externo, "Playera muestra cliente")
+
+    def test_rechazar_cambios_restaura_categoria_producto(self):
+        cat = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Chamarras")
+        CotizacionDetalle.objects.filter(pk=self.muestra.pk).update(categoria_producto=cat)
+        self._autorizar()
+        CotizacionDetalle.objects.filter(cotizacion=self.cotizacion).update(categoria_producto=None)
+        self._forzar_cambios_solicitados()
+
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/rechazar-cambios/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+        muestra = CotizacionDetalle.objects.get(cotizacion=self.cotizacion, producto__isnull=True)
+        self.assertEqual(muestra.categoria_producto_id, cat.pk)
+
+    def test_rechazar_cambios_con_categoria_desactivada_no_truena(self):
+        cat = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Vieja")
+        CotizacionDetalle.objects.filter(pk=self.muestra.pk).update(categoria_producto=cat)
+        self._autorizar()
+        self._forzar_cambios_solicitados()
+        CategoriaProducto.objects.filter(pk=cat.pk).update(activo=False)
+
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/rechazar-cambios/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        muestra = CotizacionDetalle.objects.get(cotizacion=self.cotizacion, producto__isnull=True)
+        self.assertIsNone(muestra.categoria_producto_id)
+
+    def test_guardar_lineas_sin_categoria_en_la_fila_conserva_la_previa(self):
+        # #427: editar-mesa-control parte del pedido, que no trae categoría.
+        cat = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Chamarras")
+        CotizacionDetalle.objects.filter(pk=self.muestra.pk).update(categoria_producto=cat)
+        fila = {"producto_nombre_externo": "Playera muestra cliente", "precio_unitario": "0.00", "tallas": []}
+
+        _save_cotizacion_detalle(self.cotizacion, [dict(fila)], self.empresa, self.admin)
+        nueva = CotizacionDetalle.objects.get(cotizacion=self.cotizacion)
+        self.assertEqual(nueva.categoria_producto_id, cat.pk)
+
+        # Con la clave explícita (aunque sea nula) manda lo que llega.
+        _save_cotizacion_detalle(self.cotizacion, [{**fila, "categoria_producto": None}], self.empresa, self.admin)
+        self.assertIsNone(CotizacionDetalle.objects.get(cotizacion=self.cotizacion).categoria_producto_id)
+
+
+class RangosCreditoYMontoTests(TestCase):
+    """#461: ``dias_credito`` 0-365, ``limite_credito`` y ``monto_estimado`` no negativos."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-rg", razon_social="acme-rg SA")
+        cls.admin = Usuario.objects.create(
+            username="a@acme-rg.test", email="a@acme-rg.test", empresa=cls.empresa, is_admin_empresa=True
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def _patch(self, **datos):
+        return self.client.patch(f"/api/v1/terceros/clientes/{self.cliente.pk}/", datos, format="json")
+
+    def test_dias_credito_fuera_de_0_365_es_400(self):
+        self.assertEqual(self._patch(dias_credito=366).status_code, 400)
+        self.assertEqual(self._patch(dias_credito=5000000).status_code, 400)
+        self.assertEqual(self._patch(dias_credito=365).status_code, 200)
+
+    def test_limite_credito_negativo_es_400(self):
+        self.assertEqual(self._patch(limite_credito="-1.00").status_code, 400)
+        self.assertEqual(self._patch(limite_credito="0.00").status_code, 200)
+
+    def test_monto_estimado_negativo_es_400(self):
+        resp = self.client.post("/api/v1/ventas/oportunidades/", {"titulo": "N", "monto_estimado": "-5.00"}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        resp = self.client.post("/api/v1/ventas/oportunidades/", {"titulo": "N", "monto_estimado": "5.00"}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
 
 
 # Pk que no existe en ninguna tabla del test: el rechazo de una FK de OTRA empresa
