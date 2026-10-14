@@ -43,7 +43,7 @@ class RecalculoConsumoTelaService:
             .first()
         )
         filtro = models.Q(producto_id=producto.pk) | models.Q(producto_variante__producto_id=producto.pk)
-        qs = Existencia.objects.select_for_update().filter(
+        qs = Existencia.objects.select_for_update(of=("self",)).filter(
             almacen__empresa_id=op.empresa_id, almacen__sucursal_id=op.sucursal_id
         ).filter(filtro)
         existencia = None
