@@ -85,6 +85,7 @@ from ventas.utils.helpers import (
     _save_pedido_servicios_extras,
 )
 from ventas.services.sku_produccion_service import (
+    TALLAS_DE_LINEA_NO_MUESTRA_Q,
     es_muestra,
     variante_produccion_de_talla,
     variantes_produccion_prefetch,
@@ -3161,7 +3162,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             # validado no puede cambiar entre la validación y el guardado.
             pedido = Pedido.objects.select_for_update().get(pk=base_pedido.pk)
             # Excluye líneas de MUESTRA (``PedidoDetalle.producto_nombre_externo``
-            # puesto -- mismo criterio que ``produccion._detalles_especiales_qs``,
+            # puesto -- mismo criterio que ``sku_produccion_service.nombre_es_muestra``,
             # NO el flag ``requiere_produccion`` porque se desincroniza): esas
             # piezas no tienen SKU todavía y no se surten/embarcan/bordan por este
             # flujo genérico de programación, tienen el suyo propio
@@ -3170,10 +3171,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             # que nunca iban a poder cumplirse por esta vía.
             total_piezas = (
                 PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
-                .filter(
-                    Q(pedido_detalle__producto_nombre_externo__isnull=True)
-                    | Q(pedido_detalle__producto_nombre_externo__exact="")
-                )
+                .filter(TALLAS_DE_LINEA_NO_MUESTRA_Q)
                 .aggregate(total=Sum("cantidad"))["total"]
                 or 0
             )

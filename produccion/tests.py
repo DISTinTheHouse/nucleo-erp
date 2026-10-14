@@ -6511,3 +6511,25 @@ class OrdenBordadoOnboardingSkuTests(OrdenBordadoParcialidadesTests):
         self.assertEqual(linea["sku_proscai"], "PRO-1")
         self.assertEqual(linea["existencias"], 10.0)
 
+
+
+class SkuProduccionVacioTests(TestCase):
+    """#440: producción y ventas coinciden en "sku vacío = sin SKU" y en qué es muestra."""
+
+    def test_sku_vacio_sale_como_none_en_pedidos_especiales(self):
+        from types import SimpleNamespace
+        from produccion.api.serializers import PedidoDetalleTallaEspecialSerializer
+
+        serializer = PedidoDetalleTallaEspecialSerializer()
+        self.assertIsNone(serializer.get_sku_produccion(SimpleNamespace(variante_produccion=SimpleNamespace(sku=""))))
+        self.assertEqual(
+            serializer.get_sku_produccion(SimpleNamespace(variante_produccion=SimpleNamespace(sku="MP1"))), "MP1"
+        )
+
+    def test_una_sola_definicion_de_muestra(self):
+        from ventas.services.sku_produccion_service import nombre_es_muestra
+
+        self.assertFalse(nombre_es_muestra(None))
+        self.assertFalse(nombre_es_muestra(""))
+        self.assertTrue(nombre_es_muestra("Gorra"))
+        self.assertTrue(nombre_es_muestra("  "))
