@@ -2122,6 +2122,23 @@ class PedidoVincularSkuMuestraTests(TestCase):
         resp = self.client_post_otro(otro_pedido)
         self.assertEqual(resp.status_code, 400, resp.json())
 
+    def test_id_no_numerico_responde_400(self):
+        for valor in ("abc", [1, 2]):
+            resp = self._post(self.mesa, talla_id=valor)
+            self.assertEqual(resp.status_code, 400, resp.json())
+
+    def test_pedido_cancelado_responde_400(self):
+        Pedido.objects.filter(pk=self.pedido.pk).update(estatus=Pedido.ESTATUS_CANCELADO)
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 400, resp.json())
+        self.ped_talla.refresh_from_db()
+        self.assertIsNone(self.ped_talla.sku_muestra)
+
+    def test_linea_que_ya_no_es_muestra_responde_400(self):
+        PedidoDetalle.objects.filter(pk=self.ped_talla.pedido_detalle_id).update(producto_nombre_externo=None)
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 400, resp.json())
+
     def client_post_otro(self, otro_pedido):
         client = APIClient()
         client.force_authenticate(user=self.mesa)
