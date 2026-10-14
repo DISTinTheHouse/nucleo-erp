@@ -2335,43 +2335,13 @@ Cancelar = la orden al proveedor queda anulada **pero se conserva y sigue visibl
 
 ## 🧾 Compras - Ruta Crítica de Orden de Compra
 
-Seguimiento **informativo** de la OC para compras: fecha real de recibo + comentario. Un renglón por OC en tabla aparte (`ordenes_compra_ruta_critica`); no cambia el estatus de la OC, ni crea/modifica recepciones, ni mueve inventario, ni toca WMS. Compras suele saber que la mercancía llegó antes de que WMS la recepcione (a veces más de una semana después): aquí se anota esa fecha sin afectar ningún proceso.
+Seguimiento **informativo** de la OC: la fecha en que compras supo que llegó la mercancía y un comentario. No cambia la OC, ni las recepciones, ni inventario, ni WMS (WMS sigue haciendo la recepción real).
 
-- **Un OC**: `GET|PATCH /api/v1/compras/ordenes/{id}/ruta-critica/`
-- **Varias OC**: `GET /api/v1/compras/ordenes/ruta-critica/?oc_id=1,2,3` → arreglo (máx. 200 ids; ajenos o inexistentes se omiten; `oc_id` faltante/no numérico → `400`).
-- **GET**: cualquier usuario con acceso a la OC (misma empresa). Sin captura devuelve los valores por defecto **sin escribir**; el renglón nace en el primer `PATCH`. OC de otra empresa → `404`.
-- **PATCH** (parcial; manda solo lo que cambia): solo departamento **Compras** o **ContaCompras** (o superuser/admin_empresa), si no `400 {"permiso": "..."}`. Solo OC Autorizada, Parcialmente recibida o Recibida; Borrador, Pendiente a confirmar o Cancelada → `409 {"msg": ...}`.
-- Cada cambio real deja un `AuditoriaEvento` (`modulo=compras`, `accion=RUTA_CRITICA`, `tabla=ordenes_compra_ruta_critica`, `id_registro=<id de la OC>`) con usuario, IP, y `antes_json`/`despues_json` solo con los campos que cambiaron. Reenviar el mismo valor no audita.
-- Consultas constantes: GET = 3 (OC, ruta, recepciones WMS), también en el bulk.
-
-**Campos editables**
-
-| Campo | Tipo | Notas |
-|---|---|---|
-| `fecha_real_recibo` | date `AAAA-MM-DD` o `null` | No puede ser futura. `null` la borra. |
-| `comentarios` | text o `null` | Se recorta; máx. 2000 caracteres; vacío = `null`. |
-
-Cualquier otro campo en el body → `400`.
-
-**Respuesta** (mismo shape en GET, bulk y PATCH)
-
-```json
-{
-  "oc_id": 12,
-  "folio": "OC-0012",
-  "estatus": 3,
-  "estatus_display": "Autorizada",
-  "fecha_entrega_estimada": "2026-10-20",
-  "fecha_recepcion_wms": null,
-  "fecha_real_recibo": "2026-10-14",
-  "comentarios": "Llegó completo",
-  "actualizado_por": 7,
-  "actualizado_por_nombre": "Ana Compras",
-  "updated_at": "2026-10-14T16:02:11Z"
-}
-```
-
-`fecha_recepcion_wms` (solo lectura) es la primera recepción no cancelada ni en borrador que WMS registró contra la OC, `null` si aún no hay; sirve para comparar contra `fecha_real_recibo`.
+- **Endpoint**: `GET|PATCH /api/v1/compras/ordenes/{id}/ruta-critica/` (OC de otra empresa → `404`).
+- **GET**: sin captura devuelve los valores por defecto sin escribir; el renglón nace en el primer `PATCH`.
+- **PATCH** parcial, body `{"fecha_real_recibo": "2026-10-14", "comentarios": "..."}`. `fecha_real_recibo` es `AAAA-MM-DD` o `null`; `comentarios` máx. 2000 caracteres (vacío = `null`). Fecha inválida → `400`.
+- Cada cambio real queda en auditoría (`modulo=compras`, `accion=RUTA_CRITICA`, `id_registro` = id de la OC) con usuario, IP y antes/después; reenviar el mismo valor no audita.
+- **Respuesta**: `{"oc_id": 12, "fecha_real_recibo": "2026-10-14", "comentarios": "Llegó completo", "updated_at": "..."}`.
 
 ---
 

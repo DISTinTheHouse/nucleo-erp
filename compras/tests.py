@@ -1707,8 +1707,7 @@ class OrdenCompraPedidosSeriesRendimientoTests(TestCase):
 
 
 class OrdenCompraRutaCriticaTests(TestCase):
-    """``ordenes/{id}/ruta-critica/`` y ``ordenes/ruta-critica/?oc_id=``: captura
-    informativa de compras (fecha real de recibo + comentario)."""
+    """``ordenes/{id}/ruta-critica/``: fecha real de recibo + comentario, solo informativos."""
 
     @classmethod
     def setUpTestData(cls):
@@ -1717,178 +1716,80 @@ class OrdenCompraRutaCriticaTests(TestCase):
         def tenant(codigo):
             empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
             sucursal = Sucursal.objects.create(empresa=empresa, codigo=codigo[:3].upper(), nombre=codigo)
-            admin = Usuario.objects.create(
-                username=f"a@{codigo}.test", email=f"a@{codigo}.test", empresa=empresa,
-                sucursal_default=sucursal, is_admin_empresa=True, first_name="Ana", last_name="Compras",
+            usuario = Usuario.objects.create(
+                username=f"a@{codigo}.test", email=f"a@{codigo}.test", empresa=empresa, sucursal_default=sucursal,
             )
-            return empresa, sucursal, admin
+            return empresa, sucursal, usuario
 
-        cls.empresa, cls.sucursal, cls.admin = tenant("acme-rc")
-        cls.otra, cls.otra_sucursal, cls.otro_admin = tenant("globex-rc")
-        cls.usuario = Usuario.objects.create(
-            username="u@acme-rc.test", email="u@acme-rc.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
-        )
+        cls.empresa, cls.sucursal, cls.usuario = tenant("acme-rc")
+        cls.otra, cls.otra_sucursal, _ = tenant("globex-rc")
 
-    def _oc(self, empresa=None, sucursal=None, estatus=OrdenCompra.EstatusOrdenCompra.AUTORIZADA):
+    def _oc(self, empresa=None, sucursal=None):
         return OrdenCompra.objects.create(
             empresa=empresa or self.empresa, sucursal=sucursal or self.sucursal, moneda=self.moneda,
-            usuario=self.admin, fecha_oc=timezone.localdate(), estatus=estatus, folio=f"OC-{OrdenCompra.objects.count()}",
+            usuario=self.usuario, fecha_oc=timezone.localdate(), folio=f"OC-{OrdenCompra.objects.count()}",
         )
 
-    def _api(self, user):
-        api = APIClient()
-        api.force_authenticate(user=user)
-        return api
+    def setUp(self):
+        self.api = APIClient()
+        self.api.force_authenticate(user=self.usuario)
 
     def _url(self, oc):
         return f"/api/v1/compras/ordenes/{oc.pk}/ruta-critica/"
 
     def test_get_sin_captura_devuelve_defaults_y_no_escribe(self):
         oc = self._oc()
-        resp = self._api(self.usuario).get(self._url(oc))
+        resp = self.api.get(self._url(oc))
 
         self.assertEqual(resp.status_code, 200, resp.content)
-        data = resp.json()
-        self.assertEqual(data["oc_id"], oc.pk)
-        self.assertIsNone(data["fecha_real_recibo"])
-        self.assertIsNone(data["comentarios"])
-        self.assertIsNone(data["updated_at"])
+        self.assertEqual(resp.json(), {"oc_id": oc.pk, "fecha_real_recibo": None, "comentarios": None, "updated_at": None})
         self.assertFalse(OrdenCompraRutaCritica.objects.exists())
 
     def test_patch_guarda_audita_quien_y_no_toca_la_oc(self):
         oc = self._oc()
-        hoy = timezone.localdate()
         antes = OrdenCompra.objects.filter(pk=oc.pk).values().get()
         historial = oc.history.count()
 
-        resp = self._api(self.admin).patch(
-            self._url(oc), {"fecha_real_recibo": hoy.isoformat(), "comentarios": "  Llegó completo  "}, format="json",
+        resp = self.api.patch(
+            self._url(oc), {"fecha_real_recibo": "2026-10-14", "comentarios": "  Llegó completo  "}, format="json",
         )
 
         self.assertEqual(resp.status_code, 200, resp.content)
-        data = resp.json()
-        self.assertEqual(data["fecha_real_recibo"], hoy.isoformat())
-        self.assertEqual(data["comentarios"], "Llegó completo")
-        self.assertEqual(data["actualizado_por"], self.admin.pk)
-        self.assertEqual(data["actualizado_por_nombre"], "Ana Compras")
-        # Informativa: la OC, su historial y las recepciones quedan intactos.
+        self.assertEqual(resp.json()["fecha_real_recibo"], "2026-10-14")
+        self.assertEqual(resp.json()["comentarios"], "Llegó completo")
         self.assertEqual(OrdenCompra.objects.filter(pk=oc.pk).values().get(), antes)
         self.assertEqual(oc.history.count(), historial)
         self.assertFalse(Recepcion.objects.exists())
         evento = AuditoriaEvento.objects.get(accion="RUTA_CRITICA")
-        self.assertEqual(evento.usuario, self.admin)
-        self.assertEqual(evento.modulo, "compras")
+        self.assertEqual(evento.usuario, self.usuario)
         self.assertEqual(evento.id_registro, str(oc.pk))
-        self.assertEqual(evento.despues_json["fecha_real_recibo"], hoy.isoformat())
+        self.assertEqual(evento.despues_json["fecha_real_recibo"], "2026-10-14")
         self.assertIsNone(evento.antes_json["fecha_real_recibo"])
 
-    def test_patch_sin_cambios_no_audita_y_solo_audita_lo_que_cambio(self):
+    def test_sin_cambios_no_audita_y_se_puede_limpiar(self):
         oc = self._oc()
-        api = self._api(self.admin)
-        api.patch(self._url(oc), {"comentarios": "uno"}, format="json")
-        api.patch(self._url(oc), {"comentarios": "uno"}, format="json")
+        self.api.patch(self._url(oc), {"comentarios": "uno"}, format="json")
+        self.api.patch(self._url(oc), {"comentarios": "uno"}, format="json")
         self.assertEqual(AuditoriaEvento.objects.filter(accion="RUTA_CRITICA").count(), 1)
 
-        api.patch(self._url(oc), {"comentarios": "dos"}, format="json")
-        ultimo = AuditoriaEvento.objects.filter(accion="RUTA_CRITICA").latest("id_evento")
-        self.assertEqual(ultimo.antes_json["comentarios"], "uno")
-        self.assertNotIn("fecha_real_recibo", ultimo.despues_json)
+        resp = self.api.patch(self._url(oc), {"comentarios": ""}, format="json")
+        self.assertIsNone(resp.json()["comentarios"])
+        self.assertEqual(AuditoriaEvento.objects.filter(accion="RUTA_CRITICA").count(), 2)
 
-    def test_fecha_se_puede_limpiar(self):
+    def test_fecha_invalida_es_400(self):
         oc = self._oc()
-        api = self._api(self.admin)
-        api.patch(self._url(oc), {"fecha_real_recibo": timezone.localdate().isoformat()}, format="json")
-        resp = api.patch(self._url(oc), {"fecha_real_recibo": None}, format="json")
-
-        self.assertEqual(resp.status_code, 200)
-        self.assertIsNone(resp.json()["fecha_real_recibo"])
-
-    def test_validaciones(self):
-        oc = self._oc()
-        api = self._api(self.admin)
-        futura = (timezone.localdate() + timedelta(days=2)).isoformat()
-        for body, campo in [
-            ({"fecha_real_recibo": futura}, "fecha_real_recibo"),
-            ({"fecha_real_recibo": "no-es-fecha"}, "fecha_real_recibo"),
-            ({"fecha_real_recibo": 5}, "fecha_real_recibo"),
-            ({"comentarios": "x" * 2001}, "comentarios"),
-            ({"comentarios": 7}, "comentarios"),
-            ({"estatus": 5}, "estatus"),
-        ]:
-            resp = api.patch(self._url(oc), body, format="json")
-            self.assertEqual(resp.status_code, 400, (body, resp.content))
-            self.assertIn(campo, resp.json())
-        self.assertFalse(AuditoriaEvento.objects.filter(accion="RUTA_CRITICA").exists())
-
-    def test_permiso_de_escritura_solo_compras_o_admin(self):
-        oc = self._oc()
-        resp = self._api(self.usuario).patch(self._url(oc), {"comentarios": "x"}, format="json")
+        resp = self.api.patch(self._url(oc), {"fecha_real_recibo": "no-es-fecha"}, format="json")
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("permiso", resp.json())
-
-        with mock.patch(
-            "compras.services.ruta_critica_oc_service.claves_departamento_usuario", return_value={"COMPRAS"}
-        ):
-            resp = self._api(self.usuario).patch(self._url(oc), {"comentarios": "x"}, format="json")
-        self.assertEqual(resp.status_code, 200, resp.content)
-
-    def test_estatus_no_capturable_es_409(self):
-        api = self._api(self.admin)
-        for estatus in (
-            OrdenCompra.EstatusOrdenCompra.BORRADOR,
-            OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
-            OrdenCompra.EstatusOrdenCompra.CANCELADA,
-        ):
-            oc = self._oc(estatus=estatus)
-            self.assertEqual(api.patch(self._url(oc), {"comentarios": "x"}, format="json").status_code, 409)
-        recibida = self._oc(estatus=OrdenCompra.EstatusOrdenCompra.RECIBIDA)
-        self.assertEqual(api.patch(self._url(recibida), {"comentarios": "x"}, format="json").status_code, 200)
+        self.assertFalse(AuditoriaEvento.objects.filter(accion="RUTA_CRITICA").exists())
 
     def test_aislamiento_entre_empresas(self):
         ajena = self._oc(self.otra, self.otra_sucursal)
-        api = self._api(self.admin)
 
-        self.assertEqual(api.get(self._url(ajena)).status_code, 404)
-        self.assertEqual(api.patch(self._url(ajena), {"comentarios": "x"}, format="json").status_code, 404)
-        self.assertEqual(api.get(f"/api/v1/compras/ordenes/ruta-critica/?oc_id={ajena.pk}").json(), [])
+        self.assertEqual(self.api.get(self._url(ajena)).status_code, 404)
+        self.assertEqual(self.api.patch(self._url(ajena), {"comentarios": "x"}, format="json").status_code, 404)
         self.assertFalse(OrdenCompraRutaCritica.objects.exists())
-        sin_empresa = Usuario.objects.create(username="n@x.test", email="n@x.test")
-        self.assertEqual(self._api(sin_empresa).get(self._url(self._oc())).status_code, 404)
-
-    def test_muestra_la_primera_recepcion_de_wms_como_dato_de_solo_lectura(self):
-        oc = self._oc()
-        almacen = Almacen.objects.create(empresa=self.empresa, sucursal=self.sucursal, codigo="A", nombre="A")
-        ayer = timezone.now() - timedelta(days=1)
-        Recepcion.objects.create(
-            empresa=self.empresa, sucursal=self.sucursal, orden_compra=oc, almacen=almacen, usuario=self.admin,
-            fecha_recepcion=ayer, estatus=Recepcion.EstatusRecepcion.RECIBIDA,
-            tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
-        )
-        data = self._api(self.usuario).get(self._url(oc)).json()
-
-        self.assertIsNotNone(data["fecha_recepcion_wms"])
-        self.assertIsNone(data["fecha_real_recibo"])  # capturar no depende de WMS ni al revés
-
-    def test_bulk_y_validaciones_del_filtro(self):
-        a, b = self._oc(), self._oc()
-        self._api(self.admin).patch(self._url(a), {"comentarios": "hola"}, format="json")
-        api = self._api(self.usuario)
-
-        data = api.get(f"/api/v1/compras/ordenes/ruta-critica/?oc_id={a.pk},{b.pk},99999").json()
-        self.assertEqual([f["oc_id"] for f in data], [a.pk, b.pk])
-        self.assertEqual(data[0]["comentarios"], "hola")
-        self.assertIsNone(data[1]["comentarios"])
-        for q in ("", "?oc_id=", "?oc_id=a,b", "?oc_id=" + ",".join(str(i) for i in range(201))):
-            self.assertEqual(api.get(f"/api/v1/compras/ordenes/ruta-critica/{q}").status_code, 400, q)
 
     def test_consultas_constantes(self):
-        ocs = [self._oc() for _ in range(6)]
-        api = self._api(self.admin)
-        for oc in ocs:
-            api.patch(self._url(oc), {"comentarios": "c"}, format="json")
-        ids = ",".join(str(o.pk) for o in ocs)
-
-        with self.assertNumQueries(3):  # sesión no cuenta: OC + rutas + recepciones WMS
-            api.get(f"/api/v1/compras/ordenes/ruta-critica/?oc_id={ids}")
-        with self.assertNumQueries(3):
-            api.get(self._url(ocs[0]))
+        oc = self._oc()
+        with self.assertNumQueries(2):
+            self.api.get(self._url(oc))

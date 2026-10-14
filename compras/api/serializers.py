@@ -6,6 +6,7 @@ from compras.models import (
     CalidadInspeccionDetalle,
     OrdenCompra,
     OrdenCompraDetalle,
+    OrdenCompraRutaCritica,
     Recepcion,
     RecepcionDetalle,
     RecepcionRFIDEncuadre,
@@ -574,3 +575,18 @@ class RecepcionRFIDEncuadreCreateSerializer(serializers.ModelSerializer):
 class RecepcionRFIDLecturaInputSerializer(serializers.Serializer):
     codigo_tag = serializers.CharField()
 
+
+
+class OrdenCompraRutaCriticaSerializer(serializers.ModelSerializer):
+    """Fecha real de recibo y comentario; ``oc_id`` solo de lectura."""
+
+    oc_id = serializers.IntegerField(read_only=True)
+    comentarios = serializers.CharField(required=False, allow_null=True, allow_blank=True, max_length=2000)
+
+    class Meta:
+        model = OrdenCompraRutaCritica
+        fields = ["oc_id", "fecha_real_recibo", "comentarios", "updated_at"]
+        read_only_fields = ["updated_at"]
+
+    def validate_comentarios(self, value):
+        return (value or "").strip() or None

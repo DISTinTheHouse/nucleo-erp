@@ -173,24 +173,15 @@ class OrdenCompra(StatusLifecycleModel):
         return str(self.id)
 
 class OrdenCompraRutaCritica(models.Model):
-    """Seguimiento informativo de la OC para compras: un renglón por orden, en
-    tabla aparte de ``OrdenCompra`` para que leerlo/editarlo sea barato (no toca
-    el serializer pesado de la OC ni su historial).
-
-    Es solo información: nada de aquí cambia el estatus de la OC, las
-    recepciones ni el inventario. La recepción real la sigue haciendo WMS;
-    ``fecha_real_recibo`` es la fecha en que compras supo que la mercancía llegó,
-    que puede adelantarse a la recepción de WMS por más de una semana.
-    """
+    """Seguimiento informativo de la OC: fecha en que compras supo que llegó la
+    mercancía y un comentario. No afecta la OC, las recepciones ni WMS (que sigue
+    haciendo la recepción real). Quién y qué cambió queda en ``AuditoriaEvento``."""
 
     oc = models.OneToOneField(
         OrdenCompra, on_delete=models.CASCADE, primary_key=True, related_name="ruta_critica"
     )
     fecha_real_recibo = models.DateField(null=True, blank=True)
     comentarios = models.TextField(blank=True, null=True)
-    updated_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
-    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
