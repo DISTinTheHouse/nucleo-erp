@@ -3275,26 +3275,35 @@ class PedidoViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             dt.sku_muestra = variante.sku
             dt.save(update_fields=["sku_muestra"])
-            self._reflejar_sku_muestra_en_cotizacion(pedido, dt, variante.sku)
+            reflejado = self._reflejar_sku_muestra_en_cotizacion(pedido, dt, variante.sku)
 
-        return Response({"pedido_detalle_talla_id": dt.pk, "sku_muestra": dt.sku_muestra})
+        return Response({
+            "pedido_detalle_talla_id": dt.pk,
+            "sku_muestra": dt.sku_muestra,
+            "cotizacion_actualizada": reflejado,
+        })
 
     @staticmethod
     def _reflejar_sku_muestra_en_cotizacion(pedido, dt, sku):
-        """Copia el SKU a la talla espejo de la cotización de origen.
+        """Copia el SKU a la talla espejo de la cotización de origen; ``True`` si la halló.
 
-        Match por producto_nombre_externo + color + talla, mismo criterio que agrupa
-        líneas en ``_merge_detalle``. Sin cotización o sin match no hace nada: el
-        pedido ya quedó actualizado, que es lo que pidió el clic.
+        Match por producto_nombre_externo + talla y el color del pedido o, si la
+        cotización se capturó sin color (el caso habitual: el color se asigna después en
+        el pedido, #436), sin color. Sin cotización o sin match no falla: el pedido ya
+        quedó actualizado, que es lo que pidió el clic.
         """
         if not pedido.cotizacion_id:
-            return
-        CotizacionDetalleTalla.objects.filter(
+            return False
+        tallas = CotizacionDetalleTalla.objects.filter(
             cotizacion_detalle__cotizacion_id=pedido.cotizacion_id,
             cotizacion_detalle__producto_nombre_externo=dt.pedido_detalle.producto_nombre_externo,
-            cotizacion_detalle__color_id=dt.pedido_detalle.color_id,
             talla_id=dt.talla_id,
-        ).update(sku_muestra=sku)
+        )
+        color_id = dt.pedido_detalle.color_id
+        actualizadas = tallas.filter(cotizacion_detalle__color_id=color_id).update(sku_muestra=sku)
+        if not actualizadas and color_id is not None:
+            actualizadas = tallas.filter(cotizacion_detalle__color__isnull=True).update(sku_muestra=sku)
+        return bool(actualizadas)
 
     @action(detail=True, methods=["post"], url_path="recomprar")
     def recomprar(self, request, pk=None):
