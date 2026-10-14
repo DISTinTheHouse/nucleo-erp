@@ -3835,6 +3835,66 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
 }
 ```
 
+### 6.1.1) Estatus de la Orden de Producción (cambio en un clic)
+
+`OrdenProduccion.estatus_op`: `1` Pendiente · `2` Preparacion · `3` En produccion · `4` Revision · `5` Completado · `6` Detenido · `7` Cancelado. Ya **no** se cambia con el `PATCH` genérico de la OP (`estatus_op` es de solo lectura ahí): se cambia únicamente con este endpoint, que valida la transición y deja el evento en auditoría.
+
+- **Endpoint**: `GET|POST /api/v1/produccion/orden-produccion/{op_id}/estatus/`
+- **Alcance**: mismo que list/detail de OP (empresa y sucursales del usuario). OP ajena o inexistente → `404`.
+- **Rendimiento**: fuera del prefetch de BOM; `GET` ≤ 3 queries, `POST` ≤ 9 (fijado en tests, no crece con el tamaño de la OP). Pensado para pedirse al hacer clic en el estatus, no en el listado (el listado ya trae `estatus_op` y `estatus_op_display`).
+
+**GET** (cualquier usuario con acceso a la OP): estatus actual y a dónde se puede pasar.
+
+```json
+{
+  "op_id": 12, "folio_op": "OP-0012",
+  "estatus_op": 2, "estatus_op_display": "Preparacion",
+  "opciones": [
+    {"estatus_op": 3, "etiqueta": "En produccion", "requiere_motivo": false,
+     "permitido": false, "se_puede_forzar": true,
+     "bloqueos": ["Desarrollo de producto: falta liberar el paquete técnico.",
+                  "Telas y avíos: falta marcar el kit completo."]},
+    {"estatus_op": 6, "etiqueta": "Detenido", "requiere_motivo": true,
+     "permitido": true, "se_puede_forzar": false, "bloqueos": []},
+    {"estatus_op": 7, "etiqueta": "Cancelado", "requiere_motivo": true,
+     "permitido": true, "se_puede_forzar": false, "bloqueos": []}
+  ]
+}
+```
+
+Sugerencia de UI: pintar cada opción; si `permitido` es `false`, deshabilitarla y mostrar `bloqueos` (si `se_puede_forzar`, ofrecer "Forzar" con confirmación); si `requiere_motivo`, pedir un texto antes de enviar. Completado y Cancelado devuelven `opciones: []` (terminales).
+
+**POST** — solo Producción (o superuser/admin_empresa); el resto: `400 {"permiso": "..."}`.
+
+```json
+{"estatus_op": 3, "motivo": "texto (obligatorio para 6 y 7)", "forzar": false}
+```
+
+Respuesta `200`: `{"msg": "Estatus actualizado", "op_id", "estatus_op", "estatus_op_display", "fecha_fin"}`.
+
+| Código | Cuándo |
+|---|---|
+| `400` | `estatus_op` ausente/no entero/inexistente; falta `motivo` para Detenido/Cancelado; sin permiso de Producción |
+| `404` | OP de otra empresa/sucursal o inexistente |
+| `409` | Transición no permitida (`{"msg", "estatus_op": <actual>}`), o faltan requisitos de ruta crítica (`{"msg", "bloqueos": [...], "se_puede_forzar"}`) |
+
+**Transiciones**
+
+| Desde | Puede pasar a |
+|---|---|
+| Pendiente | Preparacion, Detenido, Cancelado |
+| Preparacion | En produccion*, Detenido, Cancelado |
+| En produccion | Revision, Preparacion, Detenido, Cancelado |
+| Revision | Completado, En produccion, Detenido, Cancelado |
+| Detenido | Preparacion, En produccion*, Revision, Cancelado |
+| Completado / Cancelado | — |
+
+\* **Entrar a En produccion** exige de la ruta crítica (§6.1): `fecha_liberacion_paquete_tecnico` capturada y `estatus_paquete_tecnico` distinto de `espera_muestra`, y `kit_completo = true`. Superuser/admin_empresa pueden mandar `"forzar": true` para saltarse el requisito; queda marcado en auditoría.
+
+**Efectos**: al pasar a Completado se sella `fecha_fin` (si estaba vacía), que es lo que usa el KPI de cumplimiento a tiempo (§6.2). Ruta crítica ya no es editable en Completado/Cancelado (sin cambios).
+
+**Auditoría**: cada cambio crea un `AuditoriaEvento` (`modulo="produccion"`, `accion="CAMBIO_ESTATUS"`, `tabla="ordenes_produccion"`, `id_registro=op_id`) con `usuario`, `ip`, `antes_json` (`estatus_op`, `estatus`), `despues_json` (`estatus_op`, `estatus`, `motivo`, `forzado`, `bloqueos_omitidos`).
+
 ### 6.2) KPIs de Órdenes de Producción (EC-412)
 
 - **Endpoint**: `GET /api/v1/produccion/orden-produccion/kpis/`

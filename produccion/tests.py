@@ -4480,6 +4480,159 @@ class RutaCriticaOPTests(TestCase):
                 self.assertEqual(resp.data["cantidad_real_corte"], esperado)
 
 
+class EstatusOPTests(TestCase):
+    """``/orden-produccion/{op_id}/estatus/``: opciones y cambio de estatus."""
+
+    E = OrdenProduccion.EstatusOrdenProduccion
+
+    @classmethod
+    def setUpTestData(cls):
+        from auditoria.models import AuditoriaEvento  # noqa: F401
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.otra = Empresa.objects.create(codigo="otra", razon_social="OTRA SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
+        cls.admin = Usuario.objects.create(
+            username="adm", email="adm@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.lector = Usuario.objects.create(
+            username="lec", email="lec@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.ajeno = Usuario.objects.create(
+            username="ajeno", email="ajeno@otra.test", empresa=cls.otra, is_admin_empresa=True,
+        )
+
+    def setUp(self):
+        self.op = OrdenProduccion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, folio_op="OP-EST-1",
+        )
+        self.url = f"/api/v1/produccion/orden-produccion/{self.op.pk}/estatus/"
+
+    def _client(self, user=None):
+        client = APIClient()
+        client.force_authenticate(user=user or self.admin)
+        return client
+
+    def _post(self, body, user=None):
+        return self._client(user).post(self.url, body, format="json")
+
+    def _set(self, estatus):
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(estatus_op=estatus)
+
+    def _liberar_ruta(self):
+        OrdenProduccionRutaCritica.objects.create(
+            op=self.op, kit_completo=True,
+            fecha_liberacion_paquete_tecnico=timezone.localdate(),
+            estatus_paquete_tecnico="nueva",
+        )
+
+    def test_get_lista_opciones_con_pocas_queries(self):
+        client = self._client()
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.get(self.url)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertLessEqual(len(ctx), 3, [q["sql"] for q in ctx])
+        self.assertEqual(resp.data["estatus_op"], 1)
+        self.assertEqual(
+            [o["estatus_op"] for o in resp.data["opciones"]],
+            [int(self.E.PREPARACION), int(self.E.DETENIDO), int(self.E.CANCELADO)],
+        )
+
+    def test_cambio_feliz_deja_auditoria_con_usuario(self):
+        from auditoria.models import AuditoriaEvento
+        resp = self._post({"estatus_op": int(self.E.PREPARACION)})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.op.refresh_from_db()
+        self.assertEqual(self.op.estatus_op, self.E.PREPARACION)
+        ev = AuditoriaEvento.objects.get(modulo="produccion", accion="CAMBIO_ESTATUS")
+        self.assertEqual(ev.usuario_id, self.admin.pk)
+        self.assertEqual(ev.id_registro, str(self.op.pk))
+        self.assertEqual(ev.antes_json["estatus_op"], 1)
+        self.assertEqual(ev.despues_json["estatus_op"], 2)
+
+    def test_cambio_con_pocas_queries(self):
+        client = self._client()
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.post(self.url, {"estatus_op": int(self.E.PREPARACION)}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertLessEqual(len(ctx), 9, [q["sql"] for q in ctx])
+
+    def test_transicion_invalida_409(self):
+        resp = self._post({"estatus_op": int(self.E.COMPLETADO)})
+        self.assertEqual(resp.status_code, 409, resp.data)
+        self.op.refresh_from_db()
+        self.assertEqual(self.op.estatus_op, self.E.PENDIENTE)
+
+    def test_estatus_terminales_no_tienen_salida(self):
+        for terminal in (self.E.COMPLETADO, self.E.CANCELADO):
+            self._set(terminal)
+            self.assertEqual(self._client().get(self.url).data["opciones"], [])
+            self.assertEqual(self._post({"estatus_op": int(self.E.PREPARACION)}).status_code, 409)
+
+    def test_detener_y_cancelar_exigen_motivo(self):
+        for destino in (self.E.DETENIDO, self.E.CANCELADO):
+            resp = self._post({"estatus_op": int(destino)})
+            self.assertEqual(resp.status_code, 400, resp.data)
+            self.assertIn("motivo", resp.data)
+        ok = self._post({"estatus_op": int(self.E.DETENIDO), "motivo": "Falta de tela"})
+        self.assertEqual(ok.status_code, 200, ok.data)
+
+    def test_en_produccion_exige_ruta_critica(self):
+        self._set(self.E.PREPARACION)
+        resp = self._post({"estatus_op": int(self.E.BORDANDO)})
+        self.assertEqual(resp.status_code, 409, resp.data)
+        self.assertEqual(len(resp.data["bloqueos"]), 2)
+        opcion = next(o for o in self._client().get(self.url).data["opciones"] if o["estatus_op"] == 3)
+        self.assertFalse(opcion["permitido"])
+        self._liberar_ruta()
+        self.assertEqual(self._post({"estatus_op": int(self.E.BORDANDO)}).status_code, 200)
+
+    def test_espera_muestra_bloquea_el_paquete_tecnico(self):
+        self._set(self.E.PREPARACION)
+        self._liberar_ruta()
+        OrdenProduccionRutaCritica.objects.filter(op=self.op).update(estatus_paquete_tecnico="espera_muestra")
+        self.assertEqual(self._post({"estatus_op": int(self.E.BORDANDO)}).status_code, 409)
+
+    def test_forzar_solo_admin_y_queda_en_auditoria(self):
+        from auditoria.models import AuditoriaEvento
+        self._set(self.E.PREPARACION)
+        resp = self._post({"estatus_op": int(self.E.BORDANDO), "forzar": True})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        ev = AuditoriaEvento.objects.get(accion="CAMBIO_ESTATUS")
+        self.assertTrue(ev.despues_json["forzado"])
+        self.assertEqual(len(ev.despues_json["bloqueos_omitidos"]), 2)
+
+    def test_completar_sella_fecha_fin(self):
+        self._set(self.E.REVISION)
+        resp = self._post({"estatus_op": int(self.E.COMPLETADO)})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.op.refresh_from_db()
+        self.assertIsNotNone(self.op.fecha_fin)
+
+    def test_sin_departamento_produccion_no_escribe_pero_si_lee(self):
+        self.assertEqual(self._client(self.lector).get(self.url).status_code, 200)
+        resp = self._post({"estatus_op": int(self.E.PREPARACION)}, user=self.lector)
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("permiso", resp.data)
+
+    def test_otra_empresa_recibe_404(self):
+        self.assertEqual(self._client(self.ajeno).get(self.url).status_code, 404)
+        self.assertEqual(self._post({"estatus_op": int(self.E.PREPARACION)}, user=self.ajeno).status_code, 404)
+
+    def test_estatus_invalido_o_mal_tipado(self):
+        for valor in ("2", None, True, 99):
+            with self.subTest(valor=valor):
+                self.assertEqual(self._post({"estatus_op": valor}).status_code, 400)
+
+    def test_patch_generico_ya_no_cambia_el_estatus(self):
+        resp = self._client().patch(
+            f"/api/v1/produccion/orden-produccion/{self.op.pk}/",
+            {"estatus_op": int(self.E.COMPLETADO)}, format="json",
+        )
+        self.op.refresh_from_db()
+        self.assertEqual(self.op.estatus_op, self.E.PENDIENTE, resp.data)
+
+
 class OnboardingPostProgramacionTests(TestCase):
     """#278: el POST de onboarding exige la misma programación de Mesa de
     Control que el GET usa para ofrecer el pedido."""
