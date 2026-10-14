@@ -242,3 +242,11 @@ class NotificacionScopeTests(TestCase):
         resto = client.get(NOTIFICACIONES_URL, {"limit": 2, "offset": 2}).json()
         self.assertEqual(len(resto["results"]), 2)
         self.assertIsNone(resto["next"])
+
+    # --- crear no se expone por API ------------------------------------------
+
+    def test_post_a_la_coleccion_responde_405(self):
+        resp = self._client(self.admin_empresa).post(
+            NOTIFICACIONES_URL, {"titulo": "x"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 405)
