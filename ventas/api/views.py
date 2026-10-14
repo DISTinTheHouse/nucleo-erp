@@ -2435,6 +2435,14 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 direccion_id = det.get("direccion_envio_cliente")
                 if isinstance(direccion_id, dict):
                     direccion_id = direccion_id.get("id")
+                from catalogo.models import CategoriaProducto as _CategoriaProducto
+
+                categoria_id = det.get("categoria_producto")
+                if isinstance(categoria_id, dict):
+                    categoria_id = categoria_id.get("id")
+                # El id del snapshot puede apuntar a una categoría ya desactivada o borrada.
+                if categoria_id and not _CategoriaProducto.objects.filter(pk=categoria_id, activo=True).exists():
+                    categoria_id = None
                 cot_det = CotizacionDetalle.objects.create(
                     cotizacion=cotizacion,
                     producto_id=prod_id,
@@ -2443,6 +2451,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     # antes no se pasaba aquí y la línea quedaba sin nombre.
                     producto_nombre_externo=det.get("producto_nombre_externo"),
                     color_id=color_id or None,
+                    categoria_producto_id=categoria_id,
                     direccion_envio_cliente_id=direccion_id or None,
                     precio_lista=det.get("precio_lista"),
                     precio_unitario=det.get("precio_unitario") or 0,
