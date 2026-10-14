@@ -1123,7 +1123,7 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
 
 ### KPIs de Clientes (EC-422)
 
-- **Endpoint**: `GET /api/v1/terceros/clientes/kpis/`. Sin query params.
+- **Endpoint**: `GET /api/v1/terceros/clientes/kpis/`. Sin query params: cualquiera responde `400`.
 - Facturas, pedidos y CxC cuentan solo si son de la **misma empresa que su cliente**; un documento de otra empresa que apunte al cliente no entra.
 - Alcance = mismo que el listado de clientes (`clientes_visibles`): un vendedor normal solo ve KPIs de **sus propios clientes** (M2M `vendedores`); Mesa de Control/`is_admin_empresa`/superuser ven toda la empresa.
 - Solo **3 de 4 KPIs son reales**. `reclamos_devoluciones` viene `"disponible": false` — `Devolucion`/`Entrega` no registran cantidad de piezas, solo los FKs.
@@ -1133,14 +1133,23 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
   "generado_en": "2026-10-08T15:00:00Z",
   "ventas_por_cliente": {
     "disponible": true,
-    "total_facturado": "185000.00",
-    "total_clientes_facturados": 12,
-    "top_clientes": [
-      { "cliente_id": 7, "cliente_nombre": "Comercializadora Ejemplo", "monto": "52000.00", "pct_del_total": 28.1, "pct_acumulado": 28.1 }
+    "criterio": "Facturas Emitidas y activas.",
+    "por_moneda": [
+      {
+        "moneda": "MXN", "total_facturado": "185000.00", "total_clientes_facturados": 12,
+        "top_clientes": [
+          { "cliente_id": 7, "cliente_nombre": "Comercializadora Ejemplo", "monto": "52000.00", "pct_del_total": 28.1, "pct_acumulado": 28.1 }
+        ]
+      }
     ]
   },
   "clientes_activos": {
-    "disponible": true, "total": 40, "activos": 22, "inactivos": 18, "pct_activos": 55.0, "ventana_dias": 90
+    "disponible": true, "total": 40, "activos": 22, "inactivos": 18, "pct_activos": 55.0, "ventana_dias": 90,
+    "drill_down": {
+      "activos": [{ "cliente_id": 7, "cliente_nombre": "Comercializadora Ejemplo" }],
+      "inactivos": [{ "cliente_id": 9, "cliente_nombre": "Otro Cliente" }],
+      "activos_truncado": true, "inactivos_truncado": false
+    }
   },
   "reclamos_devoluciones": {
     "disponible": false,
@@ -1148,23 +1157,30 @@ Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y q
   },
   "cartera_antiguedad": {
     "disponible": true,
-    "saldo_total_vencido": "45000.00",
     "total_cuentas_vencidas": 9,
-    "buckets": {
-      "0_30": { "total": 4, "monto": "18000.00" },
-      "31_60": { "total": 3, "monto": "15000.00" },
-      "60_mas": { "total": 2, "monto": "12000.00" }
-    },
+    "por_moneda": [
+      {
+        "moneda": "MXN", "saldo_total_vencido": "45000.00", "total_cuentas_vencidas": 9,
+        "buckets": {
+          "0_30": { "total": 4, "monto": "18000.00" },
+          "31_60": { "total": 3, "monto": "15000.00" },
+          "60_mas": { "total": 2, "monto": "12000.00" }
+        }
+      }
+    ],
+    "sin_vencimiento": [{ "moneda": "MXN", "total": 2, "monto": "772952.24" }],
     "drill_down": [
-      { "id": 55, "cliente_id": 7, "cliente__nombre": "Comercializadora Ejemplo", "saldo": "5000.00", "fecha_vencimiento": "2026-09-15", "dias_vencida": 23 }
-    ]
+      { "id": 55, "cliente_id": 7, "cliente__nombre": "Comercializadora Ejemplo", "saldo": "5000.00", "fecha_vencimiento": "2026-09-15", "moneda": "MXN", "dias_vencida": 23 }
+    ],
+    "drill_down_total": 9, "drill_down_truncado": false
   }
 }
 ```
 
-- `ventas_por_cliente`: `Factura` con `activo=true`, excluye `Cancelada`. `top_clientes` trae los 5 de mayor facturación, con `pct_acumulado` listo para graficar un Pareto.
-- `clientes_activos`: "activo" = tiene al menos un `Pedido` creado en los últimos 90 días (fijo, no configurable).
-- `cartera_antiguedad`: `CuentaPorCobrar` con estatus `Pendiente`/`Parcial` y `fecha_vencimiento` ya pasada. `drill_down` trae hasta 20, ordenadas por más antigua primero.
+- **Montos por moneda** (#370): nunca se suman monedas distintas; cada bloque trae su `moneda`.
+- `ventas_por_cliente`: `Factura` con `activo=true` y estatus **`Emitida`** (los borradores y cancelados no cuentan). `top_clientes` = los 5 de mayor facturación de esa moneda, con `pct_acumulado` listo para un Pareto.
+- `clientes_activos`: "activo" = al menos un `Pedido` **Por autorizar, Autorizada o En proceso** creado en los últimos 90 días (fijo). Borrador y Cancelado no cuentan. `drill_down` trae hasta 20 activos y 20 inactivos (por nombre) con la misma definición que los conteos; `*_truncado` indica que hay más.
+- `cartera_antiguedad`: `CuentaPorCobrar` `Pendiente`/`Parcial` con `fecha_vencimiento` ya pasada, de facturas activas y no canceladas. Las CxC vivas **sin `fecha_vencimiento`** van aparte en `sin_vencimiento` (no cuentan como vencidas). `drill_down`: hasta 20, la más antigua primero.
 
 ### Proveedores: escritura (`/api/v1/terceros/proveedores/`)
 
@@ -1506,10 +1522,11 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
   "pedidos_activos": {
     "disponible": true,
     "total": 12,
-    "valor": "185000.00",
+    "por_moneda": [{ "moneda": "MXN", "total": 12, "valor": "185000.00" }],
     "drill_down": [
-      { "id": 88, "folio": "PED-000088", "estatus": 4, "estatus_label": "EN PROCESO", "gran_total": "10500.00", "cliente_nombre": "Comercializadora Ejemplo" }
-    ]
+      { "id": 88, "folio": "PED-000088", "estatus": 4, "estatus_label": "EN PROCESO", "gran_total": "10500.00", "moneda": "MXN", "cliente_nombre": "Comercializadora Ejemplo" }
+    ],
+    "drill_down_total": 12, "drill_down_truncado": false
   },
   "otif": { "disponible": false, "motivo": "..." },
   "lead_time_promedio": { "disponible": false, "motivo": "..." },
@@ -1517,7 +1534,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 }
 ```
 
-- `drill_down` trae hasta 20 pedidos activos (`AUTORIZADA`+`EN PROCESO`), ordenados por `gran_total` desc.
+- `valor` va **por moneda** (`por_moneda`): no se suman monedas. `drill_down` trae hasta 20 pedidos activos (`AUTORIZADA`+`EN PROCESO`), ordenados por `gran_total` desc; `drill_down_truncado` avisa si hay más.
 
 #### Automatización de Órdenes de Trabajo (Producción)
 
@@ -2653,59 +2670,96 @@ Sin `desde`/`hasta` el gasto es histórico completo. `desde`/`hasta` inválidos 
 
 ## 🧾 Compras - KPIs por pantalla (EC-432 / EC-434 / EC-436)
 
-Distintos de `/dashboard/` de arriba: cada uno es la tarjeta de KPIs de **una pantalla específica**, no el resumen general. Mismo patrón en los 3: `GET`, sin query params, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.
+Distintos de `/dashboard/` de arriba: cada uno es la tarjeta de KPIs de **una pantalla específica**, no el resumen general. Mismo patrón en los 3: `GET`, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.
 
-**Montos y permiso de contabilidad** (mismo criterio que el listado de OC, `puede_ver_contabilidad`): sin permiso, `ordenes/kpis/` omite `ocs_abiertas.monto` y `por_estatus[].monto`, y `gasto_por_categoria` llega como `{"disponible": false, "motivo": "Sin permiso de contabilidad."}`; `recepciones/kpis/` hace lo mismo con `diferencia_precio` y omite `material_rechazado.valor_rechazado` y `drill_down[].valor_linea`. Conteos y cantidades no cambian.
+**Reglas comunes**
+- **Parámetros no soportados → `400`** (`{"parametros": "..."}`), nunca se ignoran en silencio. `ordenes/kpis/` no acepta ninguno; `recepciones/kpis/` y `proveedores/kpis/` aceptan los de su sección. Los filtros aplicados se devuelven en `filtros`.
+- **Nunca se suman monedas ni unidades de medida distintas**: los montos vienen por moneda (cada fila con monto trae `moneda`) y las cantidades por unidad. Con más de una unidad, `cantidad_*`/`pct` agregados vienen `null` y `mezcla_unidades: true`; usar `por_unidad`. `unidad: null` = productos sin unidad capturada.
+- **Drill-down acotado**: máximo 20 filas, con `drill_down_total` y `drill_down_truncado`.
+- **Criterios compartidos** entre `recepciones/kpis/` y `proveedores/kpis/` (`compras/services/kpi_criterios.py`): OC *comprometida* = activa en Autorizada/Parcial/Recibida; *recibido neto* = recibido en recepciones de OC − rechazado por Calidad (igual que el estatus de la OC); *rechazo* = renglón de Calidad con `resultado = rechazo` en una recepción de **OC** (las de producción no cuentan); *diferencia de precio* = facturas `Registrada` y activas, solo si factura y OC están en la misma moneda.
+- **Superusuario**: ve todas las empresas (como el listado), con o sin empresa asignada. Un usuario normal sin empresa recibe `disponible: false` + `motivo`.
+- **Permiso de contabilidad** (mismo criterio que el listado de OC, `puede_ver_contabilidad`): sin permiso, `ordenes/kpis/` omite los `monto` y `gasto_por_categoria` llega como `{"disponible": false, "motivo": "Sin permiso de contabilidad."}`; `recepciones/kpis/` hace lo mismo con `diferencia_precio` y omite `valor_rechazado`, `por_moneda` y `valor_linea` de `material_rechazado`. Conteos y cantidades no cambian.
 
 ### Órdenes de Compra — `GET /api/v1/compras/ordenes/kpis/`
 
 ```json
 {
   "generado_en": "2026-10-08T12:00:00Z",
-  "ocs_abiertas": { "disponible": true, "total": 12, "monto": "185000.00", "por_estatus": [{ "estatus": 3, "estatus_label": "Autorizada", "total": 8, "monto": "120000.00" }] },
+  "ocs_abiertas": {
+    "disponible": true, "total": 12,
+    "por_moneda": [{ "moneda": "MXN", "total": 11, "monto": "90000.00" }, { "moneda": "USD", "total": 1, "monto": "94838.16" }],
+    "por_estatus": [{ "estatus": 3, "estatus_label": "Autorizada", "moneda": "MXN", "total": 8, "monto": "120000.00" }]
+  },
   "ocs_vencidas_sin_recibir": { "disponible": true, "total": 3, "drill_down": [{ "oc_id": 88, "folio": "OC-000088", "fecha_entrega_estimada": "2026-10-01", "dias_vencida": 7 }] },
   "ciclo_compra": { "disponible": false, "motivo": "El flujo Requisición → Solicitud de compra no se usa hoy; no hay fecha de requisición." },
-  "gasto_por_categoria": { "disponible": true, "categorias": [{ "categoria": "Tela", "monto": "80000.00" }, { "categoria": "Sin categoría", "monto": "5000.00" }] }
+  "gasto_por_categoria": { "disponible": true, "categorias": [{ "categoria": "Tela", "moneda": "MXN", "monto": "80000.00" }, { "categoria": "Sin categoría", "moneda": "MXN", "monto": "5000.00" }] }
 }
 ```
-`gasto_por_categoria` agrupa por `Producto.categoria_producto.nombre` (lo que exista en el catálogo, no una lista fija) y solo cuenta OCs comprometidas (Autorizada/Parcial/Recibida).
+`gasto_por_categoria` agrupa por `Producto.categoria_producto.nombre` y moneda de la OC (una fila por categoría y moneda), y solo cuenta OCs comprometidas (Autorizada/Parcial/Recibida).
 
 ### Recepciones — `GET /api/v1/compras/recepciones/kpis/`
 
+Parámetros opcionales (se aplican sobre la OC): `sucursal`, `proveedor` (ids), `fecha_desde`, `fecha_hasta` (`YYYY-MM-DD`, sobre `fecha_oc`).
+
 ```json
 {
   "generado_en": "2026-10-08T12:00:00Z",
-  "cumplimiento_cantidad": { "disponible": true, "cantidad_ordenada": "500.00", "cantidad_recibida": "430.00", "pct": 86.0, "drill_down": [{ "oc_id": 12, "folio": "OC-000012", "cantidad_ordenada": "50", "cantidad_recibida": "20", "pct": 40.0 }] },
+  "filtros": { "sucursal": null, "proveedor": null, "fecha_desde": null, "fecha_hasta": null },
+  "cumplimiento_cantidad": {
+    "disponible": true, "mezcla_unidades": false, "cantidad_ordenada": 500, "cantidad_recibida": 430, "pct": 86.0,
+    "por_unidad": [{ "unidad_id": 1, "unidad": "MTR", "cantidad_ordenada": 500, "cantidad_recibida": 430, "pct": 86.0 }],
+    "drill_down": [{ "oc_id": 12, "folio": "OC-000012", "unidad_id": 1, "unidad": "MTR", "cantidad_ordenada": 50, "cantidad_recibida": 20, "pct": 40.0 }],
+    "drill_down_total": 1, "drill_down_truncado": false
+  },
   "recepciones_parciales": { "disponible": true, "ocs_parciales": 4, "ocs_recibidas_o_parciales": 15, "pct": 26.7 },
-  "diferencia_precio": { "disponible": true, "lineas_evaluadas": 14, "costo_facturado": "52000.00", "costo_pactado_oc": "50000.00", "diferencia": "2000.00", "pct": 4.0, "drill_down": [...] },
-  "material_rechazado": { "disponible": true, "cantidad_rechazada": "12.00", "valor_rechazado": "1800.00", "drill_down": [{ "id": 5, "recepcion_detalle__recepcion__folio": "RC-000005", "recepcion_detalle__producto__nombre": "Tela Azul", "cantidad_rechazada": "5.00", "valor_linea": "750.00", "motivo_rechazo": "Fuera de tono" }] }
+  "diferencia_precio": {
+    "disponible": true, "lineas_evaluadas": 14, "lineas_moneda_distinta": 0,
+    "por_moneda": [{ "moneda": "MXN", "lineas_evaluadas": 14, "costo_facturado": "52000.00", "costo_pactado_oc": "50000.00", "diferencia": "2000.00", "pct": 4.0 }],
+    "drill_down": [{ "id": 3, "factura_id": 9, "factura_folio": "FP-9", "producto": "Tela Azul", "moneda": "MXN", "precio_facturado": "6.00", "precio_pactado": "5.00", "diferencia_linea": "6.00" }],
+    "drill_down_total": 1, "drill_down_truncado": false
+  },
+  "material_rechazado": {
+    "disponible": true, "mezcla_unidades": false, "cantidad_rechazada": "12.00",
+    "por_unidad": [{ "unidad_id": 1, "unidad": "MTR", "cantidad_rechazada": "12.00" }],
+    "por_moneda": [{ "moneda": "MXN", "valor_rechazado": "1800.00" }],
+    "drill_down": [{ "id": 5, "recepcion_id": 5, "recepcion_folio": "RC-000005", "producto": "Tela Azul", "unidad": "MTR", "moneda": "MXN", "cantidad_rechazada": "5.00", "valor_linea": "750.00", "motivo_rechazo": "Fuera de tono" }],
+    "drill_down_total": 1, "drill_down_truncado": false
+  }
 }
 ```
-`diferencia_precio` compara `FacturaProveedorDetalle.precio_unitario` contra `OrdenCompraDetalle.precio` de la misma línea. Solo facturas `Registrada` y activas, de OC activas en estatus 3/4/5. `lineas_evaluadas: 0` = no hubo líneas que evaluar (distinto de diferencia 0). `material_rechazado` viene de `CalidadInspeccionDetalle.cantidad_rechazada`, valorizado al precio pactado en la OC.
+Montos y cantidades son **números JSON** (no strings) en este endpoint. `lineas_evaluadas: 0` = no hubo líneas que evaluar (distinto de diferencia 0). `material_rechazado` se valoriza al precio pactado en la OC. `cumplimiento_cantidad.drill_down` lista OC y unidad con algo pendiente (recibido neto < ordenado), peor cobertura primero.
 
 ### Proveedores — `GET /api/v1/terceros/proveedores/kpis/`
 
-Shape distinto: es una **lista de proveedores** (scorecard), no un solo agregado — ordenada de mejor a peor por `scorecard.puntaje`.
+Shape distinto: es una **lista de proveedores** (scorecard), no un solo agregado — ordenada de mejor a peor por `scorecard.puntaje` (desempate por nombre e id). Solo proveedores activos.
+
+Parámetros opcionales: `proveedor`, `sucursal`, `fecha_desde`, `fecha_hasta` (como en recepciones), `meta_scorecard` (0-100, default 80, para el semáforo) y `limite` (1-200, default 50). Sin empresa → `disponible: false` + `motivo` (distinto de "sin datos", que es `proveedores: []`).
 
 ```json
 {
   "generado_en": "2026-10-08T12:00:00Z",
+  "disponible": true,
+  "filtros": { "sucursal": null, "proveedor": null, "fecha_desde": null, "fecha_hasta": null, "meta_scorecard": 80.0, "limite": 50 },
+  "total_proveedores": 1, "truncado": false,
   "proveedores": [
     {
       "proveedor_id": 7, "proveedor_nombre": "Textiles ACME",
       "entrega_a_tiempo": { "pct": 92.0, "recepciones_a_tiempo": 23, "recepciones_total": 25, "recepciones_con_compromiso": 25 },
       "calidad": { "pct_rechazado": 2.1, "cantidad_rechazada": "8.00", "cantidad_inspeccionada": "380.00" },
-      "lead_time": { "dias_promedio_real": 11.2, "dias_promedio_pactado": 10.0 },
-      "cumplimiento_cantidad": { "pct": 97.5, "cantidad_ordenada": "400.00", "cantidad_recibida": "390.00" },
-      "diferencia_precio": { "pct": 1.5 },
+      "lead_time": { "dias_promedio_real": 11.2, "dias_promedio_pactado": 10.0, "recepciones_medidas": 25 },
+      "cumplimiento_cantidad": { "pct": 97.5, "mezcla_unidades": false, "cantidad_ordenada": "400.00", "cantidad_recibida": "390.00", "por_unidad": [] },
+      "diferencia_precio": { "pct": 1.5, "por_moneda": [{ "moneda": "MXN", "costo_facturado": "10150.00", "costo_pactado_oc": "10000.00", "pct": 1.5 }] },
       "scorecard": { "puntaje": 96.5, "semaforo": "verde" }
     }
   ]
 }
 ```
 
-`entrega_a_tiempo.pct` = a tiempo / `recepciones_con_compromiso`: una recepción cuya OC no tiene `fecha_entrega_estimada` no cuenta como tarde; sin ninguna con fecha, `pct` es `null` y no entra al `scorecard`.
-`scorecard.puntaje` es el **promedio simple** de los 4 factores de arriba (entrega a tiempo, 100-%rechazo, cumplimiento, 100-|%diferencia precio|) — si a un proveedor le falta un factor (p. ej. nunca se le ha facturado), se promedia solo entre los que sí tiene, no se inventa el que falta. Semáforo: verde ≥80, amarillo ≥70, rojo <70. Tope de 50 proveedores por respuesta.
+- `entrega_a_tiempo.pct` = a tiempo / `recepciones_con_compromiso`: una recepción cuya OC no tiene `fecha_entrega_estimada` no cuenta como tarde; sin ninguna con fecha, `pct` es `null` y no entra al `scorecard`. Las fechas se comparan en hora de Ciudad de México.
+- `lead_time`: real (recepción − fecha de la OC) y pactado (fecha prometida − fecha de la OC) se promedian sobre las **mismas** recepciones, las que tienen ambas fechas (`recepciones_medidas`); sin fecha prometida ambos son `null`.
+- `cumplimiento_cantidad` y `diferencia_precio`: con más de una unidad o moneda el `pct` es `null` (no se mezclan) y el factor no entra al `scorecard`; el detalle va en `por_unidad`/`por_moneda`.
+- `scorecard.puntaje` es el **promedio simple** de los 4 factores (entrega a tiempo, 100-%rechazo, cumplimiento, 100-|%diferencia precio|), sin pesos configurables — si a un proveedor le falta un factor se promedia solo entre los que sí tiene. Semáforo: verde ≥ `meta_scorecard`, amarillo ≥ meta−10, rojo debajo.
+- **Registros detrás de cada fila**: `GET /api/v1/terceros/proveedores/{id}/kpis-detalle/?factor=puntualidad|calidad|cumplimiento|precio` (+ `sucursal`, `fecha_desde`, `fecha_hasta`) devuelve `{ total, truncado, tope: 100, registros: [...] }` con los mismos criterios.
 
 ---
 
@@ -2780,6 +2834,7 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 
 - **`POST /api/v1/finanzas/facturas-proveedor/{id}/adjuntar-pdf/`** — `multipart/form-data` con campo `archivo` (el PDF de la factura del proveedor). Valida que empiece con `%PDF` y pese ≤ 10 MB; si no, `400`. Se guarda como bytes en la propia fila (`pdf_adjunto`/`pdf_adjunto_nombre`), sin storage externo. Respuesta `200`: `{ "tiene_pdf_adjunto": true, "pdf_adjunto_nombre": "factura.pdf" }`.
 - **`GET /api/v1/finanzas/facturas-proveedor/{id}/pdf-fusionado/`** — genera un PDF simple de la OC (datos + renglones) y otro de la Recepción, y los junta con el PDF adjunto en un solo archivo (`application/pdf`, `Content-Disposition: inline`), en ese orden: OC → RC → factura. `400` si todavía no se adjuntó el PDF de la factura.
+- **Montos de `facturas-proveedor` (#385)**: el `POST` exige **al menos una línea** en `factura_proveedor_detalles` (`400` si no) y los montos del encabezado (`subtotal`, `descuento`, `impuestos`, `total`) se **derivan de las líneas**: si el body los manda y no cuadran → `400`. Por línea, `subtotal` y `total` que no se manden se calculan (`cantidad × precio_unitario` y `subtotal − descuento + impuesto`); un `total` de línea que no cuadra → `400`. En `PUT`/`PATCH` los montos no se editan (las líneas tampoco) y una factura sin líneas no se puede registrar. El admin aplica lo mismo (mínimo una línea; montos de solo lectura, recalculados al guardar). Las facturas viejas sin líneas no se migran.
 - `list`/`retrieve` de `facturas-proveedor` exponen `tiene_pdf_adjunto` (bool); **no** devuelven el binario (`pdf_adjunto` se excluye del serializer a propósito).
 - Deliberadamente simple: nada de storage en disco ni de servicios externos (Vercel serverless tiene filesystem efímero, y esto se va a Oracle OCI pronto) — el PDF vive como bytes en Postgres igual en cualquier infraestructura.
 
@@ -3726,19 +3781,19 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
 
 - **Endpoint**: `GET /api/v1/produccion/orden-produccion/kpis/`
 - Un solo GET agregado en DB (sin iterar OPs en Python) — pensado para tarjetas de dashboard, no para una tabla.
-- **Único query param soportado**: `meta_otd` (float, default `95`, rango `0`–`100`) — el objetivo de % de cumplimiento a tiempo contra el que se calcula el semáforo (`verde` si `pct >= meta`, `amarillo` si está a ≤10 puntos, `rojo` si no). No finito (`nan`/`inf`/`-inf`), no numérico, o fuera de `0`–`100` → `400`. **Cualquier otro query param se ignora en silencio** (no hay filtro por sucursal, periodo ni cliente todavía — es una decisión de producto pendiente, no un bug).
+- **Query params**: `meta_otd` (float, default `95`, rango `0`–`100`; el objetivo del semáforo: `verde` si `pct >= meta`, `amarillo` a ≤10 puntos, `rojo` si no), `sucursal` (id) y `fecha_desde`/`fecha_hasta` (`YYYY-MM-DD`, sobre `fecha_entrega_estimada`, la fecha compromiso de ambos KPIs). Valor inválido (`nan`/`inf`, no numérico, fuera de rango, fecha mal formada) → `400`; **cualquier otro parámetro → `400`** (`{"parametros": ...}`), ya no se ignora. Los filtros aplicados se devuelven en `filtros`.
 - **Alcance (#361)**: SIEMPRE la empresa activa del usuario (`Usuario.empresa`), **incluido el superusuario** — a propósito distinto de bordado/reflejante/corte de manga, donde el superusuario ve todas las empresas. Se igualó así porque el listado/detalle normal de OP (`GET /orden-produccion/`) tampoco le da alcance global al superusuario, y las dos fuentes de la misma pantalla deben cuadrar. Sin empresa asignada (cualquier usuario, incluido superusuario) → los 4 bloques responden `"disponible": false` con `"motivo": "Usuario sin empresa asignada."` (200, no 403). Dentro de la empresa: superusuario e `is_admin_empresa` ven todas las sucursales, el resto solo `sucursales_permitidas()`. **Nota:** el listado/detalle de OP en sí todavía no filtra por sucursal para nadie — alinearlo es una decisión aparte.
 - **`cumplimiento_a_tiempo`** (OTD): "terminada" = `estatus_op = Completado` (no por `fecha_fin`: ese campo casi nunca se llena, y decidir por su presencia contaba Canceladas y perdía Completadas sin fecha). `ops_a_tiempo / ops_terminadas`; a tiempo = tiene `fecha_fin` **y** `fecha_entrega_estimada`, y `fecha_fin <= fecha_entrega_estimada`. Una OP Completada sin alguna de esas dos fechas cuenta en `ops_terminadas` pero no en `ops_a_tiempo` ni en `ops_tardias` (no se puede afirmar que llegó tarde sin ambos datos). **Invariante**: `ops_a_tiempo + ops_tardias + ops_sin_clasificar == ops_terminadas` (#362) — usa estos 3 totales, no restes `ops_terminadas - ops_a_tiempo`, porque esa resta también incluye las sin clasificar. `drill_down_tardias[]` (máx. 20, puede ser menor que `ops_tardias`) trae `op_id`, `folio_op`, `fecha_fin` (hora local, no UTC), `fecha_entrega_estimada`.
 - **`ops_atrasadas`**: cuenta OPs no `Completado`/`Cancelado` con `fecha_entrega_estimada` ya vencida. `drill_down[]` (máx. 20) trae `op_id`, `folio_op`, `fecha_entrega_estimada`, `dias_vencida`. Por construcción, ninguna OP puede aparecer aquí **y** en `cumplimiento_a_tiempo` a la vez (uno exige `Completado`, el otro lo excluye).
 - **`avance_produccion` y `eficiencia_linea` vienen `"disponible": false`** con un `"motivo"` explicando por qué — el esquema actual no registra piezas terminadas por OP (solo piezas programadas en `OrdenProduccionDetalle`), ni SAM, operarios asignados o minutos trabajados. No se inventan estos dos KPIs con datos que no existen; se habilitan cuando se defina cómo capturar esa información.
-- **Límite conocido**: los drill-down (`drill_down_tardias`, `ops_atrasadas.drill_down`) topan en 20 filas, sin paginación. Si una empresa tiene más de 20 OPs tardías o atrasadas, hoy no hay forma de ver el resto desde este endpoint — pendiente de diseño (paginar aquí vs. exponer filtros equivalentes en el listado de OP).
+- **Drill-down completo**: `drill_down_tardias` y `ops_atrasadas.drill_down` traen máx. 20 (ordenadas de forma estable) con `*_total` y `*_truncado`. Para todas las OP de un conjunto: `GET /api/v1/produccion/orden-produccion/?kpi=terminadas|a_tiempo|tardias|sin_clasificar|atrasadas` (misma definición que el KPI). El listado además acepta `estatus_op`, `sucursal`, `fecha_desde`, `fecha_hasta`, **excluye las dadas de baja** (`activo=false`, como los KPIs), expone `fecha_entrega_estimada` y se pagina **solo si** se manda `page` o `page_size` (sin ellos devuelve la lista completa, como antes). Con `?kpi=` el listado usa el mismo alcance que los KPIs (también por sucursal para quien no es admin); sin `kpi` sigue acotado solo por empresa.
 
 **Respuesta**
 
 ```json
 {
   "generado_en": "2026-10-07T18:00:00Z",
-  "filtros": { "meta_otd": 95.0 },
+  "filtros": { "meta_otd": 95.0, "sucursal": null, "fecha_desde": null, "fecha_hasta": null },
   "cumplimiento_a_tiempo": {
     "disponible": true,
     "pct": 87.5,
@@ -3750,7 +3805,10 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
     "ops_sin_clasificar": 1,
     "drill_down_tardias": [
       { "op_id": 112, "folio_op": "OP-000112", "fecha_fin": "2026-10-01T12:00:00-06:00", "fecha_entrega_estimada": "2026-09-28" }
-    ]
+    ],
+    "drill_down_tardias_total": 4,
+    "drill_down_tardias_truncado": false,
+    "listado": "?kpi=tardias"
   },
   "avance_produccion": {
     "disponible": false,
@@ -3766,7 +3824,10 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
     "nota": "Solo cuenta OPs vencidas (fecha_entrega_estimada pasada); no incluye 'en riesgo por avance'.",
     "drill_down": [
       { "op_id": 120, "folio_op": "OP-000120", "fecha_entrega_estimada": "2026-10-02", "dias_vencida": 5 }
-    ]
+    ],
+    "drill_down_total": 5,
+    "drill_down_truncado": false,
+    "listado": "?kpi=atrasadas"
   }
 }
 ```

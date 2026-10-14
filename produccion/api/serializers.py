@@ -262,7 +262,7 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
         model = OrdenProduccion
         fields = [
             "op_id", "folio_op", "estatus_op", "estatus_op_display",
-            "prioridad", "fecha_inicio", "fecha_fin", "activo",
+            "prioridad", "fecha_inicio", "fecha_fin", "fecha_entrega_estimada", "activo",
             "pedido", "sucursal",
         ]
 

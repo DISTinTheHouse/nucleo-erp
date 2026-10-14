@@ -8,6 +8,7 @@ from rest_framework.decorators import action
 from rest_framework.viewsets import GenericViewSet
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
+from rest_framework.pagination import PageNumberPagination
 
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
 from usuarios.models import Usuario
@@ -16,6 +17,7 @@ from seguridad.role_identity import (
     usuario_tiene_clave_departamento,
 )
 
+from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
 from produccion.services.common import config_como_dict, pendientes_por_linea
 from produccion.scope import (
     ordenes_bordado_base,
@@ -382,6 +384,46 @@ class BomDetalleViewSet(viewsets.ModelViewSet):
 
         return queryset
 
+# Criterios de "a tiempo / tardía / atrasada" de OP: una sola definición para
+# el KPI y para el filtro ``?kpi=`` del listado, así el listado reproduce
+# EXACTAMENTE cada conjunto del tablero (#358).
+_OP_CON_AMBAS_FECHAS = Q(fecha_fin__isnull=False, fecha_entrega_estimada__isnull=False)
+_OP_A_TIEMPO = _OP_CON_AMBAS_FECHAS & Q(fecha_fin__date__lte=F("fecha_entrega_estimada"))
+_OP_TARDIA = _OP_CON_AMBAS_FECHAS & Q(fecha_fin__date__gt=F("fecha_entrega_estimada"))
+
+
+def _ops_terminadas(qs):
+    # "Terminada" = estatus_op Completado (#354), no por ``fecha_fin``.
+    return qs.filter(estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO)
+
+
+def _ops_atrasadas(qs):
+    return qs.exclude(
+        estatus_op__in=[
+            OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+            OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
+        ]
+    ).filter(fecha_entrega_estimada__lt=timezone.localdate())
+
+
+KPI_OP_CONJUNTOS = {
+    "terminadas": _ops_terminadas,
+    "a_tiempo": lambda qs: _ops_terminadas(qs).filter(_OP_A_TIEMPO),
+    "tardias": lambda qs: _ops_terminadas(qs).filter(_OP_TARDIA),
+    "sin_clasificar": lambda qs: _ops_terminadas(qs).filter(~_OP_CON_AMBAS_FECHAS),
+    "atrasadas": _ops_atrasadas,
+}
+
+
+class PaginacionOpcional(PageNumberPagination):
+    """Solo pagina si el cliente manda ``page`` o ``page_size``: sin ellos el
+    listado sigue devolviendo la lista completa (contrato previo)."""
+
+    page_size = 50
+    page_size_query_param = "page_size"
+    max_page_size = 200
+
+
 class OrdenProduccionViewSet(viewsets.ModelViewSet):
     queryset = OrdenProduccion.objects.all()
     serializer_class = OrdenProduccionSerializer
@@ -430,8 +472,44 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                     ),
                 ),
             )
+        if getattr(self, "action", None) == "list":
+            queryset = self._filtrar_listado(queryset)
         return queryset
-    
+
+    def _filtrar_listado(self, queryset):
+        # Sin las inactivas (como los KPIs y como OB/OR/OCM) y con filtros que
+        # reproducen los conjuntos del tablero: ``?kpi=tardias`` etc.
+        params = self.request.query_params
+        queryset = queryset.filter(activo=True)
+        estatus = entero_param(self.request, "estatus_op")
+        if estatus is not None:
+            queryset = queryset.filter(estatus_op=estatus)
+        sucursal = entero_param(self.request, "sucursal")
+        if sucursal is not None:
+            queryset = queryset.filter(sucursal_id=sucursal)
+        desde, hasta = rango_fechas(self.request)
+        if desde:
+            queryset = queryset.filter(fecha_entrega_estimada__gte=desde)
+        if hasta:
+            queryset = queryset.filter(fecha_entrega_estimada__lte=hasta)
+        kpi = (params.get("kpi") or "").strip()
+        if kpi:
+            if kpi not in KPI_OP_CONJUNTOS:
+                raise ValidationError({"kpi": f"Debe ser uno de: {', '.join(KPI_OP_CONJUNTOS)}."})
+            # Con ``kpi`` el listado usa el MISMO alcance que los KPIs (también por
+            # sucursal para quien no es admin), así reproduce el conjunto exacto.
+            # Sin ``kpi`` el listado sigue acotado solo por empresa: alinear su
+            # alcance por sucursal es una decisión aparte.
+            queryset = KPI_OP_CONJUNTOS[kpi](ordenes_produccion_visibles(queryset, self.request.user))
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        if "page" in request.query_params or "page_size" in request.query_params:
+            paginator = PaginacionOpcional()
+            page = paginator.paginate_queryset(self.filter_queryset(self.get_queryset()), request, view=self)
+            return paginator.get_paginated_response(self.get_serializer(page, many=True).data)
+        return super().list(request, *args, **kwargs)
+
     def save_op(self, request):
         return self._crear_op_desde_request(request)
     
@@ -621,6 +699,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         if getattr(user, "empresa", None) is None:
             return Response(self._kpis_vacio())
 
+        # Parámetro desconocido → 400 (#357): antes se ignoraba con 200 y la
+        # tarjeta parecía filtrada sin estarlo.
+        validar_parametros(request, {"meta_otd", "sucursal", "fecha_desde", "fecha_hasta"})
         meta_otd_raw = request.query_params.get("meta_otd", "95")
         try:
             meta_otd = float(meta_otd_raw)
@@ -633,9 +714,24 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # ella por sucursal (#355) -- admin/superuser ven todas, el resto
         # solo ``sucursales_permitidas()``.
         base = ordenes_produccion_visibles(ordenes_produccion_base(), user)
+        # ``fecha_desde``/``fecha_hasta`` acotan por ``fecha_entrega_estimada``:
+        # la fecha compromiso con la que se miden los dos KPIs.
+        sucursal = entero_param(request, "sucursal")
+        fecha_desde, fecha_hasta = rango_fechas(request)
+        if sucursal is not None:
+            base = base.filter(sucursal_id=sucursal)
+        if fecha_desde:
+            base = base.filter(fecha_entrega_estimada__gte=fecha_desde)
+        if fecha_hasta:
+            base = base.filter(fecha_entrega_estimada__lte=fecha_hasta)
         data = {
             "generado_en": timezone.now(),
-            "filtros": {"meta_otd": meta_otd},
+            "filtros": {
+                "meta_otd": meta_otd,
+                "sucursal": sucursal,
+                "fecha_desde": fecha_desde,
+                "fecha_hasta": fecha_hasta,
+            },
         }
         data["cumplimiento_a_tiempo"] = self._kpi_otd(base, meta_otd)
         data["avance_produccion"] = {
@@ -678,10 +774,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # las dos no se puede afirmar que llegó a tiempo NI que llegó tarde,
         # así que esa OP cuenta en el denominador (está terminada) pero no
         # entra ni al numerador ni al drill-down de tardías.
-        terminadas = base.filter(estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO)
-        con_ambas_fechas = Q(fecha_fin__isnull=False, fecha_entrega_estimada__isnull=False)
-        a_tiempo_filter = con_ambas_fechas & Q(fecha_fin__date__lte=F("fecha_entrega_estimada"))
-        tardia_filter = con_ambas_fechas & Q(fecha_fin__date__gt=F("fecha_entrega_estimada"))
+        terminadas = _ops_terminadas(base)
 
         # #362: conteo exacto de tardías y sin-clasificar en el mismo
         # aggregate() (nunca len(drill_down_tardias), que se corta en 20).
@@ -689,9 +782,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # ops_terminadas.
         agg = terminadas.aggregate(
             total=Count("op_id"),
-            a_tiempo=Count("op_id", filter=a_tiempo_filter),
-            tardias=Count("op_id", filter=tardia_filter),
-            sin_clasificar=Count("op_id", filter=~con_ambas_fechas),
+            a_tiempo=Count("op_id", filter=_OP_A_TIEMPO),
+            tardias=Count("op_id", filter=_OP_TARDIA),
+            sin_clasificar=Count("op_id", filter=~_OP_CON_AMBAS_FECHAS),
         )
         total = agg["total"] or 0
         a_tiempo = agg["a_tiempo"] or 0
@@ -699,11 +792,13 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         sin_clasificar = agg["sin_clasificar"] or 0
         pct = round((a_tiempo / total) * 100, 1) if total else None
 
+        # ``-op_id`` desempata: dos OP con la misma ``fecha_fin`` no cambian de
+        # lugar entre llamadas.
         drill_down_tardias = [
             {**row, "fecha_fin": timezone.localtime(row["fecha_fin"]) if row["fecha_fin"] else None}
-            for row in terminadas.filter(tardia_filter)
-            .order_by("-fecha_fin")
-            .values("op_id", "folio_op", "fecha_fin", "fecha_entrega_estimada")[:20]
+            for row in terminadas.filter(_OP_TARDIA)
+            .order_by("-fecha_fin", "-op_id")
+            .values("op_id", "folio_op", "fecha_fin", "fecha_entrega_estimada")[:TOPE_DRILL_DOWN]
         ]
         return {
             "disponible": True,
@@ -715,6 +810,10 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             "ops_tardias": n_tardias,
             "ops_sin_clasificar": sin_clasificar,
             "drill_down_tardias": drill_down_tardias,
+            "drill_down_tardias_total": n_tardias,
+            "drill_down_tardias_truncado": n_tardias > len(drill_down_tardias),
+            # Todas las del conjunto: GET .../orden-produccion/?kpi=tardias
+            "listado": "?kpi=tardias",
         }
 
     def _kpi_atrasadas(self, base):
@@ -723,13 +822,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # ("avance menor al tiempo transcurrido") necesita piezas terminadas
         # por OP, que no existen en el esquema -- ver avance_produccion.
         hoy = timezone.localdate()
-        abiertas = base.exclude(
-            estatus_op__in=[
-                OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
-                OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
-            ]
-        )
-        vencidas_qs = abiertas.filter(fecha_entrega_estimada__lt=hoy)
+        vencidas_qs = _ops_atrasadas(base)
         total = vencidas_qs.count()
         drill_down = [
             {
@@ -738,15 +831,19 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                 "fecha_entrega_estimada": row["fecha_entrega_estimada"],
                 "dias_vencida": (hoy - row["fecha_entrega_estimada"]).days,
             }
-            for row in vencidas_qs.order_by("fecha_entrega_estimada").values(
+            for row in vencidas_qs.order_by("fecha_entrega_estimada", "op_id").values(
                 "op_id", "folio_op", "fecha_entrega_estimada"
-            )[:20]
+            )[:TOPE_DRILL_DOWN]
         ]
         return {
             "disponible": True,
             "total": total,
             "nota": "Solo cuenta OPs vencidas (fecha_entrega_estimada pasada); no incluye 'en riesgo por avance'.",
             "drill_down": drill_down,
+            "drill_down_total": total,
+            "drill_down_truncado": total > len(drill_down),
+            # Todas las del conjunto: GET .../orden-produccion/?kpi=atrasadas
+            "listado": "?kpi=atrasadas",
         }
 
 class ConsumoProduccionViewSet(viewsets.ModelViewSet):

@@ -1,3 +1,4 @@
+import math
 from datetime import timedelta
 from decimal import Decimal
 
@@ -7,12 +8,13 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from django.conf import settings
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, Q, Sum
+from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from finanzas.services.facturama.acceso import empresa_usa_facturama
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import ProveedorSerializer, ClienteSerializer, DireccionClienteSerializer
+from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
 from terceros.scope import clientes_base, clientes_visibles
 import json
 import base64
@@ -168,6 +170,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], url_path="kpis")
     def kpis(self, request):
         user = request.user
+        validar_parametros(request, set())  # sin filtros: un parámetro → 400
         empresa = getattr(user, "empresa", None)
         if empresa is None and not getattr(user, "is_superuser", False):
             return Response(self._kpis_vacio())
@@ -201,101 +204,161 @@ class ClienteViewSet(viewsets.ModelViewSet):
     def _kpi_ventas_por_cliente(self, clientes_qs):
         from finanzas.models import Factura
 
+        # Facturación = facturas Emitidas (ni Borrador ni Cancelada) y activas
+        # (#367). Por moneda (#370): una factura en USD no se suma con las MXN.
         filas = list(
-            Factura.objects.filter(cliente__in=clientes_qs, empresa=F("cliente__empresa"), activo=True)
-            .exclude(estatus=Factura.FacturaStatus.CANCELADA)
-            .values("cliente_id", "cliente__nombre")
+            Factura.objects.filter(
+                cliente__in=clientes_qs, empresa=F("cliente__empresa"), activo=True,
+                estatus=Factura.FacturaStatus.EMITIDA,
+            )
+            .values("moneda__codigo_iso", "cliente_id", "cliente__nombre")
             .annotate(monto=Sum("total"))
-            .order_by("-monto")
+            .order_by("moneda__codigo_iso", "-monto", "cliente_id")
         )
-        gran_total = sum((f["monto"] or Decimal("0")) for f in filas)
+        por_moneda = {}
+        for fila in filas:
+            por_moneda.setdefault(fila["moneda__codigo_iso"], []).append(fila)
 
-        top_clientes = []
-        acumulado = Decimal("0")
-        for fila in filas[:5]:
-            monto = fila["monto"] or Decimal("0")
-            acumulado += monto
-            top_clientes.append({
-                "cliente_id": fila["cliente_id"],
-                "cliente_nombre": fila["cliente__nombre"],
-                "monto": monto,
-                "pct_del_total": round(float(monto) / float(gran_total) * 100, 1) if gran_total else 0.0,
-                "pct_acumulado": round(float(acumulado) / float(gran_total) * 100, 1) if gran_total else 0.0,
+        monedas = []
+        for moneda, clientes in por_moneda.items():
+            gran_total = sum((f["monto"] or Decimal("0")) for f in clientes)
+            top_clientes = []
+            acumulado = Decimal("0")
+            for fila in clientes[:5]:
+                monto = fila["monto"] or Decimal("0")
+                acumulado += monto
+                top_clientes.append({
+                    "cliente_id": fila["cliente_id"],
+                    "cliente_nombre": fila["cliente__nombre"],
+                    "monto": monto,
+                    "pct_del_total": round(float(monto) / float(gran_total) * 100, 1) if gran_total else 0.0,
+                    "pct_acumulado": round(float(acumulado) / float(gran_total) * 100, 1) if gran_total else 0.0,
+                })
+            monedas.append({
+                "moneda": moneda,
+                "total_facturado": gran_total,
+                "total_clientes_facturados": len(clientes),
+                "top_clientes": top_clientes,
             })
 
         return {
             "disponible": True,
-            "total_facturado": gran_total,
-            "total_clientes_facturados": len(filas),
-            "top_clientes": top_clientes,
+            "criterio": "Facturas Emitidas y activas.",
+            "por_moneda": monedas,
         }
 
+    # Pedidos que cuentan como actividad comercial (#367): POR AUTORIZAR (2),
+    # AUTORIZADA (3) y EN PROCESO (4); no BORRADOR (1) ni CANCELADO (5).
+    ESTATUS_PEDIDO_ACTIVIDAD = (2, 3, 4)
+    VENTANA_ACTIVIDAD_DIAS = 90
+
     def _kpi_clientes_activos(self, clientes_qs):
+        from django.db.models import Exists, OuterRef
+
         from ventas.models import Pedido
 
-        desde = timezone.now() - timedelta(days=90)
-        total = clientes_qs.count()
-        activos = (
-            Pedido.objects.filter(
-                cliente__in=clientes_qs, empresa=F("cliente__empresa"), activo=True, created_at__gte=desde,
-            )
-            .values("cliente_id")
-            .distinct()
-            .count()
+        desde = timezone.now() - timedelta(days=self.VENTANA_ACTIVIDAD_DIAS)
+        # Una sola definición de "activo" para los conteos Y las listas (#371).
+        pedidos = Pedido.objects.filter(
+            cliente=OuterRef("pk"), empresa=OuterRef("empresa"), activo=True,
+            estatus__in=self.ESTATUS_PEDIDO_ACTIVIDAD, created_at__gte=desde,
         )
-        inactivos = max(total - activos, 0)
+        activos_qs = clientes_qs.filter(Exists(pedidos))
+        inactivos_qs = clientes_qs.exclude(Exists(pedidos))
+        activos = activos_qs.count()
+        inactivos = inactivos_qs.count()
+        total = activos + inactivos
+
+        def _filas(qs, orden):
+            return [
+                {"cliente_id": c["id"], "cliente_nombre": c["nombre"]}
+                for c in qs.order_by(*orden).values("id", "nombre")[:TOPE_DRILL_DOWN]
+            ]
+
+        drill_activos = _filas(activos_qs, ("nombre", "id"))
+        drill_inactivos = _filas(inactivos_qs, ("nombre", "id"))
         return {
             "disponible": True,
+            "criterio": "Activo = al menos un pedido Por autorizar, Autorizado o En proceso en la ventana.",
             "total": total,
             "activos": activos,
             "inactivos": inactivos,
             "pct_activos": round(activos / total * 100, 1) if total else None,
-            "ventana_dias": 90,
+            "ventana_dias": self.VENTANA_ACTIVIDAD_DIAS,
+            "drill_down": {
+                "activos": drill_activos,
+                "inactivos": drill_inactivos,
+                "activos_truncado": activos > len(drill_activos),
+                "inactivos_truncado": inactivos > len(drill_inactivos),
+            },
         }
 
     def _kpi_cartera_antiguedad(self, clientes_qs):
-        from finanzas.models import CuentaPorCobrar
+        from finanzas.models import CuentaPorCobrar, Factura
 
         hoy = timezone.localdate()
         hace_30 = hoy - timedelta(days=30)
         hace_60 = hoy - timedelta(days=60)
         # Solo documentos de la empresa del cliente: uno de otra empresa que lo
-        # apunte no entra (mismo criterio que ``_resumen_comercial``).
-        vencidas = CuentaPorCobrar.objects.filter(
+        # apunte no entra (mismo criterio que ``_resumen_comercial``). Sin
+        # saldos de facturas canceladas o dadas de baja (#368), y por moneda de
+        # la factura (#370).
+        vivas = CuentaPorCobrar.objects.filter(
             cliente__in=clientes_qs,
             empresa=F("cliente__empresa"),
             estatus__in=[CuentaPorCobrar.EstatusCxC.PENDIENTE, CuentaPorCobrar.EstatusCxC.PARCIAL],
-            fecha_vencimiento__isnull=False,
-            fecha_vencimiento__lt=hoy,
-        )
-        agg = vencidas.aggregate(
-            total_cuentas=Count("id"),
-            saldo_total=Sum("saldo"),
-            b_0_30_total=Count("id", filter=Q(fecha_vencimiento__gte=hace_30)),
-            b_0_30_monto=Sum("saldo", filter=Q(fecha_vencimiento__gte=hace_30)),
-            b_31_60_total=Count("id", filter=Q(fecha_vencimiento__lt=hace_30, fecha_vencimiento__gte=hace_60)),
-            b_31_60_monto=Sum("saldo", filter=Q(fecha_vencimiento__lt=hace_30, fecha_vencimiento__gte=hace_60)),
-            b_60_mas_total=Count("id", filter=Q(fecha_vencimiento__lt=hace_60)),
-            b_60_mas_monto=Sum("saldo", filter=Q(fecha_vencimiento__lt=hace_60)),
-        )
+            factura__activo=True,
+        ).exclude(factura__estatus=Factura.FacturaStatus.CANCELADA)
+        vencidas = vivas.filter(fecha_vencimiento__isnull=False, fecha_vencimiento__lt=hoy)
+        moneda = "factura__moneda__codigo_iso"
+
+        por_moneda = [
+            {
+                "moneda": fila[moneda],
+                "saldo_total_vencido": fila["saldo_total"] or Decimal("0"),
+                "total_cuentas_vencidas": fila["total_cuentas"] or 0,
+                "buckets": {
+                    "0_30": {"total": fila["b_0_30_total"] or 0, "monto": fila["b_0_30_monto"] or Decimal("0")},
+                    "31_60": {"total": fila["b_31_60_total"] or 0, "monto": fila["b_31_60_monto"] or Decimal("0")},
+                    "60_mas": {"total": fila["b_60_mas_total"] or 0, "monto": fila["b_60_mas_monto"] or Decimal("0")},
+                },
+            }
+            for fila in vencidas.values(moneda).annotate(
+                total_cuentas=Count("id"),
+                saldo_total=Sum("saldo"),
+                b_0_30_total=Count("id", filter=Q(fecha_vencimiento__gte=hace_30)),
+                b_0_30_monto=Sum("saldo", filter=Q(fecha_vencimiento__gte=hace_30)),
+                b_31_60_total=Count("id", filter=Q(fecha_vencimiento__lt=hace_30, fecha_vencimiento__gte=hace_60)),
+                b_31_60_monto=Sum("saldo", filter=Q(fecha_vencimiento__lt=hace_30, fecha_vencimiento__gte=hace_60)),
+                b_60_mas_total=Count("id", filter=Q(fecha_vencimiento__lt=hace_60)),
+                b_60_mas_monto=Sum("saldo", filter=Q(fecha_vencimiento__lt=hace_60)),
+            ).order_by(moneda)
+        ]
+        # Saldo vivo sin fecha de vencimiento: no se puede decir si está
+        # vencido, así que va aparte en vez de perderse en silencio (#368).
+        sin_vencimiento = [
+            {"moneda": fila[moneda], "total": fila["total"], "monto": fila["monto"] or Decimal("0")}
+            for fila in vivas.filter(fecha_vencimiento__isnull=True).values(moneda)
+            .annotate(total=Count("id"), monto=Sum("saldo")).order_by(moneda)
+        ]
+        total_vencidas = vencidas.count()
         drill_down = list(
             vencidas.select_related("cliente")
-            .order_by("fecha_vencimiento")
-            .values("id", "cliente_id", "cliente__nombre", "saldo", "fecha_vencimiento")[:20]
+            .order_by("fecha_vencimiento", "id")
+            .values("id", "cliente_id", "cliente__nombre", "saldo", "fecha_vencimiento", moneda)[:TOPE_DRILL_DOWN]
         )
         for fila in drill_down:
+            fila["moneda"] = fila.pop(moneda)
             fila["dias_vencida"] = (hoy - fila["fecha_vencimiento"]).days
 
         return {
             "disponible": True,
-            "saldo_total_vencido": agg["saldo_total"] or Decimal("0"),
-            "total_cuentas_vencidas": agg["total_cuentas"] or 0,
-            "buckets": {
-                "0_30": {"total": agg["b_0_30_total"] or 0, "monto": agg["b_0_30_monto"] or Decimal("0")},
-                "31_60": {"total": agg["b_31_60_total"] or 0, "monto": agg["b_31_60_monto"] or Decimal("0")},
-                "60_mas": {"total": agg["b_60_mas_total"] or 0, "monto": agg["b_60_mas_monto"] or Decimal("0")},
-            },
+            "total_cuentas_vencidas": total_vencidas,
+            "por_moneda": por_moneda,
+            "sin_vencimiento": sin_vencimiento,
             "drill_down": drill_down,
+            "drill_down_total": total_vencidas,
+            "drill_down_truncado": total_vencidas > len(drill_down),
         }
 
 class HistorialOrdenesCompraPagination(PageNumberPagination):
@@ -416,205 +479,118 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         response.data["resumen"] = resumen
         return Response(response.data)
 
-    def _semaforo(self, valor, meta):
-        if valor is None:
-            return "sin_datos"
-        if valor >= meta:
-            return "verde"
-        if valor >= meta - 10:
-            return "amarillo"
-        return "rojo"
+    PARAMS_KPIS = {"proveedor", "sucursal", "fecha_desde", "fecha_hasta", "meta_scorecard", "limite"}
+
+    def _alcance_kpis(self, request):
+        """Mismo alcance que el listado de proveedores: el superusuario ve
+        todas las empresas, el resto la suya; ``None`` si no hay empresa."""
+        from compras.services.kpi_criterios import AlcanceCompras
+
+        user = request.user
+        es_superusuario = getattr(user, "is_superuser", False)
+        empresa = getattr(user, "empresa", None)
+        if empresa is None and not es_superusuario:
+            return None
+        fecha_desde, fecha_hasta = rango_fechas(request)
+        return AlcanceCompras(
+            empresa=None if es_superusuario else empresa,
+            sucursal_id=entero_param(request, "sucursal"),
+            proveedor_id=entero_param(request, "proveedor"),
+            fecha_desde=fecha_desde,
+            fecha_hasta=fecha_hasta,
+            solo_proveedores_activos=True,
+        )
 
     @action(detail=False, methods=["get"], url_path="kpis")
     def kpis(self, request):
         """Scorecard por proveedor (EC-436): puntualidad, calidad, cumplimiento
         de cantidad y diferencia de precio, todo contra datos reales de
-        compras (``Recepcion``/``CalidadInspeccionDetalle``/
-        ``FacturaProveedorDetalle``). ``scorecard`` es el promedio simple de
-        los factores que sí tienen dato para ese proveedor -- si falta uno
-        (p. ej. nunca le han facturado), se re-normaliza entre los demás en
-        vez de inventar un valor."""
-        from compras.models import CalidadInspeccionDetalle, OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
-        from finanzas.models import FacturaProveedor, FacturaProveedorDetalle
-
-        user = request.user
-        empresa = getattr(user, "empresa", None)
-        if empresa is None and not getattr(user, "is_superuser", False):
-            return Response({"generado_en": timezone.now(), "proveedores": []})
-
-        por_proveedor = {}
-
-        def _bucket(pid, nombre):
-            return por_proveedor.setdefault(pid, {
-                "proveedor_id": pid, "proveedor_nombre": nombre,
-                "recepciones_total": 0, "recepciones_con_compromiso": 0, "recepciones_a_tiempo": 0,
-                "dias_reales": [], "dias_pactados": [],
-                "cantidad_rechazada": Decimal("0"), "cantidad_inspeccionada": Decimal("0"),
-                "cantidad_ordenada": Decimal("0"), "cantidad_recibida": Decimal("0"),
-                "facturado": Decimal("0"), "pactado_oc": Decimal("0"),
-            })
-
-        # 1) Puntualidad + lead time: una fila por recepción contra su OC.
-        recepciones = (
-            Recepcion.objects.filter(
-                empresa=empresa, activo=True, tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
-                proveedor__isnull=False, orden_compra__isnull=False,
-            )
-            .exclude(estatus=Recepcion.EstatusRecepcion.CANCELADA)
-            .values(
-                "proveedor_id", "proveedor__nombre", "fecha_recepcion",
-                "orden_compra__fecha_oc", "orden_compra__fecha_entrega_estimada",
-            )
+        compras. ``scorecard`` es el promedio simple de los factores que sí
+        tienen dato para ese proveedor -- si falta uno (p. ej. nunca le han
+        facturado), se re-normaliza entre los demás en vez de inventar un
+        valor. Criterios en ``compras.services.kpi_proveedores``/``kpi_criterios``
+        (compartidos con ``recepciones/kpis/``)."""
+        from compras.services.kpi_proveedores import (
+            LIMITE_PROVEEDORES,
+            META_SCORECARD,
+            TOPE_LIMITE_PROVEEDORES,
+            calcular_scorecards,
         )
-        for row in recepciones:
-            b = _bucket(row["proveedor_id"], row["proveedor__nombre"])
-            b["recepciones_total"] += 1
-            fecha_recepcion = row["fecha_recepcion"].date() if row["fecha_recepcion"] else None
-            fecha_compromiso = row["orden_compra__fecha_entrega_estimada"]
-            fecha_oc = row["orden_compra__fecha_oc"]
-            # Sin fecha prometida no se puede saber si llegó tarde: no cuenta (#387).
-            if fecha_compromiso:
-                b["recepciones_con_compromiso"] += 1
-                if fecha_recepcion and fecha_recepcion <= fecha_compromiso:
-                    b["recepciones_a_tiempo"] += 1
-            if fecha_recepcion and fecha_oc:
-                b["dias_reales"].append((fecha_recepcion - fecha_oc).days)
-            if fecha_compromiso and fecha_oc:
-                b["dias_pactados"].append((fecha_compromiso - fecha_oc).days)
 
-        # 2) Calidad: rechazado vs. inspeccionado.
-        for row in (
-            CalidadInspeccionDetalle.objects.filter(
-                recepcion_detalle__recepcion__empresa=empresa, recepcion_detalle__recepcion__activo=True,
-                recepcion_detalle__recepcion__proveedor__isnull=False,
-            )
-            .exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
-            .values("recepcion_detalle__recepcion__proveedor_id", "recepcion_detalle__recepcion__proveedor__nombre")
-            .annotate(rechazada=Sum("cantidad_rechazada"), inspeccionada=Sum("cantidad_inspeccionada"))
-        ):
-            b = _bucket(row["recepcion_detalle__recepcion__proveedor_id"], row["recepcion_detalle__recepcion__proveedor__nombre"])
-            b["cantidad_rechazada"] += row["rechazada"] or 0
-            b["cantidad_inspeccionada"] += row["inspeccionada"] or 0
+        validar_parametros(request, self.PARAMS_KPIS)
+        meta = self._numero_param(request, "meta_scorecard", META_SCORECARD, 0, 100)
+        limite = entero_param(request, "limite")
+        limite = LIMITE_PROVEEDORES if limite is None else limite
+        if not 1 <= limite <= TOPE_LIMITE_PROVEEDORES:
+            raise ValidationError({"limite": f"Debe estar entre 1 y {TOPE_LIMITE_PROVEEDORES}."})
 
-        # 3) Cumplimiento de cantidad: ordenado vs. recibido, OCs comprometidas.
-        estatus_comprometidas = [
-            OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
-            OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
-            OrdenCompra.EstatusOrdenCompra.RECIBIDA,
-        ]
-        for row in (
-            OrdenCompraDetalle.objects.filter(
-                orden_compra__empresa=empresa, orden_compra__activo=True,
-                orden_compra__estatus__in=estatus_comprometidas, orden_compra__proveedor__isnull=False,
-            )
-            .values("orden_compra__proveedor_id", "orden_compra__proveedor__nombre")
-            .annotate(ordenado=Sum("cantidad"))
-        ):
-            b = _bucket(row["orden_compra__proveedor_id"], row["orden_compra__proveedor__nombre"])
-            b["cantidad_ordenada"] += row["ordenado"] or 0
-
-        for row in (
-            RecepcionDetalle.objects.filter(
-                orden_compra_detalle__orden_compra__empresa=empresa,
-                orden_compra_detalle__orden_compra__activo=True,
-                orden_compra_detalle__orden_compra__estatus__in=estatus_comprometidas,
-                orden_compra_detalle__orden_compra__proveedor__isnull=False,
-                recepcion__activo=True, recepcion__tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
-            )
-            .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
-            .values(
-                "orden_compra_detalle__orden_compra__proveedor_id",
-                "orden_compra_detalle__orden_compra__proveedor__nombre",
-            )
-            .annotate(recibido=Sum("cantidad_recibida"))
-        ):
-            b = _bucket(
-                row["orden_compra_detalle__orden_compra__proveedor_id"],
-                row["orden_compra_detalle__orden_compra__proveedor__nombre"],
-            )
-            b["cantidad_recibida"] += row["recibido"] or 0
-
-        # 4) Diferencia de precio: facturado vs. pactado en la OC.
-        money = DecimalField(max_digits=18, decimal_places=2)
-        for row in (
-            FacturaProveedorDetalle.objects.filter(
-                factura_proveedor__empresa=empresa, factura_proveedor__proveedor__isnull=False,
-            )
-            .exclude(factura_proveedor__estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA)
-            .annotate(
-                facturado_linea=ExpressionWrapper(F("precio_unitario") * F("cantidad"), output_field=money),
-                pactado_linea=ExpressionWrapper(F("oc_detalle__precio") * F("cantidad"), output_field=money),
-            )
-            .values("factura_proveedor__proveedor_id", "factura_proveedor__proveedor__nombre")
-            .annotate(facturado=Sum("facturado_linea"), pactado=Sum("pactado_linea"))
-        ):
-            b = _bucket(row["factura_proveedor__proveedor_id"], row["factura_proveedor__proveedor__nombre"])
-            b["facturado"] += row["facturado"] or Decimal("0")
-            b["pactado_oc"] += row["pactado"] or Decimal("0")
-
-        proveedores = []
-        for b in por_proveedor.values():
-            pct_a_tiempo = (
-                round(b["recepciones_a_tiempo"] / b["recepciones_con_compromiso"] * 100, 1)
-                if b["recepciones_con_compromiso"] else None
-            )
-            dias_real_prom = round(sum(b["dias_reales"]) / len(b["dias_reales"]), 1) if b["dias_reales"] else None
-            dias_pactado_prom = (
-                round(sum(b["dias_pactados"]) / len(b["dias_pactados"]), 1) if b["dias_pactados"] else None
-            )
-            pct_rechazo = (
-                round(float(b["cantidad_rechazada"]) / float(b["cantidad_inspeccionada"]) * 100, 1)
-                if b["cantidad_inspeccionada"] else None
-            )
-            pct_cumplimiento = (
-                round(float(b["cantidad_recibida"]) / float(b["cantidad_ordenada"]) * 100, 1)
-                if b["cantidad_ordenada"] else None
-            )
-            pct_diferencia_precio = (
-                round(float(b["facturado"] - b["pactado_oc"]) / float(b["pactado_oc"]) * 100, 1)
-                if b["pactado_oc"] else None
-            )
-
-            factores = []
-            if pct_a_tiempo is not None:
-                factores.append(pct_a_tiempo)
-            if pct_rechazo is not None:
-                factores.append(max(0.0, 100 - pct_rechazo))
-            if pct_cumplimiento is not None:
-                factores.append(min(pct_cumplimiento, 100.0))
-            if pct_diferencia_precio is not None:
-                factores.append(max(0.0, 100 - abs(pct_diferencia_precio)))
-            scorecard = round(sum(factores) / len(factores), 1) if factores else None
-
-            proveedores.append({
-                "proveedor_id": b["proveedor_id"],
-                "proveedor_nombre": b["proveedor_nombre"],
-                "entrega_a_tiempo": {
-                    "pct": pct_a_tiempo,
-                    "recepciones_a_tiempo": b["recepciones_a_tiempo"],
-                    "recepciones_total": b["recepciones_total"],
-                    "recepciones_con_compromiso": b["recepciones_con_compromiso"],
-                },
-                "calidad": {
-                    "pct_rechazado": pct_rechazo,
-                    "cantidad_rechazada": b["cantidad_rechazada"],
-                    "cantidad_inspeccionada": b["cantidad_inspeccionada"],
-                },
-                "lead_time": {
-                    "dias_promedio_real": dias_real_prom,
-                    "dias_promedio_pactado": dias_pactado_prom,
-                },
-                "cumplimiento_cantidad": {
-                    "pct": pct_cumplimiento,
-                    "cantidad_ordenada": b["cantidad_ordenada"],
-                    "cantidad_recibida": b["cantidad_recibida"],
-                },
-                "diferencia_precio": {"pct": pct_diferencia_precio},
-                "scorecard": {"puntaje": scorecard, "semaforo": self._semaforo(scorecard, 80)},
+        alcance = self._alcance_kpis(request)
+        if alcance is None:
+            # Distinto de "sin datos": el usuario no tiene empresa.
+            return Response({
+                "generado_en": timezone.now(),
+                "disponible": False,
+                "motivo": "Usuario sin empresa asignada.",
+                "filtros": None,
+                "proveedores": [],
+                "total_proveedores": 0,
+                "truncado": False,
             })
 
-        proveedores.sort(key=lambda r: (r["scorecard"]["puntaje"] is None, -(r["scorecard"]["puntaje"] or 0)))
-        return Response({"generado_en": timezone.now(), "proveedores": proveedores[:50]})
+        proveedores = calcular_scorecards(alcance, meta)
+        return Response({
+            "generado_en": timezone.now(),
+            "disponible": True,
+            "filtros": {**alcance.como_dict(), "meta_scorecard": meta, "limite": limite},
+            "proveedores": proveedores[:limite],
+            "total_proveedores": len(proveedores),
+            "truncado": len(proveedores) > limite,
+        })
+
+    @action(detail=True, methods=["get"], url_path="kpis-detalle")
+    def kpis_detalle(self, request, pk=None):
+        """Registros detrás de un factor del scorecard de este proveedor:
+        ``?factor=puntualidad|calidad|cumplimiento|precio`` (+ los mismos
+        filtros de ``kpis``). Acotado a ``TOPE_DETALLE`` con ``total``."""
+        from compras.services.kpi_criterios import AlcanceCompras
+        from compras.services.kpi_proveedores import FACTORES_DETALLE, TOPE_DETALLE, detalle_proveedor
+
+        validar_parametros(request, {"factor", "sucursal", "fecha_desde", "fecha_hasta"})
+        factor = (request.query_params.get("factor") or "").strip()
+        if factor not in FACTORES_DETALLE:
+            raise ValidationError({"factor": f"Debe ser uno de: {', '.join(FACTORES_DETALLE)}."})
+        proveedor = self.get_object()  # 404 si es de otra empresa
+        fecha_desde, fecha_hasta = rango_fechas(request)
+        alcance = AlcanceCompras(
+            empresa=proveedor.empresa,
+            sucursal_id=entero_param(request, "sucursal"),
+            proveedor_id=proveedor.pk,
+            fecha_desde=fecha_desde,
+            fecha_hasta=fecha_hasta,
+        )
+        filas, total = detalle_proveedor(alcance, factor)
+        return Response({
+            "proveedor_id": proveedor.pk,
+            "factor": factor,
+            "total": total,
+            "truncado": total > len(filas),
+            "tope": TOPE_DETALLE,
+            "registros": filas,
+        })
+
+    @staticmethod
+    def _numero_param(request, nombre, default, minimo, maximo):
+        valor = request.query_params.get(nombre)
+        if valor in (None, ""):
+            return default
+        try:
+            numero = float(valor)
+        except ValueError:
+            raise ValidationError({nombre: "Debe ser un número."})
+        if not math.isfinite(numero) or not minimo <= numero <= maximo:
+            raise ValidationError({nombre: f"Debe ser un número entre {minimo} y {maximo}."})
+        return numero
+
 
 class DireccionClienteViewSet(viewsets.ModelViewSet):
     queryset = DireccionCliente.objects.filter(activo=True)

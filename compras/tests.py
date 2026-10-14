@@ -1312,6 +1312,7 @@ class RecepcionKpisTests(TestCase):
 
         self.assertEqual(data["diferencia_precio"], {"disponible": False, "motivo": "Sin permiso de contabilidad."})
         self.assertNotIn("valor_rechazado", data["material_rechazado"])
+        self.assertNotIn("por_moneda", data["material_rechazado"])
         self.assertTrue(all("valor_linea" not in f for f in data["material_rechazado"]["drill_down"]))
         self.assertIn("cantidad_rechazada", data["material_rechazado"])
         self.assertIn("pct", data["cumplimiento_cantidad"])
@@ -1323,10 +1324,14 @@ class RecepcionKpisTests(TestCase):
         kpi = resp.data["cumplimiento_cantidad"]
         self.assertTrue(kpi["disponible"])
         self.assertEqual(kpi["cantidad_ordenada"], Decimal("15"))  # 10 + 5
-        self.assertEqual(kpi["cantidad_recibida"], Decimal("11"))  # 6 + 5
-        self.assertAlmostEqual(kpi["pct"], 73.3, places=1)
+        # Recibido NETO (#381): 6 + 5 menos 2 rechazados por Calidad.
+        self.assertEqual(kpi["cantidad_recibida"], Decimal("9"))
+        self.assertAlmostEqual(kpi["pct"], 60.0, places=1)
+        self.assertFalse(kpi["mezcla_unidades"])
         self.assertEqual(len(kpi["drill_down"]), 1)
         self.assertEqual(kpi["drill_down"][0]["oc_id"], self.oc1.pk)
+        self.assertEqual(kpi["drill_down"][0]["cantidad_recibida"], Decimal("4"))
+        self.assertFalse(kpi["drill_down_truncado"])
 
     def test_recepciones_parciales(self):
         resp = self._get()
@@ -1341,11 +1346,19 @@ class RecepcionKpisTests(TestCase):
 
         kpi = resp.data["diferencia_precio"]
         self.assertTrue(kpi["disponible"])
-        self.assertEqual(kpi["costo_facturado"], Decimal("36.00"))  # 6 * 6.00
-        self.assertEqual(kpi["costo_pactado_oc"], Decimal("30.00"))  # 6 * 5.00
-        self.assertEqual(kpi["diferencia"], Decimal("6.00"))
+        mxn = kpi["por_moneda"][0]
+        self.assertEqual(mxn["moneda"], "MXN")
+        self.assertEqual(mxn["costo_facturado"], Decimal("36.00"))  # 6 * 6.00
+        self.assertEqual(mxn["costo_pactado_oc"], Decimal("30.00"))  # 6 * 5.00
+        self.assertEqual(mxn["diferencia"], Decimal("6.00"))
         self.assertEqual(len(kpi["drill_down"]), 1)
         self.assertEqual(kpi["lineas_evaluadas"], 1)
+        # #384: el drill-down no expone nombres de lookup de Django.
+        self.assertEqual(
+            set(kpi["drill_down"][0]),
+            {"id", "factura_id", "factura_folio", "producto", "moneda", "precio_facturado", "precio_pactado",
+             "diferencia_linea"},
+        )
 
     def _factura_extra(self, **kwargs):
         factura = FacturaProveedor.objects.create(
@@ -1365,7 +1378,7 @@ class RecepcionKpisTests(TestCase):
 
         kpi = self._get().data["diferencia_precio"]
 
-        self.assertEqual(kpi["costo_facturado"], Decimal("36.00"))
+        self.assertEqual(kpi["por_moneda"][0]["costo_facturado"], Decimal("36.00"))
         self.assertEqual(kpi["lineas_evaluadas"], 1)
 
     def test_diferencia_precio_sin_lineas_se_distingue_de_diferencia_cero(self):
@@ -1377,7 +1390,7 @@ class RecepcionKpisTests(TestCase):
         kpi = self._get().data["diferencia_precio"]
 
         self.assertEqual(kpi["lineas_evaluadas"], 0)
-        self.assertEqual(kpi["diferencia"], Decimal("0"))
+        self.assertEqual(kpi["por_moneda"], [])
 
     def test_material_rechazado(self):
         resp = self._get()
@@ -1385,20 +1398,257 @@ class RecepcionKpisTests(TestCase):
         kpi = resp.data["material_rechazado"]
         self.assertTrue(kpi["disponible"])
         self.assertEqual(kpi["cantidad_rechazada"], Decimal("2"))
-        self.assertEqual(kpi["valor_rechazado"], Decimal("10.00"))  # 2 * 5.00
+        self.assertEqual(kpi["por_moneda"], [{"moneda": "MXN", "valor_rechazado": Decimal("10.00")}])  # 2 * 5.00
         self.assertEqual(kpi["drill_down"][0]["motivo_rechazo"], "Material defectuoso")
+        self.assertEqual(kpi["drill_down"][0]["recepcion_folio"], "RC-1")
+        self.assertEqual(kpi["drill_down"][0]["producto"], "Insumo Test")
+
+    # --- helpers para armar más datos --------------------------------------
+
+    def _oc(self, empresa=None, sucursal=None, proveedor=None, moneda=None, estatus=None, fecha_oc=None, usuario=None):
+        return OrdenCompra.objects.create(
+            empresa=empresa or self.empresa, sucursal=sucursal or self.sucursal,
+            proveedor=proveedor or self.proveedor, moneda=moneda or self.moneda,
+            usuario=usuario or self.usuario, fecha_oc=fecha_oc or timezone.now().date(),
+            estatus=estatus or OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+        )
+
+    def _linea_recibida(self, oc, producto=None, cantidad=10, recibida=10, precio="5.00", folio=None,
+                        tipo_origen=None, rechazada=0, resultado="rechazo", empresa=None, sucursal=None, almacen=None):
+        """OC detalle + recepción + renglón recibido (+ rechazo de Calidad si ``rechazada``)."""
+        producto = producto or self.producto
+        det = OrdenCompraDetalle.objects.create(
+            orden_compra=oc, producto=producto, sucursal=sucursal or self.sucursal, cantidad=cantidad,
+            precio=Decimal(precio),
+        )
+        rec = Recepcion.objects.create(
+            orden_compra=None if tipo_origen == Recepcion.TipoOrigen.ORDEN_PRODUCCION else oc,
+            tipo_origen=tipo_origen or Recepcion.TipoOrigen.ORDEN_COMPRA,
+            empresa=empresa or self.empresa, sucursal=sucursal or self.sucursal, proveedor=oc.proveedor,
+            almacen=almacen or self.almacen, usuario=oc.usuario,
+            folio=folio or f"RC-X{Recepcion.objects.count() + 100}", fecha_recepcion=timezone.now(),
+            estatus=Recepcion.EstatusRecepcion.RECIBIDA,
+        )
+        rec_det = RecepcionDetalle.objects.create(
+            recepcion=rec,
+            orden_compra_detalle=None if tipo_origen == Recepcion.TipoOrigen.ORDEN_PRODUCCION else det,
+            producto=producto, cantidad_recibida=recibida,
+        )
+        if rechazada:
+            inspeccion = CalidadInspeccion.objects.create(
+                recepcion=rec, inspector=self.inspector, fecha=timezone.localdate(), estado="rechazada",
+            )
+            CalidadInspeccionDetalle.objects.create(
+                calidad_inspeccion=inspeccion, recepcion_detalle=rec_det, cantidad_inspeccionada=recibida,
+                cantidad_aprobada=recibida - rechazada, cantidad_rechazada=rechazada, resultado=resultado,
+                motivo_rechazo="Prueba",
+            )
+        return det, rec, rec_det
+
+    def _documentos_de_otra_empresa(self):
+        sucursal = Sucursal.objects.create(empresa=self.otra, codigo="GDL", nombre="GDL")
+        almacen = Almacen.objects.create(empresa=self.otra, sucursal=sucursal, codigo="ALG", nombre="Almacen G")
+        usuario = Usuario.objects.create(username="ug", email="ug@globex.test", empresa=self.otra)
+        producto = Producto.objects.create(empresa=self.otra, nombre="Insumo G")
+        oc = self._oc(empresa=self.otra, sucursal=sucursal, usuario=usuario, estatus=OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA)
+        return self._linea_recibida(
+            oc, producto=producto, cantidad=100, recibida=100, rechazada=40, folio="RC-GLOBEX",
+            empresa=self.otra, sucursal=sucursal, almacen=almacen,
+        )
+
+    # --- #384/#380: aislamiento y superusuario -------------------------------
 
     def test_otra_empresa_no_contamina_los_totales(self):
-        resp = self._get()
-        kpi = resp.data["cumplimiento_cantidad"]
-        # Si hubiera fuga cross-tenant el total ordenado/recibido cambiaría.
-        self.assertEqual(kpi["cantidad_ordenada"], Decimal("15"))
+        self._documentos_de_otra_empresa()
+
+        data = self._get().data
+
+        # Si hubiera fuga cross-tenant los totales cambiarían.
+        self.assertEqual(data["cumplimiento_cantidad"]["cantidad_ordenada"], Decimal("15"))
+        self.assertEqual(data["cumplimiento_cantidad"]["cantidad_recibida"], Decimal("9"))
+        self.assertEqual(data["material_rechazado"]["cantidad_rechazada"], Decimal("2"))
+        self.assertEqual(data["recepciones_parciales"]["ocs_recibidas_o_parciales"], 2)
 
     def test_usuario_sin_empresa_no_ve_nada(self):
         resp = self._get(self.sin_empresa)
 
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data["cumplimiento_cantidad"]["disponible"])
+
+    def test_superusuario_con_empresa_ve_todas_las_empresas_como_el_listado(self):
+        self._documentos_de_otra_empresa()
+        root = Usuario.objects.create(
+            username="root", email="root@acme.test", empresa=self.empresa, is_superuser=True, is_staff=True,
+        )
+
+        data = self._get(root).data
+
+        self.assertEqual(data["cumplimiento_cantidad"]["cantidad_ordenada"], Decimal("115"))  # 15 + 100
+        self.assertEqual(data["material_rechazado"]["cantidad_rechazada"], Decimal("42"))  # 2 + 40
+
+    def test_superusuario_sin_empresa_no_recibe_ceros_como_disponibles(self):
+        self._documentos_de_otra_empresa()
+        root = Usuario.objects.create(username="root2", email="root2@nowhere.test", is_superuser=True, is_staff=True)
+
+        data = self._get(root).data
+
+        self.assertTrue(data["cumplimiento_cantidad"]["disponible"])
+        self.assertEqual(data["cumplimiento_cantidad"]["cantidad_ordenada"], Decimal("115"))
+
+    # --- #357/#384/#390: parámetros -------------------------------------------
+
+    def _get_q(self, query, user=None):
+        client = APIClient()
+        client.force_authenticate(user=user or self.usuario)
+        return client.get(self.URL + query)
+
+    def test_parametro_no_soportado_responde_400(self):
+        resp = self._get_q("?almacen=999&meta_cumplimiento=95")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("almacen", str(resp.data["parametros"]))
+        self.assertIn("meta_cumplimiento", str(resp.data["parametros"]))
+
+    def test_parametros_invalidos_responden_400(self):
+        for query in ("?sucursal=x", "?fecha_desde=2026-99-01", "?fecha_desde=2026-02-01&fecha_hasta=2026-01-01"):
+            self.assertEqual(self._get_q(query).status_code, 400, query)
+
+    def test_filtros_de_sucursal_proveedor_y_fechas_se_aplican(self):
+        otra_suc = Sucursal.objects.create(empresa=self.empresa, codigo="GDL", nombre="GDL")
+        resp = self._get_q(f"?sucursal={otra_suc.pk}")
+        self.assertEqual(resp.data["cumplimiento_cantidad"]["cantidad_ordenada"], 0)
+        self.assertEqual(resp.data["filtros"]["sucursal"], otra_suc.pk)
+
+        resp = self._get_q(f"?sucursal={self.sucursal.pk}&proveedor={self.proveedor.pk}")
+        self.assertEqual(resp.data["cumplimiento_cantidad"]["cantidad_ordenada"], Decimal("15"))
+
+        manana = (timezone.now().date() + timedelta(days=1)).isoformat()
+        self.assertEqual(self._get_q(f"?fecha_desde={manana}").data["cumplimiento_cantidad"]["cantidad_ordenada"], 0)
+        hoy = timezone.now().date().isoformat()
+        self.assertEqual(
+            self._get_q(f"?fecha_desde={hoy}&fecha_hasta={hoy}").data["cumplimiento_cantidad"]["cantidad_ordenada"],
+            Decimal("15"),
+        )
+
+    # --- #381: neto y unidades ------------------------------------------------
+
+    def test_rechazo_y_nueva_recepcion_sobre_la_misma_linea(self):
+        """Tras rechazar 2 y recibir de nuevo 2, la OC 1 queda en 6 netas, no en 8 brutas."""
+        RecepcionDetalle.objects.create(
+            recepcion=self.rec1, orden_compra_detalle=self.oc1_det, producto=self.producto, cantidad_recibida=2,
+        )
+
+        kpi = self._get().data["cumplimiento_cantidad"]
+
+        self.assertEqual(kpi["cantidad_recibida"], Decimal("11"))  # (6 + 2 - 2) + 5
+        self.assertEqual(kpi["drill_down"][0]["cantidad_recibida"], Decimal("6"))
+
+    def test_oc_parcial_con_recibido_bruto_completo_sigue_en_el_drill_down(self):
+        """Como OC 126 del issue: 4 ordenadas, 4 recibidas, 2 rechazadas."""
+        oc = self._oc(estatus=OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA)
+        self._linea_recibida(oc, cantidad=4, recibida=4, rechazada=2)
+
+        folios = [f["oc_id"] for f in self._get().data["cumplimiento_cantidad"]["drill_down"]]
+
+        self.assertIn(oc.pk, folios)
+
+    def test_cantidades_de_unidades_distintas_no_se_suman(self):
+        from nucleo.models import UnidadMedida
+
+        metros = UnidadMedida.objects.create(clave="MTR", nombre="Metro")
+        piezas = UnidadMedida.objects.create(clave="PZA", nombre="Pieza")
+        tela = Producto.objects.create(empresa=self.empresa, nombre="Tela", unidad_medida=metros)
+        boton = Producto.objects.create(empresa=self.empresa, nombre="Botón", unidad_medida=piezas)
+        oc = self._oc()
+        self._linea_recibida(oc, producto=tela, cantidad=1000, recibida=500, rechazada=30)
+        self._linea_recibida(oc, producto=boton, cantidad=10, recibida=10, rechazada=1)
+
+        data = self._get().data
+
+        cumplimiento = data["cumplimiento_cantidad"]
+        self.assertTrue(cumplimiento["mezcla_unidades"])
+        self.assertIsNone(cumplimiento["pct"])
+        self.assertIsNone(cumplimiento["cantidad_ordenada"])
+        por_unidad = {u["unidad"]: u for u in cumplimiento["por_unidad"]}
+        self.assertEqual(por_unidad["MTR"]["cantidad_recibida"], Decimal("470"))
+        self.assertEqual(por_unidad["PZA"]["cantidad_recibida"], Decimal("9"))
+        self.assertIn(None, {u["unidad"] for u in cumplimiento["por_unidad"]})  # productos sin unidad
+        rechazado = data["material_rechazado"]
+        self.assertTrue(rechazado["mezcla_unidades"])
+        self.assertIsNone(rechazado["cantidad_rechazada"])
+        self.assertEqual({u["unidad"] for u in rechazado["por_unidad"]}, {"MTR", "PZA", None})
+
+    # --- #382: qué es un rechazo ----------------------------------------------
+
+    def test_rechazos_de_recepciones_de_produccion_no_cuentan(self):
+        oc = self._oc()
+        self._linea_recibida(
+            oc, cantidad=5, recibida=5, rechazada=5, tipo_origen=Recepcion.TipoOrigen.ORDEN_PRODUCCION,
+        )
+
+        kpi = self._get().data["material_rechazado"]
+
+        self.assertEqual(kpi["cantidad_rechazada"], Decimal("2"))
+        self.assertEqual(kpi["drill_down_total"], 1)
+
+    def test_solo_resultado_rechazo_cuenta_como_rechazado(self):
+        oc = self._oc()
+        self._linea_recibida(oc, cantidad=5, recibida=5, rechazada=3, resultado="liberado")
+        self._linea_recibida(oc, cantidad=5, recibida=5, rechazada=4, resultado="concesion lazzar")
+
+        kpi = self._get().data["material_rechazado"]
+
+        self.assertEqual(kpi["cantidad_rechazada"], Decimal("2"))
+
+    # --- #378: monedas ---------------------------------------------------------
+
+    def test_valor_rechazado_y_diferencia_de_precio_se_separan_por_moneda(self):
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        oc = self._oc(moneda=usd, estatus=OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA)
+        det, rec, rec_det = self._linea_recibida(oc, cantidad=10, recibida=10, precio="2.00", rechazada=3)
+        factura = FacturaProveedor.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, proveedor=self.proveedor, oc=oc, recepcion=rec,
+            moneda=usd, estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA,
+        )
+        FacturaProveedorDetalle.objects.create(
+            factura_proveedor=factura, oc_detalle=det, recepcion_detalle=rec_det, producto=self.producto,
+            cantidad=10, precio_unitario=Decimal("3.00"),
+        )
+
+        data = self._get().data
+
+        valor = {m["moneda"]: m["valor_rechazado"] for m in data["material_rechazado"]["por_moneda"]}
+        self.assertEqual(valor, {"MXN": Decimal("10.00"), "USD": Decimal("6.00")})
+        precio = {m["moneda"]: m for m in data["diferencia_precio"]["por_moneda"]}
+        self.assertEqual(precio["MXN"]["diferencia"], Decimal("6.00"))
+        self.assertEqual(precio["USD"]["diferencia"], Decimal("10.00"))
+
+    def test_factura_en_moneda_distinta_a_su_oc_no_se_compara(self):
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        FacturaProveedor.objects.filter(empresa=self.empresa).update(moneda=usd)
+
+        kpi = self._get().data["diferencia_precio"]
+
+        self.assertEqual(kpi["lineas_evaluadas"], 0)
+        self.assertEqual(kpi["lineas_moneda_distinta"], 1)
+        self.assertEqual(kpi["por_moneda"], [])
+
+    # --- #384: drill-downs truncados -------------------------------------------
+
+    def test_drill_down_truncado_se_indica_y_el_orden_es_estable(self):
+        oc = self._oc()
+        for i in range(22):
+            self._linea_recibida(oc, cantidad=5, recibida=5, rechazada=1, folio=f"RC-T{i:02d}")
+
+        kpi = self._get().data["material_rechazado"]
+
+        self.assertEqual(kpi["drill_down_total"], 23)  # 22 + el de setUp
+        self.assertTrue(kpi["drill_down_truncado"])
+        self.assertEqual(len(kpi["drill_down"]), 20)
+        # Primero el de 2 piezas; los de 1 pieza van por id descendente (desempate).
+        self.assertEqual(kpi["drill_down"][0]["cantidad_rechazada"], Decimal("2"))
+        ids = [f["id"] for f in kpi["drill_down"][1:]]
+        self.assertEqual(ids, sorted(ids, reverse=True))
 
 
 class OrdenCompraKpisTests(TestCase):
@@ -1497,7 +1747,8 @@ class OrdenCompraKpisTests(TestCase):
         kpi = resp.data["ocs_abiertas"]
         self.assertTrue(kpi["disponible"])
         self.assertEqual(kpi["total"], 2)  # abierta + vencida (ambas en estatus abierto)
-        self.assertEqual(kpi["monto"], Decimal("1300.00"))
+        self.assertEqual(kpi["por_moneda"], [{"moneda": "MXN", "total": 2, "monto": Decimal("1300.00")}])
+        self.assertNotIn("monto", kpi)
 
     def test_ocs_vencidas_sin_recibir(self):
         resp = self._get()
@@ -1518,6 +1769,32 @@ class OrdenCompraKpisTests(TestCase):
         categorias = {c["categoria"]: c["monto"] for c in resp.data["gasto_por_categoria"]["categorias"]}
         self.assertEqual(categorias["Tela"], Decimal("800.00"))  # 500 (abierta) + 300 (vencida)
         self.assertEqual(categorias["Hilo"], Decimal("500.00"))
+
+    def test_montos_de_oc_en_otra_moneda_no_se_suman(self):
+        """#374: una OC en USD va en su propia fila, no dentro del total MXN."""
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        oc = OrdenCompra.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, proveedor=self.proveedor, moneda=usd,
+            usuario=self.usuario, fecha_oc=timezone.now().date(),
+            estatus=OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA, gran_total=Decimal("94838.16"),
+        )
+        OrdenCompraDetalle.objects.create(
+            orden_compra=oc, producto=self.prod_tela, sucursal=self.sucursal,
+            cantidad=1, precio=Decimal("94838.16"), importe=Decimal("94838.16"),
+        )
+
+        data = self._get().data
+
+        abiertas = {m["moneda"]: m for m in data["ocs_abiertas"]["por_moneda"]}
+        self.assertEqual(abiertas["MXN"]["monto"], Decimal("1300.00"))
+        self.assertEqual(abiertas["USD"]["monto"], Decimal("94838.16"))
+        self.assertEqual(data["ocs_abiertas"]["total"], 3)
+        por_estatus = {(f["estatus"], f["moneda"]): f["monto"] for f in data["ocs_abiertas"]["por_estatus"]}
+        self.assertEqual(por_estatus[(4, "USD")], Decimal("94838.16"))
+        self.assertEqual(por_estatus[(4, "MXN")], Decimal("300.00"))
+        gasto = {(c["categoria"], c["moneda"]): c["monto"] for c in data["gasto_por_categoria"]["categorias"]}
+        self.assertEqual(gasto[("Tela", "MXN")], Decimal("800.00"))
+        self.assertEqual(gasto[("Tela", "USD")], Decimal("94838.16"))
 
     def test_usuario_sin_empresa_no_ve_nada(self):
         resp = self._get(self.sin_empresa)
