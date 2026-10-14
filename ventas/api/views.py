@@ -325,6 +325,22 @@ def _exigir_renglones_sin_dependencias(pedido):
         raise PedidoConDependencias(_etiquetas(afectados))
 
 
+def _texto_comentario(data):
+    """``comentario`` del body como texto recortado; ``""`` si falta o es null.
+
+    Un body que no es objeto, o un ``comentario`` que no es texto, responde 400
+    (antes se guardaba su repr de Python o fallaba con 500).
+    """
+    if not hasattr(data, "get"):
+        raise ValidationError({"comentario": "El cuerpo debe ser un objeto JSON."})
+    valor = data.get("comentario")
+    if valor is None:
+        return ""
+    if not isinstance(valor, str):
+        raise ValidationError({"comentario": "El comentario debe ser texto."})
+    return valor.strip()
+
+
 class CotizacionViewSet(viewsets.ModelViewSet):
     queryset = cotizaciones_base()
     serializer_class = CotizacionSerializer
@@ -2087,7 +2103,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 {"estatus": "La cotización ya está en revisión o autorizada."}
             )
 
-        comentario = str(request.data.get("comentario") or "").strip()
+        comentario = _texto_comentario(request.data)
         with transaction.atomic():
             if cotizacion.estatus == 4 and comentario:
                 CotizacionComentario.objects.create(
@@ -2257,7 +2273,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         user = request.user
         self._require_mesa_control(user)
         cotizacion = self.get_object()
-        motivo = str(request.data.get("comentario") or "").strip()
+        motivo = _texto_comentario(request.data)
         if not motivo:
             raise ValidationError(
                 {"comentario": "Indica el motivo del rechazo para que el vendedor lo vea."}
