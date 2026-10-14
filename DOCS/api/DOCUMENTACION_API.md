@@ -3547,6 +3547,7 @@ Regla validada en el backend: con `PaymentMethod = "PPD"`, `PaymentForm` debe se
 
 ### Otras piezas que usan la cuenta de Facturama
 
+- **Crédito del cliente** (`dias_credito` 0-365, `limite_credito` >= 0): cambiarlos exige el permiso `E-CRM-CLIENTES-CREDITO` (superusuario y admin de empresa lo tienen). Sin él, `POST`/`PATCH` de `/api/v1/terceros/clientes/` responde `400 {"dias_credito": ...}` solo si el valor mandado difiere del actual (en alta, de 0); reenviar el mismo valor o no mandarlo no falla. La clave debe existir en el catálogo `permisos`; viaja en la lista de permisos del login.
 - **Alta de cliente** (`POST /api/v1/terceros/clientes/`): después de guardar el cliente, el backend lo da de alta también en Facturama (`/Client`). **Solo** se hace para clientes de la empresa dueña de la cuenta; los de otras empresas ya no se suben.
 - **Páginas del Core** `/core/terceros/validar-rfc/` y `/core/terceros/crear-cliente/`: consultan y crean clientes en Facturama. **Solo superusuario.**
 

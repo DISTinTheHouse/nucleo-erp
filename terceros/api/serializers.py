@@ -2,6 +2,11 @@ from rest_framework import serializers
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from nucleo.models import SatRegimenFiscal, SatUsoCfdi
 
+# Definir o cambiar el crédito del cliente es una capacidad aparte de editarlo (#462).
+PERMISO_CREDITO_CLIENTE = "E-CRM-CLIENTES-CREDITO"
+CAMPOS_CREDITO_CLIENTE = ("dias_credito", "limite_credito")
+
+
 class ClienteSerializer(serializers.ModelSerializer):
     razon_social = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     correo = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
@@ -15,11 +20,26 @@ class ClienteSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["activo", "empresa", "vendedores"]
 
+    def _validar_permiso_credito(self, attrs, user):
+        """Sin el permiso de crédito solo se puede mandar el valor que ya tiene (o el de alta: 0)."""
+        if user is None or user.tiene_permiso(PERMISO_CREDITO_CLIENTE):
+            return
+        errores = {}
+        for campo in CAMPOS_CREDITO_CLIENTE:
+            if campo not in attrs:
+                continue
+            actual = getattr(self.instance, campo) if self.instance is not None else Cliente._meta.get_field(campo).get_default()
+            if attrs[campo] != actual:
+                errores[campo] = "No tienes permiso para definir las condiciones de crédito."
+        if errores:
+            raise serializers.ValidationError(errores)
+
     def validate(self, attrs):
         rfc = (attrs.get("rfc") or "").strip().upper()
         if rfc:
             attrs["rfc"] = rfc
         request = self.context.get("request")
+        self._validar_permiso_credito(attrs, getattr(request, "user", None))
         empresa = getattr(getattr(request, "user", None), "empresa", None)
         if empresa and rfc:
             qs = Cliente.objects.filter(empresa=empresa, rfc__iexact=rfc, activo=True)
