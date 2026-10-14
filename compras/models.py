@@ -172,6 +172,36 @@ class OrdenCompra(StatusLifecycleModel):
     def __str__(self):
         return str(self.id)
 
+class OrdenCompraRutaCritica(models.Model):
+    """Seguimiento informativo de la OC para compras: un renglón por orden, en
+    tabla aparte de ``OrdenCompra`` para que leerlo/editarlo sea barato (no toca
+    el serializer pesado de la OC ni su historial).
+
+    Es solo información: nada de aquí cambia el estatus de la OC, las
+    recepciones ni el inventario. La recepción real la sigue haciendo WMS;
+    ``fecha_real_recibo`` es la fecha en que compras supo que la mercancía llegó,
+    que puede adelantarse a la recepción de WMS por más de una semana.
+    """
+
+    oc = models.OneToOneField(
+        OrdenCompra, on_delete=models.CASCADE, primary_key=True, related_name="ruta_critica"
+    )
+    fecha_real_recibo = models.DateField(null=True, blank=True)
+    comentarios = models.TextField(blank=True, null=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ordenes_compra_ruta_critica'
+        verbose_name = 'Ruta Crítica de Orden de Compra'
+        verbose_name_plural = 'Rutas Críticas de Órdenes de Compra'
+
+    def __str__(self):
+        return f"Ruta crítica OC {self.oc_id}"
+
+
 class OrdenCompraDetalle(models.Model):
     orden_compra = models.ForeignKey(OrdenCompra, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
