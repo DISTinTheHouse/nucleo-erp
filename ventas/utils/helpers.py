@@ -128,7 +128,29 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
             cotizacion_detalle__producto__isnull=True,
         ).exclude(sku_muestra__isnull=True).exclude(sku_muestra="").select_related("cotizacion_detalle")
     }
+    # Misma razón con ``categoria_producto``: el pedido no la tiene, así que las
+    # ediciones que parten de él (mesa de control) no la traen. Se conserva la de la
+    # línea previa con la misma llave cuando la fila no menciona el campo.
+    categoria_previa = {
+        (d.producto_id, d.producto_nombre_externo, d.color_id): d.categoria_producto_id
+        for d in CotizacionDetalle.objects.filter(
+            cotizacion=cotizacion_obj, categoria_producto__isnull=False
+        )
+    }
     CotizacionDetalle.objects.filter(cotizacion=cotizacion_obj).delete()
+    # Antes de agrupar: ``_merge_detalle`` rellena la clave con ``None`` y ya no se
+    # distinguiría "no vino" de "vino vacía".
+    rows = [
+        r if "categoria_producto" in r or "categoria_producto_id" in r else {
+            **r,
+            "categoria_producto": categoria_previa.get((
+                next(iter(_ids_validos([r.get("producto")])), None) if not r.get("producto_nombre_externo") else None,
+                r.get("producto_nombre_externo") or None,
+                next(iter(_ids_validos([r.get("color")])), None),
+            )),
+        }
+        for r in rows
+    ]
     rows = _merge_detalle(rows)
 
     from catalogo.models import CategoriaProducto as CategoriaProductoModel
@@ -155,7 +177,8 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
     categorias = CategoriaProductoModel.objects.filter(
         pk__in=_ids_validos(
             r.get("categoria_producto") or r.get("categoria_producto_id") for r in rows
-        ),
+        )
+        | set(categoria_previa.values()),
         activo=True,
     ).in_bulk()
     direcciones = DirModel.objects.filter(
