@@ -665,10 +665,13 @@ if _SIN_PERMISOS:
         f"invisibles para todos: {', '.join(_SIN_PERMISOS)}"
     )
 
-# ``fila`` y ``filas`` son opcionales por separado, pero cada entidad necesita una.
-_SIN_FILA = [entidad.tipo for entidad in REGISTRO if entidad.fila is None and entidad.filas is None]
-if _SIN_FILA:
-    raise ImproperlyConfigured(f"Entidades del buscador sin ``fila`` ni ``filas``: {', '.join(_SIN_FILA)}")
+# Cada entidad declara exactamente uno de ``fila`` o ``filas``: con las dos, ``buscar()``
+# usaría ``filas`` en silencio y ``fila`` quedaría muerta.
+_FILA_AMBIGUA = [entidad.tipo for entidad in REGISTRO if (entidad.fila is None) == (entidad.filas is None)]
+if _FILA_AMBIGUA:
+    raise ImproperlyConfigured(
+        f"Entidades del buscador sin ``fila`` ni ``filas``, o con las dos: {', '.join(_FILA_AMBIGUA)}"
+    )
 
 
 class BusquedaGlobalAPIView(APIView):
