@@ -1645,7 +1645,7 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
 
         self.assertEqual(self._fila(self.a["admin"], "playero", op), ("Comercial Acme Norte", "Luis Playero"))
         self.assertEqual(self._fila(self.superuser, "playero", op), ("Comercial Acme Norte", "Luis Playero"))
-        self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Luis Playero", ""))
+        self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Luis Playero", None))
         cliente.vendedores.add(self.vendedor_a)
         self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Comercial Acme Norte", "Luis Playero"))
 
@@ -1657,12 +1657,12 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
         cliente.soft_delete()
 
         self.assertEqual(self._fila(self.a["admin"], "playero", op), ("Comercial Acme Norte", "Luis Playero"))
-        self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Luis Playero", ""))
+        self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Luis Playero", None))
 
     def test_sin_titulo_ni_cliente_se_nombra_por_el_contacto(self):
         op = self._oportunidad(self.a, self.a["admin"], "", nombre_contacto="Luis Playero")
 
-        self.assertEqual(self._fila(self.a["admin"], "playero", op), ("Luis Playero", ""))
+        self.assertEqual(self._fila(self.a["admin"], "playero", op), ("Luis Playero", None))
 
     def test_sin_nada_se_nombra_por_el_id(self):
         # No se encuentra por texto (no tiene título ni contacto): se prueba el armado de filas.
@@ -1671,7 +1671,7 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
 
         (fila,) = entidad.filas(self.a["admin"], list(entidad.alcance(self.a["admin"]).filter(pk=op.pk)))
 
-        self.assertEqual((fila["titulo"], fila["subtitulo"]), (f"Oportunidad #{op.pk}", ""))
+        self.assertEqual((fila["titulo"], fila["subtitulo"]), (f"Oportunidad #{op.pk}", None))
 
     def test_el_subtitulo_nunca_repite_el_titulo(self):
         # Título igual al nombre del cliente: el subtítulo pasa al contacto, y si no hay, queda vacío.
@@ -1685,8 +1685,8 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
         )
 
         self.assertEqual(self._fila(self.a["admin"], "comercial", con_contacto), ("Comercial Acme Norte", "Ana"))
-        self.assertEqual(self._fila(self.a["admin"], "comercial", sin_contacto), ("comercial acme norte", ""))
-        self.assertEqual(self._fila(self.a["admin"], "comercial", contacto_igual), ("Comercial Acme Norte", ""))
+        self.assertEqual(self._fila(self.a["admin"], "comercial", sin_contacto), ("comercial acme norte", None))
+        self.assertEqual(self._fila(self.a["admin"], "comercial", contacto_igual), ("Comercial Acme Norte", None))
 
     def test_el_nombre_del_cliente_no_crece_las_consultas(self):
         self._dar_permiso_crm(self.vendedor_a)

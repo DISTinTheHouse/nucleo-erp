@@ -310,12 +310,13 @@ def _fila_cotizacion(cotizacion) -> dict:
     }
 
 
-def _nombre_oportunidad(oportunidad, cliente_visible: bool) -> tuple[str, str]:
+def _nombre_oportunidad(oportunidad, cliente_visible: bool) -> tuple[str, str | None]:
     """``(titulo, subtitulo)`` con la misma regla que el resto de la app.
 
     Título: el título, el nombre del cliente (solo si el usuario lo ve), el contacto
     o ``"Oportunidad #<id>"``. Subtítulo: el siguiente de esa misma cadena que no
-    repita el título; con título de contacto o de respaldo queda vacío.
+    repita el título; con título de contacto o de respaldo es ``None``, como en los
+    demás grupos.
     """
     titulo = _texto(oportunidad.titulo)
     cliente = _texto(oportunidad.cliente.nombre) if cliente_visible and oportunidad.cliente_id else None
@@ -328,7 +329,7 @@ def _nombre_oportunidad(oportunidad, cliente_visible: bool) -> tuple[str, str]:
         titulo, candidatos = contacto, ()
     else:
         titulo, candidatos = f"Oportunidad #{oportunidad.pk}", ()
-    subtitulo = next((c for c in candidatos if c and c.casefold() != titulo.casefold()), "")
+    subtitulo = next((c for c in candidatos if c and c.casefold() != titulo.casefold()), None)
     return titulo, subtitulo
 
 
