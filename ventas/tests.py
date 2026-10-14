@@ -21,6 +21,7 @@ from rest_framework.test import APIClient
 from auditoria.models import AuditoriaEvento
 from catalogo.models import CategoriaProducto, Color, Producto, ProductoVariante, Talla, VarianteProductoProduccion
 from inventarios.models import MovimientoInventario
+from notificaciones.models import Notificacion
 from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
 from inventarios.models import (
     Almacen,
@@ -1094,6 +1095,7 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertTrue(response.json()["editable"])
 
     def test_edicion_mesa_control_actualiza_pedido_y_cotizacion_sin_inventario(self):
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(vendedor=self.mesa_no_admin)
         response = self._client(self.admin_mesa).post(
             pedido_editar_mesa_control_url(self.pedido.pk),
             self._payload(),
@@ -1118,6 +1120,9 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(str(self.cotizacion.subtotal), "250.00")
         self.assertEqual(self.cotizacion.estatus, 3)
         self.assertIsNotNone(self.cotizacion.aprobado_snapshot)
+        n = Notificacion.objects.get(tipo="cotizacion_editada_mesa")
+        self.assertEqual(n.usuario_id, self.mesa_no_admin.pk)
+        self.assertEqual(n.data, {"cotizacion_id": self.cotizacion.pk, "pedido_id": self.pedido.pk})
 
         pedido_detalle = self.pedido.detalles.get()
         self.assertEqual(pedido_detalle.producto_id, self.producto_a.pk)
@@ -2657,6 +2662,9 @@ class ServicioExtraCantidadCopiaTests(TestCase):
 
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/aceptar-cambios/")
         self.assertEqual(resp.status_code, 200, resp.content)
+        n = Notificacion.objects.get(tipo="cotizacion_cambios_aceptados")
+        self.assertEqual(n.usuario_id, self.cotizacion.vendedor_id)
+        self.assertEqual(n.data, {"cotizacion_id": self.cotizacion.pk, "pedido_id": pedido.pk})
         esperadas = [(n, 7 if n == "Bordado" else c) for n, c in self._esperadas()]
         self.assertEqual(self._cantidades(PedidoServicioExtra.objects.filter(pedido=pedido)), esperadas)
 
@@ -2759,6 +2767,8 @@ class RechazarCambiosCotizacionTests(TestCase):
 
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/rechazar-cambios/")
         self.assertEqual(resp.status_code, 200, resp.content)  # antes: 500
+        n = Notificacion.objects.get(tipo="cotizacion_cambios_rechazados")
+        self.assertEqual(n.usuario_id, self.cotizacion.vendedor_id)
 
         self.cotizacion.refresh_from_db()
         self.assertEqual(self.cotizacion.estatus, 3)
@@ -5268,6 +5278,26 @@ class RechazoCotizacionComentarioTests(TestCase):
         self.assertEqual(n.data["cotizacion_id"], self.cotizacion.id)
         self.assertEqual(n.data["motivo"], "Precio mal")
         self.assertFalse(Notificacion.objects.filter(usuario=self.mesa).exists())
+
+    def test_rechazar_solo_en_revision(self):
+        for estatus in (1, 4, 5):
+            Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=estatus)
+            resp = self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "x"}, format="json")
+            self.assertEqual(resp.status_code, 400, (estatus, resp.content))
+            self.cotizacion.refresh_from_db()
+            self.assertEqual(self.cotizacion.estatus, estatus)
+        self.assertFalse(Notificacion.objects.filter(tipo="cotizacion_rechazada").exists())
+
+    def test_rechazar_cotizacion_sin_empresa_no_truena(self):
+        su = Usuario.objects.create(
+            username="su@acme-mc.test", email="su@acme-mc.test", is_superuser=True, is_staff=True
+        )
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(empresa=None)
+        resp = self._como(su).post(self.url + "rechazar/", {"comentario": "x"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 4)
+        self.assertFalse(Notificacion.objects.exists())
 
     def test_vendedor_reenvia_y_queda_historial(self):
         self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Precio mal"}, format="json")

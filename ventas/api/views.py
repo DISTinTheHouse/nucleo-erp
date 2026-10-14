@@ -327,6 +327,20 @@ def _exigir_renglones_sin_dependencias(pedido):
         raise PedidoConDependencias(_etiquetas(afectados))
 
 
+def _notificar_vendedor_cambios(cotizacion, pedido_id, *, tipo, titulo, mensaje):
+    """Aviso (1 INSERT) al vendedor sobre un cambio de mesa de control en su
+    cotización ya autorizada. Llamar dentro de la transacción del flujo."""
+    crear_notificacion_usuario(
+        empresa=cotizacion.empresa,
+        usuario_id=cotizacion.vendedor_id,
+        titulo=titulo,
+        mensaje=mensaje,
+        modulo="ventas",
+        tipo=tipo,
+        data={"cotizacion_id": cotizacion.id, "pedido_id": pedido_id},
+    )
+
+
 def _texto_comentario(data):
     """``comentario`` del body como texto recortado; ``""`` si falta o es null.
 
@@ -2288,6 +2302,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 raise ValidationError(
                     {"cotizacion": "La cotización ya está autorizada."}
                 )
+            if cotizacion.estatus != 2:
+                raise ValidationError(
+                    {"cotizacion": "La cotización debe estar EN REVISION para ser rechazada."}
+                )
             cotizacion.estatus = 4
             cotizacion.motivo_rechazo = motivo
             cotizacion.save(update_fields=["estatus", "motivo_rechazo", "updated_at"])
@@ -2358,6 +2376,13 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     "aprobado_snapshot",
                     "updated_at",
                 ]
+            )
+            _notificar_vendedor_cambios(
+                cotizacion,
+                pedido.id,
+                tipo="cotizacion_cambios_aceptados",
+                titulo="Cambios aceptados",
+                mensaje=f"Mesa de control aceptó los cambios de tu cotización #{cotizacion.id} y los aplicó al pedido.",
             )
         return Response(
             {
@@ -2496,6 +2521,19 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     cantidad=s.get("cantidad") or 1,
                     visible_en_factura=bool(s.get("visible_en_factura", True)),
                 )
+            pedido_id = (
+                Pedido.objects.filter(cotizacion=cotizacion, activo=True)
+                .order_by("-id")
+                .values_list("id", flat=True)
+                .first()
+            )
+            _notificar_vendedor_cambios(
+                cotizacion,
+                pedido_id,
+                tipo="cotizacion_cambios_rechazados",
+                titulo="Cambios rechazados",
+                mensaje=f"Mesa de control rechazó los cambios de tu cotización #{cotizacion.id}; se conservó la versión autorizada.",
+            )
         return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
 
 
@@ -3120,6 +3158,13 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 self, cotizacion
             )
             cotizacion.save(update_fields=["aprobado_snapshot", "updated_at"])
+            _notificar_vendedor_cambios(
+                cotizacion,
+                pedido.pk,
+                tipo="cotizacion_editada_mesa",
+                titulo="Cotización editada por mesa de control",
+                mensaje=f"Mesa de control editó el pedido y actualizó tu cotización #{cotizacion.id}.",
+            )
 
         pedido = (
             Pedido.objects.filter(pk=pedido.pk)

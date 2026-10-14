@@ -84,9 +84,18 @@ def crear_notificacion_usuario(
     """Notifica a un único usuario con un solo INSERT (sin resolver roles).
 
     Pensada para llamarse dentro de la transacción del endpoint: si éste hace
-    rollback, la notificación tampoco se guarda. Sin destinatario no hace nada.
+    rollback, la notificación tampoco se guarda. Sin destinatario o sin empresa
+    no hace nada.
     """
     if not usuario_id:
+        return None
+    if empresa is None:
+        # Notificacion.empresa es NOT NULL; un documento sin empresa (p. ej. de un
+        # superusuario sin empresa) no debe tumbar el flujo que lo notifica.
+        logger.warning(
+            "Notificacion omitida: sin empresa",
+            extra={"usuario_id": usuario_id, "modulo": modulo, "tipo": tipo},
+        )
         return None
     return Notificacion.objects.create(
         empresa=empresa,
