@@ -1616,3 +1616,106 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
 
         self.assertEqual(len(pocas), len(muchas))
 
+    # -- nombre: título -> cliente (si lo ve) -> contacto -> "Oportunidad #id" ----
+
+    def _dar_permiso_crm(self, user):
+        rol = self._rol_con(self.a["empresa"], f"crm-{user.username}", ["R-CRM"])
+        UsuarioRol.objects.create(usuario=user, rol=rol, empresa=self.a["empresa"])
+
+    def _fila(self, user, q, op):
+        grupo = next(g for g in self._buscar(user, q)["grupos"] if g["tipo"] == "oportunidad")
+        fila = next(f for f in grupo["resultados"] if f["id"] == op.pk)
+        return fila["titulo"], fila["subtitulo"]
+
+    def test_con_titulo_el_subtitulo_es_el_cliente_si_lo_ve_o_el_contacto(self):
+        self._dar_permiso_crm(self.vendedor_a)
+        cliente = self.a["cliente"]  # vendedor_a NO lo tiene asignado
+        del_admin = self._oportunidad(self.a, self.a["admin"], "Chamarras", cliente=cliente, nombre_contacto="Ana")
+        del_vendedor = self._oportunidad(self.a, self.vendedor_a, "Chamarras", cliente=cliente, nombre_contacto="Ana")
+
+        self.assertEqual(self._fila(self.a["admin"], "chamarras", del_admin), ("Chamarras", "Comercial Acme Norte"))
+        self.assertEqual(self._fila(self.vendedor_a, "chamarras", del_vendedor), ("Chamarras", "Ana"))
+        cliente.vendedores.add(self.vendedor_a)
+        self.assertEqual(self._fila(self.vendedor_a, "chamarras", del_vendedor), ("Chamarras", "Comercial Acme Norte"))
+
+    def test_sin_titulo_se_nombra_por_el_cliente_si_lo_ve_y_si_no_por_el_contacto(self):
+        self._dar_permiso_crm(self.vendedor_a)
+        cliente = self.a["cliente"]
+        op = self._oportunidad(self.a, self.vendedor_a, "", cliente=cliente, nombre_contacto="Luis Playero")
+
+        self.assertEqual(self._fila(self.a["admin"], "playero", op), ("Comercial Acme Norte", "Luis Playero"))
+        self.assertEqual(self._fila(self.superuser, "playero", op), ("Comercial Acme Norte", "Luis Playero"))
+        self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Luis Playero", ""))
+        cliente.vendedores.add(self.vendedor_a)
+        self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Comercial Acme Norte", "Luis Playero"))
+
+    def test_el_admin_ve_el_nombre_del_cliente_aunque_este_de_baja(self):
+        self._dar_permiso_crm(self.vendedor_a)
+        cliente = self.a["cliente"]
+        cliente.vendedores.add(self.vendedor_a)
+        op = self._oportunidad(self.a, self.vendedor_a, "", cliente=cliente, nombre_contacto="Luis Playero")
+        cliente.soft_delete()
+
+        self.assertEqual(self._fila(self.a["admin"], "playero", op), ("Comercial Acme Norte", "Luis Playero"))
+        self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Luis Playero", ""))
+
+    def test_sin_titulo_ni_cliente_se_nombra_por_el_contacto(self):
+        op = self._oportunidad(self.a, self.a["admin"], "", nombre_contacto="Luis Playero")
+
+        self.assertEqual(self._fila(self.a["admin"], "playero", op), ("Luis Playero", ""))
+
+    def test_sin_nada_se_nombra_por_el_id(self):
+        # No se encuentra por texto (no tiene título ni contacto): se prueba el armado de filas.
+        op = self._oportunidad(self.a, self.a["admin"], "")
+        entidad = next(e for e in REGISTRO if e.tipo == "oportunidad")
+
+        (fila,) = entidad.filas(self.a["admin"], list(entidad.alcance(self.a["admin"]).filter(pk=op.pk)))
+
+        self.assertEqual((fila["titulo"], fila["subtitulo"]), (f"Oportunidad #{op.pk}", ""))
+
+    def test_el_subtitulo_nunca_repite_el_titulo(self):
+        # Título igual al nombre del cliente: el subtítulo pasa al contacto, y si no hay, queda vacío.
+        con_contacto = self._oportunidad(
+            self.a, self.a["admin"], "Comercial Acme Norte", cliente=self.a["cliente"], nombre_contacto="Ana"
+        )
+        sin_contacto = self._oportunidad(self.a, self.a["admin"], "comercial acme norte ", cliente=self.a["cliente"])
+        # Sin título, con el contacto igual al nombre del cliente.
+        contacto_igual = self._oportunidad(
+            self.a, self.a["admin"], "", cliente=self.a["cliente"], nombre_contacto="Comercial Acme Norte"
+        )
+
+        self.assertEqual(self._fila(self.a["admin"], "comercial", con_contacto), ("Comercial Acme Norte", "Ana"))
+        self.assertEqual(self._fila(self.a["admin"], "comercial", sin_contacto), ("comercial acme norte", ""))
+        self.assertEqual(self._fila(self.a["admin"], "comercial", contacto_igual), ("Comercial Acme Norte", ""))
+
+    def test_el_nombre_del_cliente_no_crece_las_consultas(self):
+        self._dar_permiso_crm(self.vendedor_a)
+        self.a["cliente"].vendedores.add(self.vendedor_a)
+        for user in (self.a["admin"], self.vendedor_a):
+            self._oportunidad(self.a, user, "", cliente=self.a["cliente"], nombre_contacto="Contacto Uniformes")
+
+        def consultas(user):
+            with CaptureQueriesContext(connection) as ctx:
+                self._buscar(user, "uniformes", limit=50)
+            return len(ctx)
+
+        for user in (self.a["admin"], self.vendedor_a):
+            consultas(user)
+        pocas = {u.username: consultas(u) for u in (self.a["admin"], self.vendedor_a)}
+        for i in range(10):
+            otro = Cliente.objects.create(empresa=self.a["empresa"], nombre=f"Cliente {i}")
+            otro.vendedores.add(self.vendedor_a)
+            ajeno = Cliente.objects.create(empresa=self.a["empresa"], nombre=f"Ajeno {i}")
+            self._oportunidad(self.a, self.vendedor_a, "", cliente=otro, nombre_contacto=f"Contacto Uniformes {i}")
+            self._oportunidad(self.a, self.vendedor_a, "", cliente=ajeno, nombre_contacto=f"Otro Uniformes {i}")
+        muchas = {u.username: consultas(u) for u in (self.a["admin"], self.vendedor_a)}
+
+        self.assertEqual(pocas, muchas)
+        titulos = [
+            f["titulo"]
+            for g in self._buscar(self.vendedor_a, "uniformes", limit=50)["grupos"] if g["tipo"] == "oportunidad"
+            for f in g["resultados"]
+        ]
+        self.assertEqual(len(titulos), 21)
+        self.assertEqual(sum(t.startswith("Cliente ") or t == "Comercial Acme Norte" for t in titulos), 11)
+
