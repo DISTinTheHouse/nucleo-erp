@@ -1,4 +1,5 @@
 from django.contrib.postgres.indexes import OpClass
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.db.models.functions import Upper
 from nucleo.indices import GinIndexSoloPostgres, IndexSoloPostgres
@@ -25,16 +26,89 @@ class Prospecto(models.Model):
     def __str__(self):
         return str(self.id)
 
-class Oportunidad(models.Model):
-    prospecto = models.ForeignKey(Prospecto, on_delete=models.CASCADE, related_name="oportunidades")
+class Oportunidad(StatusLifecycleModel):
+    """Un posible negocio, antes de la cotización.
+
+    Cotizada y Ganada no se guardan: se calculan de las cotizaciones ligadas
+    (con cotización = Cotizada, alguna Autorizada = Ganada). Así el flujo
+    cotización -> mesa de control -> pedido no se toca.
+    """
+
+    class Etapa(models.TextChoices):
+        NUEVA = "Nueva", "Nueva"
+        CONTACTADA = "Contactada", "Contactada"
+        PERDIDA = "Perdida", "Perdida"
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="oportunidades")
+    vendedor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="oportunidades", null=True, blank=True)
+    cliente = models.ForeignKey(Cliente, on_delete=models.PROTECT, related_name="oportunidades", null=True, blank=True)
+    nombre_contacto = models.CharField(max_length=120, blank=True, default="")
+    telefono = models.CharField(max_length=30, blank=True, default="")
+    correo = models.EmailField(max_length=120, blank=True, default="")
+    titulo = models.CharField(max_length=150, default="")
+    monto_estimado = models.DecimalField(max_digits=14, decimal_places=2, default=0, validators=[MinValueValidator(0)])
+    etapa = models.CharField(max_length=20, choices=Etapa.choices, default=Etapa.NUEVA)
+    motivo_perdida = models.CharField(max_length=255, blank=True, default="")
+    proximo_contacto = models.DateField(null=True, blank=True)
+    notas = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True)
+    history = HistoricalRecords()
 
     class Meta:
         db_table = "oportunidades"
         verbose_name = "Oportunidad"
         verbose_name_plural = "Oportunidades"
-    
+        indexes = [
+            # Búsqueda del buscador global (``icontains``): ver ``terceros.Cliente``.
+            GinIndexSoloPostgres(
+                OpClass(Upper("titulo"), name="gin_trgm_ops"), name="oport_titulo_upper_trgm"
+            ),
+            GinIndexSoloPostgres(
+                OpClass(Upper("nombre_contacto"), name="gin_trgm_ops"), name="oport_contacto_upper_trgm"
+            ),
+            models.Index(fields=["empresa", "vendedor", "etapa"], name="ix_oport_emp_vend_etapa"),
+            models.Index(fields=["empresa", "vendedor", "proximo_contacto"], name="ix_oport_emp_vend_contacto"),
+        ]
+
     def __str__(self):
-        return str(self.id)
+        return self.titulo or str(self.id)
+
+class OportunidadSeguimiento(models.Model):
+    """Una nota, llamada, correo, visita o tarea de una oportunidad, con recordatorio opcional.
+
+    Las fechas las pone quien captura: el sistema no avisa solo, el frontend consulta los pendientes.
+    """
+
+    class Tipo(models.TextChoices):
+        NOTA = "Nota", "Nota"
+        LLAMADA = "Llamada", "Llamada"
+        CORREO = "Correo", "Correo"
+        VISITA = "Visita", "Visita"
+        TAREA = "Tarea", "Tarea"
+
+    oportunidad = models.ForeignKey(Oportunidad, on_delete=models.CASCADE, related_name="seguimientos")
+    vendedor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="seguimientos_oportunidad", null=True, blank=True)
+    tipo = models.CharField(max_length=20, choices=Tipo.choices, default=Tipo.NOTA)
+    detalle = models.TextField()
+    fecha_recordatorio = models.DateField(null=True, blank=True)
+    completado = models.BooleanField(default=False)
+    completado_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "oportunidad_seguimientos"
+        verbose_name = "Seguimiento de oportunidad"
+        verbose_name_plural = "Seguimientos de oportunidad"
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["oportunidad", "completado"], name="ix_seg_oport_completado"),
+            models.Index(fields=["completado", "fecha_recordatorio"], name="ix_seg_pendientes"),
+        ]
+
+    def __str__(self):
+        return f"{self.tipo} - {self.oportunidad_id}"
+
 
 class Cotizacion(models.Model):
     class FormaPago(models.TextChoices):
@@ -73,11 +147,14 @@ class Cotizacion(models.Model):
     vendedor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="cotizaciones", null=True, blank=True, db_index=True)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="cotizacion", null=True, blank=True)
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="cotizacion", null=True, blank=True)
-    oportunidad = models.ForeignKey(Oportunidad, on_delete=models.CASCADE, related_name="cotizacion", null=True)
+    oportunidad = models.ForeignKey(Oportunidad, on_delete=models.SET_NULL, related_name="cotizacion", null=True, blank=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name="cotizacion", null=True, blank=True)
     tipo_pedido = models.SmallIntegerField(default=1, choices=TIPO_PEDIDO_CHOICES)
     estatus = models.SmallIntegerField(default=1, choices=CHOICES_ESTATUS, db_index=True)
     autorizada_at = models.DateTimeField(null=True, blank=True)
+    # Último motivo con el que mesa de control rechazó la cotización; el
+    # historial completo vive en ``CotizacionComentario``.
+    motivo_rechazo = models.TextField(null=True, blank=True)
     cambios_solicitados_at = models.DateTimeField(null=True, blank=True)
     aprobado_snapshot = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True, db_index=True)
@@ -170,6 +247,29 @@ class Cotizacion(models.Model):
     def __str__(self):
         return str(self.id)
 
+class CotizacionComentario(models.Model):
+    """Historial de comentarios del ciclo rechazo -> corrección -> reenvío."""
+
+    class Tipo(models.TextChoices):
+        RECHAZO = "RECHAZO", "Rechazo de mesa de control"
+        REENVIO = "REENVIO", "Reenvío del vendedor a revisión"
+
+    cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="comentarios")
+    autor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    tipo = models.CharField(max_length=10, choices=Tipo.choices)
+    comentario = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "cotizacion_comentarios"
+        verbose_name = "Comentario de Cotización"
+        verbose_name_plural = "Comentarios de Cotización"
+        ordering = ["created_at", "id"]
+
+    def __str__(self):
+        return f"{self.tipo} #{self.cotizacion_id}"
+
+
 class CotizacionDetalle(models.Model):
     cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name="cotizaciondetalle")
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="cotizaciondetalle", null=True, blank=True)
@@ -212,6 +312,11 @@ class CotizacionDetalleTalla(models.Model):
     lleva_cambio_talla = models.BooleanField(default=False)
     cambio_talla_config = models.JSONField(null=True, blank=True)
     sku = models.CharField(max_length=150, null=True, blank=True)
+    # Distinto de ``sku`` de arriba (ese es snapshot del SKU de CATÁLOGO real
+    # al recomprar, vía ``variante``). Este es el SKU de producción de una
+    # MUESTRA (``catalogo.VarianteProductoProduccion``, fuera de catálogo) --
+    # ver el mismo campo en ``PedidoDetalleTalla`` para el porqué no es FK.
+    sku_muestra = models.CharField(max_length=50, null=True, blank=True)
     requiere_produccion = models.BooleanField(default=False)
     variante = models.ForeignKey(ProductoVariante, on_delete=models.SET_NULL, null=True, blank=True, related_name="cotizacion_tallas")
 
@@ -478,6 +583,13 @@ class PedidoDetalleTalla(models.Model):
     cambio_talla_config = models.JSONField(null=True, blank=True)
     requiere_produccion = models.BooleanField(default=False)
     variante = models.ForeignKey(ProductoVariante, on_delete=models.SET_NULL, null=True, blank=True, related_name="pedido_tallas")
+    # Copia de ``catalogo.VarianteProductoProduccion.sku`` (SKU de producción
+    # para una muestra, fuera del catálogo real) -- NO es FK a propósito: esa
+    # variante vive en otra tabla por diseño (no es ``ProductoVariante``/
+    # ``variante`` de arriba), y copiar el string es más simple/rápido que
+    # unir contra ella en cada lectura. La pone mesa de control con un clic
+    # (``PedidoViewSet.vincular_sku_muestra``); no toca ``producto_nombre_externo``.
+    sku_muestra = models.CharField(max_length=50, null=True, blank=True)
 
     class Meta:
         db_table = "pedido_detalle_talla"

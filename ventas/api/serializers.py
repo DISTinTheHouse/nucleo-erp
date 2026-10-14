@@ -2,6 +2,7 @@ from decimal import Decimal, InvalidOperation
 from rest_framework import serializers
 from ventas.models import (
     Cotizacion,
+    CotizacionComentario,
     CotizacionDetalle,
     CotizacionDetalleTalla,
     CotizacionServicioExtra,
@@ -9,6 +10,10 @@ from ventas.models import (
     PedidoDetalle,
     PedidoDetalleTalla,
     PedidoServicioExtra,
+)
+from ventas.services.sku_produccion_service import (
+    cargar_variantes_produccion,
+    skus_produccion_por_talla,
 )
 
 
@@ -42,8 +47,7 @@ def _moneda_de_la_empresa(moneda, empresa_id):
 
 
 def _oportunidad_de_la_empresa(oportunidad, empresa_id):
-    # ``Oportunidad`` no tiene empresa propia: cuelga de ``Prospecto.empresa``.
-    return empresa_id is not None and oportunidad.prospecto.empresa_id == empresa_id
+    return _de_la_empresa(oportunidad, empresa_id)
 
 
 def _error_pk_inexistente(serializer, campo, obj):
@@ -139,7 +143,13 @@ class CotizacionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Cotizacion
-        read_only_fields = ['empresa']
+        # El estatus y sus marcas de flujo solo cambian por las acciones
+        # (enviar-revision / autorizar / rechazar / ...), que exigen mesa de control
+        # y dejan motivo, pedido y notificaciones.
+        read_only_fields = [
+            'empresa', 'motivo_rechazo', 'estatus', 'autorizada_at',
+            'cambios_solicitados_at', 'aprobado_snapshot',
+        ]
         fields = '__all__'
         extra_kwargs = {
             'oc': {'required': False, 'allow_null': True},
@@ -152,6 +162,21 @@ class CotizacionSerializer(serializers.ModelSerializer):
             'metodo_pago': {'required': False, 'allow_null': True, 'allow_blank': True},
             'uso_cfdi': {'required': False, 'allow_null': True, 'allow_blank': True},
         }
+
+class CotizacionComentarioSerializer(serializers.ModelSerializer):
+    autor_nombre = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CotizacionComentario
+        fields = ["id", "tipo", "comentario", "autor", "autor_nombre", "created_at"]
+        read_only_fields = fields
+
+    def get_autor_nombre(self, obj):
+        autor = obj.autor
+        if not autor:
+            return None
+        return autor.get_full_name() or getattr(autor, "email", None)
+
 
 class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
     estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)
@@ -228,11 +253,13 @@ class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
             "piezas",
             "autorizada_at",
             "cambios_solicitados_at",
+            "motivo_rechazo",
             "created_at",
             "updated_at",
             "pedido_id",
             "pedido_folio",
         ]
+        read_only_fields = ["motivo_rechazo"]
 
 class CotizacionDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
@@ -258,11 +285,19 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
     def validate_direccion_envio_cliente(self, direccion):
         return _exigir_empresa_del_usuario(self, "direccion_envio_cliente", direccion)
 
+    def validate_categoria_producto(self, categoria):
+        categoria = _exigir_empresa_del_usuario(self, "categoria_producto", categoria)
+        # Una asignación nueva exige categoría activa; la que la línea ya tenía se tolera (#429).
+        actual = self.instance.categoria_producto_id if self.instance is not None else None
+        if categoria is not None and not categoria.activo and categoria.pk != actual:
+            raise serializers.ValidationError("La categoría de producto está inactiva.")
+        return categoria
+
     def validate(self, attrs):
         cotizacion = attrs.get("cotizacion") or self.instance.cotizacion
         _exigir_empresa_del_padre(
             self, attrs, "cotizacion", cotizacion.empresa_id,
-            ("producto", "direccion_envio_cliente"),
+            ("producto", "direccion_envio_cliente", "categoria_producto"),
         )
         return attrs
 
@@ -362,6 +397,13 @@ class PedidoDetalleTallaReadSerializer(serializers.ModelSerializer):
     ``variante_nombre``/``variante_sku`` quedan en ``null``. Como
     ``ProductoVariante.nombre`` puede venir vacío, ``variante_nombre`` cae al
     ``sku`` (que es único y siempre existe).
+
+    ``sku_produccion`` es el SKU que producción ya generó para esa talla de una
+    línea de MUESTRA (``catalogo.VarianteProductoProduccion``) — el que copiaría
+    ``vincular-sku-muestra`` a ``sku_muestra``. ``None`` si la línea no es
+    muestra o la talla aún no tiene SKU. Lo resuelve el renglón padre
+    (``PedidoDetalleReadSerializer.get_tallas``) y llega por contexto; usado
+    sin ese contexto lo calcula él mismo, una vez por renglón.
     """
 
     talla_nombre = serializers.CharField(source="talla.nombre", read_only=True)
@@ -369,10 +411,21 @@ class PedidoDetalleTallaReadSerializer(serializers.ModelSerializer):
     variante_sku = serializers.CharField(source="variante.sku", read_only=True, default=None)
     cantidad_asignada_picking = serializers.SerializerMethodField()
     cantidad_surtida_picking = serializers.SerializerMethodField()
+    sku_produccion = serializers.SerializerMethodField()
 
     class Meta:
         model = PedidoDetalleTalla
         fields = "__all__"
+
+    def get_sku_produccion(self, obj):
+        skus = self.context.get("_skus_produccion_por_talla")
+        if skus is None:
+            # Fuera de ``get_tallas``: mismo helper, cacheado por renglón.
+            cache = self.__dict__.setdefault("_skus_produccion_cache", {})
+            if obj.pedido_detalle_id not in cache:
+                cache[obj.pedido_detalle_id] = skus_produccion_por_talla(obj.pedido_detalle)
+            skus = cache[obj.pedido_detalle_id]
+        return skus.get(obj.talla_id)
 
     def get_variante_nombre(self, obj):
         if not obj.variante_id:
@@ -451,6 +504,9 @@ class PedidoDetalleReadSerializer(serializers.ModelSerializer):
         # ``_result_cache`` y re-ejecutaba la consulta UNA VEZ POR RENGLÓN
         # (N+1), tirando a la basura el prefetch del viewset.
         ctx_safe = dict(self.context or {})
+        # ``{talla_id: sku}`` de ESTE renglón, sobre las variantes de producción
+        # que ``_pedido_detalles_prefetch()`` ya trajo: 0 queries por talla.
+        ctx_safe["_skus_produccion_por_talla"] = skus_produccion_por_talla(obj)
         child = PedidoDetalleTallaReadSerializer(
             instance=obj.tallas.all(),
             many=True,
@@ -684,8 +740,15 @@ class PedidoSerializer(serializers.ModelSerializer):
         # que había aquí clonaba el queryset, descartaba ``_result_cache`` y
         # re-ejecutaba tanto la consulta de ``detalles`` como su prefetch anidado
         # de ``tallas``.
+        #
+        # ``list(...)`` reutiliza ese mismo caché cuando hay prefetch. Cuando no
+        # lo hay (respuesta de un PATCH o del alta), ``cargar_variantes_produccion``
+        # trae las variantes de ``sku_produccion`` de TODO el pedido en una
+        # consulta, en vez de una por renglón de muestra.
+        detalles = list(obj.detalles.all())
+        cargar_variantes_produccion(detalles)
         child = PedidoDetalleReadSerializer(
-            instance=obj.detalles.all(),
+            instance=detalles,
             many=True,
             context=ctx_safe,
         )
@@ -782,11 +845,23 @@ class PedidoDetalleTallaSerializer(serializers.ModelSerializer):
         _exigir_empresa_del_padre(
             self, attrs, "pedido_detalle", pedido_detalle.pedido.empresa_id, ("variante",)
         )
+        # La talla de una fila existente no se reasigna: arrastraría el
+        # ``sku_muestra`` de la talla anterior.
+        if (
+            self.instance is not None
+            and "talla" in attrs
+            and attrs["talla"].pk != self.instance.talla_id
+        ):
+            raise serializers.ValidationError(
+                {"talla": "No se puede cambiar la talla de un renglón existente."}
+            )
         return attrs
 
     class Meta:
         model = PedidoDetalleTalla
         fields = '__all__'
+        # Sólo ``vincular-sku-muestra`` (mesa de control) escribe el SKU de muestra.
+        read_only_fields = ('sku_muestra',)
 
 class PedidoDetalleWithTallasSerializer(serializers.ModelSerializer):
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)

@@ -1801,3 +1801,182 @@ class OrdenCompraKpisTests(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data["ocs_abiertas"]["disponible"])
+
+
+
+class OrdenCompraPedidosSeriesRendimientoTests(TestCase):
+    """OC: referencia opcional, varios pedidos, serie de folio por tipo de compra
+    (MP -> ORDEN_COMPRA/OC, PT -> ORDEN_COMPRA_PT/O) y alta/edición/aceptación sin N+1."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from ventas.models import Pedido
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Una exhibición")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.otra = Empresa.objects.create(codigo="globex", razon_social="Globex SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.proveedor = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="P1", moneda=cls.moneda, sat_regimen_fiscal=regimen,
+            sat_forma_pago=forma, sat_metodo_pago=metodo, codigo="P1", razon_social="P1",
+            telefono="8100000000", contacto_principal="Ana", rfc="XAXX010101000", email="p1@p.test",
+        )
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Tela")
+        cls.usuario = Usuario.objects.create(
+            username="compras", email="c@acme.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        from terceros.models import Cliente
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cliente_ajeno = Cliente.objects.create(empresa=cls.otra, nombre="Cliente X")
+        cls.pedidos = [
+            Pedido.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=cls.moneda, folio=f"PED-{i}")
+            for i in range(3)
+        ]
+        cls.pedido_ajeno = Pedido.objects.create(
+            empresa=cls.otra, sucursal=Sucursal.objects.create(empresa=cls.otra, codigo="GX", nombre="GX"),
+            cliente=cliente_ajeno, moneda=cls.moneda, folio="PED-X",
+        )
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="ORDEN_COMPRA", serie="OC", relleno_ceros=4,
+        )
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="ORDEN_COMPRA_PT", serie="O", relleno_ceros=4,
+        )
+
+    def setUp(self):
+        self.client_api = APIClient()
+        self.client_api.force_authenticate(user=self.usuario)
+
+    def _renglones(self, n=1):
+        return [{"producto": self.producto.pk, "cantidad": 2, "precio": "10.00"} for _ in range(n)]
+
+    def _crear(self, header=None, n=1):
+        body = {"orden_compra": {"proveedor": self.proveedor.pk, **(header or {})}, "detalle": self._renglones(n)}
+        return self.client_api.post(f"{ORDENES_URL}onboarding/", body, format="json")
+
+    def test_referencia_es_opcional(self):
+        resp = self._crear()
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertIsNone(resp.json()["orden_compra"]["referencia"])
+        self.assertEqual(self._crear({"referencia": ""}).status_code, 200)
+
+    def test_una_oc_surte_varios_pedidos(self):
+        ids = [p.pk for p in self.pedidos]
+        resp = self._crear({"pedidos": ids})
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        oc = resp.json()["orden_compra"]
+        self.assertEqual(oc["pedidos"], ids)
+        self.assertEqual([p["folio"] for p in oc["pedidos_vinculados"]], ["PED-0", "PED-1", "PED-2"])
+        self.assertEqual(oc["pedido"], ids[0])  # el FK legado refleja el primero
+        detalle = self.client_api.get(f"{ORDENES_URL}{oc['id']}/").json()
+        self.assertEqual(detalle["pedidos"], ids)
+        listado = self.client_api.get(ORDENES_URL).json()
+        filas = listado["results"] if isinstance(listado, dict) else listado
+        self.assertEqual(filas[0]["pedidos"], ids)
+
+    def test_pedido_unico_legado_se_refleja_en_pedidos(self):
+        oc = self._crear({"pedido": self.pedidos[1].pk}).json()["orden_compra"]
+
+        self.assertEqual(oc["pedido"], self.pedidos[1].pk)
+        self.assertEqual(oc["pedidos"], [self.pedidos[1].pk])
+
+    def test_editar_reemplaza_y_vacia_los_pedidos(self):
+        oc = self._crear({"pedidos": [self.pedidos[0].pk, self.pedidos[1].pk]}).json()["orden_compra"]
+        resp = self.client_api.put(
+            f"{ORDENES_URL}{oc['id']}/", {"pedidos": [self.pedidos[2].pk]}, format="json",
+        )
+        self.assertEqual(resp.json()["orden_compra"]["pedidos"], [self.pedidos[2].pk])
+        # Sin ``pedidos`` en el body no se tocan.
+        resp = self.client_api.put(f"{ORDENES_URL}{oc['id']}/", {"observaciones": "x"}, format="json")
+        self.assertEqual(resp.json()["orden_compra"]["pedidos"], [self.pedidos[2].pk])
+        resp = self.client_api.put(f"{ORDENES_URL}{oc['id']}/", {"pedidos": []}, format="json")
+        self.assertEqual(resp.json()["orden_compra"]["pedidos"], [])
+        self.assertIsNone(resp.json()["orden_compra"]["pedido"])
+
+    def test_pedido_de_otra_empresa_se_rechaza(self):
+        resp = self._crear({"pedidos": [self.pedidos[0].pk, self.pedido_ajeno.pk]})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("pedidos", resp.json())
+        self.assertEqual(OrdenCompra.objects.count(), 0)
+
+    def test_oc_legada_con_solo_fk_pedido_se_lista_en_pedidos(self):
+        oc = OrdenCompra.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, proveedor=self.proveedor, moneda=self.moneda,
+            usuario=self.usuario, fecha_oc="2026-10-01", pedido=self.pedidos[0],
+        )
+        self.assertEqual(self.client_api.get(f"{ORDENES_URL}{oc.pk}/").json()["pedidos"], [self.pedidos[0].pk])
+
+    def _aceptar(self, header=None):
+        oc = self._crear(header).json()["orden_compra"]
+        resp = self.client_api.post(f"{ORDENES_URL}{oc['id']}/aceptar/", {}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()["orden_compra"]
+
+    def test_folio_por_tipo_de_compra(self):
+        self.assertEqual(self._aceptar()["folio"], "OC-0001")
+        self.assertEqual(self._aceptar({"tipo_compra": "MP"})["folio"], "OC-0002")
+        pt = self._aceptar({"tipo_compra": "PT"})
+        self.assertEqual(pt["folio"], "O-0001")
+        self.assertEqual(pt["tipo_compra"], "PT")
+        self.assertEqual(self._aceptar({"tipo_compra": "PT"})["folio"], "O-0002")
+        self.assertEqual(self._aceptar()["folio"], "OC-0003")
+
+    def test_pt_sin_serie_usa_folio_de_respaldo_con_prefijo_o(self):
+        SerieFolio.objects.filter(tipo_documento="ORDEN_COMPRA_PT").delete()
+        folio = self._aceptar({"tipo_compra": "PT"})["folio"]
+
+        self.assertTrue(folio.startswith(f"O-{self.empresa.pk}-"), folio)
+
+    def test_tipo_compra_invalido_responde_400(self):
+        self.assertEqual(self._crear({"tipo_compra": "XX"}).status_code, 400)
+
+    def test_con_folio_no_se_puede_cambiar_el_tipo_de_compra(self):
+        oc = self._aceptar()
+        resp = self.client_api.put(f"{ORDENES_URL}{oc['id']}/", {"tipo_compra": "PT"}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("tipo_compra", resp.json())
+
+    def test_totales_y_renglones_se_guardan_igual(self):
+        resp = self._crear({"porcentaje_iva": "16.00"}, n=3)
+
+        oc = resp.json()["orden_compra"]
+        self.assertEqual(len(resp.json()["detalle"]), 3)
+        self.assertEqual((oc["subtotal"], oc["total_iva"], oc["gran_total"], oc["total_piezas"]),
+                         ("60.00", "9.60", "69.60", 6))
+        # Los renglones nuevos siguen dejando historial.
+        self.assertEqual(OrdenCompraDetalle.history.filter(orden_compra_id=oc["id"]).count(), 3)
+
+    def _queries(self, fn):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        with CaptureQueriesContext(connection) as ctx:
+            resp = fn()
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return len(ctx)
+
+    def test_queries_de_alta_y_aceptar_no_crecen_con_los_renglones(self):
+        ids = [p.pk for p in self.pedidos]
+        chico = self._queries(lambda: self._crear({"pedidos": ids}, n=2))
+        grande = self._queries(lambda: self._crear({"pedidos": ids}, n=20))
+        self.assertEqual(chico, grande)
+        # Antes de la optimización: ~47 con 10 renglones.
+        self.assertLessEqual(grande, 20)
+
+        oc_id = self._crear({}, n=20).json()["orden_compra"]["id"]
+        aceptar = self._queries(lambda: self.client_api.post(f"{ORDENES_URL}{oc_id}/aceptar/", {}, format="json"))
+        self.assertLessEqual(aceptar, 12)  # antes: 16
+
+    def test_queries_de_edicion_no_crecen_con_los_pedidos(self):
+        oc_id = self._crear({}, n=5).json()["orden_compra"]["id"]
+        body = {"orden_compra_id": oc_id, "orden_compra": {"pedidos": [self.pedidos[0].pk]}, "detalle": self._renglones(5)}
+        una = self._queries(lambda: self.client_api.post(f"{ORDENES_URL}onboarding/", body, format="json"))
+        body["orden_compra"]["pedidos"] = [p.pk for p in self.pedidos]
+        varias = self._queries(lambda: self.client_api.post(f"{ORDENES_URL}onboarding/", body, format="json"))
+        self.assertLessEqual(varias, una + 2)

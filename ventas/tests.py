@@ -6,7 +6,8 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
     python manage.py test ventas --settings=sqlite_settings
 """
 
-from datetime import datetime, timedelta
+import time
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -18,8 +19,9 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import Color, Producto, ProductoVariante, Talla
+from catalogo.models import CategoriaProducto, Color, Producto, ProductoVariante, Talla, VarianteProductoProduccion
 from inventarios.models import MovimientoInventario
+from notificaciones.models import Notificacion
 from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
 from inventarios.models import (
     Almacen,
@@ -48,11 +50,11 @@ from ventas.models import (
     CotizacionServicioExtra,
     CotizacionDetalleTalla,
     Oportunidad,
+    OportunidadSeguimiento,
     Pedido,
     PedidoDetalle,
     PedidoDetalleTalla,
     PedidoServicioExtra,
-    Prospecto,
 )
 from ventas.servicios_bordado import TipoServicioBordado, validar_tipos_servicio_array
 from ventas.utils.helpers import _save_cotizacion_detalle
@@ -1093,6 +1095,7 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertTrue(response.json()["editable"])
 
     def test_edicion_mesa_control_actualiza_pedido_y_cotizacion_sin_inventario(self):
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(vendedor=self.mesa_no_admin)
         response = self._client(self.admin_mesa).post(
             pedido_editar_mesa_control_url(self.pedido.pk),
             self._payload(),
@@ -1117,6 +1120,9 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(str(self.cotizacion.subtotal), "250.00")
         self.assertEqual(self.cotizacion.estatus, 3)
         self.assertIsNotNone(self.cotizacion.aprobado_snapshot)
+        n = Notificacion.objects.get(tipo="cotizacion_editada_mesa")
+        self.assertEqual(n.usuario_id, self.mesa_no_admin.pk)
+        self.assertEqual(n.data, {"cotizacion_id": self.cotizacion.pk, "pedido_id": self.pedido.pk})
 
         pedido_detalle = self.pedido.detalles.get()
         self.assertEqual(pedido_detalle.producto_id, self.producto_a.pk)
@@ -1169,6 +1175,29 @@ class PedidoMesaControlUpdateTests(TestCase):
 
         cot_talla = self.cotizacion.cotizaciondetalle.get().tallas.get()
         self.assertTrue(cot_talla.requiere_produccion)
+
+    def test_edicion_mesa_control_responde_sku_produccion_por_talla(self):
+        """``sku_produccion`` viaja también en el ``pedido`` de esta respuesta,
+        no sólo en el ``GET`` del detalle."""
+        detalle = self.pedido.detalles.get()
+        PedidoDetalle.objects.filter(pk=detalle.pk).update(
+            producto=None, producto_nombre_externo="Muestra especial cliente"
+        )
+        VarianteProductoProduccion.objects.create(
+            empresa=self.empresa, pedido_detalle=detalle, talla=self.talla_m,
+            nombre="Muestra especial cliente", sku=f"MP{detalle.pk}-NEG-M",
+        )
+        payload = self._payload()
+        payload["detalle"][0].pop("producto", None)
+        payload["detalle"][0]["producto_nombre_externo"] = "Muestra especial cliente"
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk),
+            payload,
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        talla = response.json()["pedido"]["detalles"][0]["tallas"][0]
+        self.assertEqual(talla["sku_produccion"], f"MP{detalle.pk}-NEG-M")
 
     def test_bloquea_edicion_si_hay_factura_emitida_ligada(self):
         factura = Factura.objects.create(
@@ -2002,6 +2031,358 @@ class PedidoProgramarTests(TestCase):
         )
 
 
+class PedidoVincularSkuMuestraTests(TestCase):
+    """``POST /pedidos/{id}/vincular-sku-muestra/``: copia el SKU de
+    producción de una muestra a la talla del pedido y, si hay cotización de
+    origen, a su talla espejo."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme2", razon_social="ACME2 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY2", nombre="Matriz")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(
+            empresa=cls.empresa, nombre="Cliente", razon_social="Cliente SA"
+        )
+        cls.talla = Talla.objects.create(nombre="M")
+        cls.color = Color.objects.create(nombre="Azul", codigo="AZL", codigo_hex="#00F")
+        cls.mesa = Usuario.objects.create(
+            username="mesa2", email="mesa2@acme2.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(
+            username="vend2", email="vend2@acme2.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+
+        cls.cotizacion = Cotizacion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente,
+            moneda=cls.moneda, vendedor=cls.vendedor,
+        )
+        cot_det = CotizacionDetalle.objects.create(
+            cotizacion=cls.cotizacion, producto_nombre_externo="Gorra muestra", color=cls.color,
+        )
+        cls.cot_talla = CotizacionDetalleTalla.objects.create(
+            cotizacion_detalle=cot_det, talla=cls.talla, cantidad=5,
+        )
+
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente,
+            cotizacion=cls.cotizacion, moneda=cls.moneda, folio="P-900001",
+            persona_pagos="Pagos", correo_facturas="pagos@acme2.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        ped_det = PedidoDetalle.objects.create(
+            pedido=cls.pedido, producto_nombre_externo="Gorra muestra", color=cls.color,
+        )
+        cls.ped_talla = PedidoDetalleTalla.objects.create(
+            pedido_detalle=ped_det, talla=cls.talla, cantidad=5,
+        )
+
+        cls.variante = VarianteProductoProduccion.objects.create(
+            empresa=cls.empresa, pedido_detalle=ped_det, talla=cls.talla,
+            color=cls.color, nombre="Gorra muestra", sku="MP1-AZL-M",
+        )
+
+    def _url(self, pedido=None):
+        return f"{PEDIDOS_URL}{(pedido or self.pedido).pk}/vincular-sku-muestra/"
+
+    def _post(self, user, talla_id=None):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.post(
+            self._url(), {"pedido_detalle_talla_id": talla_id or self.ped_talla.pk}, format="json"
+        )
+
+    def test_copia_sku_al_pedido_y_a_la_cotizacion_sin_tocar_muestra(self):
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 200, resp.json())
+        self.assertEqual(resp.json()["sku_muestra"], "MP1-AZL-M")
+
+        self.ped_talla.refresh_from_db()
+        self.assertEqual(self.ped_talla.sku_muestra, "MP1-AZL-M")
+        self.assertEqual(self.ped_talla.pedido_detalle.producto_nombre_externo, "Gorra muestra")
+
+        self.cot_talla.refresh_from_db()
+        self.assertEqual(self.cot_talla.sku_muestra, "MP1-AZL-M")
+
+    def test_sin_variante_generada_responde_400(self):
+        PedidoDetalleTalla.objects.filter(pk=self.ped_talla.pk).update(sku_muestra=None)
+        self.variante.delete()
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 400, resp.json())
+
+    def test_requiere_mesa_control(self):
+        resp = self._post(self.vendedor)
+        self.assertEqual(resp.status_code, 400, resp.json())
+        self.assertIn("permiso", resp.json())
+
+    def test_talla_de_otro_pedido_responde_400(self):
+        otro_pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, folio="P-900002",
+            persona_pagos="Pagos", correo_facturas="pagos@acme2.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        resp = self.client_post_otro(otro_pedido)
+        self.assertEqual(resp.status_code, 400, resp.json())
+
+    def test_cotizacion_sin_color_tambien_recibe_el_sku(self):
+        # #436: la muestra se cotiza sin color; el color lo asigna producción en el pedido.
+        CotizacionDetalle.objects.filter(pk=self.cot_talla.cotizacion_detalle_id).update(color=None)
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 200, resp.json())
+        self.assertTrue(resp.json()["cotizacion_actualizada"])
+        self.cot_talla.refresh_from_db()
+        self.assertEqual(self.cot_talla.sku_muestra, "MP1-AZL-M")
+
+    def test_avisa_si_no_hubo_linea_en_la_cotizacion(self):
+        CotizacionDetalleTalla.objects.filter(pk=self.cot_talla.pk).delete()
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 200, resp.json())
+        self.assertFalse(resp.json()["cotizacion_actualizada"])
+
+    def test_id_no_numerico_responde_400(self):
+        for valor in ("abc", [1, 2]):
+            resp = self._post(self.mesa, talla_id=valor)
+            self.assertEqual(resp.status_code, 400, resp.json())
+
+    def test_pedido_cancelado_responde_400(self):
+        Pedido.objects.filter(pk=self.pedido.pk).update(estatus=Pedido.ESTATUS_CANCELADO)
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 400, resp.json())
+        self.ped_talla.refresh_from_db()
+        self.assertIsNone(self.ped_talla.sku_muestra)
+
+    def test_linea_que_ya_no_es_muestra_responde_400(self):
+        PedidoDetalle.objects.filter(pk=self.ped_talla.pedido_detalle_id).update(producto_nombre_externo=None)
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 400, resp.json())
+
+    def client_post_otro(self, otro_pedido):
+        client = APIClient()
+        client.force_authenticate(user=self.mesa)
+        return client.post(
+            self._url(otro_pedido), {"pedido_detalle_talla_id": self.ped_talla.pk}, format="json"
+        )
+
+
+class PedidoDetalleSkuProduccionTests(TestCase):
+    """``sku_produccion`` de cada talla en ``GET /pedidos/{id}/``.
+
+    Es el ``sku`` de la ``VarianteProductoProduccion`` activa de esa
+    (línea, talla) -- el mismo que copiaría ``vincular-sku-muestra`` -- y
+    ``None`` si la línea no es muestra, no hay variante activa o no tiene SKU.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme3", razon_social="ACME3 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY3", nombre="Matriz")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(
+            empresa=cls.empresa, nombre="Cliente", razon_social="Cliente SA"
+        )
+        cls.talla_m = Talla.objects.create(nombre="M")
+        cls.talla_l = Talla.objects.create(nombre="L")
+        cls.color = Color.objects.create(nombre="Azul", codigo="AZL", codigo_hex="#00F")
+        cls.admin = Usuario.objects.create(
+            username="mesa3", email="mesa3@acme3.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente,
+            moneda=cls.moneda, folio="P-900101",
+            persona_pagos="Pagos", correo_facturas="pagos@acme3.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="PEDIDO", serie="P"
+        )
+
+    def _linea(self, nombre="Gorra muestra", tallas=None):
+        detalle = PedidoDetalle.objects.create(
+            pedido=self.pedido, producto_nombre_externo=nombre, color=self.color
+        )
+        for talla in tallas or (self.talla_m,):
+            PedidoDetalleTalla.objects.create(pedido_detalle=detalle, talla=talla, cantidad=5)
+        return detalle
+
+    def _variante(self, detalle, talla=None, **campos):
+        talla = talla or self.talla_m
+        campos.setdefault("sku", f"MP{detalle.pk}-AZL-{talla.nombre}")
+        return VarianteProductoProduccion.objects.create(
+            empresa=self.empresa, pedido_detalle=detalle, talla=talla,
+            color=self.color, nombre="Gorra muestra", **campos,
+        )
+
+    def _get(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        resp = client.get(f"{PEDIDOS_URL}{self.pedido.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        return resp
+
+    def _skus(self, detalle):
+        """``{talla_nombre: sku_produccion}`` de la línea en el detalle del pedido."""
+        linea = next(d for d in self._get().json()["detalles"] if d["id"] == detalle.pk)
+        for talla in linea["tallas"]:
+            self.assertIn("sku_produccion", talla)
+        return {talla["talla_nombre"]: talla["sku_produccion"] for talla in linea["tallas"]}
+
+    def test_muestra_con_variante_activa(self):
+        detalle = self._linea()
+        variante = self._variante(detalle)
+        self.assertEqual(self._skus(detalle), {"M": variante.sku})
+
+    def test_talla_sin_variante_es_none(self):
+        detalle = self._linea(tallas=(self.talla_m, self.talla_l))
+        variante = self._variante(detalle, self.talla_m)
+        self.assertEqual(self._skus(detalle), {"M": variante.sku, "L": None})
+
+    def test_variante_inactiva_es_none(self):
+        detalle = self._linea()
+        self._variante(detalle, activo=False)
+        self.assertEqual(self._skus(detalle), {"M": None})
+
+    def test_variante_sin_sku_es_none(self):
+        for sku in ("", None):
+            with self.subTest(sku=sku):
+                detalle = self._linea()
+                self._variante(detalle, sku=sku)
+                self.assertEqual(self._skus(detalle), {"M": None})
+
+    def test_linea_que_no_es_muestra_es_none_aunque_tenga_variante(self):
+        for nombre in (None, ""):
+            with self.subTest(nombre=nombre):
+                detalle = self._linea(nombre=nombre)
+                self._variante(detalle)
+                self.assertEqual(self._skus(detalle), {"M": None})
+
+    def test_nombre_externo_de_solo_espacios_cuenta_como_muestra(self):
+        """Mismo criterio que producción (``_detalles_especiales_qs``): esa
+        línea aparece en ``pedidos-especiales`` y puede recibir SKU."""
+        detalle = self._linea(nombre="   ")
+        variante = self._variante(detalle)
+        self.assertEqual(self._skus(detalle), {"M": variante.sku})
+
+    def test_queries_constantes_sin_importar_lineas_ni_tallas(self):
+        self._variante(self._linea())
+        with CaptureQueriesContext(connection) as chico:
+            self._get()
+        for _ in range(4):
+            detalle = self._linea(tallas=(self.talla_m, self.talla_l))
+            self._variante(detalle, self.talla_m)
+            self._variante(detalle, self.talla_l)
+        with CaptureQueriesContext(connection) as grande:
+            self._get()
+        self.assertEqual(len(chico), len(grande))
+
+    # --- respuestas que no pasan por el prefetch del viewset ------------------
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        return client
+
+    def _patch(self):
+        """PATCH del pedido -> (respuesta, nº de consultas sobre las variantes)."""
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self._client().patch(
+                f"{PEDIDOS_URL}{self.pedido.pk}/", {"observaciones": "x"}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp, sum("variantes_producto_produccion" in q["sql"] for q in ctx)
+
+    def test_patch_responde_sku_sin_consultas_por_linea(self):
+        """DRF vacía el prefetch tras guardar: el PATCH responde con una sola
+        consulta de variantes para todo el pedido, no una por línea."""
+        self._variante(self._linea())
+        _, chico = self._patch()
+        esperado = {}
+        for _ in range(4):
+            detalle = self._linea(tallas=(self.talla_m, self.talla_l))
+            variante = self._variante(detalle, self.talla_m)
+            esperado[detalle.pk] = {"M": variante.sku, "L": None}
+        resp, grande = self._patch()
+        self.assertEqual(chico, grande)
+        lineas = {d["id"]: d for d in resp.json()["detalles"]}
+        for detalle_id, skus in esperado.items():
+            self.assertEqual(
+                {t["talla_nombre"]: t["sku_produccion"] for t in lineas[detalle_id]["tallas"]},
+                skus,
+            )
+
+    def test_alta_de_pedido_responde_sin_renglones(self):
+        """El alta no escribe renglones (``detalles`` es de sólo lectura): no
+        hay talla que lleve el campo, y tampoco debe tronar sin prefetch."""
+        resp = self._client().post(
+            PEDIDOS_URL,
+            {
+                "sucursal": self.sucursal.pk, "cliente": self.cliente.pk, "moneda": self.moneda.pk,
+                "persona_pagos": "Pagos", "correo_facturas": "pagos@acme3.test",
+                "telefono_pagos": "8100000000", "forma_pago": "03", "metodo_pago": "PUE",
+                "uso_cfdi": "G03",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()["detalles"], [])
+
+    def test_autorizar_cotizacion_responde_sku_produccion_none(self):
+        """El pedido recién creado aún no pasó por producción: el campo viaja en ``null``."""
+        cotizacion = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.admin, sucursal=self.sucursal,
+            cliente=self.cliente, moneda=self.moneda, estatus=2,
+            persona_pagos="Pagos", correo_facturas="pagos@acme3.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        cot_det = CotizacionDetalle.objects.create(
+            cotizacion=cotizacion, producto_nombre_externo="Gorra muestra", color=self.color,
+        )
+        CotizacionDetalleTalla.objects.create(cotizacion_detalle=cot_det, talla=self.talla_m, cantidad=5)
+        resp = self._client().post(f"{COTIZACIONES_URL}{cotizacion.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        tallas = resp.json()["pedido"]["detalles"][0]["tallas"]
+        self.assertEqual([t["sku_produccion"] for t in tallas], [None])
+
+    def test_sin_prefetch_una_consulta_para_todo_el_pedido(self):
+        from ventas.services.sku_produccion_service import (
+            cargar_variantes_produccion,
+            skus_produccion_por_talla,
+        )
+
+        esperado = {}
+        for _ in range(3):
+            detalle = self._linea(tallas=(self.talla_m, self.talla_l))
+            esperado[detalle.pk] = {self.talla_m.pk: self._variante(detalle, self.talla_m).sku}
+        detalles = list(PedidoDetalle.objects.filter(pedido=self.pedido))
+        with self.assertNumQueries(1):
+            cargar_variantes_produccion(detalles)
+        with self.assertNumQueries(0):
+            self.assertEqual({d.pk: skus_produccion_por_talla(d) for d in detalles}, esperado)
+
+    def test_sin_prefetch_una_linea_suelta_hace_una_consulta(self):
+        from ventas.services.sku_produccion_service import skus_produccion_por_talla
+
+        detalle = self._linea(tallas=(self.talla_m, self.talla_l))
+        variante = self._variante(detalle, self.talla_l)
+        detalle = PedidoDetalle.objects.get(pk=detalle.pk)
+        with self.assertNumQueries(1):
+            self.assertEqual(skus_produccion_por_talla(detalle), {self.talla_l.pk: variante.sku})
+
+    def test_serializer_de_talla_sin_contexto_resuelve_el_sku(self):
+        """Usado fuera de ``get_tallas`` (sin la llave de contexto) no devuelve
+        un ``None`` indistinguible de "no hay SKU"."""
+        from ventas.api.serializers import PedidoDetalleTallaReadSerializer
+
+        detalle = self._linea(tallas=(self.talla_m, self.talla_l))
+        variante = self._variante(detalle, self.talla_m)
+        tallas = PedidoDetalleTalla.objects.filter(pedido_detalle=detalle).order_by("id")
+        data = PedidoDetalleTallaReadSerializer(tallas, many=True).data
+        self.assertEqual([t["sku_produccion"] for t in data], [variante.sku, None])
+
+
 class PedidoDestinosAplicablesTests(TestCase):
     """``destinos_aplicables`` (detalle) + su validación en ``programar``.
 
@@ -2281,6 +2662,9 @@ class ServicioExtraCantidadCopiaTests(TestCase):
 
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/aceptar-cambios/")
         self.assertEqual(resp.status_code, 200, resp.content)
+        n = Notificacion.objects.get(tipo="cotizacion_cambios_aceptados")
+        self.assertEqual(n.usuario_id, self.cotizacion.vendedor_id)
+        self.assertEqual(n.data, {"cotizacion_id": self.cotizacion.pk, "pedido_id": pedido.pk})
         esperadas = [(n, 7 if n == "Bordado" else c) for n, c in self._esperadas()]
         self.assertEqual(self._cantidades(PedidoServicioExtra.objects.filter(pedido=pedido)), esperadas)
 
@@ -2327,6 +2711,10 @@ class RechazarCambiosCotizacionTests(TestCase):
         )
         cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
         cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        # ``autorizar`` exige una Serie/Folio activa de PEDIDO en la sucursal.
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="PEDIDO", serie="P"
+        )
 
     def setUp(self):
         self.client = APIClient()
@@ -2379,6 +2767,8 @@ class RechazarCambiosCotizacionTests(TestCase):
 
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/rechazar-cambios/")
         self.assertEqual(resp.status_code, 200, resp.content)  # antes: 500
+        n = Notificacion.objects.get(tipo="cotizacion_cambios_rechazados")
+        self.assertEqual(n.usuario_id, self.cotizacion.vendedor_id)
 
         self.cotizacion.refresh_from_db()
         self.assertEqual(self.cotizacion.estatus, 3)
@@ -2404,6 +2794,202 @@ class RechazarCambiosCotizacionTests(TestCase):
         muestra = CotizacionDetalle.objects.get(cotizacion=self.cotizacion, producto__isnull=True)
         self.assertNotEqual(muestra.pk, self.muestra.pk)
         self.assertEqual(muestra.producto_nombre_externo, "Playera muestra cliente")
+
+    def test_rechazar_cambios_restaura_categoria_producto(self):
+        cat = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Chamarras")
+        CotizacionDetalle.objects.filter(pk=self.muestra.pk).update(categoria_producto=cat)
+        self._autorizar()
+        CotizacionDetalle.objects.filter(cotizacion=self.cotizacion).update(categoria_producto=None)
+        self._forzar_cambios_solicitados()
+
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/rechazar-cambios/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+        muestra = CotizacionDetalle.objects.get(cotizacion=self.cotizacion, producto__isnull=True)
+        self.assertEqual(muestra.categoria_producto_id, cat.pk)
+
+    def test_rechazar_cambios_con_categoria_desactivada_no_truena(self):
+        cat = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Vieja")
+        CotizacionDetalle.objects.filter(pk=self.muestra.pk).update(categoria_producto=cat)
+        self._autorizar()
+        self._forzar_cambios_solicitados()
+        CategoriaProducto.objects.filter(pk=cat.pk).update(activo=False)
+
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/rechazar-cambios/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        muestra = CotizacionDetalle.objects.get(cotizacion=self.cotizacion, producto__isnull=True)
+        self.assertIsNone(muestra.categoria_producto_id)
+
+    def test_guardar_lineas_sin_categoria_en_la_fila_conserva_la_previa(self):
+        # #427: editar-mesa-control parte del pedido, que no trae categoría.
+        cat = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Chamarras")
+        CotizacionDetalle.objects.filter(pk=self.muestra.pk).update(categoria_producto=cat)
+        fila = {"producto_nombre_externo": "Playera muestra cliente", "precio_unitario": "0.00", "tallas": []}
+
+        _save_cotizacion_detalle(self.cotizacion, [dict(fila)], self.empresa, self.admin)
+        nueva = CotizacionDetalle.objects.get(cotizacion=self.cotizacion)
+        self.assertEqual(nueva.categoria_producto_id, cat.pk)
+
+        # Con la clave explícita (aunque sea nula) manda lo que llega.
+        _save_cotizacion_detalle(self.cotizacion, [{**fila, "categoria_producto": None}], self.empresa, self.admin)
+        self.assertIsNone(CotizacionDetalle.objects.get(cotizacion=self.cotizacion).categoria_producto_id)
+
+
+class PermisoCreditoClienteTests(TestCase):
+    """#462: dias_credito y limite_credito exigen ``E-CRM-CLIENTES-CREDITO``."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        cls.empresa = Empresa.objects.create(codigo="acme-pc", razon_social="acme-pc SA")
+        cls.vendedor = Usuario.objects.create(username="v@pc.test", email="v@pc.test", empresa=cls.empresa)
+        cls.finanzas = Usuario.objects.create(username="f@pc.test", email="f@pc.test", empresa=cls.empresa)
+        permiso = Permiso.objects.create(clave="E-CRM-CLIENTES-CREDITO", nombre="Crédito de clientes")
+        UsuarioPermiso.objects.create(usuario=cls.finanzas, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT)
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.cliente.vendedores.add(cls.vendedor, cls.finanzas)
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _patch(self, user, **datos):
+        return self._client(user).patch(f"/api/v1/terceros/clientes/{self.cliente.pk}/", datos, format="json")
+
+    def test_sin_permiso_no_puede_cambiar_el_credito(self):
+        resp = self._patch(self.vendedor, dias_credito=30)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("dias_credito", resp.json())
+        self.assertEqual(self._patch(self.vendedor, limite_credito="100.00").status_code, 400)
+
+    def test_sin_permiso_puede_editar_lo_demas_y_reenviar_el_credito_igual(self):
+        resp = self._patch(self.vendedor, nombre="Otro", dias_credito=0, limite_credito="0.00")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_sin_permiso_no_puede_dar_de_alta_con_credito(self):
+        resp = self._client(self.vendedor).post(
+            "/api/v1/terceros/clientes/", {"nombre": "Nuevo", "dias_credito": 90}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_con_permiso_puede_cambiarlo(self):
+        resp = self._patch(self.finanzas, dias_credito=30, limite_credito="1000.00")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.cliente.refresh_from_db()
+        self.assertEqual(self.cliente.dias_credito, 30)
+
+
+class RangosCreditoYMontoTests(TestCase):
+    """#461: ``dias_credito`` 0-365, ``limite_credito`` y ``monto_estimado`` no negativos."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-rg", razon_social="acme-rg SA")
+        cls.admin = Usuario.objects.create(
+            username="a@acme-rg.test", email="a@acme-rg.test", empresa=cls.empresa, is_admin_empresa=True
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def _patch(self, **datos):
+        return self.client.patch(f"/api/v1/terceros/clientes/{self.cliente.pk}/", datos, format="json")
+
+    def test_dias_credito_fuera_de_0_365_es_400(self):
+        self.assertEqual(self._patch(dias_credito=366).status_code, 400)
+        self.assertEqual(self._patch(dias_credito=5000000).status_code, 400)
+        self.assertEqual(self._patch(dias_credito=365).status_code, 200)
+
+    def test_limite_credito_negativo_es_400(self):
+        self.assertEqual(self._patch(limite_credito="-1.00").status_code, 400)
+        self.assertEqual(self._patch(limite_credito="0.00").status_code, 200)
+
+    def test_monto_estimado_negativo_es_400(self):
+        resp = self.client.post("/api/v1/ventas/oportunidades/", {"titulo": "N", "monto_estimado": "-5.00"}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        resp = self.client.post("/api/v1/ventas/oportunidades/", {"titulo": "N", "monto_estimado": "5.00"}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+
+class CategoriaProductoCotizacionTests(TestCase):
+    """#426 / #429: ``categoria_producto`` de la línea, contra la empresa y su estado."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-cp", razon_social="acme-cp SA")
+        cls.otra = Empresa.objects.create(codigo="otra-cp", razon_social="otra-cp SA")
+        cls.admin = Usuario.objects.create(
+            username="a@acme-cp.test", email="a@acme-cp.test", empresa=cls.empresa, is_admin_empresa=True
+        )
+        cls.root = Usuario.objects.create(
+            username="root@cp.test", email="root@cp.test", empresa=cls.empresa, is_superuser=True
+        )
+        sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ACP", nombre="acme-cp")
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.cotizacion = Cotizacion.objects.create(
+            empresa=cls.empresa, vendedor=cls.admin, sucursal=sucursal, cliente=cliente, estatus=1,
+        )
+        cls.propia = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Propia", codigo="PRO")
+        cls.ajena = CategoriaProducto.objects.create(empresa=cls.otra, nombre="Ajena", codigo="AJE")
+
+    def _fila(self, categoria):
+        return {
+            "producto_nombre_externo": "Muestra", "precio_unitario": "10.00",
+            "categoria_producto": categoria.pk, "tallas": [],
+        }
+
+    def test_helper_rechaza_categoria_de_otra_empresa_tambien_a_superusuario(self):
+        for user in (self.admin, self.root):
+            with self.assertRaises(DRFValidationError):
+                _save_cotizacion_detalle(self.cotizacion, [self._fila(self.ajena)], self.empresa, user)
+
+    def test_cotizacion_detalle_rechaza_categoria_ajena(self):
+        det = CotizacionDetalle.objects.create(
+            cotizacion=self.cotizacion, producto_nombre_externo="Muestra",
+            precio_unitario="10.00", subtotal_linea="10.00",
+        )
+        for user in (self.admin, self.root):
+            client = APIClient()
+            client.force_authenticate(user=user)
+            resp = client.patch(
+                f"/api/v1/ventas/cotizacion-detalle/{det.pk}/", {"categoria_producto": self.ajena.pk}, format="json"
+            )
+            self.assertEqual(resp.status_code, 400, resp.content)
+        det.refresh_from_db()
+        self.assertIsNone(det.categoria_producto_id)
+    def test_categoria_desactivada_ya_guardada_no_impide_volver_a_guardar(self):
+        CotizacionDetalle.objects.create(
+            cotizacion=self.cotizacion, producto_nombre_externo="Muestra", categoria_producto=self.propia,
+            precio_unitario="10.00", subtotal_linea="10.00",
+        )
+        CategoriaProducto.objects.filter(pk=self.propia.pk).update(activo=False)
+
+        _save_cotizacion_detalle(self.cotizacion, [self._fila(self.propia)], self.empresa, self.admin)
+        self.assertEqual(
+            CotizacionDetalle.objects.get(cotizacion=self.cotizacion).categoria_producto_id, self.propia.pk
+        )
+
+    def test_categoria_desactivada_nueva_se_rechaza(self):
+        CategoriaProducto.objects.filter(pk=self.propia.pk).update(activo=False)
+        with self.assertRaises(DRFValidationError):
+            _save_cotizacion_detalle(self.cotizacion, [self._fila(self.propia)], self.empresa, self.admin)
+
+    def test_cotizacion_detalle_acepta_la_inactiva_que_ya_tenia(self):
+        det = CotizacionDetalle.objects.create(
+            cotizacion=self.cotizacion, producto_nombre_externo="Muestra", categoria_producto=self.propia,
+            precio_unitario="10.00", subtotal_linea="10.00",
+        )
+        CategoriaProducto.objects.filter(pk=self.propia.pk).update(activo=False)
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        url = f"/api/v1/ventas/cotizacion-detalle/{det.pk}/"
+        self.assertEqual(client.patch(url, {"categoria_producto": self.propia.pk}, format="json").status_code, 200)
+        otra = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Off", codigo="OFF", activo=False)
+        self.assertEqual(client.patch(url, {"categoria_producto": otra.pk}, format="json").status_code, 400)
 
 
 # Pk que no existe en ninguna tabla del test: el rechazo de una FK de OTRA empresa
@@ -2461,9 +3047,7 @@ class FkCrossTenantEscrituraTests(TestCase):
         moneda_privada = Moneda.objects.create(
             empresa=empresa, codigo_iso="USD", nombre=f"Dolar {codigo}"
         )
-        oportunidad = Oportunidad.objects.create(
-            prospecto=Prospecto.objects.create(empresa=empresa)
-        )
+        oportunidad = Oportunidad.objects.create(empresa=empresa, titulo="Oportunidad")
         producto = Producto.objects.create(empresa=empresa, nombre=f"Prod {codigo}")
         variante = ProductoVariante.objects.create(
             producto=producto,
@@ -3793,3 +4377,1263 @@ class DescuentoVentaAlmacenesConSalidaTests(TestCase):
 
         self.assertIn("salida permitida", str(ctx.exception.detail["inventario"]))
         self.assertEqual(self._cantidades(), [Decimal("100"), Decimal("5"), Decimal("50")])
+
+
+OPORTUNIDADES_URL = "/api/v1/ventas/oportunidades/"
+
+
+class OportunidadesBase(TestCase):
+    """Empresa, usuarios y ayudas comunes de las pruebas del CRM."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="Acme SA")
+        cls.otra = Empresa.objects.create(codigo="globex", razon_social="Globex SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.ana = Usuario.objects.create(
+            username="ana", email="ana@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal
+        )
+        cls.beto = Usuario.objects.create(username="beto", email="beto@acme.test", empresa=cls.empresa)
+        cls.jefe = Usuario.objects.create(
+            username="jefe", email="jefe@acme.test", empresa=cls.empresa, is_admin_empresa=True
+        )
+        cls.ajeno = Usuario.objects.create(username="ajeno", email="x@globex.test", empresa=cls.otra)
+        cls.sin_empresa = Usuario.objects.create(username="nadie", email="n@x.test")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente Acme")
+        cls.cliente_ajeno = Cliente.objects.create(empresa=cls.otra, nombre="Cliente Globex")
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _op(self, vendedor=None, empresa=None, **extra):
+        return Oportunidad.objects.create(
+            empresa=empresa or self.empresa, vendedor=vendedor or self.ana, titulo="Uniformes", **extra
+        )
+
+
+class OportunidadesTests(OportunidadesBase):
+    """CRM mínimo: oportunidades antes de la cotización."""
+
+    # -- scope ---------------------------------------------------------------
+
+    def test_el_vendedor_ve_solo_las_suyas_y_el_admin_todas(self):
+        mia = self._op(self.ana)
+        ajena = self._op(self.beto)
+
+        ids = lambda user: {o["id"] for o in self._client(user).get(OPORTUNIDADES_URL).data}
+        self.assertEqual(ids(self.ana), {mia.pk})
+        self.assertEqual(ids(self.jefe), {mia.pk, ajena.pk})
+        self.assertEqual(ids(self.ajeno), set())
+        self.assertEqual(ids(self.sin_empresa), set())
+
+    def test_detalle_de_otro_vendedor_o_empresa_responde_404(self):
+        de_beto = self._op(self.beto)
+        de_otra_empresa = self._op(self.ajeno, empresa=self.otra)
+
+        self.assertEqual(self._client(self.ana).get(f"{OPORTUNIDADES_URL}{de_beto.pk}/").status_code, 404)
+        self.assertEqual(self._client(self.jefe).get(f"{OPORTUNIDADES_URL}{de_otra_empresa.pk}/").status_code, 404)
+
+    # -- alta y edición ------------------------------------------------------
+
+    def test_alta_fija_empresa_y_vendedor_del_servidor(self):
+        resp = self._client(self.ana).post(
+            OPORTUNIDADES_URL,
+            {"titulo": "Playeras", "nombre_contacto": "Luis", "monto_estimado": "5000.00",
+             "vendedor": self.beto.pk, "empresa": self.otra.pk},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        op = Oportunidad.objects.get(pk=resp.data["id"])
+        self.assertEqual((op.empresa_id, op.vendedor_id), (self.empresa.pk, self.ana.pk))
+        self.assertEqual(resp.data["estado"], "Nueva")
+
+    def test_rechaza_un_cliente_de_otra_empresa(self):
+        resp = self._client(self.ana).post(
+            OPORTUNIDADES_URL, {"titulo": "X", "cliente": self.cliente_ajeno.pk}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cliente", resp.data)
+
+    def test_perdida_exige_motivo(self):
+        op = self._op()
+        url = f"{OPORTUNIDADES_URL}{op.pk}/"
+
+        sin_motivo = self._client(self.ana).patch(url, {"etapa": "Perdida"}, format="json")
+        con_motivo = self._client(self.ana).patch(
+            url, {"etapa": "Perdida", "motivo_perdida": "Precio"}, format="json"
+        )
+
+        self.assertEqual(sin_motivo.status_code, 400)
+        self.assertIn("motivo_perdida", sin_motivo.data)
+        self.assertEqual(con_motivo.status_code, 200, con_motivo.data)
+        self.assertEqual(con_motivo.data["estado"], "Perdida")
+
+    def test_borrar_da_de_baja_y_conserva_el_registro(self):
+        op = self._op()
+
+        self.assertEqual(self._client(self.ana).delete(f"{OPORTUNIDADES_URL}{op.pk}/").status_code, 204)
+
+        op.refresh_from_db()
+        self.assertFalse(op.activo)
+        self.assertEqual(self._client(self.ana).get(OPORTUNIDADES_URL).data, [])
+
+    # -- cotizar y estado calculado -----------------------------------------
+
+    def test_cotizar_crea_cotizacion_borrador_ligada(self):
+        op = self._op(cliente=self.cliente)
+
+        resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        cotizacion = Cotizacion.objects.get(pk=resp.data["cotizacion_id"])
+        self.assertEqual(
+            (cotizacion.oportunidad_id, cotizacion.vendedor_id, cotizacion.cliente_id, cotizacion.estatus),
+            (op.pk, self.ana.pk, self.cliente.pk, 1),
+        )
+        self.assertEqual(self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/").data["estado"], "Cotizada")
+
+    def test_no_se_cotiza_una_perdida(self):
+        op = self._op(etapa="Perdida", motivo_perdida="Precio")
+
+        self.assertEqual(self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/").status_code, 400)
+
+    def test_con_cotizacion_autorizada_esta_ganada_y_ya_no_se_pierde(self):
+        op = self._op()
+        Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op, estatus=3)
+
+        detalle = self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/")
+        perder = self._client(self.ana).patch(
+            f"{OPORTUNIDADES_URL}{op.pk}/", {"etapa": "Perdida", "motivo_perdida": "x"}, format="json"
+        )
+
+        self.assertEqual(detalle.data["estado"], "Ganada")
+        self.assertEqual(perder.status_code, 400)
+
+    def test_borrar_la_oportunidad_no_borra_la_cotizacion(self):
+        op = self._op()
+        cotizacion = Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op)
+
+        op.delete()
+
+        cotizacion.refresh_from_db()
+        self.assertIsNone(cotizacion.oportunidad_id)
+
+    # -- embudo, filtros y rendimiento --------------------------------------
+
+    def test_embudo_cuenta_y_suma_por_estado(self):
+        self._op(monto_estimado=Decimal("100.00"))
+        self._op(etapa="Contactada", monto_estimado=Decimal("200.00"))
+        self._op(etapa="Perdida", motivo_perdida="x", monto_estimado=Decimal("50.00"))
+        cotizada = self._op(monto_estimado=Decimal("300.00"))
+        Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=cotizada)
+        ganada = self._op(monto_estimado=Decimal("400.00"))
+        Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=ganada, estatus=3)
+        self._op(self.beto, monto_estimado=Decimal("999.00"))  # de otro vendedor: no cuenta
+
+        resp = self._client(self.ana).get(f"{OPORTUNIDADES_URL}embudo/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        por_estado = {e["estado"]: (e["cantidad"], e["monto"]) for e in resp.data["estados"]}
+        self.assertEqual(por_estado, {
+            "Nueva": (1, "100.00"), "Contactada": (1, "200.00"), "Cotizada": (1, "300.00"),
+            "Ganada": (1, "400.00"), "Perdida": (1, "50.00"),
+        })
+        self.assertEqual(resp.data["total"], {"cantidad": 5, "monto": "1050.00"})
+
+    def test_filtro_proximo_contacto_deja_solo_las_abiertas_vencidas(self):
+        hoy = timezone.localdate()
+        toca = self._op(proximo_contacto=hoy)
+        self._op(proximo_contacto=hoy + timedelta(days=3))
+        self._op(proximo_contacto=hoy - timedelta(days=1), etapa="Perdida", motivo_perdida="x")
+        self._op()
+
+        resp = self._client(self.ana).get(OPORTUNIDADES_URL, {"proximo_contacto_hasta": hoy.isoformat()})
+
+        self.assertEqual([o["id"] for o in resp.data], [toca.pk])
+
+    def test_filtros_invalidos_responden_400(self):
+        cliente = self._client(self.ana)
+
+        self.assertEqual(cliente.get(OPORTUNIDADES_URL, {"estado": "Rara"}).status_code, 400)
+        self.assertEqual(cliente.get(OPORTUNIDADES_URL, {"proximo_contacto_hasta": "ayer"}).status_code, 400)
+
+    def test_limit_pagina_y_sin_limit_regresa_la_lista(self):
+        for _ in range(3):
+            self._op()
+        cliente = self._client(self.ana)
+
+        self.assertEqual(len(cliente.get(OPORTUNIDADES_URL).data), 3)
+        self.assertEqual(len(cliente.get(OPORTUNIDADES_URL, {"limit": 2}).data["results"]), 2)
+
+    def test_el_listado_no_hace_consultas_por_fila(self):
+        self._op(cliente=self.cliente)
+        cliente = self._client(self.ana)
+        cliente.get(OPORTUNIDADES_URL)
+
+        with CaptureQueriesContext(connection) as pocas:
+            cliente.get(OPORTUNIDADES_URL)
+        for _ in range(10):
+            op = self._op(cliente=self.cliente)
+            Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op)
+        with CaptureQueriesContext(connection) as muchas:
+            cliente.get(OPORTUNIDADES_URL)
+
+        self.assertEqual(len(pocas), len(muchas))
+
+
+SEGUIMIENTOS_URL = "/api/v1/ventas/oportunidad-seguimientos/"
+
+
+class OportunidadSeguimientosTests(OportunidadesBase):
+    """Seguimientos con recordatorio, transferir y onboarding. Aditivo: no cambia lo anterior."""
+
+    def _seg(self, oportunidad, **extra):
+        datos = {"oportunidad": oportunidad, "vendedor": self.ana, "detalle": "Llamar", **extra}
+        return OportunidadSeguimiento.objects.create(**datos)
+
+    # -- lo que ya existía no cambia ----------------------------------------
+
+    def test_la_respuesta_de_oportunidades_conserva_sus_campos(self):
+        op = self._op(self.ana)
+
+        data = self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/").data
+
+        self.assertEqual(set(data), {
+            "id", "cliente", "cliente_nombre", "vendedor", "vendedor_nombre", "nombre_contacto",
+            "telefono", "correo", "titulo", "monto_estimado", "etapa", "estado", "motivo_perdida",
+            "proximo_contacto", "notas", "created_at", "updated_at",
+        })
+
+    # -- seguimientos --------------------------------------------------------
+
+    def test_crea_un_seguimiento_con_recordatorio(self):
+        op = self._op(self.ana)
+
+        resp = self._client(self.ana).post(SEGUIMIENTOS_URL, {
+            "oportunidad": op.pk, "tipo": "Llamada", "detalle": "Confirmar muestra",
+            "fecha_recordatorio": "2026-11-05", "vendedor": self.beto.pk,
+        }, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        seg = OportunidadSeguimiento.objects.get(pk=resp.data["id"])
+        self.assertEqual((seg.vendedor_id, seg.tipo, seg.fecha_recordatorio, seg.completado),
+                         (self.ana.pk, "Llamada", date(2026, 11, 5), False))
+
+    def test_no_se_agrega_seguimiento_a_oportunidad_ajena(self):
+        de_beto = self._op(self.beto)
+
+        resp = self._client(self.ana).post(
+            SEGUIMIENTOS_URL, {"oportunidad": de_beto.pk, "detalle": "x"}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("oportunidad", resp.data)
+
+    def test_cada_quien_ve_los_seguimientos_de_sus_oportunidades(self):
+        mia, de_beto = self._op(self.ana), self._op(self.beto)
+        s_mio, s_beto = self._seg(mia), self._seg(de_beto, vendedor=self.beto)
+
+        ids = lambda user: {s["id"] for s in self._client(user).get(SEGUIMIENTOS_URL).data}
+
+        self.assertEqual(ids(self.ana), {s_mio.pk})
+        self.assertEqual(ids(self.jefe), {s_mio.pk, s_beto.pk})
+        self.assertEqual(ids(self.ajeno), set())
+        self.assertEqual(self._client(self.ana).get(f"{SEGUIMIENTOS_URL}{s_beto.pk}/").status_code, 404)
+
+    def test_pendientes_por_fecha_de_recordatorio(self):
+        op = self._op(self.ana)
+        manana = self._seg(op, fecha_recordatorio=date(2026, 11, 2))
+        ayer = self._seg(op, fecha_recordatorio=date(2026, 10, 30))
+        sin_fecha = self._seg(op)
+        self._seg(op, fecha_recordatorio=date(2026, 10, 1), completado=True)
+        cliente = self._client(self.ana)
+
+        todos = [s["id"] for s in cliente.get(SEGUIMIENTOS_URL, {"pendientes": "true"}).data]
+        vencidos = [s["id"] for s in cliente.get(SEGUIMIENTOS_URL, {"pendientes": "true", "hasta": "2026-11-01"}).data]
+
+        self.assertEqual(todos, [ayer.pk, manana.pk, sin_fecha.pk])
+        self.assertEqual(vencidos, [ayer.pk])
+
+    def test_hasta_hoy_y_fecha_invalida(self):
+        op = self._op(self.ana)
+        hoy = self._seg(op, fecha_recordatorio=timezone.localdate())
+        self._seg(op, fecha_recordatorio=timezone.localdate() + timedelta(days=1))
+        cliente = self._client(self.ana)
+
+        resp = cliente.get(SEGUIMIENTOS_URL, {"pendientes": "true", "hasta": "hoy"})
+
+        self.assertEqual([s["id"] for s in resp.data], [hoy.pk])
+        self.assertEqual(cliente.get(SEGUIMIENTOS_URL, {"hasta": "ayer"}).status_code, 400)
+
+    def test_los_pendientes_ignoran_oportunidades_perdidas(self):
+        perdida = self._op(self.ana, etapa="Perdida", motivo_perdida="Precio")
+        self._seg(perdida, fecha_recordatorio=date(2026, 10, 1))
+
+        resp = self._client(self.ana).get(SEGUIMIENTOS_URL, {"pendientes": "true"})
+
+        self.assertEqual(resp.data, [])
+
+    def test_completar_y_reabrir(self):
+        seg = self._seg(self._op(self.ana), fecha_recordatorio=date(2026, 11, 1))
+        cliente = self._client(self.ana)
+
+        resp = cliente.post(f"{SEGUIMIENTOS_URL}{seg.pk}/completar/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        seg.refresh_from_db()
+        self.assertTrue(seg.completado)
+        self.assertIsNotNone(seg.completado_at)
+
+        resp = cliente.patch(f"{SEGUIMIENTOS_URL}{seg.pk}/", {"completado": False}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        seg.refresh_from_db()
+        self.assertFalse(seg.completado)
+        self.assertIsNone(seg.completado_at)
+
+    def test_reprogramar_el_recordatorio_y_borrar(self):
+        seg = self._seg(self._op(self.ana), fecha_recordatorio=date(2026, 11, 1))
+        cliente = self._client(self.ana)
+
+        resp = cliente.patch(f"{SEGUIMIENTOS_URL}{seg.pk}/", {"fecha_recordatorio": "2026-12-01"}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        seg.refresh_from_db()
+        self.assertEqual(seg.fecha_recordatorio, date(2026, 12, 1))
+        self.assertEqual(cliente.delete(f"{SEGUIMIENTOS_URL}{seg.pk}/").status_code, 204)
+        self.assertFalse(OportunidadSeguimiento.objects.exists())
+
+    def test_no_se_puede_mover_un_seguimiento_a_otra_oportunidad(self):
+        seg = self._seg(self._op(self.ana))
+        otra = self._op(self.ana)
+
+        resp = self._client(self.ana).patch(f"{SEGUIMIENTOS_URL}{seg.pk}/", {"oportunidad": otra.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    # -- transferir ----------------------------------------------------------
+
+    def test_el_admin_transfiere_la_oportunidad(self):
+        op = self._op(self.ana)
+
+        resp = self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", {"vendedor": self.beto.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.vendedor_id, self.beto.pk)
+        self.assertEqual(self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/").status_code, 404)
+        self.assertEqual(self._client(self.beto).get(f"{OPORTUNIDADES_URL}{op.pk}/").status_code, 200)
+
+    def test_un_vendedor_no_puede_transferir(self):
+        op = self._op(self.ana)
+
+        resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", {"vendedor": self.beto.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 403)
+        op.refresh_from_db()
+        self.assertEqual(op.vendedor_id, self.ana.pk)
+
+    def test_no_se_transfiere_a_un_usuario_de_otra_empresa_ni_inexistente(self):
+        op = self._op(self.ana)
+        url = f"{OPORTUNIDADES_URL}{op.pk}/transferir/"
+
+        self.assertEqual(self._client(self.jefe).post(url, {"vendedor": self.ajeno.pk}, format="json").status_code, 400)
+        self.assertEqual(self._client(self.jefe).post(url, {"vendedor": 99999}, format="json").status_code, 400)
+        self.assertEqual(self._client(self.jefe).post(url, {}, format="json").status_code, 400)
+
+    # -- onboarding ----------------------------------------------------------
+
+    def test_onboarding_trae_todo_en_una_llamada(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        self._seg(op, fecha_recordatorio=date(2026, 11, 9))
+        self._seg(op, fecha_recordatorio=date(2026, 11, 3))
+        self._seg(op, completado=True, fecha_recordatorio=date(2026, 10, 1))
+        cot = Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op, estatus=3)
+
+        resp = self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["oportunidad"]["estado"], "Ganada")
+        self.assertEqual(len(resp.data["seguimientos"]), 3)
+        self.assertEqual(resp.data["pendientes"], 2)
+        self.assertEqual(resp.data["proximo_recordatorio"], date(2026, 11, 3))
+        self.assertEqual([c["id"] for c in resp.data["cotizaciones"]], [cot.pk])
+        self.assertEqual(resp.data["cotizaciones"][0]["estatus_display"], "AUTORIZADA")
+        self.assertIsNone(resp.data["cotizaciones"][0]["pedido_id"])
+        self.assertEqual(resp.data["cartera"], [])
+
+    def test_onboarding_de_otro_vendedor_responde_404(self):
+        de_beto = self._op(self.beto)
+
+        self.assertEqual(self._client(self.ana).get(f"{OPORTUNIDADES_URL}{de_beto.pk}/onboarding/").status_code, 404)
+
+    def test_onboarding_sin_cliente_trae_cartera_vacia(self):
+        op = self._op(self.ana)
+
+        resp = self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
+
+        self.assertEqual((resp.data["seguimientos"], resp.data["pendientes"], resp.data["proximo_recordatorio"]), ([], 0, None))
+
+    def test_onboarding_y_pendientes_hacen_consultas_fijas(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        # Con al menos una fila: la visibilidad del cliente se resuelve una vez por
+        # petición, y solo si hay algún seguimiento con cliente que mostrar.
+        self._seg(op)
+        cliente = self._client(self.ana)
+        cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
+
+        with CaptureQueriesContext(connection) as pocas:
+            cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
+            cliente.get(SEGUIMIENTOS_URL, {"pendientes": "true"})
+        for _ in range(10):
+            self._seg(op, fecha_recordatorio=date(2026, 11, 1))
+            Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op)
+        with CaptureQueriesContext(connection) as muchas:
+            cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
+            cliente.get(SEGUIMIENTOS_URL, {"pendientes": "true"})
+
+        self.assertEqual(len(pocas), len(muchas))
+
+    # -- contexto para la agenda --------------------------------------------
+
+    CONTEXTO = ("oportunidad_titulo", "oportunidad_nombre_contacto", "oportunidad_cliente_nombre", "vendedor_nombre")
+
+    def _contexto(self, fila):
+        return tuple(fila[campo] for campo in self.CONTEXTO)
+
+    def test_el_seguimiento_trae_el_contexto_de_su_oportunidad(self):
+        lola = Usuario.objects.create(
+            username="lola", email="lola@acme.test", empresa=self.empresa, first_name="Lola", last_name="Paz"
+        )
+        op = self._op(lola, cliente=self.cliente, nombre_contacto="Luis")
+        self.cliente.vendedores.add(lola)  # el nombre del cliente solo sale si lo puede ver
+        seg = self._seg(op, vendedor=lola)
+        cliente = self._client(lola)
+        url = f"{SEGUIMIENTOS_URL}{seg.pk}/"
+
+        respuestas = {
+            "lista": cliente.get(SEGUIMIENTOS_URL).data[0],
+            "detalle": cliente.get(url).data,
+            "alta": cliente.post(SEGUIMIENTOS_URL, {"oportunidad": op.pk, "detalle": "x"}, format="json").data,
+            "edicion": cliente.patch(url, {"detalle": "y"}, format="json").data,
+            "completar": cliente.post(f"{url}completar/").data,
+            "onboarding": cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/").data["seguimientos"][0],
+        }
+
+        for origen, fila in respuestas.items():
+            with self.subTest(origen=origen):
+                self.assertEqual(self._contexto(fila), ("Uniformes", "Luis", "Cliente Acme", "Lola Paz"))
+
+    def test_el_contexto_sin_cliente_ni_autor_no_truena(self):
+        op = self._op(self.ana)  # sin cliente ni contacto; ana no tiene nombre capturado
+        de_ana = self._seg(op)
+        sin_autor = self._seg(op, vendedor=None)
+        cliente = self._client(self.ana)
+
+        filas = {s["id"]: s for s in cliente.get(SEGUIMIENTOS_URL).data}
+        oportunidad = cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/").data
+
+        self.assertEqual(self._contexto(filas[de_ana.pk]), ("Uniformes", "", None, ""))
+        self.assertEqual(self._contexto(filas[sin_autor.pk]), ("Uniformes", "", None, None))
+        # Misma derivación que la oportunidad: el frontend ve el mismo valor en los dos lados.
+        self.assertEqual(filas[de_ana.pk]["oportunidad_cliente_nombre"], oportunidad["cliente_nombre"])
+
+    def test_vendedor_nombre_es_el_autor_no_el_duenio_de_la_oportunidad(self):
+        lola = Usuario.objects.create(
+            username="lola", email="lola@acme.test", empresa=self.empresa, first_name="Lola", last_name="Paz"
+        )
+        raul = Usuario.objects.create(
+            username="raul", email="raul@acme.test", empresa=self.empresa, first_name="Raul", last_name="Sol",
+            is_admin_empresa=True,
+        )
+        op = self._op(lola)
+        seg = self._seg(op, vendedor=raul)
+        cliente = self._client(lola)
+
+        onboarding = cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/").data
+
+        self.assertEqual(cliente.get(f"{SEGUIMIENTOS_URL}{seg.pk}/").data["vendedor_nombre"], "Raul Sol")
+        self.assertEqual(onboarding["seguimientos"][0]["vendedor_nombre"], "Raul Sol")
+        self.assertEqual(onboarding["oportunidad"]["vendedor_nombre"], "Lola Paz")
+
+    def test_el_nombre_del_cliente_solo_sale_si_el_usuario_puede_verlo(self):
+        op = self._op(self.ana, cliente=self.cliente)  # ana no tiene asignado a ese cliente
+        seg = self._seg(op)
+
+        def nombres(user):
+            cliente = self._client(user)
+            return (
+                cliente.get(SEGUIMIENTOS_URL).data[0]["oportunidad_cliente_nombre"],
+                cliente.get(f"{SEGUIMIENTOS_URL}{seg.pk}/").data["oportunidad_cliente_nombre"],
+                cliente.get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/").data["seguimientos"][0][
+                    "oportunidad_cliente_nombre"
+                ],
+            )
+
+        self.assertEqual(nombres(self.ana), (None, None, None))
+        self.assertEqual(nombres(self.jefe), ("Cliente Acme",) * 3)
+        self.cliente.vendedores.add(self.ana)
+        self.assertEqual(nombres(self.ana), ("Cliente Acme",) * 3)
+        self.cliente.soft_delete()  # dado de baja: el vendedor deja de verlo; el admin, no
+        self.assertEqual(nombres(self.ana), (None, None, None))
+        self.assertEqual(nombres(self.jefe), ("Cliente Acme",) * 3)
+        superusuario = Usuario.objects.create(username="root", email="root@x.test", is_superuser=True)
+        self.assertEqual(nombres(superusuario), ("Cliente Acme",) * 3)
+
+    def test_el_listado_con_contexto_no_hace_consultas_por_fila(self):
+        self.cliente.vendedores.add(self.ana)
+        self._seg(self._op(self.ana, cliente=self.cliente))
+        # Mesa de Control ve todos los clientes de la empresa sin tenerlos asignados.
+        mesa = Usuario.objects.create(username="mesa", email="mesa@acme.test", empresa=self.empresa)
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="MESACONTROL-0002", nombre="Mesa-de-control", estatus=Rol.Estatus.ACTIVO
+        )
+        UsuarioRol.objects.create(usuario=mesa, rol=rol, empresa=self.empresa)
+        self._seg(self._op(mesa, cliente=self.cliente), vendedor=mesa)
+        clientes = {
+            "admin": self._client(self.jefe), "vendedor": self._client(self.ana), "mesa": self._client(mesa),
+        }
+
+        def medir():
+            consultas, filas = {}, {}
+            for quien, cliente in clientes.items():
+                with CaptureQueriesContext(connection) as ctx:
+                    filas[quien] = len(cliente.get(SEGUIMIENTOS_URL).data)
+                consultas[quien] = len(ctx)
+            return consultas, filas
+
+        medir()
+        pocas, _ = medir()
+        for i in range(10):
+            autor = Usuario.objects.create(username=f"v{i}", email=f"v{i}@acme.test", empresa=self.empresa)
+            otro_cliente = Cliente.objects.create(empresa=self.empresa, nombre=f"Cliente {i}")
+            otro_cliente.vendedores.add(self.ana)
+            self._seg(self._op(autor, cliente=otro_cliente), vendedor=autor)
+            self._seg(self._op(self.ana, cliente=otro_cliente))
+            self._seg(self._op(mesa, cliente=Cliente.objects.create(empresa=self.empresa, nombre=f"Sin asignar {i}")))
+        muchas, filas = medir()
+
+        self.assertEqual(filas, {"admin": 32, "vendedor": 11, "mesa": 11})
+        self.assertEqual(pocas, muchas)
+        nombres = [s["oportunidad_cliente_nombre"] for s in clientes["mesa"].get(SEGUIMIENTOS_URL).data]
+        self.assertNotIn(None, nombres)
+
+    # -- filtro por dueño de la oportunidad ---------------------------------
+
+    def _ids(self, user, **params):
+        resp = self._client(user).get(SEGUIMIENTOS_URL, params)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return [s["id"] for s in resp.data]
+
+    def test_oportunidad_vendedor_filtra_por_el_duenio_de_la_oportunidad(self):
+        op_ana = self._op(self.ana)
+        de_ana = self._seg(op_ana)
+        del_jefe_en_la_de_ana = self._seg(op_ana, vendedor=self.jefe)
+        de_beto = self._seg(self._op(self.beto), vendedor=self.beto)
+
+        self.assertCountEqual(
+            self._ids(self.jefe, oportunidad_vendedor=self.ana.pk), [de_ana.pk, del_jefe_en_la_de_ana.pk]
+        )
+        self.assertEqual(self._ids(self.jefe, oportunidad_vendedor=self.beto.pk), [de_beto.pk])
+        self.assertEqual(self._ids(self.jefe, oportunidad_vendedor=self.jefe.pk), [])
+        self.assertCountEqual(
+            self._ids(self.ana, oportunidad_vendedor=self.ana.pk), [de_ana.pk, del_jefe_en_la_de_ana.pk]
+        )
+        # Sin el filtro todo sigue igual.
+        self.assertEqual(len(self._ids(self.jefe)), 3)
+
+    def test_oportunidad_vendedor_se_combina_con_los_pendientes_de_hoy(self):
+        hoy = timezone.localdate()
+        op_ana = self._op(self.ana)
+        vencido = self._seg(op_ana, fecha_recordatorio=hoy - timedelta(days=2))
+        de_hoy = self._seg(op_ana, vendedor=self.jefe, fecha_recordatorio=hoy)
+        self._seg(op_ana, fecha_recordatorio=hoy + timedelta(days=3))
+        self._seg(op_ana, fecha_recordatorio=hoy - timedelta(days=1), completado=True)
+        self._seg(self._op(self.beto), vendedor=self.beto, fecha_recordatorio=hoy - timedelta(days=5))
+
+        agenda = {"pendientes": "true", "hasta": "hoy"}
+
+        self.assertEqual(self._ids(self.jefe, oportunidad_vendedor=self.ana.pk, **agenda), [vencido.pk, de_hoy.pk])
+        self.assertEqual(self._ids(self.ana, oportunidad_vendedor=self.ana.pk, **agenda), [vencido.pk, de_hoy.pk])
+        self.assertEqual(len(self._ids(self.jefe, **agenda)), 3)
+
+    def test_oportunidad_vendedor_no_amplia_el_alcance(self):
+        self._seg(self._op(self.ana))
+        self._seg(self._op(self.beto), vendedor=self.beto)
+
+        # Un vendedor no ve lo de otro por pedirlo, ni otra empresa lo de ésta.
+        self.assertEqual(self._ids(self.ana, oportunidad_vendedor=self.beto.pk), [])
+        for user in (self.ajeno, self.sin_empresa):
+            with self.subTest(user=user.username):
+                self.assertEqual(self._ids(user), [])
+                self.assertEqual(self._ids(user, oportunidad_vendedor=self.ana.pk), [])
+                self.assertEqual(self._ids(user, oportunidad_vendedor=user.pk), [])
+
+    def test_oportunidad_vendedor_no_numerico_es_400(self):
+        resp = self._client(self.jefe).get(SEGUIMIENTOS_URL, {"oportunidad_vendedor": "abc"})
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("oportunidad_vendedor", resp.data)
+
+    def test_ordering_no_acepta_los_campos_de_contexto(self):
+        primero = self._seg(self._op(self.ana, nombre_contacto="Abel"))
+        segundo = self._seg(self._op(self.ana, nombre_contacto="Zoe", cliente=self.cliente))
+        por_omision = [segundo.pk, primero.pk]
+
+        for campo in (
+            "vendedor__get_full_name", "-vendedor__get_full_name", "vendedor_nombre",
+            "oportunidad__titulo", "oportunidad_titulo", "oportunidad__nombre_contacto",
+            "oportunidad_nombre_contacto", "oportunidad__cliente__nombre", "oportunidad_cliente_nombre",
+        ):
+            with self.subTest(campo=campo):
+                self.assertEqual(self._ids(self.ana, ordering=campo), por_omision)
+        # Los de siempre siguen ordenando.
+        self.assertEqual(self._ids(self.ana, ordering="id"), [primero.pk, segundo.pk])
+        for campo in ("fecha_recordatorio", "-created_at", "completado", "tipo", "vendedor", "oportunidad"):
+            with self.subTest(campo=campo):
+                self._ids(self.ana, ordering=campo)
+
+
+class OportunidadesValidacionesTests(OportunidadesBase):
+    """Cliente visible, sucursal de la empresa y parámetros inválidos (400, no 500)."""
+
+    def test_no_se_liga_un_cliente_que_el_vendedor_no_ve(self):
+        resp = self._client(self.ana).post(OPORTUNIDADES_URL, {"titulo": "X", "cliente": self.cliente.pk})
+        self.assertEqual(resp.status_code, 400)
+
+        self.cliente.vendedores.add(self.ana)
+        resp = self._client(self.ana).post(OPORTUNIDADES_URL, {"titulo": "X", "cliente": self.cliente.pk})
+        self.assertEqual(resp.status_code, 201)
+
+    def test_no_se_liga_un_cliente_dado_de_baja(self):
+        self.cliente.vendedores.add(self.ana)
+        self.cliente.soft_delete()
+
+        resp = self._client(self.ana).post(OPORTUNIDADES_URL, {"titulo": "X", "cliente": self.cliente.pk})
+
+        self.assertEqual(resp.status_code, 400)
+
+    def test_onboarding_no_muestra_cartera_de_un_cliente_no_visible(self):
+        op = self._op(self.ana, cliente=self.cliente)
+
+        resp = self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/onboarding/")
+
+        self.assertEqual(resp.data["cartera"], [])
+
+    def test_cliente_nombre_no_sale_si_el_vendedor_no_ve_al_cliente(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        url = f"{OPORTUNIDADES_URL}{op.pk}/"
+
+        self.assertIsNone(self._client(self.ana).get(url).data["cliente_nombre"])
+        self.assertIsNone(self._client(self.ana).get(OPORTUNIDADES_URL).data[0]["cliente_nombre"])
+        self.assertIsNone(self._client(self.ana).get(f"{url}onboarding/").data["oportunidad"]["cliente_nombre"])
+        self.assertEqual(self._client(self.jefe).get(url).data["cliente_nombre"], "Cliente Acme")
+
+        self.cliente.vendedores.add(self.ana)
+        self.assertEqual(self._client(self.ana).get(url).data["cliente_nombre"], "Cliente Acme")
+
+    def test_transferir_pasa_las_cotizaciones_al_nuevo_dueno(self):
+        op = self._op(self.ana)
+        resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
+        cot = resp.data["cotizacion_id"]
+
+        self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", {"vendedor": self.beto.pk})
+
+        self.assertEqual(Cotizacion.objects.get(pk=cot).vendedor, self.beto)
+        self.assertEqual(self._client(self.beto).get(f"/api/v1/ventas/cotizaciones/{cot}/").status_code, 200)
+
+    def test_cotizar_como_admin_deja_la_cotizacion_al_dueno(self):
+        op = self._op(self.ana)
+        cot = self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/").data["cotizacion_id"]
+
+        self.assertEqual(Cotizacion.objects.get(pk=cot).vendedor, self.ana)
+        self.assertEqual(self._client(self.ana).get(f"/api/v1/ventas/cotizaciones/{cot}/").status_code, 200)
+
+    def test_cotizar_rechaza_sucursal_de_otra_empresa(self):
+        otra_sucursal = Sucursal.objects.create(empresa=self.otra, codigo="GDL", nombre="GDL")
+        self.ana.sucursal_default = otra_sucursal
+        self.ana.save()
+        op = self._op(self.ana)
+
+        resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Cotizacion.objects.filter(oportunidad=op).exists())
+
+    def test_parametros_no_numericos_responden_400(self):
+        c = self._client(self.jefe)
+        for url, params in (
+            (OPORTUNIDADES_URL, {"cliente": "abc"}),
+            (OPORTUNIDADES_URL, {"vendedor": "abc"}),
+            (f"{OPORTUNIDADES_URL}embudo/", {"cliente": "abc"}),
+            (SEGUIMIENTOS_URL, {"oportunidad": "abc"}),
+        ):
+            with self.subTest(url=url, params=params):
+                self.assertEqual(c.get(url, params).status_code, 400)
+
+    def test_transferir_con_vendedor_no_numerico_es_400(self):
+        op = self._op(self.ana)
+
+        resp = self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", {"vendedor": "abc"})
+
+        self.assertEqual(resp.status_code, 400)
+
+    def test_transferir_solo_acepta_un_id_valido(self):
+        op = self._op(self.ana)
+        url = f"{OPORTUNIDADES_URL}{op.pk}/transferir/"
+        c = self._client(self.jefe)
+
+        for valor in ("99999999999999999999999", 99999999999999999999999, " 1", "1_0", "-1", -1, 1.5, True, [1]):
+            with self.subTest(valor=valor):
+                resp = c.post(url, {"vendedor": valor}, format="json")
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("vendedor", resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.vendedor_id, self.ana.pk)
+        # Sigue aceptando el id como número o como texto.
+        self.assertEqual(c.post(url, {"vendedor": self.beto.pk}, format="json").status_code, 200)
+        self.assertEqual(c.post(url, {"vendedor": str(self.ana.pk)}, format="json").status_code, 200)
+
+    def test_parametros_numericos_solo_aceptan_digitos_y_dentro_de_rango(self):
+        c = self._client(self.jefe)
+        casos = (
+            (OPORTUNIDADES_URL, "cliente"),
+            (OPORTUNIDADES_URL, "vendedor"),
+            (SEGUIMIENTOS_URL, "oportunidad"),
+            (SEGUIMIENTOS_URL, "oportunidad_vendedor"),
+        )
+        invalidos = ("99999999999999999999999", "9" * 5000, " 1", "1 ", "1_0", "-1", "+1", "1.0", "١٢")
+        for url, nombre in casos:
+            for valor in invalidos:
+                with self.subTest(url=url, nombre=nombre, valor=valor[:25]):
+                    resp = c.get(url, {nombre: valor})
+                    self.assertEqual(resp.status_code, 400)
+                    self.assertIn(nombre, resp.data)
+            for valor in ("0", "1", str(2**63 - 1)):
+                with self.subTest(url=url, nombre=nombre, valor=valor):
+                    self.assertEqual(c.get(url, {nombre: valor}).status_code, 200)
+
+    def test_ordering_invalido_no_truena(self):
+        self._op(self.ana)
+        for campo in ("zzz", "estado", "-cliente_nombre", "vendedor__password"):
+            with self.subTest(campo=campo):
+                resp = self._client(self.jefe).get(OPORTUNIDADES_URL, {"ordering": campo})
+                self.assertIn(resp.status_code, (200, 400))
+
+    def test_ordering_por_nombre_de_vendedor_se_ignora_y_los_campos_reales_siguen(self):
+        cara = self._op(self.ana, monto_estimado=Decimal("200.00"))
+        barata = self._op(self.ana, monto_estimado=Decimal("100.00"))
+        cliente = self._client(self.ana)
+
+        def ids(campo):
+            resp = cliente.get(OPORTUNIDADES_URL, {"ordering": campo})
+            self.assertEqual(resp.status_code, 200, campo)
+            return [o["id"] for o in resp.data]
+
+        for campo in ("vendedor__get_full_name", "-vendedor__get_full_name", "vendedor_nombre"):
+            with self.subTest(campo=campo):
+                self.assertEqual(ids(campo), [barata.pk, cara.pk])  # el orden por omisión (-id)
+        self.assertEqual(ids("monto_estimado"), [barata.pk, cara.pk])
+        self.assertEqual(ids("-monto_estimado"), [cara.pk, barata.pk])
+        self.assertEqual(ids("id"), [cara.pk, barata.pk])
+        for campo in (
+            "titulo", "proximo_contacto", "created_at", "updated_at", "etapa", "cliente", "cliente__nombre",
+            "vendedor", "nombre_contacto", "telefono", "correo", "motivo_perdida", "notas",
+        ):
+            with self.subTest(campo=campo):
+                ids(campo)
+
+
+class SkuMuestraCotizacionTests(TestCase):
+    """#449/#437/#438/#441: SKU de muestras en cotización, ``sku_muestra`` y
+    respuestas de escritura del pedido."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-sku", razon_social="ACME SKU SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="SKU", nombre="Matriz")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.talla = Talla.objects.create(nombre="CH")
+        cls.otra_talla = Talla.objects.create(nombre="GR")
+        cls.color = Color.objects.create(nombre="Azul", codigo="802", codigo_hex="#00F")
+        cls.admin = Usuario.objects.create(
+            username="admin@acme-sku.test", email="admin@acme-sku.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(
+            username="vend@acme-sku.test", email="vend@acme-sku.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.cotizacion = Cotizacion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente,
+            moneda=cls.moneda, vendedor=cls.admin,
+        )
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente,
+            moneda=cls.moneda, folio="P-SKU01",
+            persona_pagos="Pagos", correo_facturas="p@acme-sku.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+
+    def _rows(self):
+        return [{
+            "producto_nombre_externo": "Gorra muestra",
+            "color": self.color.pk,
+            "precio_unitario": "10",
+            "tallas": [{"talla": self.talla.pk, "cantidad": 2, "precio_unitario": "10"}],
+        }]
+
+    def _tallas_cotizacion(self):
+        return CotizacionDetalleTalla.objects.filter(cotizacion_detalle__cotizacion=self.cotizacion)
+
+    def test_linea_de_muestra_no_guarda_sku_de_concatenacion(self):
+        _save_cotizacion_detalle(self.cotizacion, self._rows(), self.empresa, self.admin)
+        self.assertEqual([t.sku for t in self._tallas_cotizacion()], [None])
+
+    def test_editar_cotizacion_conserva_sku_muestra(self):
+        _save_cotizacion_detalle(self.cotizacion, self._rows(), self.empresa, self.admin)
+        self._tallas_cotizacion().update(sku_muestra="MP1-802-CH")
+        _save_cotizacion_detalle(self.cotizacion, self._rows(), self.empresa, self.admin)
+        self.assertEqual([t.sku_muestra for t in self._tallas_cotizacion()], ["MP1-802-CH"])
+
+    def test_pedido_detalle_talla_patch_no_escribe_sku_muestra_ni_cambia_talla(self):
+        det = PedidoDetalle.objects.create(
+            pedido=self.pedido, producto_nombre_externo="Gorra muestra", color=self.color
+        )
+        dt = PedidoDetalleTalla.objects.create(
+            pedido_detalle=det, talla=self.talla, cantidad=2, sku_muestra="MP1-802-CH"
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.vendedor)
+        url = f"{PEDIDO_DETALLE_TALLA_URL}{dt.pk}/"
+        resp = client.patch(url, {"sku_muestra": "LO-QUE-SEA", "cantidad": 3}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        dt.refresh_from_db()
+        self.assertEqual((dt.sku_muestra, dt.cantidad), ("MP1-802-CH", 3))
+        resp = client.patch(url, {"talla": self.otra_talla.pk}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_patch_pedido_no_crece_con_los_renglones(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        url = f"{PEDIDOS_URL}{self.pedido.pk}/"
+
+        def consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                resp = client.patch(url, {"observaciones": "x"}, format="json")
+            self.assertEqual(resp.status_code, 200, resp.content)
+            return len(ctx), resp
+
+        for _ in range(1):
+            det = PedidoDetalle.objects.create(
+                pedido=self.pedido, producto_nombre_externo="Uno", color=self.color
+            )
+            PedidoDetalleTalla.objects.create(pedido_detalle=det, talla=self.talla, cantidad=1)
+        base, _ = consultas()
+        for i in range(4):
+            det = PedidoDetalle.objects.create(
+                pedido=self.pedido, producto_nombre_externo=f"Otro {i}", color=self.color
+            )
+            PedidoDetalleTalla.objects.create(pedido_detalle=det, talla=self.talla, cantidad=1)
+        mas, resp = consultas()
+        self.assertEqual(base, mas)
+        ids = [d["id"] for d in resp.data["detalles"]]
+        self.assertEqual(ids, sorted(ids))
+
+
+class RechazoCotizacionComentarioTests(TestCase):
+    """Mesa de control debe dar un motivo al rechazar; el vendedor lo ve y reenvía."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-mc", razon_social="acme-mc SA")
+        cls.mesa = Usuario.objects.create(
+            username="mesa@acme-mc.test", email="mesa@acme-mc.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(
+            username="vend@acme-mc.test", email="vend@acme-mc.test", empresa=cls.empresa,
+        )
+
+    def setUp(self):
+        self.cotizacion = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.vendedor, estatus=2,
+        )
+        self.url = f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/"
+
+    def _como(self, user):
+        c = APIClient()
+        c.force_authenticate(user=user)
+        return c
+
+    def test_rechazar_sin_comentario_falla(self):
+        for body in ({}, {"comentario": "   "}):
+            resp = self._como(self.mesa).post(self.url + "rechazar/", body, format="json")
+            self.assertEqual(resp.status_code, 400, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 2)
+
+    def test_rechazar_guarda_motivo_y_lo_ve_el_vendedor(self):
+        resp = self._como(self.mesa).post(
+            self.url + "rechazar/", {"comentario": "Falta el RFC del cliente"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.data["cotizacion"]["motivo_rechazo"], "Falta el RFC del cliente")
+        detalle = self._como(self.vendedor).get(self.url)
+        self.assertEqual(detalle.data["estatus"], 4)
+        self.assertEqual(detalle.data["motivo_rechazo"], "Falta el RFC del cliente")
+
+    def test_rechazar_notifica_al_vendedor(self):
+        from notificaciones.models import Notificacion
+
+        self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Precio mal"}, format="json")
+        n = Notificacion.objects.get(usuario=self.vendedor, tipo="cotizacion_rechazada")
+        self.assertIn(f"#{self.cotizacion.id}", n.mensaje)
+        self.assertEqual(n.data["cotizacion_id"], self.cotizacion.id)
+        self.assertEqual(n.data["motivo"], "Precio mal")
+        self.assertFalse(Notificacion.objects.filter(usuario=self.mesa).exists())
+
+    def test_rechazar_solo_en_revision(self):
+        for estatus in (1, 4, 5):
+            Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=estatus)
+            resp = self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "x"}, format="json")
+            self.assertEqual(resp.status_code, 400, (estatus, resp.content))
+            self.cotizacion.refresh_from_db()
+            self.assertEqual(self.cotizacion.estatus, estatus)
+        self.assertFalse(Notificacion.objects.filter(tipo="cotizacion_rechazada").exists())
+
+    def test_rechazar_cotizacion_sin_empresa_no_truena(self):
+        su = Usuario.objects.create(
+            username="su@acme-mc.test", email="su@acme-mc.test", is_superuser=True, is_staff=True
+        )
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(empresa=None)
+        resp = self._como(su).post(self.url + "rechazar/", {"comentario": "x"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 4)
+        self.assertFalse(Notificacion.objects.exists())
+
+    def test_vendedor_reenvia_y_queda_historial(self):
+        self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Precio mal"}, format="json")
+        resp = self._como(self.vendedor).post(
+            self.url + "enviar-revision/", {"comentario": "Ya corregí el precio"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 2)
+        hist = self._como(self.vendedor).get(self.url + "comentarios/")
+        self.assertEqual(hist.status_code, 200)
+        self.assertEqual([c["tipo"] for c in hist.data], ["RECHAZO", "REENVIO"])
+        self.assertEqual([c["comentario"] for c in hist.data], ["Precio mal", "Ya corregí el precio"])
+
+    def test_reenviar_sin_comentario_sigue_permitido(self):
+        self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Precio mal"}, format="json")
+        resp = self._como(self.vendedor).post(self.url + "enviar-revision/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(self.cotizacion.comentarios.count(), 1)
+
+
+class CotizacionOnboardingRendimientoTests(TestCase):
+    """``POST /cotizaciones/onboarding/`` (guardar cotización, alta y edición).
+
+    El número de queries NO debe crecer con renglones × tallas: catálogos y
+    variantes se resuelven en lote y los renglones se insertan con ``bulk_create``.
+    """
+
+    N_PRODUCTOS = 6
+    N_TALLAS = 5
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="perf", razon_social="Perf SA")
+        cls.usuario = Usuario.objects.create(
+            username="perf@perf.test", email="perf@perf.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente", razon_social="Cliente SA")
+        cls.direccion = DireccionCliente.objects.create(
+            empresa=cls.empresa, cliente=cls.cliente, destinatario="X", direccion_envio="Calle 1"
+        )
+        cls.tallas = [Talla.objects.create(nombre=n) for n in ["CH", "M", "G", "XG", "2XG"][: cls.N_TALLAS]]
+        cls.color = Color.objects.create(nombre="Rojo", codigo="ROJ", codigo_hex="#f00")
+        cls.productos = []
+        for i in range(cls.N_PRODUCTOS):
+            p = Producto.objects.create(empresa=cls.empresa, nombre=f"Prod {i}", codigo=f"P{i}")
+            cls.productos.append(p)
+            # Sólo algunas combinaciones con variante (el resto cae al SKU armado).
+            if i % 2 == 0:
+                for t in cls.tallas:
+                    ProductoVariante.objects.create(
+                        producto=p, empresa=cls.empresa, color=cls.color, talla=t,
+                        sku=f"P{i}-ROJ-{t.nombre}", precio_base=100,
+                    )
+
+    def _payload(self, cotizacion_id=None):
+        detalle = [
+            {
+                "producto": p.pk,
+                "color": self.color.pk,
+                "direccion_envio_cliente": self.direccion.pk,
+                "precio_unitario": "10.00",
+                "tallas": [
+                    {
+                        "talla": t.pk,
+                        "cantidad": 3,
+                        "lleva_bordado": j == 0,
+                        "bordado_config": {"posicion": "pecho"} if j == 0 else None,
+                    }
+                    for j, t in enumerate(self.tallas)
+                ],
+            }
+            for p in self.productos
+        ]
+        payload = {
+            "cotizacion": {"cliente": self.cliente.pk, "subtotal": "100.00", "gran_total": "116.00"},
+            "detalle": detalle,
+            "servicios_extras": [
+                {"nombre": f"Extra {i}", "monto": "5.00", "cantidad": 1} for i in range(3)
+            ],
+        }
+        if cotizacion_id:
+            payload["cotizacion_id"] = cotizacion_id
+        return payload
+
+    def _post(self, payload):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        with CaptureQueriesContext(connection) as ctx:
+            t0 = time.perf_counter()
+            resp = client.post(COTIZACION_ONBOARDING_URL, payload, format="json")
+            elapsed = (time.perf_counter() - t0) * 1000
+        self.assertEqual(resp.status_code, 201, resp.content)
+        return resp.json(), len(ctx), elapsed
+
+    def test_guardar_cotizacion_rendimiento(self):
+        data, q_alta, ms_alta = self._post(self._payload())
+        cot_id = data["cotizacion"]["id"]
+        data2, q_edit, ms_edit = self._post(self._payload(cot_id))
+        print(
+            f"\n[PERF onboarding] {self.N_PRODUCTOS}x{self.N_TALLAS} tallas: "
+            f"alta={q_alta} queries {ms_alta:.0f}ms | edición={q_edit} queries {ms_edit:.0f}ms"
+        )
+        # Techo holgado (hoy 19/22): antes eran ~177/181 y crecían con el tamaño.
+        self.assertLessEqual(q_alta, 25)
+        self.assertLessEqual(q_edit, 28)
+        self.assertEqual(len(data2["detalles"]), self.N_PRODUCTOS)
+        self.assertEqual(sum(len(d["tallas"]) for d in data2["detalles"]), self.N_PRODUCTOS * self.N_TALLAS)
+
+
+class AutorizarCotizacionRendimientoTests(TestCase):
+    """``POST /cotizaciones/{id}/autorizar/`` (aceptar pedido).
+
+    El número de queries NO debe crecer con renglones × tallas: la copia a
+    pedido, el descuento de inventario, el snapshot y la respuesta se resuelven
+    en lote.
+    """
+
+    N_PRODUCTOS = 6
+    N_TALLAS = 5
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="perf-au", razon_social="Perf SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="PAU", nombre="perf")
+        SerieFolio.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="PEDIDO", serie="P")
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="PT", nombre="PT",
+            tipo_almacen="PT", permite_salida=True,
+        )
+        cls.usuario = Usuario.objects.create(
+            username="perf-au@perf.test", email="perf-au@perf.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente", razon_social="Cliente SA")
+        cls.tallas = [Talla.objects.create(nombre=n) for n in ["CH", "M", "G", "XG", "2XG"][: cls.N_TALLAS]]
+        cls.color = Color.objects.create(nombre="Rojo", codigo="ROJ", codigo_hex="#f00")
+        cls.cotizacion = Cotizacion.objects.create(
+            empresa=cls.empresa, vendedor=cls.usuario, sucursal=cls.sucursal,
+            cliente=cls.cliente, moneda=cls.moneda, estatus=2,
+            persona_pagos="Pagos", correo_facturas="p@perf.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            subtotal="100.00", gran_total="116.00",
+        )
+        for i in range(cls.N_PRODUCTOS):
+            p = Producto.objects.create(empresa=cls.empresa, nombre=f"Prod {i}", codigo=f"P{i}")
+            det = CotizacionDetalle.objects.create(
+                cotizacion=cls.cotizacion, producto=p, color=cls.color,
+                precio_unitario="10.00", subtotal_linea="30.00",
+            )
+            for t in cls.tallas:
+                v = ProductoVariante.objects.create(
+                    producto=p, empresa=cls.empresa, color=cls.color, talla=t,
+                    sku=f"P{i}-ROJ-{t.nombre}", precio_base=100,
+                )
+                CotizacionDetalleTalla.objects.create(
+                    cotizacion_detalle=det, talla=t, cantidad=3, variante=v,
+                    precio_unitario="10.00", subtotal_talla="30.00",
+                )
+                Existencia.objects.create(
+                    producto=p, producto_variante=v, almacen=cls.almacen, cantidad=Decimal("50"),
+                )
+        for i in range(3):
+            CotizacionServicioExtra.objects.create(
+                cotizacion=cls.cotizacion, nombre=f"Extra {i}", monto="5.00", cantidad=1,
+            )
+
+    def test_autorizar_rendimiento(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        url = f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/"
+        with CaptureQueriesContext(connection) as ctx:
+            t0 = time.perf_counter()
+            resp = client.post(url)
+            elapsed = (time.perf_counter() - t0) * 1000
+        self.assertEqual(resp.status_code, 201, resp.content)
+        print(
+            f"\n[PERF autorizar] {self.N_PRODUCTOS}x{self.N_TALLAS} tallas: "
+            f"{len(ctx)} queries {elapsed:.0f}ms"
+        )
+        # Resultado intacto: renglones, tallas, servicios y descuento de inventario.
+        pedido = Pedido.objects.get(pk=resp.data["pedido"]["id"])
+        self.assertEqual(pedido.detalles.count(), self.N_PRODUCTOS)
+        self.assertEqual(
+            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido).count(),
+            self.N_PRODUCTOS * self.N_TALLAS,
+        )
+        self.assertEqual(pedido.servicios_extras.count(), 3)
+        self.assertEqual(
+            sum(Existencia.objects.values_list("cantidad", flat=True)),
+            Decimal("50") * self.N_PRODUCTOS * self.N_TALLAS - 3 * self.N_PRODUCTOS * self.N_TALLAS,
+        )
+        mov = MovimientoInventario.objects.get(pedido=pedido)
+        self.assertEqual(mov.detalles.count(), self.N_PRODUCTOS * self.N_TALLAS)
+        self.assertEqual(
+            AuditoriaEvento.objects.filter(modulo="inventarios", id_registro=str(pedido.pk)).count(), 1
+        )
+        # Techo holgado (hoy 59): antes eran 261 y crecían con renglones × tallas.
+        self.assertLessEqual(len(ctx), 70)
+
+
+
+class AutorizarCotizacionNotificaVendedorTests(TestCase):
+    """Al autorizar, el vendedor recibe cotización # y folio del pedido (P-xxxx)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme-nv", razon_social="acme-nv SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ANV", nombre="acme-nv")
+        SerieFolio.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="PEDIDO", serie="P")
+        cls.mesa = Usuario.objects.create(
+            username="mesa@acme-nv.test", email="mesa@acme-nv.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(
+            username="vend@acme-nv.test", email="vend@acme-nv.test", empresa=cls.empresa,
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+
+    def test_autorizar_notifica_al_vendedor_con_folio(self):
+        from notificaciones.models import Notificacion
+
+        cot = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.vendedor, sucursal=self.sucursal,
+            cliente=self.cliente, moneda=self.moneda, estatus=2,
+            persona_pagos="Pagos", correo_facturas="p@acme-nv.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        c = APIClient()
+        c.force_authenticate(user=self.mesa)
+        resp = c.post(f"/api/v1/ventas/cotizaciones/{cot.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        folio = resp.data["pedido"]["folio"]
+        n = Notificacion.objects.get(usuario=self.vendedor, tipo="cotizacion_autorizada")
+        self.assertIn(f"#{cot.id}", n.mensaje)
+        self.assertIn(folio, n.mensaje)
+        self.assertEqual(n.data, {"cotizacion_id": cot.id, "pedido_id": resp.data["pedido"]["id"], "pedido_folio": folio})
+
+
+class CotizacionFlujoEndurecidoTests(TestCase):
+    """#479/#480/#481: PATCH sin campos de flujo, motivo en el listado, comentario validado."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-fl", razon_social="acme-fl SA")
+        cls.mesa = Usuario.objects.create(
+            username="mesa@acme-fl.test", email="mesa@acme-fl.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(
+            username="vend@acme-fl.test", email="vend@acme-fl.test", empresa=cls.empresa,
+        )
+
+    def setUp(self):
+        self.cotizacion = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.vendedor, estatus=2,
+        )
+        self.url = f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/"
+
+    def _como(self, user):
+        c = APIClient()
+        c.force_authenticate(user=user)
+        return c
+
+    def test_patch_ignora_estatus_y_campos_de_flujo(self):
+        for payload in (
+            {"estatus": 3}, {"estatus": 4}, {"estatus": 5},
+            {"autorizada_at": "2026-01-01T00:00:00Z"},
+            {"cambios_solicitados_at": "2026-01-01T00:00:00Z"},
+            {"aprobado_snapshot": {"x": 1}},
+        ):
+            with self.subTest(payload=payload):
+                resp = self._como(self.vendedor).patch(self.url, payload, format="json")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.cotizacion.refresh_from_db()
+                self.assertEqual(self.cotizacion.estatus, 2)
+                self.assertIsNone(self.cotizacion.autorizada_at)
+                self.assertIsNone(self.cotizacion.cambios_solicitados_at)
+                self.assertIsNone(self.cotizacion.aprobado_snapshot)
+
+    def test_vendedor_no_autoriza_por_patch_y_si_por_accion_de_mesa(self):
+        self._como(self.vendedor).patch(self.url, {"estatus": 3}, format="json")
+        resp = self._como(self.mesa).post(
+            self.url + "rechazar/", {"comentario": "Falta RFC"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_listado_incluye_motivo_rechazo(self):
+        self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Falta RFC"}, format="json")
+        resp = self._como(self.vendedor).get("/api/v1/ventas/cotizaciones/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        filas = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+        fila = next(f for f in filas if f["id"] == self.cotizacion.pk)
+        self.assertEqual(fila["motivo_rechazo"], "Falta RFC")
+
+    def test_comentario_invalido_es_400_en_rechazar_y_enviar_revision(self):
+        self.assertEqual(
+            self._como(self.mesa).post(self.url + "rechazar/", ["x"], format="json").status_code, 400
+        )
+        for valor in (123, True, ["a"], {"a": 1}):
+            with self.subTest(valor=valor):
+                resp = self._como(self.mesa).post(
+                    self.url + "rechazar/", {"comentario": valor}, format="json"
+                )
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertIn("comentario", resp.data)
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=4)
+        self.assertEqual(
+            self._como(self.vendedor).post(self.url + "enviar-revision/", ["x"], format="json").status_code, 400
+        )
+        for valor in (123, True, ["a"], {"a": 1}):
+            with self.subTest(valor=valor):
+                resp = self._como(self.vendedor).post(
+                    self.url + "enviar-revision/", {"comentario": valor}, format="json"
+                )
+                self.assertEqual(resp.status_code, 400, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 4)
+        self.assertEqual(self.cotizacion.comentarios.count(), 0)

@@ -14,7 +14,7 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
 """
 
 import json
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock
@@ -496,7 +496,7 @@ SATELITES = (
         "url": "/api/v1/produccion/bordado-avances/",
         "modelo": BordadoAvances,
         "fk": "ob",
-        "extra": {"cantidad_bordada": 5},
+        "extra": {"cantidad_bordada": 5, "puntadas_por_pieza": 1000},
         "patch": {"comentario": "tocado"},
         # A diferencia del resto de satélites, ``BordadoAvancesViewSet``
         # fuerza ``usuario=request.user`` en ``perform_create`` y el serializer
@@ -780,6 +780,29 @@ class SatelitesSuperficieEscribibleTests(TestCase):
             **{cfg["fk"]: self.padres[cfg["fk"]]},
             **cfg["extra"],
         )
+
+    def test_avance_bordado_simple_por_ob(self):
+        """Avance por OB: piezas + puntadas por pieza; total calculado en backend."""
+        client = self._client()
+        url = "/api/v1/produccion/bordado-avances/"
+        resp = client.post(
+            url,
+            {"ob": self.ob.pk, "cantidad_bordada": 20, "puntadas_por_pieza": 5000,
+             "puntadas_total": 1},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        av = BordadoAvances.objects.get(pk=resp.data["id"])
+        self.assertEqual(av.puntadas_total, 100000)
+        self.assertIsNone(av.orden_bordado_detalle_id)
+        # Editar piezas recalcula el total.
+        resp = client.patch(f"{url}{av.pk}/", {"cantidad_bordada": 10}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        av.refresh_from_db()
+        self.assertEqual(av.puntadas_total, 50000)
+        # Las puntadas son obligatorias al crear.
+        resp = client.post(url, {"ob": self.ob.pk, "cantidad_bordada": 5}, format="json")
+        self.assertEqual(resp.status_code, 400)
 
     def test_create_via_api_sigue_funcionando(self):
         """Los candados no rompen el POST legítimo (regresión de creación)."""
@@ -1596,10 +1619,12 @@ class OrdenBordadoParcialidadesTests(TestCase):
             pedido=self.pedido, producto=self.producto
         )
         self.pdt_ch = PedidoDetalleTalla.objects.create(
+            sku_muestra="SKU-TEST",
             pedido_detalle=self.detalle, talla=self.talla_ch,
             cantidad=self.CANTIDAD_CH, lleva_bordado=True,
         )
         self.pdt_m = PedidoDetalleTalla.objects.create(
+            sku_muestra="SKU-TEST",
             pedido_detalle=self.detalle, talla=self.talla_m,
             cantidad=self.CANTIDAD_M, lleva_bordado=True,
         )
@@ -1917,6 +1942,7 @@ class OrdenBordadoRevisionParcialidadesTests(OrdenBordadoParcialidadesTests):
                     pedido=self.pedido, producto=self.producto
                 )
                 PedidoDetalleTalla.objects.create(
+                    sku_muestra="SKU-TEST",
                     pedido_detalle=det, talla=self.talla_ch,
                     cantidad=5, lleva_bordado=True,
                 )
@@ -2924,6 +2950,7 @@ class OnboardingGetConfigFormaRealTests(TestCase):
         )
         detalle = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
         PedidoDetalleTalla.objects.create(
+            sku_muestra="SKU-TEST",
             pedido_detalle=detalle, talla=self.talla_ch, cantidad=10,
             **{flag: True, campo_config: valor},
         )
@@ -3103,6 +3130,7 @@ class BordadoSinUbicacionesTests(TestCase):
             pedido=self.pedido, producto=self.producto
         )
         self.pdt = PedidoDetalleTalla.objects.create(
+            sku_muestra="SKU-TEST",
             pedido_detalle=self.detalle, talla=self.talla_ch, cantidad=6,
             lleva_bordado=True, bordado_config=BORDADO_CONFIG_SIN_UBICACIONES,
         )
@@ -3217,6 +3245,7 @@ class ToleranciaFormaConfigTests(TestCase):
         )
         detalle = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
         pdt = PedidoDetalleTalla.objects.create(
+            sku_muestra="SKU-TEST",
             pedido_detalle=detalle, talla=self.talla_ch, cantidad=5,
             **{flag: True, campo_config: valor},
         )
@@ -3418,6 +3447,7 @@ class OnboardingReflejanteConfigCrudoTests(TestCase):
         )
         detalle = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
         PedidoDetalleTalla.objects.create(
+            sku_muestra="SKU-TEST",
             pedido_detalle=detalle, talla=self.talla_ch, cantidad=5,
             **{flag: True, campo_config: valor},
         )
@@ -3529,7 +3559,11 @@ class OnboardingReflejanteConfigCrudoTests(TestCase):
             "/api/v1/produccion/orden-bordado/onboarding/", pedido
         )
 
-        self.assertEqual(set(lineas[0].keys()), CLAVES_LINEA_ONBOARDING_BASE)
+        # Bordado suma sku/sku_proscai/existencias sobre la base.
+        self.assertEqual(
+            set(lineas[0].keys()),
+            CLAVES_LINEA_ONBOARDING_BASE | {"sku", "sku_proscai", "existencias"},
+        )
         self.assertNotIn("bordado_config", lineas[0])
         # Y lo que ya publicaba sigue igual.
         self.assertEqual(len(lineas[0]["ubicaciones"]), 1)
@@ -6336,6 +6370,21 @@ class VarianteOnboardingColorTests(_BomTenantBase, TestCase):
         self.assertEqual(set(resp.data), {"pedido_detalle_id"})
         self.assertIn("ya tiene SKU", str(resp.data["pedido_detalle_id"]))
 
+    def test_reintento_genera_sku_solo_de_las_tallas_que_faltan(self):
+        linea = self._linea()
+        self.assertEqual(self._post(linea, color=self.color.pk).status_code, 201)
+        nueva = Talla.objects.create(nombre="XG-inc")
+        PedidoDetalleTalla.objects.create(pedido_detalle=linea, talla=nueva, cantidad=3)
+
+        resp = self._post(linea)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(
+            VarianteProductoProduccion.objects.filter(pedido_detalle=linea).count(), 2
+        )
+        self.assertEqual(self._post(linea).status_code, 400)
+
     def _post_con_integrity_error(self, linea, mensaje):
         client = self._client(self.admin)
         client.raise_request_exception = False
@@ -6444,3 +6493,260 @@ class VarianteOnboardingColorTests(_BomTenantBase, TestCase):
                 Pedido.objects.filter(pk=self.pedido.pk).update(estatus=estatus)
                 resp = self._post(self._linea(), color=self.otro_color.pk)
                 self.assertEqual(resp.status_code, 201, resp.data)
+
+
+class RecalculoConsumoTelaTests(TestCase):
+    """``POST /ordenes-produccion/{id}/recalcular-consumos/``: ajusta los
+    consumos a las piezas realmente cortadas, solo por diferencia y sin
+    pólizas."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-rc", razon_social="acme-rc SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ARC", nombre="acme-rc")
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM", nombre="Almacen",
+        )
+        cls.usuario = Usuario.objects.create(
+            username="a@acme-rc.test", email="a@acme-rc.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.op = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-RC-1",
+        )
+        um = UnidadMedida.objects.create(clave="MTR", nombre="Metro")
+        bom = ListaMaterialBom.objects.create(empresa=cls.empresa)
+        OrdenProduccionDetalle.objects.create(op=cls.op, bom=bom, cantidad=Decimal("90"), unidad=um)
+        cls.tela = Producto.objects.create(empresa=cls.empresa, nombre="Algodon")
+        cls.hilo = Producto.objects.create(empresa=cls.empresa, nombre="Hilo")
+
+    def setUp(self):
+        self.existencia = Existencia.objects.create(
+            producto=self.tela, almacen=self.almacen, cantidad=Decimal("500"),
+        )
+        self.ex_hilo = Existencia.objects.create(producto=self.hilo, almacen=self.almacen, cantidad=Decimal("50"))
+        consumos = OrdenProduccionService._discount_existencias(
+            [
+                {"producto": self.tela, "cantidad": Decimal("90")},
+                {"producto": self.hilo, "cantidad": Decimal("9")},
+            ],
+            self.empresa, self.sucursal,
+        )
+        OrdenProduccionService._registrar_consumo(self.op, consumos)
+        OrdenProduccionService._registrar_movimiento_inventario(self.op, self.usuario, consumos)
+        self.client = APIClient()
+        self.client.force_authenticate(self.usuario)
+
+    def _post(self, cantidad=None, productos=None, op=None):
+        body = {}
+        if cantidad is not None:
+            body["cantidad_real_corte"] = cantidad
+        body["productos"] = [p.pk for p in (productos if productos is not None else [self.tela])]
+        return self.client.post(
+            f"/api/v1/produccion/orden-produccion/{(op or self.op).pk}/recalcular-consumos/",
+            body, format="json",
+        )
+
+    def _total(self, producto):
+        from django.db.models import Sum
+        from produccion.models import ConsumoProduccionDetalle
+        return ConsumoProduccionDetalle.objects.filter(
+            consumo_produccion__op=self.op, producto=producto
+        ).aggregate(t=Sum("cantidad"))["t"]
+
+    def test_mas_piezas_escala_la_tela_y_descuenta_la_diferencia(self):
+        resp = self._post(100)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.existencia.refresh_from_db()
+        self.ex_hilo.refresh_from_db()
+        self.assertEqual(self.existencia.cantidad, Decimal("400"))
+        self.assertEqual(self._total(self.tela), Decimal("100"))
+        # El hilo no es tela: no se toca.
+        self.assertEqual(self._total(self.hilo), Decimal("9"))
+        self.assertEqual(self.ex_hilo.cantidad, Decimal("41"))
+        mov = MovimientoInventario.objects.filter(op=self.op).order_by("-id").first()
+        self.assertEqual(mov.tipo_movimiento, "SALIDA")
+        self.assertEqual(list(mov.detalles.values_list("cantidad", flat=True)), [Decimal("10")])
+        self.assertEqual(
+            OrdenProduccionRutaCritica.objects.get(op=self.op).cantidad_real_corte, Decimal("100")
+        )
+
+    def test_sin_telas_es_400(self):
+        resp = self.client.post(
+            f"/api/v1/produccion/orden-produccion/{self.op.pk}/recalcular-consumos/",
+            {"cantidad_real_corte": 100}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        resp = self.client.post(
+            f"/api/v1/produccion/orden-produccion/{self.op.pk}/recalcular-consumos/",
+            {"cantidad_real_corte": 100, "productos": []}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_varias_telas(self):
+        self.assertEqual(self._post(100, productos=[self.tela, self.hilo]).status_code, 200)
+        self.assertEqual(self._total(self.tela), Decimal("100"))
+        self.assertEqual(self._total(self.hilo), Decimal("10"))
+
+    def test_producto_fuera_del_consumo_se_rechaza(self):
+        otro = Producto.objects.create(empresa=self.empresa, nombre="Boton")
+        self.assertEqual(self._post(100, productos=[otro]).status_code, 400)
+
+    def test_sin_cantidad_usa_la_de_ruta_critica(self):
+        OrdenProduccionRutaCritica.objects.create(op=self.op, cantidad_real_corte=Decimal("100"))
+        self.assertEqual(self._post().status_code, 200)
+        self.assertEqual(self._total(self.tela), Decimal("100"))
+
+    def test_sin_cantidad_en_ningun_lado_es_400(self):
+        self.assertEqual(self._post().status_code, 400)
+
+    def test_repetir_con_el_mismo_valor_no_hace_nada(self):
+        self._post(100)
+        n = MovimientoInventario.objects.filter(op=self.op).count()
+        self.assertEqual(self._post(100).status_code, 200)
+        self.assertEqual(MovimientoInventario.objects.filter(op=self.op).count(), n)
+
+    def test_segundo_recalculo_hacia_abajo_regresa_a_inventario(self):
+        self._post(100)
+        self.assertEqual(self._post(95).status_code, 200)
+        self.existencia.refresh_from_db()
+        self.assertEqual(self.existencia.cantidad, Decimal("405"))
+        self.assertEqual(self._total(self.tela), Decimal("95"))
+
+    def test_menos_de_lo_planeado_se_rechaza(self):
+        self.assertEqual(self._post(80).status_code, 400)
+        self.existencia.refresh_from_db()
+        self.assertEqual(self.existencia.cantidad, Decimal("410"))
+
+    def test_sin_existencia_suficiente_no_cambia_nada(self):
+        self.assertEqual(self._post(1000).status_code, 400)
+        self.assertEqual(self._total(self.tela), Decimal("90"))
+        self.assertFalse(OrdenProduccionRutaCritica.objects.filter(op=self.op).exists())
+
+    def test_op_cerrada_se_rechaza(self):
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO
+        )
+        self.assertEqual(self._post(100).status_code, 400)
+
+    def test_op_de_otra_empresa_es_404(self):
+        otra = Empresa.objects.create(codigo="otra-rc", razon_social="otra SA")
+        suc = Sucursal.objects.create(empresa=otra, codigo="ORC", nombre="otra")
+        op = OrdenProduccion.objects.create(empresa=otra, sucursal=suc, folio_op="OP-RC-X")
+        self.assertEqual(self._post(100, op=op).status_code, 404)
+
+    def test_no_genera_polizas(self):
+        from finanzas.models import Poliza
+        antes = Poliza.objects.count()
+        self._post(100)
+        self.assertEqual(Poliza.objects.count(), antes)
+
+
+class OrdenBordadoOnboardingSkuTests(OrdenBordadoParcialidadesTests):
+    """GET onboarding de OB: oculta muestras sin SKU y publica SKU/Proscai/existencias."""
+
+    def test_oculta_muestra_sin_sku_y_publica_sku_proscai_existencias(self):
+        from catalogo.models import Color, ProductoVariante
+        from inventarios.models import Almacen, Existencia
+
+        color = Color.objects.create(nombre="Marino")
+        variante = ProductoVariante.objects.create(
+            producto=self.producto, empresa=self.empresa, color=color,
+            talla=self.talla_ch, sku="PLY-CH-MAR", cod_proscai="PRO-1", precio_base=1,
+        )
+        almacen = Almacen.objects.create(empresa=self.empresa, codigo="A1", nombre="Alm")
+        Existencia.objects.create(almacen=almacen, producto_variante=variante, cantidad=7)
+        Existencia.objects.create(almacen=almacen, producto_variante=variante, cantidad=3)
+        PedidoDetalleTalla.objects.filter(pk=self.pdt_ch.pk).update(
+            variante=variante, sku_muestra=None
+        )
+        PedidoDetalleTalla.objects.filter(pk=self.pdt_m.pk).update(sku_muestra=None)
+
+        lineas = self._lineas_del_get()
+
+        self.assertEqual(list(lineas), [self.talla_ch.pk])  # la muestra sin SKU no sale
+        linea = lineas[self.talla_ch.pk]
+        self.assertEqual(linea["sku"], "PLY-CH-MAR")
+        self.assertEqual(linea["sku_proscai"], "PRO-1")
+        self.assertEqual(linea["existencias"], 10.0)
+
+
+
+class SkuProduccionVacioTests(TestCase):
+    """#440: producción y ventas coinciden en "sku vacío = sin SKU" y en qué es muestra."""
+
+    def test_sku_vacio_sale_como_none_en_pedidos_especiales(self):
+        from types import SimpleNamespace
+        from produccion.api.serializers import PedidoDetalleTallaEspecialSerializer
+
+        serializer = PedidoDetalleTallaEspecialSerializer()
+        self.assertIsNone(serializer.get_sku_produccion(SimpleNamespace(variante_produccion=SimpleNamespace(sku=""))))
+        self.assertEqual(
+            serializer.get_sku_produccion(SimpleNamespace(variante_produccion=SimpleNamespace(sku="MP1"))), "MP1"
+        )
+
+    def test_una_sola_definicion_de_muestra(self):
+        from ventas.services.sku_produccion_service import nombre_es_muestra
+
+        self.assertFalse(nombre_es_muestra(None))
+        self.assertFalse(nombre_es_muestra(""))
+        self.assertTrue(nombre_es_muestra("Gorra"))
+        self.assertTrue(nombre_es_muestra("  "))
+
+
+class RutaCriticaFechasSelladasTests(TestCase):
+    """#425: la fecha acompaña al checkbox en el modelo, no solo en el serializer."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-rcf", razon_social="acme-rcf SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="RCF", nombre="acme-rcf")
+        cls.usuario = Usuario.objects.create(
+            username="a@acme-rcf.test", email="a@acme-rcf.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.op = OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-RCF-1")
+
+    def _patch(self, **datos):
+        client = APIClient()
+        client.force_authenticate(self.usuario)
+        return client.patch(
+            f"/api/v1/produccion/orden-produccion/{self.op.pk}/ruta-critica/", datos, format="json"
+        )
+
+    def test_kit_completo_sella_limpia_y_no_cambia_al_reenviar(self):
+        resp = self._patch(kit_completo=True)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        sellada = OrdenProduccionRutaCritica.objects.get(op=self.op).fecha_kit_completo
+        self.assertIsNotNone(sellada)
+
+        self._patch(kit_completo=True)
+        self.assertEqual(OrdenProduccionRutaCritica.objects.get(op=self.op).fecha_kit_completo, sellada)
+
+        self._patch(kit_completo=False)
+        self.assertIsNone(OrdenProduccionRutaCritica.objects.get(op=self.op).fecha_kit_completo)
+
+    def test_fecha_enviada_por_el_cliente_se_ignora(self):
+        self._patch(fecha_kit_completo="2020-01-01T00:00:00Z")
+        self.assertIsNone(OrdenProduccionRutaCritica.objects.get(op=self.op).fecha_kit_completo)
+
+    def test_fecha_llegada_centro_confeccion_se_lee_escribe_y_limpia(self):
+        resp = self._patch(fecha_llegada_centro_confeccion="2026-10-20")
+        self.assertEqual(resp.data["fecha_llegada_centro_confeccion"], "2026-10-20")
+        resp = self._patch(fecha_llegada_centro_confeccion=None)
+        self.assertIsNone(resp.data["fecha_llegada_centro_confeccion"])
+
+    def test_escritura_por_orm_tambien_sella(self):
+        ruta = OrdenProduccionRutaCritica.objects.create(op=self.op, kit_completo=True)
+        self.assertIsNotNone(ruta.fecha_kit_completo)
+
+    def test_renglon_anterior_sin_fecha_no_se_sella_en_silencio(self):
+        OrdenProduccionRutaCritica.objects.bulk_create([OrdenProduccionRutaCritica(op=self.op, kit_completo=True)])
+        ruta = OrdenProduccionRutaCritica.objects.get(op=self.op)
+        ruta.fecha_trazo = date(2026, 10, 1)
+        ruta.save()
+        self.assertIsNone(OrdenProduccionRutaCritica.objects.get(op=self.op).fecha_kit_completo)
+
+    def test_op_cerrada_responde_409_con_mensaje_neutro(self):
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO)
+        resp = self._patch(kit_completo=True)
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("estatus «Completado»", resp.data["msg"])

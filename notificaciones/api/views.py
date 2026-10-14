@@ -4,8 +4,9 @@ from datetime import datetime
 
 from django.db.models import Max
 from django.http import StreamingHttpResponse
-from rest_framework import viewsets
+from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
+from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 from rest_framework.request import Request
 
@@ -52,9 +53,12 @@ def _autenticar_por_token_param(request):
     return user
 
 
-class NotificacionViewSet(viewsets.ModelViewSet):
+class NotificacionViewSet(
+    mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
+):
     serializer_class = NotificacionSerializer
     http_method_names = ["get", "post"]
+    pagination_class = LimitOffsetPagination  # sin ?limit= regresa la lista completa
 
     def get_queryset(self):
         user = self.request.user

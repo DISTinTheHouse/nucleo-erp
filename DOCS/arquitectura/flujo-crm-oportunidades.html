@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flujo del CRM</title>
+<style>
+  :root { --bg:#f8fafc; --panel:#fff; --line:#cbd5e1; --text:#0f172a; --muted:#64748b;
+          --azul:#0e7490; --azul-bg:#cffafe; --verde:#047857; --verde-bg:#d1fae5;
+          --rojo:#be123c; --rojo-bg:#ffe4e6; --gris:#475569; --gris-bg:#e2e8f0; --morado:#6d28d9; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0b1220; --panel:#111a2e; --line:#334155; --text:#e2e8f0; --muted:#94a3b8;
+            --azul:#22d3ee; --azul-bg:#164e63; --verde:#34d399; --verde-bg:#064e3b;
+            --rojo:#fb7185; --rojo-bg:#4c0519; --gris:#cbd5e1; --gris-bg:#1e293b; --morado:#a78bfa; }
+  }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--text); font-family:system-ui,sans-serif; }
+  h1 { font-size:1.25rem; margin:0 0 12px; }
+  svg { width:100%; height:auto; max-width:1000px; display:block; }
+  .lane { fill:var(--panel); stroke:var(--line); stroke-dasharray:6 4; }
+  .lane-t { fill:var(--muted); font-size:13px; font-weight:600; }
+  .n-t { font-size:14px; font-weight:600; text-anchor:middle; fill:var(--text); }
+  .n-s { font-size:11px; text-anchor:middle; fill:var(--muted); }
+  .az { fill:var(--azul-bg); stroke:var(--azul); stroke-width:2; }
+  .ve { fill:var(--verde-bg); stroke:var(--verde); stroke-width:2; }
+  .ro { fill:var(--rojo-bg); stroke:var(--rojo); stroke-width:2; }
+  .gr { fill:var(--gris-bg); stroke:var(--gris); stroke-width:2; }
+  .arr { fill:none; stroke:var(--gris); stroke-width:2; marker-end:url(#p); }
+  .arr-ve { fill:none; stroke:var(--verde); stroke-width:2; marker-end:url(#pv); }
+  .arr-ro { fill:none; stroke:var(--rojo); stroke-width:2; stroke-dasharray:6 4; marker-end:url(#pr); }
+  .arr-mo { fill:none; stroke:var(--morado); stroke-width:2; marker-end:url(#pm); }
+  .lbl { font-size:11px; fill:var(--muted); text-anchor:middle; }
+  p { max-width:1000px; font-size:.9rem; color:var(--muted); }
+</style>
+</head>
+<body>
+<h1>Flujo del CRM</h1>
+<svg viewBox="0 0 1000 440" role="img" aria-label="Flujo: oportunidad, cotización, mesa de control, pedido">
+  <defs>
+    <marker id="p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--gris)"/></marker>
+    <marker id="pv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--verde)"/></marker>
+    <marker id="pr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--rojo)"/></marker>
+    <marker id="pm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--morado)"/></marker>
+  </defs>
+
+  <!-- Carril 1 -->
+  <rect class="lane" x="20" y="20" width="960" height="170" rx="14"/>
+  <text class="lane-t" x="40" y="46">01 / Vendedor · CRM (nuevo)</text>
+
+  <rect class="az" x="50" y="80" width="170" height="64" rx="10"/>
+  <text class="n-t" x="135" y="108">Oportunidad</text><text class="n-s" x="135" y="126">Nueva</text>
+
+  <rect class="az" x="290" y="80" width="170" height="64" rx="10"/>
+  <text class="n-t" x="375" y="108">Oportunidad</text><text class="n-s" x="375" y="126">Contactada · próximo contacto</text>
+
+  <rect class="ro" x="560" y="80" width="170" height="64" rx="10"/>
+  <text class="n-t" x="645" y="108">Perdida</text><text class="n-s" x="645" y="126">motivo obligatorio</text>
+
+  <path class="arr" d="M220 112H288"/><text class="lbl" x="254" y="102">contacta</text>
+  <path class="arr-ro" d="M460 112H558"/><text class="lbl" x="509" y="102">no avanza</text>
+
+  <!-- Carril 2 -->
+  <rect class="lane" x="20" y="210" width="960" height="210" rx="14"/>
+  <text class="lane-t" x="40" y="236">02 / Flujo existente (no cambia)</text>
+
+  <rect class="gr" x="290" y="270" width="170" height="64" rx="10"/>
+  <text class="n-t" x="375" y="298">Cotización</text><text class="n-s" x="375" y="316">Borrador · oportunidad: Cotizada</text>
+
+  <rect class="gr" x="530" y="270" width="170" height="64" rx="10"/>
+  <text class="n-t" x="615" y="298">En revisión</text><text class="n-s" x="615" y="316">Mesa de control decide</text>
+
+  <rect class="ve" x="770" y="270" width="170" height="64" rx="10"/>
+  <text class="n-t" x="855" y="298">Pedido</text><text class="n-s" x="855" y="316">autorizada · oportunidad: Ganada</text>
+
+  <!-- Oportunidad -> cotización -->
+  <path class="arr-mo" d="M375 144V268"/><text class="lbl" x="408" y="210" style="text-anchor:start">POST /cotizar/ (crea Borrador)</text>
+
+  <path class="arr" d="M460 302H528"/><text class="lbl" x="494" y="292">enviar</text>
+  <path class="arr-ve" d="M700 302H768"/><text class="lbl" x="734" y="292">autoriza</text>
+  <path class="arr-ro" d="M615 334C615 385 375 385 375 336"/><text class="lbl" x="495" y="398">rechaza o pide cambios · vuelve a Borrador</text>
+</svg>
+<p><b>Cotizada</b> y <b>Ganada</b> no se guardan: se calculan de las cotizaciones ligadas a la oportunidad (con cotización = Cotizada; alguna autorizada = Ganada). Por eso el flujo cotización → mesa de control → pedido no se toca. Una oportunidad Ganada ya no se puede marcar Perdida.</p>
+</body>
+</html>

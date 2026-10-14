@@ -4,6 +4,7 @@ from django.db import transaction
 
 from rest_framework.exceptions import ValidationError
 
+from auditoria.models import AuditoriaEvento
 from ventas.models import PedidoDetalleTalla
 from wms.models import Picking, PickingDetalle
 from wms.services.existencia_service import ExistenciaService
@@ -344,3 +345,64 @@ class PickingService:
         #    módulo Produccion endpoints dedicados).
         ordenes_trabajo_generadas = []
         return picking, ordenes_trabajo_generadas
+
+    ESTADOS_TRASLADABLES = (
+        Picking.Estado.PENDIENTE,
+        Picking.Estado.ASIGNADO,
+        Picking.Estado.EN_PROCESO,
+        Picking.Estado.PAUSADO,
+        Picking.Estado.PARCIAL,
+    )
+
+    @classmethod
+    @transaction.atomic
+    def trasladar(cls, picking, almacen, user, observaciones=None):
+        """Mueve un picking abierto a otro almacén (p. ej. de bordados a APARTADOS).
+
+        El picking es un tracker: no mueve inventario ni crea transferencias,
+        solo cambia el almacén desde el que se surte. Si el nuevo almacén era
+        el destino, el picking queda sin destino (las prendas ya están ahí).
+        Las ubicaciones de línea del almacén anterior se limpian.
+        """
+        picking = Picking.objects.select_for_update().get(pk=picking.pk)
+        if picking.estado not in cls.ESTADOS_TRASLADABLES:
+            raise ValidationError(
+                {"estado": f"No se puede trasladar un picking en estado {picking.estado}."}
+            )
+        if picking.almacen_id == almacen.pk:
+            raise ValidationError({"almacen": "El picking ya está en ese almacén."})
+        if almacen.empresa_id and almacen.empresa_id != picking.empresa_id:
+            raise ValidationError({"almacen": "El almacén no pertenece a la empresa del picking."})
+        if almacen.sucursal_id and almacen.sucursal_id != picking.sucursal_id:
+            raise ValidationError({"almacen": "El almacén no pertenece a la sucursal del picking."})
+        if not bool(getattr(almacen, "permite_salida", False)):
+            raise ValidationError({"almacen": "Este almacén no permite salidas."})
+        if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
+            if picking.sucursal_id not in user.sucursales_permitidas():
+                raise ValidationError({"picking": "No tiene acceso a la sucursal del picking."})
+
+        anterior = picking.almacen
+        destino_anterior_id = picking.almacen_destino_id
+        picking.almacen = almacen
+        if picking.almacen_destino_id == almacen.pk:
+            picking.almacen_destino = None
+        nota = f"Trasladado de {anterior.nombre} a {almacen.nombre}."
+        if observaciones:
+            nota += f" {observaciones}"
+        picking.observaciones = f"{picking.observaciones}\n{nota}" if picking.observaciones else nota
+        picking.save(update_fields=["almacen", "almacen_destino", "observaciones", "updated_at"])
+        picking.picking_detalle.exclude(ubicacion__isnull=True).exclude(
+            ubicacion__almacen=almacen
+        ).update(ubicacion=None)
+
+        AuditoriaEvento.objects.create(
+            empresa=picking.empresa,
+            usuario=user,
+            modulo="wms",
+            accion="TRASLADO_PICKING",
+            tabla="picking",
+            id_registro=str(picking.pk),
+            antes_json={"almacen_id": anterior.pk, "almacen_destino_id": destino_anterior_id},
+            despues_json={"almacen_id": almacen.pk, "almacen_destino_id": picking.almacen_destino_id},
+        )
+        return picking

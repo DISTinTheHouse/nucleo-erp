@@ -227,6 +227,10 @@ class Poliza(models.Model):
     poliza_reversa_de = models.ForeignKey(
         "self", on_delete=models.PROTECT, related_name="reversas", null=True, blank=True
     )
+    # Documento que originó la póliza automática (p. ej. "Factura", 15). Con
+    # el único de abajo, un documento no puede tener dos pólizas.
+    origen_tipo = models.CharField(max_length=30, null=True, blank=True)
+    origen_id = models.PositiveIntegerField(null=True, blank=True)
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
@@ -235,7 +239,13 @@ class Poliza(models.Model):
         db_table = "polizas"
         verbose_name = "Poliza"
         verbose_name_plural = "Polizas"
+        indexes = [models.Index(fields=["empresa", "fecha"], name="ix_poliza_empresa_fecha")]
         constraints = [
+            models.UniqueConstraint(
+                fields=("origen_tipo", "origen_id"),
+                condition=models.Q(origen_tipo__isnull=False, poliza_reversa_de__isnull=True),
+                name="uq_poliza_origen",
+            ),
             models.UniqueConstraint(
                 fields=("poliza_reversa_de",),
                 condition=models.Q(poliza_reversa_de__isnull=False),
@@ -685,15 +695,14 @@ class PolizaDetalle(models.Model):
         db_table = "poliza_detalle"
         verbose_name = "Poliza Detalle"
         verbose_name_plural = "Polizas Detalle"
-
-    constraints = [
-        models.CheckConstraint(  # `condition=` en Django 5.1+, `check=` antes
-            condition=models.Q(cargo__gte=0, abono__gte=0)
-            & (models.Q(cargo=0) | models.Q(abono=0))
-            & ~models.Q(cargo=0, abono=0),
-            name="ck_poliza_detalle_cargo_xor_abono",
-        ),
-    ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(cargo__gte=0, abono__gte=0)
+                & (models.Q(cargo=0) | models.Q(abono=0))
+                & ~models.Q(cargo=0, abono=0),
+                name="ck_poliza_detalle_cargo_xor_abono",
+            ),
+        ]
 
     def __str__(self):
         return str(self.id)
@@ -814,6 +823,18 @@ class AlertaMora(models.Model):
         db_table = "alertas_mora"
         verbose_name = "Alerta de Mora"
         verbose_name_plural = "Alertas de Mora"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("cuenta_por_cobrar",),
+                condition=models.Q(cuenta_por_cobrar__isnull=False),
+                name="uq_alerta_mora_cxc",
+            ),
+            models.UniqueConstraint(
+                fields=("cuenta_por_pagar",),
+                condition=models.Q(cuenta_por_pagar__isnull=False),
+                name="uq_alerta_mora_cxp",
+            ),
+        ]
 
     def __str__(self):
         cuenta = self.cuenta_por_cobrar or self.cuenta_por_pagar

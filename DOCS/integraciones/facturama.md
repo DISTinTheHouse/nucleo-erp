@@ -1,6 +1,6 @@
 <div align="center">
     <p>
-        <img src="./facturama_logo.png" width="239">
+        <img src="../assets/facturama_logo.png" width="239">
     </p>
         <h1>Facturama</h1>
         <h3>Genera tus Comprobantes Fiscales de manera rápida y segura con nuestro innovador Software de Facturación .</h3>

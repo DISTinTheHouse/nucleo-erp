@@ -19,10 +19,11 @@ from unittest.mock import MagicMock, patch
 from django.apps import apps as django_apps
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import IntegrityError, OperationalError, transaction
+from django.db import IntegrityError, OperationalError, connection, transaction
 from django.db.models import ProtectedError
 from django.db.models.signals import post_delete
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from drf_spectacular.generators import SchemaGenerator
 from rest_framework.test import APIClient
@@ -45,6 +46,7 @@ from finanzas.exceptions import (
     ErrorDeNegocio,
 )
 from finanzas.models import (
+    AlertaMora,
     Banco,
     CentroCosto,
     Cobro,
@@ -69,8 +71,11 @@ from finanzas.models import (
     Poliza,
     PolizaDetalle,
 )
+from finanzas.services.alerta_mora_service import AlertaMoraService
 from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
 from finanzas.services.plan_contable_service import PlanContableService
+from finanzas.services.factura_poliza_service import FacturaPolizaService
+from finanzas.services.poliza_motor_service import PolizaMotorService
 from finanzas.services.poliza_service import PolizaService
 from inventarios.models import Almacen
 from nucleo.models import (
@@ -736,6 +741,16 @@ class Defecto2PolizaDetalleSerializer(FinanzasBase):
         ``registrar-pendiente-cobro`` (que siempre genera póliza)."""
         empresa = self.a["empresa"]
         self._crear_cuentas(empresa)
+        for concepto, codigo in (
+            (ConceptoContable.CLIENTES, "1050"),
+            (ConceptoContable.INGRESO_VENTAS, "4000"),
+            (ConceptoContable.IVA_TRASLADADO, "2080"),
+        ):
+            ConfiguracionContable.objects.create(
+                empresa=empresa, concepto=concepto,
+                cuenta_contable=CuentaContable.objects.get(empresa=empresa, codigo=codigo),
+            )
+        ParametrosContabilidad.objects.create(empresa=empresa, contabilizacion_automatica=True)
         client = self._client(self.a["usuario"])
 
         creada = client.post(
@@ -4014,6 +4029,70 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         self.assertFalse(FacturaProveedor.objects.filter(pk=factura.pk).exists())
         self.assertFalse(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
 
+    # -- F0: transiciones de estatus del pago --------------------------------
+
+    def _saldo_banco(self, pago):
+        pago.cuenta_bancaria.refresh_from_db()
+        return pago.cuenta_bancaria.saldo_actual
+
+    def test_patch_a_cancelado_revierte_saldos_y_banco_del_pago(self):
+        proveedor, _, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "400.00")
+        saldo_banco_aplicado = self._saldo_banco(pago)
+
+        resp = self._patch(f"{PAGOS_URL}{pago.pk}/", {"estatus": Pago.Estatus.CANCELADO.value})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        pago.refresh_from_db()
+        cxp.refresh_from_db()
+        self.assertEqual(pago.estatus, Pago.Estatus.CANCELADO)
+        self.assertEqual(cxp.saldo, Decimal("1000.00"))
+        self.assertEqual(self._saldo_banco(pago), saldo_banco_aplicado + Decimal("400.00"))
+        self.assertEqual(
+            pago.movimientos_bancarios.get().estatus, MovimientoBancario.Estatus.CANCELADO
+        )
+
+    def test_pago_aplicado_no_puede_regresar_a_borrador(self):
+        proveedor, _, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "400.00")
+
+        resp = self._patch(f"{PAGOS_URL}{pago.pk}/", {"estatus": Pago.Estatus.BORRADOR.value})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("estatus", resp.data)
+        pago.refresh_from_db()
+        cxp.refresh_from_db()
+        self.assertEqual(pago.estatus, Pago.Estatus.APLICADO)
+        self.assertEqual(cxp.saldo, Decimal("600.00"))
+
+    def test_cancelar_un_pago_en_borrador_no_toca_saldos_ni_banco(self):
+        proveedor, _, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "400.00", estatus=Pago.Estatus.BORRADOR.value)
+        saldo_banco = self._saldo_banco(pago)
+
+        resp = self._client(self.a["usuario"]).post(f"{PAGOS_URL}{pago.pk}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        pago.refresh_from_db()
+        cxp.refresh_from_db()
+        self.assertEqual(pago.estatus, Pago.Estatus.CANCELADO)
+        self.assertEqual(cxp.saldo, Decimal("1000.00"))
+        self.assertEqual(self._saldo_banco(pago), saldo_banco)
+
+    def test_borrar_un_pago_aplicado_lo_cancela_y_lo_saca_del_listado(self):
+        proveedor, _, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "400.00")
+
+        resp = self._client(self.a["usuario"]).delete(f"{PAGOS_URL}{pago.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        pago.refresh_from_db()
+        cxp.refresh_from_db()
+        self.assertEqual(pago.estatus, Pago.Estatus.CANCELADO)
+        self.assertFalse(pago.activo)
+        self.assertEqual(cxp.saldo, Decimal("1000.00"))
+        self.assertEqual(self._client(self.a["usuario"]).get(f"{PAGOS_URL}{pago.pk}/").status_code, 404)
+
     # -- Migración 0013 ---------------------------------------------------------
 
     def test_migration_remaps_vencida_by_balance_and_is_a_noop_without_rows(self):
@@ -4758,9 +4837,8 @@ class CentroCostoBajaLogicaTests(FinanzasBase):
         ajeno.refresh_from_db()
         self.assertTrue(ajeno.activo)
 
-    def test_sin_centro_activo_la_factura_pendiente_de_cobro_devuelve_400(self):
-        # Efecto colateral conocido: ``_crear_poliza_factura_pendiente`` exige un
-        # centro de costo activo.
+    def test_sin_centro_activo_la_factura_pendiente_de_cobro_se_registra(self):
+        # El centro de costo es opcional en la póliza: no bloquea la factura.
         _, _, centro = self._crear_cuentas_contables(self.a["empresa"])
         self.assertEqual(self._delete(centro).status_code, 204)
 
@@ -4778,8 +4856,7 @@ class CentroCostoBajaLogicaTests(FinanzasBase):
             format="json",
         )
 
-        self.assertEqual(resp.status_code, 400, resp.data)
-        self.assertIn("centro_costo", resp.data)
+        self.assertEqual(resp.status_code, 201, resp.data)
 
 
 class CentroCostoCodigoUnicoTests(FinanzasBase):
@@ -6325,3 +6402,1318 @@ class CuentaPorCobrarUnicaPorFacturaTests(FinanzasBase):
 
         with self.assertRaises(IntegrityError), transaction.atomic():
             CuentaPorCobrar.objects.create(**datos)
+
+
+class F0CobroEstatusYGuardsTests(FinanzasBase):
+    """F0 del plan de pólizas: un cobro solo avanza, revierte de verdad al cancelarse
+    y no admite CxC ni facturas canceladas. La póliza se cuelga de estos hechos."""
+
+    def _cxc(self, total="100.00", *, estatus=None, factura_estatus=None):
+        empresa = self.a["empresa"]
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"], cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        if factura_estatus is not None:
+            Factura.objects.filter(pk=factura.pk).update(estatus=factura_estatus)
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=empresa, cliente=self.a["cliente"], factura=factura,
+            total=Decimal(total), saldo=Decimal(total),
+        )
+        if estatus is not None:
+            CuentaPorCobrar.objects.filter(pk=cxc.pk).update(estatus=estatus)
+        return cxc
+
+    def _cobrar(self, cxc, importe="100.00", *, cuenta=None, **extra):
+        cuenta = cuenta or self._crear_cuenta_bancaria(self.a["empresa"])
+        payload = {
+            "cliente": self.a["cliente"].pk,
+            "cuenta_bancaria": cuenta.pk,
+            "total_cobrado": importe,
+            "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": importe}],
+            **extra,
+        }
+        return self._client(self.a["usuario"]).post(COBROS_URL, payload, format="json")
+
+    def _patch(self, cobro, data):
+        return self._client(self.a["usuario"]).patch(f"{COBROS_URL}{cobro.pk}/", data, format="json")
+
+    def _banco(self, cobro):
+        cobro.cuenta_bancaria.refresh_from_db()
+        return cobro.cuenta_bancaria.saldo_actual
+
+    def test_no_se_puede_cobrar_una_cxc_cancelada(self):
+        cxc = self._cxc(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA)
+
+        resp = self._cobrar(cxc)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cobro_detalles", resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.CANCELADA)
+
+    def test_no_se_puede_cobrar_una_factura_cancelada(self):
+        cxc = self._cxc(factura_estatus=Factura.FacturaStatus.CANCELADA)
+
+        resp = self._cobrar(cxc)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cobro_detalles", resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+
+    def test_no_se_puede_cobrar_dos_veces_una_cxc_liquidada(self):
+        cxc = self._cxc()
+        self.assertEqual(self._cobrar(cxc).status_code, 201)
+
+        resp = self._cobrar(cxc)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("0.00"))
+
+    def test_patch_a_cancelado_revierte_saldo_y_banco(self):
+        cxc = self._cxc()
+        resp = self._cobrar(cxc, "60.00")
+        cobro = Cobro.objects.get(pk=resp.data["id"])
+        banco_aplicado = self._banco(cobro)
+
+        resp = self._patch(cobro, {"estatus": Cobro.Estatus.CANCELADO.value})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cobro.refresh_from_db()
+        cxc.refresh_from_db()
+        self.assertEqual(cobro.estatus, Cobro.Estatus.CANCELADO)
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
+        self.assertEqual(self._banco(cobro), banco_aplicado - Decimal("60.00"))
+        self.assertEqual(
+            cobro.movimientos_bancarios.get().estatus, MovimientoBancario.Estatus.CANCELADO
+        )
+
+    def test_cobro_aplicado_no_puede_regresar_a_borrador(self):
+        cxc = self._cxc()
+        cobro = Cobro.objects.get(pk=self._cobrar(cxc, "60.00").data["id"])
+
+        resp = self._patch(cobro, {"estatus": Cobro.Estatus.BORRADOR.value})
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("estatus", resp.data)
+        cobro.refresh_from_db()
+        cxc.refresh_from_db()
+        self.assertEqual(cobro.estatus, Cobro.Estatus.APLICADO)
+        self.assertEqual(cxc.saldo, Decimal("40.00"))
+
+    def test_un_borrador_se_aplica_una_sola_vez(self):
+        cxc = self._cxc()
+        resp = self._cobrar(cxc, "60.00", estatus=Cobro.Estatus.BORRADOR.value)
+        cobro = Cobro.objects.get(pk=resp.data["id"])
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+
+        self.assertEqual(self._patch(cobro, {"estatus": "Aplicado"}).status_code, 200)
+        self.assertEqual(self._patch(cobro, {"estatus": "Borrador"}).status_code, 400)
+        self.assertEqual(self._patch(cobro, {"estatus": "Aplicado"}).status_code, 200)
+
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("40.00"))
+
+    def test_cancelar_un_borrador_no_toca_saldos_ni_banco(self):
+        cxc = self._cxc()
+        resp = self._cobrar(cxc, "60.00", estatus=Cobro.Estatus.BORRADOR.value)
+        cobro = Cobro.objects.get(pk=resp.data["id"])
+        banco = self._banco(cobro)
+
+        resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cobro.refresh_from_db()
+        cxc.refresh_from_db()
+        self.assertEqual(cobro.estatus, Cobro.Estatus.CANCELADO)
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+        self.assertEqual(self._banco(cobro), banco)
+
+    def test_borrar_un_cobro_aplicado_lo_cancela_y_lo_saca_del_listado(self):
+        cxc = self._cxc()
+        cobro = Cobro.objects.get(pk=self._cobrar(cxc, "60.00").data["id"])
+
+        resp = self._client(self.a["usuario"]).delete(f"{COBROS_URL}{cobro.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        cobro.refresh_from_db()
+        cxc.refresh_from_db()
+        self.assertEqual(cobro.estatus, Cobro.Estatus.CANCELADO)
+        self.assertFalse(cobro.activo)
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+        self.assertEqual(self._client(self.a["usuario"]).get(f"{COBROS_URL}{cobro.pk}/").status_code, 404)
+
+
+class F0CuentaPorCobrarSoloLecturaTests(FinanzasBase):
+    """Saldo y estatus de la CxC los mueven los servicios, no el cliente HTTP."""
+
+    def _cxc(self):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        return CuentaPorCobrar.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+
+    def test_no_hay_alta_manual_de_cxc(self):
+        resp = self._client(self.a["usuario"]).post(CXC_URL, {"total": "100.00"}, format="json")
+
+        self.assertEqual(resp.status_code, 405)
+
+    def test_patch_no_cambia_saldo_ni_estatus(self):
+        cxc = self._cxc()
+
+        resp = self._client(self.a["usuario"]).patch(
+            f"{CXC_URL}{cxc.pk}/", {"saldo": "0.00", "estatus": "Pagada"}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("100.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
+
+    def test_patch_rechaza_cambiar_el_total(self):
+        cxc = self._cxc()
+
+        resp = self._client(self.a["usuario"]).patch(f"{CXC_URL}{cxc.pk}/", {"total": "5.00"}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("total", resp.data)
+
+
+class F0PolizaDetalleCargoXorAbonoTests(FinanzasBase):
+    """El constraint vivía fuera de ``Meta`` y no se aplicaba."""
+
+    def setUp(self):
+        empresa = self.a["empresa"]
+        self.cuenta, _, centro = self._crear_cuentas_contables(empresa)
+        self.poliza = Poliza.objects.create(empresa=empresa, sucursal=self.a["sucursal"], centro_costo=centro)
+
+    def _linea(self, **montos):
+        return PolizaDetalle(poliza=self.poliza, cuenta_contable=self.cuenta, **montos)
+
+    def test_acepta_solo_cargo_o_solo_abono(self):
+        self._linea(cargo=Decimal("10.00"), abono=Decimal("0.00")).save()
+        self._linea(cargo=Decimal("0.00"), abono=Decimal("10.00")).save()
+
+    def test_rechaza_cargo_y_abono_a_la_vez(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self._linea(cargo=Decimal("10.00"), abono=Decimal("5.00")).save()
+
+    def test_rechaza_renglon_en_ceros(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self._linea(cargo=Decimal("0.00"), abono=Decimal("0.00")).save()
+
+    def test_rechaza_importes_negativos(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self._linea(cargo=Decimal("-10.00"), abono=Decimal("0.00")).save()
+
+
+class MotorPolizasBase(FinanzasBase):
+    """Plan contable mínimo y contabilización encendida para probar el motor."""
+
+    def setUp(self):
+        self.empresa = self.a["empresa"]
+        self.sucursal = self.a["sucursal"]
+        self.clientes = self._cuenta("1120", CuentaContable.CuentaTipo.ACTIVO)
+        self.ventas = self._cuenta("4100", CuentaContable.CuentaTipo.INGRESO)
+        self.iva = self._cuenta("2170", CuentaContable.CuentaTipo.PASIVO)
+        self._config(ConceptoContable.CLIENTES, self.clientes)
+        self._config(ConceptoContable.INGRESO_VENTAS, self.ventas)
+        self._config(ConceptoContable.IVA_TRASLADADO, self.iva)
+        self.factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        self._encender()
+
+    def _cuenta(self, codigo, tipo):
+        return CuentaContable.objects.create(
+            empresa=self.empresa, codigo=codigo, nombre=f"Cuenta {codigo}", tipo=tipo
+        )
+
+    def _config(self, concepto, cuenta):
+        return ConfiguracionContable.objects.create(
+            empresa=self.empresa, concepto=concepto, cuenta_contable=cuenta
+        )
+
+    def _encender(self, **extra):
+        ParametrosContabilidad.objects.update_or_create(
+            empresa=self.empresa, defaults={"contabilizacion_automatica": True, **extra}
+        )
+
+    def _lineas(self, total="116.00", neto="100.00", iva="16.00"):
+        return [
+            {"concepto": ConceptoContable.CLIENTES, "cargo": total, "factura": self.factura},
+            {"concepto": ConceptoContable.INGRESO_VENTAS, "abono": neto, "factura": self.factura},
+            {"concepto": ConceptoContable.IVA_TRASLADADO, "abono": iva, "factura": self.factura},
+        ]
+
+    def _generar(self, origen_id=None, fecha=None, lineas=None):
+        return PolizaMotorService.generar(
+            empresa_id=self.empresa.pk,
+            sucursal_id=self.sucursal.pk,
+            origen_tipo="Factura",
+            origen_id=origen_id or self.factura.pk,
+            fecha=fecha or date(2026, 3, 1),
+            tipo=Poliza.PolizaTipo.INGRESO,
+            concepto="Factura de prueba",
+            lineas=lineas or self._lineas(),
+            usuario=self.a["usuario"],
+        )
+
+
+class F1MotorDePolizasTests(MotorPolizasBase):
+    """Motor de pólizas automáticas y contrapóliza."""
+
+    # -- generar -----------------------------------------------------------
+
+    def test_genera_una_poliza_contabilizada_y_cuadrada(self):
+        poliza = self._generar()
+
+        self.assertEqual(poliza.estatus, Poliza.PolizaStatus.CONTABILIZADA)
+        self.assertEqual(poliza.fecha, date(2026, 3, 1))
+        self.assertTrue(poliza.folio)
+        self.assertEqual(PolizaService.calcular_sumas(poliza), (Decimal("116.00"), Decimal("116.00")))
+        cuentas = list(poliza.poliza_detalles.order_by("orden").values_list("cuenta_contable_id", flat=True))
+        self.assertEqual(cuentas, [self.clientes.pk, self.ventas.pk, self.iva.pk])
+        self.assertEqual(poliza.poliza_detalles.first().factura_id, self.factura.pk)
+
+    def test_no_genera_renglones_en_ceros(self):
+        poliza = self._generar(lineas=self._lineas("100.00", "100.00", "0.00"))
+
+        self.assertEqual(poliza.poliza_detalles.count(), 2)
+
+    def test_es_idempotente_por_documento(self):
+        primera = self._generar()
+        segunda = self._generar()
+
+        self.assertEqual(primera.pk, segunda.pk)
+        self.assertEqual(Poliza.objects.filter(origen_tipo="Factura").count(), 1)
+
+    def test_con_el_interruptor_apagado_no_genera(self):
+        self._encender(contabilizacion_automatica=False)
+
+        self.assertIsNone(self._generar())
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_respeta_la_fecha_de_inicio(self):
+        self._encender(fecha_inicio_contabilizacion=date(2026, 6, 1))
+
+        self.assertIsNone(self._generar(fecha=date(2026, 5, 31)))
+        self.assertIsNotNone(self._generar(fecha=date(2026, 6, 1)))
+
+    def test_cuenta_faltante_reporta_todos_los_conceptos_y_no_deja_nada(self):
+        ConfiguracionContable.objects.filter(
+            concepto__in=[ConceptoContable.INGRESO_VENTAS, ConceptoContable.IVA_TRASLADADO]
+        ).delete()
+
+        with self.assertRaises(ErrorDeNegocio) as ctx:
+            self._generar()
+
+        mensaje = str(ctx.exception.message_dict)
+        self.assertIn("Ingresos por ventas", mensaje)
+        self.assertIn("IVA trasladado", mensaje)
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_rechaza_una_cuenta_de_agrupacion(self):
+        CuentaContable.objects.filter(pk=self.ventas.pk).update(acepta_movimientos=False)
+
+        with self.assertRaises(ErrorDeNegocio):
+            self._generar()
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_rechaza_un_asiento_descuadrado_y_no_deja_nada(self):
+        with self.assertRaises(ErrorDeNegocio):
+            self._generar(lineas=self._lineas(total="116.00", neto="100.00", iva="10.00"))
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_costo_fijo_de_consultas_por_poliza(self):
+        self._generar()  # abre la serie de folios
+        with self.assertNumQueries(15):
+            self._generar(origen_id=self.factura.pk + 1000)
+
+    # -- contrapóliza ------------------------------------------------------
+
+    def test_contrapoliza_invierte_cada_renglon_y_cancela_la_original(self):
+        original = self._generar()
+
+        reversa = PolizaService.cancelar(original, self.a["usuario"])
+
+        original.refresh_from_db()
+        self.assertEqual(original.estatus, Poliza.PolizaStatus.CANCELADA)
+        self.assertEqual(reversa.estatus, Poliza.PolizaStatus.CONTABILIZADA)
+        self.assertEqual(reversa.poliza_reversa_de_id, original.pk)
+        self.assertEqual(reversa.fecha, timezone.localdate())
+        invertidas = {
+            (d.cuenta_contable_id, d.cargo, d.abono) for d in reversa.poliza_detalles.all()
+        }
+        esperadas = {
+            (d.cuenta_contable_id, d.abono, d.cargo) for d in original.poliza_detalles.all()
+        }
+        self.assertEqual(invertidas, esperadas)
+        self.assertEqual(reversa.poliza_detalles.first().factura_id, self.factura.pk)
+
+    def test_cancelar_dos_veces_no_duplica_la_contrapoliza(self):
+        original = self._generar()
+
+        primera = PolizaService.cancelar(original, self.a["usuario"])
+        segunda = PolizaService.cancelar(original, self.a["usuario"])
+
+        self.assertEqual(primera.pk, segunda.pk)
+        self.assertEqual(Poliza.objects.filter(poliza_reversa_de=original).count(), 1)
+
+    def test_el_documento_cancelado_puede_volver_a_contabilizarse(self):
+        original = self._generar()
+        PolizaService.cancelar(original, self.a["usuario"])
+
+        self.assertEqual(self._generar().pk, original.pk)
+
+    def test_cancelar_un_borrador_no_genera_contrapoliza(self):
+        borrador = Poliza.objects.create(empresa=self.empresa, sucursal=self.sucursal)
+
+        self.assertIsNone(PolizaService.cancelar(borrador))
+
+        borrador.refresh_from_db()
+        self.assertEqual(borrador.estatus, Poliza.PolizaStatus.CANCELADA)
+        self.assertEqual(Poliza.objects.count(), 1)
+
+    def test_endpoint_cancelar_devuelve_la_contrapoliza(self):
+        original = self._generar()
+
+        resp = self._client(self.a["usuario"]).post(f"{POLIZAS_URL}{original.pk}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["estatus"], Poliza.PolizaStatus.CANCELADA)
+        reversa = Poliza.objects.get(poliza_reversa_de=original)
+        self.assertEqual(resp.data["contrapoliza_id"], reversa.pk)
+
+    def test_listado_lee_las_lineas_con_consultas_fijas(self):
+        for i in range(5):
+            self._generar(origen_id=self.factura.pk + i + 1)
+        cliente = self._client(self.a["usuario"])
+        cliente.get(POLIZAS_URL)  # calienta sesión y permisos
+
+        with CaptureQueriesContext(connection) as pocas:
+            self.assertEqual(cliente.get(POLIZAS_URL).status_code, 200)
+        for i in range(10):
+            self._generar(origen_id=self.factura.pk + i + 100)
+        with CaptureQueriesContext(connection) as muchas:
+            self.assertEqual(cliente.get(POLIZAS_URL).status_code, 200)
+
+        self.assertEqual(len(pocas), len(muchas))
+
+
+class F2PolizaDeFacturaTests(MotorPolizasBase):
+    """La factura de venta contabiliza con el motor: Clientes / Ventas / IVA."""
+
+    def _factura(self, **extra):
+        datos = dict(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.a["cliente"], moneda=self.moneda,
+            folio="F-100", subtotal=Decimal("100.00"), descuento=Decimal("0.00"),
+            impuestos=Decimal("16.00"), total=Decimal("116.00"),
+        )
+        datos.update(extra)
+        return Factura.objects.create(**datos)
+
+    def test_genera_cargo_a_clientes_y_abonos_a_ventas_e_iva(self):
+        factura = self._factura()
+
+        poliza = FacturaPolizaService.generar(factura, self.a["usuario"])
+
+        self.assertEqual(poliza.tipo, Poliza.PolizaTipo.INGRESO)
+        self.assertEqual(poliza.fecha, factura.fecha_emision)
+        self.assertEqual(poliza.origen_id, factura.pk)
+        renglones = {
+            d.cuenta_contable_id: (d.cargo, d.abono) for d in poliza.poliza_detalles.all()
+        }
+        self.assertEqual(renglones, {
+            self.clientes.pk: (Decimal("116.00"), Decimal("0.00")),
+            self.ventas.pk: (Decimal("0.00"), Decimal("100.00")),
+            self.iva.pk: (Decimal("0.00"), Decimal("16.00")),
+        })
+
+    def test_el_descuento_baja_el_ingreso_neto(self):
+        factura = self._factura(
+            subtotal=Decimal("100.00"), descuento=Decimal("10.00"),
+            impuestos=Decimal("14.40"), total=Decimal("104.40"),
+        )
+
+        poliza = FacturaPolizaService.generar(factura)
+
+        self.assertEqual(
+            poliza.poliza_detalles.get(cuenta_contable=self.ventas).abono, Decimal("90.00")
+        )
+
+    def test_sin_impuestos_no_hay_renglon_de_iva(self):
+        factura = self._factura(impuestos=Decimal("0.00"), total=Decimal("100.00"))
+
+        poliza = FacturaPolizaService.generar(factura)
+
+        self.assertEqual(poliza.poliza_detalles.count(), 2)
+
+    def test_con_el_interruptor_apagado_no_genera(self):
+        self._encender(contabilizacion_automatica=False)
+
+        self.assertIsNone(FacturaPolizaService.generar(self._factura()))
+
+    def test_previsualizar_no_guarda_y_funciona_con_el_interruptor_apagado(self):
+        self._encender(contabilizacion_automatica=False)
+        factura = self._factura()
+
+        resp = self._client(self.a["usuario"]).get(f"/api/v1/finanzas/facturas/{factura.pk}/previsualizar-poliza/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(resp.data["cuadre_correcto"])
+        self.assertEqual(resp.data["total_cargos"], "116.00")
+        self.assertEqual([r["cuenta_codigo"] for r in resp.data["renglones"]], ["1120", "4100", "2170"])
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_previsualizar_de_otra_empresa_responde_404(self):
+        factura = self._factura()
+
+        resp = self._client(self.b["usuario"]).get(f"/api/v1/finanzas/facturas/{factura.pk}/previsualizar-poliza/")
+
+        self.assertEqual(resp.status_code, 404)
+
+
+class F3PolizaDeCobroYPagoTests(MotorPolizasBase):
+    """Cobro: Banco / Clientes. Pago: Proveedores / Banco. Cancelar genera la contrapóliza."""
+
+    def setUp(self):
+        super().setUp()
+        self.banco_contable = self._cuenta("1020", CuentaContable.CuentaTipo.ACTIVO)
+        self.proveedores = self._cuenta("2110", CuentaContable.CuentaTipo.PASIVO)
+        self._config(ConceptoContable.PROVEEDORES, self.proveedores)
+        self.cuenta_bancaria = self._crear_cuenta_bancaria(self.empresa)
+        self.cuenta_bancaria.cuenta_contable = self.banco_contable
+        self.cuenta_bancaria.save()
+
+    def _cobrar(self, importe="100.00"):
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=self.empresa, cliente=self.a["cliente"], factura=self.factura,
+            total=Decimal("1000.00"), saldo=Decimal("1000.00"),
+        )
+        resp = self._client(self.a["usuario"]).post(COBROS_URL, {
+            "cliente": self.a["cliente"].pk, "cuenta_bancaria": self.cuenta_bancaria.pk,
+            "total_cobrado": importe, "fecha_cobro": "2026-03-05",
+            "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": importe}],
+        }, format="json")
+        return resp
+
+    def _pagar(self, importe="100.00"):
+        proveedor, _, _, _, _, _, factura = self._crear_oc_recepcion_y_factura_proveedor(
+            self.empresa, self.sucursal, self.a["usuario"]
+        )
+        FacturaProveedor.objects.filter(pk=factura.pk).update(
+            total=Decimal("1000.00"), estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA
+        )
+        cxp = CuentaPorPagar.objects.create(
+            empresa=self.empresa, proveedor=proveedor, factura_proveedor=factura,
+            total=Decimal("1000.00"), saldo=Decimal("1000.00"),
+        )
+        return self._client(self.a["usuario"]).post(PAGOS_URL, {
+            "proveedor": proveedor.pk, "cuenta_bancaria": self.cuenta_bancaria.pk,
+            "total_pagado": importe, "fecha_pago": "2026-03-06",
+            "pago_detalles": [{"cxp": cxp.pk, "importe_aplicado": importe}],
+        }, format="json"), factura
+
+    def _renglones(self, poliza):
+        return {d.cuenta_contable_id: (d.cargo, d.abono) for d in poliza.poliza_detalles.all()}
+
+    # -- cobro ---------------------------------------------------------------
+
+    def test_el_cobro_asienta_banco_contra_clientes(self):
+        resp = self._cobrar()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(origen_tipo="Cobro", origen_id=resp.data["id"])
+        self.assertEqual(poliza.tipo, Poliza.PolizaTipo.INGRESO)
+        self.assertEqual(poliza.fecha, date(2026, 3, 5))
+        self.assertEqual(poliza.sucursal_id, self.sucursal.pk)
+        self.assertEqual(self._renglones(poliza), {
+            self.banco_contable.pk: (Decimal("100.00"), Decimal("0.00")),
+            self.clientes.pk: (Decimal("0.00"), Decimal("100.00")),
+        })
+        self.assertEqual(poliza.poliza_detalles.first().cobro_id, resp.data["id"])
+
+    def test_cobro_con_interruptor_apagado_no_genera_poliza(self):
+        self._encender(contabilizacion_automatica=False)
+
+        self.assertEqual(self._cobrar().status_code, 201)
+
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_cobro_sin_cuenta_contable_del_banco_da_400_y_no_deja_nada(self):
+        CuentaBancaria.objects.filter(pk=self.cuenta_bancaria.pk).update(cuenta_contable=None)
+
+        resp = self._cobrar()
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(Cobro.objects.exists())
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_cancelar_el_cobro_genera_la_contrapoliza(self):
+        cobro_id = self._cobrar().data["id"]
+        original = Poliza.objects.get(origen_tipo="Cobro", origen_id=cobro_id)
+
+        resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro_id}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        original.refresh_from_db()
+        self.assertEqual(original.estatus, Poliza.PolizaStatus.CANCELADA)
+        reversa = Poliza.objects.get(poliza_reversa_de=original)
+        self.assertEqual(self._renglones(reversa), {
+            self.banco_contable.pk: (Decimal("0.00"), Decimal("100.00")),
+            self.clientes.pk: (Decimal("100.00"), Decimal("0.00")),
+        })
+
+    def test_cancelar_por_patch_tambien_genera_la_contrapoliza(self):
+        cobro_id = self._cobrar().data["id"]
+
+        resp = self._client(self.a["usuario"]).patch(f"{COBROS_URL}{cobro_id}/", {"estatus": "Cancelado"}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(Poliza.objects.filter(poliza_reversa_de__isnull=False).count(), 1)
+
+    def test_cancelar_un_cobro_en_borrador_no_genera_poliza(self):
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=self.empresa, cliente=self.a["cliente"], factura=self.factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+        resp = self._client(self.a["usuario"]).post(COBROS_URL, {
+            "cliente": self.a["cliente"].pk, "cuenta_bancaria": self.cuenta_bancaria.pk,
+            "total_cobrado": "100.00", "estatus": "Borrador",
+            "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "100.00"}],
+        }, format="json")
+
+        self._client(self.a["usuario"]).post(f"{COBROS_URL}{resp.data['id']}/cancelar/")
+
+        self.assertFalse(Poliza.objects.exists())
+
+    # -- pago ----------------------------------------------------------------
+
+    def test_el_pago_asienta_proveedores_contra_banco(self):
+        resp, factura = self._pagar()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(origen_tipo="Pago", origen_id=resp.data["id"])
+        self.assertEqual(poliza.tipo, Poliza.PolizaTipo.EGRESO)
+        self.assertEqual(poliza.fecha, date(2026, 3, 6))
+        self.assertEqual(poliza.sucursal_id, factura.sucursal_id)
+        self.assertEqual(self._renglones(poliza), {
+            self.proveedores.pk: (Decimal("100.00"), Decimal("0.00")),
+            self.banco_contable.pk: (Decimal("0.00"), Decimal("100.00")),
+        })
+
+    def test_cancelar_el_pago_genera_la_contrapoliza(self):
+        resp, _ = self._pagar()
+        original = Poliza.objects.get(origen_tipo="Pago", origen_id=resp.data["id"])
+
+        self._client(self.a["usuario"]).post(f"{PAGOS_URL}{resp.data['id']}/cancelar/")
+
+        original.refresh_from_db()
+        self.assertEqual(original.estatus, Poliza.PolizaStatus.CANCELADA)
+        reversa = Poliza.objects.get(poliza_reversa_de=original)
+        self.assertEqual(self._renglones(reversa), {
+            self.proveedores.pk: (Decimal("0.00"), Decimal("100.00")),
+            self.banco_contable.pk: (Decimal("100.00"), Decimal("0.00")),
+        })
+
+    def test_pago_con_interruptor_apagado_no_genera_poliza(self):
+        self._encender(contabilizacion_automatica=False)
+
+        resp, _ = self._pagar()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertFalse(Poliza.objects.exists())
+
+
+MOVIMIENTOS_URL = "/api/v1/finanzas/movimientos-bancarios/"
+
+
+class F4PolizaDeNotaFacturaProveedorYMovimientoTests(MotorPolizasBase):
+    """Nota de crédito, factura de proveedor y movimiento bancario manual."""
+
+    def setUp(self):
+        super().setUp()
+        self.devoluciones = self._cuenta("4150", CuentaContable.CuentaTipo.INGRESO)
+        self.compras = self._cuenta("1150", CuentaContable.CuentaTipo.ACTIVO)
+        self.iva_acreditable = self._cuenta("1190", CuentaContable.CuentaTipo.ACTIVO)
+        self.proveedores = self._cuenta("2110", CuentaContable.CuentaTipo.PASIVO)
+        self.banco_contable = self._cuenta("1020", CuentaContable.CuentaTipo.ACTIVO)
+        for concepto, cuenta in (
+            (ConceptoContable.DEVOLUCIONES_VENTAS, self.devoluciones),
+            (ConceptoContable.COMPRAS_INVENTARIO, self.compras),
+            (ConceptoContable.IVA_ACREDITABLE, self.iva_acreditable),
+            (ConceptoContable.PROVEEDORES, self.proveedores),
+        ):
+            self._config(concepto, cuenta)
+        self.cuenta_bancaria = self._crear_cuenta_bancaria(self.empresa)
+        self.cuenta_bancaria.cuenta_contable = self.banco_contable
+        self.cuenta_bancaria.save()
+
+    def _renglones(self, poliza):
+        return {d.cuenta_contable_id: (d.cargo, d.abono) for d in poliza.poliza_detalles.all()}
+
+    # -- nota de crédito -----------------------------------------------------
+
+    def _nota(self, estatus="Emitida"):
+        Factura.objects.filter(pk=self.factura.pk).update(total=Decimal("116.00"))
+        CuentaPorCobrar.objects.create(
+            empresa=self.empresa, cliente=self.a["cliente"], factura=self.factura,
+            total=Decimal("116.00"), saldo=Decimal("116.00"),
+        )
+        return self._client(self.a["usuario"]).post(NOTAS_CREDITO_URL, {
+            "factura": self.factura.pk, "cliente": self.a["cliente"].pk, "estatus": estatus,
+            "subtotal": "100.00", "impuestos": "16.00", "total": "116.00",
+        }, format="json")
+
+    def test_la_nota_emitida_asienta_devolucion_e_iva_contra_clientes(self):
+        resp = self._nota()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(origen_tipo="NotaCredito", origen_id=resp.data["id"])
+        self.assertEqual(poliza.tipo, Poliza.PolizaTipo.DIARIO)
+        self.assertEqual(poliza.sucursal_id, self.sucursal.pk)
+        self.assertEqual(self._renglones(poliza), {
+            self.devoluciones.pk: (Decimal("100.00"), Decimal("0.00")),
+            self.iva.pk: (Decimal("16.00"), Decimal("0.00")),
+            self.clientes.pk: (Decimal("0.00"), Decimal("116.00")),
+        })
+
+    def test_la_nota_en_borrador_no_genera_poliza(self):
+        self.assertEqual(self._nota("Borrador").status_code, 201)
+
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_cancelar_la_nota_genera_la_contrapoliza(self):
+        nota_id = self._nota().data["id"]
+        original = Poliza.objects.get(origen_tipo="NotaCredito", origen_id=nota_id)
+
+        resp = self._client(self.a["usuario"]).post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        original.refresh_from_db()
+        self.assertEqual(original.estatus, Poliza.PolizaStatus.CANCELADA)
+        self.assertEqual(Poliza.objects.filter(poliza_reversa_de=original).count(), 1)
+
+    def test_nota_sin_cuenta_de_devoluciones_da_400_y_no_deja_nada(self):
+        ConfiguracionContable.objects.filter(concepto=ConceptoContable.DEVOLUCIONES_VENTAS).delete()
+
+        resp = self._nota()
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(NotaCredito.objects.exists())
+        self.assertFalse(Poliza.objects.exists())
+
+    # -- factura de proveedor ------------------------------------------------
+
+    def _factura_proveedor(self, **extra):
+        proveedor, producto, oc, oc_detalle, recepcion, recepcion_detalle, _ = (
+            self._crear_oc_recepcion_y_factura_proveedor(self.empresa, self.sucursal, self.a["usuario"])
+        )
+        payload = {
+            "proveedor": proveedor.pk, "sucursal": self.sucursal.pk, "oc": oc.pk,
+            "recepcion": recepcion.pk, "moneda": self.moneda.pk, "estatus": "Registrada",
+            "subtotal": "500.00", "descuento": "0.00", "impuestos": "80.00", "total": "580.00",
+            "factura_proveedor_detalles": [{
+                "oc_detalle": oc_detalle.pk, "recepcion_detalle": recepcion_detalle.pk,
+                "producto": producto.pk, "cantidad": "10", "precio_unitario": "50.00",
+                "impuesto": "80.00", "total": "580.00",
+            }],
+            **extra,
+        }
+        return self._client(self.a["usuario"]).post(FACTURAS_PROVEEDOR_URL, payload, format="json")
+
+    def test_la_factura_de_proveedor_registrada_asienta_compra_e_iva_contra_proveedores(self):
+        resp = self._factura_proveedor()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(origen_tipo="FacturaProveedor", origen_id=resp.data["id"])
+        self.assertEqual(self._renglones(poliza), {
+            self.compras.pk: (Decimal("500.00"), Decimal("0.00")),
+            self.iva_acreditable.pk: (Decimal("80.00"), Decimal("0.00")),
+            self.proveedores.pk: (Decimal("0.00"), Decimal("580.00")),
+        })
+        self.assertEqual(poliza.poliza_detalles.first().factura_proveedor_id, resp.data["id"])
+
+    def test_la_factura_de_proveedor_en_borrador_no_genera_y_al_registrarla_si(self):
+        resp = self._factura_proveedor(estatus="Borrador")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertFalse(Poliza.objects.exists())
+
+        resp = self._client(self.a["usuario"]).patch(
+            f"{FACTURAS_PROVEEDOR_URL}{resp.data['id']}/", {"estatus": "Registrada"}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(Poliza.objects.filter(origen_tipo="FacturaProveedor").count(), 1)
+
+    def test_factura_de_proveedor_con_interruptor_apagado_no_genera(self):
+        self._encender(contabilizacion_automatica=False)
+
+        self.assertEqual(self._factura_proveedor().status_code, 201)
+
+        self.assertFalse(Poliza.objects.exists())
+
+    # -- movimiento bancario manual -----------------------------------------
+
+    def _movimiento(self, tipo, importe="250.00", **extra):
+        return self._client(self.a["usuario"]).post(MOVIMIENTOS_URL, {
+            "cuenta_bancaria": self.cuenta_bancaria.pk, "tipo_movimiento": tipo, "importe": importe,
+            "fecha": "2026-03-07", "concepto": "Comisión", **extra,
+        }, format="json")
+
+    def test_un_retiro_asienta_contrapartida_contra_banco(self):
+        gastos = self._cuenta("6200", CuentaContable.CuentaTipo.GASTO)
+
+        resp = self._movimiento("Cargo", cuenta_contable_contrapartida=gastos.pk)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(origen_tipo="MovimientoBancario", origen_id=resp.data["id"])
+        self.assertEqual(poliza.tipo, Poliza.PolizaTipo.EGRESO)
+        self.assertEqual(poliza.fecha, date(2026, 3, 7))
+        self.assertEqual(self._renglones(poliza), {
+            gastos.pk: (Decimal("250.00"), Decimal("0.00")),
+            self.banco_contable.pk: (Decimal("0.00"), Decimal("250.00")),
+        })
+
+    def test_un_deposito_usa_el_concepto_de_contrapartida_si_no_trae_cuenta(self):
+        por_identificar = self._cuenta("2180", CuentaContable.CuentaTipo.PASIVO)
+        self._config(ConceptoContable.CONTRAPARTIDA_MB_ABONO, por_identificar)
+
+        resp = self._movimiento("Abono")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        poliza = Poliza.objects.get(origen_tipo="MovimientoBancario", origen_id=resp.data["id"])
+        self.assertEqual(poliza.tipo, Poliza.PolizaTipo.INGRESO)
+        self.assertEqual(self._renglones(poliza), {
+            self.banco_contable.pk: (Decimal("250.00"), Decimal("0.00")),
+            por_identificar.pk: (Decimal("0.00"), Decimal("250.00")),
+        })
+
+    def test_movimiento_sin_contrapartida_configurada_da_400_y_no_deja_nada(self):
+        resp = self._movimiento("Cargo")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(MovimientoBancario.objects.exists())
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_cancelar_el_movimiento_genera_la_contrapoliza(self):
+        gastos = self._cuenta("6200", CuentaContable.CuentaTipo.GASTO)
+        movimiento_id = self._movimiento("Cargo", cuenta_contable_contrapartida=gastos.pk).data["id"]
+        original = Poliza.objects.get(origen_tipo="MovimientoBancario", origen_id=movimiento_id)
+
+        resp = self._client(self.a["usuario"]).post(f"{MOVIMIENTOS_URL}{movimiento_id}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        original.refresh_from_db()
+        self.assertEqual(original.estatus, Poliza.PolizaStatus.CANCELADA)
+        self.assertEqual(Poliza.objects.filter(poliza_reversa_de=original).count(), 1)
+
+    def test_el_movimiento_de_un_cobro_no_duplica_la_poliza(self):
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=self.empresa, cliente=self.a["cliente"], factura=self.factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+
+        resp = self._client(self.a["usuario"]).post(COBROS_URL, {
+            "cliente": self.a["cliente"].pk, "cuenta_bancaria": self.cuenta_bancaria.pk,
+            "total_cobrado": "100.00",
+            "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "100.00"}],
+        }, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(Poliza.objects.count(), 1)
+        self.assertEqual(Poliza.objects.get().origen_tipo, "Cobro")
+
+
+class F7AlertasDeMoraTests(FinanzasBase):
+    """Una alerta por cuenta, en los hitos de 30, 60, 90 y 120 días vencida."""
+
+    HOY = date(2026, 6, 30)
+
+    def _cxc(self, dias_vencida, saldo="100.00", estatus=None, empresa=None):
+        empresa = empresa or self.a
+        factura = Factura.objects.create(
+            empresa=empresa["empresa"], sucursal=empresa["sucursal"], cliente=empresa["cliente"],
+            moneda=self.moneda,
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=empresa["empresa"], cliente=empresa["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal(saldo),
+            fecha_vencimiento=self.HOY - timedelta(days=dias_vencida),
+        )
+        if estatus:
+            CuentaPorCobrar.objects.filter(pk=cxc.pk).update(estatus=estatus)
+        return cxc
+
+    def _generar(self, empresa=None):
+        return AlertaMoraService.generar_alertas(empresa=empresa, fecha_hoy=self.HOY)
+
+    def _nivel(self, cxc):
+        alerta = AlertaMora.objects.filter(cuenta_por_cobrar=cxc).first()
+        return alerta and alerta.nivel
+
+    def test_los_hitos_son_30_60_90_y_120_dias(self):
+        casos = {29: None, 30: "Leve", 59: "Leve", 60: "Moderada", 89: "Moderada",
+                 90: "Grave", 119: "Grave", 120: "Critica", 400: "Critica"}
+        cuentas = {dias: self._cxc(dias) for dias in casos}
+
+        self._generar()
+
+        for dias, esperado in casos.items():
+            with self.subTest(dias=dias):
+                self.assertEqual(self._nivel(cuentas[dias]), esperado)
+
+    def test_guarda_los_dias_de_mora(self):
+        cxc = self._cxc(45)
+
+        self._generar()
+
+        self.assertEqual(AlertaMora.objects.get(cuenta_por_cobrar=cxc).dias_mora, 45)
+
+    def test_pagadas_canceladas_y_sin_saldo_no_alertan(self):
+        self._cxc(100, estatus="Pagada")
+        self._cxc(100, estatus="Cancelada")
+        self._cxc(100, saldo="0.00")
+
+        self.assertEqual(self._generar(), 0)
+
+    def test_tambien_alerta_las_cuentas_por_pagar(self):
+        proveedor, _, _, _, _, _, factura = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"]
+        )
+        cxp = CuentaPorPagar.objects.create(
+            empresa=self.a["empresa"], proveedor=proveedor, factura_proveedor=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+            fecha_vencimiento=self.HOY - timedelta(days=95),
+        )
+
+        self._generar()
+
+        alerta = AlertaMora.objects.get(cuenta_por_pagar=cxp)
+        self.assertEqual((alerta.tipo_cuenta, alerta.nivel), ("Pagar", "Grave"))
+
+    def test_correr_dos_veces_o_sin_empresa_no_duplica(self):
+        cxc = self._cxc(40)
+
+        self._generar()
+        self._generar(self.a["empresa"])
+        total = self._generar()
+
+        self.assertEqual(total, 1)
+        self.assertEqual(AlertaMora.objects.filter(cuenta_por_cobrar=cxc).count(), 1)
+
+    def test_conserva_notificado_y_lo_reinicia_al_subir_de_nivel(self):
+        cxc = self._cxc(40)
+        self._generar()
+        AlertaMora.objects.update(notificado=True, fecha_notificado=timezone.now())
+
+        self._generar()  # mismo nivel
+        self.assertTrue(AlertaMora.objects.get().notificado)
+
+        CuentaPorCobrar.objects.filter(pk=cxc.pk).update(fecha_vencimiento=self.HOY - timedelta(days=65))
+        self._generar()  # sube a Moderada
+        alerta = AlertaMora.objects.get()
+        self.assertEqual(alerta.nivel, "Moderada")
+        self.assertFalse(alerta.notificado)
+        self.assertIsNone(alerta.fecha_notificado)
+
+    def test_borra_la_alerta_de_una_cuenta_que_ya_se_pago(self):
+        cxc = self._cxc(40)
+        self._generar()
+
+        CuentaPorCobrar.objects.filter(pk=cxc.pk).update(saldo=Decimal("0.00"), estatus="Pagada")
+        self.assertEqual(self._generar(), 0)
+
+    def test_con_empresa_solo_toca_esa_empresa(self):
+        propia, ajena = self._cxc(40), self._cxc(40, empresa=self.b)
+        self._generar()
+
+        CuentaPorCobrar.objects.filter(pk__in=[propia.pk, ajena.pk]).update(saldo=Decimal("0.00"))
+        self._generar(self.a["empresa"])
+
+        self.assertEqual(list(AlertaMora.objects.values_list("cuenta_por_cobrar_id", flat=True)), [ajena.pk])
+
+    def test_la_base_impide_dos_alertas_para_la_misma_cuenta(self):
+        cxc = self._cxc(40)
+        datos = dict(empresa=self.a["empresa"], tipo_cuenta="Cobrar", cuenta_por_cobrar=cxc,
+                     dias_mora=40, nivel="Leve")
+        AlertaMora.objects.create(**datos)
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            AlertaMora.objects.create(**datos)
+
+    def test_numero_fijo_de_consultas(self):
+        for dias in (40, 70):
+            self._cxc(dias)
+        self._generar()
+        with CaptureQueriesContext(connection) as pocas:
+            self._generar()
+        for dias in range(31, 51):
+            self._cxc(dias)
+        with CaptureQueriesContext(connection) as muchas:
+            self._generar()
+        # Las nuevas se insertan en un solo lote: las consultas no crecen con las cuentas.
+        self.assertLessEqual(len(muchas), len(pocas) + 1)
+
+    # -- plazo de crédito del cliente ----------------------------------------
+
+    def _facturar(self, **extra):
+        return self._client(self.a["usuario"]).post(PENDIENTE_COBRO_URL, {
+            "cliente": self.a["cliente"].pk, "moneda": self.moneda.pk, "folio": "F-900",
+            "subtotal": "100.00", "descuento": "0.00", "impuestos": "0.00", "total": "100.00", **extra,
+        }, format="json")
+
+    def test_sin_vencimiento_usa_los_dias_de_credito_del_cliente(self):
+        Cliente.objects.filter(pk=self.a["cliente"].pk).update(dias_credito=30)
+
+        resp = self._facturar()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        esperado = timezone.localdate() + timedelta(days=30)
+        self.assertEqual(Factura.objects.get().fecha_vencimiento, esperado)
+        self.assertEqual(CuentaPorCobrar.objects.get().fecha_vencimiento, esperado)
+
+    def test_un_vencimiento_explicito_manda_sobre_el_plazo_del_cliente(self):
+        Cliente.objects.filter(pk=self.a["cliente"].pk).update(dias_credito=30)
+
+        self._facturar(fecha_vencimiento="2026-12-01")
+
+        self.assertEqual(CuentaPorCobrar.objects.get().fecha_vencimiento, date(2026, 12, 1))
+
+    def test_sin_dias_de_credito_ni_vencimiento_queda_sin_fecha(self):
+        self._facturar()
+
+        self.assertIsNone(CuentaPorCobrar.objects.get().fecha_vencimiento)
+
+
+class F5CancelarFacturaTests(MotorPolizasBase):
+    """``POST /facturas/{id}/cancelar/``: factura y CxC canceladas, contrapóliza del día."""
+
+    def setUp(self):
+        super().setUp()
+        self.banco_contable = self._cuenta("1020", CuentaContable.CuentaTipo.ACTIVO)
+        self.cuenta_bancaria = self._crear_cuenta_bancaria(self.empresa)
+        self.cuenta_bancaria.cuenta_contable = self.banco_contable
+        self.cuenta_bancaria.save()
+
+    def _emitida(self, folio="F-500"):
+        resp = self._client(self.a["usuario"]).post(PENDIENTE_COBRO_URL, {
+            "cliente": self.a["cliente"].pk, "moneda": self.moneda.pk, "folio": folio,
+            "subtotal": "100.00", "descuento": "0.00", "impuestos": "16.00", "total": "116.00",
+        }, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return Factura.objects.get(pk=resp.data["factura"]["id"]), resp.data["poliza"]
+
+    def _cancelar(self, factura, user=None, **datos):
+        return self._client(user or self.a["usuario"]).post(
+            f"/api/v1/finanzas/facturas/{factura.pk}/cancelar/", datos, format="json"
+        )
+
+    def test_cancelar_una_emitida_cancela_factura_cxc_y_crea_la_contrapoliza_de_hoy(self):
+        factura, _ = self._emitida()
+        original = Poliza.objects.get(origen_tipo="Factura", origen_id=factura.pk)
+
+        resp = self._cancelar(factura, motivo="Error de captura")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
+        self.assertIn("Error de captura", factura.observaciones)
+        self.assertEqual(
+            CuentaPorCobrar.objects.get(factura=factura).estatus, CuentaPorCobrar.EstatusCxC.CANCELADA
+        )
+        original.refresh_from_db()
+        self.assertEqual(original.estatus, Poliza.PolizaStatus.CANCELADA)
+        reversa = Poliza.objects.get(poliza_reversa_de=original)
+        self.assertEqual(resp.data["contrapoliza_id"], reversa.pk)
+        self.assertEqual(reversa.fecha, timezone.localdate())
+        self.assertEqual(
+            {d.cuenta_contable_id: (d.cargo, d.abono) for d in reversa.poliza_detalles.all()},
+            {
+                self.clientes.pk: (Decimal("0.00"), Decimal("116.00")),
+                self.ventas.pk: (Decimal("100.00"), Decimal("0.00")),
+                self.iva.pk: (Decimal("16.00"), Decimal("0.00")),
+            },
+        )
+
+    def test_con_cobros_aplicados_se_puede_cancelar_y_el_cobro_no_se_toca(self):
+        factura, _ = self._emitida()
+        cxc = CuentaPorCobrar.objects.get(factura=factura)
+        cobro = self._client(self.a["usuario"]).post(COBROS_URL, {
+            "cliente": self.a["cliente"].pk, "cuenta_bancaria": self.cuenta_bancaria.pk,
+            "total_cobrado": "50.00", "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "50.00"}],
+        }, format="json")
+        self.assertEqual(cobro.status_code, 201, cobro.data)
+
+        resp = self._cancelar(factura)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(Cobro.objects.get(pk=cobro.data["id"]).estatus, Cobro.Estatus.APLICADO)
+        self.assertEqual(
+            Poliza.objects.get(origen_tipo="Cobro", origen_id=cobro.data["id"]).estatus,
+            Poliza.PolizaStatus.CONTABILIZADA,
+        )
+        # Clientes: +116 de la factura, -50 del cobro, -116 de la contrapóliza = saldo a favor de 50.
+        saldo_clientes = sum(
+            d.cargo - d.abono for d in PolizaDetalle.objects.filter(cuenta_contable=self.clientes)
+        )
+        self.assertEqual(saldo_clientes, Decimal("-50.00"))
+
+    def test_no_se_puede_cobrar_una_factura_cancelada(self):
+        factura, _ = self._emitida()
+        cxc = CuentaPorCobrar.objects.get(factura=factura)
+        self._cancelar(factura)
+
+        resp = self._client(self.a["usuario"]).post(COBROS_URL, {
+            "cliente": self.a["cliente"].pk, "cuenta_bancaria": self.cuenta_bancaria.pk,
+            "total_cobrado": "10.00", "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "10.00"}],
+        }, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_con_nota_de_credito_emitida_responde_400(self):
+        factura, _ = self._emitida()
+        NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"], estatus=NotaCredito.Estatus.EMITIDA,
+            subtotal=Decimal("10.00"), total=Decimal("10.00"),
+        )
+
+        resp = self._cancelar(factura)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.EMITIDA)
+
+    def test_un_borrador_se_cancela_sin_poliza(self):
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.a["cliente"], moneda=self.moneda,
+        )
+
+        resp = self._cancelar(factura)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIsNone(resp.data["contrapoliza_id"])
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_cancelar_dos_veces_no_duplica_la_contrapoliza(self):
+        factura, _ = self._emitida()
+
+        self.assertEqual(self._cancelar(factura).status_code, 200)
+        segunda = self._cancelar(factura)
+
+        self.assertEqual(segunda.status_code, 200, segunda.data)
+        self.assertEqual(Poliza.objects.filter(poliza_reversa_de__isnull=False).count(), 1)
+
+    def test_con_el_interruptor_apagado_cancela_sin_poliza(self):
+        self._encender(contabilizacion_automatica=False)
+        factura, poliza = self._emitida()
+        self.assertIsNone(poliza)
+
+        resp = self._cancelar(factura)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
+        self.assertFalse(Poliza.objects.exists())
+
+    def test_factura_de_otra_empresa_responde_404(self):
+        factura, _ = self._emitida()
+
+        self.assertEqual(self._cancelar(factura, self.b["usuario"]).status_code, 404)
+
+    def test_el_pedido_puede_volver_a_facturarse_tras_cancelar(self):
+        factura, _ = self._emitida()
+        Factura.objects.filter(pk=factura.pk).update(pedido=self.a["pedido"])
+        self._cancelar(factura)
+
+        resp = self._client(self.a["usuario"]).post(PENDIENTE_COBRO_URL, {
+            "cliente": self.a["cliente"].pk, "moneda": self.moneda.pk, "folio": "F-501",
+            "pedido": self.a["pedido"].pk, "subtotal": "100.00", "descuento": "0.00",
+            "impuestos": "16.00", "total": "116.00",
+        }, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+
+REPORTES_URL = "/api/v1/finanzas/reportes-contables/"
+
+
+class F9ReportesContablesTests(MotorPolizasBase):
+    """Libro diario, auxiliar, balanza y rastro, sobre pólizas generadas por el motor."""
+
+    def setUp(self):
+        super().setUp()
+        self.banco = self._cuenta("1020", CuentaContable.CuentaTipo.ACTIVO)
+        self.cuenta_bancaria = self._crear_cuenta_bancaria(self.empresa)
+        self.cuenta_bancaria.cuenta_contable = self.banco
+        self.cuenta_bancaria.save()
+
+    def _factura_en(self, fecha, folio, neto="100.00", iva="16.00"):
+        total = str(Decimal(neto) + Decimal(iva))
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.a["cliente"], moneda=self.moneda,
+            folio=folio, subtotal=Decimal(neto), impuestos=Decimal(iva), total=Decimal(total),
+            fecha_emision=fecha,
+        )
+        return FacturaPolizaService.generar(factura, self.a["usuario"]), factura
+
+    def _get(self, ruta, user=None, **params):
+        return self._client(user or self.a["usuario"]).get(f"{REPORTES_URL}{ruta}/", params)
+
+    PERIODO = {"fecha_inicio": "2026-03-01", "fecha_fin": "2026-03-31"}
+
+    # -- libro diario --------------------------------------------------------
+
+    def test_libro_diario_lista_los_renglones_del_periodo_con_totales(self):
+        self._factura_en(date(2026, 3, 5), "F-1")
+        self._factura_en(date(2026, 4, 5), "F-2")  # fuera del periodo
+
+        resp = self._get("libro-diario", **self.PERIODO)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(len(resp.data["renglones"]), 3)
+        self.assertEqual((resp.data["total_cargos"], resp.data["total_abonos"]), ("116.00", "116.00"))
+        primero = resp.data["renglones"][0]
+        self.assertEqual((primero["cuenta_codigo"], primero["cargo"], primero["origen_tipo"]), ("1120", "116.00", "Factura"))
+
+    def test_libro_diario_incluye_la_cancelada_y_su_contrapoliza_pero_no_borradores(self):
+        poliza, _ = self._factura_en(date(2026, 3, 5), "F-1")
+        PolizaService.cancelar(poliza, self.a["usuario"])
+        Poliza.objects.create(empresa=self.empresa, sucursal=self.sucursal, fecha=date(2026, 3, 6))
+
+        resp = self._get("libro-diario", fecha_inicio="2026-03-01", fecha_fin=str(timezone.localdate()))
+
+        self.assertEqual(len(resp.data["renglones"]), 6)  # 3 de la original + 3 de la contrapóliza
+        self.assertEqual({r["estatus"] for r in resp.data["renglones"]}, {"Cancelada", "Contabilizada"})
+        self.assertEqual(resp.data["total_cargos"], resp.data["total_abonos"])
+
+    def test_libro_diario_filtra_por_tipo_y_pagina(self):
+        self._factura_en(date(2026, 3, 5), "F-1")
+
+        solo_egreso = self._get("libro-diario", tipo="Egreso", **self.PERIODO)
+        pagina = self._get("libro-diario", limit=2, offset=1, **self.PERIODO)
+
+        self.assertEqual(solo_egreso.data["renglones"], [])
+        self.assertEqual(len(pagina.data["renglones"]), 2)
+        self.assertEqual(pagina.data["total_cargos"], "116.00")  # el total es del periodo, no de la página
+
+    # -- auxiliar ------------------------------------------------------------
+
+    def test_auxiliar_da_saldo_inicial_movimientos_y_saldo_corrido(self):
+        self._factura_en(date(2026, 2, 10), "F-0", neto="200.00", iva="32.00")   # saldo inicial 232
+        self._factura_en(date(2026, 3, 5), "F-1")
+        self._factura_en(date(2026, 3, 20), "F-2", neto="50.00", iva="8.00")
+
+        resp = self._get("auxiliar", cuenta=self.clientes.pk, **self.PERIODO)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["cuenta"]["naturaleza"], "Deudora")
+        self.assertEqual(resp.data["saldo_inicial"], "232.00")
+        self.assertEqual([m["saldo"] for m in resp.data["movimientos"]], ["348.00", "406.00"])
+        self.assertEqual((resp.data["total_cargos"], resp.data["saldo_final"]), ("174.00", "406.00"))
+
+    def test_auxiliar_de_cuenta_acreedora_invierte_el_signo(self):
+        self._factura_en(date(2026, 3, 5), "F-1")
+
+        resp = self._get("auxiliar", cuenta=self.ventas.pk, **self.PERIODO)
+
+        self.assertEqual(resp.data["cuenta"]["naturaleza"], "Acreedora")
+        self.assertEqual((resp.data["saldo_inicial"], resp.data["saldo_final"]), ("0.00", "100.00"))
+        self.assertEqual(resp.data["movimientos"][0]["saldo"], "100.00")
+
+    def test_auxiliar_exige_cuenta_de_la_empresa(self):
+        ajena = CuentaContable.objects.create(
+            empresa=self.b["empresa"], codigo="9999", nombre="Ajena", tipo=CuentaContable.CuentaTipo.ACTIVO
+        )
+
+        self.assertEqual(self._get("auxiliar", **self.PERIODO).status_code, 400)
+        self.assertEqual(self._get("auxiliar", cuenta=ajena.pk, **self.PERIODO).status_code, 400)
+
+    # -- balanza -------------------------------------------------------------
+
+    def test_balanza_por_cuenta_y_cuadra(self):
+        self._factura_en(date(2026, 2, 10), "F-0", neto="200.00", iva="32.00")
+        self._factura_en(date(2026, 3, 5), "F-1")
+
+        resp = self._get("balanza", **self.PERIODO)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        por_codigo = {c["codigo"]: c for c in resp.data["cuentas"]}
+        self.assertEqual(list(por_codigo), ["1120", "2170", "4100"])
+        clientes = por_codigo["1120"]
+        self.assertEqual((clientes["saldo_inicial"], clientes["cargos"], clientes["abonos"], clientes["saldo_final"]),
+                         ("232.00", "116.00", "0.00", "348.00"))
+        ventas = por_codigo["4100"]
+        self.assertEqual((ventas["naturaleza"], ventas["saldo_inicial"], ventas["saldo_final"]),
+                         ("Acreedora", "200.00", "300.00"))
+        self.assertEqual((resp.data["total_cargos"], resp.data["total_abonos"]), ("116.00", "116.00"))
+        self.assertTrue(resp.data["cuadre_correcto"])
+
+    def test_la_cancelacion_deja_el_saldo_en_cero(self):
+        poliza, _ = self._factura_en(date(2026, 3, 5), "F-1")
+        PolizaService.cancelar(poliza, self.a["usuario"])
+
+        resp = self._get("balanza", fecha_inicio="2026-03-01", fecha_fin=str(timezone.localdate()))
+
+        self.assertEqual({c["saldo_final"] for c in resp.data["cuentas"]}, {"0.00"})
+
+    # -- validación, aislamiento y rastro -----------------------------------
+
+    def test_fechas_requeridas_y_validas(self):
+        self.assertEqual(self._get("balanza").status_code, 400)
+        self.assertEqual(self._get("balanza", fecha_inicio="ayer", fecha_fin="2026-03-31").status_code, 400)
+        self.assertEqual(self._get("balanza", fecha_inicio="2026-04-01", fecha_fin="2026-03-31").status_code, 400)
+
+    def test_cada_empresa_ve_solo_lo_suyo_y_el_superusuario_pide_empresa(self):
+        self._factura_en(date(2026, 3, 5), "F-1")
+
+        ajena = self._get("libro-diario", user=self.b["usuario"], **self.PERIODO)
+        root = Usuario.objects.create(username="root-f9", email="root@f9.test", is_superuser=True)
+        sin_empresa = self._get("libro-diario", user=root, **self.PERIODO)
+        con_empresa = self._get("libro-diario", user=root, empresa=self.empresa.pk, **self.PERIODO)
+
+        self.assertEqual(ajena.data["renglones"], [])
+        self.assertEqual(sin_empresa.status_code, 400)
+        self.assertEqual(len(con_empresa.data["renglones"]), 3)
+
+    def test_rastro_de_un_documento_trae_su_poliza_y_la_contrapoliza(self):
+        poliza, factura = self._factura_en(date(2026, 3, 5), "F-1")
+        PolizaService.cancelar(poliza, self.a["usuario"])
+        self._factura_en(date(2026, 3, 6), "F-2")
+
+        resp = self._client(self.a["usuario"]).get(POLIZAS_URL, {"origen_tipo": "Factura", "origen_id": factura.pk})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(len(resp.data), 2)
+        self.assertEqual({p["estatus"] for p in resp.data}, {"Cancelada", "Contabilizada"})
+        self.assertEqual({p["poliza_reversa_de"] for p in resp.data}, {None, poliza.pk})
+
+    def test_las_consultas_no_crecen_con_las_polizas(self):
+        self._factura_en(date(2026, 3, 5), "F-1")
+        cliente = self._client(self.a["usuario"])
+        cuenta = self.clientes.pk
+
+        def consultas():
+            with CaptureQueriesContext(connection) as c:
+                cliente.get(f"{REPORTES_URL}libro-diario/", self.PERIODO)
+                cliente.get(f"{REPORTES_URL}balanza/", self.PERIODO)
+                cliente.get(f"{REPORTES_URL}auxiliar/", {"cuenta": cuenta, **self.PERIODO})
+            return len(c)
+
+        consultas()
+        pocas = consultas()
+        for i in range(15):
+            self._factura_en(date(2026, 3, 6), f"F-{i + 10}")
+
+        self.assertEqual(pocas, consultas())
+

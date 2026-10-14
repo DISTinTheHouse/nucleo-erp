@@ -1,6 +1,7 @@
 import math
+from decimal import Decimal
 
-from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, prefetch_related_objects
+from django.db.models import Sum, Count, Exists, F, OuterRef, Prefetch, Q, prefetch_related_objects
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import status, viewsets, mixins
@@ -11,6 +12,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+from ventas.services.sku_produccion_service import detalles_de_muestra, variantes_produccion_activas
 from usuarios.models import Usuario
 from seguridad.role_identity import (
     CLAVE_DEPARTAMENTO_PRODUCCION,
@@ -78,14 +80,16 @@ from produccion.api.serializers import (
     VarianteProduccionSerializer,
 )
 from catalogo.models import VarianteProductoProduccion
+from inventarios.models import Existencia
 
 from produccion.services.orden_bordado_service import OrdenBordadoService
 from produccion.services.orden_reflejante_service import OrdenReflejanteService
 from produccion.services.orden_produccion_service import OrdenProduccionService
+from produccion.services.recalculo_consumo_service import RecalculoConsumoTelaService
 from produccion.services.orden_corte_manga_service import OrdenCorteMangaService
 
 
-def _tallas_ot_prefetch(flag):
+def _tallas_ot_prefetch(flag, con_variante=False):
     """``Prefetch`` de las tallas elegibles para una orden de trabajo.
 
     Filtra en la BD por el flag y por ``cantidad > 0`` —el mismo criterio que
@@ -96,15 +100,15 @@ def _tallas_ot_prefetch(flag):
     ignora la caché del prefetch y dispara una query por ``PedidoDetalle``,
     dejando además inservible el ``prefetch_related`` del queryset.
     """
-    return Prefetch(
-        "detalles__tallas",
-        queryset=(
-            PedidoDetalleTalla.objects
-            .filter(**{flag: True}, cantidad__gt=0)
-            .select_related("talla")
-            .order_by("id")
-        ),
+    qs = (
+        PedidoDetalleTalla.objects
+        .filter(**{flag: True}, cantidad__gt=0)
+        .select_related("talla")
+        .order_by("id")
     )
+    if con_variante:
+        qs = qs.select_related("variante")
+    return Prefetch("detalles__tallas", queryset=qs)
 
 
 def _programado_para_destino(pedido, destino):
@@ -132,7 +136,8 @@ def _programado_para_destino(pedido, destino):
 
 
 def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn,
-                                incluir_config_crudo=False, destino_programacion=None):
+                                incluir_config_crudo=False, destino_programacion=None,
+                                incluir_sku=False):
     """Arma la lista ``pedidos`` del GET de onboarding de órdenes de trabajo.
 
     Compartido por Bordado / Reflejante / Corte de Manga: los tres emitían el
@@ -161,9 +166,30 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
     pedidos_lista = list(pedidos_qs)
     por_linea, sin_talla = cantidades_asignadas_fn([p.id for p in pedidos_lista])
 
+    existencias = {}
+    if incluir_sku:
+        # ``incluir_sku`` (sólo Bordado): se descartan las líneas de MUESTRA sin
+        # SKU (sin ``variante`` de catálogo ni ``sku_muestra``) y cada línea
+        # publica ``sku``/``sku_proscai``/``existencias``. Las existencias se
+        # suman en UNA query agregada por las variantes de todo el payload.
+        variante_ids = {
+            dt.variante_id
+            for p in pedidos_lista for det in p.detalles.all() for dt in det.tallas.all()
+            if dt.variante_id
+        }
+        if variante_ids:
+            existencias = {
+                r["producto_variante_id"]: float(r["total"] or 0)
+                for r in Existencia.objects.filter(
+                    producto_variante_id__in=variante_ids,
+                    almacen__empresa_id=pedidos_lista[0].empresa_id,
+                ).values("producto_variante_id").annotate(total=Sum("cantidad"))
+            }
+
     pedidos_payload = []
     for p in pedidos_lista:
-        pares = [(det, dt) for det in p.detalles.all() for dt in det.tallas.all()]
+        pares = [(det, dt) for det in p.detalles.all() for dt in det.tallas.all()
+                 if not incluir_sku or dt.variante_id or dt.sku_muestra]
         pendientes = pendientes_por_linea(
             [(det.id, dt.talla_id, float(dt.cantidad or 0)) for det, dt in pares],
             por_linea,
@@ -238,6 +264,11 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
                 "tipos_servicio": tipos_servicio,
                 "tipos_servicio_display": tipos_servicio_display,
             }
+            if incluir_sku:
+                var = dt.variante
+                linea["sku"] = var.sku if var else dt.sku_muestra
+                linea["sku_proscai"] = (var.cod_proscai or None) if var else None
+                linea["existencias"] = existencias.get(dt.variante_id, 0) if var else None
             if incluir_config_crudo:
                 # El config ÍNTEGRO, con todos sus elementos y sus claves
                 # verbatim. Misma clave, misma forma y mismo ``or None`` que
@@ -610,6 +641,64 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
     def _require_produccion(self, user):
         _require_produccion(user)
 
+    @action(detail=True, methods=['post'], url_path='recalcular-consumos')
+    def recalcular_consumos(self, request, pk=None):
+        """Ajusta los consumos de la OP a las piezas realmente cortadas.
+
+        Body: ``{"cantidad_real_corte": 100, "productos": [ids]}``. Sin
+        ``cantidad_real_corte`` usa la ya capturada en la ruta crítica; con
+        ella, también la guarda ahí. ``productos`` (obligatorio) son las
+        telas a recalcular: el catálogo no distingue telas, así que las
+        elige el usuario y el resto de los insumos no se toca.
+        Registra solo la diferencia (movimiento de inventario + consumo
+        nuevo, sin pólizas). No acepta menos piezas que las planeadas; se
+        puede repetir. Mismo gate y 404 por empresa que la ruta crítica.
+        """
+        self._require_produccion(request.user)
+        empresa = getattr(request.user, 'empresa', None)
+        op = (
+            OrdenProduccion.objects.filter(pk=pk, empresa=empresa).first()
+            if empresa is not None else None
+        )
+        if op is None:
+            return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+
+        ruta = OrdenProduccionRutaCritica.objects.filter(op=op).first()
+        cantidad = request.data.get('cantidad_real_corte', None)
+        if cantidad is None and ruta is not None:
+            cantidad = ruta.cantidad_real_corte
+        try:
+            cantidad = Decimal(str(cantidad))
+        except (TypeError, ValueError, ArithmeticError):
+            raise ValidationError({'cantidad_real_corte': 'Captura la cantidad real cortada.'})
+        if not cantidad.is_finite() or cantidad <= 0 or cantidad != cantidad.to_integral_value():
+            raise ValidationError({'cantidad_real_corte': 'Debe ser un número entero de piezas mayor a 0.'})
+
+        productos = request.data.get('productos', None)
+        try:
+            productos = [int(x) for x in productos]
+        except (TypeError, ValueError):
+            raise ValidationError({'productos': 'Lista de ids de las telas a recalcular.'})
+        if not productos:
+            raise ValidationError({'productos': 'Selecciona al menos una tela.'})
+
+        with transaction.atomic():
+            resultado = RecalculoConsumoTelaService.recalcular(
+                pk, empresa, cantidad, productos, request.user, request=request
+            )
+            if resultado is None:
+                return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+            if 'cantidad_real_corte' in request.data:
+                ruta, _ = OrdenProduccionRutaCritica.objects.get_or_create(op=op)
+                ruta.cantidad_real_corte = cantidad
+                ruta.save(update_fields=['cantidad_real_corte', 'updated_at'])
+        return Response({
+            'op': op.pk,
+            'cantidad_real_corte': str(cantidad),
+            'consumo_produccion': getattr(resultado['consumo_produccion'], 'pk', None),
+            'cambios': resultado['cambios'],
+        })
+
     MAX_OPS_RUTA_CRITICA = 200
 
     @action(detail=False, methods=['get'], url_path='ruta-critica')
@@ -675,13 +764,16 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
         ):
             return Response(
-                {'msg': f'La OP está {op.get_estatus_op_display().lower()}: su ruta crítica ya no se puede editar.'},
+                {'msg': f'La OP tiene estatus «{op.get_estatus_op_display()}»: su ruta crítica ya no se puede editar.'},
                 status=status.HTTP_409_CONFLICT,
             )
-        instance, _created = OrdenProduccionRutaCritica.objects.get_or_create(op=op)
-        serializer = OrdenProduccionRutaCriticaSerializer(instance, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+        # Bloqueo de fila: dos PATCH simultáneos no se pisan el sellado de fechas.
+        with transaction.atomic():
+            OrdenProduccionRutaCritica.objects.get_or_create(op=op)
+            instance = OrdenProduccionRutaCritica.objects.select_for_update().get(op=op)
+            serializer = OrdenProduccionRutaCriticaSerializer(instance, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
         return Response(serializer.data)
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-412): el
@@ -1124,7 +1216,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 .select_related("cliente", "sucursal")
                 .prefetch_related(
                     "detalles",
-                    _tallas_ot_prefetch("lleva_bordado"),
+                    _tallas_ot_prefetch("lleva_bordado", con_variante=True),
                     "detalles__producto",
                     "detalles__color",
                 )
@@ -1151,6 +1243,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 "bordado_config",
                 OrdenBordadoService.cantidades_asignadas_por_pedidos,
                 destino_programacion="BORDADO",
+                incluir_sku=True,
             )
 
             return Response({
@@ -1207,37 +1300,28 @@ class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet)
     serializer_class = BordadoAvancesSerializer
     orden_padre_field = "ob"
 
+    @staticmethod
+    def _puntadas_total(por_pieza, cantidad):
+        # puntadas_total = puntadas_por_pieza × cantidad_bordada
+        return int(round(float(por_pieza or 0) * float(cantidad or 0)))
+
     def perform_create(self, serializer):
-        validated = dict(serializer.validated_data)
-        extra = {}
-        detalle = validated.get("orden_bordado_detalle")
-        if detalle is not None and validated.get("pedido_detalle_talla") is None:
-            pedido_detalle_id = getattr(detalle, "pedido_detalle_id", None)
-            talla_id = getattr(detalle, "talla_id", None)
-            if pedido_detalle_id is not None and talla_id is not None:
-                from ventas.models import PedidoDetalleTalla
-                pdt = (
-                    PedidoDetalleTalla.objects
-                    .filter(pedido_detalle_id=pedido_detalle_id, talla_id=talla_id)
-                    .only("id")
-                    .first()
-                )
-                if pdt is not None:
-                    extra["pedido_detalle_talla"] = pdt
+        v = serializer.validated_data
+        serializer.save(
+            usuario=self.request.user,
+            puntadas_total=self._puntadas_total(
+                v.get("puntadas_por_pieza"), v.get("cantidad_bordada")
+            ),
+        )
 
-        # Auto-cálculo puntadas_total = puntadas_por_pieza × cantidad_bordada
-        puntadas_por_pieza = int(validated.get("puntadas_por_pieza", 0) or 0)
-        cantidad_bordada = validated.get("cantidad_bordada", 0) or 0
-        if puntadas_por_pieza > 0 and cantidad_bordada:
-            # Si el frontend envió puntadas_total manual lo sobreescribimos
-            # (la fuente de verdad es el producto por_pieza × pz). Sólo si
-            # puntadas_por_pieza es 0 (registros legacy sin capturar)
-            # conservamos el puntadas_total que llegó (puede ser 0).
-            extra["puntadas_total"] = int(
-                round(float(puntadas_por_pieza) * float(cantidad_bordada))
+    def perform_update(self, serializer):
+        inst, v = serializer.instance, serializer.validated_data
+        serializer.save(
+            puntadas_total=self._puntadas_total(
+                v.get("puntadas_por_pieza", inst.puntadas_por_pieza),
+                v.get("cantidad_bordada", inst.cantidad_bordada),
             )
-
-        serializer.save(usuario=self.request.user, **extra)
+        )
 
     def perform_destroy(self, instance):
         instance.soft_delete()
@@ -1718,9 +1802,7 @@ def _detalles_especiales_qs():
     autorizar, aceptar-cambios y recomprar lo copian tal cual desde la
     cotizacion, y los PATCH genericos/admin no lo recalculan.
     """
-    return PedidoDetalle.objects.exclude(producto_nombre_externo__isnull=True).exclude(
-        producto_nombre_externo=""
-    )
+    return detalles_de_muestra()
 
 
 def _require_produccion(user):
@@ -1790,8 +1872,8 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         # las variantes de producción ya generadas para estas líneas, y se
         # cuelgan por (pedido_detalle_id, talla_id) sobre cada ``dt`` -- lo
         # que lee ``PedidoDetalleTallaEspecialSerializer.get_sku_produccion``.
-        variantes = VarianteProductoProduccion.objects.filter(
-            pedido_detalle_id__in=[d.id for d in detalles], activo=True
+        variantes = variantes_produccion_activas().filter(
+            pedido_detalle_id__in=[d.id for d in detalles]
         ).only("id", "sku", "pedido_detalle_id", "talla_id")
         variantes_por_talla = {(v.pedido_detalle_id, v.talla_id): v for v in variantes}
         for det in detalles:
@@ -1856,9 +1938,20 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                     'pedido_detalle_id': 'No es una línea de producción especial de este pedido.'
                 })
 
-            # Antes que cualquier validación de color: en un reintento lo que
-            # importa es que la línea ya no admite otra alta.
-            if VarianteProductoProduccion.objects.filter(pedido_detalle=detalle).exists():
+            # El alta es incremental: un reintento sólo genera SKU para las
+            # tallas con cantidad que aún no tienen variante (talla en 0 durante
+            # el primer alta o agregada después con editar-mesa-control). Antes
+            # que cualquier validación de color: si no falta ninguna, la línea
+            # ya no admite otra alta.
+            tallas_con_variante = set(
+                VarianteProductoProduccion.objects.filter(pedido_detalle=detalle)
+                .values_list('talla_id', flat=True)
+            )
+            if tallas_con_variante and not (
+                PedidoDetalleTalla.objects.filter(pedido_detalle=detalle, cantidad__gt=0)
+                .exclude(talla_id__in=tallas_con_variante)
+                .exists()
+            ):
                 raise ValidationError(YA_TIENE_SKU)
 
             color_body = serializer.validated_data.get('color')
@@ -1894,6 +1987,7 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
 
             tallas = list(
                 PedidoDetalleTalla.objects.filter(pedido_detalle=detalle, cantidad__gt=0)
+                .exclude(talla_id__in=tallas_con_variante)
                 .select_related("talla")
             )
             if not tallas:

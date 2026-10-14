@@ -1,0 +1,37 @@
+"""Cancelar una factura de venta: factura y CxC canceladas, contrapóliza del día."""
+
+from django.db import transaction
+
+from finanzas.exceptions import ErrorDeNegocio
+from finanzas.models import CuentaPorCobrar, Factura, NotaCredito
+from finanzas.services.factura_poliza_service import FacturaPolizaService
+
+
+class FacturaCancelacionService:
+    @staticmethod
+    @transaction.atomic
+    def cancelar(factura, usuario=None, motivo=""):
+        """Regresa la contrapóliza, o ``None`` si no hubo (Borrador, ya cancelada o sin póliza).
+
+        Los cobros aplicados no se tocan: su póliza sigue y en Clientes queda el
+        importe cobrado como saldo a favor.
+        """
+        bloqueada = Factura.objects.select_for_update().get(pk=factura.pk)
+        if bloqueada.estatus == Factura.FacturaStatus.CANCELADA:
+            return None
+        if NotaCredito.objects.filter(
+            factura=bloqueada, estatus=NotaCredito.Estatus.EMITIDA
+        ).exists():
+            raise ErrorDeNegocio({"estatus": "La factura tiene notas de crédito emitidas: cancélalas primero."})
+
+        era_emitida = bloqueada.estatus == Factura.FacturaStatus.EMITIDA
+        bloqueada.estatus = Factura.FacturaStatus.CANCELADA
+        if motivo:
+            bloqueada.observaciones = f"{bloqueada.observaciones or ''}\nCancelada: {motivo}".strip()
+        bloqueada.save(update_fields=["estatus", "observaciones", "updated_at"])
+        factura.estatus, factura.observaciones = bloqueada.estatus, bloqueada.observaciones
+
+        CuentaPorCobrar.objects.filter(factura=bloqueada).update(
+            estatus=CuentaPorCobrar.EstatusCxC.CANCELADA
+        )
+        return FacturaPolizaService.cancelar(bloqueada, usuario) if era_emitida else None

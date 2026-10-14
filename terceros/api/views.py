@@ -15,6 +15,7 @@ from finanzas.services.facturama.acceso import empresa_usa_facturama
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import ProveedorSerializer, ClienteSerializer, DireccionClienteSerializer
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
+from terceros.cartera import cartera_de_cliente
 from terceros.scope import clientes_base, clientes_visibles
 import json
 import base64
@@ -107,6 +108,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
             "montos_por_moneda": montos_por_moneda,
             "ultimo_pedido": pedidos_recientes[0] if pedidos_recientes else None,
             "pedidos_recientes": pedidos_recientes,
+            "cartera": cartera_de_cliente(cliente),
         }
 
     def perform_create(self, serializer):
@@ -425,6 +427,7 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         qs = (
             OrdenCompra.objects.filter(proveedor=proveedor, empresa=empresa, activo=True)
             .select_related("empresa", "sucursal", "moneda", "usuario", "pedido", "proveedor")
+            .prefetch_related("pedidos")
         ) if empresa is not None else OrdenCompra.objects.none()
 
         estatus = (request.query_params.get("estatus") or "").strip()

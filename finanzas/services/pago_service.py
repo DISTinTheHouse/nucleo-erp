@@ -13,12 +13,13 @@ from finanzas.models import (
     PagoDetalle,
 )
 from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
+from finanzas.services.pago_poliza_service import PagoPolizaService
 
 
 class PagoService:
     @staticmethod
     @transaction.atomic
-    def aplicar_pago(pago: Pago):
+    def aplicar_pago(pago: Pago, usuario=None):
         # Facturas antes que CxP, el mismo orden que el registro de la factura y la
         # edición de la CxP: así la factura no deja de estar Registrada entre la
         # comprobación de abajo y el guardado.
@@ -144,10 +145,21 @@ class PagoService:
             mb.tipo_movimiento = MovimientoBancario.TipoMovimiento.CARGO
             mb.save()
 
+        PagoPolizaService.generar(pago, usuario)
+
     @staticmethod
     @transaction.atomic
-    def cancelar_pago(pago: Pago):
+    def cancelar_pago(pago: Pago, usuario=None):
         if pago.estatus == Pago.Estatus.CANCELADO:
+            return
+        if pago.estatus != Pago.Estatus.APLICADO:
+            # Un Borrador nunca descontó saldos ni tocó el banco: revertirlos
+            # inflaría la CxP y el saldo bancario con dinero que no salió.
+            pago.estatus = Pago.Estatus.CANCELADO
+            pago.save()
+            MovimientoBancario.objects.filter(pago=pago).update(
+                estatus=MovimientoBancario.Estatus.CANCELADO
+            )
             return
         detalles = list(PagoDetalle.objects.filter(pago=pago).select_related("cxp").all())
         cxp_ids = [d.cxp_id for d in detalles]
@@ -181,3 +193,4 @@ class PagoService:
         if mb:
             mb.estatus = MovimientoBancario.Estatus.CANCELADO
             mb.save()
+        PagoPolizaService.cancelar(pago, usuario)

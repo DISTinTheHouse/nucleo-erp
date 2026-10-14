@@ -324,12 +324,14 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
 | `cotizacion` | Cotizaciones | — | nombre y razón social del cliente | `R-CRM-COTIZACIONES`, `R-CRM`, `R-MESACONTROL-COTI`, `R-MESACONTROL` | más reciente primero |
 | `producto` | Productos | `sku` | nombre de la variante, nombre del producto | `R-CATALOGO-PRODUCTOS` ⚠️ | nombre del producto, sku |
 | `factura` | Facturas | `folio` | nombre y razón social del cliente | `R-CONTABILIDAD-FACTURACION` | `fecha_emision` desc |
+| `oportunidad` | Oportunidades | — | `titulo`, `nombre_contacto`, `cliente.nombre` (si lo ve) | `R-CRM-OPORTUNIDADES`, `R-CRM` | más reciente primero |
 
 **Regla de los permisos de visibilidad**: las claves de una entidad son las que le permiten al usuario *abrir* esa entidad en algún lugar del frontend.
 - `orden_bordado` / `orden_reflejante` / `orden_corte_manga` / `factura`: sólo la clave de sección (`R-PRODUCCION-OB` / `R-PRODUCCION-OR` / `R-PRODUCCION-CM` / `R-CONTABILIDAD-FACTURACION`); los códigos de módulo `R-PRODUCCION` / `R-CONTABILIDAD` no abren esas rutas.
 - `cotizacion`: `R-CRM` / `R-MESACONTROL` sí cuentan, porque los dashboards de esos módulos (`/sales`, `/operations`) abren cotizaciones.
 - `pedido`: incluye claves de otras secciones (OB/OR/CM, OC, picking) porque esas vistas enlazan al pedido y la ruta `/orders/[id]` las acepta.
 
+- **`oportunidad`**: se busca por **subcadena** en el título, en el nombre del contacto y en el nombre del cliente, este último solo si el usuario puede ver a ese cliente (mínimo **3 caracteres**). El vendedor ve las suyas y el admin de empresa las de su empresa; las dadas de baja no salen. La fila trae `titulo`, `subtitulo` y `estatus` con el estado calculado (`Nueva`, `Contactada`, `Cotizada`, `Ganada`, `Perdida`). Va al final de `grupos`, así que no cambia el orden de los demás. `titulo` es el nombre de la oportunidad con la misma regla que el resto de la app: el título; si no hay, el nombre del cliente (solo si el usuario puede ver a ese cliente: el superusuario y el admin de empresa siempre, aunque esté dado de baja; el resto, con la regla de `/terceros/clientes/`); si no, el contacto; y si no, `Oportunidad #<id>`. `subtitulo` es lo siguiente de esa cadena que no repita el título: con título propio, el cliente (si lo ve) o el contacto; con el cliente como título, el contacto; con el contacto o el respaldo como título, `null` (igual que en los demás grupos cuando no hay subtítulo). Se usa el `nombre` del cliente, no la razón social.
 - **`orden_bordado`**: el folio real tiene el año delante (`2026-OB-00017`), por eso se busca por **subcadena** y no por prefijo: `OB-00017`, `00017` y `2026-OB` la encuentran, pero hace falta un mínimo de **3 caracteres** (con 2 el grupo llega vacío). No se busca por folio del pedido ni por cliente; esos datos sólo aparecen en `subtitulo` (`"<folio pedido> · <cliente>"`).
 - **`orden_reflejante`**: misma plantilla que `orden_bordado`. Folio `2026-OR-00006` por **subcadena** (`OR-00006`, `00006`, `2026-OR`), mínimo **3 caracteres**; folio del pedido y cliente sólo en `subtitulo`.
 - **`orden_corte_manga`**: misma plantilla. Folio `2026-CM-00005` (serie `CM`, no `OCM`) por **subcadena** (`CM-00005`, `00005`, `2026-CM`), mínimo **3 caracteres**. Excepción: la generación automática desactivada en `ventas` tiene un respaldo que crea folios `OCM-<folio pedido>`; si existieran, esas órdenes sí aparecerían al buscar el folio del pedido (hoy no hay ninguna).
@@ -1594,6 +1596,19 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
     |---|---|---|
     | `cantidad_asignada_picking` | `str` | Cuántas de esas prendas ya tienen folio picking (suma de todas las líneas activas, sin filtro de almacén). |
     | `cantidad_surtida_picking` | `str` | Cuántas ya están marcadas como surtidas en sus líneas de picking correspondientes. |
+  - **Nuevo (SKU de producción de muestras)**: cada talla de `detalles[].tallas[]` trae `sku_produccion` (`string | null`, solo lectura): el `sku` de la `VarianteProductoProduccion` activa de esa línea + talla (la que genera `variante-onboarding` en producción) — es decir, el SKU que copiaría `POST /pedidos/{id}/vincular-sku-muestra/`.
+    - `null` si la línea no es muestra (`producto_nombre_externo` `null` o `""`; un nombre de solo espacios **sí** cuenta como muestra, mismo criterio que `pedidos-especiales` en producción), si la talla aún no tiene variante activa, o si la variante no tiene `sku`.
+    - Junto con `sku_muestra` (mismo objeto) da los estados sin llamar a producción:
+      | `sku_produccion` | `sku_muestra` | Estado |
+      |---|---|---|
+      | `null` | `null` | Sin SKU de producción todavía (o la línea no es muestra). |
+      | valor | `null` | Hay SKU listo para vincular. |
+      | valor | mismo valor | Vinculado. |
+      | valor | otro valor | `sku_muestra` quedó desfasado. |
+      | `null` | valor | Vinculado, pero ya no hay SKU de producción visible para esa talla: la línea se convirtió a producto de catálogo, o se cambió la `talla` (o el propio `sku_muestra`) por el `PATCH` genérico de `/pedido-detalle-talla/`. |
+    - Mismo criterio que usa `vincular-sku-muestra` para buscar la variante (activa, por línea + talla, con `sku`). Ambos exigen que la línea siga siendo muestra.
+    - Viaja en todas las respuestas que devuelven el pedido completo (`GET`/`POST`/`PATCH`/`PUT` de `/pedidos/`, `pedido` de `editar-mesa-control` y de autorizar cotización). No está en el listado ni en `/pedido-detalle-talla/`.
+    - Costo: **una** consulta por petición para todo el pedido, nunca por línea ni por talla. En `GET`, `editar-mesa-control` y autorizar va en el prefetch del pedido (corre aunque no haya muestras); en la respuesta de `PATCH`/`PUT` se suma una más, y solo si el pedido tiene alguna línea de muestra.
   - **Ya existente**: `documentos[]` — lista de todos los documentos ligados al pedido (1 solo query por relación, prefetch optimizado).
     - **Shape de cada entrada**:
       ```ts
@@ -1842,7 +1857,25 @@ En qué paso va el pedido, cuánto lleva y si va a tiempo. Todo se calcula en el
   - Defaults de facturación: si `cotizacion.persona_pagos / correo_facturas / telefono_pagos / forma_pago / metodo_pago / uso_cfdi` vienen `null`, el backend usa sensible defaults derivados del cliente (`razon_social`/`email`/`telefono`) y los TextChoices de `Cotizacion.FormaPago.TRANSFERENCIA`, `MetodoPago.PUE`, `UsoCfdi.G03`. Esto garantiza que la conversión `Cotizacion → Pedido` nunca falle por campos `NOT NULL` de facturación.
 - Rechazar cotización:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar/`
-  - Efecto: la cotización pasa a `Rechazada (4)`. **No** se crea pedido ni se gasta folio.
+  - Body (obligatorio): `{"comentario": "Falta RFC"}`. Vacío, `null`, ausente o solo espacios → `400 {"comentario": "Indica el motivo del rechazo para que el vendedor lo vea."}`.
+  - Efecto: la cotización pasa a `Rechazada (4)`, se guarda el motivo en `motivo_rechazo` y se agrega una fila `RECHAZO` al historial (`comentarios/`). **No** se crea pedido ni se gasta folio. Si ya está `Autorizada (3)` → `400 {"cotizacion": ...}`. Responde `{"cotizacion": {...}}`.
+- Reenviar a revisión (vendedor):
+  - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/enviar-revision/`
+  - Body (opcional): `{"comentario": "Listo"}`. Solo se registra, como `REENVIO` en el historial, cuando la cotización estaba `Rechazada (4)` y el comentario no viene vacío.
+  - Efecto: la cotización pasa a `Por Autorizar (2)`. Solo desde estatus 1, 4 o 5.
+- Historial de comentarios:
+  - **Endpoint**: `GET /api/v1/ventas/cotizaciones/{id}/comentarios/` (lista sin paginar, del más antiguo al más reciente).
+  - `tipo`: `RECHAZO` (mesa de control) o `REENVIO` (vendedor).
+  - Respuesta:
+
+    ```json
+    [
+      {"id": 13, "tipo": "RECHAZO", "comentario": "Falta RFC", "autor": 1, "autor_nombre": "a1@x.t", "created_at": "2026-10-14T08:28:45.890187-06:00"},
+      {"id": 14, "tipo": "REENVIO", "comentario": "Listo", "autor": 2, "autor_nombre": "v1@x.t", "created_at": "2026-10-14T08:28:45.894255-06:00"}
+    ]
+    ```
+
+  - La cotización expone además `motivo_rechazo` (solo lectura): el último motivo de rechazo.
 - Aceptar cambios:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/aceptar-cambios/`
   - Efecto: se **aplican** los cambios de la cotización al `Pedido` ya existente (detalle + `servicios_extras`) y la cotización vuelve a `Autorizada (3)` con `aprobado_snapshot` actualizado.
@@ -2280,6 +2313,30 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 
 - `fecha_oc` (fecha de generación) **ya no se acepta en el body**, ni en `POST .../onboarding/` ni en `PUT`: el servidor la fija una sola vez al crear la OC con el día local (`timezone.localdate()`, America/Mexico_City) y nunca se vuelve a tocar. Si la mandas en el body, se ignora en silencio (no es error).
 - `fecha_vencimiento` sí es editable: agrégala al objeto `orden_compra` del body (`POST .../onboarding/` o `PUT`) como `"fecha_vencimiento": "YYYY-MM-DD"`. El campo ya existía en el modelo pero no estaba expuesto en el onboarding; ahora sí.
+
+### Referencia opcional, varios pedidos y tipo de compra (serie de folio)
+
+Campos nuevos/cambiados en el objeto `orden_compra` de `POST .../onboarding/` y `PUT .../ordenes/{id}/` (todos opcionales; lo que no mandes no se toca, así el flujo actual sigue igual):
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `referencia` | string \| null | **Ya no es obligatoria** en el API (nunca lo fue; el "La referencia es requerida" era validación del formulario). `""`/`null` se guardan como `null`. Máx. 50 caracteres (`400` si excede). |
+| `pedidos` | `int[]` \| null | Pedidos que surte la OC. Reemplaza la lista completa; `[]`/`null` desvincula. Todos deben ser de la empresa de la OC, si no `400 {"pedidos": ...}`. |
+| `pedido` | int \| null | Forma legada de un solo pedido; equivale a `pedidos: [id]`. Si mandas ambos, manda `pedidos`. |
+| `tipo_compra` | `"MP"` \| `"PT"` | `MP` = materia prima (default), `PT` = producto terminado. Define la serie del folio al aceptar. Una vez que la OC tiene folio ya no se puede cambiar (`400`). |
+
+Respuesta (`GET` lista/detalle, y `orden_compra` de onboarding/PUT/aceptar) añade:
+
+```json
+{ "pedido": 12, "pedido_folio": "PED-000012",
+  "pedidos": [12, 15],
+  "pedidos_vinculados": [ {"id": 12, "folio": "PED-000012"}, {"id": 15, "folio": "PED-000015"} ],
+  "tipo_compra": "PT", "tipo_compra_label": "Producto terminado" }
+```
+
+- `pedido` / `pedido_folio` / `pedido_vinculado` **se conservan** y reflejan el primer pedido de `pedidos` (o `null`): ninguna integración existente se rompe. Una OC creada antes (o desde el admin) con solo `pedido` aparece también en `pedidos`.
+- **Folios**: `aceptar` toma la serie activa de la sucursal por `tipo_compra`: `MP` → `SerieFolio.tipo_documento = ORDEN_COMPRA` (serie `OC`, la de siempre), `PT` → `ORDEN_COMPRA_PT` (serie `O`). Si no hay serie configurada se usa el folio de respaldo `OC-{empresa}-{id}` / `O-{empresa}-{id}`.
+- Rendimiento: crear/editar/aceptar una OC ya no hace consultas por renglón (alta de 10 renglones: 47 → 15 consultas; edición: 62 → 30; aceptar: 16 → 11). Los renglones se insertan en lote conservando su historial.
 
 ### Cancelar una orden de compra
 
@@ -2844,7 +2901,7 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 | ------------------------ | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | Clientes contabilidad    | `GET /api/v1/finanzas/clientes-contabilidad/`         | solo lectura                                                                                              | `id`                                                        |
 | Facturas clientes        | `GET/POST /api/v1/finanzas/facturas/`                 | `POST /facturas/onboarding/`, `POST /facturas/desde-pedido/`, `POST /facturas/registrar-pendiente-cobro/` | `id`, `pedido`, `cliente`                                   |
-| Cuentas por cobrar       | `GET/POST /api/v1/finanzas/cuentas-por-cobrar/`       | detalle `GET /{id}/` trae factura y pólizas relacionadas                                                  | `id`, `factura_id`, `cliente`                               |
+| Cuentas por cobrar       | `GET /api/v1/finanzas/cuentas-por-cobrar/`       | detalle `GET /{id}/` trae factura y pólizas relacionadas                                                  | `id`, `factura_id`, `cliente`                               |
 | Cobros                   | `GET/POST /api/v1/finanzas/cobros/`                   | `POST /cobros/{id}/cancelar/`                                                                             | `id`, `cliente`, `cuenta_bancaria`, `cobro_detalles[].cxc`  |
 | Facturas proveedor       | `GET/POST /api/v1/finanzas/facturas-proveedor/`       | CRUD estándar                                                                                             | `id`, `oc`, `recepcion`, `proveedor`, `factura_proveedor_detalles[].oc_detalle` |
 | Cuentas por pagar        | `GET/POST /api/v1/finanzas/cuentas-por-pagar/`        | CRUD estándar                                                                                             | `id`, `factura_proveedor`, `proveedor`                      |
@@ -3545,6 +3602,7 @@ Regla validada en el backend: con `PaymentMethod = "PPD"`, `PaymentForm` debe se
 
 ### Otras piezas que usan la cuenta de Facturama
 
+- **Crédito del cliente** (`dias_credito` 0-365, `limite_credito` >= 0): cambiarlos exige el permiso `E-CRM-CLIENTES-CREDITO` (superusuario y admin de empresa lo tienen). Sin él, `POST`/`PATCH` de `/api/v1/terceros/clientes/` responde `400 {"dias_credito": ...}` solo si el valor mandado difiere del actual (en alta, de 0); reenviar el mismo valor o no mandarlo no falla. La clave debe existir en el catálogo `permisos`; viaja en la lista de permisos del login.
 - **Alta de cliente** (`POST /api/v1/terceros/clientes/`): después de guardar el cliente, el backend lo da de alta también en Facturama (`/Client`). **Solo** se hace para clientes de la empresa dueña de la cuenta; los de otras empresas ya no se suben.
 - **Páginas del Core** `/core/terceros/validar-rfc/` y `/core/terceros/crear-cliente/`: consultan y crean clientes en Facturama. **Solo superusuario.**
 
@@ -3714,7 +3772,7 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
 - **Varias OPs**: `GET /api/v1/produccion/orden-produccion/ruta-critica/?op_id=1,2,3` → arreglo, una fila por OP (con `op_id`). Máx. 200 ids; ids de otra empresa o inexistentes se omiten; `op_id` faltante o no numérico → `400`.
 - **PATCH**: solo usuarios del departamento **Producción** (o superuser/admin_empresa). `400 {"permiso": "..."}` para el resto. OP Completada (5) o Cancelada (7) → `409 {"msg": "..."}`.
 - Acepta `PATCH` parcial — solo manda los campos que cambian.
-- Los campos `fecha_existencia_*` y `fecha_kit_completo` son de solo lectura: el backend los sella con la fecha/hora actual al **marcar** su checkbox y los limpia (`null`) al **desmarcarlo**. Reenviar el mismo valor no los toca.
+- Los campos `fecha_existencia_*` y `fecha_kit_completo` son de solo lectura: el backend los sella con la fecha/hora actual al **marcar** su checkbox y los limpia (`null`) al **desmarcarlo**. Reenviar el mismo valor no los toca. La regla vive en el modelo, así que aplica también a escrituras fuera de la API; un renglón anterior con `kit_completo=true` y `fecha_kit_completo=null` se queda así hasta que se desmarque y vuelva a marcar. El PATCH bloquea la fila, y en OP completada/cancelada responde `409 {"msg": "La OP tiene estatus «Completado»: su ruta crítica ya no se puede editar."}`.
 - Toda respuesta incluye `op_id`.
 
 **Campos**
@@ -3845,7 +3903,7 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
   - `DELETE /api/v1/produccion/orden-bordado/{id}/` — soft delete (`activo=False`). Libera cupo del pedido para nuevas OBs.
 - **Avances de producción (registrar bordado del día)**:
   - `GET /api/v1/produccion/bordado-avances/?ob=42` — listado filtrado por OB.
-  - `POST /api/v1/produccion/bordado-avances/` — registrar producción. **En el body NO mandar `usuario`**: el backend usa SIEMPRE `request.user` (operador conectado). Body: `{ "ob": 42, "cantidad_bordada": 20, "puntadas_realizadas": 165000, "comentario": "Turno matutino" }`.
+  - `POST /api/v1/produccion/bordado-avances/` — registrar producción. **En el body NO mandar `usuario`**: el backend usa SIEMPRE `request.user` (operador conectado). Body: `{ "ob": 42, "cantidad_bordada": 20, "puntadas_por_pieza": 5000, "comentario": "Turno matutino" }`. **Captura simple por OB (sin talla/SKU):** solo piezas totales + puntadas por pieza (obligatorias). `puntadas_total = puntadas_por_pieza × cantidad_bordada` lo calcula el backend (también al editar). `orden_bordado_detalle`, `pedido_detalle_talla` y `puntadas_total` son solo lectura; los avances por talla ya capturados se conservan y siguen sumando al total.
   - `DELETE /api/v1/produccion/bordado-avances/{id}/` — soft delete.
 - **Onboarding**:
   - `GET /api/v1/produccion/orden-bordado/onboarding/`
@@ -4761,6 +4819,16 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
 - Dos altas simultáneas de la misma línea se serializan (la línea se bloquea durante el alta): la segunda recibe ese mismo `400`, no un `500`.
 - Tras esto, el `GET` del detalle refleja `sku_produccion` en cada talla sin consultas extra.
 
+**Vincular SKU de muestra al pedido (mesa de control, un clic)**: `POST /api/v1/ventas/pedidos/{id}/vincular-sku-muestra/`
+
+- Gateado a mesa de control. Body: `{"pedido_detalle_talla_id": 456}`.
+- Copia el `sku` de la `VarianteProductoProduccion` ya generada (por `variante-onboarding`) a `PedidoDetalleTalla.sku_muestra` — **no** crea nada nuevo, no toca `producto_nombre_externo` (sigue siendo muestra). Si hay cotización de origen, refleja el mismo SKU en la `CotizacionDetalleTalla` equivalente (match por producto/talla y el color del pedido o, si la cotización no tiene color, sin color; no bloquea si no encuentra una, y `cotizacion_actualizada` lo indica).
+- Sin SKU de producción generado todavía para esa talla: `400 {"pedido_detalle_talla_id": "Esta talla no tiene SKU de producción generado todavía."}`.
+- `sku_muestra` ya viaja en `PedidoDetalleTallaSerializer`/`CotizacionDetalleTallaSerializer` (son `fields='__all__'`) — no hace falta un GET aparte para leerlo tras vincular.
+- Para saber **antes** del clic qué tallas ya tienen SKU de producción: `detalles[].tallas[].sku_produccion` en `GET /api/v1/ventas/pedidos/{id}/` (ver ese endpoint).
+- `400` también con id no numérico, pedido cancelado o línea que ya no es muestra. Las dos escrituras van en una transacción.
+- Respuesta (`200`): `{"pedido_detalle_talla_id": 456, "sku_muestra": "MP123-AZL-M", "cotizacion_actualizada": true}`.
+
 ---
 
 ## 📦 WMS - Picking
@@ -5060,6 +5128,14 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
   - Historial de `PickingDetalle` si se requiere vista granular.
 - Si frontend necesita mostrar el surtido creado, puede usar la respuesta del `POST` o consultar el `GET` de detalle.
 - `ordenes_trabajo_generadas` siempre devuelve `[]` en este endpoint. Las OT se vinculan desde sus endpoints de Producción.
+
+### Trasladar un Picking a otro almacén
+
+- **Endpoint**: `POST /api/v1/wms/pickings/{id}/trasladar/`
+- **Body**: `{"almacen": <id>, "observaciones": "opcional"}`
+- Cambia el almacén desde el que se surte el picking (p. ej. de Bordados a Apartados). No mueve inventario ni crea transferencias (el picking es un tracker).
+- Solo estados Pendiente/Asignado/En proceso/Pausado/Parcial. El almacén debe ser de la misma empresa y sucursal y permitir salidas; distinto al actual. Si coincide con `almacen_destino`, este queda en `null`. Se limpian las `ubicacion` de línea de otro almacén y se registra en observaciones y en auditoría (`TRASLADO_PICKING`).
+- Respuesta `200` con el picking actualizado; `400` si no cumple; `404` si es de otra empresa/sucursal.
 
 ### 3) Listar Pickings
 
@@ -6303,11 +6379,24 @@ Notas:
 | ------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | `GET`  | `/api/v1/notificaciones/sin-leer/count/`            | Badge rojo (contador ligero). Respuesta: `{count, ultima_notificacion_id}`                 |
 | `GET`  | `/api/v1/notificaciones/stream/?token=ACCESS_TOKEN` | **Realtime SSE** — EventSource nativo. Eventos: `abierto`, `nueva`, `ping`, `error`, `fin` |
-| `GET`  | `/api/v1/notificaciones/`                           | Dropdown lista — soporta `?leido=false&modulo=ventas&page=1&page_size=20`                  |
+| `GET`  | `/api/v1/notificaciones/`                           | Dropdown lista — soporta `?leido=false&modulo=ventas&limit=20&offset=0`. Sin `limit` regresa un arreglo plano; con `limit` regresa `{count, next, previous, results}` |
 | `POST` | `/api/v1/notificaciones/{id}/marcar-leida/`         | Marcar 1 notificación como leída                                                           |
 | `POST` | `/api/v1/notificaciones/marcar-todas-leidas/`       | Marcar TODO como leído                                                                     |
 
 > 💡 El SSE dura ~6min y reconecta solo (`EventSource` lo hace automático). Cierra conexiones idle con keep-alive cada 20s. Perfecto para no abrir 100 requests/hour de polling.
+
+---
+
+### Notificaciones al vendedor: cotización autorizada / rechazada
+
+Cuando Mesa de Control **autoriza** (`POST /api/v1/ventas/cotizaciones/{id}/autorizar/`) o **rechaza** (`.../rechazar/`, con `comentario` obligatorio; el motivo viaja en el mensaje y en `data.motivo`) una cotización, el **vendedor de la cotización** recibe una `Notificacion` (un solo INSERT dentro de la misma transacción; llega por el SSE `nueva` y aparece en el listado). Se filtra con `?modulo=ventas`. No hay endpoint nuevo.
+
+| `tipo` | `titulo` | `mensaje` (ejemplo) | `data` |
+| --- | --- | --- | --- |
+| `cotizacion_autorizada` | Cotización autorizada | Tu cotización #123 fue autorizada y generó el pedido P-000045. | `{cotizacion_id, pedido_id, pedido_folio}` |
+| `cotizacion_rechazada` | Cotización rechazada | Tu cotización #123 fue rechazada: <motivo> | `{cotizacion_id, motivo}` |
+
+Sugerencia para el frontend: navegar con `data.pedido_id` / `data.cotizacion_id`.
 
 ---
 

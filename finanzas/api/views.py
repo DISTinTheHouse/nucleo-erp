@@ -1,3 +1,5 @@
+from datetime import timedelta
+from django.utils.dateparse import parse_date
 from decimal import Decimal
 from django.db import OperationalError, transaction
 from django.db.models import DecimalField, Max, Min, OuterRef, Q, Subquery, Sum
@@ -91,9 +93,13 @@ from finanzas.services.movimiento_bancario_service import MovimientoBancarioServ
 from finanzas.services.nota_credito_service import NotaCreditoService
 from finanzas.services.pago_service import PagoService
 from finanzas.services.plan_contable_service import PlanContableService
+from finanzas.services.factura_cancelacion_service import FacturaCancelacionService
+from finanzas.services.factura_poliza_service import FacturaPolizaService
+from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
+from finanzas.services.reporte_contable_service import LIMITE_OMISION, ReporteContableService
 from finanzas.utils.folios import generate_factura_folio
-from nucleo.models import Moneda, Sucursal
+from nucleo.models import Empresa, Moneda, Sucursal
 from ventas.models import Pedido, PedidoDetalleTalla
 from terceros.models import Cliente
 from terceros.api.serializers import ClienteSerializer
@@ -371,7 +377,10 @@ ClienteViewSet = ClienteViewSetContabilidad
 
 class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
     serializer_class = CuentaPorCobrarSerializer
-    http_method_names = ['get', 'post', 'put', 'patch']
+    # Sin POST: una CxC nace de la factura (``uq_cxc_factura``). El alta manual daba
+    # 500 -- el serializer no recibe ``factura`` y la columna es NOT NULL-- y de
+    # funcionar habría creado saldos que ninguna póliza respalda.
+    http_method_names = ['get', 'put', 'patch']
 
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -551,118 +560,6 @@ class FacturaViewSet(FinanzasBaseViewSet):
             return sucursal
         return Sucursal.objects.filter(empresa=empresa, activo=True).order_by("codigo").first()
 
-    def _get_default_centro_costo(self, empresa):
-        return (
-            CentroCosto.objects.filter(empresa=empresa, activo=True)
-            .order_by("codigo", "id")
-            .first()
-        )
-
-    def _get_poliza_folio(self, empresa, sucursal):
-        ultima = (
-            Poliza.objects.filter(empresa=empresa, sucursal=sucursal)
-            .order_by("-folio_consecutivo", "-id")
-            .first()
-        )
-        consecutivo = (getattr(ultima, "folio_consecutivo", 0) or 0) + 1
-        return f"POL-{consecutivo:06d}", consecutivo
-
-    def _get_poliza_cuentas(self, empresa, impuestos):
-        cuentas = CuentaContable.objects.filter(
-            empresa=empresa,
-            activo=True,
-            acepta_movimientos=True,
-        )
-        cuenta_cxc = cuentas.filter(tipo=CuentaContable.CuentaTipo.ACTIVO).order_by("codigo", "id").first()
-        cuenta_ingreso = cuentas.filter(tipo=CuentaContable.CuentaTipo.INGRESO).order_by("codigo", "id").first()
-        cuenta_impuesto = None
-        if impuestos > Decimal("0"):
-            cuenta_impuesto = cuentas.filter(tipo=CuentaContable.CuentaTipo.PASIVO).order_by("codigo", "id").first()
-
-        errores = {}
-        if cuenta_cxc is None:
-            errores["cuenta_contable_cxc"] = "No existe una cuenta contable activa de tipo Activo para registrar cuentas por cobrar."
-        if cuenta_ingreso is None:
-            errores["cuenta_contable_ingreso"] = "No existe una cuenta contable activa de tipo Ingreso para registrar la factura."
-        if impuestos > Decimal("0") and cuenta_impuesto is None:
-            errores["cuenta_contable_impuesto"] = "No existe una cuenta contable activa de tipo Pasivo para registrar impuestos."
-        if errores:
-            raise ValidationError(errores)
-
-        return cuenta_cxc, cuenta_ingreso, cuenta_impuesto
-
-    def _crear_poliza_factura_pendiente(self, *, empresa, sucursal, user, factura, cxc):
-        centro_costo = self._get_default_centro_costo(empresa)
-        if centro_costo is None:
-            raise ValidationError(
-                {"centro_costo": "No existe un centro de costo activo para generar la póliza contable."}
-            )
-
-        cuenta_cxc, cuenta_ingreso, cuenta_impuesto = self._get_poliza_cuentas(
-            empresa,
-            factura.impuestos or Decimal("0"),
-        )
-        folio_poliza, folio_consecutivo = self._get_poliza_folio(empresa, sucursal)
-        referencia = cxc.referencia or factura.folio or str(factura.pk)
-        ingreso_neto = (factura.subtotal or Decimal("0")) - (factura.descuento or Decimal("0"))
-
-        poliza = Poliza.objects.create(
-            empresa=empresa,
-            sucursal=sucursal,
-            centro_costo=centro_costo,
-            folio=folio_poliza,
-            folio_consecutivo=folio_consecutivo,
-            tipo=Poliza.PolizaTipo.INGRESO,
-            concepto=f"Factura por cobrar {factura.folio or factura.pk} - {factura.cliente.nombre}"[:200],
-            usuario_creacion=user,
-        )
-
-        detalles = [
-            PolizaDetalle(
-                poliza=poliza,
-                cuenta_contable=cuenta_cxc,
-                centro_costo=centro_costo,
-                factura=factura,
-                cargo=factura.total,
-                abono=Decimal("0.00"),
-                referencia=referencia,
-                observaciones=f"Cargo por cuenta por cobrar de factura {factura.folio or factura.pk}.",
-                orden=1,
-            )
-        ]
-        if ingreso_neto > Decimal("0"):
-            detalles.append(
-                PolizaDetalle(
-                    poliza=poliza,
-                    cuenta_contable=cuenta_ingreso,
-                    centro_costo=centro_costo,
-                    factura=factura,
-                    cargo=Decimal("0.00"),
-                    abono=ingreso_neto,
-                    referencia=referencia,
-                    observaciones=f"Abono por ingreso de factura {factura.folio or factura.pk}.",
-                    orden=2,
-                )
-            )
-        if (factura.impuestos or Decimal("0")) > Decimal("0"):
-            detalles.append(
-                PolizaDetalle(
-                    poliza=poliza,
-                    cuenta_contable=cuenta_impuesto,
-                    centro_costo=centro_costo,
-                    factura=factura,
-                    cargo=Decimal("0.00"),
-                    abono=factura.impuestos,
-                    referencia=referencia,
-                    observaciones=f"Abono por impuestos de factura {factura.folio or factura.pk}.",
-                    orden=len(detalles) + 1,
-                )
-            )
-
-        PolizaDetalle.objects.bulk_create(detalles)
-        PolizaService.validar_suma_cero(poliza)
-        return poliza
-
     @action(detail=False, methods=['post'], url_path='registrar-pendiente-cobro')
     def registrar_pendiente_cobro(self, request):
         serializer = FacturaPendienteCobroInputSerializer(data=request.data)
@@ -735,6 +632,10 @@ class FacturaViewSet(FinanzasBaseViewSet):
                         'pedido': 'El pedido ya tiene una factura activa; no puede facturarse más de una vez.'
                     })
 
+            # Sin vencimiento explícito, vence según el plazo de crédito del cliente.
+            fecha_vencimiento = data.get('fecha_vencimiento')
+            if fecha_vencimiento is None and cliente.dias_credito:
+                fecha_vencimiento = timezone.localdate() + timedelta(days=cliente.dias_credito)
             factura = Factura.objects.create(
                 empresa=empresa,
                 sucursal=sucursal,
@@ -742,7 +643,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
                 pedido=pedido,
                 moneda=moneda,
                 folio=folio,
-                fecha_vencimiento=data.get('fecha_vencimiento'),
+                fecha_vencimiento=fecha_vencimiento,
                 subtotal=data['subtotal'],
                 descuento=data['descuento'],
                 impuestos=data['impuestos'],
@@ -754,20 +655,14 @@ class FacturaViewSet(FinanzasBaseViewSet):
                 empresa=empresa,
                 cliente=cliente,
                 factura=factura,
-                fecha_vencimiento=data.get('fecha_vencimiento'),
+                fecha_vencimiento=fecha_vencimiento,
                 total=data['total'],
                 saldo=data['total'],
                 estatus=CuentaPorCobrar.EstatusCxC.PENDIENTE,
                 referencia=(data.get('referencia') or folio or None),
                 observaciones=data.get('observaciones') or None,
             )
-            poliza = self._crear_poliza_factura_pendiente(
-                empresa=empresa,
-                sucursal=sucursal,
-                user=user,
-                factura=factura,
-                cxc=cxc,
-            )
+            poliza = FacturaPolizaService.generar(factura, user)
 
         return Response(
             {
@@ -779,7 +674,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
                     'referencia': cxc.referencia,
                     'fecha_vencimiento': cxc.fecha_vencimiento,
                 },
-                'poliza': {
+                'poliza': poliza and {
                     'id': poliza.pk,
                     'folio': poliza.folio,
                     'tipo': poliza.tipo,
@@ -890,6 +785,22 @@ class FacturaViewSet(FinanzasBaseViewSet):
             FacturaSerializer(factura).data,
             status=status.HTTP_201_CREATED,
         )
+
+    @action(detail=True, methods=['post'], url_path='cancelar', url_name='cancelar')
+    def cancelar(self, request, pk=None):
+        """Cancela la factura y su CxC y crea la contrapóliza del día. Los cobros aplicados no se tocan."""
+        factura = self.get_object()
+        motivo = (request.data.get('motivo') or '').strip()[:200]
+        contrapoliza = FacturaCancelacionService.cancelar(factura, request.user, motivo)
+        data = dict(FacturaSerializer(factura).data)
+        data['contrapoliza_id'] = contrapoliza.pk if contrapoliza else None
+        return Response(data)
+
+    @action(detail=True, methods=['get'], url_path='previsualizar-poliza', url_name='previsualizar-poliza')
+    def previsualizar_poliza(self, request, pk=None):
+        """Asiento que generaría esta factura, sin guardarlo. Sirve para revisar el
+        plan contable aunque la contabilización automática esté apagada."""
+        return Response(FacturaPolizaService.previsualizar(self.get_object()))
 
     @action(detail=True, methods=['get'], url_path='desglose', url_name='desglose')
     def desglose(self, request, pk=None):
@@ -1188,7 +1099,8 @@ class ParametrosContabilidadViewSet(FinanzasBaseViewSet):
 
 
 class PolizaViewSet(FinanzasBaseViewSet):
-    queryset = Poliza.objects.all()
+    # Las líneas se leen una vez para todo el listado (el serializer las suma).
+    queryset = Poliza.objects.prefetch_related("poliza_detalles")
     serializer_class = PolizaSerializer
 
     def get_queryset(self):
@@ -1217,6 +1129,13 @@ class PolizaViewSet(FinanzasBaseViewSet):
             qs = qs.filter(sucursal_id=sucursal)
         if centro_costo:
             qs = qs.filter(centro_costo_id=centro_costo)
+        # Rastro de un documento: sus pólizas, con la contrapóliza si se canceló.
+        origen_tipo = (qp.get("origen_tipo") or "").strip()
+        origen_id = qp.get("origen_id")
+        if origen_tipo:
+            qs = qs.filter(origen_tipo=origen_tipo)
+        if origen_id:
+            qs = qs.filter(origen_id=origen_id)
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha")
         return _aplicar_ordering(qs, qp, ["-fecha", "-folio_consecutivo", "-id"])
 
@@ -1289,8 +1208,11 @@ class PolizaViewSet(FinanzasBaseViewSet):
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         poliza = self.get_object()
-        PolizaService.cancelar(poliza)
-        return Response(PolizaSerializer(poliza).data)
+        contrapoliza = PolizaService.cancelar(poliza, request.user)
+        poliza.refresh_from_db()
+        data = PolizaSerializer(poliza).data
+        data["contrapoliza_id"] = contrapoliza.pk if contrapoliza else None
+        return Response(data)
 
     @action(detail=True, methods=["post"], url_path="validar-cuadre")
     def validar_cuadre(self, request, pk=None):
@@ -1379,6 +1301,7 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
         # Crear la factura directamente como Registrada también la registra.
         if factura_proveedor.estatus == FacturaProveedor.FacturaProveedorStatus.REGISTRADA:
             CuentaPorPagarService.generate_for_invoice(factura_proveedor)
+            FacturaProveedorPolizaService.generar(factura_proveedor, self.request.user)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -1438,6 +1361,7 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
             and previous_status != FacturaProveedor.FacturaProveedorStatus.REGISTRADA
         ):
             CuentaPorPagarService.generate_for_invoice(factura_proveedor)
+            FacturaProveedorPolizaService.generar(factura_proveedor, self.request.user)
 
     @transaction.atomic
     def perform_destroy(self, instance):
@@ -1453,6 +1377,7 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
         if locked is None:
             raise NotFound("La factura de proveedor ya no existe.")
         CuentaPorPagarService.ensure_invoice_deletable(locked)
+        FacturaProveedorPolizaService.cancelar(locked, user)
         locked.delete()
 
     @action(detail=True, methods=["post"], url_path="adjuntar-pdf", parser_classes=[MultiPartParser])
@@ -1769,13 +1694,31 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
         instance.delete()
 
 
+def _validar_transicion_estatus_cobro_pago(Estatus, anterior, nuevo, documento):
+    """Un cobro/pago solo avanza: Borrador -> Aplicado/Cancelado y Aplicado -> Cancelado.
+
+    Regresar de Aplicado a Borrador dejaba los saldos descontados sin documento
+    que los respaldara, y un segundo Borrador -> Aplicado los descontaba de nuevo.
+    """
+    if nuevo == anterior:
+        return
+    permitidas = {
+        Estatus.BORRADOR: {Estatus.APLICADO, Estatus.CANCELADO},
+        Estatus.APLICADO: {Estatus.CANCELADO},
+    }
+    if nuevo not in permitidas.get(anterior, set()):
+        raise ValidationError(
+            {"estatus": f"No se puede pasar el {documento} de {anterior} a {nuevo}."}
+        )
+
+
 class CobroViewSet(FinanzasBaseViewSet):
     queryset = Cobro.objects.all()
     serializer_class = CobroSerializer
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset()
+        qs = super().get_queryset().filter(activo=True)
         if _puede_ver_todo(user):
             pass
         else:
@@ -1832,7 +1775,7 @@ class CobroViewSet(FinanzasBaseViewSet):
                     )
             CobroDetalle.objects.create(cobro=cobro, **d)
         if cobro.estatus == Cobro.Estatus.APLICADO:
-            CobroService.aplicar_cobro(cobro)
+            CobroService.aplicar_cobro(cobro, user)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -1844,12 +1787,18 @@ class CobroViewSet(FinanzasBaseViewSet):
         if serializer.instance.estatus == Cobro.Estatus.CANCELADO:
             raise ValidationError("No se puede editar un cobro cancelado.")
         anterior_estatus = serializer.instance.estatus
+        nuevo_estatus = serializer.validated_data.get("estatus", anterior_estatus)
+        _validar_transicion_estatus_cobro_pago(Cobro.Estatus, anterior_estatus, nuevo_estatus, "cobro")
+        if nuevo_estatus == Cobro.Estatus.CANCELADO:
+            # El servicio decide qué revertir según el estatus PREVIO: si el
+            # ``save()`` ya lo hubiera cambiado, ``cancelar_cobro`` saldría por su
+            # guard de idempotencia sin devolver saldos ni banco.
+            serializer.validated_data["estatus"] = anterior_estatus
         cobro = serializer.save()
-        nuevo_estatus = cobro.estatus
-        if nuevo_estatus == Cobro.Estatus.CANCELADO and anterior_estatus != Cobro.Estatus.CANCELADO:
-            CobroService.cancelar_cobro(cobro)
+        if nuevo_estatus == Cobro.Estatus.CANCELADO:
+            CobroService.cancelar_cobro(cobro, self.request.user)
         elif nuevo_estatus == Cobro.Estatus.APLICADO and anterior_estatus != Cobro.Estatus.APLICADO:
-            CobroService.aplicar_cobro(cobro)
+            CobroService.aplicar_cobro(cobro, self.request.user)
 
     def perform_destroy(self, instance):
         user = self.request.user
@@ -1859,14 +1808,20 @@ class CobroViewSet(FinanzasBaseViewSet):
                 raise PermissionDenied()
         with transaction.atomic():
             if instance.estatus == Cobro.Estatus.APLICADO:
-                CobroService.cancelar_cobro(instance)
-            instance.delete()
+                CobroService.cancelar_cobro(instance, self.request.user)
+            if instance.movimientos_bancarios.exists():
+                # El movimiento bancario es la huella del documento (FK PROTECT):
+                # borrar de verdad daba 500. Queda cancelado y fuera del listado.
+                instance.activo = False
+                instance.save(update_fields=["activo", "updated_at"])
+            else:
+                instance.delete()
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         cobro = self.get_object()
         with transaction.atomic():
-            CobroService.cancelar_cobro(cobro)
+            CobroService.cancelar_cobro(cobro, request.user)
         return Response(CobroSerializer(cobro).data)
 
 
@@ -1876,7 +1831,7 @@ class PagoViewSet(FinanzasBaseViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset()
+        qs = super().get_queryset().filter(activo=True)
         if _puede_ver_todo(user):
             pass
         else:
@@ -1930,7 +1885,7 @@ class PagoViewSet(FinanzasBaseViewSet):
                     )
             PagoDetalle.objects.create(pago=pago, **d)
         if pago.estatus == Pago.Estatus.APLICADO:
-            PagoService.aplicar_pago(pago)
+            PagoService.aplicar_pago(pago, user)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -1942,12 +1897,16 @@ class PagoViewSet(FinanzasBaseViewSet):
         if serializer.instance.estatus == Pago.Estatus.CANCELADO:
             raise ValidationError("No se puede editar un pago cancelado.")
         anterior_estatus = serializer.instance.estatus
+        nuevo_estatus = serializer.validated_data.get("estatus", anterior_estatus)
+        _validar_transicion_estatus_cobro_pago(Pago.Estatus, anterior_estatus, nuevo_estatus, "pago")
+        if nuevo_estatus == Pago.Estatus.CANCELADO:
+            # Ver ``CobroViewSet.perform_update``: el servicio necesita el estatus previo.
+            serializer.validated_data["estatus"] = anterior_estatus
         pago = serializer.save()
-        nuevo_estatus = pago.estatus
-        if nuevo_estatus == Pago.Estatus.CANCELADO and anterior_estatus != Pago.Estatus.CANCELADO:
-            PagoService.cancelar_pago(pago)
+        if nuevo_estatus == Pago.Estatus.CANCELADO:
+            PagoService.cancelar_pago(pago, self.request.user)
         elif nuevo_estatus == Pago.Estatus.APLICADO and anterior_estatus != Pago.Estatus.APLICADO:
-            PagoService.aplicar_pago(pago)
+            PagoService.aplicar_pago(pago, self.request.user)
 
     def perform_destroy(self, instance):
         user = self.request.user
@@ -1957,14 +1916,20 @@ class PagoViewSet(FinanzasBaseViewSet):
                 raise PermissionDenied()
         with transaction.atomic():
             if instance.estatus == Pago.Estatus.APLICADO:
-                PagoService.cancelar_pago(instance)
-            instance.delete()
+                PagoService.cancelar_pago(instance, self.request.user)
+            if instance.movimientos_bancarios.exists():
+                # El movimiento bancario es la huella del documento (FK PROTECT):
+                # borrar de verdad daba 500. Queda cancelado y fuera del listado.
+                instance.activo = False
+                instance.save(update_fields=["activo", "updated_at"])
+            else:
+                instance.delete()
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         pago = self.get_object()
         with transaction.atomic():
-            PagoService.cancelar_pago(pago)
+            PagoService.cancelar_pago(pago, request.user)
         return Response(PagoSerializer(pago).data)
 
 
@@ -2026,7 +1991,7 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
                 raise PermissionDenied("Usuario sin empresa.")
         movimiento = serializer.save()
         MovimientoBancarioService.registrar_movimiento(
-            movimiento, empresa_id=getattr(empresa, "pk", None)
+            movimiento, empresa_id=getattr(empresa, "pk", None), usuario=user
         )
 
     @transaction.atomic
@@ -2051,14 +2016,14 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
                 cta = getattr(instance, "cuenta_bancaria", None)
                 if cta and getattr(cta, "empresa_id", None) and cta.empresa_id != empresa.pk:
                     raise PermissionDenied()
-        MovimientoBancarioService.revertir_movimiento(instance)
+        MovimientoBancarioService.revertir_movimiento(instance, user)
         instance.delete()
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         mb = self.get_object()
         with transaction.atomic():
-            MovimientoBancarioService.revertir_movimiento(mb)
+            MovimientoBancarioService.revertir_movimiento(mb, request.user)
         return Response(MovimientoBancarioSerializer(mb).data)
 
 
@@ -2286,7 +2251,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
                 raise ValidationError({"factura_detalle": "Detalle de factura no corresponde a la factura de la nota."})
             NotaCreditoDetalle.objects.create(nota_credito=nota, **detalle_data)
         if nota.estatus == NotaCredito.Estatus.EMITIDA:
-            NotaCreditoService.aplicar_nota_credito(nota)
+            NotaCreditoService.aplicar_nota_credito(nota, self.request.user)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -2333,7 +2298,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
             )
         nota = serializer.save()
         if nota.estatus == NotaCredito.Estatus.EMITIDA and anterior != NotaCredito.Estatus.EMITIDA:
-            NotaCreditoService.aplicar_nota_credito(nota)
+            NotaCreditoService.aplicar_nota_credito(nota, user)
 
     @transaction.atomic
     def perform_destroy(self, instance):
@@ -2363,7 +2328,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
         nota = self.get_object()
         try:
             with transaction.atomic():
-                NotaCreditoService.cancelar_nota_credito(nota)
+                NotaCreditoService.cancelar_nota_credito(nota, request.user)
         except NotaCredito.DoesNotExist:
             # Borrada entre get_object() y el lock del servicio.
             raise NotFound("La nota de crédito ya no existe.")
@@ -2456,6 +2421,70 @@ class DashboardFinancieroViewSet(FinanzasBaseSimpleViewSet):
                 moneda_id=moneda,
             )
         )
+
+class ReporteContableViewSet(FinanzasBaseSimpleViewSet):
+    """Libro diario, auxiliar de cuenta y balanza de comprobación sobre las pólizas."""
+
+    http_method_names = ["get"]
+
+    def _empresa(self, request):
+        user, qp = request.user, request.query_params
+        if _puede_ver_todo(user):
+            empresa_id = qp.get("empresa") or qp.get("empresa_id")
+            if not empresa_id:
+                raise ValidationError({"empresa": "Superusuario debe especificar ?empresa=ID."})
+            if not Empresa.objects.filter(pk=empresa_id).exists():
+                raise ValidationError({"empresa": "Empresa no encontrada."})
+            return int(empresa_id)
+        empresa = getattr(user, "empresa", None)
+        if empresa is None:
+            raise PermissionDenied("Usuario sin empresa.")
+        return empresa.pk
+
+    def _fechas(self, request):
+        qp = request.query_params
+        fechas = {}
+        for campo in ("fecha_inicio", "fecha_fin"):
+            valor = parse_date(qp.get(campo) or "")
+            if valor is None:
+                raise ValidationError({campo: "Requerida, con formato AAAA-MM-DD."})
+            fechas[campo] = valor
+        if fechas["fecha_inicio"] > fechas["fecha_fin"]:
+            raise ValidationError({"fecha_fin": "No puede ser anterior a fecha_inicio."})
+        return fechas["fecha_inicio"], fechas["fecha_fin"]
+
+    @staticmethod
+    def _pagina(qp):
+        try:
+            return int(qp.get("limit", LIMITE_OMISION)), int(qp.get("offset", 0))
+        except ValueError:
+            raise ValidationError({"limit": "limit y offset deben ser enteros."})
+
+    @action(detail=False, methods=["get"], url_path="libro-diario")
+    def libro_diario(self, request):
+        empresa_id, (inicio, fin) = self._empresa(request), self._fechas(request)
+        limit, offset = self._pagina(request.query_params)
+        return Response(ReporteContableService.libro_diario(
+            empresa_id, inicio, fin, sucursal=request.query_params.get("sucursal"),
+            tipo=request.query_params.get("tipo"), limit=limit, offset=offset,
+        ))
+
+    @action(detail=False, methods=["get"], url_path="auxiliar")
+    def auxiliar(self, request):
+        empresa_id, (inicio, fin) = self._empresa(request), self._fechas(request)
+        cuenta = CuentaContable.objects.filter(
+            pk=request.query_params.get("cuenta") or 0, empresa_id=empresa_id
+        ).first()
+        if cuenta is None:
+            raise ValidationError({"cuenta": "Requerida; cuenta no encontrada en la empresa."})
+        limit, offset = self._pagina(request.query_params)
+        return Response(ReporteContableService.auxiliar(empresa_id, cuenta, inicio, fin, limit=limit, offset=offset))
+
+    @action(detail=False, methods=["get"], url_path="balanza")
+    def balanza(self, request):
+        empresa_id, (inicio, fin) = self._empresa(request), self._fechas(request)
+        return Response(ReporteContableService.balanza(empresa_id, inicio, fin))
+
 
 class PuedeUsarFacturama(BasePermission):
     """Candado de la cuenta única de Facturama (ver ``facturama/acceso.py``).
