@@ -1840,7 +1840,25 @@ En qué paso va el pedido, cuánto lleva y si va a tiempo. Todo se calcula en el
   - Defaults de facturación: si `cotizacion.persona_pagos / correo_facturas / telefono_pagos / forma_pago / metodo_pago / uso_cfdi` vienen `null`, el backend usa sensible defaults derivados del cliente (`razon_social`/`email`/`telefono`) y los TextChoices de `Cotizacion.FormaPago.TRANSFERENCIA`, `MetodoPago.PUE`, `UsoCfdi.G03`. Esto garantiza que la conversión `Cotizacion → Pedido` nunca falle por campos `NOT NULL` de facturación.
 - Rechazar cotización:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar/`
-  - Efecto: la cotización pasa a `Rechazada (4)`. **No** se crea pedido ni se gasta folio.
+  - Body (obligatorio): `{"comentario": "Falta RFC"}`. Vacío, `null`, ausente o solo espacios → `400 {"comentario": "Indica el motivo del rechazo para que el vendedor lo vea."}`.
+  - Efecto: la cotización pasa a `Rechazada (4)`, se guarda el motivo en `motivo_rechazo` y se agrega una fila `RECHAZO` al historial (`comentarios/`). **No** se crea pedido ni se gasta folio. Si ya está `Autorizada (3)` → `400 {"cotizacion": ...}`. Responde `{"cotizacion": {...}}`.
+- Reenviar a revisión (vendedor):
+  - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/enviar-revision/`
+  - Body (opcional): `{"comentario": "Listo"}`. Solo se registra, como `REENVIO` en el historial, cuando la cotización estaba `Rechazada (4)` y el comentario no viene vacío.
+  - Efecto: la cotización pasa a `Por Autorizar (2)`. Solo desde estatus 1, 4 o 5.
+- Historial de comentarios:
+  - **Endpoint**: `GET /api/v1/ventas/cotizaciones/{id}/comentarios/` (lista sin paginar, del más antiguo al más reciente).
+  - `tipo`: `RECHAZO` (mesa de control) o `REENVIO` (vendedor).
+  - Respuesta:
+
+    ```json
+    [
+      {"id": 13, "tipo": "RECHAZO", "comentario": "Falta RFC", "autor": 1, "autor_nombre": "a1@x.t", "created_at": "2026-10-14T08:28:45.890187-06:00"},
+      {"id": 14, "tipo": "REENVIO", "comentario": "Listo", "autor": 2, "autor_nombre": "v1@x.t", "created_at": "2026-10-14T08:28:45.894255-06:00"}
+    ]
+    ```
+
+  - La cotización expone además `motivo_rechazo` (solo lectura): el último motivo de rechazo.
 - Aceptar cambios:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/aceptar-cambios/`
   - Efecto: se **aplican** los cambios de la cotización al `Pedido` ya existente (detalle + `servicios_extras`) y la cotización vuelve a `Autorizada (3)` con `aprobado_snapshot` actualizado.
@@ -6308,7 +6326,7 @@ Notas:
 
 ### Notificaciones al vendedor: cotización autorizada / rechazada
 
-Cuando Mesa de Control **autoriza** (`POST /api/v1/ventas/cotizaciones/{id}/autorizar/`) o **rechaza** (`.../rechazar/`) una cotización, el **vendedor de la cotización** recibe una `Notificacion` (un solo INSERT dentro de la misma transacción; llega por el SSE `nueva` y aparece en el listado). Se filtra con `?modulo=ventas`. No hay endpoint nuevo.
+Cuando Mesa de Control **autoriza** (`POST /api/v1/ventas/cotizaciones/{id}/autorizar/`) o **rechaza** (`.../rechazar/`, con `comentario` obligatorio; el motivo viaja en el mensaje y en `data.motivo`) una cotización, el **vendedor de la cotización** recibe una `Notificacion` (un solo INSERT dentro de la misma transacción; llega por el SSE `nueva` y aparece en el listado). Se filtra con `?modulo=ventas`. No hay endpoint nuevo.
 
 | `tipo` | `titulo` | `mensaje` (ejemplo) | `data` |
 | --- | --- | --- | --- |
