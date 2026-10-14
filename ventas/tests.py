@@ -2827,6 +2827,54 @@ class RangosCreditoYMontoTests(TestCase):
         self.assertEqual(resp.status_code, 201, resp.content)
 
 
+class CategoriaProductoCotizacionTests(TestCase):
+    """#426 / #429: ``categoria_producto`` de la línea, contra la empresa y su estado."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-cp", razon_social="acme-cp SA")
+        cls.otra = Empresa.objects.create(codigo="otra-cp", razon_social="otra-cp SA")
+        cls.admin = Usuario.objects.create(
+            username="a@acme-cp.test", email="a@acme-cp.test", empresa=cls.empresa, is_admin_empresa=True
+        )
+        cls.root = Usuario.objects.create(
+            username="root@cp.test", email="root@cp.test", empresa=cls.empresa, is_superuser=True
+        )
+        sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ACP", nombre="acme-cp")
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.cotizacion = Cotizacion.objects.create(
+            empresa=cls.empresa, vendedor=cls.admin, sucursal=sucursal, cliente=cliente, estatus=1,
+        )
+        cls.propia = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Propia", codigo="PRO")
+        cls.ajena = CategoriaProducto.objects.create(empresa=cls.otra, nombre="Ajena", codigo="AJE")
+
+    def _fila(self, categoria):
+        return {
+            "producto_nombre_externo": "Muestra", "precio_unitario": "10.00",
+            "categoria_producto": categoria.pk, "tallas": [],
+        }
+
+    def test_helper_rechaza_categoria_de_otra_empresa_tambien_a_superusuario(self):
+        for user in (self.admin, self.root):
+            with self.assertRaises(DRFValidationError):
+                _save_cotizacion_detalle(self.cotizacion, [self._fila(self.ajena)], self.empresa, user)
+
+    def test_cotizacion_detalle_rechaza_categoria_ajena(self):
+        det = CotizacionDetalle.objects.create(
+            cotizacion=self.cotizacion, producto_nombre_externo="Muestra",
+            precio_unitario="10.00", subtotal_linea="10.00",
+        )
+        for user in (self.admin, self.root):
+            client = APIClient()
+            client.force_authenticate(user=user)
+            resp = client.patch(
+                f"/api/v1/ventas/cotizacion-detalle/{det.pk}/", {"categoria_producto": self.ajena.pk}, format="json"
+            )
+            self.assertEqual(resp.status_code, 400, resp.content)
+        det.refresh_from_db()
+        self.assertIsNone(det.categoria_producto_id)
+
+
 # Pk que no existe en ninguna tabla del test: el rechazo de una FK de OTRA empresa
 # debe ser byte a byte el mismo que DRF da para este pk (salvo el número).
 PK_INEXISTENTE = 999999
