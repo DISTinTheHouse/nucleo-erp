@@ -6242,7 +6242,7 @@ Notas:
 | ------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | `GET`  | `/api/v1/notificaciones/sin-leer/count/`            | Badge rojo (contador ligero). Respuesta: `{count, ultima_notificacion_id}`                 |
 | `GET`  | `/api/v1/notificaciones/stream/?token=ACCESS_TOKEN` | **Realtime SSE** — EventSource nativo. Eventos: `abierto`, `nueva`, `ping`, `error`, `fin` |
-| `GET`  | `/api/v1/notificaciones/`                           | Dropdown lista — soporta `?leido=false&modulo=ventas&page=1&page_size=20`                  |
+| `GET`  | `/api/v1/notificaciones/`                           | Dropdown lista — soporta `?leido=false&modulo=ventas&limit=20&offset=0`. Sin `limit` regresa un arreglo plano; con `limit` regresa `{count, next, previous, results}` |
 | `POST` | `/api/v1/notificaciones/{id}/marcar-leida/`         | Marcar 1 notificación como leída                                                           |
 | `POST` | `/api/v1/notificaciones/marcar-todas-leidas/`       | Marcar TODO como leído                                                                     |
 

@@ -222,3 +222,23 @@ class NotificacionScopeTests(TestCase):
         self.assertEqual(
             client.get(SIN_LEER_COUNT_URL).json()["count"], 0
         )
+
+    # --- paginación opt-in ---------------------------------------------------
+
+    def test_listado_sin_limit_regresa_arreglo_plano(self):
+        resp = self._client(self.admin_empresa).get(NOTIFICACIONES_URL)
+        self.assertIsInstance(resp.json(), list)
+
+    def test_listado_con_limit_pagina_y_conserva_el_scope(self):
+        for i in range(3):
+            self._notificacion(self.empresa, self.admin_empresa, f"Extra {i}")
+        client = self._client(self.admin_empresa)
+        resp = client.get(NOTIFICACIONES_URL, {"limit": 2})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["count"], 4)
+        self.assertEqual(len(body["results"]), 2)
+        self.assertIsNotNone(body["next"])
+        resto = client.get(NOTIFICACIONES_URL, {"limit": 2, "offset": 2}).json()
+        self.assertEqual(len(resto["results"]), 2)
+        self.assertIsNone(resto["next"])
