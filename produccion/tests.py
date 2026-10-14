@@ -496,7 +496,7 @@ SATELITES = (
         "url": "/api/v1/produccion/bordado-avances/",
         "modelo": BordadoAvances,
         "fk": "ob",
-        "extra": {"cantidad_bordada": 5},
+        "extra": {"cantidad_bordada": 5, "puntadas_por_pieza": 1000},
         "patch": {"comentario": "tocado"},
         # A diferencia del resto de satélites, ``BordadoAvancesViewSet``
         # fuerza ``usuario=request.user`` en ``perform_create`` y el serializer
@@ -780,6 +780,29 @@ class SatelitesSuperficieEscribibleTests(TestCase):
             **{cfg["fk"]: self.padres[cfg["fk"]]},
             **cfg["extra"],
         )
+
+    def test_avance_bordado_simple_por_ob(self):
+        """Avance por OB: piezas + puntadas por pieza; total calculado en backend."""
+        client = self._client()
+        url = "/api/v1/produccion/bordado-avances/"
+        resp = client.post(
+            url,
+            {"ob": self.ob.pk, "cantidad_bordada": 20, "puntadas_por_pieza": 5000,
+             "puntadas_total": 1},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        av = BordadoAvances.objects.get(pk=resp.data["id"])
+        self.assertEqual(av.puntadas_total, 100000)
+        self.assertIsNone(av.orden_bordado_detalle_id)
+        # Editar piezas recalcula el total.
+        resp = client.patch(f"{url}{av.pk}/", {"cantidad_bordada": 10}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        av.refresh_from_db()
+        self.assertEqual(av.puntadas_total, 50000)
+        # Las puntadas son obligatorias al crear.
+        resp = client.post(url, {"ob": self.ob.pk, "cantidad_bordada": 5}, format="json")
+        self.assertEqual(resp.status_code, 400)
 
     def test_create_via_api_sigue_funcionando(self):
         """Los candados no rompen el POST legítimo (regresión de creación)."""

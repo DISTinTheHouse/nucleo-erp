@@ -3842,7 +3842,7 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
   - `DELETE /api/v1/produccion/orden-bordado/{id}/` — soft delete (`activo=False`). Libera cupo del pedido para nuevas OBs.
 - **Avances de producción (registrar bordado del día)**:
   - `GET /api/v1/produccion/bordado-avances/?ob=42` — listado filtrado por OB.
-  - `POST /api/v1/produccion/bordado-avances/` — registrar producción. **En el body NO mandar `usuario`**: el backend usa SIEMPRE `request.user` (operador conectado). Body: `{ "ob": 42, "cantidad_bordada": 20, "puntadas_realizadas": 165000, "comentario": "Turno matutino" }`.
+  - `POST /api/v1/produccion/bordado-avances/` — registrar producción. **En el body NO mandar `usuario`**: el backend usa SIEMPRE `request.user` (operador conectado). Body: `{ "ob": 42, "cantidad_bordada": 20, "puntadas_por_pieza": 5000, "comentario": "Turno matutino" }`. **Captura simple por OB (sin talla/SKU):** solo piezas totales + puntadas por pieza (obligatorias). `puntadas_total = puntadas_por_pieza × cantidad_bordada` lo calcula el backend (también al editar). `orden_bordado_detalle`, `pedido_detalle_talla` y `puntadas_total` son solo lectura; los avances por talla ya capturados se conservan y siguen sumando al total.
   - `DELETE /api/v1/produccion/bordado-avances/{id}/` — soft delete.
 - **Onboarding**:
   - `GET /api/v1/produccion/orden-bordado/onboarding/`
