@@ -1,6 +1,7 @@
 import math
+from decimal import Decimal
 
-from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, prefetch_related_objects
+from django.db.models import Sum, Count, Exists, F, OuterRef, Prefetch, Q, prefetch_related_objects
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import status, viewsets, mixins
@@ -8,14 +9,17 @@ from rest_framework.decorators import action
 from rest_framework.viewsets import GenericViewSet
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
+from rest_framework.pagination import PageNumberPagination
 
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+from ventas.services.sku_produccion_service import detalles_de_muestra, variantes_produccion_activas
 from usuarios.models import Usuario
 from seguridad.role_identity import (
     CLAVE_DEPARTAMENTO_PRODUCCION,
     usuario_tiene_clave_departamento,
 )
 
+from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
 from produccion.services.common import config_como_dict, pendientes_por_linea
 from produccion.scope import (
     ordenes_bordado_base,
@@ -76,15 +80,17 @@ from produccion.api.serializers import (
     VarianteProduccionSerializer,
 )
 from catalogo.models import VarianteProductoProduccion
+from inventarios.models import Existencia
 
 from produccion.services.orden_bordado_service import OrdenBordadoService
 from produccion.services.orden_reflejante_service import OrdenReflejanteService
 from produccion.services.orden_produccion_service import OrdenProduccionService
 from produccion.services import estatus_op_service
+from produccion.services.recalculo_consumo_service import RecalculoConsumoTelaService
 from produccion.services.orden_corte_manga_service import OrdenCorteMangaService
 
 
-def _tallas_ot_prefetch(flag):
+def _tallas_ot_prefetch(flag, con_variante=False):
     """``Prefetch`` de las tallas elegibles para una orden de trabajo.
 
     Filtra en la BD por el flag y por ``cantidad > 0`` —el mismo criterio que
@@ -95,15 +101,15 @@ def _tallas_ot_prefetch(flag):
     ignora la caché del prefetch y dispara una query por ``PedidoDetalle``,
     dejando además inservible el ``prefetch_related`` del queryset.
     """
-    return Prefetch(
-        "detalles__tallas",
-        queryset=(
-            PedidoDetalleTalla.objects
-            .filter(**{flag: True}, cantidad__gt=0)
-            .select_related("talla")
-            .order_by("id")
-        ),
+    qs = (
+        PedidoDetalleTalla.objects
+        .filter(**{flag: True}, cantidad__gt=0)
+        .select_related("talla")
+        .order_by("id")
     )
+    if con_variante:
+        qs = qs.select_related("variante")
+    return Prefetch("detalles__tallas", queryset=qs)
 
 
 def _programado_para_destino(pedido, destino):
@@ -131,7 +137,8 @@ def _programado_para_destino(pedido, destino):
 
 
 def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn,
-                                incluir_config_crudo=False, destino_programacion=None):
+                                incluir_config_crudo=False, destino_programacion=None,
+                                incluir_sku=False):
     """Arma la lista ``pedidos`` del GET de onboarding de órdenes de trabajo.
 
     Compartido por Bordado / Reflejante / Corte de Manga: los tres emitían el
@@ -160,9 +167,30 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
     pedidos_lista = list(pedidos_qs)
     por_linea, sin_talla = cantidades_asignadas_fn([p.id for p in pedidos_lista])
 
+    existencias = {}
+    if incluir_sku:
+        # ``incluir_sku`` (sólo Bordado): se descartan las líneas de MUESTRA sin
+        # SKU (sin ``variante`` de catálogo ni ``sku_muestra``) y cada línea
+        # publica ``sku``/``sku_proscai``/``existencias``. Las existencias se
+        # suman en UNA query agregada por las variantes de todo el payload.
+        variante_ids = {
+            dt.variante_id
+            for p in pedidos_lista for det in p.detalles.all() for dt in det.tallas.all()
+            if dt.variante_id
+        }
+        if variante_ids:
+            existencias = {
+                r["producto_variante_id"]: float(r["total"] or 0)
+                for r in Existencia.objects.filter(
+                    producto_variante_id__in=variante_ids,
+                    almacen__empresa_id=pedidos_lista[0].empresa_id,
+                ).values("producto_variante_id").annotate(total=Sum("cantidad"))
+            }
+
     pedidos_payload = []
     for p in pedidos_lista:
-        pares = [(det, dt) for det in p.detalles.all() for dt in det.tallas.all()]
+        pares = [(det, dt) for det in p.detalles.all() for dt in det.tallas.all()
+                 if not incluir_sku or dt.variante_id or dt.sku_muestra]
         pendientes = pendientes_por_linea(
             [(det.id, dt.talla_id, float(dt.cantidad or 0)) for det, dt in pares],
             por_linea,
@@ -237,6 +265,11 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
                 "tipos_servicio": tipos_servicio,
                 "tipos_servicio_display": tipos_servicio_display,
             }
+            if incluir_sku:
+                var = dt.variante
+                linea["sku"] = var.sku if var else dt.sku_muestra
+                linea["sku_proscai"] = (var.cod_proscai or None) if var else None
+                linea["existencias"] = existencias.get(dt.variante_id, 0) if var else None
             if incluir_config_crudo:
                 # El config ÍNTEGRO, con todos sus elementos y sus claves
                 # verbatim. Misma clave, misma forma y mismo ``or None`` que
@@ -383,6 +416,46 @@ class BomDetalleViewSet(viewsets.ModelViewSet):
 
         return queryset
 
+# Criterios de "a tiempo / tardía / atrasada" de OP: una sola definición para
+# el KPI y para el filtro ``?kpi=`` del listado, así el listado reproduce
+# EXACTAMENTE cada conjunto del tablero (#358).
+_OP_CON_AMBAS_FECHAS = Q(fecha_fin__isnull=False, fecha_entrega_estimada__isnull=False)
+_OP_A_TIEMPO = _OP_CON_AMBAS_FECHAS & Q(fecha_fin__date__lte=F("fecha_entrega_estimada"))
+_OP_TARDIA = _OP_CON_AMBAS_FECHAS & Q(fecha_fin__date__gt=F("fecha_entrega_estimada"))
+
+
+def _ops_terminadas(qs):
+    # "Terminada" = estatus_op Completado (#354), no por ``fecha_fin``.
+    return qs.filter(estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO)
+
+
+def _ops_atrasadas(qs):
+    return qs.exclude(
+        estatus_op__in=[
+            OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+            OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
+        ]
+    ).filter(fecha_entrega_estimada__lt=timezone.localdate())
+
+
+KPI_OP_CONJUNTOS = {
+    "terminadas": _ops_terminadas,
+    "a_tiempo": lambda qs: _ops_terminadas(qs).filter(_OP_A_TIEMPO),
+    "tardias": lambda qs: _ops_terminadas(qs).filter(_OP_TARDIA),
+    "sin_clasificar": lambda qs: _ops_terminadas(qs).filter(~_OP_CON_AMBAS_FECHAS),
+    "atrasadas": _ops_atrasadas,
+}
+
+
+class PaginacionOpcional(PageNumberPagination):
+    """Solo pagina si el cliente manda ``page`` o ``page_size``: sin ellos el
+    listado sigue devolviendo la lista completa (contrato previo)."""
+
+    page_size = 50
+    page_size_query_param = "page_size"
+    max_page_size = 200
+
+
 class OrdenProduccionViewSet(viewsets.ModelViewSet):
     queryset = OrdenProduccion.objects.all()
     serializer_class = OrdenProduccionSerializer
@@ -431,8 +504,44 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                     ),
                 ),
             )
+        if getattr(self, "action", None) == "list":
+            queryset = self._filtrar_listado(queryset)
         return queryset
-    
+
+    def _filtrar_listado(self, queryset):
+        # Sin las inactivas (como los KPIs y como OB/OR/OCM) y con filtros que
+        # reproducen los conjuntos del tablero: ``?kpi=tardias`` etc.
+        params = self.request.query_params
+        queryset = queryset.filter(activo=True)
+        estatus = entero_param(self.request, "estatus_op")
+        if estatus is not None:
+            queryset = queryset.filter(estatus_op=estatus)
+        sucursal = entero_param(self.request, "sucursal")
+        if sucursal is not None:
+            queryset = queryset.filter(sucursal_id=sucursal)
+        desde, hasta = rango_fechas(self.request)
+        if desde:
+            queryset = queryset.filter(fecha_entrega_estimada__gte=desde)
+        if hasta:
+            queryset = queryset.filter(fecha_entrega_estimada__lte=hasta)
+        kpi = (params.get("kpi") or "").strip()
+        if kpi:
+            if kpi not in KPI_OP_CONJUNTOS:
+                raise ValidationError({"kpi": f"Debe ser uno de: {', '.join(KPI_OP_CONJUNTOS)}."})
+            # Con ``kpi`` el listado usa el MISMO alcance que los KPIs (también por
+            # sucursal para quien no es admin), así reproduce el conjunto exacto.
+            # Sin ``kpi`` el listado sigue acotado solo por empresa: alinear su
+            # alcance por sucursal es una decisión aparte.
+            queryset = KPI_OP_CONJUNTOS[kpi](ordenes_produccion_visibles(queryset, self.request.user))
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        if "page" in request.query_params or "page_size" in request.query_params:
+            paginator = PaginacionOpcional()
+            page = paginator.paginate_queryset(self.filter_queryset(self.get_queryset()), request, view=self)
+            return paginator.get_paginated_response(self.get_serializer(page, many=True).data)
+        return super().list(request, *args, **kwargs)
+
     def save_op(self, request):
         return self._crear_op_desde_request(request)
     
@@ -533,6 +642,64 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
     def _require_produccion(self, user):
         _require_produccion(user)
 
+    @action(detail=True, methods=['post'], url_path='recalcular-consumos')
+    def recalcular_consumos(self, request, pk=None):
+        """Ajusta los consumos de la OP a las piezas realmente cortadas.
+
+        Body: ``{"cantidad_real_corte": 100, "productos": [ids]}``. Sin
+        ``cantidad_real_corte`` usa la ya capturada en la ruta crítica; con
+        ella, también la guarda ahí. ``productos`` (obligatorio) son las
+        telas a recalcular: el catálogo no distingue telas, así que las
+        elige el usuario y el resto de los insumos no se toca.
+        Registra solo la diferencia (movimiento de inventario + consumo
+        nuevo, sin pólizas). No acepta menos piezas que las planeadas; se
+        puede repetir. Mismo gate y 404 por empresa que la ruta crítica.
+        """
+        self._require_produccion(request.user)
+        empresa = getattr(request.user, 'empresa', None)
+        op = (
+            OrdenProduccion.objects.filter(pk=pk, empresa=empresa).first()
+            if empresa is not None else None
+        )
+        if op is None:
+            return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+
+        ruta = OrdenProduccionRutaCritica.objects.filter(op=op).first()
+        cantidad = request.data.get('cantidad_real_corte', None)
+        if cantidad is None and ruta is not None:
+            cantidad = ruta.cantidad_real_corte
+        try:
+            cantidad = Decimal(str(cantidad))
+        except (TypeError, ValueError, ArithmeticError):
+            raise ValidationError({'cantidad_real_corte': 'Captura la cantidad real cortada.'})
+        if not cantidad.is_finite() or cantidad <= 0 or cantidad != cantidad.to_integral_value():
+            raise ValidationError({'cantidad_real_corte': 'Debe ser un número entero de piezas mayor a 0.'})
+
+        productos = request.data.get('productos', None)
+        try:
+            productos = [int(x) for x in productos]
+        except (TypeError, ValueError):
+            raise ValidationError({'productos': 'Lista de ids de las telas a recalcular.'})
+        if not productos:
+            raise ValidationError({'productos': 'Selecciona al menos una tela.'})
+
+        with transaction.atomic():
+            resultado = RecalculoConsumoTelaService.recalcular(
+                pk, empresa, cantidad, productos, request.user, request=request
+            )
+            if resultado is None:
+                return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+            if 'cantidad_real_corte' in request.data:
+                ruta, _ = OrdenProduccionRutaCritica.objects.get_or_create(op=op)
+                ruta.cantidad_real_corte = cantidad
+                ruta.save(update_fields=['cantidad_real_corte', 'updated_at'])
+        return Response({
+            'op': op.pk,
+            'cantidad_real_corte': str(cantidad),
+            'consumo_produccion': getattr(resultado['consumo_produccion'], 'pk', None),
+            'cambios': resultado['cambios'],
+        })
+
     MAX_OPS_RUTA_CRITICA = 200
 
     @action(detail=False, methods=['get'], url_path='ruta-critica')
@@ -598,13 +765,16 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
         ):
             return Response(
-                {'msg': f'La OP está {op.get_estatus_op_display().lower()}: su ruta crítica ya no se puede editar.'},
+                {'msg': f'La OP tiene estatus «{op.get_estatus_op_display()}»: su ruta crítica ya no se puede editar.'},
                 status=status.HTTP_409_CONFLICT,
             )
-        instance, _created = OrdenProduccionRutaCritica.objects.get_or_create(op=op)
-        serializer = OrdenProduccionRutaCriticaSerializer(instance, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+        # Bloqueo de fila: dos PATCH simultáneos no se pisan el sellado de fechas.
+        with transaction.atomic():
+            OrdenProduccionRutaCritica.objects.get_or_create(op=op)
+            instance = OrdenProduccionRutaCritica.objects.select_for_update().get(op=op)
+            serializer = OrdenProduccionRutaCriticaSerializer(instance, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
         return Response(serializer.data)
 
     @action(detail=True, methods=['get', 'post'], url_path='estatus')
@@ -665,6 +835,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         if getattr(user, "empresa", None) is None:
             return Response(self._kpis_vacio())
 
+        # Parámetro desconocido → 400 (#357): antes se ignoraba con 200 y la
+        # tarjeta parecía filtrada sin estarlo.
+        validar_parametros(request, {"meta_otd", "sucursal", "fecha_desde", "fecha_hasta"})
         meta_otd_raw = request.query_params.get("meta_otd", "95")
         try:
             meta_otd = float(meta_otd_raw)
@@ -677,9 +850,24 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # ella por sucursal (#355) -- admin/superuser ven todas, el resto
         # solo ``sucursales_permitidas()``.
         base = ordenes_produccion_visibles(ordenes_produccion_base(), user)
+        # ``fecha_desde``/``fecha_hasta`` acotan por ``fecha_entrega_estimada``:
+        # la fecha compromiso con la que se miden los dos KPIs.
+        sucursal = entero_param(request, "sucursal")
+        fecha_desde, fecha_hasta = rango_fechas(request)
+        if sucursal is not None:
+            base = base.filter(sucursal_id=sucursal)
+        if fecha_desde:
+            base = base.filter(fecha_entrega_estimada__gte=fecha_desde)
+        if fecha_hasta:
+            base = base.filter(fecha_entrega_estimada__lte=fecha_hasta)
         data = {
             "generado_en": timezone.now(),
-            "filtros": {"meta_otd": meta_otd},
+            "filtros": {
+                "meta_otd": meta_otd,
+                "sucursal": sucursal,
+                "fecha_desde": fecha_desde,
+                "fecha_hasta": fecha_hasta,
+            },
         }
         data["cumplimiento_a_tiempo"] = self._kpi_otd(base, meta_otd)
         data["avance_produccion"] = {
@@ -722,10 +910,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # las dos no se puede afirmar que llegó a tiempo NI que llegó tarde,
         # así que esa OP cuenta en el denominador (está terminada) pero no
         # entra ni al numerador ni al drill-down de tardías.
-        terminadas = base.filter(estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO)
-        con_ambas_fechas = Q(fecha_fin__isnull=False, fecha_entrega_estimada__isnull=False)
-        a_tiempo_filter = con_ambas_fechas & Q(fecha_fin__date__lte=F("fecha_entrega_estimada"))
-        tardia_filter = con_ambas_fechas & Q(fecha_fin__date__gt=F("fecha_entrega_estimada"))
+        terminadas = _ops_terminadas(base)
 
         # #362: conteo exacto de tardías y sin-clasificar en el mismo
         # aggregate() (nunca len(drill_down_tardias), que se corta en 20).
@@ -733,9 +918,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # ops_terminadas.
         agg = terminadas.aggregate(
             total=Count("op_id"),
-            a_tiempo=Count("op_id", filter=a_tiempo_filter),
-            tardias=Count("op_id", filter=tardia_filter),
-            sin_clasificar=Count("op_id", filter=~con_ambas_fechas),
+            a_tiempo=Count("op_id", filter=_OP_A_TIEMPO),
+            tardias=Count("op_id", filter=_OP_TARDIA),
+            sin_clasificar=Count("op_id", filter=~_OP_CON_AMBAS_FECHAS),
         )
         total = agg["total"] or 0
         a_tiempo = agg["a_tiempo"] or 0
@@ -743,11 +928,13 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         sin_clasificar = agg["sin_clasificar"] or 0
         pct = round((a_tiempo / total) * 100, 1) if total else None
 
+        # ``-op_id`` desempata: dos OP con la misma ``fecha_fin`` no cambian de
+        # lugar entre llamadas.
         drill_down_tardias = [
             {**row, "fecha_fin": timezone.localtime(row["fecha_fin"]) if row["fecha_fin"] else None}
-            for row in terminadas.filter(tardia_filter)
-            .order_by("-fecha_fin")
-            .values("op_id", "folio_op", "fecha_fin", "fecha_entrega_estimada")[:20]
+            for row in terminadas.filter(_OP_TARDIA)
+            .order_by("-fecha_fin", "-op_id")
+            .values("op_id", "folio_op", "fecha_fin", "fecha_entrega_estimada")[:TOPE_DRILL_DOWN]
         ]
         return {
             "disponible": True,
@@ -759,6 +946,10 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             "ops_tardias": n_tardias,
             "ops_sin_clasificar": sin_clasificar,
             "drill_down_tardias": drill_down_tardias,
+            "drill_down_tardias_total": n_tardias,
+            "drill_down_tardias_truncado": n_tardias > len(drill_down_tardias),
+            # Todas las del conjunto: GET .../orden-produccion/?kpi=tardias
+            "listado": "?kpi=tardias",
         }
 
     def _kpi_atrasadas(self, base):
@@ -767,13 +958,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # ("avance menor al tiempo transcurrido") necesita piezas terminadas
         # por OP, que no existen en el esquema -- ver avance_produccion.
         hoy = timezone.localdate()
-        abiertas = base.exclude(
-            estatus_op__in=[
-                OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
-                OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
-            ]
-        )
-        vencidas_qs = abiertas.filter(fecha_entrega_estimada__lt=hoy)
+        vencidas_qs = _ops_atrasadas(base)
         total = vencidas_qs.count()
         drill_down = [
             {
@@ -782,15 +967,19 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                 "fecha_entrega_estimada": row["fecha_entrega_estimada"],
                 "dias_vencida": (hoy - row["fecha_entrega_estimada"]).days,
             }
-            for row in vencidas_qs.order_by("fecha_entrega_estimada").values(
+            for row in vencidas_qs.order_by("fecha_entrega_estimada", "op_id").values(
                 "op_id", "folio_op", "fecha_entrega_estimada"
-            )[:20]
+            )[:TOPE_DRILL_DOWN]
         ]
         return {
             "disponible": True,
             "total": total,
             "nota": "Solo cuenta OPs vencidas (fecha_entrega_estimada pasada); no incluye 'en riesgo por avance'.",
             "drill_down": drill_down,
+            "drill_down_total": total,
+            "drill_down_truncado": total > len(drill_down),
+            # Todas las del conjunto: GET .../orden-produccion/?kpi=atrasadas
+            "listado": "?kpi=atrasadas",
         }
 
 class ConsumoProduccionViewSet(viewsets.ModelViewSet):
@@ -1071,7 +1260,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 .select_related("cliente", "sucursal")
                 .prefetch_related(
                     "detalles",
-                    _tallas_ot_prefetch("lleva_bordado"),
+                    _tallas_ot_prefetch("lleva_bordado", con_variante=True),
                     "detalles__producto",
                     "detalles__color",
                 )
@@ -1098,6 +1287,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 "bordado_config",
                 OrdenBordadoService.cantidades_asignadas_por_pedidos,
                 destino_programacion="BORDADO",
+                incluir_sku=True,
             )
 
             return Response({
@@ -1154,37 +1344,28 @@ class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet)
     serializer_class = BordadoAvancesSerializer
     orden_padre_field = "ob"
 
+    @staticmethod
+    def _puntadas_total(por_pieza, cantidad):
+        # puntadas_total = puntadas_por_pieza × cantidad_bordada
+        return int(round(float(por_pieza or 0) * float(cantidad or 0)))
+
     def perform_create(self, serializer):
-        validated = dict(serializer.validated_data)
-        extra = {}
-        detalle = validated.get("orden_bordado_detalle")
-        if detalle is not None and validated.get("pedido_detalle_talla") is None:
-            pedido_detalle_id = getattr(detalle, "pedido_detalle_id", None)
-            talla_id = getattr(detalle, "talla_id", None)
-            if pedido_detalle_id is not None and talla_id is not None:
-                from ventas.models import PedidoDetalleTalla
-                pdt = (
-                    PedidoDetalleTalla.objects
-                    .filter(pedido_detalle_id=pedido_detalle_id, talla_id=talla_id)
-                    .only("id")
-                    .first()
-                )
-                if pdt is not None:
-                    extra["pedido_detalle_talla"] = pdt
+        v = serializer.validated_data
+        serializer.save(
+            usuario=self.request.user,
+            puntadas_total=self._puntadas_total(
+                v.get("puntadas_por_pieza"), v.get("cantidad_bordada")
+            ),
+        )
 
-        # Auto-cálculo puntadas_total = puntadas_por_pieza × cantidad_bordada
-        puntadas_por_pieza = int(validated.get("puntadas_por_pieza", 0) or 0)
-        cantidad_bordada = validated.get("cantidad_bordada", 0) or 0
-        if puntadas_por_pieza > 0 and cantidad_bordada:
-            # Si el frontend envió puntadas_total manual lo sobreescribimos
-            # (la fuente de verdad es el producto por_pieza × pz). Sólo si
-            # puntadas_por_pieza es 0 (registros legacy sin capturar)
-            # conservamos el puntadas_total que llegó (puede ser 0).
-            extra["puntadas_total"] = int(
-                round(float(puntadas_por_pieza) * float(cantidad_bordada))
+    def perform_update(self, serializer):
+        inst, v = serializer.instance, serializer.validated_data
+        serializer.save(
+            puntadas_total=self._puntadas_total(
+                v.get("puntadas_por_pieza", inst.puntadas_por_pieza),
+                v.get("cantidad_bordada", inst.cantidad_bordada),
             )
-
-        serializer.save(usuario=self.request.user, **extra)
+        )
 
     def perform_destroy(self, instance):
         instance.soft_delete()
@@ -1665,9 +1846,7 @@ def _detalles_especiales_qs():
     autorizar, aceptar-cambios y recomprar lo copian tal cual desde la
     cotizacion, y los PATCH genericos/admin no lo recalculan.
     """
-    return PedidoDetalle.objects.exclude(producto_nombre_externo__isnull=True).exclude(
-        producto_nombre_externo=""
-    )
+    return detalles_de_muestra()
 
 
 def _require_produccion(user):
@@ -1737,8 +1916,8 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         # las variantes de producción ya generadas para estas líneas, y se
         # cuelgan por (pedido_detalle_id, talla_id) sobre cada ``dt`` -- lo
         # que lee ``PedidoDetalleTallaEspecialSerializer.get_sku_produccion``.
-        variantes = VarianteProductoProduccion.objects.filter(
-            pedido_detalle_id__in=[d.id for d in detalles], activo=True
+        variantes = variantes_produccion_activas().filter(
+            pedido_detalle_id__in=[d.id for d in detalles]
         ).only("id", "sku", "pedido_detalle_id", "talla_id")
         variantes_por_talla = {(v.pedido_detalle_id, v.talla_id): v for v in variantes}
         for det in detalles:

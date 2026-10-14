@@ -4,7 +4,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, Prefetch, Q, Sum
+from django.db.models import Count, ExpressionWrapper, F, Prefetch, Q, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
@@ -26,7 +26,19 @@ from compras.models import (
     RecepcionRFIDEncuadre,
     RecepcionRFIDLectura,
 )
-from finanzas.models import FacturaProveedor, FacturaProveedorDetalle
+from finanzas.models import FacturaProveedor
+from compras.services.kpi_criterios import (
+    MONEY,
+    AlcanceCompras,
+    con_importes_precio,
+    cumplimiento_pendiente_por_oc,
+    cumplimiento_por_unidad,
+    lineas_factura_proveedor,
+    misma_moneda,
+    porcentaje,
+    rechazos_oc,
+)
+from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
 from compras.api.serializers import (
     CalidadInspeccionInputSerializer,
     CalidadInspeccionSerializer,
@@ -921,22 +933,34 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         }
 
     def _kpi_ocs_abiertas(self, base):
+        # Los montos van por moneda (#374): una OC en USD no se suma con las
+        # MXN. ``total`` (conteo) sí es de todas; cada fila con ``monto``
+        # trae su ``moneda``.
         abiertas = base.filter(estatus__in=self.ESTATUS_OC_ABIERTAS)
-        por_estatus = {}
         estatus_labels = dict(OrdenCompra.EstatusOrdenCompra.choices)
-        for fila in abiertas.values("estatus").annotate(total=Count("id"), monto=Sum("gran_total")):
-            por_estatus[fila["estatus"]] = {
+        por_estatus = [
+            {
                 "estatus": fila["estatus"],
                 "estatus_label": estatus_labels.get(fila["estatus"], str(fila["estatus"])),
+                "moneda": fila["moneda__codigo_iso"],
                 "total": fila["total"],
                 "monto": fila["monto"] or Decimal("0"),
             }
-        agg = abiertas.aggregate(total=Count("id"), monto=Sum("gran_total"))
+            for fila in abiertas.values("estatus", "moneda__codigo_iso")
+            .annotate(total=Count("id"), monto=Sum("gran_total"))
+            .order_by("estatus", "moneda__codigo_iso")
+        ]
+        por_moneda = [
+            {"moneda": fila["moneda__codigo_iso"], "total": fila["total"], "monto": fila["monto"] or Decimal("0")}
+            for fila in abiertas.values("moneda__codigo_iso")
+            .annotate(total=Count("id"), monto=Sum("gran_total"))
+            .order_by("moneda__codigo_iso")
+        ]
         return {
             "disponible": True,
-            "total": agg["total"] or 0,
-            "monto": agg["monto"] or Decimal("0"),
-            "por_estatus": list(por_estatus.values()),
+            "total": sum(f["total"] for f in por_moneda),
+            "por_moneda": por_moneda,
+            "por_estatus": por_estatus,
         }
 
     def _kpi_ocs_vencidas(self, base):
@@ -968,15 +992,17 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         ]
         filas = (
             OrdenCompraDetalle.objects.filter(orden_compra__in=base.filter(estatus__in=estatus_gasto))
-            .values("producto__categoria_producto__nombre")
+            .values("producto__categoria_producto__nombre", "orden_compra__moneda__codigo_iso")
             .annotate(monto=Sum("importe"))
-            .order_by("-monto")
+            .order_by("orden_compra__moneda__codigo_iso", "-monto", "producto__categoria_producto__nombre")
         )
+        # Una fila por categoría y moneda (#374): nunca se suman monedas.
         return {
             "disponible": True,
             "categorias": [
                 {
                     "categoria": fila["producto__categoria_producto__nombre"] or "Sin categoría",
+                    "moneda": fila["orden_compra__moneda__codigo_iso"],
                     "monto": fila["monto"] or Decimal("0"),
                 }
                 for fila in filas
@@ -1771,103 +1797,91 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-434): mismo
     # criterio que los demás ``kpis`` -- todo con ``aggregate()``/``Sum`` en
-    # DB, nunca iterando recepciones fila por fila.
-    ESTATUS_OC_CON_RECEPCION_ESPERADA = {
-        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
-        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
-        OrdenCompra.EstatusOrdenCompra.RECIBIDA,
-    }
+    # DB, nunca iterando recepciones fila por fila. Los criterios (qué es
+    # comprometida, recibido neto, rechazo, diferencia de precio) viven en
+    # ``compras.services.kpi_criterios``, compartidos con el KPI de proveedores.
+    PARAMS_KPIS = {"sucursal", "proveedor", "fecha_desde", "fecha_hasta"}
 
     @action(detail=False, methods=["get"], url_path="kpis")
     def kpis(self, request):
         user = request.user
+        validar_parametros(request, self.PARAMS_KPIS)
+        fecha_desde, fecha_hasta = rango_fechas(request)
+        # Mismo alcance que el listado (``get_queryset``): el superusuario ve
+        # todas las empresas, tenga o no empresa asignada; el resto, la suya.
+        es_superusuario = getattr(user, "is_superuser", False)
         empresa = getattr(user, "empresa", None)
-        if empresa is None and not getattr(user, "is_superuser", False):
+        if empresa is None and not es_superusuario:
             return Response(self._kpis_vacio())
 
+        alcance = AlcanceCompras(
+            empresa=None if es_superusuario else empresa,
+            sucursal_id=entero_param(request, "sucursal"),
+            proveedor_id=entero_param(request, "proveedor"),
+            fecha_desde=fecha_desde,
+            fecha_hasta=fecha_hasta,
+        )
         data = {
             "generado_en": timezone.now(),
-            "cumplimiento_cantidad": self._kpi_cumplimiento_cantidad(empresa),
-            "recepciones_parciales": self._kpi_recepciones_parciales(empresa),
-            "diferencia_precio": self._kpi_diferencia_precio(empresa),
-            "material_rechazado": self._kpi_material_rechazado(empresa),
+            # Los filtros se aplican sobre la OC (``fecha_oc`` para el periodo).
+            "filtros": alcance.como_dict(),
+            "cumplimiento_cantidad": self._kpi_cumplimiento_cantidad(alcance),
+            "recepciones_parciales": self._kpi_recepciones_parciales(alcance),
+            "diferencia_precio": self._kpi_diferencia_precio(alcance),
+            "material_rechazado": self._kpi_material_rechazado(alcance),
         }
         if not puede_ver_contabilidad(user):
             data["diferencia_precio"] = SIN_PERMISO_CONTABILIDAD
             quitar_montos(data["material_rechazado"], ["valor_rechazado", "valor_linea"])
+            data["material_rechazado"].pop("por_moneda", None)
         return Response(data)
 
     def _kpis_vacio(self):
         motivo = {"disponible": False, "motivo": "Usuario sin empresa asignada."}
         return {
             "generado_en": timezone.now(),
+            "filtros": None,
             "cumplimiento_cantidad": motivo,
             "recepciones_parciales": motivo,
             "diferencia_precio": motivo,
             "material_rechazado": motivo,
         }
 
-    def _kpi_cumplimiento_cantidad(self, empresa):
-        # Ordenado = renglones de OCs comprometidas (autorizada/parcial/recibida,
-        # no borrador ni cancelada). Recibido = lo realmente capturado en
-        # recepciones activas y no canceladas contra esas mismas OCs.
-        detalles = OrdenCompraDetalle.objects.filter(
-            orden_compra__empresa=empresa,
-            orden_compra__activo=True,
-            orden_compra__estatus__in=self.ESTATUS_OC_CON_RECEPCION_ESPERADA,
+    def _kpi_cumplimiento_cantidad(self, alcance):
+        # Ordenado = renglones de OCs comprometidas. Recibido = capturado en
+        # recepciones de OC menos lo rechazado por Calidad (igual que el
+        # estatus de la OC). Se agrupa por unidad de medida: cantidades de
+        # unidades distintas no se suman (``unidad`` null = producto sin unidad).
+        por_unidad = sorted(
+            cumplimiento_por_unidad(alcance).values(),
+            key=lambda f: (f["unidad"] is None, f["unidad"] or ""),
         )
-        ordenado = detalles.aggregate(t=Sum("cantidad"))["t"] or 0
+        for fila in por_unidad:
+            fila["pct"] = porcentaje(fila["cantidad_recibida"], fila["cantidad_ordenada"])
+        mezcla = len(por_unidad) > 1
+        ordenado = None if mezcla else (por_unidad[0]["cantidad_ordenada"] if por_unidad else 0)
+        recibido = None if mezcla else (por_unidad[0]["cantidad_recibida"] if por_unidad else 0)
 
-        recibido_qs = RecepcionDetalle.objects.filter(
-            orden_compra_detalle__orden_compra__empresa=empresa,
-            orden_compra_detalle__orden_compra__activo=True,
-            orden_compra_detalle__orden_compra__estatus__in=self.ESTATUS_OC_CON_RECEPCION_ESPERADA,
-            recepcion__activo=True,
-            recepcion__tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
-        ).exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
-        recibido = recibido_qs.aggregate(t=Sum("cantidad_recibida"))["t"] or 0
-
-        pct = round(float(recibido) / float(ordenado) * 100, 1) if ordenado else None
-
-        # Drill-down: OCs con algo pendiente, peor cobertura primero.
-        recibido_por_oc = dict(
-            recibido_qs.values("orden_compra_detalle__orden_compra_id")
-            .annotate(recibido=Sum("cantidad_recibida"))
-            .values_list("orden_compra_detalle__orden_compra_id", "recibido")
-        )
-        drill_down = []
-        for fila in (
-            detalles.values("orden_compra_id", "orden_compra__folio")
-            .annotate(ordenado=Sum("cantidad"))
-        ):
-            oc_id = fila["orden_compra_id"]
-            ord_oc = fila["ordenado"] or 0
-            rec_oc = recibido_por_oc.get(oc_id) or 0
-            if rec_oc >= ord_oc:
-                continue
-            drill_down.append({
-                "oc_id": oc_id,
-                "folio": fila["orden_compra__folio"],
-                "cantidad_ordenada": ord_oc,
-                "cantidad_recibida": rec_oc,
-                "pct": round(float(rec_oc) / float(ord_oc) * 100, 1) if ord_oc else 0.0,
-            })
-        drill_down.sort(key=lambda d: d["pct"])
-
+        pendientes = cumplimiento_pendiente_por_oc(alcance)
+        drill_down = pendientes[:TOPE_DRILL_DOWN]
         return {
             "disponible": True,
+            # Totales y pct solo si hay una unidad; con varias, ver ``por_unidad``.
+            "mezcla_unidades": mezcla,
             "cantidad_ordenada": ordenado,
             "cantidad_recibida": recibido,
-            "pct": pct,
-            "drill_down": drill_down[:20],
+            "pct": None if mezcla else porcentaje(recibido, ordenado),
+            "por_unidad": por_unidad,
+            "drill_down": drill_down,
+            "drill_down_total": len(pendientes),
+            "drill_down_truncado": len(pendientes) > len(drill_down),
         }
 
-    def _kpi_recepciones_parciales(self, empresa):
+    def _kpi_recepciones_parciales(self, alcance):
         # % de OCs que ya recibieron algo (parcial o recibida) que se
         # quedaron en parcial -- no cuenta las que nunca han recibido nada.
         agg = OrdenCompra.objects.filter(
-            empresa=empresa,
-            activo=True,
+            alcance.oc(),
             estatus__in=[
                 OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
                 OrdenCompra.EstatusOrdenCompra.RECIBIDA,
@@ -1886,95 +1900,122 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             "pct": pct,
         }
 
-    def _kpi_diferencia_precio(self, empresa):
+    def _kpi_diferencia_precio(self, alcance):
         # Costo facturado (FacturaProveedorDetalle.precio_unitario) vs. costo
         # pactado en la OC (OrdenCompraDetalle.precio), línea por línea vía
-        # el FK ``oc_detalle``. Solo facturas Registradas y activas, de OC
-        # vigentes (mismos estatus que ``cumplimiento_cantidad``).
-        money = DecimalField(max_digits=18, decimal_places=2)
-        lineas = (
-            FacturaProveedorDetalle.objects.filter(
-                factura_proveedor__empresa=empresa,
-                factura_proveedor__activo=True,
-                factura_proveedor__estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA,
-                oc_detalle__orden_compra__activo=True,
-                oc_detalle__orden_compra__estatus__in=self.ESTATUS_OC_CON_RECEPCION_ESPERADA,
-            )
-            .annotate(
-                facturado_linea=ExpressionWrapper(F("precio_unitario") * F("cantidad"), output_field=money),
-                pactado_linea=ExpressionWrapper(F("oc_detalle__precio") * F("cantidad"), output_field=money),
-            )
-        )
-        agg = lineas.aggregate(
-            facturado=Sum("facturado_linea"), pactado=Sum("pactado_linea"), lineas=Count("id"),
-        )
-        facturado = agg["facturado"] or Decimal("0")
-        pactado = agg["pactado"] or Decimal("0")
-        diferencia = facturado - pactado
-        pct = round(float(diferencia) / float(pactado) * 100, 1) if pactado else None
+        # el FK ``oc_detalle``. Solo líneas cuya factura está en la moneda de
+        # su OC; el resultado va por moneda, nunca sumado entre monedas.
+        lineas = con_importes_precio(lineas_factura_proveedor(alcance))
+        comparables = lineas.filter(misma_moneda())
+        moneda = "factura_proveedor__moneda__codigo_iso"
 
-        drill_down = list(
-            lineas.exclude(facturado_linea=F("pactado_linea"))
-            .select_related("oc_detalle__producto", "factura_proveedor")
-            .annotate(diferencia_linea=ExpressionWrapper(F("facturado_linea") - F("pactado_linea"), output_field=money))
-            .order_by("-diferencia_linea")
-            .values(
-                "id",
-                "factura_proveedor__folio",
-                "oc_detalle__producto__nombre",
-                "precio_unitario",
-                "oc_detalle__precio",
-                "diferencia_linea",
-            )[:20]
+        por_moneda = []
+        for fila in (
+            comparables.values(moneda)
+            .annotate(facturado=Sum("facturado_linea"), pactado=Sum("pactado_linea"), lineas=Count("id"))
+            .order_by(moneda)
+        ):
+            facturado = fila["facturado"] or Decimal("0")
+            pactado = fila["pactado"] or Decimal("0")
+            por_moneda.append({
+                "moneda": fila[moneda],
+                "lineas_evaluadas": fila["lineas"],
+                "costo_facturado": facturado,
+                "costo_pactado_oc": pactado,
+                "diferencia": facturado - pactado,
+                "pct": porcentaje(facturado - pactado, pactado),
+            })
+
+        con_diferencia = (
+            comparables.exclude(facturado_linea=F("pactado_linea"))
+            .annotate(diferencia_linea=ExpressionWrapper(F("facturado_linea") - F("pactado_linea"), output_field=MONEY))
+            .order_by("-diferencia_linea", "-id")
         )
+        total_diferencias = con_diferencia.count()
+        drill_down = [
+            {
+                "id": fila["id"],
+                "factura_id": fila["factura_proveedor_id"],
+                "factura_folio": fila["factura_proveedor__folio"],
+                "producto": fila["oc_detalle__producto__nombre"],
+                "moneda": fila[moneda],
+                "precio_facturado": fila["precio_unitario"],
+                "precio_pactado": fila["oc_detalle__precio"],
+                "diferencia_linea": fila["diferencia_linea"],
+            }
+            for fila in con_diferencia.values(
+                "id", "factura_proveedor_id", "factura_proveedor__folio", "oc_detalle__producto__nombre",
+                moneda, "precio_unitario", "oc_detalle__precio", "diferencia_linea",
+            )[:TOPE_DRILL_DOWN]
+        ]
         return {
             "disponible": True,
             # 0 = no hubo líneas que evaluar (distinto de diferencia 0).
-            "lineas_evaluadas": agg["lineas"],
-            "costo_facturado": facturado,
-            "costo_pactado_oc": pactado,
-            "diferencia": diferencia,
-            "pct": pct,
+            "lineas_evaluadas": sum(f["lineas_evaluadas"] for f in por_moneda),
+            # Líneas cuya factura y OC están en monedas distintas: no se comparan.
+            "lineas_moneda_distinta": lineas.exclude(misma_moneda()).count(),
+            "por_moneda": por_moneda,
             "drill_down": drill_down,
+            "drill_down_total": total_diferencias,
+            "drill_down_truncado": total_diferencias > len(drill_down),
         }
 
-    def _kpi_material_rechazado(self, empresa):
-        # Cantidad y valor (a precio pactado en la OC) rechazado en Calidad,
-        # contra recepciones activas y no canceladas.
-        money = DecimalField(max_digits=18, decimal_places=2)
-        rechazos = (
-            CalidadInspeccionDetalle.objects.filter(
-                recepcion_detalle__recepcion__empresa=empresa,
-                recepcion_detalle__recepcion__activo=True,
-            )
-            .exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
-            .filter(cantidad_rechazada__gt=0)
-            .annotate(
-                valor_linea=ExpressionWrapper(
-                    F("cantidad_rechazada") * F("recepcion_detalle__orden_compra_detalle__precio"),
-                    output_field=money,
-                )
-            )
-        )
-        agg = rechazos.aggregate(cantidad=Sum("cantidad_rechazada"), valor=Sum("valor_linea"))
+    def _kpi_material_rechazado(self, alcance):
+        # Rechazos de Calidad (``resultado = rechazo``) de recepciones de OC,
+        # activas y no canceladas. Cantidad por unidad de medida; valor (a
+        # precio pactado en la OC) por moneda de la OC.
+        rechazos = rechazos_oc(alcance)
+        unidad = "recepcion_detalle__orden_compra_detalle__producto__unidad_medida__clave"
+        unidad_id = "recepcion_detalle__orden_compra_detalle__producto__unidad_medida_id"
+        moneda = "recepcion_detalle__orden_compra_detalle__orden_compra__moneda__codigo_iso"
 
-        drill_down = list(
-            rechazos.select_related("recepcion_detalle__producto", "recepcion_detalle__recepcion")
-            .order_by("-cantidad_rechazada")
-            .values(
-                "id",
-                "recepcion_detalle__recepcion__folio",
-                "recepcion_detalle__producto__nombre",
-                "cantidad_rechazada",
-                "valor_linea",
-                "motivo_rechazo",
-            )[:20]
+        por_unidad = [
+            {"unidad_id": fila[unidad_id], "unidad": fila[unidad], "cantidad_rechazada": fila["t"] or Decimal("0")}
+            for fila in rechazos.values(unidad_id, unidad).annotate(t=Sum("cantidad_rechazada")).order_by(unidad)
+        ]
+        valor = ExpressionWrapper(
+            F("cantidad_rechazada") * F("recepcion_detalle__orden_compra_detalle__precio"), output_field=MONEY
         )
+        por_moneda = [
+            {"moneda": fila[moneda], "valor_rechazado": fila["t"] or Decimal("0")}
+            for fila in rechazos.annotate(valor_linea=valor).values(moneda)
+            .annotate(t=Sum("valor_linea")).order_by(moneda)
+        ]
+        mezcla = len(por_unidad) > 1
+
+        filas = list(
+            rechazos.annotate(valor_linea=valor)
+            .order_by("-cantidad_rechazada", "-id")
+            .values(
+                "id", "recepcion_detalle__recepcion_id", "recepcion_detalle__recepcion__folio",
+                "recepcion_detalle__producto__nombre", unidad, moneda, "cantidad_rechazada",
+                "valor_linea", "motivo_rechazo",
+            )[:TOPE_DRILL_DOWN]
+        )
+        drill_down = [
+            {
+                "id": fila["id"],
+                "recepcion_id": fila["recepcion_detalle__recepcion_id"],
+                "recepcion_folio": fila["recepcion_detalle__recepcion__folio"],
+                "producto": fila["recepcion_detalle__producto__nombre"],
+                "unidad": fila[unidad],
+                "moneda": fila[moneda],
+                "cantidad_rechazada": fila["cantidad_rechazada"],
+                "valor_linea": fila["valor_linea"],
+                "motivo_rechazo": fila["motivo_rechazo"],
+            }
+            for fila in filas
+        ]
+        total = rechazos.count()
         return {
             "disponible": True,
-            "cantidad_rechazada": agg["cantidad"] or Decimal("0"),
-            "valor_rechazado": agg["valor"] or Decimal("0"),
+            "mezcla_unidades": mezcla,
+            "cantidad_rechazada": None if mezcla else (por_unidad[0]["cantidad_rechazada"] if por_unidad else Decimal("0")),
+            "por_unidad": por_unidad,
+            "por_moneda": por_moneda,
             "drill_down": drill_down,
+            "drill_down_total": total,
+            "drill_down_truncado": total > len(drill_down),
         }
 
 

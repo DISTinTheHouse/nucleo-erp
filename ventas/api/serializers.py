@@ -143,7 +143,13 @@ class CotizacionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Cotizacion
-        read_only_fields = ['empresa', 'motivo_rechazo']
+        # El estatus y sus marcas de flujo solo cambian por las acciones
+        # (enviar-revision / autorizar / rechazar / ...), que exigen mesa de control
+        # y dejan motivo, pedido y notificaciones.
+        read_only_fields = [
+            'empresa', 'motivo_rechazo', 'estatus', 'autorizada_at',
+            'cambios_solicitados_at', 'aprobado_snapshot',
+        ]
         fields = '__all__'
         extra_kwargs = {
             'oc': {'required': False, 'allow_null': True},
@@ -247,11 +253,13 @@ class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
             "piezas",
             "autorizada_at",
             "cambios_solicitados_at",
+            "motivo_rechazo",
             "created_at",
             "updated_at",
             "pedido_id",
             "pedido_folio",
         ]
+        read_only_fields = ["motivo_rechazo"]
 
 class CotizacionDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
@@ -277,11 +285,19 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
     def validate_direccion_envio_cliente(self, direccion):
         return _exigir_empresa_del_usuario(self, "direccion_envio_cliente", direccion)
 
+    def validate_categoria_producto(self, categoria):
+        categoria = _exigir_empresa_del_usuario(self, "categoria_producto", categoria)
+        # Una asignación nueva exige categoría activa; la que la línea ya tenía se tolera (#429).
+        actual = self.instance.categoria_producto_id if self.instance is not None else None
+        if categoria is not None and not categoria.activo and categoria.pk != actual:
+            raise serializers.ValidationError("La categoría de producto está inactiva.")
+        return categoria
+
     def validate(self, attrs):
         cotizacion = attrs.get("cotizacion") or self.instance.cotizacion
         _exigir_empresa_del_padre(
             self, attrs, "cotizacion", cotizacion.empresa_id,
-            ("producto", "direccion_envio_cliente"),
+            ("producto", "direccion_envio_cliente", "categoria_producto"),
         )
         return attrs
 

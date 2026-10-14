@@ -262,7 +262,7 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
         model = OrdenProduccion
         fields = [
             "op_id", "folio_op", "estatus_op", "estatus_op_display",
-            "prioridad", "fecha_inicio", "fecha_fin", "activo",
+            "prioridad", "fecha_inicio", "fecha_fin", "fecha_entrega_estimada", "activo",
             "pedido", "sucursal",
         ]
 
@@ -379,23 +379,15 @@ class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
 
     Deliberadamente separado de ``OrdenProduccionSerializer``: éste no lo
     declara, así que list/retrieve de la OP no cargan ni serializan esta
-    tabla. Los cuatro campos ``fecha_*`` de existencia son ``read_only``
-    porque los sella (o limpia) el servidor en ``update()`` cuando su boolean
-    asociado cambia de valor -- el cliente solo manda el checkbox.
+    tabla. Los cinco campos ``fecha_*`` sellados por el servidor son ``read_only``:
+    el modelo los sella (o limpia) cuando su boolean asociado cambia de valor
+    (``OrdenProduccionRutaCritica.save``) -- el cliente solo manda el checkbox.
     """
 
     op_id = serializers.IntegerField(read_only=True)
     estatus_paquete_tecnico_display = serializers.CharField(
         source="get_estatus_paquete_tecnico_display", read_only=True, allow_null=True
     )
-
-    CAMPOS_ESTADO_CON_FECHA = {
-        "existencia_tela": "fecha_existencia_tela",
-        "sin_existencia_tela": "fecha_sin_existencia_tela",
-        "existencia_avios": "fecha_existencia_avios",
-        "sin_existencia_avios": "fecha_sin_existencia_avios",
-        "kit_completo": "fecha_kit_completo",
-    }
 
     class Meta:
         model = OrdenProduccionRutaCritica
@@ -417,16 +409,6 @@ class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
                 "Debe ser un número entero de piezas, mayor o igual a 0."
             )
         return value
-
-    def update(self, instance, validated_data):
-        from django.utils import timezone
-
-        # La fecha significa "marcado desde": se sella al pasar a true y se
-        # limpia al pasar a false.
-        for campo_bool, campo_fecha in self.CAMPOS_ESTADO_CON_FECHA.items():
-            if campo_bool in validated_data and validated_data[campo_bool] != getattr(instance, campo_bool):
-                validated_data[campo_fecha] = timezone.now() if validated_data[campo_bool] else None
-        return super().update(instance, validated_data)
 
 class ConsumoProduccionSerializer(serializers.ModelSerializer):
     detalles = serializers.SerializerMethodField()
@@ -1192,6 +1174,9 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
                 2,
             )
 
+        def pct_de(num, den):
+            return round(float(num) / float(den) * 100.0, 2) if den and den > 0 else 0.0
+
         agrupado = {}
         for a in avances:
             key = getattr(a, "orden_bordado_detalle_id", None)
@@ -1307,13 +1292,18 @@ class OrdenBordadoRetrieveSerializer(OrdenBordadoListSerializer):
             avance_sin_detalle["cantidad_bordada"] or avance_sin_detalle["puntadas_realizadas"]
             or avance_sin_detalle.get("puntadas_total")
         ):
-            programa = 0.0
-            porc = 0.0
-            porc_punt = 0.0
+            # Captura simple: el avance se registra por OB (sin talla/SKU), así
+            # que este renglón se mide contra el programa total de la OB.
+            programa = cantidad_programada
+            porc = pct_de(avance_sin_detalle["cantidad_bordada"], programa)
+            porc_punt = pct_de(
+                avance_sin_detalle.get("puntadas_total", 0) or 0,
+                puntadas_presupuesto_total,
+            )
             por_detalle.append({
                 "orden_bordado_detalle_id": None,
                 "producto_id": None,
-                "producto_nombre": "Sin talla/SKU asignado (registro antiguo)",
+                "producto_nombre": "Avance de la OB (sin talla)",
                 "talla_id": None,
                 "talla_nombre": None,
                 "color_id": None,
@@ -1468,7 +1458,17 @@ class BordadoAvancesSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSeria
         # en el body sólo producía un 400 espurio. El chequeo usuario↔empresa del
         # ``_OrdenPadreWriteOnceMixin`` queda inerte aquí (usuario nunca llega en
         # ``attrs``) y es correcto: request.user siempre es de su propia empresa.
-        read_only_fields = ['activo', 'usuario']
+        # Captura simple por OB: ya no se captura por talla/SKU. El detalle y
+        # la talla quedan solo lectura (registros históricos) y
+        # ``puntadas_total`` lo calcula el backend (puntadas_por_pieza × piezas).
+        read_only_fields = [
+            'activo', 'usuario', 'orden_bordado_detalle',
+            'pedido_detalle_talla', 'puntadas_total',
+        ]
+        extra_kwargs = {
+            'puntadas_por_pieza': {'required': True, 'min_value': 0},
+            'cantidad_bordada': {'min_value': 0},
+        }
 
     def get_orden_bordado_detalle_display(self, obj):
         det = getattr(obj, "orden_bordado_detalle", None)
@@ -1501,58 +1501,6 @@ class BordadoAvancesSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSeria
             "talla_nombre": getattr(talla, "nombre", None) if talla else None,
             "cantidad_pedido": getattr(pdt, "cantidad", None),
         }
-
-    def validate(self, attrs):
-        attrs = super().validate(attrs)
-
-        ob_id = None
-        if self.instance is None:
-            ob = attrs.get(self.orden_padre_field)
-            if ob is not None:
-                ob_id = ob.pk
-        else:
-            ob_instancia = getattr(self.instance, self.orden_padre_field, None)
-            if ob_instancia is not None:
-                ob_id = ob_instancia.pk
-
-        detalle = attrs.get("orden_bordado_detalle")
-        if detalle is not None and ob_id is not None:
-            if int(detalle.ob_id) != int(ob_id):
-                raise serializers.ValidationError({
-                    "orden_bordado_detalle": (
-                        "Este detalle-talla no pertenece a la orden de bordado seleccionada."
-                    )
-                })
-
-        pdt = attrs.get("pedido_detalle_talla")
-        if pdt is not None and detalle is not None:
-            if (
-                getattr(pdt, "pedido_detalle_id", None) is not None
-                and getattr(detalle, "pedido_detalle_id", None) is not None
-                and int(pdt.pedido_detalle_id) != int(detalle.pedido_detalle_id)
-            ):
-                raise serializers.ValidationError({
-                    "pedido_detalle_talla": (
-                        "El PedidoDetalleTalla no coincide con el pedido_detalle del renglón de la OB."
-                    )
-                })
-            if (
-                getattr(pdt, "talla_id", None) is not None
-                and getattr(detalle, "talla_id", None) is not None
-                and int(pdt.talla_id) != int(detalle.talla_id)
-            ):
-                raise serializers.ValidationError({
-                    "pedido_detalle_talla": (
-                        "La talla del PedidoDetalleTalla no coincide con la talla del renglón de la OB."
-                    )
-                })
-
-        return attrs
-
-    def update(self, instance, validated_data):
-        validated_data.pop("orden_bordado_detalle", None)
-        validated_data.pop("pedido_detalle_talla", None)
-        return super().update(instance, validated_data)
 
 class BordadoIncidenciasSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSerializer):
     orden_padre_field = 'ob'
@@ -2302,7 +2250,7 @@ class OrdenesCorteMangaRetrieveSerializer(OrdenesCorteMangaSerializer):
 
 # --- Pedidos con produccion especial (muestras) para el modulo de produccion ---
 # Una linea es especial si trae producto_nombre_externo (muestra sin SKU de
-# catalogo); la seleccion vive en ``produccion.api.views._detalles_especiales_qs``.
+# catalogo); la seleccion vive en ``ventas.services.sku_produccion_service.detalles_de_muestra``.
 # Aqui solo se serializa lo que la vista ya filtro.
 
 class PedidoEspecialListSerializer(serializers.ModelSerializer):
@@ -2322,7 +2270,8 @@ class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
 
     def get_sku_produccion(self, obj):
         variante = getattr(obj, "variante_produccion", None)
-        return variante.sku if variante else None
+        # ``sku`` vacío = sin SKU, igual que el ``sku_produccion`` del detalle de ventas.
+        return (variante.sku or None) if variante else None
 
     class Meta:
         model = PedidoDetalleTalla

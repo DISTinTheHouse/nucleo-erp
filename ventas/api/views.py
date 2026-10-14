@@ -85,6 +85,8 @@ from ventas.utils.helpers import (
     _save_pedido_servicios_extras,
 )
 from ventas.services.sku_produccion_service import (
+    TALLAS_DE_LINEA_NO_MUESTRA_Q,
+    es_muestra,
     variante_produccion_de_talla,
     variantes_produccion_prefetch,
 )
@@ -323,6 +325,36 @@ def _exigir_renglones_sin_dependencias(pedido):
     }
     if afectados:
         raise PedidoConDependencias(_etiquetas(afectados))
+
+
+def _notificar_vendedor_cambios(cotizacion, pedido_id, *, tipo, titulo, mensaje):
+    """Aviso (1 INSERT) al vendedor sobre un cambio de mesa de control en su
+    cotización ya autorizada. Llamar dentro de la transacción del flujo."""
+    crear_notificacion_usuario(
+        empresa=cotizacion.empresa,
+        usuario_id=cotizacion.vendedor_id,
+        titulo=titulo,
+        mensaje=mensaje,
+        modulo="ventas",
+        tipo=tipo,
+        data={"cotizacion_id": cotizacion.id, "pedido_id": pedido_id},
+    )
+
+
+def _texto_comentario(data):
+    """``comentario`` del body como texto recortado; ``""`` si falta o es null.
+
+    Un body que no es objeto, o un ``comentario`` que no es texto, responde 400
+    (antes se guardaba su repr de Python o fallaba con 500).
+    """
+    if not hasattr(data, "get"):
+        raise ValidationError({"comentario": "El cuerpo debe ser un objeto JSON."})
+    valor = data.get("comentario")
+    if valor is None:
+        return ""
+    if not isinstance(valor, str):
+        raise ValidationError({"comentario": "El comentario debe ser texto."})
+    return valor.strip()
 
 
 class CotizacionViewSet(viewsets.ModelViewSet):
@@ -2087,7 +2119,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 {"estatus": "La cotización ya está en revisión o autorizada."}
             )
 
-        comentario = str(request.data.get("comentario") or "").strip()
+        comentario = _texto_comentario(request.data)
         with transaction.atomic():
             if cotizacion.estatus == 4 and comentario:
                 CotizacionComentario.objects.create(
@@ -2257,7 +2289,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         user = request.user
         self._require_mesa_control(user)
         cotizacion = self.get_object()
-        motivo = str(request.data.get("comentario") or "").strip()
+        motivo = _texto_comentario(request.data)
         if not motivo:
             raise ValidationError(
                 {"comentario": "Indica el motivo del rechazo para que el vendedor lo vea."}
@@ -2269,6 +2301,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             if cotizacion.estatus == 3:
                 raise ValidationError(
                     {"cotizacion": "La cotización ya está autorizada."}
+                )
+            if cotizacion.estatus != 2:
+                raise ValidationError(
+                    {"cotizacion": "La cotización debe estar EN REVISION para ser rechazada."}
                 )
             cotizacion.estatus = 4
             cotizacion.motivo_rechazo = motivo
@@ -2340,6 +2376,13 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     "aprobado_snapshot",
                     "updated_at",
                 ]
+            )
+            _notificar_vendedor_cambios(
+                cotizacion,
+                pedido.id,
+                tipo="cotizacion_cambios_aceptados",
+                titulo="Cambios aceptados",
+                mensaje=f"Mesa de control aceptó los cambios de tu cotización #{cotizacion.id} y los aplicó al pedido.",
             )
         return Response(
             {
@@ -2419,6 +2462,14 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 direccion_id = det.get("direccion_envio_cliente")
                 if isinstance(direccion_id, dict):
                     direccion_id = direccion_id.get("id")
+                from catalogo.models import CategoriaProducto as _CategoriaProducto
+
+                categoria_id = det.get("categoria_producto")
+                if isinstance(categoria_id, dict):
+                    categoria_id = categoria_id.get("id")
+                # El id del snapshot puede apuntar a una categoría ya desactivada o borrada.
+                if categoria_id and not _CategoriaProducto.objects.filter(pk=categoria_id, activo=True).exists():
+                    categoria_id = None
                 cot_det = CotizacionDetalle.objects.create(
                     cotizacion=cotizacion,
                     producto_id=prod_id,
@@ -2427,6 +2478,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     # antes no se pasaba aquí y la línea quedaba sin nombre.
                     producto_nombre_externo=det.get("producto_nombre_externo"),
                     color_id=color_id or None,
+                    categoria_producto_id=categoria_id,
                     direccion_envio_cliente_id=direccion_id or None,
                     precio_lista=det.get("precio_lista"),
                     precio_unitario=det.get("precio_unitario") or 0,
@@ -2469,6 +2521,19 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     cantidad=s.get("cantidad") or 1,
                     visible_en_factura=bool(s.get("visible_en_factura", True)),
                 )
+            pedido_id = (
+                Pedido.objects.filter(cotizacion=cotizacion, activo=True)
+                .order_by("-id")
+                .values_list("id", flat=True)
+                .first()
+            )
+            _notificar_vendedor_cambios(
+                cotizacion,
+                pedido_id,
+                tipo="cotizacion_cambios_rechazados",
+                titulo="Cambios rechazados",
+                mensaje=f"Mesa de control rechazó los cambios de tu cotización #{cotizacion.id}; se conservó la versión autorizada.",
+            )
         return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
 
 
@@ -3093,6 +3158,13 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 self, cotizacion
             )
             cotizacion.save(update_fields=["aprobado_snapshot", "updated_at"])
+            _notificar_vendedor_cambios(
+                cotizacion,
+                pedido.pk,
+                tipo="cotizacion_editada_mesa",
+                titulo="Cotización editada por mesa de control",
+                mensaje=f"Mesa de control editó el pedido y actualizó tu cotización #{cotizacion.id}.",
+            )
 
         pedido = (
             Pedido.objects.filter(pk=pedido.pk)
@@ -3135,7 +3207,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             # validado no puede cambiar entre la validación y el guardado.
             pedido = Pedido.objects.select_for_update().get(pk=base_pedido.pk)
             # Excluye líneas de MUESTRA (``PedidoDetalle.producto_nombre_externo``
-            # puesto -- mismo criterio que ``produccion._detalles_especiales_qs``,
+            # puesto -- mismo criterio que ``sku_produccion_service.nombre_es_muestra``,
             # NO el flag ``requiere_produccion`` porque se desincroniza): esas
             # piezas no tienen SKU todavía y no se surten/embarcan/bordan por este
             # flujo genérico de programación, tienen el suyo propio
@@ -3144,10 +3216,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             # que nunca iban a poder cumplirse por esta vía.
             total_piezas = (
                 PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
-                .filter(
-                    Q(pedido_detalle__producto_nombre_externo__isnull=True)
-                    | Q(pedido_detalle__producto_nombre_externo__exact="")
-                )
+                .filter(TALLAS_DE_LINEA_NO_MUESTRA_Q)
                 .aggregate(total=Sum("cantidad"))["total"]
                 or 0
             )
@@ -3218,9 +3287,16 @@ class PedidoViewSet(viewsets.ModelViewSet):
         self._require_mesa_control(user)
         pedido = self.get_object()
 
+        if pedido.estatus == Pedido.ESTATUS_CANCELADO:
+            raise ValidationError({"pedido": "El pedido está cancelado."})
+
         talla_id = request.data.get("pedido_detalle_talla_id")
         if not talla_id:
             raise ValidationError({"pedido_detalle_talla_id": "Este campo es requerido."})
+        try:
+            talla_id = int(talla_id)
+        except (TypeError, ValueError):
+            raise ValidationError({"pedido_detalle_talla_id": "Debe ser un número entero."})
 
         dt = (
             PedidoDetalleTalla.objects.filter(pk=talla_id, pedido_detalle__pedido=pedido)
@@ -3230,28 +3306,47 @@ class PedidoViewSet(viewsets.ModelViewSet):
         if dt is None:
             raise ValidationError({"pedido_detalle_talla_id": "No pertenece a este pedido."})
 
+        if not es_muestra(dt.pedido_detalle):
+            raise ValidationError({"pedido_detalle_talla_id": "La línea ya no es una muestra."})
+
         variante = variante_produccion_de_talla(dt.pedido_detalle_id, dt.talla_id)
         if variante is None:
             raise ValidationError({
                 "pedido_detalle_talla_id": "Esta talla no tiene SKU de producción generado todavía."
             })
 
-        dt.sku_muestra = variante.sku
-        dt.save(update_fields=["sku_muestra"])
+        with transaction.atomic():
+            dt.sku_muestra = variante.sku
+            dt.save(update_fields=["sku_muestra"])
+            reflejado = self._reflejar_sku_muestra_en_cotizacion(pedido, dt, variante.sku)
 
-        # Reflejo best-effort en la cotización de origen: match por
-        # producto_nombre_externo + color + talla, mismo criterio que agrupa
-        # líneas en ``_merge_detalle``. Sin cotización o sin match, el pedido
-        # ya quedó actualizado -- eso es lo que pidió el clic.
-        if pedido.cotizacion_id:
-            CotizacionDetalleTalla.objects.filter(
-                cotizacion_detalle__cotizacion_id=pedido.cotizacion_id,
-                cotizacion_detalle__producto_nombre_externo=dt.pedido_detalle.producto_nombre_externo,
-                cotizacion_detalle__color_id=dt.pedido_detalle.color_id,
-                talla_id=dt.talla_id,
-            ).update(sku_muestra=variante.sku)
+        return Response({
+            "pedido_detalle_talla_id": dt.pk,
+            "sku_muestra": dt.sku_muestra,
+            "cotizacion_actualizada": reflejado,
+        })
 
-        return Response({"pedido_detalle_talla_id": dt.pk, "sku_muestra": dt.sku_muestra})
+    @staticmethod
+    def _reflejar_sku_muestra_en_cotizacion(pedido, dt, sku):
+        """Copia el SKU a la talla espejo de la cotización de origen; ``True`` si la halló.
+
+        Match por producto_nombre_externo + talla y el color del pedido o, si la
+        cotización se capturó sin color (el caso habitual: el color se asigna después en
+        el pedido, #436), sin color. Sin cotización o sin match no falla: el pedido ya
+        quedó actualizado, que es lo que pidió el clic.
+        """
+        if not pedido.cotizacion_id:
+            return False
+        tallas = CotizacionDetalleTalla.objects.filter(
+            cotizacion_detalle__cotizacion_id=pedido.cotizacion_id,
+            cotizacion_detalle__producto_nombre_externo=dt.pedido_detalle.producto_nombre_externo,
+            talla_id=dt.talla_id,
+        )
+        color_id = dt.pedido_detalle.color_id
+        actualizadas = tallas.filter(cotizacion_detalle__color_id=color_id).update(sku_muestra=sku)
+        if not actualizadas and color_id is not None:
+            actualizadas = tallas.filter(cotizacion_detalle__color__isnull=True).update(sku_muestra=sku)
+        return bool(actualizadas)
 
     @action(detail=True, methods=["post"], url_path="recomprar")
     def recomprar(self, request, pk=None):
@@ -3547,20 +3642,30 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # ``ComprasDashboardView.ESTATUS_GASTO_OC`` (excluir lo que todavía no
         # es compromiso real).
         activos = base.filter(estatus__in=self.ESTATUS_PEDIDO_ACTIVOS)
-        agg = activos.aggregate(total=Count("id"), valor=Sum("gran_total"))
+        # El valor va por moneda (#370): un pedido en USD no se suma con los MXN.
+        por_moneda = [
+            {"moneda": fila["moneda__codigo_iso"], "total": fila["total"], "valor": fila["valor"] or Decimal("0")}
+            for fila in activos.values("moneda__codigo_iso")
+            .annotate(total=Count("id"), valor=Sum("gran_total"))
+            .order_by("moneda__codigo_iso")
+        ]
+        total = sum(f["total"] for f in por_moneda)
         drill_down = list(
             activos.order_by("-gran_total", "-id").values(
-                "id", "folio", "estatus", "gran_total", "cliente_nombre"
+                "id", "folio", "estatus", "gran_total", "cliente_nombre", "moneda__codigo_iso"
             )[:20]
         )
         estatus_labels = dict(Pedido.CHOICES_ESTATUS)
         for fila in drill_down:
             fila["estatus_label"] = estatus_labels.get(fila["estatus"], str(fila["estatus"]))
+            fila["moneda"] = fila.pop("moneda__codigo_iso")
         return {
             "disponible": True,
-            "total": agg["total"] or 0,
-            "valor": agg["valor"] or Decimal("0"),
+            "total": total,
+            "por_moneda": por_moneda,
             "drill_down": drill_down,
+            "drill_down_total": total,
+            "drill_down_truncado": total > len(drill_down),
         }
 
 

@@ -1,4 +1,5 @@
 from django.contrib.postgres.indexes import OpClass
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models.functions import Upper
 from nucleo.indices import GinIndexSoloPostgres
@@ -39,8 +40,8 @@ class Cliente(StatusLifecycleModel):
     web = models.URLField(max_length=255, blank=True, null=True)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="clientes", null=True, blank=True)
 
-    dias_credito = models.PositiveIntegerField(default=0)
-    limite_credito = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    dias_credito = models.PositiveIntegerField(default=0, validators=[MaxValueValidator(365)])
+    limite_credito = models.DecimalField(max_digits=14, decimal_places=2, default=0, validators=[MinValueValidator(0)])
     history = HistoricalRecords()
 
     class Meta:

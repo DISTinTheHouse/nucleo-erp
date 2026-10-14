@@ -1,4 +1,6 @@
+from django.db.models import Q
 from catalogo.models import Talla, Producto, ProductoVariante
+from ventas.services.sku_produccion_service import nombre_es_muestra
 from ventas.models import (
     CotizacionServicioExtra,
     CotizacionDetalle,
@@ -128,7 +130,29 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
             cotizacion_detalle__producto__isnull=True,
         ).exclude(sku_muestra__isnull=True).exclude(sku_muestra="").select_related("cotizacion_detalle")
     }
+    # Misma razón con ``categoria_producto``: el pedido no la tiene, así que las
+    # ediciones que parten de él (mesa de control) no la traen. Se conserva la de la
+    # línea previa con la misma llave cuando la fila no menciona el campo.
+    categoria_previa = {
+        (d.producto_id, d.producto_nombre_externo, d.color_id): d.categoria_producto_id
+        for d in CotizacionDetalle.objects.filter(
+            cotizacion=cotizacion_obj, categoria_producto__isnull=False
+        )
+    }
     CotizacionDetalle.objects.filter(cotizacion=cotizacion_obj).delete()
+    # Antes de agrupar: ``_merge_detalle`` rellena la clave con ``None`` y ya no se
+    # distinguiría "no vino" de "vino vacía".
+    rows = [
+        r if "categoria_producto" in r or "categoria_producto_id" in r else {
+            **r,
+            "categoria_producto": categoria_previa.get((
+                next(iter(_ids_validos([r.get("producto")])), None) if not r.get("producto_nombre_externo") else None,
+                r.get("producto_nombre_externo") or None,
+                next(iter(_ids_validos([r.get("color")])), None),
+            )),
+        }
+        for r in rows
+    ]
     rows = _merge_detalle(rows)
 
     from catalogo.models import CategoriaProducto as CategoriaProductoModel
@@ -152,11 +176,14 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
     colores = ColorModel.objects.filter(
         pk__in=_ids_validos(r.get("color") for r in rows), activo=True
     ).in_bulk()
+    # Siempre de la empresa de la cotización (también para superusuario, #426). Una
+    # categoría desactivada solo se admite si la cotización ya la tenía (#429).
     categorias = CategoriaProductoModel.objects.filter(
+        Q(activo=True) | Q(pk__in=set(categoria_previa.values())),
         pk__in=_ids_validos(
             r.get("categoria_producto") or r.get("categoria_producto_id") for r in rows
         ),
-        activo=True,
+        empresa_id=cotizacion_obj.empresa_id,
     ).in_bulk()
     direcciones = DirModel.objects.filter(
         pk__in=_ids_validos(r.get("direccion_envio_cliente") for r in rows),
@@ -346,7 +373,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                     sku_muestra=sku_muestra_previo.get(
                         (producto_nombre_externo, getattr(color_obj, "pk", None), talla.pk)
                     ) if not producto else None,
-                    requiere_produccion=bool(producto_nombre_externo),
+                    requiere_produccion=nombre_es_muestra(producto_nombre_externo),
                     variante=variante_obj,
                 )
             )
@@ -567,7 +594,7 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
             talla_existente.corte_manga_config = t.get("corte_manga_config")
             talla_existente.lleva_cambio_talla = bool(t.get("lleva_cambio_talla"))
             talla_existente.cambio_talla_config = t.get("cambio_talla_config")
-            talla_existente.requiere_produccion = bool(producto_nombre_externo)
+            talla_existente.requiere_produccion = nombre_es_muestra(producto_nombre_externo)
             talla_existente.variante = variante_obj
             if producto:
                 # La línea ya es de catálogo: el SKU de muestra no aplica.

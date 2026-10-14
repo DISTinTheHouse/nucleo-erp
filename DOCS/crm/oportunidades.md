@@ -85,6 +85,7 @@ Rendimiento: el onboarding y los pendientes hacen un número fijo de consultas.
 
 Las oportunidades salen en `GET /api/v1/search/?q=` como el grupo `oportunidad` (al final de `grupos`).
 
-- Se busca por subcadena en `titulo` y `nombre_contacto`, con 3 o más caracteres.
-- Cada fila: `tipo`, `id`, `codigo` (siempre `null`), `titulo`, `subtitulo` (contacto o cliente) y `estatus` (el estado calculado).
+- Se busca por subcadena en `titulo`, `nombre_contacto` y el `nombre` del cliente, con 3 o más caracteres. El nombre del cliente solo cuenta si el usuario puede ver a ese cliente (la misma regla que para mostrarlo).
+- Cada fila: `tipo`, `id`, `codigo` (siempre `null`), `titulo`, `subtitulo` y `estatus` (el estado calculado).
+- `titulo` es el nombre de la oportunidad con la misma regla que el resto de la app: el título; si no hay, el nombre del cliente (solo si el usuario puede ver a ese cliente: el superusuario y el admin de empresa siempre, aunque esté dado de baja; el resto, con la regla de `/terceros/clientes/`); si no, el contacto; y si no, `Oportunidad #<id>`. `subtitulo` es lo siguiente de esa cadena que no repita el título: con título propio, el cliente (si lo ve) o el contacto; con el cliente como título, el contacto; con el contacto o el respaldo como título, `null` (igual que en los demás grupos cuando no hay subtítulo). Se usa el `nombre` del cliente, no la razón social.
 - El grupo aparece con la clave `R-CRM-OPORTUNIDADES` o con `R-CRM`. El vendedor solo ve las suyas; el admin de empresa, las de su empresa.

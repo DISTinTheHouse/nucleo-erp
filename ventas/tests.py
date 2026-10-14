@@ -19,8 +19,9 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import Color, Producto, ProductoVariante, Talla, VarianteProductoProduccion
+from catalogo.models import CategoriaProducto, Color, Producto, ProductoVariante, Talla, VarianteProductoProduccion
 from inventarios.models import MovimientoInventario
+from notificaciones.models import Notificacion
 from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
 from inventarios.models import (
     Almacen,
@@ -1094,6 +1095,7 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertTrue(response.json()["editable"])
 
     def test_edicion_mesa_control_actualiza_pedido_y_cotizacion_sin_inventario(self):
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(vendedor=self.mesa_no_admin)
         response = self._client(self.admin_mesa).post(
             pedido_editar_mesa_control_url(self.pedido.pk),
             self._payload(),
@@ -1118,6 +1120,9 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(str(self.cotizacion.subtotal), "250.00")
         self.assertEqual(self.cotizacion.estatus, 3)
         self.assertIsNotNone(self.cotizacion.aprobado_snapshot)
+        n = Notificacion.objects.get(tipo="cotizacion_editada_mesa")
+        self.assertEqual(n.usuario_id, self.mesa_no_admin.pk)
+        self.assertEqual(n.data, {"cotizacion_id": self.cotizacion.pk, "pedido_id": self.pedido.pk})
 
         pedido_detalle = self.pedido.detalles.get()
         self.assertEqual(pedido_detalle.producto_id, self.producto_a.pk)
@@ -2122,6 +2127,38 @@ class PedidoVincularSkuMuestraTests(TestCase):
         resp = self.client_post_otro(otro_pedido)
         self.assertEqual(resp.status_code, 400, resp.json())
 
+    def test_cotizacion_sin_color_tambien_recibe_el_sku(self):
+        # #436: la muestra se cotiza sin color; el color lo asigna producción en el pedido.
+        CotizacionDetalle.objects.filter(pk=self.cot_talla.cotizacion_detalle_id).update(color=None)
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 200, resp.json())
+        self.assertTrue(resp.json()["cotizacion_actualizada"])
+        self.cot_talla.refresh_from_db()
+        self.assertEqual(self.cot_talla.sku_muestra, "MP1-AZL-M")
+
+    def test_avisa_si_no_hubo_linea_en_la_cotizacion(self):
+        CotizacionDetalleTalla.objects.filter(pk=self.cot_talla.pk).delete()
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 200, resp.json())
+        self.assertFalse(resp.json()["cotizacion_actualizada"])
+
+    def test_id_no_numerico_responde_400(self):
+        for valor in ("abc", [1, 2]):
+            resp = self._post(self.mesa, talla_id=valor)
+            self.assertEqual(resp.status_code, 400, resp.json())
+
+    def test_pedido_cancelado_responde_400(self):
+        Pedido.objects.filter(pk=self.pedido.pk).update(estatus=Pedido.ESTATUS_CANCELADO)
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 400, resp.json())
+        self.ped_talla.refresh_from_db()
+        self.assertIsNone(self.ped_talla.sku_muestra)
+
+    def test_linea_que_ya_no_es_muestra_responde_400(self):
+        PedidoDetalle.objects.filter(pk=self.ped_talla.pedido_detalle_id).update(producto_nombre_externo=None)
+        resp = self._post(self.mesa)
+        self.assertEqual(resp.status_code, 400, resp.json())
+
     def client_post_otro(self, otro_pedido):
         client = APIClient()
         client.force_authenticate(user=self.mesa)
@@ -2625,6 +2662,9 @@ class ServicioExtraCantidadCopiaTests(TestCase):
 
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/aceptar-cambios/")
         self.assertEqual(resp.status_code, 200, resp.content)
+        n = Notificacion.objects.get(tipo="cotizacion_cambios_aceptados")
+        self.assertEqual(n.usuario_id, self.cotizacion.vendedor_id)
+        self.assertEqual(n.data, {"cotizacion_id": self.cotizacion.pk, "pedido_id": pedido.pk})
         esperadas = [(n, 7 if n == "Bordado" else c) for n, c in self._esperadas()]
         self.assertEqual(self._cantidades(PedidoServicioExtra.objects.filter(pedido=pedido)), esperadas)
 
@@ -2727,6 +2767,8 @@ class RechazarCambiosCotizacionTests(TestCase):
 
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/rechazar-cambios/")
         self.assertEqual(resp.status_code, 200, resp.content)  # antes: 500
+        n = Notificacion.objects.get(tipo="cotizacion_cambios_rechazados")
+        self.assertEqual(n.usuario_id, self.cotizacion.vendedor_id)
 
         self.cotizacion.refresh_from_db()
         self.assertEqual(self.cotizacion.estatus, 3)
@@ -2752,6 +2794,202 @@ class RechazarCambiosCotizacionTests(TestCase):
         muestra = CotizacionDetalle.objects.get(cotizacion=self.cotizacion, producto__isnull=True)
         self.assertNotEqual(muestra.pk, self.muestra.pk)
         self.assertEqual(muestra.producto_nombre_externo, "Playera muestra cliente")
+
+    def test_rechazar_cambios_restaura_categoria_producto(self):
+        cat = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Chamarras")
+        CotizacionDetalle.objects.filter(pk=self.muestra.pk).update(categoria_producto=cat)
+        self._autorizar()
+        CotizacionDetalle.objects.filter(cotizacion=self.cotizacion).update(categoria_producto=None)
+        self._forzar_cambios_solicitados()
+
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/rechazar-cambios/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+        muestra = CotizacionDetalle.objects.get(cotizacion=self.cotizacion, producto__isnull=True)
+        self.assertEqual(muestra.categoria_producto_id, cat.pk)
+
+    def test_rechazar_cambios_con_categoria_desactivada_no_truena(self):
+        cat = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Vieja")
+        CotizacionDetalle.objects.filter(pk=self.muestra.pk).update(categoria_producto=cat)
+        self._autorizar()
+        self._forzar_cambios_solicitados()
+        CategoriaProducto.objects.filter(pk=cat.pk).update(activo=False)
+
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/rechazar-cambios/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        muestra = CotizacionDetalle.objects.get(cotizacion=self.cotizacion, producto__isnull=True)
+        self.assertIsNone(muestra.categoria_producto_id)
+
+    def test_guardar_lineas_sin_categoria_en_la_fila_conserva_la_previa(self):
+        # #427: editar-mesa-control parte del pedido, que no trae categoría.
+        cat = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Chamarras")
+        CotizacionDetalle.objects.filter(pk=self.muestra.pk).update(categoria_producto=cat)
+        fila = {"producto_nombre_externo": "Playera muestra cliente", "precio_unitario": "0.00", "tallas": []}
+
+        _save_cotizacion_detalle(self.cotizacion, [dict(fila)], self.empresa, self.admin)
+        nueva = CotizacionDetalle.objects.get(cotizacion=self.cotizacion)
+        self.assertEqual(nueva.categoria_producto_id, cat.pk)
+
+        # Con la clave explícita (aunque sea nula) manda lo que llega.
+        _save_cotizacion_detalle(self.cotizacion, [{**fila, "categoria_producto": None}], self.empresa, self.admin)
+        self.assertIsNone(CotizacionDetalle.objects.get(cotizacion=self.cotizacion).categoria_producto_id)
+
+
+class PermisoCreditoClienteTests(TestCase):
+    """#462: dias_credito y limite_credito exigen ``E-CRM-CLIENTES-CREDITO``."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        cls.empresa = Empresa.objects.create(codigo="acme-pc", razon_social="acme-pc SA")
+        cls.vendedor = Usuario.objects.create(username="v@pc.test", email="v@pc.test", empresa=cls.empresa)
+        cls.finanzas = Usuario.objects.create(username="f@pc.test", email="f@pc.test", empresa=cls.empresa)
+        permiso = Permiso.objects.create(clave="E-CRM-CLIENTES-CREDITO", nombre="Crédito de clientes")
+        UsuarioPermiso.objects.create(usuario=cls.finanzas, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT)
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.cliente.vendedores.add(cls.vendedor, cls.finanzas)
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _patch(self, user, **datos):
+        return self._client(user).patch(f"/api/v1/terceros/clientes/{self.cliente.pk}/", datos, format="json")
+
+    def test_sin_permiso_no_puede_cambiar_el_credito(self):
+        resp = self._patch(self.vendedor, dias_credito=30)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("dias_credito", resp.json())
+        self.assertEqual(self._patch(self.vendedor, limite_credito="100.00").status_code, 400)
+
+    def test_sin_permiso_puede_editar_lo_demas_y_reenviar_el_credito_igual(self):
+        resp = self._patch(self.vendedor, nombre="Otro", dias_credito=0, limite_credito="0.00")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_sin_permiso_no_puede_dar_de_alta_con_credito(self):
+        resp = self._client(self.vendedor).post(
+            "/api/v1/terceros/clientes/", {"nombre": "Nuevo", "dias_credito": 90}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_con_permiso_puede_cambiarlo(self):
+        resp = self._patch(self.finanzas, dias_credito=30, limite_credito="1000.00")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.cliente.refresh_from_db()
+        self.assertEqual(self.cliente.dias_credito, 30)
+
+
+class RangosCreditoYMontoTests(TestCase):
+    """#461: ``dias_credito`` 0-365, ``limite_credito`` y ``monto_estimado`` no negativos."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-rg", razon_social="acme-rg SA")
+        cls.admin = Usuario.objects.create(
+            username="a@acme-rg.test", email="a@acme-rg.test", empresa=cls.empresa, is_admin_empresa=True
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def _patch(self, **datos):
+        return self.client.patch(f"/api/v1/terceros/clientes/{self.cliente.pk}/", datos, format="json")
+
+    def test_dias_credito_fuera_de_0_365_es_400(self):
+        self.assertEqual(self._patch(dias_credito=366).status_code, 400)
+        self.assertEqual(self._patch(dias_credito=5000000).status_code, 400)
+        self.assertEqual(self._patch(dias_credito=365).status_code, 200)
+
+    def test_limite_credito_negativo_es_400(self):
+        self.assertEqual(self._patch(limite_credito="-1.00").status_code, 400)
+        self.assertEqual(self._patch(limite_credito="0.00").status_code, 200)
+
+    def test_monto_estimado_negativo_es_400(self):
+        resp = self.client.post("/api/v1/ventas/oportunidades/", {"titulo": "N", "monto_estimado": "-5.00"}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        resp = self.client.post("/api/v1/ventas/oportunidades/", {"titulo": "N", "monto_estimado": "5.00"}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+
+class CategoriaProductoCotizacionTests(TestCase):
+    """#426 / #429: ``categoria_producto`` de la línea, contra la empresa y su estado."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-cp", razon_social="acme-cp SA")
+        cls.otra = Empresa.objects.create(codigo="otra-cp", razon_social="otra-cp SA")
+        cls.admin = Usuario.objects.create(
+            username="a@acme-cp.test", email="a@acme-cp.test", empresa=cls.empresa, is_admin_empresa=True
+        )
+        cls.root = Usuario.objects.create(
+            username="root@cp.test", email="root@cp.test", empresa=cls.empresa, is_superuser=True
+        )
+        sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ACP", nombre="acme-cp")
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.cotizacion = Cotizacion.objects.create(
+            empresa=cls.empresa, vendedor=cls.admin, sucursal=sucursal, cliente=cliente, estatus=1,
+        )
+        cls.propia = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Propia", codigo="PRO")
+        cls.ajena = CategoriaProducto.objects.create(empresa=cls.otra, nombre="Ajena", codigo="AJE")
+
+    def _fila(self, categoria):
+        return {
+            "producto_nombre_externo": "Muestra", "precio_unitario": "10.00",
+            "categoria_producto": categoria.pk, "tallas": [],
+        }
+
+    def test_helper_rechaza_categoria_de_otra_empresa_tambien_a_superusuario(self):
+        for user in (self.admin, self.root):
+            with self.assertRaises(DRFValidationError):
+                _save_cotizacion_detalle(self.cotizacion, [self._fila(self.ajena)], self.empresa, user)
+
+    def test_cotizacion_detalle_rechaza_categoria_ajena(self):
+        det = CotizacionDetalle.objects.create(
+            cotizacion=self.cotizacion, producto_nombre_externo="Muestra",
+            precio_unitario="10.00", subtotal_linea="10.00",
+        )
+        for user in (self.admin, self.root):
+            client = APIClient()
+            client.force_authenticate(user=user)
+            resp = client.patch(
+                f"/api/v1/ventas/cotizacion-detalle/{det.pk}/", {"categoria_producto": self.ajena.pk}, format="json"
+            )
+            self.assertEqual(resp.status_code, 400, resp.content)
+        det.refresh_from_db()
+        self.assertIsNone(det.categoria_producto_id)
+    def test_categoria_desactivada_ya_guardada_no_impide_volver_a_guardar(self):
+        CotizacionDetalle.objects.create(
+            cotizacion=self.cotizacion, producto_nombre_externo="Muestra", categoria_producto=self.propia,
+            precio_unitario="10.00", subtotal_linea="10.00",
+        )
+        CategoriaProducto.objects.filter(pk=self.propia.pk).update(activo=False)
+
+        _save_cotizacion_detalle(self.cotizacion, [self._fila(self.propia)], self.empresa, self.admin)
+        self.assertEqual(
+            CotizacionDetalle.objects.get(cotizacion=self.cotizacion).categoria_producto_id, self.propia.pk
+        )
+
+    def test_categoria_desactivada_nueva_se_rechaza(self):
+        CategoriaProducto.objects.filter(pk=self.propia.pk).update(activo=False)
+        with self.assertRaises(DRFValidationError):
+            _save_cotizacion_detalle(self.cotizacion, [self._fila(self.propia)], self.empresa, self.admin)
+
+    def test_cotizacion_detalle_acepta_la_inactiva_que_ya_tenia(self):
+        det = CotizacionDetalle.objects.create(
+            cotizacion=self.cotizacion, producto_nombre_externo="Muestra", categoria_producto=self.propia,
+            precio_unitario="10.00", subtotal_linea="10.00",
+        )
+        CategoriaProducto.objects.filter(pk=self.propia.pk).update(activo=False)
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        url = f"/api/v1/ventas/cotizacion-detalle/{det.pk}/"
+        self.assertEqual(client.patch(url, {"categoria_producto": self.propia.pk}, format="json").status_code, 200)
+        otra = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Off", codigo="OFF", activo=False)
+        self.assertEqual(client.patch(url, {"categoria_producto": otra.pk}, format="json").status_code, 400)
 
 
 # Pk que no existe en ninguna tabla del test: el rechazo de una FK de OTRA empresa
@@ -3490,10 +3728,27 @@ class PedidoKpisTests(TestCase):
         activos = resp.data["pedidos_activos"]
         self.assertTrue(activos["disponible"])
         self.assertEqual(activos["total"], 2)
-        self.assertEqual(activos["valor"], Decimal("1500.00"))
+        self.assertEqual(activos["por_moneda"], [{"moneda": "MXN", "total": 2, "valor": Decimal("1500.00")}])
         self.assertEqual(
             {d["id"] for d in activos["drill_down"]}, {self.autorizada.pk, self.en_proceso.pk},
         )
+        self.assertEqual({d["moneda"] for d in activos["drill_down"]}, {"MXN"})
+        self.assertFalse(activos["drill_down_truncado"])
+
+    def test_pedidos_en_otra_moneda_no_se_suman(self):
+        """#370: el pedido en USD va en su propia fila."""
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        cot = self._cotizacion(self.vendedor_a)
+        pedido = self._pedido("PED-USD", cot, estatus=3, gran_total="6179.32")
+        Pedido.objects.filter(pk=pedido.pk).update(moneda=usd)
+
+        activos = self._get(self.vendedor_a).data["pedidos_activos"]
+
+        valores = {m["moneda"]: m for m in activos["por_moneda"]}
+        self.assertEqual(valores["MXN"]["valor"], Decimal("1500.00"))
+        self.assertEqual(valores["USD"]["valor"], Decimal("6179.32"))
+        self.assertEqual(activos["total"], 3)
+        self.assertEqual({d["moneda"] for d in activos["drill_down"]}, {"MXN", "USD"})
 
     def test_otros_tres_kpis_declaran_no_disponible(self):
         resp = self._get(self.vendedor_a)
@@ -4767,6 +5022,35 @@ class OportunidadesValidacionesTests(OportunidadesBase):
 
         self.assertEqual(resp.data["cartera"], [])
 
+    def test_cliente_nombre_no_sale_si_el_vendedor_no_ve_al_cliente(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        url = f"{OPORTUNIDADES_URL}{op.pk}/"
+
+        self.assertIsNone(self._client(self.ana).get(url).data["cliente_nombre"])
+        self.assertIsNone(self._client(self.ana).get(OPORTUNIDADES_URL).data[0]["cliente_nombre"])
+        self.assertIsNone(self._client(self.ana).get(f"{url}onboarding/").data["oportunidad"]["cliente_nombre"])
+        self.assertEqual(self._client(self.jefe).get(url).data["cliente_nombre"], "Cliente Acme")
+
+        self.cliente.vendedores.add(self.ana)
+        self.assertEqual(self._client(self.ana).get(url).data["cliente_nombre"], "Cliente Acme")
+
+    def test_transferir_pasa_las_cotizaciones_al_nuevo_dueno(self):
+        op = self._op(self.ana)
+        resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
+        cot = resp.data["cotizacion_id"]
+
+        self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", {"vendedor": self.beto.pk})
+
+        self.assertEqual(Cotizacion.objects.get(pk=cot).vendedor, self.beto)
+        self.assertEqual(self._client(self.beto).get(f"/api/v1/ventas/cotizaciones/{cot}/").status_code, 200)
+
+    def test_cotizar_como_admin_deja_la_cotizacion_al_dueno(self):
+        op = self._op(self.ana)
+        cot = self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/").data["cotizacion_id"]
+
+        self.assertEqual(Cotizacion.objects.get(pk=cot).vendedor, self.ana)
+        self.assertEqual(self._client(self.ana).get(f"/api/v1/ventas/cotizaciones/{cot}/").status_code, 200)
+
     def test_cotizar_rechaza_sucursal_de_otra_empresa(self):
         otra_sucursal = Sucursal.objects.create(empresa=self.otra, codigo="GDL", nombre="GDL")
         self.ana.sucursal_default = otra_sucursal
@@ -5012,6 +5296,26 @@ class RechazoCotizacionComentarioTests(TestCase):
         self.assertEqual(n.data["motivo"], "Precio mal")
         self.assertFalse(Notificacion.objects.filter(usuario=self.mesa).exists())
 
+    def test_rechazar_solo_en_revision(self):
+        for estatus in (1, 4, 5):
+            Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=estatus)
+            resp = self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "x"}, format="json")
+            self.assertEqual(resp.status_code, 400, (estatus, resp.content))
+            self.cotizacion.refresh_from_db()
+            self.assertEqual(self.cotizacion.estatus, estatus)
+        self.assertFalse(Notificacion.objects.filter(tipo="cotizacion_rechazada").exists())
+
+    def test_rechazar_cotizacion_sin_empresa_no_truena(self):
+        su = Usuario.objects.create(
+            username="su@acme-mc.test", email="su@acme-mc.test", is_superuser=True, is_staff=True
+        )
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(empresa=None)
+        resp = self._como(su).post(self.url + "rechazar/", {"comentario": "x"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 4)
+        self.assertFalse(Notificacion.objects.exists())
+
     def test_vendedor_reenvia_y_queda_historial(self):
         self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Precio mal"}, format="json")
         resp = self._como(self.vendedor).post(
@@ -5251,3 +5555,85 @@ class AutorizarCotizacionNotificaVendedorTests(TestCase):
         self.assertIn(f"#{cot.id}", n.mensaje)
         self.assertIn(folio, n.mensaje)
         self.assertEqual(n.data, {"cotizacion_id": cot.id, "pedido_id": resp.data["pedido"]["id"], "pedido_folio": folio})
+
+
+class CotizacionFlujoEndurecidoTests(TestCase):
+    """#479/#480/#481: PATCH sin campos de flujo, motivo en el listado, comentario validado."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-fl", razon_social="acme-fl SA")
+        cls.mesa = Usuario.objects.create(
+            username="mesa@acme-fl.test", email="mesa@acme-fl.test",
+            empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(
+            username="vend@acme-fl.test", email="vend@acme-fl.test", empresa=cls.empresa,
+        )
+
+    def setUp(self):
+        self.cotizacion = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.vendedor, estatus=2,
+        )
+        self.url = f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/"
+
+    def _como(self, user):
+        c = APIClient()
+        c.force_authenticate(user=user)
+        return c
+
+    def test_patch_ignora_estatus_y_campos_de_flujo(self):
+        for payload in (
+            {"estatus": 3}, {"estatus": 4}, {"estatus": 5},
+            {"autorizada_at": "2026-01-01T00:00:00Z"},
+            {"cambios_solicitados_at": "2026-01-01T00:00:00Z"},
+            {"aprobado_snapshot": {"x": 1}},
+        ):
+            with self.subTest(payload=payload):
+                resp = self._como(self.vendedor).patch(self.url, payload, format="json")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.cotizacion.refresh_from_db()
+                self.assertEqual(self.cotizacion.estatus, 2)
+                self.assertIsNone(self.cotizacion.autorizada_at)
+                self.assertIsNone(self.cotizacion.cambios_solicitados_at)
+                self.assertIsNone(self.cotizacion.aprobado_snapshot)
+
+    def test_vendedor_no_autoriza_por_patch_y_si_por_accion_de_mesa(self):
+        self._como(self.vendedor).patch(self.url, {"estatus": 3}, format="json")
+        resp = self._como(self.mesa).post(
+            self.url + "rechazar/", {"comentario": "Falta RFC"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_listado_incluye_motivo_rechazo(self):
+        self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Falta RFC"}, format="json")
+        resp = self._como(self.vendedor).get("/api/v1/ventas/cotizaciones/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        filas = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+        fila = next(f for f in filas if f["id"] == self.cotizacion.pk)
+        self.assertEqual(fila["motivo_rechazo"], "Falta RFC")
+
+    def test_comentario_invalido_es_400_en_rechazar_y_enviar_revision(self):
+        self.assertEqual(
+            self._como(self.mesa).post(self.url + "rechazar/", ["x"], format="json").status_code, 400
+        )
+        for valor in (123, True, ["a"], {"a": 1}):
+            with self.subTest(valor=valor):
+                resp = self._como(self.mesa).post(
+                    self.url + "rechazar/", {"comentario": valor}, format="json"
+                )
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertIn("comentario", resp.data)
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=4)
+        self.assertEqual(
+            self._como(self.vendedor).post(self.url + "enviar-revision/", ["x"], format="json").status_code, 400
+        )
+        for valor in (123, True, ["a"], {"a": 1}):
+            with self.subTest(valor=valor):
+                resp = self._como(self.vendedor).post(
+                    self.url + "enviar-revision/", {"comentario": valor}, format="json"
+                )
+                self.assertEqual(resp.status_code, 400, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 4)
+        self.assertEqual(self.cotizacion.comentarios.count(), 0)

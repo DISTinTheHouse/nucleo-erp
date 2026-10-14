@@ -58,6 +58,7 @@ from finanzas.models import (
     CuentaContable,
     CuentaPorCobrar,
     CuentaPorPagar,
+    FacturaProveedorDetalle,
     Factura,
     FacturaDetalle,
     FacturaProveedor,
@@ -2798,6 +2799,169 @@ class Defecto12BorradoSinLineasHuerfanas(FinanzasBase):
         self.assertEqual(nota.nota_credito_detalles.count(), 1)
 
 
+class FacturaProveedorMontosDerivadosTests(FinanzasBase):
+    """#385: una factura de proveedor lleva al menos una línea y los montos del
+    encabezado se derivan de ellas (API y admin)."""
+
+    def setUp(self):
+        (
+            self.proveedor, self.producto, self.oc, self.oc_detalle, self.recepcion, self.recepcion_detalle, _,
+        ) = self._crear_oc_recepcion_y_factura_proveedor(self.a["empresa"], self.a["sucursal"], self.a["usuario"])
+        self.client_api = self._client(self.a["usuario"])
+
+    def _linea(self, **extra):
+        linea = {
+            "oc_detalle": self.oc_detalle.pk, "recepcion_detalle": self.recepcion_detalle.pk,
+            "producto": self.producto.pk, "cantidad": "2.00", "precio_unitario": "100.00",
+            "impuesto": "32.00", "descuento": "0",
+        }
+        linea.update(extra)
+        return linea
+
+    def _payload(self, lineas=None, **extra):
+        payload = {
+            "sucursal": self.a["sucursal"].pk, "proveedor": self.proveedor.pk, "oc": self.oc.pk,
+            "recepcion": self.recepcion.pk, "moneda": self.moneda.pk,
+            "factura_proveedor_detalles": [self._linea()] if lineas is None else lineas,
+        }
+        payload.update(extra)
+        return payload
+
+    def _post(self, **kwargs):
+        return self.client_api.post(FACTURAS_PROVEEDOR_URL, self._payload(**kwargs), format="json")
+
+    def test_rechaza_crear_sin_lineas_y_no_deja_encabezado(self):
+        antes = FacturaProveedor.objects.count()
+
+        for lineas in ([], None):
+            payload = self._payload(lineas=[])
+            if lineas is None:
+                payload.pop("factura_proveedor_detalles")
+            resp = self.client_api.post(FACTURAS_PROVEEDOR_URL, payload, format="json")
+            self.assertEqual(resp.status_code, 400, resp.data)
+            self.assertIn("factura_proveedor_detalles", resp.data)
+
+        self.assertEqual(FacturaProveedor.objects.count(), antes)
+
+    def test_deriva_los_montos_del_encabezado_de_las_lineas(self):
+        resp = self._post(lineas=[
+            self._linea(),  # 200 + 32 = 232
+            self._linea(cantidad="1.00", precio_unitario="50.00", descuento="5.00", impuesto="7.20"),  # 50 - 5 + 7.20
+        ])
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        factura = FacturaProveedor.objects.get(pk=resp.data["id"])
+        self.assertEqual(
+            (factura.subtotal, factura.descuento, factura.impuestos, factura.total),
+            (Decimal("250.00"), Decimal("5.00"), Decimal("39.20"), Decimal("284.20")),
+        )
+        self.assertEqual(factura.subtotal - factura.descuento + factura.impuestos, factura.total)
+        lineas = list(factura.factura_proveedor_detalles.order_by("id"))
+        self.assertEqual((lineas[0].subtotal, lineas[0].total), (Decimal("200.00"), Decimal("232.00")))
+
+    def test_acepta_montos_de_encabezado_que_cuadran_y_la_cxp_nace_del_total_derivado(self):
+        resp = self._post(
+            estatus="Registrada", subtotal="200.00", descuento="0", impuestos="32.00", total="232.00",
+        )
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        cxp = CuentaPorPagar.objects.get(factura_proveedor_id=resp.data["id"])
+        self.assertEqual(cxp.total, Decimal("232.00"))
+
+    def test_rechaza_encabezado_que_no_cuadra_con_las_lineas(self):
+        antes = FacturaProveedor.objects.count()
+
+        resp = self._post(total="999.00")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("total", resp.data)
+        self.assertEqual(FacturaProveedor.objects.count(), antes)
+
+    def test_rechaza_linea_con_total_incoherente(self):
+        resp = self._post(lineas=[self._linea(subtotal="200.00", total="999.00")])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_update_no_edita_montos_derivados_pero_si_el_resto(self):
+        factura_id = self._post(estatus="Borrador").data["id"]
+        url = f"{FACTURAS_PROVEEDOR_URL}{factura_id}/"
+
+        resp = self.client_api.patch(url, {"total": "1.00"}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("total", resp.data)
+        resp = self.client_api.patch(url, {"subtotal": "1.00", "impuestos": "0"}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+        # Reenviar el mismo monto, o cambiar otro campo, sí pasa.
+        resp = self.client_api.patch(url, {"total": "232.00", "observaciones": "ok"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(FacturaProveedor.objects.get(pk=factura_id).total, Decimal("232.00"))
+
+    def test_factura_vieja_sin_lineas_conserva_sus_montos_editables(self):
+        """Las líneas no se pueden agregar por la API, así que una factura vieja
+        sin líneas se puede seguir corrigiendo a mano."""
+        factura = FacturaProveedor.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.proveedor, oc=self.oc,
+            recepcion=self.recepcion, moneda=self.moneda, total=Decimal("300.00"),
+        )
+
+        resp = self.client_api.patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"total": "350.00"}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    # --- admin -----------------------------------------------------------------
+
+    def test_admin_exige_al_menos_una_linea(self):
+        from django.forms.models import inlineformset_factory
+
+        from finanzas.admin import FacturaProveedorDetalleFormSet
+
+        Formset = inlineformset_factory(
+            FacturaProveedor, FacturaProveedorDetalle, formset=FacturaProveedorDetalleFormSet,
+            fields=["oc_detalle"], extra=1,
+        )
+        vacio = {
+            "factura_proveedor_detalles-TOTAL_FORMS": "1", "factura_proveedor_detalles-INITIAL_FORMS": "0",
+            "factura_proveedor_detalles-MIN_NUM_FORMS": "0", "factura_proveedor_detalles-MAX_NUM_FORMS": "1000",
+            "factura_proveedor_detalles-0-oc_detalle": "",
+        }
+        factura = FacturaProveedor(empresa=self.a["empresa"])
+
+        formset = Formset(vacio, instance=factura, prefix="factura_proveedor_detalles")
+
+        self.assertFalse(formset.is_valid())
+        self.assertIn("al menos una línea", str(formset.non_form_errors()))
+
+        con_linea = dict(vacio, **{"factura_proveedor_detalles-0-oc_detalle": str(self.oc_detalle.pk)})
+        self.assertTrue(Formset(con_linea, instance=factura, prefix="factura_proveedor_detalles").is_valid())
+
+    def test_admin_recalcula_el_encabezado_desde_las_lineas(self):
+        from django.contrib.admin.sites import AdminSite
+
+        from finanzas.admin import FacturaProveedorAdmin
+
+        factura = FacturaProveedor.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.proveedor, oc=self.oc,
+            recepcion=self.recepcion, moneda=self.moneda, total=Decimal("1.00"),
+        )
+        FacturaProveedorDetalle.objects.create(
+            factura_proveedor=factura, oc_detalle=self.oc_detalle, recepcion_detalle=self.recepcion_detalle,
+            producto=self.producto, cantidad=Decimal("2"), precio_unitario=Decimal("100"), impuesto=Decimal("32"),
+        )
+        model_admin = FacturaProveedorAdmin(FacturaProveedor, AdminSite())
+        form = MagicMock(instance=factura)
+
+        with patch("django.contrib.admin.ModelAdmin.save_related"):
+            model_admin.save_related(MagicMock(), form, [], False)
+
+        factura.refresh_from_db()
+        self.assertEqual((factura.subtotal, factura.impuestos, factura.total), (Decimal("200"), Decimal("32"), Decimal("232")))
+        self.assertEqual(factura.factura_proveedor_detalles.get().total, Decimal("232"))
+        self.assertEqual(
+            set(model_admin.readonly_fields), {"subtotal", "descuento", "impuestos", "total"},
+        )
+
+
 class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
     """EC-133: la CxP nace del registro de la factura de proveedor, el alta
     manual ya no la descuadra, y con pagos aplicados no se edita ni se borra."""
@@ -2844,16 +3008,25 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         return Pago.objects.get(pk=resp.data["id"])
 
     def _post_invoice(self, **overrides):
-        proveedor, oc, recepcion, _ = self._purchase_documents()
+        proveedor, oc, recepcion, factura_previa = self._purchase_documents()
+        oc_detalle = oc.ordencompradetalle_set.first()
+        recepcion_detalle = recepcion.recepciondetalle_set.first()
+        total = overrides.get("total", "1160.00")
         payload = {
             "sucursal": self.a["sucursal"].pk,
             "proveedor": proveedor.pk,
             "oc": oc.pk,
             "recepcion": recepcion.pk,
             "moneda": self.moneda.pk,
-            "total": "1160.00",
+            "total": total,
             "fecha_vencimiento": "2026-10-15",
             "estatus": FacturaProveedor.FacturaProveedorStatus.REGISTRADA.value,
+            # #385: una factura de proveedor lleva al menos una línea y el
+            # encabezado se deriva de ellas.
+            "factura_proveedor_detalles": [{
+                "oc_detalle": oc_detalle.pk, "recepcion_detalle": recepcion_detalle.pk,
+                "producto": oc_detalle.producto_id, "cantidad": "1.00", "total": total,
+            }],
         }
         payload.update(overrides)
         return self._client(self.a["usuario"]).post(FACTURAS_PROVEEDOR_URL, payload, format="json")
@@ -6950,7 +7123,8 @@ class F4PolizaDeNotaFacturaProveedorYMovimientoTests(MotorPolizasBase):
             "subtotal": "500.00", "descuento": "0.00", "impuestos": "80.00", "total": "580.00",
             "factura_proveedor_detalles": [{
                 "oc_detalle": oc_detalle.pk, "recepcion_detalle": recepcion_detalle.pk,
-                "producto": producto.pk, "cantidad": "10", "precio_unitario": "50.00", "total": "500.00",
+                "producto": producto.pk, "cantidad": "10", "precio_unitario": "50.00",
+                "impuesto": "80.00", "total": "580.00",
             }],
             **extra,
         }
