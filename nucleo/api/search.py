@@ -87,7 +87,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from django.core.exceptions import ImproperlyConfigured
-from django.db.models import F, Q
+from django.db.models import BooleanField, Exists, F, OuterRef, Q, Value
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import permissions
@@ -108,7 +108,7 @@ from produccion.scope import (
     ordenes_reflejante_base,
     ordenes_reflejante_visibles,
 )
-from terceros.scope import clientes_base, clientes_visibles
+from terceros.scope import clientes_base, clientes_visibles, ve_clientes_sin_asignacion
 from ventas.api.oportunidades import con_estado as oportunidades_con_estado
 from ventas.scope import (
     cotizaciones_base,
@@ -149,6 +149,15 @@ class EntidadBuscable:
     tenant; es el único punto que toca el aislamiento y siempre delega en el
     predicado real de la entidad.
 
+    ``filas``, si se declara, sustituye a ``fila``: recibe el usuario y todos los
+    objetos de la página, para la entidad que necesita resolver algo una vez por
+    respuesta (p. ej. qué clientes puede ver el usuario) en vez de una vez por fila.
+
+    ``condiciones_nombre`` son condiciones extra de nombre que no caben en
+    ``campos_nombre`` (p. ej. comparar contra una columna solo si el usuario la puede
+    ver): cada una recibe ``q`` y devuelve un ``Q`` que puede usar las anotaciones
+    del ``alcance``. Se combinan con OR y con el mismo mínimo de caracteres.
+
     ``campos_only`` son las columnas que ``fila()`` necesita. Se aplican con
     ``.only()`` para no arrastrar filas completas —``Pedido`` tiene ~70 columnas,
     varias de ellas ``TextField``— en un endpoint que se dispara por pulsación.
@@ -164,9 +173,11 @@ class EntidadBuscable:
     tipo: str
     etiqueta: str
     alcance: Callable[[Any], Any]
-    fila: Callable[[Any], dict]
+    fila: Callable[[Any], dict] | None = None
+    filas: Callable[[Any, list], list[dict]] | None = None
     campos_codigo: tuple[str, ...] = ()
     campos_nombre: tuple[str, ...] = ()
+    condiciones_nombre: tuple[Callable[[str], Q], ...] = ()
     campos_only: tuple[str, ...] = ()
     permisos_visibilidad: tuple[str, ...] = ()
     orden: tuple[Any, ...] = ()
@@ -202,6 +213,9 @@ class EntidadBuscable:
             for campo in self.campos_nombre:
                 condicion |= Q(**{f"{campo}__icontains": q})
                 aplicado = True
+            for condicion_nombre in self.condiciones_nombre:
+                condicion |= condicion_nombre(q)
+                aplicado = True
         return condicion if aplicado else None
 
     def buscar(self, user, q: str, limite: int) -> tuple[list, bool]:
@@ -220,6 +234,8 @@ class EntidadBuscable:
             qs = qs.order_by(*self.orden)
         objetos = list(qs[: limite + 1])
         hay_mas = len(objetos) > limite
+        if self.filas is not None:
+            return self.filas(user, objetos[:limite]), hay_mas
         return [self.fila(obj) for obj in objetos[:limite]], hay_mas
 
 
@@ -303,22 +319,62 @@ def _fila_cotizacion(cotizacion) -> dict:
     }
 
 
-def _fila_oportunidad(oportunidad) -> dict:
-    # ``estado`` viene anotado (``con_estado``): Cotizada y Ganada se calculan de las
-    # cotizaciones ligadas, no se guardan.
-    cliente = oportunidad.cliente
-    return {
-        "tipo": "oportunidad",
-        "id": oportunidad.pk,
-        "codigo": None,
-        "titulo": _texto(oportunidad.titulo) or _texto(oportunidad.nombre_contacto),
-        "subtitulo": (
-            _texto(oportunidad.nombre_contacto)
-            or _texto(getattr(cliente, "razon_social", None))
-            or _texto(getattr(cliente, "nombre", None))
-        ),
-        "estatus": oportunidad.estado,
-    }
+def _nombre_oportunidad(oportunidad, cliente_visible: bool) -> tuple[str, str | None]:
+    """``(titulo, subtitulo)`` con la misma regla que el resto de la app.
+
+    Título: el título, el nombre del cliente (solo si el usuario lo ve), el contacto
+    o ``"Oportunidad #<id>"``. Subtítulo: el siguiente de esa misma cadena que no
+    repita el título; con título de contacto o de respaldo es ``None``, como en los
+    demás grupos.
+    """
+    titulo = _texto(oportunidad.titulo)
+    cliente = _texto(oportunidad.cliente.nombre) if cliente_visible and oportunidad.cliente_id else None
+    contacto = _texto(oportunidad.nombre_contacto)
+    if titulo:
+        candidatos = (cliente, contacto)
+    elif cliente:
+        titulo, candidatos = cliente, (contacto,)
+    elif contacto:
+        titulo, candidatos = contacto, ()
+    else:
+        titulo, candidatos = f"Oportunidad #{oportunidad.pk}", ()
+    subtitulo = next((c for c in candidatos if c and c.casefold() != titulo.casefold()), None)
+    return titulo, subtitulo
+
+
+def _oportunidades_buscables(user):
+    """Alcance de ``OportunidadViewSet`` con ``estado`` y ``cliente_visible`` anotados.
+
+    ``cliente_visible`` sigue la regla de los seguimientos
+    (``terceros.scope.clientes_visibles_entre``): el superusuario y el admin de empresa
+    ven todos los clientes, también los dados de baja; el resto, ``clientes_visibles``.
+    Va como subconsulta dentro de la misma consulta: sirve para buscar por el nombre
+    del cliente y para nombrar la fila, sin consultas aparte.
+    """
+    qs = oportunidades_con_estado(
+        oportunidades_visibles(oportunidades_base().select_related("cliente"), user)
+    )
+    if ve_clientes_sin_asignacion(user):
+        visible = Value(True, output_field=BooleanField())
+    else:
+        visible = Exists(clientes_visibles(clientes_base(), user).filter(pk=OuterRef("cliente_id")))
+    return qs.annotate(cliente_visible=visible)
+
+
+def _filas_oportunidad(user, oportunidades) -> list[dict]:
+    # ``estado`` y ``cliente_visible`` vienen anotados (``_oportunidades_buscables``).
+    filas = []
+    for oportunidad in oportunidades:
+        titulo, subtitulo = _nombre_oportunidad(oportunidad, oportunidad.cliente_visible)
+        filas.append({
+            "tipo": "oportunidad",
+            "id": oportunidad.pk,
+            "codigo": None,
+            "titulo": titulo,
+            "subtitulo": subtitulo,
+            "estatus": oportunidad.estado,
+        })
+    return filas
 
 
 def _fila_orden_bordado(orden) -> dict:
@@ -606,14 +662,14 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         # Alcance de ``OportunidadViewSet`` (``ventas.scope``): el vendedor ve las
         # suyas, el admin de empresa las de su empresa. ``estado`` (Cotizada/Ganada)
         # se anota con dos EXISTS que solo corren para las filas que se devuelven.
-        alcance=lambda user: oportunidades_con_estado(
-            oportunidades_visibles(oportunidades_base().select_related("cliente"), user)
-        ),
-        fila=_fila_oportunidad,
+        alcance=_oportunidades_buscables,
+        filas=_filas_oportunidad,
         # Subcadena en título y contacto; los sirven los GIN ``UPPER(col)`` de
-        # ``ventas.Oportunidad``.
+        # ``ventas.Oportunidad``. Y en el nombre del cliente, solo si el usuario lo ve:
+        # buscar por un cliente oculto revelaría que existe.
         campos_nombre=("titulo", "nombre_contacto"),
-        campos_only=("titulo", "nombre_contacto", "etapa", "cliente__nombre", "cliente__razon_social"),
+        condiciones_nombre=(lambda q: Q(cliente__nombre__icontains=q, cliente_visible=True),),
+        campos_only=("titulo", "nombre_contacto", "etapa", "cliente__nombre"),
         # La clave de la sección de oportunidades más el módulo ``R-CRM`` de respaldo:
         # en este catálogo son cadenas planas y quien ya entra al módulo la ve.
         permisos_visibilidad=("R-CRM-OPORTUNIDADES", "R-CRM"),
@@ -631,6 +687,14 @@ if _SIN_PERMISOS:
     raise ImproperlyConfigured(
         "Entidades del buscador sin ``permisos_visibilidad``, que las haría "
         f"invisibles para todos: {', '.join(_SIN_PERMISOS)}"
+    )
+
+# Cada entidad declara exactamente uno de ``fila`` o ``filas``: con las dos, ``buscar()``
+# usaría ``filas`` en silencio y ``fila`` quedaría muerta.
+_FILA_AMBIGUA = [entidad.tipo for entidad in REGISTRO if (entidad.fila is None) == (entidad.filas is None)]
+if _FILA_AMBIGUA:
+    raise ImproperlyConfigured(
+        f"Entidades del buscador sin ``fila`` ni ``filas``, o con las dos: {', '.join(_FILA_AMBIGUA)}"
     )
 
 

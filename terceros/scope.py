@@ -17,6 +17,35 @@ def clientes_base():
     return Cliente.objects.filter(activo=True)
 
 
+def ve_clientes_sin_asignacion(user):
+    """``True`` para quien ``clientes_visibles`` nunca acota por asignación ni por
+    departamento: el superusuario y el admin de empresa.
+
+    Son las dos primeras salidas de ``clientes_visibles``; si esa precedencia cambia,
+    cambia aquí también. Mesa de Control no entra: ve todos los clientes de su empresa,
+    pero por departamento (cuesta una consulta) y lo resuelve ``clientes_visibles``.
+    """
+    return bool(getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False))
+
+
+def clientes_visibles_entre(user, ids):
+    """Cuáles de ``ids`` puede ver ``user`` como cliente, o ``None`` si los ve todos.
+
+    Sirve para decidir si se muestra el nombre de un cliente ligado a otro registro.
+    El superusuario y el admin de empresa los ven todos, también los dados de baja, y
+    no cuestan consulta. Al resto se le aplica ``clientes_visibles`` acotado a ``ids``:
+    una sola consulta, para llamarla una vez por respuesta y no por fila.
+    """
+    if ve_clientes_sin_asignacion(user):
+        return None
+    ids = {i for i in ids if i is not None}
+    if not ids:
+        return frozenset()
+    return frozenset(
+        clientes_visibles(clientes_base(), user).filter(pk__in=ids).values_list("pk", flat=True)
+    )
+
+
 def clientes_visibles(qs, user):
     """Alcance de ``terceros.Cliente``: empresa + ``vendedores`` si no es admin/mesa de control.
 

@@ -1,7 +1,7 @@
 import math
 from decimal import Decimal
 
-from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, prefetch_related_objects
+from django.db.models import Sum, Count, Exists, F, OuterRef, Prefetch, Q, prefetch_related_objects
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import status, viewsets, mixins
@@ -77,6 +77,7 @@ from produccion.api.serializers import (
     VarianteProduccionSerializer,
 )
 from catalogo.models import VarianteProductoProduccion
+from inventarios.models import Existencia
 
 from produccion.services.orden_bordado_service import OrdenBordadoService
 from produccion.services.orden_reflejante_service import OrdenReflejanteService
@@ -85,7 +86,7 @@ from produccion.services.recalculo_consumo_service import RecalculoConsumoTelaSe
 from produccion.services.orden_corte_manga_service import OrdenCorteMangaService
 
 
-def _tallas_ot_prefetch(flag):
+def _tallas_ot_prefetch(flag, con_variante=False):
     """``Prefetch`` de las tallas elegibles para una orden de trabajo.
 
     Filtra en la BD por el flag y por ``cantidad > 0`` —el mismo criterio que
@@ -96,15 +97,15 @@ def _tallas_ot_prefetch(flag):
     ignora la caché del prefetch y dispara una query por ``PedidoDetalle``,
     dejando además inservible el ``prefetch_related`` del queryset.
     """
-    return Prefetch(
-        "detalles__tallas",
-        queryset=(
-            PedidoDetalleTalla.objects
-            .filter(**{flag: True}, cantidad__gt=0)
-            .select_related("talla")
-            .order_by("id")
-        ),
+    qs = (
+        PedidoDetalleTalla.objects
+        .filter(**{flag: True}, cantidad__gt=0)
+        .select_related("talla")
+        .order_by("id")
     )
+    if con_variante:
+        qs = qs.select_related("variante")
+    return Prefetch("detalles__tallas", queryset=qs)
 
 
 def _programado_para_destino(pedido, destino):
@@ -132,7 +133,8 @@ def _programado_para_destino(pedido, destino):
 
 
 def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn,
-                                incluir_config_crudo=False, destino_programacion=None):
+                                incluir_config_crudo=False, destino_programacion=None,
+                                incluir_sku=False):
     """Arma la lista ``pedidos`` del GET de onboarding de órdenes de trabajo.
 
     Compartido por Bordado / Reflejante / Corte de Manga: los tres emitían el
@@ -161,9 +163,30 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
     pedidos_lista = list(pedidos_qs)
     por_linea, sin_talla = cantidades_asignadas_fn([p.id for p in pedidos_lista])
 
+    existencias = {}
+    if incluir_sku:
+        # ``incluir_sku`` (sólo Bordado): se descartan las líneas de MUESTRA sin
+        # SKU (sin ``variante`` de catálogo ni ``sku_muestra``) y cada línea
+        # publica ``sku``/``sku_proscai``/``existencias``. Las existencias se
+        # suman en UNA query agregada por las variantes de todo el payload.
+        variante_ids = {
+            dt.variante_id
+            for p in pedidos_lista for det in p.detalles.all() for dt in det.tallas.all()
+            if dt.variante_id
+        }
+        if variante_ids:
+            existencias = {
+                r["producto_variante_id"]: float(r["total"] or 0)
+                for r in Existencia.objects.filter(
+                    producto_variante_id__in=variante_ids,
+                    almacen__empresa_id=pedidos_lista[0].empresa_id,
+                ).values("producto_variante_id").annotate(total=Sum("cantidad"))
+            }
+
     pedidos_payload = []
     for p in pedidos_lista:
-        pares = [(det, dt) for det in p.detalles.all() for dt in det.tallas.all()]
+        pares = [(det, dt) for det in p.detalles.all() for dt in det.tallas.all()
+                 if not incluir_sku or dt.variante_id or dt.sku_muestra]
         pendientes = pendientes_por_linea(
             [(det.id, dt.talla_id, float(dt.cantidad or 0)) for det, dt in pares],
             por_linea,
@@ -238,6 +261,11 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
                 "tipos_servicio": tipos_servicio,
                 "tipos_servicio_display": tipos_servicio_display,
             }
+            if incluir_sku:
+                var = dt.variante
+                linea["sku"] = var.sku if var else dt.sku_muestra
+                linea["sku_proscai"] = (var.cod_proscai or None) if var else None
+                linea["existencias"] = existencias.get(dt.variante_id, 0) if var else None
             if incluir_config_crudo:
                 # El config ÍNTEGRO, con todos sus elementos y sus claves
                 # verbatim. Misma clave, misma forma y mismo ``or None`` que
@@ -1087,7 +1115,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 .select_related("cliente", "sucursal")
                 .prefetch_related(
                     "detalles",
-                    _tallas_ot_prefetch("lleva_bordado"),
+                    _tallas_ot_prefetch("lleva_bordado", con_variante=True),
                     "detalles__producto",
                     "detalles__color",
                 )
@@ -1114,6 +1142,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 "bordado_config",
                 OrdenBordadoService.cantidades_asignadas_por_pedidos,
                 destino_programacion="BORDADO",
+                incluir_sku=True,
             )
 
             return Response({

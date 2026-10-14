@@ -1596,10 +1596,12 @@ class OrdenBordadoParcialidadesTests(TestCase):
             pedido=self.pedido, producto=self.producto
         )
         self.pdt_ch = PedidoDetalleTalla.objects.create(
+            sku_muestra="SKU-TEST",
             pedido_detalle=self.detalle, talla=self.talla_ch,
             cantidad=self.CANTIDAD_CH, lleva_bordado=True,
         )
         self.pdt_m = PedidoDetalleTalla.objects.create(
+            sku_muestra="SKU-TEST",
             pedido_detalle=self.detalle, talla=self.talla_m,
             cantidad=self.CANTIDAD_M, lleva_bordado=True,
         )
@@ -1917,6 +1919,7 @@ class OrdenBordadoRevisionParcialidadesTests(OrdenBordadoParcialidadesTests):
                     pedido=self.pedido, producto=self.producto
                 )
                 PedidoDetalleTalla.objects.create(
+                    sku_muestra="SKU-TEST",
                     pedido_detalle=det, talla=self.talla_ch,
                     cantidad=5, lleva_bordado=True,
                 )
@@ -2924,6 +2927,7 @@ class OnboardingGetConfigFormaRealTests(TestCase):
         )
         detalle = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
         PedidoDetalleTalla.objects.create(
+            sku_muestra="SKU-TEST",
             pedido_detalle=detalle, talla=self.talla_ch, cantidad=10,
             **{flag: True, campo_config: valor},
         )
@@ -3103,6 +3107,7 @@ class BordadoSinUbicacionesTests(TestCase):
             pedido=self.pedido, producto=self.producto
         )
         self.pdt = PedidoDetalleTalla.objects.create(
+            sku_muestra="SKU-TEST",
             pedido_detalle=self.detalle, talla=self.talla_ch, cantidad=6,
             lleva_bordado=True, bordado_config=BORDADO_CONFIG_SIN_UBICACIONES,
         )
@@ -3217,6 +3222,7 @@ class ToleranciaFormaConfigTests(TestCase):
         )
         detalle = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
         pdt = PedidoDetalleTalla.objects.create(
+            sku_muestra="SKU-TEST",
             pedido_detalle=detalle, talla=self.talla_ch, cantidad=5,
             **{flag: True, campo_config: valor},
         )
@@ -3418,6 +3424,7 @@ class OnboardingReflejanteConfigCrudoTests(TestCase):
         )
         detalle = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
         PedidoDetalleTalla.objects.create(
+            sku_muestra="SKU-TEST",
             pedido_detalle=detalle, talla=self.talla_ch, cantidad=5,
             **{flag: True, campo_config: valor},
         )
@@ -3529,7 +3536,11 @@ class OnboardingReflejanteConfigCrudoTests(TestCase):
             "/api/v1/produccion/orden-bordado/onboarding/", pedido
         )
 
-        self.assertEqual(set(lineas[0].keys()), CLAVES_LINEA_ONBOARDING_BASE)
+        # Bordado suma sku/sku_proscai/existencias sobre la base.
+        self.assertEqual(
+            set(lineas[0].keys()),
+            CLAVES_LINEA_ONBOARDING_BASE | {"sku", "sku_proscai", "existencias"},
+        )
         self.assertNotIn("bordado_config", lineas[0])
         # Y lo que ya publicaba sigue igual.
         self.assertEqual(len(lineas[0]["ubicaciones"]), 1)
@@ -6470,3 +6481,33 @@ class RecalculoConsumoTelaTests(TestCase):
         antes = Poliza.objects.count()
         self._post(100)
         self.assertEqual(Poliza.objects.count(), antes)
+
+
+class OrdenBordadoOnboardingSkuTests(OrdenBordadoParcialidadesTests):
+    """GET onboarding de OB: oculta muestras sin SKU y publica SKU/Proscai/existencias."""
+
+    def test_oculta_muestra_sin_sku_y_publica_sku_proscai_existencias(self):
+        from catalogo.models import Color, ProductoVariante
+        from inventarios.models import Almacen, Existencia
+
+        color = Color.objects.create(nombre="Marino")
+        variante = ProductoVariante.objects.create(
+            producto=self.producto, empresa=self.empresa, color=color,
+            talla=self.talla_ch, sku="PLY-CH-MAR", cod_proscai="PRO-1", precio_base=1,
+        )
+        almacen = Almacen.objects.create(empresa=self.empresa, codigo="A1", nombre="Alm")
+        Existencia.objects.create(almacen=almacen, producto_variante=variante, cantidad=7)
+        Existencia.objects.create(almacen=almacen, producto_variante=variante, cantidad=3)
+        PedidoDetalleTalla.objects.filter(pk=self.pdt_ch.pk).update(
+            variante=variante, sku_muestra=None
+        )
+        PedidoDetalleTalla.objects.filter(pk=self.pdt_m.pk).update(sku_muestra=None)
+
+        lineas = self._lineas_del_get()
+
+        self.assertEqual(list(lineas), [self.talla_ch.pk])  # la muestra sin SKU no sale
+        linea = lineas[self.talla_ch.pk]
+        self.assertEqual(linea["sku"], "PLY-CH-MAR")
+        self.assertEqual(linea["sku_proscai"], "PRO-1")
+        self.assertEqual(linea["existencias"], 10.0)
+

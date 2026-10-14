@@ -324,14 +324,14 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
 | `cotizacion` | Cotizaciones | — | nombre y razón social del cliente | `R-CRM-COTIZACIONES`, `R-CRM`, `R-MESACONTROL-COTI`, `R-MESACONTROL` | más reciente primero |
 | `producto` | Productos | `sku` | nombre de la variante, nombre del producto | `R-CATALOGO-PRODUCTOS` ⚠️ | nombre del producto, sku |
 | `factura` | Facturas | `folio` | nombre y razón social del cliente | `R-CONTABILIDAD-FACTURACION` | `fecha_emision` desc |
-| `oportunidad` | Oportunidades | — | `titulo`, `nombre_contacto` | `R-CRM-OPORTUNIDADES`, `R-CRM` | más reciente primero |
+| `oportunidad` | Oportunidades | — | `titulo`, `nombre_contacto`, `cliente.nombre` (si lo ve) | `R-CRM-OPORTUNIDADES`, `R-CRM` | más reciente primero |
 
 **Regla de los permisos de visibilidad**: las claves de una entidad son las que le permiten al usuario *abrir* esa entidad en algún lugar del frontend.
 - `orden_bordado` / `orden_reflejante` / `orden_corte_manga` / `factura`: sólo la clave de sección (`R-PRODUCCION-OB` / `R-PRODUCCION-OR` / `R-PRODUCCION-CM` / `R-CONTABILIDAD-FACTURACION`); los códigos de módulo `R-PRODUCCION` / `R-CONTABILIDAD` no abren esas rutas.
 - `cotizacion`: `R-CRM` / `R-MESACONTROL` sí cuentan, porque los dashboards de esos módulos (`/sales`, `/operations`) abren cotizaciones.
 - `pedido`: incluye claves de otras secciones (OB/OR/CM, OC, picking) porque esas vistas enlazan al pedido y la ruta `/orders/[id]` las acepta.
 
-- **`oportunidad`**: se busca por **subcadena** en el título y en el nombre del contacto (mínimo **3 caracteres**). El vendedor ve las suyas y el admin de empresa las de su empresa; las dadas de baja no salen. La fila trae `titulo`, `subtitulo` (contacto o cliente) y `estatus` con el estado calculado (`Nueva`, `Contactada`, `Cotizada`, `Ganada`, `Perdida`). Va al final de `grupos`, así que no cambia el orden de los demás.
+- **`oportunidad`**: se busca por **subcadena** en el título, en el nombre del contacto y en el nombre del cliente, este último solo si el usuario puede ver a ese cliente (mínimo **3 caracteres**). El vendedor ve las suyas y el admin de empresa las de su empresa; las dadas de baja no salen. La fila trae `titulo`, `subtitulo` y `estatus` con el estado calculado (`Nueva`, `Contactada`, `Cotizada`, `Ganada`, `Perdida`). Va al final de `grupos`, así que no cambia el orden de los demás. `titulo` es el nombre de la oportunidad con la misma regla que el resto de la app: el título; si no hay, el nombre del cliente (solo si el usuario puede ver a ese cliente: el superusuario y el admin de empresa siempre, aunque esté dado de baja; el resto, con la regla de `/terceros/clientes/`); si no, el contacto; y si no, `Oportunidad #<id>`. `subtitulo` es lo siguiente de esa cadena que no repita el título: con título propio, el cliente (si lo ve) o el contacto; con el cliente como título, el contacto; con el contacto o el respaldo como título, `null` (igual que en los demás grupos cuando no hay subtítulo). Se usa el `nombre` del cliente, no la razón social.
 - **`orden_bordado`**: el folio real tiene el año delante (`2026-OB-00017`), por eso se busca por **subcadena** y no por prefijo: `OB-00017`, `00017` y `2026-OB` la encuentran, pero hace falta un mínimo de **3 caracteres** (con 2 el grupo llega vacío). No se busca por folio del pedido ni por cliente; esos datos sólo aparecen en `subtitulo` (`"<folio pedido> · <cliente>"`).
 - **`orden_reflejante`**: misma plantilla que `orden_bordado`. Folio `2026-OR-00006` por **subcadena** (`OR-00006`, `00006`, `2026-OR`), mínimo **3 caracteres**; folio del pedido y cliente sólo en `subtitulo`.
 - **`orden_corte_manga`**: misma plantilla. Folio `2026-CM-00005` (serie `CM`, no `OCM`) por **subcadena** (`CM-00005`, `00005`, `2026-CM`), mínimo **3 caracteres**. Excepción: la generación automática desactivada en `ventas` tiene un respaldo que crea folios `OCM-<folio pedido>`; si existieran, esas órdenes sí aparecerían al buscar el folio del pedido (hoy no hay ninguna).
@@ -1840,7 +1840,25 @@ En qué paso va el pedido, cuánto lleva y si va a tiempo. Todo se calcula en el
   - Defaults de facturación: si `cotizacion.persona_pagos / correo_facturas / telefono_pagos / forma_pago / metodo_pago / uso_cfdi` vienen `null`, el backend usa sensible defaults derivados del cliente (`razon_social`/`email`/`telefono`) y los TextChoices de `Cotizacion.FormaPago.TRANSFERENCIA`, `MetodoPago.PUE`, `UsoCfdi.G03`. Esto garantiza que la conversión `Cotizacion → Pedido` nunca falle por campos `NOT NULL` de facturación.
 - Rechazar cotización:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/rechazar/`
-  - Efecto: la cotización pasa a `Rechazada (4)`. **No** se crea pedido ni se gasta folio.
+  - Body (obligatorio): `{"comentario": "Falta RFC"}`. Vacío, `null`, ausente o solo espacios → `400 {"comentario": "Indica el motivo del rechazo para que el vendedor lo vea."}`.
+  - Efecto: la cotización pasa a `Rechazada (4)`, se guarda el motivo en `motivo_rechazo` y se agrega una fila `RECHAZO` al historial (`comentarios/`). **No** se crea pedido ni se gasta folio. Si ya está `Autorizada (3)` → `400 {"cotizacion": ...}`. Responde `{"cotizacion": {...}}`.
+- Reenviar a revisión (vendedor):
+  - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/enviar-revision/`
+  - Body (opcional): `{"comentario": "Listo"}`. Solo se registra, como `REENVIO` en el historial, cuando la cotización estaba `Rechazada (4)` y el comentario no viene vacío.
+  - Efecto: la cotización pasa a `Por Autorizar (2)`. Solo desde estatus 1, 4 o 5.
+- Historial de comentarios:
+  - **Endpoint**: `GET /api/v1/ventas/cotizaciones/{id}/comentarios/` (lista sin paginar, del más antiguo al más reciente).
+  - `tipo`: `RECHAZO` (mesa de control) o `REENVIO` (vendedor).
+  - Respuesta:
+
+    ```json
+    [
+      {"id": 13, "tipo": "RECHAZO", "comentario": "Falta RFC", "autor": 1, "autor_nombre": "a1@x.t", "created_at": "2026-10-14T08:28:45.890187-06:00"},
+      {"id": 14, "tipo": "REENVIO", "comentario": "Listo", "autor": 2, "autor_nombre": "v1@x.t", "created_at": "2026-10-14T08:28:45.894255-06:00"}
+    ]
+    ```
+
+  - La cotización expone además `motivo_rechazo` (solo lectura): el último motivo de rechazo.
 - Aceptar cambios:
   - **Endpoint**: `POST /api/v1/ventas/cotizaciones/{id}/aceptar-cambios/`
   - Efecto: se **aplican** los cambios de la cotización al `Pedido` ya existente (detalle + `servicios_extras`) y la cotización vuelve a `Autorizada (3)` con `aprobado_snapshot` actualizado.
@@ -2278,6 +2296,30 @@ COTIZACION_EDIT_WINDOW_MINUTES=45
 
 - `fecha_oc` (fecha de generación) **ya no se acepta en el body**, ni en `POST .../onboarding/` ni en `PUT`: el servidor la fija una sola vez al crear la OC con el día local (`timezone.localdate()`, America/Mexico_City) y nunca se vuelve a tocar. Si la mandas en el body, se ignora en silencio (no es error).
 - `fecha_vencimiento` sí es editable: agrégala al objeto `orden_compra` del body (`POST .../onboarding/` o `PUT`) como `"fecha_vencimiento": "YYYY-MM-DD"`. El campo ya existía en el modelo pero no estaba expuesto en el onboarding; ahora sí.
+
+### Referencia opcional, varios pedidos y tipo de compra (serie de folio)
+
+Campos nuevos/cambiados en el objeto `orden_compra` de `POST .../onboarding/` y `PUT .../ordenes/{id}/` (todos opcionales; lo que no mandes no se toca, así el flujo actual sigue igual):
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `referencia` | string \| null | **Ya no es obligatoria** en el API (nunca lo fue; el "La referencia es requerida" era validación del formulario). `""`/`null` se guardan como `null`. Máx. 50 caracteres (`400` si excede). |
+| `pedidos` | `int[]` \| null | Pedidos que surte la OC. Reemplaza la lista completa; `[]`/`null` desvincula. Todos deben ser de la empresa de la OC, si no `400 {"pedidos": ...}`. |
+| `pedido` | int \| null | Forma legada de un solo pedido; equivale a `pedidos: [id]`. Si mandas ambos, manda `pedidos`. |
+| `tipo_compra` | `"MP"` \| `"PT"` | `MP` = materia prima (default), `PT` = producto terminado. Define la serie del folio al aceptar. Una vez que la OC tiene folio ya no se puede cambiar (`400`). |
+
+Respuesta (`GET` lista/detalle, y `orden_compra` de onboarding/PUT/aceptar) añade:
+
+```json
+{ "pedido": 12, "pedido_folio": "PED-000012",
+  "pedidos": [12, 15],
+  "pedidos_vinculados": [ {"id": 12, "folio": "PED-000012"}, {"id": 15, "folio": "PED-000015"} ],
+  "tipo_compra": "PT", "tipo_compra_label": "Producto terminado" }
+```
+
+- `pedido` / `pedido_folio` / `pedido_vinculado` **se conservan** y reflejan el primer pedido de `pedidos` (o `null`): ninguna integración existente se rompe. Una OC creada antes (o desde el admin) con solo `pedido` aparece también en `pedidos`.
+- **Folios**: `aceptar` toma la serie activa de la sucursal por `tipo_compra`: `MP` → `SerieFolio.tipo_documento = ORDEN_COMPRA` (serie `OC`, la de siempre), `PT` → `ORDEN_COMPRA_PT` (serie `O`). Si no hay serie configurada se usa el folio de respaldo `OC-{empresa}-{id}` / `O-{empresa}-{id}`.
+- Rendimiento: crear/editar/aceptar una OC ya no hace consultas por renglón (alta de 10 renglones: 47 → 15 consultas; edición: 62 → 30; aceptar: 16 → 11). Los renglones se insertan en lote conservando su historial.
 
 ### Cancelar una orden de compra
 
@@ -6279,6 +6321,19 @@ Notas:
 | `POST` | `/api/v1/notificaciones/marcar-todas-leidas/`       | Marcar TODO como leído                                                                     |
 
 > 💡 El SSE dura ~6min y reconecta solo (`EventSource` lo hace automático). Cierra conexiones idle con keep-alive cada 20s. Perfecto para no abrir 100 requests/hour de polling.
+
+---
+
+### Notificaciones al vendedor: cotización autorizada / rechazada
+
+Cuando Mesa de Control **autoriza** (`POST /api/v1/ventas/cotizaciones/{id}/autorizar/`) o **rechaza** (`.../rechazar/`, con `comentario` obligatorio; el motivo viaja en el mensaje y en `data.motivo`) una cotización, el **vendedor de la cotización** recibe una `Notificacion` (un solo INSERT dentro de la misma transacción; llega por el SSE `nueva` y aparece en el listado). Se filtra con `?modulo=ventas`. No hay endpoint nuevo.
+
+| `tipo` | `titulo` | `mensaje` (ejemplo) | `data` |
+| --- | --- | --- | --- |
+| `cotizacion_autorizada` | Cotización autorizada | Tu cotización #123 fue autorizada y generó el pedido P-000045. | `{cotizacion_id, pedido_id, pedido_folio}` |
+| `cotizacion_rechazada` | Cotización rechazada | Tu cotización #123 fue rechazada: <motivo> | `{cotizacion_id, motivo}` |
+
+Sugerencia para el frontend: navegar con `data.pedido_id` / `data.cotizacion_id`.
 
 ---
 
