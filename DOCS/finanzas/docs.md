@@ -14,6 +14,7 @@
     <a href="#FacturasProveedor">Facturas de proveedor</a> ·
     <a href="#ProcesoFacturacion">Proceso de facturacion</a> ·
     <a href="#Cxcp">Cuentas por cobrar y cuentas por pagar</a> ·
+    <a href="#ProcesoPagos">Proceso completo de pagos</a> ·
   </p>
 </div>
 
@@ -408,4 +409,65 @@ erDiagram
     cuentas_por_cobrar |o--o{ alertas_mora : "cuenta por cobrar"
     cuentas_por_pagar |o--o{ alertas_mora : "cuenta por pagar"
 ```
+
+<a id="ProcesoPagos"></a>
+
+## 10. Proceso completo de pagos
+
+El proceso registra salidas de dinero para liquidar obligaciones con proveedores, desde la captura del pago hasta su conciliación o cancelación.
+
+**Flujo paso a paso:**
+
+1. **Preparar la obligación:** registrar la factura de proveedor para generar su CxP. Para aplicar el pago, la factura debe continuar **Registrada** y la CxP debe tener saldo suficiente.
+2. **Crear el pago:** seleccionar proveedor y cuenta bancaria; capturar fecha, método (efectivo, transferencia, tarjeta o cheque), referencias, total y las aplicaciones a CxP. La cuenta y las obligaciones deben corresponder a la empresa del pago. Los detalles se capturan al crear el documento; su edición posterior no está disponible en este flujo.
+3. **Guardar o aplicar:** elegir **Borrador** para conservar la captura sin afectar saldos, o **Aplicado** para ejecutarla directamente. Si no se indica estado, el pago se crea como **Aplicado**. Un borrador también puede pasar a aplicado.
+4. **Validar las aplicaciones:** debe existir al menos un detalle; cada importe debe ser positivo y no superar el saldo de su CxP. La suma debe coincidir con el total, con tolerancia de un centavo. Si falla una validación, no se completa la aplicación.
+5. **Actualizar saldos:** descontar las aplicaciones de las CxP y dejarlas **Parciales** o **Pagadas**. Disminuir el saldo de la cuenta bancaria por el total y generar un movimiento de **Cargo**, inicialmente **Pendiente**, relacionado con el pago.
+6. **Conciliar y cerrar:** incorporar el cargo a la conciliación de la cuenta y período. Cuando la diferencia entre el banco y el saldo interno no supere un centavo, cerrar la conciliación y marcar el movimiento **Conciliado**. El pago conserva el estado **Aplicado**; no tiene un estado ni una operación propia de cierre.
+7. **Cancelar un pago aplicado:** utilizar la cancelación del pago de origen. Se devuelven los importes a las CxP, se restituye el saldo bancario y se cancela el movimiento. Las obligaciones vuelven a **Pendientes** o **Parciales**, según su saldo. Un pago **Cancelado** no puede editarse y repetir su cancelación no vuelve a afectar saldos.
+
+**Límites del flujo actual:** registrar el pago afecta el saldo interno, sin enviar una transferencia al banco ni comprobar fondos suficientes. Cancelar un pago conciliado no recalcula la conciliación cerrada. La cancelación de un borrador también devuelve importes a las CxP y al banco, aunque no se hubieran descontado; por ello no representa una reversión correcta de saldos. Cambiar importes de un pago ya aplicado tampoco recalcula sus efectos anteriores.
+
+
+**Tablas, llaves y relaciones:** todas las tablas siguientes se identifican mediante su llave principal `id`. Se incluyen únicamente las llaves que conectan este proceso.
+
+| Papel | Tabla | Llaves de relación |
+| --- | --- | --- |
+| Principal: documento | `pagos` | `empresa_id` → `empresas.id`; `proveedor_id` → `proveedores.id`; `cuenta_bancaria_id` → `cuentas_bancarias.id` |
+| Principal: aplicaciones | `pago_detalle` | `pago_id` → `pagos.id`; `cxp_id` → `cuentas_por_pagar.id` |
+| Obligación | `cuentas_por_pagar` | `empresa_id` → `empresas.id`; `proveedor_id` → `proveedores.id`; `factura_proveedor_id` → `facturas_proveedor.id` (una CxP por factura) |
+| Documento de origen | `facturas_proveedor` | `empresa_id` → `empresas.id`; `proveedor_id` → `proveedores.id` |
+| Cuenta de salida | `cuentas_bancarias` | `empresa_id` → `empresas.id`; `banco_id` → `bancos.id`; `moneda_id` → `monedas.id` |
+| Efecto bancario | `movimientos_bancarios` | `cuenta_bancaria_id` → `cuentas_bancarias.id`; `pago_id` → `pagos.id` (opcional) |
+| Cierre bancario | `conciliaciones_bancarias` | `cuenta_bancaria_id` → `cuentas_bancarias.id` |
+| Partidas del cierre | `conciliacion_detalle` | `conciliacion_id` → `conciliaciones_bancarias.id`; `movimiento_bancario_id` → `movimientos_bancarios.id` |
+| Catálogos de apoyo | `empresas`, `proveedores`, `bancos`, `monedas` | Aportan las referencias de empresa, proveedor, banco y moneda |
+
+Un pago reúne varias aplicaciones y una CxP puede recibir aplicaciones de varios pagos. El movimiento conserva la referencia al pago y se incorpora a una conciliación mediante sus detalles.
+
+**Relaciones de tablas del flujo:**
+
+```mermaid
+erDiagram
+    empresas ||--o{ pagos : "empresa_id"
+    proveedores ||--o{ pagos : "proveedor_id"
+    cuentas_bancarias ||--o{ pagos : "cuenta_bancaria_id"
+    pagos ||--o{ pago_detalle : "pago_id"
+    cuentas_por_pagar ||--o{ pago_detalle : "cxp_id"
+    empresas ||--o{ cuentas_por_pagar : "empresa_id"
+    proveedores ||--o{ cuentas_por_pagar : "proveedor_id"
+    facturas_proveedor ||--o| cuentas_por_pagar : "factura_proveedor_id"
+    empresas ||--o{ facturas_proveedor : "empresa_id"
+    proveedores ||--o{ facturas_proveedor : "proveedor_id"
+    empresas ||--o{ cuentas_bancarias : "empresa_id"
+    bancos ||--o{ cuentas_bancarias : "banco_id"
+    monedas ||--o{ cuentas_bancarias : "moneda_id"
+    cuentas_bancarias ||--o{ movimientos_bancarios : "cuenta_bancaria_id"
+    pagos |o--o{ movimientos_bancarios : "pago_id"
+    cuentas_bancarias ||--o{ conciliaciones_bancarias : "cuenta_bancaria_id"
+    conciliaciones_bancarias ||--o{ conciliacion_detalle : "conciliacion_id"
+    movimientos_bancarios ||--o{ conciliacion_detalle : "movimiento_bancario_id"
+```
+
+**Dependencias:** CxP aporta la obligación y su factura registrada; bancos y cuentas bancarias registran la salida y permiten conciliarla. CxC no tiene relación directa con `pagos`: los ingresos de clientes se gestionan mediante `cobros` y `cobro_detalle`. Contabilidad puede vincular el pago o su movimiento a `poliza_detalle`, pero aplicar el pago no genera automáticamente una póliza.
 
