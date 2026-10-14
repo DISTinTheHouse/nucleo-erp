@@ -30,6 +30,12 @@ from finanzas.models import (
     Poliza,
     PolizaDetalle,
 )
+from finanzas.services.factura_proveedor_montos import (
+    CENTAVO,
+    completar_linea,
+    encabezado_cuadra,
+    totales_desde_lineas,
+)
 from finanzas.services.poliza_service import PolizaService
 from finanzas.services.cuenta_por_pagar_service import (
     CuentaPorPagarService,
@@ -745,6 +751,22 @@ class FacturaProveedorDetalleSerializer(serializers.ModelSerializer):
             "factura_proveedor": {"read_only": True},
         }
 
+    def validate(self, attrs):
+        # ``subtotal``/``total`` no capturados se derivan; uno capturado que no
+        # cuadra (total != subtotal - descuento + impuesto) se rechaza (#385).
+        try:
+            subtotal, total = completar_linea(
+                attrs.get("cantidad"), attrs.get("precio_unitario"),
+                attrs.get("descuento"), attrs.get("impuesto"),
+                subtotal=attrs.get("subtotal"), total=attrs.get("total"),
+            )
+        except ValueError:
+            raise ValidationError({"total": "El total no cuadra con subtotal - descuento + impuesto."})
+        attrs["subtotal"], attrs["total"] = subtotal, total
+        attrs.setdefault("descuento", Decimal("0"))
+        attrs.setdefault("impuesto", Decimal("0"))
+        return attrs
+
 
 class FacturaProveedorSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     nested_write_on_create_only = ("factura_proveedor_detalles",)
@@ -784,7 +806,39 @@ class FacturaProveedorSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnSe
             recepcion = attrs.get("recepcion")
             if recepcion and oc and getattr(recepcion, "orden_compra_id", None) and recepcion.orden_compra_id != getattr(oc, "pk", oc):
                 raise ValidationError({"recepcion": "Recepción no corresponde a la OC."})
+        self._validar_montos_contra_lineas(attrs)
         return attrs
+
+    CAMPOS_MONTO = ("subtotal", "descuento", "impuestos", "total")
+
+    def _validar_montos_contra_lineas(self, attrs):
+        """Los montos del encabezado se derivan de las líneas (#385)."""
+        capturados = {k: attrs[k] for k in self.CAMPOS_MONTO if k in attrs}
+        if self.instance is None:
+            lineas = attrs.get("factura_proveedor_detalles") or []
+            if not lineas:
+                raise ValidationError({"factura_proveedor_detalles": "La factura necesita al menos una línea."})
+            derivado = totales_desde_lineas(lineas)
+            distintos = encabezado_cuadra(capturados, derivado)
+            if distintos:
+                raise ValidationError({
+                    campo: f"No cuadra con las líneas (suma {derivado[campo]})." for campo in distintos
+                })
+            attrs.update(derivado)
+            return
+        # Update: las líneas no se editan, así que los montos tampoco. Una factura
+        # vieja SIN líneas (creada antes de esta regla; por la API ya no se pueden
+        # agregar líneas) conserva sus montos editables para poder corregirla.
+        if not self.instance.factura_proveedor_detalles.exists():
+            return
+        cambiados = [
+            k for k, v in capturados.items()
+            if abs(Decimal(str(v)) - Decimal(str(getattr(self.instance, k)))) > CENTAVO
+        ]
+        if cambiados:
+            raise ValidationError({
+                campo: "Se deriva de las líneas de la factura y no se edita." for campo in cambiados
+            })
 
 
 class BancoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):

@@ -177,6 +177,9 @@ class ProveedorEmpresaTests(TestCase):
         self.assertIsNone(proveedor.fecha_baja)
 
 
+_FABRICAS = {}
+
+
 class ProveedorKpisTests(TestCase):
     """``GET /proveedores/kpis/`` (EC-436): scorecard por proveedor con datos
     reales de compras (sin fabricar capacidad/fechas que no existen)."""
@@ -289,11 +292,24 @@ class ProveedorKpisTests(TestCase):
         )
 
         cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
+        cls.superusuario = Usuario.objects.create(
+            username="root", email="root@nowhere.test", is_superuser=True, is_staff=True,
+        )
+        # Para los tests que arman más datos (no se cuelgan de ``cls``: Django
+        # copia los atributos de ``setUpTestData`` por instancia).
+        _FABRICAS["proveedor"] = _proveedor
+        _FABRICAS["oc_con_recepcion"] = _oc_con_recepcion
 
-    def _get(self, user=None):
+    def nuevo_proveedor(self, *args, **kwargs):
+        return _FABRICAS["proveedor"](*args, **kwargs)
+
+    def nueva_oc_con_recepcion(self, *args, **kwargs):
+        return _FABRICAS["oc_con_recepcion"](*args, **kwargs)
+
+    def _get(self, user=None, query=""):
         client = APIClient()
         client.force_authenticate(user=user or self.usuario)
-        return client.get(self.URL)
+        return client.get(self.URL + query)
 
     def _fila(self, resp, proveedor_id):
         return next(p for p in resp.data["proveedores"] if p["proveedor_id"] == proveedor_id)
@@ -318,10 +334,11 @@ class ProveedorKpisTests(TestCase):
         self.assertEqual(fila["lead_time"]["dias_promedio_real"], 19.0)
         self.assertEqual(fila["lead_time"]["dias_promedio_pactado"], 9.0)
         self.assertAlmostEqual(fila["calidad"]["pct_rechazado"], 42.9, places=1)
-        self.assertAlmostEqual(fila["cumplimiento_cantidad"]["pct"], 70.0, places=1)
+        # Recibido NETO (#381): 7 recibidas - 3 rechazadas = 4 de 10.
+        self.assertAlmostEqual(fila["cumplimiento_cantidad"]["pct"], 40.0, places=1)
         self.assertAlmostEqual(fila["diferencia_precio"]["pct"], 40.0, places=1)
-        # Promedio de los 4 factores: a_tiempo(0) + calidad(57.1) + cumplimiento(70) + precio(60).
-        self.assertAlmostEqual(fila["scorecard"]["puntaje"], 46.8, places=1)
+        # Promedio de los 4 factores: a_tiempo(0) + calidad(57.1) + cumplimiento(40) + precio(60).
+        self.assertAlmostEqual(fila["scorecard"]["puntaje"], 39.3, places=1)
         self.assertEqual(fila["scorecard"]["semaforo"], "rojo")
 
     def test_recepcion_sin_fecha_prometida_no_cuenta_como_tarde(self):
@@ -343,6 +360,243 @@ class ProveedorKpisTests(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data["proveedores"], [])
+        # Distinto de "sin datos" (#390).
+        self.assertFalse(resp.data["disponible"])
+        self.assertIn("sin empresa", resp.data["motivo"])
+
+    def test_con_empresa_sin_datos_si_esta_disponible(self):
+        otra = Empresa.objects.create(codigo="vacia", razon_social="VACIA SA")
+        user = Usuario.objects.create(username="uv", email="uv@vacia.test", empresa=otra)
+
+        resp = self._get(user)
+
+        self.assertTrue(resp.data["disponible"])
+        self.assertEqual(resp.data["proveedores"], [])
+
+    # --- #390: parámetros, tope, desempate, inactivos ---------------------------
+
+    def test_parametro_desconocido_responde_400(self):
+        resp = self._get(query="?peso_precio=0&meta=99")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("meta", str(resp.data["parametros"]))
+        self.assertIn("peso_precio", str(resp.data["parametros"]))
+
+    def test_parametros_invalidos_responden_400(self):
+        for query in ("?meta_scorecard=abc", "?meta_scorecard=101", "?limite=0", "?limite=999",
+                      "?fecha_desde=2026-13-45", "?fecha_desde=2026-02-01&fecha_hasta=2026-01-01",
+                      "?proveedor=x"):
+            self.assertEqual(self._get(query=query).status_code, 400, query)
+
+    def test_meta_scorecard_cambia_el_semaforo_y_se_devuelve(self):
+        resp = self._get(query="?meta_scorecard=30")
+
+        self.assertEqual(resp.data["filtros"]["meta_scorecard"], 30.0)
+        self.assertEqual(self._fila(resp, self.malo.pk)["scorecard"]["semaforo"], "verde")  # 39.3 >= 30
+
+    def test_filtro_por_proveedor(self):
+        resp = self._get(query=f"?proveedor={self.malo.pk}")
+
+        self.assertEqual([p["proveedor_id"] for p in resp.data["proveedores"]], [self.malo.pk])
+
+    def test_limite_marca_truncado_y_total(self):
+        resp = self._get(query="?limite=1")
+
+        self.assertEqual(len(resp.data["proveedores"]), 1)
+        self.assertEqual(resp.data["total_proveedores"], 3)
+        self.assertTrue(resp.data["truncado"])
+        self.assertFalse(self._get().data["truncado"])
+
+    def test_empate_se_desempata_por_nombre(self):
+        from datetime import date
+        from decimal import Decimal as D
+
+        otro = self.nuevo_proveedor("PROV-AAA", "AAA Igual de Puntual")
+        self.nueva_oc_con_recepcion(
+            otro, "RC-AAA-1", date(2026, 1, 1), date(2026, 1, 10), date(2026, 1, 8),
+            cantidad=10, precio=D("5.00"), cantidad_recibida=10, precio_facturado=D("5.00"),
+        )
+
+        orden = [p["proveedor_id"] for p in self._get().data["proveedores"]]
+
+        self.assertEqual(orden[:2], [otro.pk, self.bueno.pk])  # mismo puntaje 100: nombre ascendente
+
+    def test_proveedor_inactivo_no_aparece(self):
+        Proveedor.objects.filter(pk=self.malo.pk).update(activo=False)
+
+        ids = [p["proveedor_id"] for p in self._get().data["proveedores"]]
+
+        self.assertNotIn(self.malo.pk, ids)
+        self.assertIn(self.bueno.pk, ids)
+
+    # --- #388: lead time y zona horaria ---------------------------------------
+
+    def test_lead_time_real_y_pactado_usan_las_mismas_recepciones(self):
+        from datetime import date
+
+        prov = self.nuevo_proveedor("PROV-LT", "Lead Time")
+        # Con fecha prometida: real 5 días, pactado 4.
+        self.nueva_oc_con_recepcion(prov, "RC-LT-1", date(2026, 2, 1), date(2026, 2, 5), date(2026, 2, 6))
+        # Sin fecha prometida y llegó a los 50 días: no puede contaminar el promedio real.
+        self.nueva_oc_con_recepcion(prov, "RC-LT-2", date(2026, 2, 1), None, date(2026, 3, 23))
+
+        lead = self._fila(self._get(), prov.pk)["lead_time"]
+
+        self.assertEqual(lead["dias_promedio_real"], 5.0)
+        self.assertEqual(lead["dias_promedio_pactado"], 4.0)
+        self.assertEqual(lead["recepciones_medidas"], 1)
+
+    def test_puntualidad_usa_la_fecha_local_no_utc(self):
+        """Recepción a las 23:30 hora de CDMX = 05:30 UTC del día siguiente."""
+        from datetime import date, datetime
+
+        from compras.models import Recepcion
+
+        prov = self.nuevo_proveedor("PROV-TZ", "Zona Horaria")
+        _oc, rec, _d, _r = self.nueva_oc_con_recepcion(
+            prov, "RC-TZ-1", date(2026, 1, 1), date(2026, 1, 10), date(2026, 1, 10)
+        )
+        Recepcion.objects.filter(pk=rec.pk).update(fecha_recepcion=timezone.make_aware(datetime(2026, 1, 10, 23, 30)))
+
+        fila = self._fila(self._get(), prov.pk)
+
+        self.assertEqual(fila["entrega_a_tiempo"]["pct"], 100.0)
+        self.assertEqual(fila["lead_time"]["dias_promedio_real"], 9.0)
+
+    # --- #389/#378: criterios compartidos -------------------------------------
+
+    def test_factura_en_borrador_no_cuenta_en_la_diferencia_de_precio(self):
+        from finanzas.models import FacturaProveedor, FacturaProveedorDetalle
+
+        FacturaProveedor.objects.filter(proveedor=self.malo).update(
+            estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR
+        )
+
+        fila = self._fila(self._get(), self.malo.pk)
+
+        self.assertIsNone(fila["diferencia_precio"]["pct"])
+        self.assertEqual(fila["diferencia_precio"]["por_moneda"], [])
+        self.assertTrue(FacturaProveedorDetalle.objects.filter(factura_proveedor__proveedor=self.malo).exists())
+
+    def test_factura_en_otra_moneda_que_su_oc_no_se_compara(self):
+        from nucleo.models import Moneda
+
+        from finanzas.models import FacturaProveedor
+
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        FacturaProveedor.objects.filter(proveedor=self.malo).update(moneda=usd)
+
+        fila = self._fila(self._get(), self.malo.pk)
+
+        self.assertIsNone(fila["diferencia_precio"]["pct"])
+
+    def test_solo_rechazos_con_resultado_rechazo_cuentan_en_calidad(self):
+        from compras.models import CalidadInspeccionDetalle
+
+        CalidadInspeccionDetalle.objects.filter(recepcion_detalle__recepcion__proveedor=self.malo).update(
+            resultado="liberado"
+        )
+
+        fila = self._fila(self._get(), self.malo.pk)
+
+        self.assertEqual(fila["calidad"]["pct_rechazado"], 0.0)
+
+    def test_dos_unidades_no_se_suman_en_el_cumplimiento(self):
+        from datetime import date
+
+        from catalogo.models import Producto
+        from nucleo.models import UnidadMedida
+
+        from compras.models import OrdenCompra, OrdenCompraDetalle
+
+        prov = self.nuevo_proveedor("PROV-UM", "Dos Unidades")
+        oc, _rec, _d, _r = self.nueva_oc_con_recepcion(prov, "RC-UM-1", date(2026, 1, 1), date(2026, 1, 10), date(2026, 1, 8))
+        metros = UnidadMedida.objects.create(clave="MTR", nombre="Metro")
+        piezas = UnidadMedida.objects.create(clave="PZA", nombre="Pieza")
+        Producto.objects.filter(pk=self.producto.pk).update(unidad_medida=metros)
+        otro = Producto.objects.create(empresa=self.empresa, nombre="Botón", unidad_medida=piezas)
+        OrdenCompraDetalle.objects.create(orden_compra=oc, producto=otro, sucursal=self.sucursal, cantidad=1000, precio=1)
+
+        cumplimiento = self._fila(self._get(), prov.pk)["cumplimiento_cantidad"]
+
+        self.assertTrue(cumplimiento["mezcla_unidades"])
+        self.assertIsNone(cumplimiento["pct"])
+        self.assertEqual({u["unidad"] for u in cumplimiento["por_unidad"]}, {"MTR", "PZA"})
+        self.assertEqual(OrdenCompra.objects.filter(proveedor=prov).count(), 1)
+
+    # --- aislamiento y superusuario ------------------------------------------
+
+    def test_otra_empresa_no_contamina_ni_se_ve(self):
+        from datetime import date
+
+        from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+        from catalogo.models import Producto
+        from inventarios.models import Almacen
+        from nucleo.models import Sucursal
+
+        globex = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        suc = Sucursal.objects.create(empresa=globex, codigo="GDL", nombre="GDL")
+        alm = Almacen.objects.create(empresa=globex, sucursal=suc, codigo="ALG", nombre="Almacen G")
+        usuario_g = Usuario.objects.create(username="ug", email="ug@globex.test", empresa=globex)
+        prov = Proveedor.objects.create(
+            empresa=globex, nombre="Proveedor Globex", moneda=self.moneda, sat_regimen_fiscal=self.bueno.sat_regimen_fiscal,
+            sat_forma_pago=self.bueno.sat_forma_pago, sat_metodo_pago=self.bueno.sat_metodo_pago, codigo="PG",
+            razon_social="PG SA", telefono="8100000000", contacto_principal="C", rfc="XAXX010101000", email="pg@t.mx",
+        )
+        producto = Producto.objects.create(empresa=globex, nombre="Insumo G")
+        oc = OrdenCompra.objects.create(
+            empresa=globex, sucursal=suc, proveedor=prov, moneda=self.moneda, usuario=usuario_g,
+            fecha_oc=date(2026, 1, 1), estatus=OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+        )
+        det = OrdenCompraDetalle.objects.create(orden_compra=oc, producto=producto, sucursal=suc, cantidad=10, precio=1)
+        rec = Recepcion.objects.create(
+            orden_compra=oc, empresa=globex, sucursal=suc, proveedor=prov, almacen=alm, usuario=usuario_g,
+            folio="RC-G", fecha_recepcion=timezone.now(), estatus=Recepcion.EstatusRecepcion.RECIBIDA,
+        )
+        RecepcionDetalle.objects.create(recepcion=rec, orden_compra_detalle=det, producto=producto, cantidad_recibida=10)
+
+        ids = [p["proveedor_id"] for p in self._get().data["proveedores"]]
+
+        self.assertNotIn(prov.pk, ids)
+        self.assertEqual(self.client_api_get_detalle(self.usuario, prov.pk, "puntualidad").status_code, 404)
+
+    def test_superusuario_ve_todas_las_empresas_con_o_sin_empresa(self):
+        sin_empresa = self._get(self.superusuario)
+        con_empresa = Usuario.objects.create(
+            username="root2", email="root2@acme.test", is_superuser=True, is_staff=True, empresa=self.empresa,
+        )
+
+        self.assertTrue(sin_empresa.data["disponible"])
+        self.assertEqual(len(sin_empresa.data["proveedores"]), 3)
+        self.assertEqual(len(self._get(con_empresa).data["proveedores"]), 3)
+
+    # --- drill-down por proveedor ---------------------------------------------
+
+    def client_api_get_detalle(self, user, proveedor_id, factor, extra=""):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(f"/api/v1/terceros/proveedores/{proveedor_id}/kpis-detalle/?factor={factor}{extra}")
+
+    def test_detalle_de_puntualidad_lista_las_recepciones(self):
+        resp = self.client_api_get_detalle(self.usuario, self.malo.pk, "puntualidad")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["total"], 1)
+        self.assertFalse(resp.data["truncado"])
+        self.assertEqual(resp.data["registros"][0]["recepcion_folio"], "RC-MALO-1")
+        self.assertFalse(resp.data["registros"][0]["a_tiempo"])
+
+    def test_detalle_de_calidad_precio_y_cumplimiento(self):
+        calidad = self.client_api_get_detalle(self.usuario, self.malo.pk, "calidad").data
+        precio = self.client_api_get_detalle(self.usuario, self.malo.pk, "precio").data
+        cumplimiento = self.client_api_get_detalle(self.usuario, self.malo.pk, "cumplimiento").data
+
+        self.assertEqual(calidad["registros"][0]["cantidad_rechazada"], 3)
+        self.assertEqual(precio["registros"][0]["precio_facturado"], Decimal("7.00"))
+        self.assertEqual(cumplimiento["registros"][0]["cantidad_recibida"], Decimal("4"))
+
+    def test_detalle_factor_invalido_responde_400(self):
+        self.assertEqual(self.client_api_get_detalle(self.usuario, self.malo.pk, "otro").status_code, 400)
 
 
 class ClienteKpisTests(TestCase):
@@ -377,11 +631,11 @@ class ClienteKpisTests(TestCase):
         cls.cliente_b = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente B", correo="b@test.mx")
         cls.cliente_b.vendedores.add(cls.vendedor_b)
 
-        def _pedido(cliente, hace_dias):
+        def _pedido(cliente, hace_dias, estatus=3):  # 3 = AUTORIZADA
             p = Pedido.objects.create(
                 empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=cls.moneda,
                 persona_pagos="Pagos", correo_facturas="p@acme.test", telefono_pagos="8100000000",
-                forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+                forma_pago="03", metodo_pago="PUE", uso_cfdi="G03", estatus=estatus,
             )
             if hace_dias:
                 Pedido.objects.filter(pk=p.pk).update(created_at=timezone.now() - timedelta(days=hace_dias))
@@ -415,16 +669,20 @@ class ClienteKpisTests(TestCase):
         factura_b2 = _factura(cls.cliente_b, "0.00")
         _cxc(cls.cliente_b, factura_b2, "200.00", hace_dias_vencida=90)  # bucket 60+
 
-    def _get(self, user):
+    def _get(self, user, query=""):
         client = APIClient()
         client.force_authenticate(user=user)
-        return client.get(self.URL)
+        return client.get(self.URL + query)
+
+    @staticmethod
+    def _mxn(bloque):
+        return next(m for m in bloque["por_moneda"] if m["moneda"] == "MXN")
 
     def test_vendedor_solo_ve_sus_propios_clientes(self):
         resp = self._get(self.vendedor_a)
 
         self.assertEqual(resp.status_code, 200, resp.data)
-        ventas = resp.data["ventas_por_cliente"]
+        ventas = self._mxn(resp.data["ventas_por_cliente"])
         self.assertEqual(ventas["total_facturado"], Decimal("1000.00"))  # excluye la cancelada
         self.assertEqual(ventas["total_clientes_facturados"], 1)
         self.assertEqual([c["cliente_id"] for c in ventas["top_clientes"]], [self.cliente_a.pk])
@@ -432,7 +690,7 @@ class ClienteKpisTests(TestCase):
     def test_admin_ve_todos_los_clientes_de_la_empresa(self):
         resp = self._get(self.admin_empresa)
 
-        ventas = resp.data["ventas_por_cliente"]
+        ventas = self._mxn(resp.data["ventas_por_cliente"])
         self.assertEqual(ventas["total_facturado"], Decimal("3000.00"))
         self.assertEqual(ventas["total_clientes_facturados"], 2)
 
@@ -450,10 +708,12 @@ class ClienteKpisTests(TestCase):
 
         cartera = resp.data["cartera_antiguedad"]
         self.assertTrue(cartera["disponible"])
-        self.assertEqual(cartera["saldo_total_vencido"], Decimal("1200.00"))
-        self.assertEqual(cartera["buckets"]["0_30"], {"total": 1, "monto": Decimal("300.00")})
-        self.assertEqual(cartera["buckets"]["31_60"], {"total": 1, "monto": Decimal("700.00")})
-        self.assertEqual(cartera["buckets"]["60_mas"], {"total": 1, "monto": Decimal("200.00")})
+        mxn = self._mxn(cartera)
+        self.assertEqual(mxn["saldo_total_vencido"], Decimal("1200.00"))
+        self.assertEqual(mxn["buckets"]["0_30"], {"total": 1, "monto": Decimal("300.00")})
+        self.assertEqual(mxn["buckets"]["31_60"], {"total": 1, "monto": Decimal("700.00")})
+        self.assertEqual(mxn["buckets"]["60_mas"], {"total": 1, "monto": Decimal("200.00")})
+        self.assertEqual(cartera["total_cuentas_vencidas"], 3)
 
     def test_documentos_de_otra_empresa_no_entran(self):
         """#366: pedido, factura y CxC de otra empresa que apuntan a un cliente visible."""
@@ -480,16 +740,16 @@ class ClienteKpisTests(TestCase):
 
         data = self._get(self.admin_empresa).data
 
-        self.assertEqual(data["ventas_por_cliente"]["total_facturado"], Decimal("3000.00"))
+        self.assertEqual(self._mxn(data["ventas_por_cliente"])["total_facturado"], Decimal("3000.00"))
         self.assertEqual(data["clientes_activos"]["activos"], 1)
-        self.assertEqual(data["cartera_antiguedad"]["saldo_total_vencido"], Decimal("1200.00"))
+        self.assertEqual(self._mxn(data["cartera_antiguedad"])["saldo_total_vencido"], Decimal("1200.00"))
         self.assertNotIn(cxc.pk, [f["id"] for f in data["cartera_antiguedad"]["drill_down"]])
 
     def test_cartera_acotada_por_vendedor(self):
         resp = self._get(self.vendedor_a)
 
         cartera = resp.data["cartera_antiguedad"]
-        self.assertEqual(cartera["saldo_total_vencido"], Decimal("300.00"))
+        self.assertEqual(self._mxn(cartera)["saldo_total_vencido"], Decimal("300.00"))
 
     def test_reclamos_devoluciones_no_disponible(self):
         resp = self._get(self.admin_empresa)
@@ -501,6 +761,139 @@ class ClienteKpisTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data["ventas_por_cliente"]["disponible"])
 
+    # --- #367: qué cuenta como facturación y como actividad ------------------
+
+    def _factura_extra(self, cliente, total, estatus, moneda=None, **kwargs):
+        from finanzas.models import Factura
+
+        return Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=cliente, moneda=moneda or self.moneda,
+            total=Decimal(total), estatus=estatus, **kwargs,
+        )
+
+    def _pedido_extra(self, cliente, estatus):
+        from ventas.models import Pedido
+
+        return Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=cliente, moneda=self.moneda,
+            persona_pagos="Pagos", correo_facturas="p@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03", estatus=estatus,
+        )
+
+    def test_facturas_borrador_no_cuentan_como_facturacion(self):
+        from finanzas.models import Factura
+
+        self._factura_extra(self.cliente_a, "7000.00", Factura.FacturaStatus.BORRADOR)
+
+        ventas = self._mxn(self._get(self.admin_empresa).data["ventas_por_cliente"])
+
+        self.assertEqual(ventas["total_facturado"], Decimal("3000.00"))
+
+    def test_pedidos_borrador_y_cancelado_no_son_actividad(self):
+        cliente_c = Cliente.objects.create(empresa=self.empresa, nombre="Cliente C", correo="c@test.mx")
+        self._pedido_extra(cliente_c, estatus=1)  # BORRADOR
+        self._pedido_extra(cliente_c, estatus=5)  # CANCELADO
+
+        activos = self._get(self.admin_empresa).data["clientes_activos"]
+        self.assertEqual(activos["activos"], 1)
+        self.assertEqual(activos["inactivos"], 2)
+
+        self._pedido_extra(cliente_c, estatus=2)  # POR AUTORIZAR sí cuenta
+        self.assertEqual(self._get(self.admin_empresa).data["clientes_activos"]["activos"], 2)
+
+    # --- #370: monedas -------------------------------------------------------
+
+    def test_ventas_y_cartera_no_mezclan_monedas(self):
+        from finanzas.models import CuentaPorCobrar, Factura
+        from nucleo.models import Moneda
+
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        factura = self._factura_extra(self.cliente_a, "100.00", Factura.FacturaStatus.EMITIDA, moneda=usd)
+        CuentaPorCobrar.objects.create(
+            empresa=self.empresa, cliente=self.cliente_a, factura=factura, total=Decimal("100.00"),
+            saldo=Decimal("100.00"), estatus=CuentaPorCobrar.EstatusCxC.PENDIENTE,
+            fecha_vencimiento=timezone.localdate() - timedelta(days=5),
+        )
+
+        data = self._get(self.admin_empresa).data
+
+        monedas = {m["moneda"]: m for m in data["ventas_por_cliente"]["por_moneda"]}
+        self.assertEqual(monedas["MXN"]["total_facturado"], Decimal("3000.00"))
+        self.assertEqual(monedas["USD"]["total_facturado"], Decimal("100.00"))
+        carteras = {m["moneda"]: m for m in data["cartera_antiguedad"]["por_moneda"]}
+        self.assertEqual(carteras["MXN"]["saldo_total_vencido"], Decimal("1200.00"))
+        self.assertEqual(carteras["USD"]["saldo_total_vencido"], Decimal("100.00"))
+        self.assertEqual({f["moneda"] for f in data["cartera_antiguedad"]["drill_down"]}, {"MXN", "USD"})
+
+    # --- #368: cartera --------------------------------------------------------
+
+    def test_cartera_sin_vencimiento_va_aparte(self):
+        from finanzas.models import CuentaPorCobrar, Factura
+
+        factura = self._factura_extra(self.cliente_a, "50.00", Factura.FacturaStatus.EMITIDA)
+        CuentaPorCobrar.objects.create(
+            empresa=self.empresa, cliente=self.cliente_a, factura=factura, total=Decimal("50.00"),
+            saldo=Decimal("50.00"), estatus=CuentaPorCobrar.EstatusCxC.PENDIENTE,
+        )
+
+        cartera = self._get(self.admin_empresa).data["cartera_antiguedad"]
+
+        self.assertEqual(cartera["sin_vencimiento"], [{"moneda": "MXN", "total": 1, "monto": Decimal("50.00")}])
+        self.assertEqual(self._mxn(cartera)["saldo_total_vencido"], Decimal("1200.00"))  # no se mezcla
+
+    def test_cartera_excluye_facturas_canceladas_o_inactivas(self):
+        from finanzas.models import CuentaPorCobrar, Factura
+
+        vencida = timezone.localdate() - timedelta(days=10)
+        for estatus, activo in ((Factura.FacturaStatus.CANCELADA, True), (Factura.FacturaStatus.EMITIDA, False)):
+            factura = self._factura_extra(self.cliente_a, "10.00", estatus, activo=activo)
+            CuentaPorCobrar.objects.create(
+                empresa=self.empresa, cliente=self.cliente_a, factura=factura, total=Decimal("10.00"),
+                saldo=Decimal("10.00"), estatus=CuentaPorCobrar.EstatusCxC.PENDIENTE, fecha_vencimiento=vencida,
+            )
+
+        cartera = self._get(self.admin_empresa).data["cartera_antiguedad"]
+
+        self.assertEqual(self._mxn(cartera)["saldo_total_vencido"], Decimal("1200.00"))
+        self.assertEqual(cartera["total_cuentas_vencidas"], 3)
+        self.assertEqual(cartera["sin_vencimiento"], [])
+
+    # --- #371: drill-down de activos / inactivos -----------------------------
+
+    def test_drill_down_de_clientes_activos_e_inactivos(self):
+        activos = self._get(self.admin_empresa).data["clientes_activos"]
+
+        lista = activos["drill_down"]
+        self.assertEqual([c["cliente_id"] for c in lista["activos"]], [self.cliente_a.pk])
+        self.assertEqual([c["cliente_id"] for c in lista["inactivos"]], [self.cliente_b.pk])
+        # Misma definición que los conteos.
+        self.assertEqual(len(lista["activos"]), activos["activos"])
+        self.assertEqual(len(lista["inactivos"]), activos["inactivos"])
+        self.assertFalse(lista["activos_truncado"])
+        self.assertFalse(lista["inactivos_truncado"])
+
+    def test_drill_down_de_clientes_se_trunca_y_lo_indica(self):
+        for i in range(25):
+            Cliente.objects.create(empresa=self.empresa, nombre=f"Inactivo {i:02d}", correo=f"i{i}@test.mx")
+
+        activos = self._get(self.admin_empresa).data["clientes_activos"]
+
+        self.assertEqual(activos["inactivos"], 26)
+        self.assertEqual(len(activos["drill_down"]["inactivos"]), 20)
+        self.assertTrue(activos["drill_down"]["inactivos_truncado"])
+
+    def test_drill_down_respeta_el_alcance_del_vendedor(self):
+        activos = self._get(self.vendedor_a).data["clientes_activos"]
+
+        self.assertEqual(activos["total"], 1)
+        self.assertEqual([c["cliente_id"] for c in activos["drill_down"]["activos"]], [self.cliente_a.pk])
+        self.assertEqual(activos["drill_down"]["inactivos"], [])
+
+    def test_parametro_desconocido_responde_400(self):
+        resp = self._get(self.admin_empresa, "?fecha_desde=2030-01-01")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("fecha_desde", str(resp.data["parametros"]))
 
 class ClienteCarteraTests(TestCase):
     """``resumen_comercial.cartera``: saldo por cobrar por moneda y antigüedad (30/60/90/120)."""

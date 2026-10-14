@@ -4879,6 +4879,141 @@ class OrdenProduccionKpisTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data["cumplimiento_a_tiempo"]["disponible"])
 
+    # --- #357: parámetros soportados / no soportados ---------------------------
+
+    def test_parametro_no_soportado_responde_400(self):
+        resp = self._get(self.usuario, "?cliente=1&linea=3")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("cliente", str(resp.data["parametros"]))
+        self.assertIn("linea", str(resp.data["parametros"]))
+
+    def test_parametros_invalidos_responden_400(self):
+        for query in ("?sucursal=abc", "?fecha_desde=2026-13-40", "?fecha_desde=2026-02-01&fecha_hasta=2026-01-01"):
+            with self.subTest(query=query):
+                self.assertEqual(self._get(self.usuario, query).status_code, 400)
+
+    def test_filtro_por_sucursal_cambia_el_resultado_y_se_refleja(self):
+        resp = self._get(self.admin_empresa, f"?sucursal={self.sucursal_2.pk}")
+
+        self.assertEqual(resp.data["filtros"]["sucursal"], self.sucursal_2.pk)
+        self.assertEqual([d["op_id"] for d in resp.data["ops_atrasadas"]["drill_down"]], [self.op_vencida_sucursal_2.pk])
+        self.assertEqual(resp.data["cumplimiento_a_tiempo"]["ops_terminadas"], 0)
+
+    def test_sucursal_inexistente_o_ajena_da_vacio_no_datos_sin_filtrar(self):
+        resp = self._get(self.admin_empresa, f"?sucursal={self.sucursal_otra.pk}")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["ops_atrasadas"]["total"], 0)
+        self.assertEqual(resp.data["cumplimiento_a_tiempo"]["ops_terminadas"], 0)
+
+    def test_filtro_por_fecha_compromiso(self):
+        hoy = timezone.localdate()
+        desde = (hoy - timedelta(days=3)).isoformat()
+
+        resp = self._get(self.admin_empresa, f"?fecha_desde={desde}&fecha_hasta={hoy.isoformat()}")
+
+        self.assertEqual(resp.data["filtros"]["fecha_desde"].isoformat(), desde)
+        # Compromiso en la ventana: OP-A (hoy), OP-C (hace 2), OP-F (hoy), OP-H (hace 1), OP-E cancelada (hace 1).
+        self.assertEqual(resp.data["cumplimiento_a_tiempo"]["ops_terminadas"], 2)  # OP-A y OP-F
+        self.assertEqual(resp.data["ops_atrasadas"]["total"], 2)  # OP-C y OP-H
+
+    # --- #358: drill-down completo --------------------------------------------
+
+    def test_drill_down_marca_truncado_y_orden_estable(self):
+        hoy = timezone.localdate()
+        ahora = timezone.now()
+        for i in range(25):
+            OrdenProduccion.objects.create(
+                empresa=self.empresa, sucursal=self.sucursal, folio_op=f"OP-ATR-{i}",
+                estatus_op=OrdenProduccion.EstatusOrdenProduccion.BORDANDO,
+                fecha_entrega_estimada=hoy - timedelta(days=10),
+            )
+            OrdenProduccion.objects.create(
+                empresa=self.empresa, sucursal=self.sucursal, folio_op=f"OP-TAR-{i}",
+                estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+                fecha_entrega_estimada=hoy - timedelta(days=5), fecha_fin=ahora,
+            )
+
+        data = self._get(self.usuario).data
+
+        atrasadas = data["ops_atrasadas"]
+        self.assertEqual(atrasadas["total"], 26)
+        self.assertEqual(atrasadas["drill_down_total"], 26)
+        self.assertTrue(atrasadas["drill_down_truncado"])
+        self.assertEqual(len(atrasadas["drill_down"]), 20)
+        tardias = data["cumplimiento_a_tiempo"]
+        self.assertEqual(tardias["drill_down_tardias_total"], 26)
+        self.assertTrue(tardias["drill_down_tardias_truncado"])
+        # Misma fecha_fin en 25 OPs: el desempate por op_id descendente fija el orden.
+        ids = [d["op_id"] for d in tardias["drill_down_tardias"]]
+        self.assertEqual(ids, sorted(ids, reverse=True))
+        self.assertEqual(len(set(ids)), 20)
+
+    LISTADO = "/api/v1/produccion/orden-produccion/"
+
+    def _listado(self, user, query=""):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(f"{self.LISTADO}{query}")
+
+    def test_listado_reproduce_cada_conjunto_del_kpi(self):
+        kpis = self._get(self.usuario).data
+        tardias = self._listado(self.usuario, "?kpi=tardias").data
+        atrasadas = self._listado(self.usuario, "?kpi=atrasadas").data
+        terminadas = self._listado(self.usuario, "?kpi=terminadas").data
+        a_tiempo = self._listado(self.usuario, "?kpi=a_tiempo").data
+        sin_clasificar = self._listado(self.usuario, "?kpi=sin_clasificar").data
+
+        otd = kpis["cumplimiento_a_tiempo"]
+        self.assertEqual(len(tardias), otd["ops_tardias"])
+        self.assertEqual([o["op_id"] for o in tardias], [self.op_tardia.pk])
+        self.assertEqual(len(atrasadas), kpis["ops_atrasadas"]["total"])
+        self.assertEqual(len(terminadas), otd["ops_terminadas"])
+        self.assertEqual(len(a_tiempo), otd["ops_a_tiempo"])
+        self.assertEqual(len(sin_clasificar), otd["ops_sin_clasificar"])
+
+    def test_listado_kpi_desconocido_es_400(self):
+        self.assertEqual(self._listado(self.usuario, "?kpi=otro").status_code, 400)
+
+    def test_listado_filtra_por_estatus_sucursal_y_fechas(self):
+        completadas = self._listado(self.admin_empresa, f"?estatus_op={OrdenProduccion.EstatusOrdenProduccion.COMPLETADO}").data
+        self.assertEqual(len(completadas), 4)
+        cdmx = self._listado(self.admin_empresa, f"?sucursal={self.sucursal_2.pk}").data
+        self.assertEqual([o["op_id"] for o in cdmx], [self.op_vencida_sucursal_2.pk])
+        hoy = timezone.localdate().isoformat()
+        hoy_ops = self._listado(self.admin_empresa, f"?fecha_desde={hoy}&fecha_hasta={hoy}").data
+        self.assertEqual({o["folio_op"] for o in hoy_ops}, {"OP-A", "OP-F"})
+
+    def test_listado_excluye_inactivas_y_expone_fecha_entrega_estimada(self):
+        OrdenProduccion.objects.filter(pk=self.op_vencida.pk).update(activo=False)
+
+        data = self._listado(self.usuario).data
+
+        self.assertNotIn(self.op_vencida.pk, [o["op_id"] for o in data])
+        self.assertTrue(all("fecha_entrega_estimada" in o for o in data))
+        # Los KPIs ya las excluían: ahora cuadran.
+        self.assertEqual(self._get(self.usuario).data["ops_atrasadas"]["total"], 0)
+
+    def test_listado_solo_pagina_si_se_pide(self):
+        completo = self._listado(self.usuario).data
+        self.assertIsInstance(completo, list)
+
+        pagina = self._listado(self.usuario, "?page_size=2").data
+
+        self.assertEqual(pagina["count"], len(completo))
+        self.assertEqual(len(pagina["results"]), 2)
+        self.assertIsNotNone(pagina["next"])
+
+    def test_fecha_fin_tiene_el_mismo_formato_en_listado_y_drill_down(self):
+        drill = json.loads(self._get(self.usuario).content)["cumplimiento_a_tiempo"]["drill_down_tardias"][0]
+        listado = next(
+            o for o in json.loads(self._listado(self.usuario).content) if o["op_id"] == drill["op_id"]
+        )
+
+        self.assertEqual(drill["fecha_fin"], listado["fecha_fin"])
+        self.assertFalse(drill["fecha_fin"].endswith("Z"))
+
 
 class _BomTenantBase:
     """Fixture de dos empresas para el aislamiento multi-tenant de BOM y OP.

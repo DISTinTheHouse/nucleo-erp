@@ -3728,10 +3728,27 @@ class PedidoKpisTests(TestCase):
         activos = resp.data["pedidos_activos"]
         self.assertTrue(activos["disponible"])
         self.assertEqual(activos["total"], 2)
-        self.assertEqual(activos["valor"], Decimal("1500.00"))
+        self.assertEqual(activos["por_moneda"], [{"moneda": "MXN", "total": 2, "valor": Decimal("1500.00")}])
         self.assertEqual(
             {d["id"] for d in activos["drill_down"]}, {self.autorizada.pk, self.en_proceso.pk},
         )
+        self.assertEqual({d["moneda"] for d in activos["drill_down"]}, {"MXN"})
+        self.assertFalse(activos["drill_down_truncado"])
+
+    def test_pedidos_en_otra_moneda_no_se_suman(self):
+        """#370: el pedido en USD va en su propia fila."""
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        cot = self._cotizacion(self.vendedor_a)
+        pedido = self._pedido("PED-USD", cot, estatus=3, gran_total="6179.32")
+        Pedido.objects.filter(pk=pedido.pk).update(moneda=usd)
+
+        activos = self._get(self.vendedor_a).data["pedidos_activos"]
+
+        valores = {m["moneda"]: m for m in activos["por_moneda"]}
+        self.assertEqual(valores["MXN"]["valor"], Decimal("1500.00"))
+        self.assertEqual(valores["USD"]["valor"], Decimal("6179.32"))
+        self.assertEqual(activos["total"], 3)
+        self.assertEqual({d["moneda"] for d in activos["drill_down"]}, {"MXN", "USD"})
 
     def test_otros_tres_kpis_declaran_no_disponible(self):
         resp = self._get(self.vendedor_a)

@@ -1,5 +1,8 @@
 from django.contrib import admin
+from django.core.exceptions import ValidationError
+from django.forms.models import BaseInlineFormSet
 
+from finanzas.services.factura_proveedor_montos import completar_linea, recalcular_encabezado
 from finanzas.models import (
     AlertaMora,
     Banco,
@@ -116,9 +119,22 @@ class FacturaAdmin(admin.ModelAdmin):
     inlines = (FacturaDetalleInline,)
 
 
+class FacturaProveedorDetalleFormSet(BaseInlineFormSet):
+    def clean(self):
+        super().clean()
+        vivas = [
+            f for f in self.forms
+            if getattr(f, "cleaned_data", None) and not f.cleaned_data.get("DELETE")
+        ]
+        if not vivas:
+            raise ValidationError("La factura de proveedor necesita al menos una línea.")
+
+
 class FacturaProveedorDetalleInline(admin.TabularInline):
     model = FacturaProveedorDetalle
-    extra = 0
+    formset = FacturaProveedorDetalleFormSet
+    extra = 1
+    min_num = 1
     autocomplete_fields = ("oc_detalle", "recepcion_detalle", "producto")
 
 
@@ -140,6 +156,35 @@ class FacturaProveedorAdmin(admin.ModelAdmin):
     autocomplete_fields = ("empresa", "sucursal", "proveedor", "oc", "recepcion", "moneda")
     list_select_related = ("empresa", "sucursal", "proveedor", "oc", "recepcion", "moneda")
     inlines = (FacturaProveedorDetalleInline,)
+    # Los montos del encabezado se derivan de las líneas (#385): no se capturan.
+    readonly_fields = ("subtotal", "descuento", "impuestos", "total")
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        # Completa subtotal/total de las líneas que se dejaron en 0 y reescribe
+        # el encabezado con la suma de las líneas guardadas.
+        factura = form.instance
+        for linea in factura.factura_proveedor_detalles.all():
+            try:
+                subtotal, total = completar_linea(
+                    linea.cantidad, linea.precio_unitario, linea.descuento, linea.impuesto,
+                    subtotal=linea.subtotal or None, total=linea.total or None,
+                )
+            except ValueError:  # total capturado que no cuadra: se recalcula
+                subtotal, total = completar_linea(
+                    linea.cantidad, linea.precio_unitario, linea.descuento, linea.impuesto,
+                    subtotal=linea.subtotal or None,
+                )
+            if (linea.subtotal, linea.total) != (subtotal, total):
+                linea.subtotal, linea.total = subtotal, total
+                linea.save(update_fields=["subtotal", "total"])
+        # Con CxP viva el total ya respalda una cuenta: no se reescribe aquí
+        # (mismo criterio que ``ensure_invoice_edit_keeps_account`` en la API).
+        tiene_cxp_viva = CuentaPorPagar.objects.filter(factura_proveedor=factura).exclude(
+            estatus=CuentaPorPagar.EstatusCxP.CANCELADA
+        ).exists()
+        if not tiene_cxp_viva:
+            recalcular_encabezado(factura)
 
 
 @admin.register(Banco)

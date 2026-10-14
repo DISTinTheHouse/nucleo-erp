@@ -3642,20 +3642,30 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # ``ComprasDashboardView.ESTATUS_GASTO_OC`` (excluir lo que todavía no
         # es compromiso real).
         activos = base.filter(estatus__in=self.ESTATUS_PEDIDO_ACTIVOS)
-        agg = activos.aggregate(total=Count("id"), valor=Sum("gran_total"))
+        # El valor va por moneda (#370): un pedido en USD no se suma con los MXN.
+        por_moneda = [
+            {"moneda": fila["moneda__codigo_iso"], "total": fila["total"], "valor": fila["valor"] or Decimal("0")}
+            for fila in activos.values("moneda__codigo_iso")
+            .annotate(total=Count("id"), valor=Sum("gran_total"))
+            .order_by("moneda__codigo_iso")
+        ]
+        total = sum(f["total"] for f in por_moneda)
         drill_down = list(
             activos.order_by("-gran_total", "-id").values(
-                "id", "folio", "estatus", "gran_total", "cliente_nombre"
+                "id", "folio", "estatus", "gran_total", "cliente_nombre", "moneda__codigo_iso"
             )[:20]
         )
         estatus_labels = dict(Pedido.CHOICES_ESTATUS)
         for fila in drill_down:
             fila["estatus_label"] = estatus_labels.get(fila["estatus"], str(fila["estatus"]))
+            fila["moneda"] = fila.pop("moneda__codigo_iso")
         return {
             "disponible": True,
-            "total": agg["total"] or 0,
-            "valor": agg["valor"] or Decimal("0"),
+            "total": total,
+            "por_moneda": por_moneda,
             "drill_down": drill_down,
+            "drill_down_total": total,
+            "drill_down_truncado": total > len(drill_down),
         }
 
 
