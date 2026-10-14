@@ -15,7 +15,7 @@ from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 
 from terceros.cartera import cartera_de_cliente
-from terceros.scope import clientes_base, clientes_visibles, ve_clientes_sin_asignacion
+from terceros.scope import clientes_base, clientes_visibles, clientes_visibles_entre
 from usuarios.models import Usuario
 from ventas.models import Cotizacion, Oportunidad, OportunidadSeguimiento, Pedido
 from ventas.scope import oportunidades_base, oportunidades_visibles
@@ -303,24 +303,18 @@ class SeguimientoSerializer(serializers.ModelSerializer):
     def _clientes_visibles(self, obj):
         """Ids de los clientes que ve el usuario, o ``None`` si no hay que filtrar.
 
-        El superusuario y el admin de empresa ven el nombre siempre, también el de un
-        cliente dado de baja, y no cuestan consulta. Al resto se le aplica la regla de la
-        cartera del onboarding, solo sobre los clientes de las filas que se serializan:
-        una consulta por respuesta, no por fila (se guarda en el serializer de la lista).
+        Regla de ``terceros.scope.clientes_visibles_entre``, solo sobre los clientes de
+        las filas que se serializan: una consulta por respuesta, no por fila (se guarda
+        en el serializer de la lista).
         """
         request = self.context.get("request")
         if request is None:
             return frozenset()
-        if ve_clientes_sin_asignacion(request.user):
-            return None
         lista = self.parent if isinstance(self.parent, serializers.ListSerializer) else None
         if lista is not None and hasattr(lista, "_clientes_visibles_ids"):
             return lista._clientes_visibles_ids
         filas = lista.instance if lista is not None else [obj]
-        ids = {fila.oportunidad.cliente_id for fila in filas} - {None}
-        visibles = frozenset(
-            clientes_visibles(clientes_base(), request.user).filter(pk__in=ids).values_list("pk", flat=True)
-        )
+        visibles = clientes_visibles_entre(request.user, {fila.oportunidad.cliente_id for fila in filas})
         if lista is not None:
             lista._clientes_visibles_ids = visibles
         return visibles
