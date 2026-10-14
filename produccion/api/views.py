@@ -1203,37 +1203,28 @@ class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet)
     serializer_class = BordadoAvancesSerializer
     orden_padre_field = "ob"
 
+    @staticmethod
+    def _puntadas_total(por_pieza, cantidad):
+        # puntadas_total = puntadas_por_pieza × cantidad_bordada
+        return int(round(float(por_pieza or 0) * float(cantidad or 0)))
+
     def perform_create(self, serializer):
-        validated = dict(serializer.validated_data)
-        extra = {}
-        detalle = validated.get("orden_bordado_detalle")
-        if detalle is not None and validated.get("pedido_detalle_talla") is None:
-            pedido_detalle_id = getattr(detalle, "pedido_detalle_id", None)
-            talla_id = getattr(detalle, "talla_id", None)
-            if pedido_detalle_id is not None and talla_id is not None:
-                from ventas.models import PedidoDetalleTalla
-                pdt = (
-                    PedidoDetalleTalla.objects
-                    .filter(pedido_detalle_id=pedido_detalle_id, talla_id=talla_id)
-                    .only("id")
-                    .first()
-                )
-                if pdt is not None:
-                    extra["pedido_detalle_talla"] = pdt
+        v = serializer.validated_data
+        serializer.save(
+            usuario=self.request.user,
+            puntadas_total=self._puntadas_total(
+                v.get("puntadas_por_pieza"), v.get("cantidad_bordada")
+            ),
+        )
 
-        # Auto-cálculo puntadas_total = puntadas_por_pieza × cantidad_bordada
-        puntadas_por_pieza = int(validated.get("puntadas_por_pieza", 0) or 0)
-        cantidad_bordada = validated.get("cantidad_bordada", 0) or 0
-        if puntadas_por_pieza > 0 and cantidad_bordada:
-            # Si el frontend envió puntadas_total manual lo sobreescribimos
-            # (la fuente de verdad es el producto por_pieza × pz). Sólo si
-            # puntadas_por_pieza es 0 (registros legacy sin capturar)
-            # conservamos el puntadas_total que llegó (puede ser 0).
-            extra["puntadas_total"] = int(
-                round(float(puntadas_por_pieza) * float(cantidad_bordada))
+    def perform_update(self, serializer):
+        inst, v = serializer.instance, serializer.validated_data
+        serializer.save(
+            puntadas_total=self._puntadas_total(
+                v.get("puntadas_por_pieza", inst.puntadas_por_pieza),
+                v.get("cantidad_bordada", inst.cantidad_bordada),
             )
-
-        serializer.save(usuario=self.request.user, **extra)
+        )
 
     def perform_destroy(self, instance):
         instance.soft_delete()
