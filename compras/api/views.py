@@ -45,6 +45,7 @@ from compras.api.serializers import (
     RecepcionRFIDLecturaSerializer,
     RecepcionRFIDLecturaInputSerializer,
 )
+from compras.services import ruta_critica_oc_service as ruta_critica_oc
 from compras.services.orden_compra_view_service import (
     SIN_PERMISO_CONTABILIDAD,
     puede_ver_contabilidad,
@@ -308,6 +309,50 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         OrdenCompra.TipoCompra.MATERIA_PRIMA: ("ORDEN_COMPRA", "OC"),
         OrdenCompra.TipoCompra.PRODUCTO_TERMINADO: ("ORDEN_COMPRA_PT", "O"),
     }
+
+    @action(detail=False, methods=["get"], url_path="ruta-critica")
+    def ruta_critica_bulk(self, request):
+        """Ruta crítica de varias OC: ``?oc_id=1,2,3``. Solo lectura, acotada por
+        empresa; los ids ajenos o inexistentes se omiten. Sin captura, la OC sale
+        con los valores por defecto (sin escribir)."""
+        try:
+            ids = {int(x) for x in request.query_params.get("oc_id", "").split(",") if x.strip()}
+        except ValueError:
+            raise ValidationError({"oc_id": "Lista de enteros separados por coma."})
+        if not ids:
+            raise ValidationError({"oc_id": "Requerido."})
+        if len(ids) > ruta_critica_oc.MAX_OCS_BULK:
+            raise ValidationError({"oc_id": f"Máximo {ruta_critica_oc.MAX_OCS_BULK} OC por llamada."})
+        ocs = list(ruta_critica_oc.ocs_de_la_empresa(request.user).filter(pk__in=ids).order_by("id"))
+        return Response(ruta_critica_oc.leer(ocs))
+
+    @action(detail=True, methods=["get", "patch"], url_path="ruta-critica")
+    def ruta_critica(self, request, pk=None):
+        """Ruta crítica informativa de la OC: fecha real de recibo y comentario.
+
+        Deliberadamente fuera de ``get_queryset()`` (sin prefetch de renglones ni
+        recepciones) y sin guardar la OC: no afecta estatus, recepciones ni WMS.
+        """
+        try:
+            oc_id = int(pk)
+        except (TypeError, ValueError):
+            raise NotFound("Orden de compra no encontrada.")
+        if request.method == "PATCH":
+            try:
+                oc = ruta_critica_oc.capturar(
+                    oc_id,
+                    request.user,
+                    request.data,
+                    ip=_ip_auditoria(request),
+                    user_agent=request.META.get("HTTP_USER_AGENT"),
+                )
+            except ruta_critica_oc.RutaCriticaOCError as e:
+                return Response(e.detalle, status=e.codigo)
+        else:
+            oc = ruta_critica_oc.ocs_de_la_empresa(request.user).filter(pk=oc_id).first()
+            if oc is None:
+                return Response({"msg": "Orden de compra no encontrada"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(ruta_critica_oc.leer([oc])[0])
 
     def _asignar_folio_oc(self, instance, empresa):
         """Pone ``instance.folio`` sin guardar: quien llama lo incluye en su ``save``.
