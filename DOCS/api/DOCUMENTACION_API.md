@@ -3717,7 +3717,7 @@ Seguimiento de los subprocesos de la OP (desarrollo de producto, telas & avíos,
 - **Varias OPs**: `GET /api/v1/produccion/orden-produccion/ruta-critica/?op_id=1,2,3` → arreglo, una fila por OP (con `op_id`). Máx. 200 ids; ids de otra empresa o inexistentes se omiten; `op_id` faltante o no numérico → `400`.
 - **PATCH**: solo usuarios del departamento **Producción** (o superuser/admin_empresa). `400 {"permiso": "..."}` para el resto. OP Completada (5) o Cancelada (7) → `409 {"msg": "..."}`.
 - Acepta `PATCH` parcial — solo manda los campos que cambian.
-- Los campos `fecha_existencia_*` y `fecha_kit_completo` son de solo lectura: el backend los sella con la fecha/hora actual al **marcar** su checkbox y los limpia (`null`) al **desmarcarlo**. Reenviar el mismo valor no los toca.
+- Los campos `fecha_existencia_*` y `fecha_kit_completo` son de solo lectura: el backend los sella con la fecha/hora actual al **marcar** su checkbox y los limpia (`null`) al **desmarcarlo**. Reenviar el mismo valor no los toca. La regla vive en el modelo, así que aplica también a escrituras fuera de la API; un renglón anterior con `kit_completo=true` y `fecha_kit_completo=null` se queda así hasta que se desmarque y vuelva a marcar. El PATCH bloquea la fila, y en OP completada/cancelada responde `409 {"msg": "La OP tiene estatus «Completado»: su ruta crítica ya no se puede editar."}`.
 - Toda respuesta incluye `op_id`.
 
 **Campos**

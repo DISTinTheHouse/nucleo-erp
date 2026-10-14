@@ -379,23 +379,15 @@ class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
 
     Deliberadamente separado de ``OrdenProduccionSerializer``: éste no lo
     declara, así que list/retrieve de la OP no cargan ni serializan esta
-    tabla. Los cuatro campos ``fecha_*`` de existencia son ``read_only``
-    porque los sella (o limpia) el servidor en ``update()`` cuando su boolean
-    asociado cambia de valor -- el cliente solo manda el checkbox.
+    tabla. Los cinco campos ``fecha_*`` sellados por el servidor son ``read_only``:
+    el modelo los sella (o limpia) cuando su boolean asociado cambia de valor
+    (``OrdenProduccionRutaCritica.save``) -- el cliente solo manda el checkbox.
     """
 
     op_id = serializers.IntegerField(read_only=True)
     estatus_paquete_tecnico_display = serializers.CharField(
         source="get_estatus_paquete_tecnico_display", read_only=True, allow_null=True
     )
-
-    CAMPOS_ESTADO_CON_FECHA = {
-        "existencia_tela": "fecha_existencia_tela",
-        "sin_existencia_tela": "fecha_sin_existencia_tela",
-        "existencia_avios": "fecha_existencia_avios",
-        "sin_existencia_avios": "fecha_sin_existencia_avios",
-        "kit_completo": "fecha_kit_completo",
-    }
 
     class Meta:
         model = OrdenProduccionRutaCritica
@@ -417,16 +409,6 @@ class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):
                 "Debe ser un número entero de piezas, mayor o igual a 0."
             )
         return value
-
-    def update(self, instance, validated_data):
-        from django.utils import timezone
-
-        # La fecha significa "marcado desde": se sella al pasar a true y se
-        # limpia al pasar a false.
-        for campo_bool, campo_fecha in self.CAMPOS_ESTADO_CON_FECHA.items():
-            if campo_bool in validated_data and validated_data[campo_bool] != getattr(instance, campo_bool):
-                validated_data[campo_fecha] = timezone.now() if validated_data[campo_bool] else None
-        return super().update(instance, validated_data)
 
 class ConsumoProduccionSerializer(serializers.ModelSerializer):
     detalles = serializers.SerializerMethodField()

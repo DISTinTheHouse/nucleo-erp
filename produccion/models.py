@@ -182,6 +182,47 @@ class OrdenProduccionRutaCritica(models.Model):
         verbose_name = 'Ruta Crítica de Orden de Producción'
         verbose_name_plural = 'Rutas Críticas de Órdenes de Producción'
 
+    # Checkbox -> fecha "marcado desde". La regla vive aquí, no en el serializer, para
+    # que ORM, admin y scripts también la cumplan (#425).
+    CAMPOS_ESTADO_CON_FECHA = {
+        "existencia_tela": "fecha_existencia_tela",
+        "sin_existencia_tela": "fecha_sin_existencia_tela",
+        "existencia_avios": "fecha_existencia_avios",
+        "sin_existencia_avios": "fecha_sin_existencia_avios",
+        "kit_completo": "fecha_kit_completo",
+    }
+
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        instance = super().from_db(db, field_names, values)
+        instance._estado_original = {
+            campo: instance.__dict__.get(campo) for campo in cls.CAMPOS_ESTADO_CON_FECHA
+        }
+        return instance
+
+    def save(self, *args, **kwargs):
+        """Sella la fecha al pasar el checkbox a true y la limpia al pasar a false.
+
+        Solo cuando el valor cambia (o en el alta): un renglón anterior con el checkbox
+        en true y sin fecha no se sella en silencio con la fecha de hoy.
+        """
+        from django.utils import timezone
+
+        original = getattr(self, "_estado_original", None)
+        tocados = []
+        for campo, campo_fecha in self.CAMPOS_ESTADO_CON_FECHA.items():
+            nuevo = getattr(self, campo)
+            previo = original.get(campo) if original is not None else False
+            if previo is None or nuevo == previo:
+                continue
+            setattr(self, campo_fecha, timezone.now() if nuevo else None)
+            tocados.append(campo_fecha)
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and tocados:
+            kwargs["update_fields"] = {*update_fields, *tocados}
+        super().save(*args, **kwargs)
+        self._estado_original = {campo: getattr(self, campo) for campo in self.CAMPOS_ESTADO_CON_FECHA}
+
     def __str__(self):
         return f"Ruta crítica OP {self.op_id}"
 
