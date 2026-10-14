@@ -18,7 +18,7 @@ from terceros.cartera import cartera_de_cliente
 from terceros.scope import clientes_base, clientes_visibles, clientes_visibles_entre
 from usuarios.models import Usuario
 from ventas.models import Cotizacion, Oportunidad, OportunidadSeguimiento, Pedido
-from ventas.scope import oportunidades_base, oportunidades_visibles
+from ventas.scope import cotizaciones_visibles, oportunidades_base, oportunidades_visibles
 
 ESTATUS_BORRADOR = 1
 ESTATUS_AUTORIZADA = 3
@@ -71,8 +71,44 @@ def con_estado(qs):
     )
 
 
-class OportunidadSerializer(serializers.ModelSerializer):
-    cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True, default=None)
+class ClienteVisibleMixin:
+    """Nombre del cliente ligado, solo si el usuario puede ver a ese cliente."""
+
+    @staticmethod
+    def _cliente_de(obj):
+        return obj.cliente
+
+    def _nombre_cliente(self, obj) -> str | None:
+        cliente = self._cliente_de(obj)
+        if cliente is None:
+            return None
+        visibles = self._clientes_visibles(obj)
+        if visibles is not None and cliente.pk not in visibles:
+            return None
+        return cliente.nombre
+
+    def _clientes_visibles(self, obj):
+        """Ids de los clientes que ve el usuario, o ``None`` si no hay que filtrar.
+
+        Regla de ``terceros.scope.clientes_visibles_entre``, solo sobre los clientes de
+        las filas que se serializan: una consulta por respuesta, no por fila (se guarda
+        en el serializer de la lista).
+        """
+        request = self.context.get("request")
+        if request is None:
+            return frozenset()
+        lista = self.parent if isinstance(self.parent, serializers.ListSerializer) else None
+        if lista is not None and hasattr(lista, "_clientes_visibles_ids"):
+            return lista._clientes_visibles_ids
+        filas = lista.instance if lista is not None else [obj]
+        visibles = clientes_visibles_entre(request.user, {self._cliente_de(fila).pk for fila in filas if self._cliente_de(fila)})
+        if lista is not None:
+            lista._clientes_visibles_ids = visibles
+        return visibles
+
+
+class OportunidadSerializer(ClienteVisibleMixin, serializers.ModelSerializer):
+    cliente_nombre = serializers.SerializerMethodField()
     vendedor_nombre = serializers.CharField(source="vendedor.get_full_name", read_only=True, default=None)
     estado = serializers.SerializerMethodField()
 
@@ -84,6 +120,9 @@ class OportunidadSerializer(serializers.ModelSerializer):
             "proximo_contacto", "notas", "created_at", "updated_at",
         ]
         read_only_fields = ["vendedor", "created_at", "updated_at"]
+
+    def get_cliente_nombre(self, obj) -> str | None:
+        return self._nombre_cliente(obj)
 
     def get_estado(self, obj):
         if obj.etapa == Oportunidad.Etapa.PERDIDA:
@@ -207,6 +246,8 @@ class OportunidadViewSet(viewsets.ModelViewSet):
             raise ValidationError({"vendedor": "Vendedor no encontrado en la empresa."})
         oportunidad.vendedor = vendedor
         oportunidad.save(update_fields=["vendedor", "updated_at"])
+        # Las cotizaciones siguen al dueño: si no, las vería en el onboarding pero no podría abrirlas.
+        Cotizacion.objects.filter(oportunidad=oportunidad).update(vendedor=vendedor)
         return Response(self.get_serializer(oportunidad).data)
 
     def _cartera(self, oportunidad):
@@ -229,7 +270,7 @@ class OportunidadViewSet(viewsets.ModelViewSet):
             seguimiento.oportunidad = oportunidad
         pedido = Pedido.objects.filter(cotizacion=OuterRef("pk")).order_by("-id")
         cotizaciones = (
-            Cotizacion.objects.filter(oportunidad=oportunidad)
+            cotizaciones_visibles(Cotizacion.objects.filter(oportunidad=oportunidad), request.user)
             .annotate(pedido_id_=Subquery(pedido.values("id")[:1]), pedido_folio=Subquery(pedido.values("folio")[:1]))
             .order_by("-id")
             .values("id", "estatus", "created_at", "autorizada_at", "pedido_id_", "pedido_folio")
@@ -264,7 +305,7 @@ class OportunidadViewSet(viewsets.ModelViewSet):
             raise ValidationError({"sucursal": "Tu sucursal no pertenece a la empresa de la oportunidad."})
         cotizacion = Cotizacion.objects.create(
             empresa_id=oportunidad.empresa_id,
-            vendedor=request.user,
+            vendedor=oportunidad.vendedor,  # el dueño, también si cotiza un admin
             sucursal=sucursal,
             cliente_id=oportunidad.cliente_id,
             oportunidad=oportunidad,
@@ -273,7 +314,7 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         return Response({"cotizacion_id": cotizacion.pk}, status=201)
 
 
-class SeguimientoSerializer(serializers.ModelSerializer):
+class SeguimientoSerializer(ClienteVisibleMixin, serializers.ModelSerializer):
     # Contexto para pintar la fila de la agenda sin pedir cada oportunidad. Los nombres
     # salen igual que en ``OportunidadSerializer``, salvo el del cliente, que aquí solo
     # sale si el usuario puede ver a ese cliente.
@@ -291,33 +332,12 @@ class SeguimientoSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["vendedor", "completado_at", "created_at"]
 
+    @staticmethod
+    def _cliente_de(obj):
+        return obj.oportunidad.cliente
+
     def get_oportunidad_cliente_nombre(self, obj) -> str | None:
-        cliente = obj.oportunidad.cliente
-        if cliente is None:
-            return None
-        visibles = self._clientes_visibles(obj)
-        if visibles is not None and cliente.pk not in visibles:
-            return None
-        return cliente.nombre
-
-    def _clientes_visibles(self, obj):
-        """Ids de los clientes que ve el usuario, o ``None`` si no hay que filtrar.
-
-        Regla de ``terceros.scope.clientes_visibles_entre``, solo sobre los clientes de
-        las filas que se serializan: una consulta por respuesta, no por fila (se guarda
-        en el serializer de la lista).
-        """
-        request = self.context.get("request")
-        if request is None:
-            return frozenset()
-        lista = self.parent if isinstance(self.parent, serializers.ListSerializer) else None
-        if lista is not None and hasattr(lista, "_clientes_visibles_ids"):
-            return lista._clientes_visibles_ids
-        filas = lista.instance if lista is not None else [obj]
-        visibles = clientes_visibles_entre(request.user, {fila.oportunidad.cliente_id for fila in filas})
-        if lista is not None:
-            lista._clientes_visibles_ids = visibles
-        return visibles
+        return self._nombre_cliente(obj)
 
     def validate_oportunidad(self, oportunidad):
         if self.instance is not None and oportunidad.pk != self.instance.oportunidad_id:

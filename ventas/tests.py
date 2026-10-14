@@ -4767,6 +4767,35 @@ class OportunidadesValidacionesTests(OportunidadesBase):
 
         self.assertEqual(resp.data["cartera"], [])
 
+    def test_cliente_nombre_no_sale_si_el_vendedor_no_ve_al_cliente(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        url = f"{OPORTUNIDADES_URL}{op.pk}/"
+
+        self.assertIsNone(self._client(self.ana).get(url).data["cliente_nombre"])
+        self.assertIsNone(self._client(self.ana).get(OPORTUNIDADES_URL).data[0]["cliente_nombre"])
+        self.assertIsNone(self._client(self.ana).get(f"{url}onboarding/").data["oportunidad"]["cliente_nombre"])
+        self.assertEqual(self._client(self.jefe).get(url).data["cliente_nombre"], "Cliente Acme")
+
+        self.cliente.vendedores.add(self.ana)
+        self.assertEqual(self._client(self.ana).get(url).data["cliente_nombre"], "Cliente Acme")
+
+    def test_transferir_pasa_las_cotizaciones_al_nuevo_dueno(self):
+        op = self._op(self.ana)
+        resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
+        cot = resp.data["cotizacion_id"]
+
+        self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", {"vendedor": self.beto.pk})
+
+        self.assertEqual(Cotizacion.objects.get(pk=cot).vendedor, self.beto)
+        self.assertEqual(self._client(self.beto).get(f"/api/v1/ventas/cotizaciones/{cot}/").status_code, 200)
+
+    def test_cotizar_como_admin_deja_la_cotizacion_al_dueno(self):
+        op = self._op(self.ana)
+        cot = self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/").data["cotizacion_id"]
+
+        self.assertEqual(Cotizacion.objects.get(pk=cot).vendedor, self.ana)
+        self.assertEqual(self._client(self.ana).get(f"/api/v1/ventas/cotizaciones/{cot}/").status_code, 200)
+
     def test_cotizar_rechaza_sucursal_de_otra_empresa(self):
         otra_sucursal = Sucursal.objects.create(empresa=self.otra, codigo="GDL", nombre="GDL")
         self.ana.sucursal_default = otra_sucursal
