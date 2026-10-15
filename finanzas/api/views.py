@@ -154,8 +154,9 @@ def _resolve_empresa(user, validated_data=None, *, required=True, allow_user_emp
     Reglas:
     - is_superuser:
         * Si validated_data trae "empresa" → la usa (puede crear para cualquier empresa).
-        * Si NO la trae y required=True → ValidationError pidiendo empresa explícita.
-        * Si NO la trae y required=False → None.
+        * Si NO la trae, cae en su propia ``user.empresa`` (si tiene).
+        * Si tampoco tiene y required=True → ValidationError pidiendo empresa explícita.
+        * Si tampoco tiene y required=False → None.
     - is_admin_empresa / usuario normal:
         * Requiere user.empresa (si no → PermissionDenied).
         * Si validated_data trae "empresa" DEBE coincidir con user.empresa o ValidationError.
@@ -168,6 +169,8 @@ def _resolve_empresa(user, validated_data=None, *, required=True, allow_user_emp
 
     if superuser:
         if data_emp is None:
+            if allow_user_empresa_fallback and user_emp is not None:
+                return user_emp
             if required:
                 raise ValidationError(
                     {"empresa": "Superusuario debe especificar la empresa explícitamente."}

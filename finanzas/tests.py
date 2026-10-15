@@ -2830,6 +2830,25 @@ class FacturaProveedorMontosDerivadosTests(FinanzasBase):
     def _post(self, **kwargs):
         return self.client_api.post(FACTURAS_PROVEEDOR_URL, self._payload(**kwargs), format="json")
 
+    def test_superusuario_sin_empresa_en_el_cuerpo_usa_la_suya(self):
+        root = Usuario.objects.create_superuser(
+            username="root-fp@test.mx", email="root-fp@test.mx", password="x",
+            empresa=self.a["empresa"],
+        )
+        resp = self._client(root).post(FACTURAS_PROVEEDOR_URL, self._payload(), format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["empresa"], self.a["empresa"].pk)
+
+    def test_superusuario_sin_empresa_propia_ni_en_el_cuerpo_recibe_400(self):
+        root = Usuario.objects.create_superuser(
+            username="root-fp2@test.mx", email="root-fp2@test.mx", password="x",
+        )
+        resp = self._client(root).post(FACTURAS_PROVEEDOR_URL, self._payload(), format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("empresa", resp.data)
+
     def test_rechaza_crear_sin_lineas_y_no_deja_encabezado(self):
         antes = FacturaProveedor.objects.count()
 
