@@ -61,10 +61,9 @@ class EmpresaResueltaEnServidorMixin:
       movimientos a otra empresa sin ninguna validación de consistencia; hoy eso
       era posible para el superusuario (medido: HTTP 200 moviendo un banco de la
       empresa 1 a la 2).
-    - **Create: de sólo lectura salvo para el superusuario**, que la sigue
-      mandando explícitamente. Es la capacidad que ``_resolve_empresa()``
-      documenta ("puede crear para cualquier empresa") y que un ``read_only``
-      incondicional habría eliminado.
+    - **Create: de sólo lectura salvo para el superusuario**, que puede
+      mandarla explícitamente (crear para cualquier empresa) o, si la omite,
+      cae en su propia ``user.empresa`` (``_resolve_empresa()``).
 
     Para el resto de usuarios el campo desaparece de la entrada, así que
     ``_resolve_empresa()`` cae en ``user.empresa``. El aislamiento no se relaja:
@@ -91,6 +90,11 @@ class EmpresaResueltaEnServidorMixin:
             kwargs["read_only"] = True
             # ``read_only`` y ``required`` son incompatibles en DRF.
             kwargs.pop("required", None)
+            extra_kwargs["empresa"] = kwargs
+        else:
+            # Superusuario en create: opcional, el ViewSet la deduce de su empresa.
+            kwargs = dict(extra_kwargs.get("empresa", {}))
+            kwargs["required"] = False
             extra_kwargs["empresa"] = kwargs
         return extra_kwargs
 
