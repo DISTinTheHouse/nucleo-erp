@@ -2379,6 +2379,8 @@ Cancelar = la orden al proveedor queda anulada **pero se conserva y sigue visibl
 - **Endpoint**: `GET /api/v1/compras/recepciones/onboarding/`
 - **Query Params (opcionales)**:
   - `orden_compra_id`: si se envía, carga esa orden; si no, el backend puede seleccionar una disponible.
+  - `tipo_compra`: `MP` (folio OC) o `PT` (folio O, producto terminado). Omitirlo devuelve ambas; otro valor es `400`.
+- **Las O (PT) se reciben igual que las OC**: mismo `POST`, mismo paso por Calidad. Cada orden de `busqueda.ordenes_compra[]` trae `tipo_compra`. En `GET /recepciones/` (y `?tipo_compra=MP|PT`) cada fila trae `orden_compra_tipo_compra` (`null` si es de OP).
 - **Respuesta (resumen)**:
   ```json
   {

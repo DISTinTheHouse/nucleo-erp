@@ -332,6 +332,9 @@ class RecepcionListSerializer(RecepcionSerializer):
     orden_compra_folio = serializers.CharField(
         source="orden_compra.folio", read_only=True, default=None
     )
+    orden_compra_tipo_compra = serializers.CharField(
+        source="orden_compra.tipo_compra", read_only=True, default=None
+    )
 
     class Meta(RecepcionSerializer.Meta):
         pass

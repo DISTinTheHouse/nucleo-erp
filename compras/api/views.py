@@ -1065,6 +1065,13 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 )
             qs = qs.filter(tipo_origen=tipo_origen)
 
+        # Filtro opcional por tipo de la OC de origen: MP (serie OC) / PT (serie O).
+        tipo_compra = (self.request.query_params.get("tipo_compra") or "").strip().upper()
+        if tipo_compra:
+            if tipo_compra not in OrdenCompra.TipoCompra.values:
+                raise ValidationError({"tipo_compra": "Valor inválido. Usa MP (OC) o PT (O)."})
+            qs = qs.filter(orden_compra__tipo_compra=tipo_compra)
+
         # El superusuario se evalúa ANTES del filtro por empresa: con el orden
         # inverso, un superusuario CON empresa asignada quedaba acotado a esa
         # empresa en vez de ver todas. Mismo orden que
@@ -1279,6 +1286,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         )
         if empresa:
             ordenes_qs = ordenes_qs.filter(empresa=empresa)
+        # Filtro opcional MP (serie OC) / PT (serie O). Omitirlo devuelve ambas.
+        tipo_compra = (request.query_params.get("tipo_compra") or "").strip().upper()
+        if tipo_compra:
+            if tipo_compra not in OrdenCompra.TipoCompra.values:
+                raise ValidationError({"tipo_compra": "Valor inválido. Usa MP (OC) o PT (O)."})
+            ordenes_qs = ordenes_qs.filter(tipo_compra=tipo_compra)
         if oc_q:
             ordenes_qs = ordenes_qs.filter(
                 Q(folio__icontains=oc_q)
@@ -1337,6 +1350,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 {
                     "id": oc.pk,
                     "folio": oc.folio,
+                    "tipo_compra": oc.tipo_compra,
                     "estatus": oc.estatus,
                     "proveedor_id": oc.proveedor_id,
                     "proveedor_nombre": getattr(oc.proveedor, "nombre", None),
