@@ -864,6 +864,22 @@ class OrdenCompraCancelacionTests(TestCase):
         ofrecidas = client.get(RECEPCION_ONBOARDING_URL).json()["busqueda"]["ordenes_compra"]
         self.assertNotIn(oc.pk, [row["id"] for row in ofrecidas])
 
+    def test_recepcion_ofrece_y_filtra_por_tipo_compra(self):
+        mp = self._oc(Estatus.AUTORIZADA)
+        pt = self._oc(Estatus.AUTORIZADA)
+        OrdenCompra.objects.filter(pk=pt.pk).update(tipo_compra=OrdenCompra.TipoCompra.PRODUCTO_TERMINADO)
+        client = self._client()
+
+        def ofrecidas(**params):
+            resp = client.get(RECEPCION_ONBOARDING_URL, params)
+            self.assertEqual(resp.status_code, 200)
+            return {r["id"]: r["tipo_compra"] for r in resp.json()["busqueda"]["ordenes_compra"]}
+
+        self.assertEqual(ofrecidas(), {mp.pk: "MP", pt.pk: "PT"})
+        self.assertEqual(ofrecidas(tipo_compra="PT"), {pt.pk: "PT"})
+        self.assertEqual(ofrecidas(tipo_compra="mp"), {mp.pk: "MP"})
+        self.assertEqual(client.get(RECEPCION_ONBOARDING_URL, {"tipo_compra": "XX"}).status_code, 400)
+
     # --- PUT con recepciones o facturas reales ------------------------------------
 
     def _put_reemplaza_renglones(self, oc):
