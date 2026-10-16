@@ -8,7 +8,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from simple_history.utils import bulk_create_with_history
@@ -78,6 +78,8 @@ from produccion.models import OrdenProduccion, OrdenProduccionDetalle
 from terceros.models import Proveedor, Transportista
 
 logger = logging.getLogger(__name__)
+
+PERMISO_EDITAR_RUTA_CRITICA_OC = "E-COMPRAS-OC"
 
 
 _ip_auditoria = ip_auditoria
@@ -324,20 +326,27 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         )
         if oc is None:
             raise NotFound("Orden de compra no encontrada.")
-        ruta = OrdenCompraRutaCritica.objects.filter(oc=oc).first() or OrdenCompraRutaCritica(oc=oc)
+        if request.method == "PATCH" and not request.user.tiene_permiso(PERMISO_EDITAR_RUTA_CRITICA_OC):
+            raise PermissionDenied("No tienes permiso para editar la ruta crítica de la orden de compra.")
         if request.method == "GET":
+            ruta = OrdenCompraRutaCritica.objects.filter(oc=oc).first() or OrdenCompraRutaCritica(oc=oc)
             return Response(OrdenCompraRutaCriticaSerializer(ruta).data)
 
-        serializer = OrdenCompraRutaCriticaSerializer(ruta, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        cambios = {
-            c: v for c, v in serializer.validated_data.items() if getattr(ruta, c) != v
-        }
-        if cambios:
-            antes = {c: getattr(ruta, c) for c in cambios}
-            for campo, valor in cambios.items():
-                setattr(ruta, campo, valor)
-            with transaction.atomic():
+        # La PK de la ruta es la OC: sin registro previo, dos primeros PATCH
+        # simultáneos harían INSERT con la misma llave (500). Se serializa
+        # bloqueando la fila de la OC y leyendo la ruta ya dentro del bloqueo (#527).
+        with transaction.atomic():
+            OrdenCompra.objects.select_for_update().only("id").get(pk=oc.pk)
+            ruta = OrdenCompraRutaCritica.objects.filter(oc=oc).first() or OrdenCompraRutaCritica(oc=oc)
+            serializer = OrdenCompraRutaCriticaSerializer(ruta, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            cambios = {
+                c: v for c, v in serializer.validated_data.items() if getattr(ruta, c) != v
+            }
+            if cambios:
+                antes = {c: getattr(ruta, c) for c in cambios}
+                for campo, valor in cambios.items():
+                    setattr(ruta, campo, valor)
                 ruta.save()
                 self._auditar_orden_compra(
                     request, oc, "RUTA_CRITICA",
