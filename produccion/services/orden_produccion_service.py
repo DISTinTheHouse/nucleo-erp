@@ -1,3 +1,4 @@
+from nucleo.middleware import ip_auditoria
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import models, transaction
@@ -245,7 +246,7 @@ class OrdenProduccionService:
         ip = None
         user_agent = None
         if request is not None:
-            ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
+            ip = ip_auditoria(request)
             user_agent = request.META.get("HTTP_USER_AGENT")
 
         return AuditoriaEvento.objects.create(

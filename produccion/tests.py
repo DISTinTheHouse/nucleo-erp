@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from django.db import IntegrityError, connection, transaction
-from django.test import TestCase
+from django.test import override_settings, TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError as DRFValidationError
@@ -4568,6 +4568,36 @@ class EstatusOPTests(TestCase):
             self._set(terminal)
             self.assertEqual(self._client().get(self.url).data["opciones"], [])
             self.assertEqual(self._post({"estatus_op": int(self.E.PREPARACION)}).status_code, 409)
+
+    def test_usuario_no_admin_cambia_estatus_de_op_de_otra_sucursal_de_su_empresa(self):
+        """#507: mismo alcance que list/detail (empresa), sin filtrar por sucursal."""
+        otra_suc = Sucursal.objects.create(empresa=self.empresa, codigo="GDL", nombre="Guadalajara")
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(sucursal=otra_suc)
+        self.assertEqual(self._client(self.lector).get(self.url).status_code, 200)
+
+    def test_motivo_que_no_es_texto_responde_400(self):
+        resp = self._post({"estatus_op": int(self.E.DETENIDO), "motivo": 5})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("motivo", resp.data)
+
+    def test_ip_de_auditoria_con_cadena_de_proxies_no_tumba_el_cambio(self):
+        """#507: ``X-Forwarded-For`` encadenado o inválido no debe dar 500."""
+        from auditoria.models import AuditoriaEvento
+
+        with override_settings(ENVIRONMENT="production"):
+            resp = self._client().post(
+                self.url, {"estatus_op": int(self.E.PREPARACION)}, format="json",
+                HTTP_X_FORWARDED_FOR="1.2.3.4, 10.0.0.1",
+            )
+            self.assertEqual(resp.status_code, 200, resp.data)
+            self.assertEqual(AuditoriaEvento.objects.get(accion="CAMBIO_ESTATUS").ip, "1.2.3.4")
+
+            self._set(self.E.PENDIENTE)
+            resp = self._client().post(
+                self.url, {"estatus_op": int(self.E.PREPARACION)}, format="json",
+                HTTP_X_FORWARDED_FOR="no-es-ip",
+            )
+            self.assertEqual(resp.status_code, 200, resp.data)
 
     def test_detener_y_cancelar_exigen_motivo(self):
         for destino in (self.E.DETENIDO, self.E.CANCELADO):

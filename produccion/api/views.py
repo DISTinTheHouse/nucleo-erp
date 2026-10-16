@@ -782,9 +782,10 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         """GET: estatus actual y siguientes estatus posibles. POST: cambia el
         estatus. Fuera de ``get_queryset()`` (sin el prefetch de BOM) para que
         abrir el menú de estatus cueste 1-2 queries; el alcance es el mismo
-        que list/detail (``ordenes_produccion_visibles``). 404 si la OP es de
-        otra empresa/sucursal."""
-        visibles = ordenes_produccion_visibles(OrdenProduccion.objects.all(), request.user)
+        que list/detail: solo la empresa activa (#507). 404 si la OP es de
+        otra empresa."""
+        empresa = getattr(request.user, 'empresa', None)
+        visibles = OrdenProduccion.objects.filter(empresa=empresa) if empresa else OrdenProduccion.objects.none()
 
         if request.method == 'GET':
             op = visibles.only('op_id', 'folio_op', 'estatus_op').filter(pk=pk).first()

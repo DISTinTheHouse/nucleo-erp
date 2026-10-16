@@ -1,3 +1,4 @@
+from nucleo.middleware import ip_auditoria
 from collections import defaultdict
 from datetime import datetime, time
 from decimal import Decimal
@@ -1199,7 +1200,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
 
             empresa_evt, _sucursal = self._resolve_empresa_sucursal(request, almacen)
             if empresa_evt:
-                ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
+                ip = ip_auditoria(request)
                 ua = request.META.get("HTTP_USER_AGENT")
                 ev = AuditoriaEvento.objects.create(
                     empresa=empresa_evt,
