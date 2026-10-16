@@ -7441,6 +7441,13 @@ class F5CancelarFacturaTests(MotorPolizasBase):
 
     def setUp(self):
         super().setUp()
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        self.permiso_cancelar = Permiso.objects.create(clave="E-FIN-FACTURAS", nombre="Facturas")
+        UsuarioPermiso.objects.create(
+            usuario=self.a["usuario"], permiso=self.permiso_cancelar,
+            tipo=UsuarioPermiso.TIPO_GRANT, empresa=self.empresa,
+        )
         self.banco_contable = self._cuenta("1020", CuentaContable.CuentaTipo.ACTIVO)
         self.cuenta_bancaria = self._crear_cuenta_bancaria(self.empresa)
         self.cuenta_bancaria.cuenta_contable = self.banco_contable
@@ -7458,6 +7465,19 @@ class F5CancelarFacturaTests(MotorPolizasBase):
         return self._client(user or self.a["usuario"]).post(
             f"/api/v1/finanzas/facturas/{factura.pk}/cancelar/", datos, format="json"
         )
+
+    def test_sin_el_permiso_cancelar_responde_403_y_no_toca_la_factura(self):
+        """#515: estar autenticado en la empresa no basta."""
+        from seguridad.models import UsuarioPermiso
+
+        factura, _ = self._emitida()
+        UsuarioPermiso.objects.filter(usuario=self.a["usuario"]).delete()
+
+        resp = self._cancelar(factura)
+
+        self.assertEqual(resp.status_code, 403, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.EMITIDA)
 
     def test_cancelar_una_emitida_cancela_factura_cxc_y_crea_la_contrapoliza_de_hoy(self):
         factura, _ = self._emitida()
