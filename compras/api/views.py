@@ -324,20 +324,25 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         )
         if oc is None:
             raise NotFound("Orden de compra no encontrada.")
-        ruta = OrdenCompraRutaCritica.objects.filter(oc=oc).first() or OrdenCompraRutaCritica(oc=oc)
         if request.method == "GET":
+            ruta = OrdenCompraRutaCritica.objects.filter(oc=oc).first() or OrdenCompraRutaCritica(oc=oc)
             return Response(OrdenCompraRutaCriticaSerializer(ruta).data)
 
-        serializer = OrdenCompraRutaCriticaSerializer(ruta, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        cambios = {
-            c: v for c, v in serializer.validated_data.items() if getattr(ruta, c) != v
-        }
-        if cambios:
-            antes = {c: getattr(ruta, c) for c in cambios}
-            for campo, valor in cambios.items():
-                setattr(ruta, campo, valor)
-            with transaction.atomic():
+        # La PK de la ruta es la OC: sin registro previo, dos primeros PATCH
+        # simultáneos harían INSERT con la misma llave (500). Se serializa
+        # bloqueando la fila de la OC y leyendo la ruta ya dentro del bloqueo (#527).
+        with transaction.atomic():
+            OrdenCompra.objects.select_for_update().only("id").get(pk=oc.pk)
+            ruta = OrdenCompraRutaCritica.objects.filter(oc=oc).first() or OrdenCompraRutaCritica(oc=oc)
+            serializer = OrdenCompraRutaCriticaSerializer(ruta, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            cambios = {
+                c: v for c, v in serializer.validated_data.items() if getattr(ruta, c) != v
+            }
+            if cambios:
+                antes = {c: getattr(ruta, c) for c in cambios}
+                for campo, valor in cambios.items():
+                    setattr(ruta, campo, valor)
                 ruta.save()
                 self._auditar_orden_compra(
                     request, oc, "RUTA_CRITICA",
