@@ -12,7 +12,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
-from ventas.services.sku_produccion_service import detalles_de_muestra, variantes_produccion_activas
+from ventas.services.sku_produccion_service import detalles_de_muestra, nombre_es_muestra, variantes_produccion_activas
 from usuarios.models import Usuario
 from nucleo.models import Sucursal
 from seguridad.role_identity import (
@@ -139,7 +139,7 @@ def _programado_para_destino(pedido, destino):
 
 def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn,
                                 incluir_config_crudo=False, destino_programacion=None,
-                                incluir_sku=False):
+                                incluir_sku=False, sucursal_ids_existencias=()):
     """Arma la lista ``pedidos`` del GET de onboarding de órdenes de trabajo.
 
     Compartido por Bordado / Reflejante / Corte de Manga: los tres emitían el
@@ -184,14 +184,21 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
                 r["producto_variante_id"]: float(r["total"] or 0)
                 for r in Existencia.objects.filter(
                     producto_variante_id__in=variante_ids,
+                    # Mismo alcance que el endpoint (empresa + sucursales del usuario) y solo
+                    # prenda terminada disponible: almacenes PT ACTIVOS (#518). No cuentan MP,
+                    # proceso, cuarentena, devolución ni tránsito.
                     almacen__empresa_id=pedidos_lista[0].empresa_id,
+                    almacen__sucursal_id__in=sucursal_ids_existencias,
+                    almacen__estatus="ACTIVO",
+                    almacen__tipo_almacen="PT",
                 ).values("producto_variante_id").annotate(total=Sum("cantidad"))
             }
 
     pedidos_payload = []
     for p in pedidos_lista:
         pares = [(det, dt) for det in p.detalles.all() for dt in det.tallas.all()
-                 if not incluir_sku or dt.variante_id or dt.sku_muestra]
+                 if not incluir_sku or dt.variante_id or dt.sku_muestra
+                 or not nombre_es_muestra(det.producto_nombre_externo)]
         pendientes = pendientes_por_linea(
             [(det.id, dt.talla_id, float(dt.cantidad or 0)) for det, dt in pares],
             por_linea,
@@ -1313,6 +1320,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 OrdenBordadoService.cantidades_asignadas_por_pedidos,
                 destino_programacion="BORDADO",
                 incluir_sku=True,
+                sucursal_ids_existencias=sucursal_ids,
             )
 
             return Response({

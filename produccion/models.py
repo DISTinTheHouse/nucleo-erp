@@ -346,7 +346,8 @@ class OrdenBordadoDetalle(models.Model):
 
     ob = models.ForeignKey(OrdenesBordado, on_delete=models.CASCADE, related_name='detalles')
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE)
-    producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
+    #: Nulo en las líneas de MUESTRA con SKU de producción (sin producto de catálogo).
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, null=True, blank=True)
     cantidad = models.FloatField()
     posicion_bordado = models.CharField(max_length=50, null=True, blank=True)
     colores_hilo = models.IntegerField(default=0)

@@ -9,7 +9,7 @@ from produccion.services.common import EPS_CANTIDAD, cantidades_asignadas
 from produccion.services.common import (
     config_como_dict,
     crear_orden_con_guardia_duplicado,
-    exigir_producto_en_tallas,
+    excluir_muestras_sin_sku,
     payload_duplicada,
     pendientes_por_linea,
     revisar_empresa,
@@ -58,7 +58,8 @@ class OrdenBordadoService:
 
     @staticmethod
     def _tallas_bordado_qs(pedido_id):
-        return tallas_orden_trabajo_qs(pedido_id, "lleva_bordado")
+        # Mismo conjunto que el GET de onboarding: sin muestras sin SKU (#516, #518).
+        return excluir_muestras_sin_sku(tallas_orden_trabajo_qs(pedido_id, "lleva_bordado"))
 
     @staticmethod
     def _payload_duplicada(existente):
@@ -464,7 +465,7 @@ class OrdenBordadoService:
                 "detalles_exceso": errores_lineas,
             })
 
-        exigir_producto_en_tallas(detalle_tallas, "bordado")
+        # Las muestras con SKU de producción sí generan OB: el detalle admite producto nulo.
         folio_bordado = generate_ob_folio(pedido.empresa_id, pedido.sucursal_id)
 
         orden_bordado = crear_orden_con_guardia_duplicado(
