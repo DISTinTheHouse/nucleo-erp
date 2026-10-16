@@ -2335,7 +2335,7 @@ Respuesta (`GET` lista/detalle, y `orden_compra` de onboarding/PUT/aceptar) aña
 ```
 
 - `pedido` / `pedido_folio` / `pedido_vinculado` **se conservan** y reflejan el primer pedido de `pedidos` (o `null`): ninguna integración existente se rompe. Una OC creada antes (o desde el admin) con solo `pedido` aparece también en `pedidos`.
-- **Folios**: `aceptar` toma la serie activa de la sucursal por `tipo_compra`: `MP` → `SerieFolio.tipo_documento = ORDEN_COMPRA` (serie `OC`, la de siempre), `PT` → `ORDEN_COMPRA_PT` (serie `O`). Si no hay serie configurada se usa el folio de respaldo `OC-{empresa}-{id}` / `O-{empresa}-{id}`.
+- **Folios**: `aceptar` toma la serie activa de la sucursal por `tipo_compra`: `MP` → `SerieFolio.tipo_documento` `ORDEN_COMPRA` u `Orden de Compra` (serie `OC`), `PT` → `ORDEN_COMPRA_PT` u `Orden de Compra PT` (serie `O`). Si no hay serie configurada se usa el folio de respaldo `OC-{empresa}-{id}` / `O-{empresa}-{id}`.
 - Rendimiento: crear/editar/aceptar una OC ya no hace consultas por renglón (alta de 10 renglones: 47 → 15 consultas; edición: 62 → 30; aceptar: 16 → 11). Los renglones se insertan en lote conservando su historial.
 
 ### Cancelar una orden de compra
@@ -2378,8 +2378,8 @@ Cancelar = la orden al proveedor queda anulada **pero se conserva y sigue visibl
 
 - **Endpoint**: `GET /api/v1/compras/recepciones/onboarding/`
 - **Query Params (opcionales)**:
-  - `orden_compra_id`: si se envía, carga esa orden; si no, el backend puede seleccionar una disponible.
-  - `tipo_compra`: `MP` (folio OC) o `PT` (folio O, producto terminado). Omitirlo devuelve ambas; otro valor es `400`.
+  - `orden_compra_id`: si se envía, `busqueda.ordenes_compra[]` trae solo esa orden (si es recibible); no es entero → `400`.
+  - `tipo_compra`: `MP` (folio OC) o `PT` (folio O, producto terminado). Omitirlo devuelve ambas; otro valor es `400`. En `GET /recepciones/{id}/` no aplica.
 - **Las O (PT) se reciben igual que las OC**: mismo `POST`, mismo paso por Calidad. Cada orden de `busqueda.ordenes_compra[]` trae `tipo_compra`. En `GET /recepciones/` (y `?tipo_compra=MP|PT`) cada fila trae `orden_compra_tipo_compra` (`null` si es de OP).
 - **Respuesta (resumen)**:
   ```json

@@ -880,6 +880,65 @@ class OrdenCompraCancelacionTests(TestCase):
         self.assertEqual(ofrecidas(tipo_compra="mp"), {mp.pk: "MP"})
         self.assertEqual(client.get(RECEPCION_ONBOARDING_URL, {"tipo_compra": "XX"}).status_code, 400)
 
+    def test_onboarding_get_descuenta_lo_rechazado_por_calidad_del_recibido(self):
+        """#511: el GET calcula el pendiente con la misma regla que el POST."""
+        oc = self._oc(Estatus.AUTORIZADA)
+        linea = OrdenCompraDetalle.objects.get(orden_compra=oc)
+        recepcion = self._recepcion(oc)
+        rd = RecepcionDetalle.objects.create(
+            recepcion=recepcion, orden_compra_detalle=linea, producto=self.a["producto"],
+            cantidad_recibida=linea.cantidad,
+        )
+        empresa, sucursal = self.a["empresa"], self.a["sucursal"]
+        departamento = Departamento.objects.create(empresa=empresa, sucursal=sucursal, codigo="CAL", nombre="Calidad")
+        inspector = Empleado.objects.create(
+            empresa=empresa, sucursal=sucursal, departamento=departamento,
+            puesto=Puesto.objects.create(empresa=empresa, nombre="Inspector"),
+            numero_empleado="EMP-9", nombre="Ana", apellido_paterno="Lopez", fecha_ingreso=timezone.localdate(),
+        )
+        inspeccion = CalidadInspeccion.objects.create(
+            recepcion=recepcion, inspector=inspector, fecha=timezone.localdate(), estado="rechazada",
+        )
+        CalidadInspeccionDetalle.objects.create(
+            calidad_inspeccion=inspeccion, recepcion_detalle=rd, cantidad_inspeccionada=linea.cantidad,
+            cantidad_aprobada=linea.cantidad - 1, cantidad_rechazada=1, resultado="rechazo", motivo_rechazo="x",
+        )
+
+        resp = self._client().get(RECEPCION_ONBOARDING_URL)
+
+        fila = next(r for r in resp.json()["busqueda"]["ordenes_compra"] if r["id"] == oc.pk)
+        renglon = fila["detalle"][0]
+        self.assertEqual(Decimal(renglon["cantidad_pendiente"]), Decimal(1))
+        self.assertEqual(Decimal(renglon["cantidad_recibida"]), Decimal(linea.cantidad) - 1)
+
+    def test_onboarding_get_orden_compra_id_trae_solo_esa_orden(self):
+        a = self._oc(Estatus.AUTORIZADA)
+        self._oc(Estatus.AUTORIZADA)
+        client = self._client()
+
+        resp = client.get(RECEPCION_ONBOARDING_URL, {"orden_compra_id": a.pk})
+
+        self.assertEqual([r["id"] for r in resp.json()["busqueda"]["ordenes_compra"]], [a.pk])
+        self.assertEqual(client.get(RECEPCION_ONBOARDING_URL, {"orden_compra_id": "x"}).status_code, 400)
+
+    def test_tipo_compra_es_filtro_del_listado_y_no_del_detalle(self):
+        oc = self._oc(Estatus.AUTORIZADA)
+        recepcion = self._recepcion(oc)
+        client = self._client()
+
+        # Retrieve: el query param no cambia la respuesta.
+        for valor in ("XX", "PT"):
+            resp = client.get(f"{RECEPCIONES_URL}{recepcion.pk}/", {"tipo_compra": valor})
+            self.assertEqual(resp.status_code, 200, resp.content)
+        # Listado: filtra y valida.
+        self.assertEqual(client.get(RECEPCIONES_URL, {"tipo_compra": "XX"}).status_code, 400)
+        # Usuario sin empresa: 200 vacío aunque el valor sea inválido.
+        sin_empresa = Usuario.objects.create(username="sin-emp", email="sin@emp.test")
+        c = APIClient()
+        c.force_authenticate(user=sin_empresa)
+        resp = c.get(RECEPCIONES_URL, {"tipo_compra": "XX"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+
     # --- PUT con recepciones o facturas reales ------------------------------------
 
     def _put_reemplaza_renglones(self, oc):
