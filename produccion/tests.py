@@ -4199,8 +4199,8 @@ class OnboardingPostLineaMuestraTests(TestCase):
     """POST de onboarding con tallas de una línea de muestra (``producto`` null):
     400 accionable en vez del 500 por ``IntegrityError`` (#276)."""
 
+    # Bordado ya no está aquí: acepta muestras con SKU y ve ``OrdenBordadoMuestraTests``.
     CASOS = (
-        ("/api/v1/produccion/orden-bordado/onboarding/", OrdenesBordado, "ORDEN_BORDADO"),
         ("/api/v1/produccion/orden-reflejante/onboarding/", OrdenesReflejante, "ORDEN_REFLEJANTE"),
         ("/api/v1/produccion/orden-corte-manga/onboarding/", OrdenesCorteManga, "ORDEN_CORTE_MANGA"),
     )
@@ -4251,6 +4251,68 @@ class OnboardingPostLineaMuestraTests(TestCase):
                 self.assertFalse(modelo.objects.filter(pedido=self.pedido).exists())
                 serie.refresh_from_db()
                 self.assertEqual(serie.folio_actual, folio_previo)
+
+
+class OrdenBordadoMuestraTests(OnboardingPostLineaMuestraTests):
+    """#516/#518: GET y POST de OB aplican el mismo criterio sobre las muestras."""
+
+    URL = "/api/v1/produccion/orden-bordado/onboarding/"
+    CASOS = ()
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client
+
+    def _linea_en_get(self):
+        data = self._client().get(self.URL).json()
+        pedido = next((p for p in data["pedidos"] if p["id"] == self.pedido.pk), None)
+        return None if pedido is None else {l["talla_id"]: l for l in pedido["detalles"]}
+
+    def test_muestra_sin_sku_no_se_ofrece_ni_se_acepta(self):
+        serie = SerieFolio.objects.get(empresa=self.empresa, tipo_documento="ORDEN_BORDADO")
+        self.assertIsNone(self._linea_en_get())
+
+        resp = self._client().post(self.URL, {"pedido": self.pedido.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(OrdenesBordado.objects.filter(pedido=self.pedido).exists())
+        serie.refresh_from_db()
+        self.assertEqual(serie.folio_actual, 0)
+
+    def test_muestra_con_sku_se_ofrece_y_genera_ob_sin_producto(self):
+        PedidoDetalleTalla.objects.filter(pk=self.pdt.pk).update(sku_muestra="MUE-001")
+        self.assertIn(self.pdt.talla_id, self._linea_en_get())
+
+        resp = self._client().post(self.URL, {"pedido": self.pedido.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        detalle = OrdenesBordado.objects.get(pedido=self.pedido).detalles.get()
+        self.assertIsNone(detalle.producto_id)
+        self.assertEqual(detalle.cantidad, 5)
+        # La OB queda visible por API aunque el detalle no tenga producto.
+        self.assertEqual(
+            self._client().get(f"/api/v1/produccion/orden-bordado/{resp.data['id']}/").status_code, 200
+        )
+
+    def test_linea_de_catalogo_sin_variante_no_se_oculta(self):
+        """#518: el filtro es solo para muestras."""
+        PedidoDetalle.objects.filter(pk=self.pdt.pedido_detalle_id).update(
+            producto=Producto.objects.create(empresa=self.empresa, nombre="Playera"),
+            producto_nombre_externo=None,
+        )
+        self.assertIn(self.pdt.talla_id, self._linea_en_get())
+        resp = self._client().post(self.URL, {"pedido": self.pedido.pk}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_override_de_talla_oculta_se_rechaza(self):
+        resp = self._client().post(
+            self.URL,
+            {"pedido": self.pedido.pk, "detalles_override": [
+                {"pedido_detalle_talla_id": self.pdt.pk, "cantidad": 1}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
 
 
 class OrdenCorteMangaParcialidadesTests(TestCase):
@@ -6876,13 +6938,21 @@ class OrdenBordadoOnboardingSkuTests(OrdenBordadoParcialidadesTests):
             producto=self.producto, empresa=self.empresa, color=color,
             talla=self.talla_ch, sku="PLY-CH-MAR", cod_proscai="PRO-1", precio_base=1,
         )
-        almacen = Almacen.objects.create(empresa=self.empresa, codigo="A1", nombre="Alm")
+        almacen = Almacen.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, codigo="A1", nombre="Alm", tipo_almacen="PT",
+        )
         Existencia.objects.create(almacen=almacen, producto_variante=variante, cantidad=7)
         Existencia.objects.create(almacen=almacen, producto_variante=variante, cantidad=3)
         PedidoDetalleTalla.objects.filter(pk=self.pdt_ch.pk).update(
             variante=variante, sku_muestra=None
         )
-        PedidoDetalleTalla.objects.filter(pk=self.pdt_m.pk).update(sku_muestra=None)
+        # La talla M pasa a una línea de MUESTRA real (sin producto) y sin SKU.
+        muestra = PedidoDetalle.objects.create(
+            pedido=self.pedido, producto=None, producto_nombre_externo="Muestra"
+        )
+        PedidoDetalleTalla.objects.filter(pk=self.pdt_m.pk).update(
+            pedido_detalle=muestra, sku_muestra=None
+        )
 
         lineas = self._lineas_del_get()
 
@@ -6892,6 +6962,35 @@ class OrdenBordadoOnboardingSkuTests(OrdenBordadoParcialidadesTests):
         self.assertEqual(linea["sku_proscai"], "PRO-1")
         self.assertEqual(linea["existencias"], 10.0)
 
+
+    def test_existencias_solo_cuentan_almacenes_pt_activos_de_las_sucursales_del_usuario(self):
+        """#518: MP, inactivos y otras sucursales no suman."""
+        from catalogo.models import Color, ProductoVariante
+        from inventarios.models import Almacen, Existencia
+
+        variante = ProductoVariante.objects.create(
+            producto=self.producto, empresa=self.empresa, color=Color.objects.create(nombre="Gris"),
+            talla=self.talla_ch, sku="PLY-CH-GRI", precio_base=1,
+        )
+        PedidoDetalleTalla.objects.filter(pk=self.pdt_ch.pk).update(variante=variante)
+        otra_suc = Sucursal.objects.create(empresa=self.empresa, codigo="OTR", nombre="Otra")
+
+        def alm(codigo, **kw):
+            kw.setdefault("sucursal", self.sucursal)
+            kw.setdefault("tipo_almacen", "PT")
+            a = Almacen.objects.create(empresa=self.empresa, codigo=codigo, nombre=codigo, **kw)
+            Existencia.objects.create(almacen=a, producto_variante=variante, cantidad=5)
+            return a
+
+        alm("OK")                                   # cuenta
+        alm("MP", tipo_almacen="MP")                # no: materia prima
+        alm("CUA", tipo_almacen="CUARENTENA")       # no: cuarentena
+        alm("INA", estatus="INACTIVO")              # no: inactivo
+        alm("OTR", sucursal=otra_suc)               # no: sucursal fuera de alcance
+
+        linea = self._lineas_del_get()[self.talla_ch.pk]
+
+        self.assertEqual(linea["existencias"], 5.0)
 
     def test_sku_proscai_sale_del_producto_cuando_la_variante_no_lo_tiene(self):
         """#517: el dato real vive en ``Producto.cod_proscai``."""

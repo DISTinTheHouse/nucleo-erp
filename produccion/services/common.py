@@ -14,7 +14,7 @@ Centraliza lo que antes estaba triplicado verbatim en cada service:
 """
 
 from django.db import IntegrityError, transaction
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from rest_framework.exceptions import ValidationError
 
 from ventas.models import PedidoDetalleTalla
@@ -157,6 +157,21 @@ def exigir_producto_en_tallas(detalle_tallas, tipo_label):
             ),
             "pedido_detalle_talla_ids": sin_producto,
         })
+
+
+def excluir_muestras_sin_sku(qs):
+    """Quita las tallas de líneas de MUESTRA sin SKU de producción.
+
+    Muestra = ``producto_nombre_externo`` no vacío (``nombre_es_muestra``). Sin SKU =
+    sin ``variante`` de catálogo y sin ``sku_muestra``. Una línea de catálogo nunca se
+    oculta, aunque su combinación producto/color/talla no tenga variante (#518).
+    Fuente única del GET y del POST de onboarding de OB.
+    """
+    muestra = Q(pedido_detalle__producto_nombre_externo__isnull=False) & ~Q(
+        pedido_detalle__producto_nombre_externo=""
+    )
+    sin_sku = Q(variante__isnull=True) & (Q(sku_muestra__isnull=True) | Q(sku_muestra=""))
+    return qs.exclude(muestra & sin_sku)
 
 
 def tallas_orden_trabajo_qs(pedido_id, lleva_field):
