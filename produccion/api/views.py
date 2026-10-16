@@ -14,6 +14,7 @@ from rest_framework.pagination import PageNumberPagination
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
 from ventas.services.sku_produccion_service import detalles_de_muestra, variantes_produccion_activas
 from usuarios.models import Usuario
+from nucleo.models import Sucursal
 from seguridad.role_identity import (
     CLAVE_DEPARTAMENTO_PRODUCCION,
     usuario_tiene_clave_departamento,
@@ -568,6 +569,27 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
         return Response(res_data)
 
+    @staticmethod
+    def _resolver_sucursal_op(request, empresa):
+        """Sucursal de la OP: la del body si viene y el usuario puede operar en ella;
+        si no viene, su ``sucursal_default``. Una sucursal ajena o fuera de alcance
+        responde igual que un pk inexistente (400), sin revelar que existe."""
+        user = request.user
+        pedida = request.data.get('sucursal')
+        if pedida in (None, ''):
+            return getattr(user, 'sucursal_default', None)
+        error = ValidationError({'sucursal': 'Sucursal no válida.'})
+        try:
+            pedida = int(pedida)
+        except (TypeError, ValueError):
+            raise error
+        sucursal = Sucursal.objects.filter(pk=pedida, empresa=empresa).first()
+        if sucursal is None:
+            raise error
+        if not (user.is_superuser or user.is_admin_empresa) and pedida not in user.sucursales_permitidas():
+            raise error
+        return sucursal
+
     def _crear_op_desde_request(self, request):
         empresa = getattr(request.user, 'empresa', None)
         if empresa is None:
@@ -575,7 +597,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                 {'msg': 'El usuario no tiene una empresa asignada'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        sucursal = getattr(request.user, 'sucursal_default', None)
+        sucursal = self._resolver_sucursal_op(request, empresa)
         if sucursal is None:
             return Response(
                 {'msg': 'El usuario no tiene una sucursal asignada'},
@@ -585,8 +607,8 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         # ``empresa``/``sucursal`` son read-only en el serializer (no se
-        # confía en el body): se inyectan ya resueltas del usuario
-        # autenticado, mismo patrón que ``OrdenBordadoService.save``.
+        # confía en el body): se inyectan ya resueltas y validadas contra el
+        # usuario autenticado, mismo patrón que ``OrdenBordadoService.save``.
         serializer.validated_data['empresa'] = empresa
         serializer.validated_data['sucursal'] = sucursal
 
