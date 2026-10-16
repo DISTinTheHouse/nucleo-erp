@@ -371,15 +371,24 @@ class PickingService:
             )
         if picking.almacen_id == almacen.pk:
             raise ValidationError({"almacen": "El picking ya está en ese almacén."})
-        if almacen.empresa_id and almacen.empresa_id != picking.empresa_id:
+        # Un almacén sin empresa o sin sucursal tampoco pertenece al picking (#510).
+        if almacen.empresa_id != picking.empresa_id:
             raise ValidationError({"almacen": "El almacén no pertenece a la empresa del picking."})
-        if almacen.sucursal_id and almacen.sucursal_id != picking.sucursal_id:
+        if almacen.sucursal_id != picking.sucursal_id:
             raise ValidationError({"almacen": "El almacén no pertenece a la sucursal del picking."})
+        if almacen.estatus != "ACTIVO":
+            raise ValidationError({"almacen": "El almacén está inactivo."})
         if not bool(getattr(almacen, "permite_salida", False)):
             raise ValidationError({"almacen": "Este almacén no permite salidas."})
         if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
             if picking.sucursal_id not in user.sucursales_permitidas():
                 raise ValidationError({"picking": "No tiene acceso a la sucursal del picking."})
+
+        # Lo ya surtido quedó atribuido a un almacén/ubicación: moverlo borraría ese historial.
+        if picking.picking_detalle.filter(cantidad_surtida__gt=0).exists():
+            raise ValidationError(
+                {"estado": "No se puede trasladar un picking con líneas ya surtidas."}
+            )
 
         anterior = picking.almacen
         destino_anterior_id = picking.almacen_destino_id

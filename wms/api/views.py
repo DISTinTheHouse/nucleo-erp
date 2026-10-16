@@ -225,7 +225,7 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
     def trasladar(self, request, pk=None):
         """Mueve el picking a otro almacén (p. ej. de bordados a APARTADOS)."""
         picking = self.get_object()
-        serializer = PickingTrasladoSerializer(data=request.data)
+        serializer = PickingTrasladoSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         picking = PickingService.trasladar(
             picking,
