@@ -729,6 +729,45 @@ class PickingTrasladoTests(TestCase):
     def test_almacen_de_otra_empresa_rechazado(self):
         self.assertEqual(self._post(self.ajeno).status_code, 400)
 
+    def test_almacen_sin_empresa_o_sin_sucursal_rechazado(self):
+        from inventarios.models import Almacen
+        sin_sucursal = Almacen.objects.create(
+            codigo="SS", nombre="Sin sucursal", empresa=self.empresa, permite_salida=True
+        )
+        self.assertEqual(self._post(sin_sucursal).status_code, 400)
+
+    def test_almacen_inactivo_rechazado(self):
+        from inventarios.models import Almacen
+        Almacen.objects.filter(pk=self.apartados.pk).update(estatus="INACTIVO")
+        self.assertEqual(self._post(self.apartados).status_code, 400)
+
+    def test_almacen_ajeno_no_se_distingue_de_uno_inexistente(self):
+        """#510: el mensaje no revela que el ID existe en otra empresa."""
+        ajeno = self._post(self.ajeno)
+        client = APIClient()
+        client.force_authenticate(self.admin)
+        inexistente = client.post(
+            f"/api/v1/wms/pickings/{self.picking.pk}/trasladar/", {"almacen": 999999}, format="json"
+        )
+        self.assertEqual(ajeno.status_code, 400)
+        self.assertEqual(inexistente.status_code, 400)
+        self.assertEqual(list(ajeno.json()), list(inexistente.json()))
+        self.assertNotIn("empresa", str(ajeno.json()))
+
+    def test_picking_con_lineas_surtidas_no_se_traslada(self):
+        from ventas.models import PedidoDetalle
+        from wms.models import PickingDetalle
+        PickingDetalle.objects.create(
+            picking=self.picking,
+            pedido_detalle=PedidoDetalle.objects.create(
+                pedido=self.picking.pedido, producto_nombre_externo="Muestra"
+            ),
+            cantidad_solicitada=2, cantidad_asignada=2, cantidad_surtida=1,
+        )
+        self.assertEqual(self._post(self.apartados).status_code, 400)
+        self.picking.refresh_from_db()
+        self.assertEqual(self.picking.almacen_id, self.bordados.pk)
+
     def test_picking_completado_no_se_traslada(self):
         from wms.models import Picking
         Picking.objects.filter(pk=self.picking.pk).update(estado=Picking.Estado.COMPLETADO)

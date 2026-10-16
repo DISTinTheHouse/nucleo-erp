@@ -355,6 +355,14 @@ class PickingTrasladoSerializer(serializers.Serializer):
     almacen = serializers.PrimaryKeyRelatedField(queryset=Almacen.objects.all())
     observaciones = serializers.CharField(required=False, allow_blank=True)
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Un almacén de otra empresa responde igual que uno inexistente (no revela IDs).
+        user = getattr(self.context.get("request"), "user", None)
+        if user is not None and not getattr(user, "is_superuser", False):
+            empresa_id = getattr(user, "empresa_id", None)
+            self.fields["almacen"].queryset = Almacen.objects.filter(empresa_id=empresa_id)
+
 
 class PickingCreateSerializer(serializers.ModelSerializer):
     """Alta de picking parcial.
