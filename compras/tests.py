@@ -2119,11 +2119,30 @@ class OrdenCompraRutaCriticaTests(TestCase):
         )
 
     def setUp(self):
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        permiso = Permiso.objects.create(clave="E-COMPRAS-OC", nombre="Órdenes de compra")
+        UsuarioPermiso.objects.create(
+            usuario=self.usuario, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT, empresa=self.empresa,
+        )
         self.api = APIClient()
         self.api.force_authenticate(user=self.usuario)
 
     def _url(self, oc):
         return f"/api/v1/compras/ordenes/{oc.pk}/ruta-critica/"
+
+    def test_patch_sin_permiso_es_403_y_get_sigue_abierto(self):
+        oc = self._oc()
+        sin_permiso = Usuario.objects.create(
+            username="b@acme-rc.test", email="b@acme-rc.test", empresa=self.empresa,
+            sucursal_default=self.sucursal,
+        )
+        api = APIClient()
+        api.force_authenticate(user=sin_permiso)
+
+        self.assertEqual(api.get(self._url(oc)).status_code, 200)
+        self.assertEqual(api.patch(self._url(oc), {"comentarios": "x"}, format="json").status_code, 403)
+        self.assertFalse(OrdenCompraRutaCritica.objects.exists())
 
     def test_get_sin_captura_devuelve_defaults_y_no_escribe(self):
         oc = self._oc()
