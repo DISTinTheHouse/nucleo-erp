@@ -61,6 +61,9 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
         pedidos = list(obj.pedidos.all())
         if not pedidos and obj.pedido_id:
             pedidos = [obj.pedido]
+        # La M2M no guarda posición: el orden es estable (el pedido principal
+        # primero, el resto por pk) para que ``pedidos[0]`` coincida con ``pedido``.
+        pedidos.sort(key=lambda p: (p.pk != obj.pedido_id, p.pk))
         return pedidos
 
     def get_pedidos(self, obj):

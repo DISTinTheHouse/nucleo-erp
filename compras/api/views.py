@@ -302,11 +302,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         data = filtrar_campos_contabilidad_orden_compra(self.get_serializer(instance).data, request.user)
         return Response(data, status=status.HTTP_200_OK)
 
-    # tipo_documento de ``SerieFolio`` por tipo de compra. MP conserva el
-    # histórico ``ORDEN_COMPRA`` (serie OC); PT usa ``ORDEN_COMPRA_PT`` (serie O).
+    # tipo_documento de ``SerieFolio`` por tipo de compra (serie OC para MP, O para PT).
+    # Se prueban el código y el nombre con que las series están dadas de alta en la
+    # BD ("Orden de Compra", "Orden de Compra PT"); sin el segundo nunca se
+    # encontraban y toda OC caía al folio de respaldo (#502).
     TIPO_DOCUMENTO_FOLIO = {
-        OrdenCompra.TipoCompra.MATERIA_PRIMA: ("ORDEN_COMPRA", "OC"),
-        OrdenCompra.TipoCompra.PRODUCTO_TERMINADO: ("ORDEN_COMPRA_PT", "O"),
+        OrdenCompra.TipoCompra.MATERIA_PRIMA: (("ORDEN_COMPRA", "Orden de Compra"), "OC"),
+        OrdenCompra.TipoCompra.PRODUCTO_TERMINADO: (("ORDEN_COMPRA_PT", "Orden de Compra PT"), "O"),
     }
 
     def _asignar_folio_oc(self, instance, empresa):
@@ -639,10 +641,14 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             if "observaciones" in header:
                 oc.observaciones = header.get("observaciones") or None
             if "tipo_compra" in header:
+                # Con folio asignado el tipo no puede cambiar, igual que en el PUT (#504).
+                if oc.folio and header["tipo_compra"] != oc.tipo_compra:
+                    raise ValidationError(
+                        {"tipo_compra": "La orden ya tiene folio y no puede cambiar de tipo de compra."}
+                    )
                 oc.tipo_compra = header["tipo_compra"]
             if pedidos_ids is not None:
                 oc.pedido_id = pedidos_ids[0] if pedidos_ids else None
-            oc.folio = None
             if not oc.pk:
                 oc.estatus = OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR
             renglones = None

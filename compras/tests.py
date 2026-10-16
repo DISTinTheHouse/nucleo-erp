@@ -1943,6 +1943,42 @@ class OrdenCompraPedidosSeriesRendimientoTests(TestCase):
         self.assertEqual(self._aceptar({"tipo_compra": "PT"})["folio"], "O-0002")
         self.assertEqual(self._aceptar()["folio"], "OC-0003")
 
+    def test_folio_usa_las_series_con_el_nombre_real_de_la_bd(self):
+        """#502: en la BD las series se llaman "Orden de Compra" / "Orden de Compra PT"."""
+        SerieFolio.objects.filter(tipo_documento__in=["ORDEN_COMPRA", "ORDEN_COMPRA_PT"]).update(
+            tipo_documento="Orden de Compra"
+        )
+        SerieFolio.objects.filter(serie="O").update(tipo_documento="Orden de Compra PT")
+
+        self.assertEqual(self._aceptar()["folio"], "OC-0001")
+        self.assertEqual(self._aceptar({"tipo_compra": "PT"})["folio"], "O-0001")
+
+    def test_onboarding_con_folio_no_cambia_el_tipo_ni_borra_el_folio(self):
+        """#504: la edición por onboarding respeta las mismas reglas que el PUT."""
+        oc = self._aceptar()
+        # El PUT regresa la OC a POR_AUTORIZAR conservando el folio: ya es editable por onboarding.
+        self.client_api.put(f"{ORDENES_URL}{oc['id']}/", {"observaciones": "y"}, format="json")
+        body = {"orden_compra_id": oc["id"], "orden_compra": {"tipo_compra": "PT"}}
+        resp = self.client_api.post(f"{ORDENES_URL}onboarding/", body, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("tipo_compra", resp.json())
+
+        body = {"orden_compra_id": oc["id"], "orden_compra": {"observaciones": "x"}}
+        resp = self.client_api.post(f"{ORDENES_URL}onboarding/", body, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(OrdenCompra.objects.get(pk=oc["id"]).folio, "OC-0001")
+
+    def test_el_primer_pedido_siempre_coincide_con_pedido_aunque_vengan_desordenados(self):
+        """#503: ``pedidos[0]`` == ``pedido`` y el orden es estable."""
+        ids = [self.pedidos[2].pk, self.pedidos[0].pk, self.pedidos[1].pk]
+        oc = self._crear({"pedidos": ids}).json()["orden_compra"]
+
+        esperado = [ids[0]] + sorted(ids[1:])
+        self.assertEqual(oc["pedido"], ids[0])
+        self.assertEqual(oc["pedidos"], esperado)
+        self.assertEqual(self.client_api.get(f"{ORDENES_URL}{oc['id']}/").json()["pedidos"], esperado)
+
     def test_pt_sin_serie_usa_folio_de_respaldo_con_prefijo_o(self):
         SerieFolio.objects.filter(tipo_documento="ORDEN_COMPRA_PT").delete()
         folio = self._aceptar({"tipo_compra": "PT"})["folio"]
