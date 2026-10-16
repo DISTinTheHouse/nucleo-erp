@@ -7929,3 +7929,101 @@ class F9ReportesContablesTests(MotorPolizasBase):
 
         self.assertEqual(pocas, consultas())
 
+
+
+class EmitirFacturaTests(MotorPolizasBase):
+    """``POST /facturas/{id}/emitir/``: Borrador -> Emitida con CxC y póliza, por acción del usuario."""
+
+    def setUp(self):
+        super().setUp()
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        permiso = Permiso.objects.create(clave="E-FIN-FACTURAS", nombre="Facturas")
+        UsuarioPermiso.objects.create(
+            usuario=self.a["usuario"], permiso=permiso,
+            tipo=UsuarioPermiso.TIPO_GRANT, empresa=self.empresa,
+        )
+
+    def _borrador(self):
+        resp = self._client(self.a["usuario"]).post(ONBOARDING_URL, {
+            "pedido": self.a["pedido"].pk,
+            "factura_detalles": [{"pedido_detalle_talla": self.a["talla_pedido"].pk, "cantidad": 1}],
+        }, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return Factura.objects.get(pk=resp.data["id"])
+
+    def _emitir(self, factura, user=None):
+        return self._client(user or self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/emitir/", {}, format="json")
+
+    def test_crear_la_factura_no_la_emite_ni_crea_cxc(self):
+        factura = self._borrador()
+
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.BORRADOR)
+        self.assertFalse(CuentaPorCobrar.objects.filter(factura=factura).exists())
+
+    def test_emitir_pasa_a_emitida_y_crea_cxc_pendiente_y_poliza(self):
+        factura = self._borrador()
+        Cliente.objects.filter(pk=self.a["cliente"].pk).update(dias_credito=30)
+
+        resp = self._emitir(factura)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.EMITIDA)
+        self.assertEqual(factura.fecha_emision, timezone.localdate())
+        cxc = CuentaPorCobrar.objects.get(factura=factura)
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
+        self.assertEqual(cxc.saldo, factura.total)
+        self.assertEqual(cxc.total, factura.total)
+        self.assertEqual(cxc.fecha_vencimiento, timezone.localdate() + timedelta(days=30))
+        self.assertEqual(resp.data["cuenta_por_cobrar"]["id"], cxc.pk)
+        self.assertTrue(Poliza.objects.filter(origen_tipo="Factura", origen_id=factura.pk).exists())
+
+    def test_emitir_dos_veces_responde_400_y_no_duplica_la_cxc(self):
+        factura = self._borrador()
+        self.assertEqual(self._emitir(factura).status_code, 200)
+
+        resp = self._emitir(factura)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(CuentaPorCobrar.objects.filter(factura=factura).count(), 1)
+
+    def test_una_cancelada_no_se_emite(self):
+        factura = self._borrador()
+        Factura.objects.filter(pk=factura.pk).update(estatus=Factura.FacturaStatus.CANCELADA)
+
+        self.assertEqual(self._emitir(factura).status_code, 400)
+        self.assertFalse(CuentaPorCobrar.objects.filter(factura=factura).exists())
+
+    def test_sin_permiso_responde_403_y_no_toca_la_factura(self):
+        from seguridad.models import UsuarioPermiso
+
+        factura = self._borrador()
+        UsuarioPermiso.objects.filter(usuario=self.a["usuario"]).delete()
+
+        self.assertEqual(self._emitir(factura).status_code, 403)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.BORRADOR)
+
+    def test_factura_de_otra_empresa_responde_404(self):
+        factura = self._borrador()
+
+        self.assertEqual(self._emitir(factura, user=self.b["usuario"]).status_code, 404)
+
+    def test_la_emitida_se_puede_cobrar(self):
+        factura = self._borrador()
+        self._emitir(factura)
+        cxc = CuentaPorCobrar.objects.get(factura=factura)
+        cuenta = self._crear_cuenta_bancaria(self.empresa)
+        cuenta.cuenta_contable = self._cuenta("1020", CuentaContable.CuentaTipo.ACTIVO)
+        cuenta.save()
+
+        resp = self._client(self.a["usuario"]).post(COBROS_URL, {
+            "cliente": self.a["cliente"].pk, "cuenta_bancaria": cuenta.pk,
+            "total_cobrado": str(cxc.saldo),
+            "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": str(cxc.saldo)}],
+        }, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PAGADA)

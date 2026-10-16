@@ -94,6 +94,7 @@ from finanzas.services.nota_credito_service import NotaCreditoService
 from finanzas.services.pago_service import PagoService
 from finanzas.services.plan_contable_service import PlanContableService
 from finanzas.services.factura_cancelacion_service import FacturaCancelacionService
+from finanzas.services.factura_emision_service import FacturaEmisionService
 from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
@@ -803,6 +804,30 @@ class FacturaViewSet(FinanzasBaseViewSet):
         data = dict(FacturaSerializer(factura).data)
         data['contrapoliza_id'] = contrapoliza.pk if contrapoliza else None
         return Response(data)
+
+    @action(detail=True, methods=['post'], url_path='emitir', url_name='emitir')
+    def emitir(self, request, pk=None):
+        """Borrador -> Emitida: crea la CxC (saldo = total) y la póliza. Es una acción del usuario, no del alta."""
+        factura = self.get_object()  # otra empresa -> 404 antes que 403
+        if not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
+            raise PermissionDenied('No tienes permiso para emitir facturas.')
+        cxc, poliza = FacturaEmisionService.emitir(factura, request.user)
+        return Response({
+            'factura': FacturaSerializer(factura).data,
+            'cuenta_por_cobrar': {
+                'id': cxc.pk,
+                'estatus': cxc.estatus,
+                'saldo': str(cxc.saldo),
+                'referencia': cxc.referencia,
+                'fecha_vencimiento': cxc.fecha_vencimiento,
+            },
+            'poliza': poliza and {
+                'id': poliza.pk,
+                'folio': poliza.folio,
+                'tipo': poliza.tipo,
+                'estatus': poliza.estatus,
+            },
+        })
 
     @action(detail=True, methods=['get'], url_path='previsualizar-poliza', url_name='previsualizar-poliza')
     def previsualizar_poliza(self, request, pk=None):
