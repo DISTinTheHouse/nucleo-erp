@@ -109,7 +109,7 @@ def _tallas_ot_prefetch(flag, con_variante=False):
         .order_by("id")
     )
     if con_variante:
-        qs = qs.select_related("variante")
+        qs = qs.select_related("variante__producto")
     return Prefetch("detalles__tallas", queryset=qs)
 
 
@@ -269,7 +269,9 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
             if incluir_sku:
                 var = dt.variante
                 linea["sku"] = var.sku if var else dt.sku_muestra
-                linea["sku_proscai"] = (var.cod_proscai or None) if var else None
+                # El código Proscai vive en el producto (el de la variante nunca se llena);
+                # mismo valor que publica el catálogo en ``ProductoVarianteSerializer``.
+                linea["sku_proscai"] = (var.producto.cod_proscai or var.cod_proscai or None) if var else None
                 linea["existencias"] = existencias.get(dt.variante_id, 0) if var else None
             if incluir_config_crudo:
                 # El config ÍNTEGRO, con todos sus elementos y sus claves

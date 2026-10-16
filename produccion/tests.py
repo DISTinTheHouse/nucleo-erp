@@ -6893,6 +6893,21 @@ class OrdenBordadoOnboardingSkuTests(OrdenBordadoParcialidadesTests):
         self.assertEqual(linea["existencias"], 10.0)
 
 
+    def test_sku_proscai_sale_del_producto_cuando_la_variante_no_lo_tiene(self):
+        """#517: el dato real vive en ``Producto.cod_proscai``."""
+        from catalogo.models import Color, ProductoVariante
+
+        Producto.objects.filter(pk=self.producto.pk).update(cod_proscai="PROD-PRO-9")
+        variante = ProductoVariante.objects.create(
+            producto=self.producto, empresa=self.empresa, color=Color.objects.create(nombre="Rojo"),
+            talla=self.talla_ch, sku="PLY-CH-ROJ", precio_base=1,
+        )
+        PedidoDetalleTalla.objects.filter(pk=self.pdt_ch.pk).update(variante=variante)
+
+        linea = self._lineas_del_get()[self.talla_ch.pk]
+
+        self.assertEqual(linea["sku_proscai"], "PROD-PRO-9")
+
 
 class SkuProduccionVacioTests(TestCase):
     """#440: producción y ventas coinciden en "sku vacío = sin SKU" y en qué es muestra."""
