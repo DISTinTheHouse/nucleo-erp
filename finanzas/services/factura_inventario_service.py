@@ -23,7 +23,14 @@ class FacturaInventarioService:
             modulo="inventarios", tabla="existencias", id_registro=str(pedido.pk)
         ).order_by("id_evento")
         for evento in eventos:
-            for item in (evento.despues_json or {}).get("items", []):
+            payload = evento.despues_json or {}
+            # ``id_registro`` también lo usan otros flujos con el pk de otra entidad
+            # (almacén, recepción, OP, transferencia): solo cuentan los eventos del pedido.
+            if payload.get("pedido_id") != pedido.pk:
+                continue
+            for item in payload.get("items", []):
+                if item.get("almacen_id") is None:
+                    continue
                 llave = (
                     item.get("producto_id"),
                     item.get("producto_variante_id"),

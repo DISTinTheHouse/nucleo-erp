@@ -1,3 +1,4 @@
+from nucleo.middleware import ip_auditoria
 import logging
 import json
 
@@ -74,7 +75,7 @@ class AuditLogMixin:
             logger.warning(f"No se pudo auditar {action} en {obj} - Falta Empresa")
             return
 
-        ip = self.request.META.get('REMOTE_ADDR')
+        ip = ip_auditoria(self.request)
         user_agent = self.request.META.get('HTTP_USER_AGENT', '')[:200] # Truncar si es necesario
 
         antes = None

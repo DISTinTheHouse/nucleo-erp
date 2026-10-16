@@ -3,6 +3,7 @@
 Concentra el mapa de transiciones, los requisitos que salen de la ruta crítica
 y el registro en auditoría, para que la vista sea solo transporte.
 """
+from nucleo.middleware import ip_auditoria
 from django.db import transaction
 from django.utils import timezone
 
@@ -96,6 +97,8 @@ def cambiar_estatus(op_id, visibles, user, destino, motivo="", forzar=False, req
     except ValueError:
         raise EstatusOpError(400, {"estatus_op": "Estatus no válido."})
 
+    if motivo is not None and not isinstance(motivo, str):
+        raise EstatusOpError(400, {"motivo": "El motivo debe ser texto."})
     motivo = (motivo or "").strip()
 
     with transaction.atomic():
@@ -138,7 +141,7 @@ def cambiar_estatus(op_id, visibles, user, destino, motivo="", forzar=False, req
 
         ip = user_agent = None
         if request is not None:
-            ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
+            ip = ip_auditoria(request)
             user_agent = request.META.get("HTTP_USER_AGENT")
         AuditoriaEvento.objects.create(
             empresa_id=op.empresa_id,

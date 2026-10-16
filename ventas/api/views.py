@@ -1,3 +1,4 @@
+from nucleo.middleware import ip_auditoria
 import json
 import logging
 from decimal import Decimal, ROUND_HALF_UP
@@ -775,9 +776,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
     def _get_request_meta(self, request=None):
         if request is None:
             return None, None
-        ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get(
-            "REMOTE_ADDR"
-        )
+        ip = ip_auditoria(request)
         user_agent = request.META.get("HTTP_USER_AGENT")
         return ip, user_agent
 
@@ -840,7 +839,12 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
         for evento in eventos:
             payload = evento.despues_json or {}
+            # Otros flujos comparten modulo/tabla con otro pk en ``id_registro``.
+            if payload.get("pedido_id") != pedido.pk:
+                continue
             for item in payload.get("items", []):
+                if item.get("almacen_id") is None:
+                    continue
                 if item.get("producto_id") != producto_id:
                     continue
                 if item.get("producto_variante_id") != producto_variante_id:

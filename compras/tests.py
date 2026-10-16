@@ -880,6 +880,65 @@ class OrdenCompraCancelacionTests(TestCase):
         self.assertEqual(ofrecidas(tipo_compra="mp"), {mp.pk: "MP"})
         self.assertEqual(client.get(RECEPCION_ONBOARDING_URL, {"tipo_compra": "XX"}).status_code, 400)
 
+    def test_onboarding_get_descuenta_lo_rechazado_por_calidad_del_recibido(self):
+        """#511: el GET calcula el pendiente con la misma regla que el POST."""
+        oc = self._oc(Estatus.AUTORIZADA)
+        linea = OrdenCompraDetalle.objects.get(orden_compra=oc)
+        recepcion = self._recepcion(oc)
+        rd = RecepcionDetalle.objects.create(
+            recepcion=recepcion, orden_compra_detalle=linea, producto=self.a["producto"],
+            cantidad_recibida=linea.cantidad,
+        )
+        empresa, sucursal = self.a["empresa"], self.a["sucursal"]
+        departamento = Departamento.objects.create(empresa=empresa, sucursal=sucursal, codigo="CAL", nombre="Calidad")
+        inspector = Empleado.objects.create(
+            empresa=empresa, sucursal=sucursal, departamento=departamento,
+            puesto=Puesto.objects.create(empresa=empresa, nombre="Inspector"),
+            numero_empleado="EMP-9", nombre="Ana", apellido_paterno="Lopez", fecha_ingreso=timezone.localdate(),
+        )
+        inspeccion = CalidadInspeccion.objects.create(
+            recepcion=recepcion, inspector=inspector, fecha=timezone.localdate(), estado="rechazada",
+        )
+        CalidadInspeccionDetalle.objects.create(
+            calidad_inspeccion=inspeccion, recepcion_detalle=rd, cantidad_inspeccionada=linea.cantidad,
+            cantidad_aprobada=linea.cantidad - 1, cantidad_rechazada=1, resultado="rechazo", motivo_rechazo="x",
+        )
+
+        resp = self._client().get(RECEPCION_ONBOARDING_URL)
+
+        fila = next(r for r in resp.json()["busqueda"]["ordenes_compra"] if r["id"] == oc.pk)
+        renglon = fila["detalle"][0]
+        self.assertEqual(Decimal(renglon["cantidad_pendiente"]), Decimal(1))
+        self.assertEqual(Decimal(renglon["cantidad_recibida"]), Decimal(linea.cantidad) - 1)
+
+    def test_onboarding_get_orden_compra_id_trae_solo_esa_orden(self):
+        a = self._oc(Estatus.AUTORIZADA)
+        self._oc(Estatus.AUTORIZADA)
+        client = self._client()
+
+        resp = client.get(RECEPCION_ONBOARDING_URL, {"orden_compra_id": a.pk})
+
+        self.assertEqual([r["id"] for r in resp.json()["busqueda"]["ordenes_compra"]], [a.pk])
+        self.assertEqual(client.get(RECEPCION_ONBOARDING_URL, {"orden_compra_id": "x"}).status_code, 400)
+
+    def test_tipo_compra_es_filtro_del_listado_y_no_del_detalle(self):
+        oc = self._oc(Estatus.AUTORIZADA)
+        recepcion = self._recepcion(oc)
+        client = self._client()
+
+        # Retrieve: el query param no cambia la respuesta.
+        for valor in ("XX", "PT"):
+            resp = client.get(f"{RECEPCIONES_URL}{recepcion.pk}/", {"tipo_compra": valor})
+            self.assertEqual(resp.status_code, 200, resp.content)
+        # Listado: filtra y valida.
+        self.assertEqual(client.get(RECEPCIONES_URL, {"tipo_compra": "XX"}).status_code, 400)
+        # Usuario sin empresa: 200 vacío aunque el valor sea inválido.
+        sin_empresa = Usuario.objects.create(username="sin-emp", email="sin@emp.test")
+        c = APIClient()
+        c.force_authenticate(user=sin_empresa)
+        resp = c.get(RECEPCIONES_URL, {"tipo_compra": "XX"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+
     # --- PUT con recepciones o facturas reales ------------------------------------
 
     def _put_reemplaza_renglones(self, oc):
@@ -1942,6 +2001,42 @@ class OrdenCompraPedidosSeriesRendimientoTests(TestCase):
         self.assertEqual(pt["tipo_compra"], "PT")
         self.assertEqual(self._aceptar({"tipo_compra": "PT"})["folio"], "O-0002")
         self.assertEqual(self._aceptar()["folio"], "OC-0003")
+
+    def test_folio_usa_las_series_con_el_nombre_real_de_la_bd(self):
+        """#502: en la BD las series se llaman "Orden de Compra" / "Orden de Compra PT"."""
+        SerieFolio.objects.filter(tipo_documento__in=["ORDEN_COMPRA", "ORDEN_COMPRA_PT"]).update(
+            tipo_documento="Orden de Compra"
+        )
+        SerieFolio.objects.filter(serie="O").update(tipo_documento="Orden de Compra PT")
+
+        self.assertEqual(self._aceptar()["folio"], "OC-0001")
+        self.assertEqual(self._aceptar({"tipo_compra": "PT"})["folio"], "O-0001")
+
+    def test_onboarding_con_folio_no_cambia_el_tipo_ni_borra_el_folio(self):
+        """#504: la edición por onboarding respeta las mismas reglas que el PUT."""
+        oc = self._aceptar()
+        # El PUT regresa la OC a POR_AUTORIZAR conservando el folio: ya es editable por onboarding.
+        self.client_api.put(f"{ORDENES_URL}{oc['id']}/", {"observaciones": "y"}, format="json")
+        body = {"orden_compra_id": oc["id"], "orden_compra": {"tipo_compra": "PT"}}
+        resp = self.client_api.post(f"{ORDENES_URL}onboarding/", body, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("tipo_compra", resp.json())
+
+        body = {"orden_compra_id": oc["id"], "orden_compra": {"observaciones": "x"}}
+        resp = self.client_api.post(f"{ORDENES_URL}onboarding/", body, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(OrdenCompra.objects.get(pk=oc["id"]).folio, "OC-0001")
+
+    def test_el_primer_pedido_siempre_coincide_con_pedido_aunque_vengan_desordenados(self):
+        """#503: ``pedidos[0]`` == ``pedido`` y el orden es estable."""
+        ids = [self.pedidos[2].pk, self.pedidos[0].pk, self.pedidos[1].pk]
+        oc = self._crear({"pedidos": ids}).json()["orden_compra"]
+
+        esperado = [ids[0]] + sorted(ids[1:])
+        self.assertEqual(oc["pedido"], ids[0])
+        self.assertEqual(oc["pedidos"], esperado)
+        self.assertEqual(self.client_api.get(f"{ORDENES_URL}{oc['id']}/").json()["pedidos"], esperado)
 
     def test_pt_sin_serie_usa_folio_de_respaldo_con_prefijo_o(self):
         SerieFolio.objects.filter(tipo_documento="ORDEN_COMPRA_PT").delete()

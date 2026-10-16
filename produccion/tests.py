@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from django.db import IntegrityError, connection, transaction
-from django.test import TestCase
+from django.test import override_settings, TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError as DRFValidationError
@@ -3955,6 +3955,46 @@ class OrdenProduccionPedidoOpcionalTests(TestCase):
         resp = self._client().post(self.URL, self._body(), format="json")
         self.assertEqual(resp.status_code, 201, resp.data)
 
+    def _segunda_sucursal(self):
+        suc = Sucursal.objects.create(empresa=self.empresa, codigo="SLP", nombre="Segunda")
+        SerieFolio.objects.create(
+            empresa=self.empresa, sucursal=suc, tipo_documento="ORDEN_PRODUCCION", serie="OP",
+        )
+        alm = Almacen.objects.create(empresa=self.empresa, sucursal=suc, codigo="ALM2", nombre="Segundo")
+        Existencia.objects.create(almacen=alm, producto=self.componente, cantidad=100)
+        return suc
+
+    def test_la_sucursal_del_body_manda_sobre_la_default(self):
+        """#509: antes se ignoraba en silencio y la OP caía en ``sucursal_default``."""
+        suc = self._segunda_sucursal()
+        body = self._body()
+        body["sucursal"] = suc.pk
+        resp = self._client().post(self.URL, body, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(OrdenProduccion.objects.get(pk=resp.data["op_id"]).sucursal_id, suc.pk)
+
+    def test_sucursal_de_otra_empresa_o_inexistente_responde_igual_400(self):
+        for pk in (self.otra_sucursal.pk, 999999, "x"):
+            body = self._body()
+            body["sucursal"] = pk
+            resp = self._client().post(self.URL, body, format="json")
+            self.assertEqual(resp.status_code, 400, resp.data)
+            self.assertEqual(str(resp.data["sucursal"]), "Sucursal no válida.")
+
+    def test_usuario_no_admin_no_puede_crear_en_sucursal_fuera_de_su_alcance(self):
+        suc = self._segunda_sucursal()
+        limitado = Usuario.objects.create(
+            username="op-lim", email="lim@acme-op.test", empresa=self.empresa,
+            sucursal_default=self.sucursal,
+        )
+        client = APIClient()
+        client.force_authenticate(user=limitado)
+        body = self._body()
+        body["sucursal"] = suc.pk
+        resp = client.post(self.URL, body, format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(str(resp.data["sucursal"]), "Sucursal no válida.")
+
     def test_pedido_de_produccion_especial_confirmado_permite_crear(self):
         pedido = self._pedido_muestra()
         resp = self._client().post(self.URL, self._body(pedido), format="json")
@@ -4568,6 +4608,36 @@ class EstatusOPTests(TestCase):
             self._set(terminal)
             self.assertEqual(self._client().get(self.url).data["opciones"], [])
             self.assertEqual(self._post({"estatus_op": int(self.E.PREPARACION)}).status_code, 409)
+
+    def test_usuario_no_admin_cambia_estatus_de_op_de_otra_sucursal_de_su_empresa(self):
+        """#507: mismo alcance que list/detail (empresa), sin filtrar por sucursal."""
+        otra_suc = Sucursal.objects.create(empresa=self.empresa, codigo="GDL", nombre="Guadalajara")
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(sucursal=otra_suc)
+        self.assertEqual(self._client(self.lector).get(self.url).status_code, 200)
+
+    def test_motivo_que_no_es_texto_responde_400(self):
+        resp = self._post({"estatus_op": int(self.E.DETENIDO), "motivo": 5})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("motivo", resp.data)
+
+    def test_ip_de_auditoria_con_cadena_de_proxies_no_tumba_el_cambio(self):
+        """#507: ``X-Forwarded-For`` encadenado o inválido no debe dar 500."""
+        from auditoria.models import AuditoriaEvento
+
+        with override_settings(ENVIRONMENT="production"):
+            resp = self._client().post(
+                self.url, {"estatus_op": int(self.E.PREPARACION)}, format="json",
+                HTTP_X_FORWARDED_FOR="1.2.3.4, 10.0.0.1",
+            )
+            self.assertEqual(resp.status_code, 200, resp.data)
+            self.assertEqual(AuditoriaEvento.objects.get(accion="CAMBIO_ESTATUS").ip, "1.2.3.4")
+
+            self._set(self.E.PENDIENTE)
+            resp = self._client().post(
+                self.url, {"estatus_op": int(self.E.PREPARACION)}, format="json",
+                HTTP_X_FORWARDED_FOR="no-es-ip",
+            )
+            self.assertEqual(resp.status_code, 200, resp.data)
 
     def test_detener_y_cancelar_exigen_motivo(self):
         for destino in (self.E.DETENIDO, self.E.CANCELADO):
@@ -6822,6 +6892,21 @@ class OrdenBordadoOnboardingSkuTests(OrdenBordadoParcialidadesTests):
         self.assertEqual(linea["sku_proscai"], "PRO-1")
         self.assertEqual(linea["existencias"], 10.0)
 
+
+    def test_sku_proscai_sale_del_producto_cuando_la_variante_no_lo_tiene(self):
+        """#517: el dato real vive en ``Producto.cod_proscai``."""
+        from catalogo.models import Color, ProductoVariante
+
+        Producto.objects.filter(pk=self.producto.pk).update(cod_proscai="PROD-PRO-9")
+        variante = ProductoVariante.objects.create(
+            producto=self.producto, empresa=self.empresa, color=Color.objects.create(nombre="Rojo"),
+            talla=self.talla_ch, sku="PLY-CH-ROJ", precio_base=1,
+        )
+        PedidoDetalleTalla.objects.filter(pk=self.pdt_ch.pk).update(variante=variante)
+
+        linea = self._lineas_del_get()[self.talla_ch.pk]
+
+        self.assertEqual(linea["sku_proscai"], "PROD-PRO-9")
 
 
 class SkuProduccionVacioTests(TestCase):

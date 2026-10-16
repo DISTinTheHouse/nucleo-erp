@@ -1,3 +1,4 @@
+from nucleo.middleware import ip_auditoria
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import models, transaction
@@ -159,7 +160,7 @@ class RecalculoConsumoTelaService:
         ]
         ip = ua = None
         if request is not None:
-            ip = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
+            ip = ip_auditoria(request)
             ua = request.META.get("HTTP_USER_AGENT")
         AuditoriaEvento.objects.create(
             empresa=op.empresa, usuario=user if getattr(user, "pk", None) else None,

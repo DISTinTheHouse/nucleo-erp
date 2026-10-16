@@ -100,6 +100,8 @@ from finanzas.services.poliza_service import PolizaService
 from finanzas.services.reporte_contable_service import LIMITE_OMISION, ReporteContableService
 from finanzas.utils.folios import generate_factura_folio
 from nucleo.models import Empresa, Moneda, Sucursal
+
+PERMISO_CANCELAR_FACTURA = 'E-FIN-FACTURAS'
 from ventas.models import Pedido, PedidoDetalleTalla
 from terceros.models import Cliente
 from terceros.api.serializers import ClienteSerializer
@@ -792,7 +794,10 @@ class FacturaViewSet(FinanzasBaseViewSet):
     @action(detail=True, methods=['post'], url_path='cancelar', url_name='cancelar')
     def cancelar(self, request, pk=None):
         """Cancela la factura y su CxC y crea la contrapóliza del día. Los cobros aplicados no se tocan."""
-        factura = self.get_object()
+        # Mueve contabilidad e inventario: exige el permiso, no solo estar autenticado (#515).
+        factura = self.get_object()  # otra empresa -> 404 antes que 403
+        if not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
+            raise PermissionDenied('No tienes permiso para cancelar facturas.')
         motivo = (request.data.get('motivo') or '').strip()[:200]
         contrapoliza = FacturaCancelacionService.cancelar(factura, request.user, motivo)
         data = dict(FacturaSerializer(factura).data)

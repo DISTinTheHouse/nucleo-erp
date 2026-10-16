@@ -1,4 +1,3 @@
-import ipaddress
 import logging
 from datetime import timedelta
 from decimal import Decimal
@@ -70,7 +69,7 @@ from inventarios.models import (
     MovimientoInventarioDetalle,
     Ubicacion,
 )
-from nucleo.middleware import get_client_ip
+from nucleo.middleware import ip_auditoria
 from nucleo.models import Moneda, SerieFolio, Sucursal
 from ventas.models import Pedido
 from produccion.models import OrdenProduccion, OrdenProduccionDetalle
@@ -79,19 +78,8 @@ from terceros.models import Proveedor, Transportista
 logger = logging.getLogger(__name__)
 
 
-def _ip_auditoria(request):
-    """IP del cliente válida para ``AuditoriaEvento.ip``, o ``None``.
+_ip_auditoria = ip_auditoria
 
-    La columna es ``inet`` en Postgres: guardar el ``X-Forwarded-For`` crudo
-    (una cadena de proxies, un valor inventado por el cliente o un
-    ``REMOTE_ADDR`` vacío) hacía fallar el INSERT y, con él, toda la
-    transacción que auditaba. ``get_client_ip`` ya toma el primer salto, pero
-    no valida que sea una IP.
-    """
-    try:
-        return str(ipaddress.ip_address(get_client_ip(request)))
-    except ValueError:
-        return None
 
 class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = OrdenCompra.objects.filter(activo=True)
@@ -314,11 +302,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         data = filtrar_campos_contabilidad_orden_compra(self.get_serializer(instance).data, request.user)
         return Response(data, status=status.HTTP_200_OK)
 
-    # tipo_documento de ``SerieFolio`` por tipo de compra. MP conserva el
-    # histórico ``ORDEN_COMPRA`` (serie OC); PT usa ``ORDEN_COMPRA_PT`` (serie O).
+    # tipo_documento de ``SerieFolio`` por tipo de compra (serie OC para MP, O para PT).
+    # Se prueban el código y el nombre con que las series están dadas de alta en la
+    # BD ("Orden de Compra", "Orden de Compra PT"); sin el segundo nunca se
+    # encontraban y toda OC caía al folio de respaldo (#502).
     TIPO_DOCUMENTO_FOLIO = {
-        OrdenCompra.TipoCompra.MATERIA_PRIMA: ("ORDEN_COMPRA", "OC"),
-        OrdenCompra.TipoCompra.PRODUCTO_TERMINADO: ("ORDEN_COMPRA_PT", "O"),
+        OrdenCompra.TipoCompra.MATERIA_PRIMA: (("ORDEN_COMPRA", "Orden de Compra"), "OC"),
+        OrdenCompra.TipoCompra.PRODUCTO_TERMINADO: (("ORDEN_COMPRA_PT", "Orden de Compra PT"), "O"),
     }
 
     def _asignar_folio_oc(self, instance, empresa):
@@ -651,10 +641,14 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             if "observaciones" in header:
                 oc.observaciones = header.get("observaciones") or None
             if "tipo_compra" in header:
+                # Con folio asignado el tipo no puede cambiar, igual que en el PUT (#504).
+                if oc.folio and header["tipo_compra"] != oc.tipo_compra:
+                    raise ValidationError(
+                        {"tipo_compra": "La orden ya tiene folio y no puede cambiar de tipo de compra."}
+                    )
                 oc.tipo_compra = header["tipo_compra"]
             if pedidos_ids is not None:
                 oc.pedido_id = pedidos_ids[0] if pedidos_ids else None
-            oc.folio = None
             if not oc.pk:
                 oc.estatus = OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR
             renglones = None
@@ -1065,23 +1059,28 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 )
             qs = qs.filter(tipo_origen=tipo_origen)
 
-        # Filtro opcional por tipo de la OC de origen: MP (serie OC) / PT (serie O).
-        tipo_compra = (self.request.query_params.get("tipo_compra") or "").strip().upper()
-        if tipo_compra:
-            if tipo_compra not in OrdenCompra.TipoCompra.values:
-                raise ValidationError({"tipo_compra": "Valor inválido. Usa MP (OC) o PT (O)."})
-            qs = qs.filter(orden_compra__tipo_compra=tipo_compra)
-
         # El superusuario se evalúa ANTES del filtro por empresa: con el orden
         # inverso, un superusuario CON empresa asignada quedaba acotado a esa
         # empresa en vez de ver todas. Mismo orden que
         # ``PedidoViewSet``/``EmpleadoViewSet.get_queryset()``.
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
-        if empresa:
-            return qs.filter(empresa=empresa)
-        return qs.none()
+        if getattr(user, "is_superuser", False):
+            pass
+        elif empresa:
+            qs = qs.filter(empresa=empresa)
+        else:
+            return qs.none()
+
+        # Filtro opcional por tipo de la OC de origen: MP (serie OC) / PT (serie O).
+        # Es del listado: no altera el retrieve, y va después del alcance por
+        # empresa para que un usuario sin empresa no vea un 400 (#511).
+        if self.action == "list":
+            tipo_compra = (self.request.query_params.get("tipo_compra") or "").strip().upper()
+            if tipo_compra:
+                if tipo_compra not in OrdenCompra.TipoCompra.values:
+                    raise ValidationError({"tipo_compra": "Valor inválido. Usa MP (OC) o PT (O)."})
+                qs = qs.filter(orden_compra__tipo_compra=tipo_compra)
+        return qs
 
     def get_serializer_class(self):
         # retrieve → forma anidada dedicada (con ``detalles[]``); list conserva la
@@ -1155,6 +1154,18 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             .get("total")
         )
         return Decimal(str(total or 0))
+
+    def _rechazado_por_detalle(self, campo, ids):
+        """Rechazado por Calidad agrupado por renglón de origen, en una sola consulta."""
+        filas = (
+            CalidadInspeccionDetalle.objects.filter(
+                recepcion_detalle__recepcion__activo=True, **{f"{campo}__in": ids}
+            )
+            .exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            .values(campo)
+            .annotate(total=Sum("cantidad_rechazada"))
+        )
+        return {fila[campo]: Decimal(str(fila["total"] or 0)) for fila in filas}
 
     def _cantidad_recibida_oc(self, orden_compra_detalle_id):
         total = (
@@ -1292,6 +1303,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             if tipo_compra not in OrdenCompra.TipoCompra.values:
                 raise ValidationError({"tipo_compra": "Valor inválido. Usa MP (OC) o PT (O)."})
             ordenes_qs = ordenes_qs.filter(tipo_compra=tipo_compra)
+        orden_compra_id = request.query_params.get("orden_compra_id")
+        if orden_compra_id not in (None, ""):
+            try:
+                ordenes_qs = ordenes_qs.filter(pk=int(orden_compra_id))
+            except (TypeError, ValueError):
+                raise ValidationError({"orden_compra_id": "Debe ser un entero."})
         if oc_q:
             ordenes_qs = ordenes_qs.filter(
                 Q(folio__icontains=oc_q)
@@ -1327,6 +1344,11 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 )
                 for row in recibido_qs:
                     recibido_map[row["orden_compra_detalle_id"]] = Decimal(str(row["total"] or 0))
+                # Lo que Calidad rechaza vuelve a ser pendiente, igual que en el POST (#511).
+                for clave, total in self._rechazado_por_detalle(
+                    "recepcion_detalle__orden_compra_detalle_id", detalle_ids
+                ).items():
+                    recibido_map[clave] = recibido_map.get(clave, Decimal("0")) - total
 
             for detalle in detalles_list:
                 recibido = recibido_map.get(detalle.pk, Decimal("0"))
@@ -1411,6 +1433,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 )
                 for row in recibido_op_qs:
                     recibido_op_map[row["orden_produccion_detalle_id"]] = Decimal(str(row["total"] or 0))
+                for clave, total in self._rechazado_por_detalle(
+                    "recepcion_detalle__orden_produccion_detalle_id", op_detalle_ids
+                ).items():
+                    recibido_op_map[clave] = recibido_op_map.get(clave, Decimal("0")) - total
 
             for op_detalle in op_detalles_list:
                 producto_variante = op_detalle.producto_variante

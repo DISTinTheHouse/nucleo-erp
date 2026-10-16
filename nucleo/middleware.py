@@ -1,3 +1,4 @@
+import ipaddress
 import logging
 import time
 from django.conf import settings
@@ -10,6 +11,20 @@ def get_client_ip(request):
         if forwarded_for:
             return forwarded_for.split(",")[0].strip()
     return (request.META.get("REMOTE_ADDR") or "").strip()
+
+def ip_auditoria(request):
+    """IP del cliente válida para ``AuditoriaEvento.ip`` (``inet``), o ``None``.
+
+    Guardar el ``X-Forwarded-For`` crudo (cadena de proxies o valor inventado por
+    el cliente) hacía fallar el INSERT y tumbaba la transacción que auditaba.
+    """
+    if request is None:
+        return None
+    try:
+        return str(ipaddress.ip_address(get_client_ip(request)))
+    except ValueError:
+        return None
+
 
 class APILoggingMiddleware:
     """

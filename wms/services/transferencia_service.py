@@ -1,3 +1,4 @@
+from nucleo.middleware import ip_auditoria
 from decimal import Decimal
 
 from django.db import transaction
@@ -212,11 +213,7 @@ class TransferenciaService:
         user_agent = None
         if request is not None:
             meta = getattr(request, "META", None) or {}
-            ip = (
-                meta.get("HTTP_X_FORWARDED_FOR")
-                or meta.get("REMOTE_ADDR")
-                or None
-            )
+            ip = ip_auditoria(request)
             user_agent = meta.get("HTTP_USER_AGENT") or None
 
         AuditoriaEvento.objects.create(

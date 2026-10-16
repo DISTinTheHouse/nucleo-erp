@@ -7441,6 +7441,13 @@ class F5CancelarFacturaTests(MotorPolizasBase):
 
     def setUp(self):
         super().setUp()
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        self.permiso_cancelar = Permiso.objects.create(clave="E-FIN-FACTURAS", nombre="Facturas")
+        UsuarioPermiso.objects.create(
+            usuario=self.a["usuario"], permiso=self.permiso_cancelar,
+            tipo=UsuarioPermiso.TIPO_GRANT, empresa=self.empresa,
+        )
         self.banco_contable = self._cuenta("1020", CuentaContable.CuentaTipo.ACTIVO)
         self.cuenta_bancaria = self._crear_cuenta_bancaria(self.empresa)
         self.cuenta_bancaria.cuenta_contable = self.banco_contable
@@ -7458,6 +7465,19 @@ class F5CancelarFacturaTests(MotorPolizasBase):
         return self._client(user or self.a["usuario"]).post(
             f"/api/v1/finanzas/facturas/{factura.pk}/cancelar/", datos, format="json"
         )
+
+    def test_sin_el_permiso_cancelar_responde_403_y_no_toca_la_factura(self):
+        """#515: estar autenticado en la empresa no basta."""
+        from seguridad.models import UsuarioPermiso
+
+        factura, _ = self._emitida()
+        UsuarioPermiso.objects.filter(usuario=self.a["usuario"]).delete()
+
+        resp = self._cancelar(factura)
+
+        self.assertEqual(resp.status_code, 403, resp.data)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.EMITIDA)
 
     def test_cancelar_una_emitida_cancela_factura_cxc_y_crea_la_contrapoliza_de_hoy(self):
         factura, _ = self._emitida()
@@ -7559,7 +7579,7 @@ class F5CancelarFacturaTests(MotorPolizasBase):
         }
         AuditoriaEvento.objects.create(
             empresa=self.empresa, modulo="inventarios", accion="SALIDA", tabla="existencias",
-            id_registro=str(pedido.pk), despues_json={"items": [item]},
+            id_registro=str(pedido.pk), despues_json={"items": [item], "pedido_id": pedido.pk},
         )
         return factura, existencia
 
@@ -7582,6 +7602,26 @@ class F5CancelarFacturaTests(MotorPolizasBase):
 
         existencia.refresh_from_db()
         self.assertEqual(existencia.cantidad, Decimal("11"))
+
+    def test_cancelar_ignora_eventos_ajenos_con_id_registro_coincidente(self):
+        """#514: la salida manual de un almacén con el mismo pk que el pedido no cuenta."""
+        from auditoria.models import AuditoriaEvento
+
+        factura, existencia = self._factura_con_piezas()
+        pedido = self.a["pedido"]
+        ajeno = {
+            "producto_id": existencia.producto_id, "producto_variante_id": existencia.producto_variante_id,
+            "ubicacion_id": existencia.ubicacion_id, "delta": "-5",
+        }
+        AuditoriaEvento.objects.create(
+            empresa=self.empresa, modulo="inventarios", accion="SALIDA", tabla="existencias",
+            id_registro=str(pedido.pk), despues_json={"items": [ajeno], "almacen_id": existencia.almacen_id},
+        )
+
+        self.assertEqual(self._cancelar(factura).status_code, 200)
+
+        existencia.refresh_from_db()
+        self.assertEqual(existencia.cantidad, Decimal("13"))
 
     def test_cancelar_dos_veces_no_devuelve_dos_veces(self):
         factura, existencia = self._factura_con_piezas()
