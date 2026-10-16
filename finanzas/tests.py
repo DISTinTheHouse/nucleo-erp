@@ -7559,7 +7559,7 @@ class F5CancelarFacturaTests(MotorPolizasBase):
         }
         AuditoriaEvento.objects.create(
             empresa=self.empresa, modulo="inventarios", accion="SALIDA", tabla="existencias",
-            id_registro=str(pedido.pk), despues_json={"items": [item]},
+            id_registro=str(pedido.pk), despues_json={"items": [item], "pedido_id": pedido.pk},
         )
         return factura, existencia
 
@@ -7582,6 +7582,26 @@ class F5CancelarFacturaTests(MotorPolizasBase):
 
         existencia.refresh_from_db()
         self.assertEqual(existencia.cantidad, Decimal("11"))
+
+    def test_cancelar_ignora_eventos_ajenos_con_id_registro_coincidente(self):
+        """#514: la salida manual de un almacén con el mismo pk que el pedido no cuenta."""
+        from auditoria.models import AuditoriaEvento
+
+        factura, existencia = self._factura_con_piezas()
+        pedido = self.a["pedido"]
+        ajeno = {
+            "producto_id": existencia.producto_id, "producto_variante_id": existencia.producto_variante_id,
+            "ubicacion_id": existencia.ubicacion_id, "delta": "-5",
+        }
+        AuditoriaEvento.objects.create(
+            empresa=self.empresa, modulo="inventarios", accion="SALIDA", tabla="existencias",
+            id_registro=str(pedido.pk), despues_json={"items": [ajeno], "almacen_id": existencia.almacen_id},
+        )
+
+        self.assertEqual(self._cancelar(factura).status_code, 200)
+
+        existencia.refresh_from_db()
+        self.assertEqual(existencia.cantidad, Decimal("13"))
 
     def test_cancelar_dos_veces_no_devuelve_dos_veces(self):
         factura, existencia = self._factura_con_piezas()

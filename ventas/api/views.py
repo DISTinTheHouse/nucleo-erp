@@ -840,7 +840,12 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
         for evento in eventos:
             payload = evento.despues_json or {}
+            # Otros flujos comparten modulo/tabla con otro pk en ``id_registro``.
+            if payload.get("pedido_id") != pedido.pk:
+                continue
             for item in payload.get("items", []):
+                if item.get("almacen_id") is None:
+                    continue
                 if item.get("producto_id") != producto_id:
                     continue
                 if item.get("producto_variante_id") != producto_variante_id:
