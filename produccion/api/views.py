@@ -1376,6 +1376,7 @@ class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet)
     queryset = BordadoAvances.objects.filter(activo=True)
     serializer_class = BordadoAvancesSerializer
     orden_padre_field = "ob"
+    filterset_fields = ["ob"]
 
     @staticmethod
     def _puntadas_total(por_pieza, cantidad):
@@ -1393,6 +1394,12 @@ class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet)
 
     def perform_update(self, serializer):
         inst, v = serializer.instance, serializer.validated_data
+        # Un PATCH que no toca piezas ni puntadas no recalcula, y un avance
+        # legacy (puntadas_por_pieza=0, total capturado a mano) conserva su total.
+        if "puntadas_por_pieza" not in v and "cantidad_bordada" not in v:
+            return serializer.save()
+        if not inst.puntadas_por_pieza and not v.get("puntadas_por_pieza"):
+            return serializer.save()
         serializer.save(
             puntadas_total=self._puntadas_total(
                 v.get("puntadas_por_pieza", inst.puntadas_por_pieza),

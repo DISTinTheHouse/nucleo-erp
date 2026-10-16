@@ -7087,3 +7087,97 @@ class RutaCriticaFechasSelladasTests(TestCase):
         resp = self._patch(kit_completo=True)
         self.assertEqual(resp.status_code, 409)
         self.assertIn("estatus «Completado»", resp.data["msg"])
+
+
+class BordadoAvancesRegresionesTests(TestCase):
+    """Regresiones de #521 (sucursal), #522 (filtro ?ob=) y #523 (PATCH legacy)."""
+
+    URL = "/api/v1/produccion/bordado-avances/"
+
+    @classmethod
+    def setUpTestData(cls):
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.mty = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.gdl = Sucursal.objects.create(empresa=cls.empresa, codigo="GDL", nombre="GDL")
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.op = Usuario.objects.create(
+            username="op@acme.test", email="op@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.mty,
+        )
+        cls.admin = Usuario.objects.create(
+            username="adm@acme.test", email="adm@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.mty, is_admin_empresa=True,
+        )
+
+        def _ob(sucursal, folio):
+            pedido = Pedido.objects.create(
+                empresa=cls.empresa, sucursal=sucursal, cliente=cliente, moneda=moneda,
+                persona_pagos="Pagos", correo_facturas="a@acme.test",
+                telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE",
+                uso_cfdi="G03",
+            )
+            return OrdenesBordado.objects.create(
+                empresa=cls.empresa, sucursal=sucursal, pedido=pedido, folio_bordado=folio
+            )
+
+        cls.ob1 = _ob(cls.mty, "OB-1")
+        cls.ob2 = _ob(cls.mty, "OB-2")
+        cls.ob_gdl = _ob(cls.gdl, "OB-GDL")
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def test_no_admin_no_crea_avance_en_ob_de_otra_sucursal(self):
+        resp = self._client(self.op).post(
+            self.URL,
+            {"ob": self.ob_gdl.pk, "cantidad_bordada": 1, "puntadas_por_pieza": 1},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("ob", resp.data)
+        # El admin de empresa sí puede.
+        resp = self._client(self.admin).post(
+            self.URL,
+            {"ob": self.ob_gdl.pk, "cantidad_bordada": 1, "puntadas_por_pieza": 1},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_filtro_ob_devuelve_solo_esa_ob(self):
+        for ob in (self.ob1, self.ob2):
+            BordadoAvances.objects.create(
+                ob=ob, usuario=self.op, cantidad_bordada=1, puntadas_por_pieza=1
+            )
+        resp = self._client(self.op).get(self.URL, {"ob": self.ob1.pk})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual({r["ob"] for r in resp.json()}, {self.ob1.pk})
+
+    def test_patch_no_borra_puntadas_total_de_avance_legacy(self):
+        av = BordadoAvances.objects.create(
+            ob=self.ob1, usuario=self.op, cantidad_bordada=10,
+            puntadas_por_pieza=0, puntadas_total=80000,
+        )
+        resp = self._client(self.op).patch(
+            f"{self.URL}{av.pk}/", {"comentario": "x"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        av.refresh_from_db()
+        self.assertEqual(av.puntadas_total, 80000)
+        # Cambiar solo las piezas de un legacy tampoco lo borra.
+        self._client(self.op).patch(
+            f"{self.URL}{av.pk}/", {"cantidad_bordada": 5}, format="json"
+        )
+        av.refresh_from_db()
+        self.assertEqual(av.puntadas_total, 80000)
+
+    def test_patch_de_comentario_no_recalcula_avance_normal(self):
+        av = BordadoAvances.objects.create(
+            ob=self.ob1, usuario=self.op, cantidad_bordada=10,
+            puntadas_por_pieza=100, puntadas_total=1000,
+        )
+        self._client(self.op).patch(f"{self.URL}{av.pk}/", {"comentario": "x"}, format="json")
+        av.refresh_from_db()
+        self.assertEqual(av.puntadas_total, 1000)
