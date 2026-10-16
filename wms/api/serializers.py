@@ -314,12 +314,16 @@ class PickingSerializer(serializers.ModelSerializer):
         source="zona_almacen.nombre", read_only=True, default=None
     )
     lote_nombre = serializers.SerializerMethodField()
+    transferencia_folio = serializers.CharField(
+        source="transferencia.folio", read_only=True, default=None
+    )
 
     class Meta:
         model = Picking
         fields = "__all__"
         read_only_fields = [
             "folio",
+            "transferencia",
             "total_lineas",
             "total_lineas_completas",
             "usuario",
