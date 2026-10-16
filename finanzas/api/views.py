@@ -784,7 +784,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
             if pedido is None:
                 raise NotFound('El pedido no existe o no pertenece a tu empresa.')
 
-            factura = FacturaService.facturar_pendiente(pedido, empresa, sucursal)
+            factura = FacturaService.facturar_pendiente(pedido, empresa, sucursal, usuario=user)
 
         return Response(
             FacturaSerializer(factura).data,

@@ -16,7 +16,8 @@ class FacturaCancelacionService:
 
         Los cobros aplicados no se tocan: su póliza sigue y en Clientes queda el
         importe cobrado como saldo a favor. Las piezas facturadas regresan a existencia
-        (solo lo que el pedido descontó y no se ha reintegrado).
+        (solo lo que el pedido descontó y no se ha reintegrado) y se vuelven a
+        descontar al refacturarlas (#513).
         """
         bloqueada = Factura.objects.select_for_update().get(pk=factura.pk)
         if bloqueada.estatus == Factura.FacturaStatus.CANCELADA:
@@ -36,6 +37,8 @@ class FacturaCancelacionService:
         CuentaPorCobrar.objects.filter(factura=bloqueada).update(
             estatus=CuentaPorCobrar.EstatusCxC.CANCELADA
         )
-        if era_emitida:
-            FacturaInventarioService.reintegrar(bloqueada, usuario)
+        # Un Borrador solo regresa lo que él mismo volvió a descontar al crearse.
+        FacturaInventarioService.reintegrar(
+            bloqueada, usuario, solo_redescontado=not era_emitida
+        )
         return FacturaPolizaService.cancelar(bloqueada, usuario) if era_emitida else None

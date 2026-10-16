@@ -7,6 +7,7 @@ from django.db.models import Sum
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import Factura, FacturaDetalle
+from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.utils.folios import TIPOS_DOCUMENTO_FACTURA, generate_factura_folio
 from nucleo.models import SerieFolio
 from ventas.models import PedidoDetalleTalla
@@ -304,12 +305,12 @@ class FacturaService:
             for renglon in renglones
         ]
         return FacturaService._crear_factura(
-            getattr(user, 'empresa', None), sucursal, pedido, lineas, **validated_data
+            getattr(user, 'empresa', None), sucursal, pedido, lineas, usuario=user, **validated_data
         )
 
     @staticmethod
     @transaction.atomic
-    def facturar_pendiente(pedido, empresa, sucursal):
+    def facturar_pendiente(pedido, empresa, sucursal, usuario=None):
         """Factura todas las piezas que le quedan pendientes al pedido."""
         FacturaService._exigir_pedido_vigente(pedido)
         lineas = [
@@ -319,7 +320,7 @@ class FacturaService:
         ]
         if not lineas:
             raise ErrorDeNegocio({'pedido': 'El pedido no tiene piezas pendientes por facturar.'})
-        return FacturaService._crear_factura(empresa, sucursal, pedido, lineas)
+        return FacturaService._crear_factura(empresa, sucursal, pedido, lineas, usuario=usuario)
 
     @staticmethod
     def _exigir_pedido_vigente(pedido):
@@ -383,7 +384,7 @@ class FacturaService:
         return pendientes
 
     @staticmethod
-    def _crear_factura(empresa, sucursal, pedido, lineas, **campos):
+    def _crear_factura(empresa, sucursal, pedido, lineas, usuario=None, **campos):
         # Se valida todo antes de generar el folio para no consumirlo en balde.
         pendientes = FacturaService._validar_lineas(pedido, lineas)
         try:
@@ -447,4 +448,6 @@ class FacturaService:
         factura.impuestos = factura_impuestos
         factura.total = factura_total
         factura.save(update_fields=['subtotal', 'descuento', 'impuestos', 'total'])
+        # Las piezas que una cancelación regresó a existencia vuelven a salir (#513).
+        FacturaInventarioService.redescontar(factura, usuario)
         return factura
