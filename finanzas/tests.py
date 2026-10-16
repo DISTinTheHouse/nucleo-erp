@@ -7684,6 +7684,78 @@ class F5CancelarFacturaTests(MotorPolizasBase):
 
         self.assertEqual(resp.status_code, 201, resp.data)
 
+    def _refacturar(self):
+        return self._client(self.a["usuario"]).post(
+            "/api/v1/finanzas/facturas/desde-pedido/", {"pedido": self.a["pedido"].pk}, format="json"
+        )
+
+    def test_refacturar_tras_cancelar_vuelve_a_descontar_las_piezas(self):
+        """#513: cancelar y reemitir no deja stock fantasma."""
+        from inventarios.models import MovimientoInventario
+
+        factura, existencia = self._factura_con_piezas()
+        self._cancelar(factura)
+        existencia.refresh_from_db()
+        self.assertEqual(existencia.cantidad, Decimal("13"))
+
+        resp = self._refacturar()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        existencia.refresh_from_db()
+        self.assertEqual(existencia.cantidad, Decimal("10"))
+        mov = MovimientoInventario.objects.get(pedido=self.a["pedido"], tipo_movimiento="SALIDA")
+        self.assertEqual(mov.detalles.get().cantidad, Decimal("3"))
+
+    def test_cancelar_el_borrador_refacturado_lo_regresa_y_se_puede_repetir_el_ciclo(self):
+        factura, existencia = self._factura_con_piezas()
+        self._cancelar(factura)
+        nueva = Factura.objects.get(pk=self._refacturar().data["id"])
+
+        self._cancelar(nueva)
+        existencia.refresh_from_db()
+        self.assertEqual(existencia.cantidad, Decimal("13"))
+
+        self.assertEqual(self._refacturar().status_code, 201)
+        existencia.refresh_from_db()
+        self.assertEqual(existencia.cantidad, Decimal("10"))
+
+    def test_la_primera_factura_no_descuenta_porque_la_cotizacion_ya_lo_hizo(self):
+        from inventarios.models import MovimientoInventario
+
+        factura, existencia = self._factura_con_piezas()
+        Factura.objects.filter(pk=factura.pk).update(activo=False)
+
+        resp = self._refacturar()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        existencia.refresh_from_db()
+        self.assertEqual(existencia.cantidad, Decimal("10"))
+        self.assertFalse(MovimientoInventario.objects.filter(tipo_movimiento="SALIDA").exists())
+
+    def test_cancelar_un_borrador_que_no_redescontó_no_toca_la_existencia(self):
+        factura, existencia = self._factura_con_piezas()
+        Factura.objects.filter(pk=factura.pk).update(estatus=Factura.FacturaStatus.BORRADOR)
+
+        self.assertEqual(self._cancelar(factura).status_code, 200)
+
+        existencia.refresh_from_db()
+        self.assertEqual(existencia.cantidad, Decimal("10"))
+
+    def test_refacturar_sin_existencia_suficiente_responde_400_y_no_crea_la_factura(self):
+        factura, existencia = self._factura_con_piezas()
+        self._cancelar(factura)
+        existencia.refresh_from_db()
+        existencia.cantidad = Decimal("1")
+        existencia.save(update_fields=["cantidad"])
+        antes = Factura.objects.count()
+
+        resp = self._refacturar()
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(Factura.objects.count(), antes)
+        existencia.refresh_from_db()
+        self.assertEqual(existencia.cantidad, Decimal("1"))
+
 
 REPORTES_URL = "/api/v1/finanzas/reportes-contables/"
 
