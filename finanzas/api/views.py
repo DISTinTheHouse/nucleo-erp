@@ -1418,14 +1418,25 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
             empresa = getattr(user, "empresa", None)
             if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
-        # Borrar la factura arrastra en cascada su CxP y los PagoDetalle de ésta.
-        # Se bloquea primero la factura para no competir con un registro
-        # concurrente que esté generando su CxP.
+        # Borrar la factura se lleva su CxP. La FK es PROTECT (ningún borrado
+        # ajeno a este flujo puede arrastrarla), así que la CxP se borra aquí, ya
+        # bloqueada y comprobada sin pagos aplicados. Se bloquea primero la
+        # factura para no competir con un registro concurrente que esté
+        # generando su CxP.
         locked = FacturaProveedor.objects.select_for_update().filter(pk=instance.pk).first()
         if locked is None:
             raise NotFound("La factura de proveedor ya no existe.")
         CuentaPorPagarService.ensure_invoice_deletable(locked)
         FacturaProveedorPolizaService.cancelar(locked, user)
+        cuentas = CuentaPorPagar.objects.filter(factura_proveedor=locked)
+        if PagoDetalle.objects.filter(cxp__in=cuentas).exists():
+            # Con pagos cancelados o en borrador hay histórico (FK PROTECT): no se
+            # borra nada, la factura y su CxP quedan canceladas.
+            cuentas.update(estatus=CuentaPorPagar.EstatusCxP.CANCELADA, updated_at=timezone.now())
+            locked.estatus = FacturaProveedor.FacturaProveedorStatus.CANCELADA
+            locked.save(update_fields=["estatus", "updated_at"])
+            return
+        cuentas.delete()
         locked.delete()
 
     @action(detail=True, methods=["post"], url_path="adjuntar-pdf", parser_classes=[MultiPartParser])
@@ -1739,6 +1750,12 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
         CuentaPorPagarService.ensure_account_deletable(instance)
+        if instance.pago_detalles.exists():
+            # Con pagos cancelados o en borrador hay histórico (FK PROTECT): la
+            # CxP se cancela en vez de borrarse.
+            instance.estatus = CuentaPorPagar.EstatusCxP.CANCELADA
+            instance.save(update_fields=["estatus", "updated_at"])
+            return
         instance.delete()
 
 
@@ -2547,7 +2564,7 @@ class PuedeUsarFacturama(BasePermission):
         return puede_usar_facturama(request.user)
 
 
-class FacturamaProductsViewSet(viewsets.ViewSet):
+class FacturamaProductsViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
     permission_classes = [IsAuthenticated, PuedeUsarFacturama]
     service_class = FacturamaService
 
@@ -2620,7 +2637,7 @@ class FacturamaProductsViewSet(viewsets.ViewSet):
         except FacturamaAPIException as exc:
             return self.handle_facturama_error(exc)
 
-class FacturamaCfdiEmisionViewSet(viewsets.ViewSet):
+class FacturamaCfdiEmisionViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
     permission_classes = [IsAuthenticated, PuedeUsarFacturama]
     service_class = FacturamaService
 
@@ -2719,7 +2736,7 @@ class FacturamaCfdiEmisionViewSet(viewsets.ViewSet):
         except FacturamaAPIException as exc:
             return self.handle_facturama_error(exc)
 
-class SyncfySessionViewSet(viewsets.ViewSet):
+class SyncfySessionViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
     client_class = SyncfyClient
 
     def get_client(self):

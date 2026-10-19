@@ -1666,7 +1666,7 @@ class Defecto7ErroresDeNegocioYTransacciones(FinanzasBase):
             and issubclass(clase, ViewSetMixin)
             and not clase.__name__.startswith("FinanzasBase")
         ))
-        self.assertEqual(len(viewsets_finanzas), 17, sorted(c.__name__ for c in viewsets_finanzas))
+        self.assertEqual(len(viewsets_finanzas), 23, sorted(c.__name__ for c in viewsets_finanzas))
         sin_cubrir = [
             c.__name__ for c in viewsets_finanzas
             if not issubclass(c, ErroresDeNegocioComo400Mixin)
@@ -4047,6 +4047,35 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         self.assertEqual(resp.status_code, 204)
         self.assertFalse(FacturaProveedor.objects.filter(pk=factura.pk).exists())
         self.assertFalse(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
+
+    def _cancelled_payment(self):
+        proveedor, factura, cxp = self._account("1000.00")
+        pago = self._pay(proveedor, cxp, "400.00")
+        resp = self._client(self.a["usuario"]).post(f"{PAGOS_URL}{pago.pk}/cancelar/", {}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return factura, cxp, pago
+
+    def test_deleting_invoice_with_cancelled_payment_cancels_instead_of_deleting(self):
+        factura, cxp, pago = self._cancelled_payment()
+
+        resp = self._client(self.a["usuario"]).delete(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        factura.refresh_from_db()
+        cxp.refresh_from_db()
+        self.assertEqual(factura.estatus, FacturaProveedor.FacturaProveedorStatus.CANCELADA)
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
+        self.assertTrue(pago.pago_detalles.filter(cxp=cxp).exists())
+
+    def test_deleting_account_with_cancelled_payment_cancels_instead_of_deleting(self):
+        _, cxp, pago = self._cancelled_payment()
+
+        resp = self._client(self.a["usuario"]).delete(f"{self.ACCOUNTS_URL}{cxp.pk}/")
+
+        self.assertEqual(resp.status_code, 204)
+        cxp.refresh_from_db()
+        self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
+        self.assertTrue(pago.pago_detalles.filter(cxp=cxp).exists())
 
     # -- F0: transiciones de estatus del pago --------------------------------
 
