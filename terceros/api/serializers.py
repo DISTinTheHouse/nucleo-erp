@@ -1,6 +1,8 @@
 from rest_framework import serializers
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from nucleo.models import SatRegimenFiscal, SatUsoCfdi
+from nucleo.utils import validate_rfc
+from finanzas.services.facturama.acceso import empresa_usa_facturama
 
 # Definir o cambiar el crédito del cliente es una capacidad aparte de editarlo (#462).
 PERMISO_CREDITO_CLIENTE = "E-CRM-CLIENTES-CREDITO"
@@ -41,6 +43,13 @@ class ClienteSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         self._validar_permiso_credito(attrs, getattr(request, "user", None))
         empresa = getattr(getattr(request, "user", None), "empresa", None)
+        # Facturama rechaza los RFC mal formados: si la empresa sube sus clientes
+        # allá, se valida aquí (formato + dígito verificador) para no guardar un
+        # cliente que nunca se podrá sincronizar.
+        if rfc and empresa_usa_facturama(self.instance.empresa if self.instance else empresa):
+            rfc_valido, error_rfc = validate_rfc(rfc)
+            if not rfc_valido:
+                raise serializers.ValidationError({"rfc": error_rfc})
         if empresa and rfc:
             qs = Cliente.objects.filter(empresa=empresa, rfc__iexact=rfc, activo=True)
             if self.instance:
