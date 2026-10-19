@@ -335,14 +335,9 @@ class FacturaSerializer(serializers.ModelSerializer):
             # La fija el servidor (día local del alta); en PATCH se ignora.
             'fecha_emision',
             # Los escribe solo el timbrado/cancelación con Facturama.
-            'cfdi_estatus',
             'cfdi_uuid',
             'facturama_id',
             'cfdi_fecha_timbrado',
-            'cfdi_error',
-            'cfdi_uso',
-            'cfdi_forma_pago',
-            'cfdi_metodo_pago',
         ]
         fields = '__all__'
 
@@ -414,7 +409,6 @@ class FacturaListSerializer(serializers.ModelSerializer):
             'total',
             'moneda',
             'moneda_nombre',
-            'cfdi_estatus',
             'cfdi_uuid',
         ]
         read_only_fields = fields

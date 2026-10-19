@@ -198,9 +198,6 @@ FACTURAMA_TIMEOUT = config('FACTURAMA_TIMEOUT', default=30)
 # Empresa.codigo dueña de la cuenta de Facturama. Vacío = sólo superusuario la usa
 # (ver finanzas/services/facturama/acceso.py).
 FACTURAMA_EMPRESA_CODIGO = config('FACTURAMA_EMPRESA_CODIGO', default='')
-# POST /facturas/{id}/emitir/ timbra el CFDI antes de crear CxC y póliza. Apagado
-# por defecto: encenderlo con FACTURAMA_BASE_URL de producción genera CFDI reales.
-FACTURAMA_TIMBRAR_AL_EMITIR = config('FACTURAMA_TIMBRAR_AL_EMITIR', default=False, cast=bool)
 
 SYNCFY_BASE_URL = config('SYNCFY_BASE_URL', default='')
 SYNCFY_APIKEY = config('SYNCFY_APIKEY', default='')

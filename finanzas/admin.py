@@ -101,10 +101,8 @@ class FacturaDetalleAdmin(admin.ModelAdmin):
 
 @admin.register(Factura)
 class FacturaAdmin(admin.ModelAdmin):
-    list_display = ("folio", "empresa", "sucursal", "cliente", "pedido", "estatus", "cfdi_estatus", "moneda", "total", "activo", "fecha_emision")
-    # ``cfdi_estatus`` se edita aquí a propósito: es como se resuelve un timbrado
-    # "Pendiente" después de revisarlo en Facturama.
-    list_filter = ("empresa", "sucursal", "moneda", "estatus", "cfdi_estatus", "activo")
+    list_display = ("folio", "empresa", "sucursal", "cliente", "pedido", "estatus", "cfdi_uuid", "moneda", "total", "activo", "fecha_emision")
+    list_filter = ("empresa", "sucursal", "moneda", "estatus", "activo")
     search_fields = (
         "folio",
         "cfdi_uuid",

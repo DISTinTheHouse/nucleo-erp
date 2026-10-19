@@ -282,28 +282,10 @@ class Factura(StatusLifecycleModel):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    # --- CFDI (timbrado con Facturama, ver ``factura_timbrado_service``) ---
-    class CfdiEstatus(models.TextChoices):
-        SIN_TIMBRAR = 'Sin timbrar', 'Sin timbrar'
-        TIMBRADA = 'Timbrada', 'Timbrada'
-        # Facturama no respondió (timeout/5xx): pudo timbrarse o no. No se
-        # reintenta solo para no duplicar el CFDI; se resuelve a mano en el admin.
-        PENDIENTE = 'Pendiente', 'Pendiente de confirmar'
-        # Facturama rechazó el comprobante: no se timbró, se puede reintentar.
-        ERROR = 'Error', 'Error'
-        # El receptor debe aceptar la cancelación ante el SAT.
-        CANCELACION_SOLICITADA = 'Cancelación solicitada', 'Cancelación solicitada'
-        CANCELADA = 'Cancelada', 'Cancelada'
-
-    cfdi_estatus = models.CharField(max_length=30, choices=CfdiEstatus.choices, default=CfdiEstatus.SIN_TIMBRAR)
+    # CFDI timbrado con Facturama (``POST /facturas/{id}/timbrar/``).
     cfdi_uuid = models.CharField(max_length=36, null=True, blank=True, unique=True)
     facturama_id = models.CharField(max_length=60, null=True, blank=True)
     cfdi_fecha_timbrado = models.DateTimeField(null=True, blank=True)
-    cfdi_error = models.TextField(null=True, blank=True)
-    # Lo que se timbró: el pedido puede cambiar después y el REP (PPD) lo necesita.
-    cfdi_uso = models.CharField(max_length=5, blank=True, default='')
-    cfdi_forma_pago = models.CharField(max_length=3, blank=True, default='')
-    cfdi_metodo_pago = models.CharField(max_length=3, blank=True, default='')
 
     history = HistoricalRecords()
 
