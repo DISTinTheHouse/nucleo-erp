@@ -1,4 +1,4 @@
-"""Cancelar una factura de venta: factura y CxC canceladas, contrapóliza del día."""
+"""Cancelar una factura de venta: CFDI, factura y CxC canceladas, contrapóliza del día."""
 
 from django.db import transaction
 
@@ -6,11 +6,11 @@ from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import CuentaPorCobrar, Factura, NotaCredito
 from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.services.factura_poliza_service import FacturaPolizaService
+from finanzas.services.factura_timbrado_service import FacturaTimbradoService
 
 
 class FacturaCancelacionService:
     @staticmethod
-    @transaction.atomic
     def cancelar(factura, usuario=None, motivo=""):
         """Regresa la contrapóliza, o ``None`` si no hubo (Borrador, ya cancelada o sin póliza).
 
@@ -18,14 +18,33 @@ class FacturaCancelacionService:
         importe cobrado como saldo a favor. Las piezas facturadas regresan a existencia
         (solo lo que el pedido descontó y no se ha reintegrado) y se vuelven a
         descontar al refacturarlas (#513).
+
+        Si la factura está timbrada, su CFDI se cancela antes ante el SAT y en su
+        propia transacción; si no queda cancelado, la factura no se cancela.
         """
+        actual = Factura.objects.get(pk=factura.pk)
+        if actual.estatus == Factura.FacturaStatus.CANCELADA:
+            return None
+        # Antes de tocar el SAT: cancelar el CFDI y que luego el ERP se niegue
+        # dejaría una factura vigente sin comprobante.
+        FacturaCancelacionService._exigir_sin_notas_emitidas(actual)
+        FacturaTimbradoService.cancelar_cfdi(factura)
+        return FacturaCancelacionService._cancelar(factura, usuario, motivo)
+
+    @staticmethod
+    def _exigir_sin_notas_emitidas(factura):
+        if NotaCredito.objects.filter(
+            factura=factura, estatus=NotaCredito.Estatus.EMITIDA
+        ).exists():
+            raise ErrorDeNegocio({"estatus": "La factura tiene notas de crédito emitidas: cancélalas primero."})
+
+    @staticmethod
+    @transaction.atomic
+    def _cancelar(factura, usuario, motivo):
         bloqueada = Factura.objects.select_for_update().get(pk=factura.pk)
         if bloqueada.estatus == Factura.FacturaStatus.CANCELADA:
             return None
-        if NotaCredito.objects.filter(
-            factura=bloqueada, estatus=NotaCredito.Estatus.EMITIDA
-        ).exists():
-            raise ErrorDeNegocio({"estatus": "La factura tiene notas de crédito emitidas: cancélalas primero."})
+        FacturaCancelacionService._exigir_sin_notas_emitidas(bloqueada)
 
         era_emitida = bloqueada.estatus == Factura.FacturaStatus.EMITIDA
         bloqueada.estatus = Factura.FacturaStatus.CANCELADA

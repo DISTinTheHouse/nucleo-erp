@@ -558,6 +558,12 @@ class FacturaViewSet(FinanzasBaseViewSet):
             raise ValidationError({
                 'estatus': f'Solo se puede eliminar una factura en Borrador (esta está {instance.estatus}).'
             })
+        # Un Borrador timbrado (falló la parte contable tras timbrar) ya tiene CFDI
+        # ante el SAT: borrarlo lo dejaría vigente y sin factura. Se cancela.
+        if instance.cfdi_uuid or instance.cfdi_estatus == Factura.CfdiEstatus.PENDIENTE:
+            raise ValidationError({
+                'estatus': 'La factura ya tiene CFDI (o uno sin confirmar): cancélala en vez de eliminarla.'
+            })
         instance.soft_delete()
 
     def _get_default_sucursal(self, user, empresa):
@@ -828,6 +834,30 @@ class FacturaViewSet(FinanzasBaseViewSet):
                 'estatus': poliza.estatus,
             },
         })
+
+    @action(detail=True, methods=['get'], url_path='cfdi', url_name='cfdi')
+    def cfdi(self, request, pk=None):
+        """XML o PDF del CFDI timbrado (``?formato=xml|pdf``, pdf por defecto), en el
+        base64 que entrega Facturama (``Content``/``ContentType``). Mismo formato que
+        el passthrough ``/facturama/cfdi/{formato}/issued/{id}/``, pero acotado a
+        las facturas de la empresa: otra empresa responde 404."""
+        factura = self.get_object()
+        formato = (request.query_params.get('formato') or 'pdf').lower()
+        if formato not in ('pdf', 'xml'):
+            raise ValidationError({'formato': 'Usa pdf o xml.'})
+        if not factura.facturama_id or factura.cfdi_estatus not in (
+            Factura.CfdiEstatus.TIMBRADA,
+            Factura.CfdiEstatus.CANCELACION_SOLICITADA,
+            Factura.CfdiEstatus.CANCELADA,
+        ):
+            raise ValidationError({'cfdi': 'La factura no tiene CFDI timbrado.'})
+        try:
+            return Response(FacturamaService().get_cfdi_file(formato, 'issued', factura.facturama_id))
+        except FacturamaAPIException as exc:
+            return Response(
+                {'cfdi': f'Facturama no entregó el archivo: {exc.message}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
     @action(detail=True, methods=['get'], url_path='previsualizar-poliza', url_name='previsualizar-poliza')
     def previsualizar_poliza(self, request, pk=None):
