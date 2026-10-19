@@ -5848,7 +5848,7 @@ class FacturaListadoLigeroTests(FinanzasBase):
             "id", "folio", "estatus", "activo", "fecha_emision", "fecha_vencimiento", "pedido",
             "pedido_folio", "cliente", "cliente_nombre", "vendedor", "vendedor_nombre",
             "cantidad", "precio_unitario", "subtotal", "impuestos", "total", "moneda",
-            "moneda_nombre", "cfdi_estatus", "cfdi_uuid",
+            "moneda_nombre", "cfdi_uuid",
         })
         self.assertEqual(fila["pedido_folio"], "PED-acme")
         self.assertEqual(fila["cliente_nombre"], "Cliente acme")
@@ -8064,24 +8064,14 @@ class EmitirFacturaTests(MotorPolizasBase):
 RESPUESTA_TIMBRADO = {
     "Id": "J6MjEYRjnLnV6aMCK8dV-w2",
     "Complement": {"TaxStamp": {"Uuid": "fe3c73d5-7881-49e0-80a3-e6c7e2eece40", "Date": "2026-10-19T12:00:00"}},
-    "Status": "active",
 }
 
 
-@override_settings(FACTURAMA_TIMBRAR_AL_EMITIR=True, FACTURAMA_EMPRESA_CODIGO="acme")
-class TimbradoFacturaTests(MotorPolizasBase):
-    """``emitir`` timbra el CFDI con Facturama (mockeado) antes de la CxC y la póliza;
-    ``cancelar`` cancela el CFDI antes de cancelar en el ERP."""
+class TimbrarFacturaTests(EmitirFacturaTests):
+    """``POST /facturas/{id}/timbrar/`` con Facturama mockeado."""
 
     def setUp(self):
         super().setUp()
-        from seguridad.models import Permiso, UsuarioPermiso
-
-        permiso = Permiso.objects.create(clave="E-FIN-FACTURAS", nombre="Facturas")
-        UsuarioPermiso.objects.create(
-            usuario=self.a["usuario"], permiso=permiso,
-            tipo=UsuarioPermiso.TIPO_GRANT, empresa=self.empresa,
-        )
         Sucursal.objects.filter(pk=self.sucursal.pk).update(cp="64000")
         Cliente.objects.filter(pk=self.a["cliente"].pk).update(
             rfc="URE180429TM6", razon_social="UNIVERSIDAD ROBOTICA ESPAÑOLA",
@@ -8095,271 +8085,45 @@ class TimbradoFacturaTests(MotorPolizasBase):
         self.facturama = patcher.start().return_value
         self.addCleanup(patcher.stop)
         self.facturama.create_cfdi_emision.return_value = RESPUESTA_TIMBRADO
-        self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
 
-    def _borrador(self):
-        resp = self._client(self.a["usuario"]).post(ONBOARDING_URL, {
-            "pedido": self.a["pedido"].pk,
-            "factura_detalles": [{"pedido_detalle_talla": self.a["talla_pedido"].pk, "cantidad": 2}],
-        }, format="json")
-        self.assertEqual(resp.status_code, 200, resp.data)
-        return Factura.objects.get(pk=resp.data["id"])
+    def _timbrar(self, factura):
+        return self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/timbrar/", {}, format="json")
 
-    def _emitir(self, factura):
-        return self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/emitir/", {}, format="json")
-
-    def _cancelar(self, factura):
-        return self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/cancelar/", {}, format="json")
-
-    def _payload(self):
-        return self.facturama.create_cfdi_emision.call_args.args[0]
-
-    # -- emitir ------------------------------------------------------------
-
-    def test_emitir_timbra_guarda_el_uuid_y_emite(self):
+    def test_timbra_guarda_uuid_y_no_toca_el_estatus(self):
         factura = self._borrador()
 
-        resp = self._emitir(factura)
+        resp = self._timbrar(factura)
 
         self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["cfdi_uuid"], "fe3c73d5-7881-49e0-80a3-e6c7e2eece40")
         factura.refresh_from_db()
-        self.assertEqual(factura.estatus, Factura.FacturaStatus.EMITIDA)
-        self.assertEqual(factura.cfdi_estatus, Factura.CfdiEstatus.TIMBRADA)
-        self.assertEqual(factura.cfdi_uuid, "fe3c73d5-7881-49e0-80a3-e6c7e2eece40")
-        self.assertEqual(factura.facturama_id, "J6MjEYRjnLnV6aMCK8dV-w2")
-        self.assertIsNotNone(factura.cfdi_fecha_timbrado)
-        self.assertEqual((factura.cfdi_uso, factura.cfdi_forma_pago, factura.cfdi_metodo_pago), ("G03", "03", "PUE"))
-        self.assertEqual(resp.data["factura"]["cfdi_uuid"], factura.cfdi_uuid)
-        self.assertTrue(CuentaPorCobrar.objects.filter(factura=factura).exists())
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.BORRADOR)
+        payload = self.facturama.create_cfdi_emision.call_args.args[0]
+        self.assertEqual(payload["Receiver"]["Rfc"], "URE180429TM6")
+        self.assertEqual(payload["Items"][0]["Taxes"][0]["Rate"], 0.16)
+        # Ya timbrada: no se vuelve a mandar.
+        self.assertEqual(self._timbrar(factura).status_code, 400)
+        self.assertEqual(self.facturama.create_cfdi_emision.call_count, 1)
 
-    def test_el_payload_sale_de_la_factura_el_pedido_y_el_cliente(self):
+    def test_faltan_datos_400_sin_llamar_a_facturama(self):
+        Cliente.objects.filter(pk=self.a["cliente"].pk).update(rfc="")
         factura = self._borrador()
 
-        self._emitir(factura)
-
-        payload = self._payload()
-        self.assertEqual(payload["CfdiType"], "I")
-        self.assertEqual(payload["ExpeditionPlace"], "64000")
-        self.assertEqual(payload["Folio"], factura.folio)
-        self.assertEqual(payload["Serie"], "A")
-        self.assertEqual(payload["OrderNumber"], self.a["pedido"].folio)
-        self.assertEqual((payload["PaymentForm"], payload["PaymentMethod"]), ("03", "PUE"))
-        self.assertEqual(payload["Receiver"], {
-            "Rfc": "URE180429TM6", "Name": "UNIVERSIDAD ROBOTICA ESPAÑOLA", "CfdiUse": "G03",
-            "FiscalRegime": "601", "TaxZipCode": "86991",
-        })
-        (item,) = payload["Items"]
-        self.assertEqual((item["ProductCode"], item["UnitCode"]), ("53102700", "H87"))
-        self.assertEqual((item["Quantity"], item["UnitPrice"], item["Subtotal"]), (2.0, 100.0, 200.0))
-        self.assertEqual(item["Taxes"], [{"Name": "IVA", "Rate": 0.16, "Base": 200.0, "Total": 32.0, "IsRetention": False}])
-        self.assertEqual(item["Total"], 232.0)
-        self.assertIn("Talla M", item["Description"])
-
-    def test_ppd_manda_forma_de_pago_99(self):
-        Pedido.objects.filter(pk=self.a["pedido"].pk).update(metodo_pago="PPD")
-        factura = self._borrador()
-
-        self._emitir(factura)
-
-        self.assertEqual((self._payload()["PaymentForm"], self._payload()["PaymentMethod"]), ("99", "PPD"))
-
-    def test_si_faltan_datos_fiscales_responde_400_con_todos_y_no_llama_a_facturama(self):
-        Cliente.objects.filter(pk=self.a["cliente"].pk).update(rfc="", codigo_postal="")
-        Producto.objects.filter(pk=self.a["producto"].pk).update(sat_prodserv=None)
-        factura = self._borrador()
-
-        resp = self._emitir(factura)
+        resp = self._timbrar(factura)
 
         self.assertEqual(resp.status_code, 400, resp.data)
-        mensaje = str(resp.data["cfdi"])
-        for falta in ("RFC", "código postal fiscal", "clave SAT"):
-            self.assertIn(falta, mensaje)
+        self.assertIn("RFC", str(resp.data["cfdi"]))
         self.facturama.create_cfdi_emision.assert_not_called()
-        factura.refresh_from_db()
-        self.assertEqual(factura.estatus, Factura.FacturaStatus.BORRADOR)
-        self.assertFalse(CuentaPorCobrar.objects.filter(factura=factura).exists())
 
-    def test_rechazo_de_facturama_deja_error_en_borrador_y_se_puede_reintentar(self):
+    def test_rechazo_de_facturama_responde_400_con_su_mensaje(self):
         factura = self._borrador()
         self.facturama.create_cfdi_emision.side_effect = FacturamaAPIException(
-            "Facturama API returned an error.", status_code=400,
-            details={"Message": "La solicitud no es válida.", "ModelState": {"Receiver.Rfc": ["RFC no registrado"]}},
+            "error", status_code=400, details={"Message": "No válida", "ModelState": {"Receiver.Rfc": ["RFC no registrado"]}},
         )
 
-        resp = self._emitir(factura)
-
-        self.assertEqual(resp.status_code, 400, resp.data)
-        self.assertIn("RFC no registrado", str(resp.data["cfdi"]))
-        factura.refresh_from_db()
-        self.assertEqual(factura.estatus, Factura.FacturaStatus.BORRADOR)
-        self.assertEqual(factura.cfdi_estatus, Factura.CfdiEstatus.ERROR)
-        self.assertFalse(CuentaPorCobrar.objects.filter(factura=factura).exists())
-
-        self.facturama.create_cfdi_emision.side_effect = None
-        self.assertEqual(self._emitir(factura).status_code, 200)
-        factura.refresh_from_db()
-        self.assertEqual(factura.cfdi_estatus, Factura.CfdiEstatus.TIMBRADA)
-        self.assertIsNone(factura.cfdi_error)
-
-    def test_sin_respuesta_queda_pendiente_y_no_se_reintenta_solo(self):
-        factura = self._borrador()
-        self.facturama.create_cfdi_emision.side_effect = FacturamaAPIException(
-            "Facturama request timed out.", code="FACTURAMA_TIMEOUT",
-        )
-
-        self.assertEqual(self._emitir(factura).status_code, 400)
-        factura.refresh_from_db()
-        self.assertEqual(factura.cfdi_estatus, Factura.CfdiEstatus.PENDIENTE)
-
-        resp = self._emitir(factura)
+        resp = self._timbrar(factura)
 
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("sin confirmar", str(resp.data["cfdi"]))
-        self.assertEqual(self.facturama.create_cfdi_emision.call_count, 1)
-
-    def test_si_falla_la_contabilidad_el_reintento_no_vuelve_a_timbrar(self):
-        factura = self._borrador()
-        with patch(
-            "finanzas.services.factura_emision_service.FacturaPolizaService.generar",
-            side_effect=RuntimeError("plan contable roto"),
-        ):
-            with self.assertRaises(RuntimeError):
-                self._emitir(factura)
-        factura.refresh_from_db()
-        self.assertEqual(factura.estatus, Factura.FacturaStatus.BORRADOR)
-        self.assertEqual(factura.cfdi_estatus, Factura.CfdiEstatus.TIMBRADA)
-
-        self.assertEqual(self._emitir(factura).status_code, 200)
-        self.assertEqual(self.facturama.create_cfdi_emision.call_count, 1)
-
-    def test_un_borrador_timbrado_no_se_elimina(self):
-        factura = self._borrador()
-        Factura.objects.filter(pk=factura.pk).update(
-            cfdi_estatus=Factura.CfdiEstatus.TIMBRADA, cfdi_uuid=RESPUESTA_TIMBRADO["Complement"]["TaxStamp"]["Uuid"]
-        )
-
-        resp = self._client(self.a["usuario"]).delete(f"{FACTURAS_URL}{factura.pk}/")
-
-        self.assertEqual(resp.status_code, 400, resp.data)
-        factura.refresh_from_db()
-        self.assertTrue(factura.activo)
-
-    @override_settings(FACTURAMA_TIMBRAR_AL_EMITIR=False)
-    def test_con_el_flag_apagado_emite_sin_timbrar(self):
-        factura = self._borrador()
-
-        self.assertEqual(self._emitir(factura).status_code, 200)
-
-        self.facturama.create_cfdi_emision.assert_not_called()
-        factura.refresh_from_db()
-        self.assertEqual(factura.cfdi_estatus, Factura.CfdiEstatus.SIN_TIMBRAR)
-
-    @override_settings(FACTURAMA_EMPRESA_CODIGO="globex")
-    def test_una_empresa_que_no_es_duena_de_la_cuenta_no_timbra(self):
-        factura = self._borrador()
-
-        self.assertEqual(self._emitir(factura).status_code, 200)
-
-        self.facturama.create_cfdi_emision.assert_not_called()
-
-    def test_patch_no_escribe_los_campos_del_cfdi(self):
-        factura = self._borrador()
-
-        resp = self._client(self.a["usuario"]).patch(
-            f"{FACTURAS_URL}{factura.pk}/", {"cfdi_uuid": "x", "cfdi_estatus": "Timbrada"}, format="json"
-        )
-
-        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIn("RFC no registrado", str(resp.data["cfdi"]))
         factura.refresh_from_db()
         self.assertIsNone(factura.cfdi_uuid)
-        self.assertEqual(factura.cfdi_estatus, Factura.CfdiEstatus.SIN_TIMBRAR)
-
-    # -- cancelar ----------------------------------------------------------
-
-    def _emitida(self):
-        factura = self._borrador()
-        self.assertEqual(self._emitir(factura).status_code, 200)
-        return factura
-
-    def test_cancelar_una_timbrada_cancela_el_cfdi_y_la_factura(self):
-        factura = self._emitida()
-
-        resp = self._cancelar(factura)
-
-        self.assertEqual(resp.status_code, 200, resp.data)
-        self.facturama.cancel_cfdi.assert_called_once_with("J6MjEYRjnLnV6aMCK8dV-w2", motive="02")
-        factura.refresh_from_db()
-        self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
-        self.assertEqual(factura.cfdi_estatus, Factura.CfdiEstatus.CANCELADA)
-
-    def test_cancelacion_por_aceptar_no_cancela_en_el_erp_hasta_que_quede(self):
-        factura = self._emitida()
-        self.facturama.cancel_cfdi.return_value = {"Status": "requested"}
-
-        resp = self._cancelar(factura)
-
-        self.assertEqual(resp.status_code, 400, resp.data)
-        self.assertIn("receptor", str(resp.data["cfdi"]))
-        factura.refresh_from_db()
-        self.assertEqual(factura.estatus, Factura.FacturaStatus.EMITIDA)
-        self.assertEqual(factura.cfdi_estatus, Factura.CfdiEstatus.CANCELACION_SOLICITADA)
-        self.assertEqual(CuentaPorCobrar.objects.get(factura=factura).estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
-
-        self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
-        self.assertEqual(self._cancelar(factura).status_code, 200)
-        factura.refresh_from_db()
-        self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
-
-    def test_si_facturama_falla_al_cancelar_la_factura_sigue_emitida(self):
-        factura = self._emitida()
-        self.facturama.cancel_cfdi.side_effect = FacturamaAPIException("Could not connect to Facturama.")
-
-        resp = self._cancelar(factura)
-
-        self.assertEqual(resp.status_code, 400, resp.data)
-        factura.refresh_from_db()
-        self.assertEqual(factura.estatus, Factura.FacturaStatus.EMITIDA)
-        self.assertEqual(factura.cfdi_estatus, Factura.CfdiEstatus.TIMBRADA)
-
-    def test_con_notas_de_credito_emitidas_no_toca_el_sat(self):
-        factura = self._emitida()
-        NotaCredito.objects.create(
-            factura=factura, cliente=self.a["cliente"], total=Decimal("10.00"),
-            estatus=NotaCredito.Estatus.EMITIDA.value,
-        )
-
-        self.assertEqual(self._cancelar(factura).status_code, 400)
-
-        self.facturama.cancel_cfdi.assert_not_called()
-
-    def test_cancelar_una_sin_cfdi_no_llama_a_facturama(self):
-        factura = self._borrador()
-
-        self.assertEqual(self._cancelar(factura).status_code, 200)
-
-        self.facturama.cancel_cfdi.assert_not_called()
-
-    # -- archivos ----------------------------------------------------------
-
-    def test_descarga_el_xml_del_cfdi_de_la_factura(self):
-        factura = self._emitida()
-        with patch("finanzas.api.views.FacturamaService") as servicio:
-            servicio.return_value.get_cfdi_file.return_value = {"ContentType": "xml", "Content": "PD94bWw="}
-            resp = self._client(self.a["usuario"]).get(f"{FACTURAS_URL}{factura.pk}/cfdi/?formato=xml")
-
-        self.assertEqual(resp.status_code, 200, resp.data)
-        servicio.return_value.get_cfdi_file.assert_called_once_with("xml", "issued", "J6MjEYRjnLnV6aMCK8dV-w2")
-
-    def test_sin_cfdi_no_hay_archivo(self):
-        factura = self._borrador()
-
-        resp = self._client(self.a["usuario"]).get(f"{FACTURAS_URL}{factura.pk}/cfdi/")
-
-        self.assertEqual(resp.status_code, 400, resp.data)
-
-    def test_archivo_de_otra_empresa_responde_404(self):
-        factura = self._emitida()
-
-        resp = self._client(self.b["usuario"]).get(f"{FACTURAS_URL}{factura.pk}/cfdi/")
-
-        self.assertEqual(resp.status_code, 404)

@@ -3298,7 +3298,7 @@ No mandes `pago` dentro de `pago_detalles`: mismo caso.
    - En el alta, `serie_folio`, `activo` y `fecha_emision` se ignoran: la serie es la de la que sale el folio, la factura nace activa y `fecha_emision` es el día local.
    - `PATCH /facturas/{id}/` solo cambia `fecha_vencimiento` y `observaciones` (`fecha_emision` se ignora). Cambiar `pedido`, `serie_folio`, `activo` o mandar `factura_detalles` → `400`. Una factura `Cancelada` no se edita (`400`).
    - `DELETE /facturas/{id}/` solo en `Borrador`; una `Emitida` o `Cancelada` → `400 {"estatus": ...}` (su CxC y póliza quedan intactas). Un Borrador con CFDI tampoco se elimina.
-   - `POST /facturas/{id}/emitir/` → Borrador a Emitida con CxC y póliza. Con `FACTURAMA_TIMBRAR_AL_EMITIR` encendido, antes timbra el CFDI, y `cancelar/` lo cancela ante el SAT. Detalle en [timbrado desde la factura](#timbrado-desde-la-factura-del-erp-emitir--cancelar).
+   - `POST /facturas/{id}/timbrar/` timbra el CFDI con Facturama (ver [timbrar una factura](#timbrar-una-factura-del-erp-post-facturasidtimbrar)).
    - Toda factura activa no cancelada (también Borrador) aparta sus piezas; cancelarla o eliminarla las libera. Un pedido con una factura registrada solo por monto (`registrar-pendiente-cobro`) ya no admite facturas por piezas.
    - Fuera de alcance por ahora: flete, servicios extra y descuento global del pedido (las facturas por piezas solo cubren piezas).
    - `GET /facturas/{id}/desglose/` → la factura completa para consulta: `emisor`, `receptor` (datos fiscales del pedido, o del cliente si faltan), `pedido` (forma/método de pago, uso CFDI), `moneda`, `conceptos[]` por producto (claves SAT de producto y unidad, color, totales) con `tallas[]` (piezas, precio, IVA, y lo pedido/pendiente de esa talla), `importes`, `avance_pedido` (piezas pedidas/facturadas/pendientes), `parcialidades[]` (todas las facturas del pedido, `es_esta_factura`), `cobranza[]` (CxC) y `notas_credito[]`. Mismo alcance por empresa que el resto: la de otra empresa responde 404.
@@ -3539,7 +3539,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 Estos endpoints hablan **directo** con Facturama: no leen ni escriben tablas del ERP. Hay **una sola cuenta** de Facturama (un emisor), con credenciales en variables de entorno.
 
-> ⚠️ **Integración en pausa.** El timbrado está detenido hasta coordinar con CxC y CxP: si `FACTURAMA_BASE_URL` apunta a producción, cada prueba genera un CFDI fiscal real. El timbrado desde `emitir` queda apagado hasta que se defina `FACTURAMA_TIMBRAR_AL_EMITIR=true`. Revisa los [detalles conocidos](#detalles-conocidos-facturama) antes de integrar.
+> ⚠️ **Integración en pausa.** El timbrado está detenido hasta coordinar con CxC y CxP: si `FACTURAMA_BASE_URL` apunta a producción, cada prueba genera un CFDI fiscal real. Revisa los [detalles conocidos](#detalles-conocidos-facturama) antes de integrar.
 
 ### Quién puede usarlos
 
@@ -3615,53 +3615,18 @@ Otros `error` posibles: `FACTURAMA_TIMEOUT`, `FACTURAMA_CONNECTION_ERROR`, `FACT
 
 Regla validada en el backend: con `PaymentMethod = "PPD"`, `PaymentForm` debe ser `"99"`.
 
-### Timbrado desde la factura del ERP (`emitir` / `cancelar`)
+### Timbrar una factura del ERP (`POST /facturas/{id}/timbrar/`)
 
-El CFDI se timbra en el backend, sin payload del frontend: el frontend solo llama `POST /finanzas/facturas/{id}/emitir/`.
+Acción aparte de `emitir`: timbra el CFDI 4.0 de ingreso y guarda `cfdi_uuid`, `facturama_id` y `cfdi_fecha_timbrado` (solo lectura). No cambia estatus, CxC ni póliza. Exige `E-FIN-FACTURAS`; otra empresa → `404`.
 
-**Se enciende con** `FACTURAMA_TIMBRAR_AL_EMITIR=true` (por defecto `false`). Aplica **solo** a la empresa de `FACTURAMA_EMPRESA_CODIGO`; las demás empresas emiten sin CFDI, como antes.
+- El payload lo arma el backend (`finanzas/services/facturama/cfdi_payload.py`): `Sucursal.cp` (lugar de expedición), receptor del pedido con respaldo en el `Cliente`, forma/método de pago del pedido (PPD → forma `99`), un concepto por renglón con las claves SAT del producto e IVA del renglón, `Factura.folio` y `serie_folio.serie`.
+- Faltan datos → `400 {"cfdi": "No se puede timbrar. ..."}` con todos los faltantes, sin llamar a Facturama.
+- Facturama rechaza → `400 {"cfdi": "Facturama rechazó el CFDI: ..."}`. Ya timbrada → `400`.
+- Una factura cancelada no se timbra; un Borrador timbrado no se elimina.
+- Archivos: `GET /facturas/{id}/cfdi/?formato=pdf|xml` (base64 de Facturama).
+- Pendiente: cancelar el CFDI ante el SAT al cancelar la factura, MXN únicamente, REP y notas de crédito.
 
-**Emitir** (`POST /facturas/{id}/emitir/`):
-
-1. Valida que esté activa, en Borrador y con total > 0.
-2. Arma el CFDI 4.0 de ingreso (`POST /3/cfdis`) a partir de la factura (`finanzas/services/facturama/cfdi_payload.py`):
-   - Lugar de expedición: `Sucursal.cp`.
-   - Receptor: los datos fiscales del pedido y, donde vengan vacíos, los del `Cliente` (RFC, razón social, régimen, CP, uso de CFDI).
-   - Forma y método de pago: del pedido. Con PPD, la forma de pago va como `99`.
-   - Conceptos: un renglón de factura = un concepto, con la clave de producto y la de unidad SAT del producto, e IVA al `porcentaje_impuesto` del renglón.
-   - Folio y serie: `Factura.folio` y `serie_folio.serie`.
-3. Si falta algún dato → `400 {"cfdi": "No se puede timbrar. <todos los faltantes>"}`, sin llamar a Facturama.
-4. Timbra y guarda el UUID en su propia transacción. Después crea la CxC y la póliza.
-5. Respuesta: la de siempre. `factura` trae además los campos `cfdi_*`.
-
-**Estados `cfdi_estatus`** (solo lectura en la API; vienen en `GET /facturas/{id}/` y en el listado):
-
-| Estado | Significa | Qué hacer |
-| --- | --- | --- |
-| `Sin timbrar` | No se ha timbrado | — |
-| `Timbrada` | Tiene `cfdi_uuid` y `facturama_id` | — |
-| `Error` | Facturama rechazó el CFDI (4xx); el motivo está en `cfdi_error` | Corregir el dato y volver a emitir |
-| `Pendiente` | Facturama no respondió (timeout, conexión o 5xx): pudo timbrarse | **No se reintenta solo.** Revisar en Facturama y corregir el estado en el admin de Django |
-| `Cancelación solicitada` | El receptor debe aceptar la cancelación ante el SAT | Volver a cancelar después |
-| `Cancelada` | CFDI cancelado ante el SAT | — |
-
-- Si la parte contable falla después de timbrar, la factura queda Borrador + `Timbrada`. Reintentar `emitir` **no vuelve a timbrar**.
-- Una factura con CFDI (o `Pendiente`) no se elimina (`DELETE` → `400`): se cancela.
-- Se guarda lo que se timbró: `cfdi_uso`, `cfdi_forma_pago` y `cfdi_metodo_pago`. El REP de las facturas PPD los va a necesitar.
-
-**Cancelar** (`POST /facturas/{id}/cancelar/`):
-
-- Si la factura tiene CFDI, primero se cancela ante el SAT (`DELETE /cfdi/{id}?type=issued&motive=02`). Esto aplica aunque el flag esté apagado.
-- Respuesta `canceled` → la factura se cancela en el ERP como antes.
-- Respuesta `requested` → `400 {"cfdi": ...}`: la factura sigue Emitida hasta que el receptor acepte. Respuesta `rejected` → `400`, y el CFDI sigue vigente.
-- Si Facturama falla, la factura no se toca. Con notas de crédito emitidas no se llama al SAT.
-- Motivo SAT fijo: `02` (con errores, sin relación). La sustitución (`01`) no está implementada.
-
-**Archivos**: `GET /facturas/{id}/cfdi/?formato=pdf|xml` regresa el base64 de Facturama (`Content`, `ContentType`). Está acotado por empresa: la factura de otra empresa responde `404`; una sin CFDI, `400`.
-
-**Fuera de alcance por ahora**: facturas en moneda distinta de MXN (no hay tipo de cambio), complemento de pago (REP), notas de crédito (CFDI de egreso), factura global y envío del CFDI por correo desde Facturama.
-
-Pruebas: `finanzas.tests.TimbradoFacturaTests` (Facturama mockeado).
+Pruebas: `finanzas.tests.TimbrarFacturaTests`.
 
 ### Otras piezas que usan la cuenta de Facturama
 
@@ -3674,11 +3639,11 @@ Pruebas: `finanzas.tests.TimbradoFacturaTests` (Facturama mockeado).
 Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró; lo demás sigue abierto **a propósito** porque arreglarlo activaría el timbrado, que está en pausa.
 
 1. **Emitir CFDI y crear/editar productos truena con `500`.** El backend manda `validated_data` tal cual a `requests`, que no sabe serializar `Decimal` (`Price`, `Quantity`, `UnitPrice`) ni `datetime` (`Date`). Falla antes de llegar a Facturama, así que **nunca se ha timbrado un CFDI por este endpoint**. `FacturamaProductSerializer` ya trae `to_facturama_payload()`, que convierte los `Decimal`, pero la vista no lo usa.
-2. **El CFDI timbrado por este passthrough no queda ligado a la factura del ERP.** Para facturas del ERP usa `emitir` (ver [timbrado desde la factura](#timbrado-desde-la-factura-del-erp-emitir--cancelar)), que sí guarda UUID y estatus.
+2. **El CFDI timbrado por este passthrough no queda ligado a la factura del ERP.** Para facturas del ERP usa `POST /facturas/{id}/timbrar/`, que sí guarda el UUID.
 3. **La descarga acepta `received` y `payroll`.** Con permiso de Facturama se pueden bajar CFDIs recibidos y de nómina de toda la cuenta, no solo los emitidos por el ERP.
 4. **`details` reenvía la respuesta cruda de Facturama**, y los mensajes `message` están en inglés.
 5. **El alta de cliente en Facturama es silenciosa.** Cualquier error (red, RFC inválido, credenciales) se ignora sin log, y no se guarda el id de Facturama, así que no hay forma de saber si el cliente se subió ni de evitar duplicados.
-6. **El passthrough no cancela CFDIs**, solo descarga el acuse. La cancelación va por `POST /facturas/{id}/cancelar/`.
+6. **El passthrough no cancela CFDIs**, solo descarga el acuse. Cancelar el CFDI ante el SAT aún no está implementado.
 
 ---
 
