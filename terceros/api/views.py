@@ -19,8 +19,12 @@ from terceros.cartera import cartera_de_cliente
 from terceros.scope import clientes_base, clientes_visibles
 import json
 import base64
+import logging
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+
+logger = logging.getLogger(__name__)
+
 
 class ClienteViewSetMesaControl(viewsets.ModelViewSet):
     queryset = clientes_base()
@@ -123,7 +127,9 @@ class ClienteViewSet(viewsets.ModelViewSet):
         # La cuenta de Facturama es de UNA empresa: los clientes de las demás no se
         # le suben (antes se mandaban todos, de cualquier tenant).
         if not empresa_usa_facturama(cliente.empresa):
+            logger.info("Cliente %s no se sube a Facturama: la empresa no es la dueña de la cuenta (FACTURAMA_EMPRESA_CODIGO).", cliente.pk)
             return
+        serializer.facturama_sincronizado = False
         try:
             base_url = getattr(settings, "FACTURAMA_BASE_URL", "https://apisandbox.facturama.mx").rstrip("/")
             url = f"{base_url}/Client"
@@ -158,10 +164,23 @@ class ClienteViewSet(viewsets.ModelViewSet):
                 req = Request(url, data=raw_body, headers=headers, method="POST")
                 with urlopen(req, timeout=10) as resp:
                     resp.read()  # ignore body; best-effort
-            except (HTTPError, URLError, TimeoutError, ValueError):
-                pass
+                serializer.facturama_sincronizado = True
+            except HTTPError as exc:
+                detalle = exc.read().decode("utf-8", "replace")[:500]
+                logger.warning("Facturama rechazó al cliente %s (HTTP %s): %s", cliente.pk, exc.code, detalle)
+            except (URLError, TimeoutError, ValueError) as exc:
+                logger.warning("No se pudo subir el cliente %s a Facturama: %s", cliente.pk, exc)
         except Exception:
-            pass
+            logger.exception("Error inesperado al subir el cliente %s a Facturama", cliente.pk)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        data = dict(serializer.data)
+        # ``None`` si la empresa no usa Facturama; ``False`` si se intentó y falló (ver logs).
+        data["facturama_sincronizado"] = getattr(serializer, "facturama_sincronizado", None)
+        return Response(data, status=201, headers=self.get_success_headers(serializer.data))
 
     def perform_destroy(self, instance):
         instance.soft_delete()
