@@ -95,6 +95,7 @@ from finanzas.services.pago_service import PagoService
 from finanzas.services.plan_contable_service import PlanContableService
 from finanzas.services.factura_cancelacion_service import FacturaCancelacionService
 from finanzas.services.factura_emision_service import FacturaEmisionService
+from finanzas.services.factura_timbrado_service import FacturaTimbradoService
 from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
@@ -558,11 +559,10 @@ class FacturaViewSet(FinanzasBaseViewSet):
             raise ValidationError({
                 'estatus': f'Solo se puede eliminar una factura en Borrador (esta está {instance.estatus}).'
             })
-        # Un Borrador timbrado (falló la parte contable tras timbrar) ya tiene CFDI
-        # ante el SAT: borrarlo lo dejaría vigente y sin factura. Se cancela.
-        if instance.cfdi_uuid or instance.cfdi_estatus == Factura.CfdiEstatus.PENDIENTE:
+        # Un Borrador timbrado ya tiene CFDI: borrarlo lo dejaría vigente y sin factura.
+        if instance.cfdi_uuid:
             raise ValidationError({
-                'estatus': 'La factura ya tiene CFDI (o uno sin confirmar): cancélala en vez de eliminarla.'
+                'estatus': 'La factura ya tiene CFDI: cancélala en vez de eliminarla.'
             })
         instance.soft_delete()
 
@@ -835,6 +835,15 @@ class FacturaViewSet(FinanzasBaseViewSet):
             },
         })
 
+    @action(detail=True, methods=['post'], url_path='timbrar', url_name='timbrar')
+    def timbrar(self, request, pk=None):
+        """Timbra el CFDI de la factura con Facturama. No cambia su estatus, CxC ni póliza."""
+        factura = self.get_object()  # otra empresa -> 404 antes que 403
+        if not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
+            raise PermissionDenied('No tienes permiso para timbrar facturas.')
+        FacturaTimbradoService.timbrar(factura)
+        return Response(FacturaSerializer(factura).data)
+
     @action(detail=True, methods=['get'], url_path='cfdi', url_name='cfdi')
     def cfdi(self, request, pk=None):
         """XML o PDF del CFDI timbrado (``?formato=xml|pdf``, pdf por defecto), en el
@@ -845,11 +854,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
         formato = (request.query_params.get('formato') or 'pdf').lower()
         if formato not in ('pdf', 'xml'):
             raise ValidationError({'formato': 'Usa pdf o xml.'})
-        if not factura.facturama_id or factura.cfdi_estatus not in (
-            Factura.CfdiEstatus.TIMBRADA,
-            Factura.CfdiEstatus.CANCELACION_SOLICITADA,
-            Factura.CfdiEstatus.CANCELADA,
-        ):
+        if not factura.facturama_id:
             raise ValidationError({'cfdi': 'La factura no tiene CFDI timbrado.'})
         try:
             return Response(FacturamaService().get_cfdi_file(formato, 'issued', factura.facturama_id))

@@ -117,10 +117,7 @@ def _conceptos(factura, errores):
 
 
 def construir_payload_cfdi(factura):
-    """Regresa ``(payload, datos)``; ``datos`` es lo fiscal que se congela en la factura.
-
-    Levanta ``ErrorDeNegocio`` con todos los faltantes juntos.
-    """
+    """Payload de Facturama; levanta ``ErrorDeNegocio`` con todos los faltantes juntos."""
     errores = {}
     pedido = factura.pedido
 
@@ -171,6 +168,4 @@ def construir_payload_cfdi(factura):
         payload["Serie"] = serie
     if pedido is not None and _texto(pedido.folio):
         payload["OrderNumber"] = _texto(pedido.folio)[:100]
-
-    datos = {"cfdi_uso": receptor["CfdiUse"], "cfdi_forma_pago": forma, "cfdi_metodo_pago": metodo}
-    return payload, datos
+    return payload

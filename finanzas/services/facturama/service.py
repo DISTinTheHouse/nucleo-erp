@@ -23,13 +23,6 @@ class FacturamaService:
     def create_cfdi_emision(self, payload):
         return self.client.post("/3/cfdis", json=payload)
 
-    def cancel_cfdi(self, cfdi_id, motive="02", uuid_replacement=None):
-        """``DELETE /cfdi/{id}``: ``Status`` = canceled | requested | rejected."""
-        params = {"type": "issued", "motive": motive}
-        if uuid_replacement:
-            params["uuidReplacement"] = uuid_replacement
-        return self.client.delete(f"/cfdi/{cfdi_id}", params=params)
-
     def get_cfdi_file(
         self,
         file_format,
