@@ -112,6 +112,14 @@ class Picking(models.Model):
     almacen = models.ForeignKey("inventarios.Almacen", on_delete=models.CASCADE, related_name="pickings")
     almacen_destino = models.ForeignKey("inventarios.Almacen", on_delete=models.CASCADE, related_name="pickings_destino", blank=True, null=True,)
 
+    transferencia = models.ForeignKey(
+        "wms.Transferencia",
+        on_delete=models.SET_NULL,
+        related_name="pickings",
+        blank=True,
+        null=True,
+    )
+
     oleada = models.ForeignKey(Oleada, on_delete=models.CASCADE, related_name="pickings", blank=True, null=True)
     zona_almacen = models.ForeignKey(ZonaAlmacen, on_delete=models.CASCADE, related_name="pickings", blank=True, null=True)
     lote = models.ForeignKey(LotePicking, on_delete=models.CASCADE, related_name="pickings", blank=True, null=True)
