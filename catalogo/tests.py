@@ -337,6 +337,7 @@ class AislamientoEmpresaCatalogoTests(TestCase):
     def test_create_variante_valida_empresa(self):
         client = self._client(self.user_a)
         talla = Talla.objects.create(nombre="G")
+        CategoriaProductoTalla.objects.create(categoria_producto=self.cat_a, talla=talla)
         payload = {
             "producto": self.prod_a.pk, "color": self.color.pk, "talla": talla.pk,
             "sku": "PLA00-NEG-G", "precio_base": "100.00",
