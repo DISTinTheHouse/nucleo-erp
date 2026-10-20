@@ -338,6 +338,7 @@ class FacturaSerializer(serializers.ModelSerializer):
             'cfdi_uuid',
             'facturama_id',
             'cfdi_fecha_timbrado',
+            'cfdi_pendiente',
         ]
         fields = '__all__'
 
@@ -1010,7 +1011,7 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
     class Meta:
         model = Cobro
         fields = "__all__"
-        read_only_fields = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado")
+        read_only_fields = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado", "rep_pendiente")
 
     def validate(self, attrs):
         req = self.context.get("request")
