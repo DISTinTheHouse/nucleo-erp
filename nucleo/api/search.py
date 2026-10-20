@@ -455,7 +455,7 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
             "R-WMS-PEDIDOS",
             "R-COMPRAS-PEDIDOS",
             "R-MESACONTROL-PEDIDOS",
-            "R-PRODUCCION-OB",
+            "R-PRODUCCION-OP", "R-PRODUCCION-OB",
             "R-PRODUCCION-OR",
             "R-PRODUCCION-CM",
             "R-COMPRAS-OC",

@@ -73,7 +73,7 @@ class AlmacenViewSet(viewsets.ModelViewSet):
         if user.empresa_id:
             empresa_ids.append(user.empresa_id)
         empresa_ids += list(user.empresas.values_list('pk', flat=True))
-        sucursal_ids = list(user.sucursales.values_list('pk', flat=True))
+        sucursal_ids = list(user.sucursales_permitidas())
         return qs.filter(
             models.Q(empresa_id__in=empresa_ids) &
             models.Q(sucursal_id__in=sucursal_ids)
@@ -106,7 +106,7 @@ class UbicacionViewSet(viewsets.ModelViewSet):
         if user.empresa_id:
             empresa_ids.append(user.empresa_id)
         empresa_ids += list(user.empresas.values_list('pk', flat=True))
-        sucursal_ids = list(user.sucursales.values_list('pk', flat=True))
+        sucursal_ids = list(user.sucursales_permitidas())
         return qs.filter(
             models.Q(almacen__empresa_id__in=empresa_ids) &
             models.Q(almacen__sucursal_id__in=sucursal_ids)
@@ -140,7 +140,7 @@ def almacenes_en_alcance(user):
     if getattr(user, "empresa_id", None):
         empresa_ids.append(user.empresa_id)
     empresa_ids += list(user.empresas.values_list("pk", flat=True))
-    sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+    sucursal_ids = list(user.sucursales_permitidas())
     return Almacen.objects.filter(
         models.Q(empresa_id__in=empresa_ids) & models.Q(sucursal_id__in=sucursal_ids)
     )
@@ -285,7 +285,7 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
             if getattr(user, "empresa_id", None):
                 empresa_ids.append(user.empresa_id)
             empresa_ids += list(user.empresas.values_list("pk", flat=True))
-            sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+            sucursal_ids = list(user.sucursales_permitidas())
             qs = qs.filter(
                 models.Q(empresa_id__in=empresa_ids)
                 & models.Q(sucursal_id__in=sucursal_ids)
@@ -1302,7 +1302,7 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
             if getattr(user, "empresa_id", None):
                 empresa_ids.append(user.empresa_id)
             empresa_ids += list(user.empresas.values_list("pk", flat=True))
-            sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+            sucursal_ids = list(user.sucursales_permitidas())
             qs = qs.filter(
                 models.Q(empresa_id__in=empresa_ids)
                 & models.Q(sucursal_id__in=sucursal_ids)
@@ -1635,7 +1635,7 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
         )
         if not user.is_superuser:
             empresa_ids = self._empresa_ids_permitidas(user)
-            sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
+            sucursal_ids = list(user.sucursales_permitidas())
             qs = qs.filter(empresa_id__in=empresa_ids, sucursal_id__in=sucursal_ids)
         mov = qs.filter(pk=movimiento_id).first()
         if not mov:
@@ -1814,7 +1814,7 @@ class MovimientoInventarioViewSet(viewsets.ModelViewSet):
         if user.empresa_id:
             empresa_ids.append(user.empresa_id)
         empresa_ids += list(user.empresas.values_list('pk', flat=True))
-        sucursal_ids = list(user.sucursales.values_list('pk', flat=True))
+        sucursal_ids = list(user.sucursales_permitidas())
         
         return qs.filter(
             models.Q(empresa_id__in=empresa_ids) &
@@ -1854,7 +1854,7 @@ class MovimientoInventarioDetalleViewSet(viewsets.ModelViewSet):
         if user.empresa_id:
             empresa_ids.append(user.empresa_id)
         empresa_ids += list(user.empresas.values_list('pk', flat=True))
-        sucursal_ids = list(user.sucursales.values_list('pk', flat=True))
+        sucursal_ids = list(user.sucursales_permitidas())
         
         return qs.filter(
             models.Q(movimiento_inventario__empresa_id__in=empresa_ids) &
@@ -1888,7 +1888,7 @@ class AjusteInventarioViewSet(viewsets.ModelViewSet):
         if user.empresa_id:
             empresa_ids.append(user.empresa_id)
         empresa_ids += list(user.empresas.values_list('pk', flat=True))
-        sucursal_ids = list(user.sucursales.values_list('pk', flat=True))
+        sucursal_ids = list(user.sucursales_permitidas())
         
         return qs.filter(
             models.Q(empresa_id__in=empresa_ids) &

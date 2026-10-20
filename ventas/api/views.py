@@ -3039,6 +3039,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
         return qs.order_by(F("created_at").desc(nulls_last=True), "-id")
 
     def perform_create(self, serializer):
+        # Mismos controles que ``perform_update`` (#532): clasificación, confirmación
+        # y nacer CANCELADO son de mesa de control.
+        datos = serializer.validated_data
+        if {"clasificacion", "fecha_confirmacion"} & set(datos) or datos.get("estatus") == Pedido.ESTATUS_CANCELADO:
+            self._require_mesa_control(self.request.user)
         empresa = self.request.user.empresa
         with transaction.atomic():
             pedido = serializer.save(empresa=empresa)
