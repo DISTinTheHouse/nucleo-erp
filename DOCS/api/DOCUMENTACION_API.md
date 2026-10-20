@@ -3624,7 +3624,8 @@ Acción aparte de `emitir`: timbra el CFDI 4.0 de ingreso y guarda `cfdi_uuid`, 
 - Facturama rechaza → `400 {"cfdi": "Facturama rechazó el CFDI: ..."}`. Ya timbrada → `400`.
 - Una factura cancelada no se timbra; un Borrador timbrado no se elimina.
 - Archivos: `GET /facturas/{id}/cfdi/?formato=pdf|xml` (base64 de Facturama).
-- Pendiente: cancelar el CFDI ante el SAT al cancelar la factura, MXN únicamente, REP y notas de crédito.
+- Cancelar: `POST /facturas/{id}/cancelar/` de una factura timbrada cancela primero el CFDI ante el SAT (motivo 02). Si Facturama no responde `canceled` (p. ej. `requested`: el receptor debe aceptar) → `400 {"cfdi": ...}` y la factura no se toca.
+- Pendiente: MXN únicamente, REP y notas de crédito.
 
 Pruebas: `finanzas.tests.TimbrarFacturaTests`.
 
@@ -3643,7 +3644,7 @@ Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró
 3. **La descarga acepta `received` y `payroll`.** Con permiso de Facturama se pueden bajar CFDIs recibidos y de nómina de toda la cuenta, no solo los emitidos por el ERP.
 4. **`details` reenvía la respuesta cruda de Facturama**, y los mensajes `message` están en inglés.
 5. **El alta de cliente en Facturama es silenciosa.** Cualquier error (red, RFC inválido, credenciales) se ignora sin log, y no se guarda el id de Facturama, así que no hay forma de saber si el cliente se subió ni de evitar duplicados.
-6. **El passthrough no cancela CFDIs**, solo descarga el acuse. Cancelar el CFDI ante el SAT aún no está implementado.
+6. **El passthrough no cancela CFDIs**, solo descarga el acuse. La cancelación del CFDI va por `POST /facturas/{id}/cancelar/`.
 
 ---
 

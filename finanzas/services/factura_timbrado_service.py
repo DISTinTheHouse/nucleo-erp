@@ -28,6 +28,19 @@ def _mensaje(exc):
 
 class FacturaTimbradoService:
     @staticmethod
+    def cancelar_cfdi(factura):
+        """Cancela el CFDI ante el SAT (motivo 02). Levanta ``ErrorDeNegocio`` si no queda cancelado."""
+        try:
+            respuesta = FacturamaService().cancel_cfdi(factura.facturama_id)
+        except FacturamaAPIException as exc:
+            raise ErrorDeNegocio({"cfdi": f"Facturama no canceló el CFDI: {_mensaje(exc)}"})
+        estatus = str((respuesta or {}).get("Status") or "").lower()
+        if estatus == "requested":
+            raise ErrorDeNegocio({"cfdi": "El receptor debe aceptar la cancelación ante el SAT; vuelve a cancelar cuando la acepte."})
+        if estatus != "canceled":
+            raise ErrorDeNegocio({"cfdi": f"El SAT no canceló el CFDI (estatus: {estatus or 'vacío'})."})
+
+    @staticmethod
     @transaction.atomic
     def timbrar(factura):
         bloqueada = (

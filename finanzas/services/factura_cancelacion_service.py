@@ -6,6 +6,7 @@ from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import CuentaPorCobrar, Factura, NotaCredito
 from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.services.factura_poliza_service import FacturaPolizaService
+from finanzas.services.factura_timbrado_service import FacturaTimbradoService
 
 
 class FacturaCancelacionService:
@@ -26,6 +27,9 @@ class FacturaCancelacionService:
             factura=bloqueada, estatus=NotaCredito.Estatus.EMITIDA
         ).exists():
             raise ErrorDeNegocio({"estatus": "La factura tiene notas de crédito emitidas: cancélalas primero."})
+        # Timbrada: primero el SAT; si no queda cancelado, no se toca nada en el ERP.
+        if bloqueada.cfdi_uuid:
+            FacturaTimbradoService.cancelar_cfdi(bloqueada)
 
         era_emitida = bloqueada.estatus == Factura.FacturaStatus.EMITIDA
         bloqueada.estatus = Factura.FacturaStatus.CANCELADA
