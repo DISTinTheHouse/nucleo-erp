@@ -340,6 +340,7 @@ class FacturaSerializer(serializers.ModelSerializer):
             'cfdi_fecha_timbrado',
             'cfdi_pendiente',
             'cfdi_cancelado',
+            'cfdi_cancelacion_solicitada',
         ]
         fields = '__all__'
 

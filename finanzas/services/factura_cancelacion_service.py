@@ -27,10 +27,10 @@ class FacturaCancelacionService:
         if actual.estatus == Factura.FacturaStatus.CANCELADA:
             return None
         FacturaCancelacionService._exigir_sin_notas_emitidas(actual)
+        if actual.cfdi_pendiente:  # #562
+            raise ErrorDeNegocio({"cfdi": "La factura tiene un timbrado sin confirmar: revísalo en Facturama antes de cancelarla."})
         if actual.cfdi_uuid and not actual.cfdi_cancelado:
-            FacturaTimbradoService.cancelar_cfdi(actual)
-            Factura.objects.filter(pk=actual.pk).update(cfdi_cancelado=True)
-            factura.cfdi_cancelado = True
+            FacturaTimbradoService.cancelar_cfdi(factura)
         return FacturaCancelacionService._cancelar_en_erp(factura, usuario, motivo)
 
     @staticmethod
