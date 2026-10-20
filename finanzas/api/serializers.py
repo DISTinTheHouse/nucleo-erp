@@ -1118,6 +1118,7 @@ class NotaCreditoSerializer(CreateOnlyNestedLinesMixin, serializers.ModelSeriali
     class Meta:
         model = NotaCredito
         fields = "__all__"
+        read_only_fields = ("cfdi_uuid", "facturama_id", "cfdi_fecha_timbrado", "cfdi_pendiente")
 
     def validate(self, attrs):
         req = self.context.get("request")

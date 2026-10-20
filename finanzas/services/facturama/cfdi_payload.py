@@ -260,3 +260,60 @@ def _cobros_previos(cobro):
     return Q(cobro__fecha_cobro__lt=cobro.fecha_cobro) | Q(
         cobro__fecha_cobro=cobro.fecha_cobro, cobro_id__lt=cobro.pk
     )
+
+
+# --- Nota de crédito: CFDI de egreso relacionado a la factura ---------------
+
+def construir_payload_nota_credito(nota):
+    """CFDI tipo E (uso G02, PUE) relacionado (01) al UUID de su factura.
+
+    Un solo concepto (bonificación/descuento, clave 84111506 "servicios de
+    facturación", unidad ACT) por el subtotal de la nota, con el IVA a la tasa de
+    los renglones de la factura.
+    """
+    factura = nota.factura
+    errores = {}
+    if not factura.cfdi_uuid:
+        errores["factura"] = f"La factura {factura.folio} no está timbrada."
+    if (nota.total or 0) <= 0:
+        errores["total"] = "La nota debe tener un total mayor a 0."
+    forma = _texto(getattr(factura.pedido, "forma_pago", None))
+    if not forma:
+        errores["forma_pago"] = "El pedido de la factura no tiene forma de pago."
+    lugar = _texto(factura.sucursal.cp)
+    if not CP_RE.match(lugar):
+        errores["sucursal"] = "La sucursal de la factura no tiene código postal válido."
+    receptor = _receptor(factura, errores)
+    if errores:
+        raise ErrorDeNegocio({"cfdi": "No se puede timbrar la nota. " + " ".join(errores.values())})
+
+    tasa = (factura.factura_detalles.values_list("porcentaje_impuesto", flat=True).first() or Decimal("0")) / Decimal("100")
+    receptor["CfdiUse"] = "G02"
+    payload = {
+        "NameId": "2",
+        "CfdiType": "E",
+        "ExpeditionPlace": lugar,
+        "Currency": "MXN",
+        "Exportation": "01",
+        "PaymentForm": forma,
+        "PaymentMethod": "PUE",
+        "Receiver": receptor,
+        "Relations": {"Type": "01", "Cfdis": [{"Uuid": factura.cfdi_uuid}]},
+        "Items": [{
+            "ProductCode": "84111506",
+            "Description": f"Nota de crédito {nota.folio or nota.pk}" + (f": {nota.motivo}" if nota.motivo else ""),
+            "Unit": "Actividad",
+            "UnitCode": "ACT",
+            "UnitPrice": _numero(nota.subtotal),
+            "Quantity": 1.0,
+            "Subtotal": _numero(nota.subtotal),
+            "TaxObject": "02",
+            "Taxes": [{"Name": "IVA", "Rate": _numero(tasa), "Base": _numero(nota.subtotal),
+                       "Total": _numero(nota.impuestos), "IsRetention": False}],
+            "Total": _numero(nota.total),
+        }],
+    }
+    if _texto(nota.folio):
+        payload["Folio"] = _texto(nota.folio)[:40]
+    return payload
+
