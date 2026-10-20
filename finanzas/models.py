@@ -557,6 +557,10 @@ class Cobro(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     activo = models.BooleanField(default=True)
+    # REP (complemento de pago, CFDI tipo P) timbrado con Facturama.
+    rep_uuid = models.CharField(max_length=36, null=True, blank=True, unique=True)
+    rep_facturama_id = models.CharField(max_length=60, null=True, blank=True)
+    rep_fecha_timbrado = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "cobros"

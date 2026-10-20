@@ -169,3 +169,94 @@ def construir_payload_cfdi(factura):
     if pedido is not None and _texto(pedido.folio):
         payload["OrderNumber"] = _texto(pedido.folio)[:100]
     return payload
+
+
+# --- REP: complemento de pago (CFDI tipo P) de un cobro ---------------------
+
+FORMA_PAGO_COBRO = {"Efectivo": "01", "Cheque": "02", "Transferencia": "03", "Tarjeta": "04"}
+CENTAVO = Decimal("0.01")
+
+
+def construir_payload_rep(cobro):
+    """Payload del REP de un cobro aplicado a facturas PPD timbradas.
+
+    Por factura: parcialidad = cobros previos + 1 y saldo anterior = total menos
+    lo cobrado antes (por ``fecha_cobro``, ``id``). El IVA se desglosa con la tasa
+    de los renglones de la factura.
+    """
+    from finanzas.models import CobroDetalle
+
+    detalles = list(cobro.cobro_detalles.select_related(
+        "cxc__factura__pedido__cliente_regimen_fiscal", "cxc__factura__cliente__sat_regimen_fiscal",
+        "cxc__factura__sucursal", "cxc__factura__serie_folio",
+    ))
+    errores = {}
+    if not detalles:
+        errores["detalles"] = "El cobro no tiene facturas aplicadas."
+    forma = FORMA_PAGO_COBRO.get(cobro.metodo_pago)
+    if not forma:
+        errores["forma_pago"] = f"Método de cobro sin forma de pago SAT ({cobro.metodo_pago})."
+
+    documentos = []
+    for d in detalles:
+        f = d.cxc.factura
+        if not f.cfdi_uuid:
+            errores[f"f{f.pk}"] = f"La factura {f.folio} no está timbrada."
+            continue
+        if _texto(getattr(f.pedido, "metodo_pago", None)).upper() != "PPD":
+            errores[f"f{f.pk}"] = f"La factura {f.folio} no es PPD: no lleva complemento de pago."
+            continue
+        previos = CobroDetalle.objects.filter(
+            cxc=d.cxc, cobro__activo=True, cobro__estatus="Aplicado",
+        ).exclude(cobro=cobro).filter(_cobros_previos(cobro))
+        pagado_antes = sum((p.importe_aplicado for p in previos), Decimal("0"))
+        tasa = (f.factura_detalles.values_list("porcentaje_impuesto", flat=True).first() or Decimal("0")) / Decimal("100")
+        base = (d.importe_aplicado / (1 + tasa)).quantize(CENTAVO)
+        documentos.append({
+            "Uuid": f.cfdi_uuid,
+            "Serie": _texto(getattr(f.serie_folio, "serie", None)) or None,
+            "Folio": f.folio,
+            "Currency": "MXN",
+            "EquivalenceDocRel": 1,
+            "PartialityNumber": len(previos) + 1,
+            "PreviousBalanceAmount": _numero(f.total - pagado_antes),
+            "AmountPaid": _numero(d.importe_aplicado),
+            "TaxObject": "02",
+            "Taxes": [{"Name": "IVA", "Rate": _numero(tasa), "Base": _numero(base),
+                       "Total": _numero(d.importe_aplicado - base), "IsRetention": False}],
+        })
+
+    factura = detalles[0].cxc.factura if detalles else None
+    receptor = _receptor(factura, errores) if factura else {}
+    lugar = _texto(factura.sucursal.cp) if factura else ""
+    if factura and not CP_RE.match(lugar):
+        errores["sucursal"] = "La sucursal de la factura no tiene código postal válido."
+    if errores:
+        raise ErrorDeNegocio({"rep": "No se puede timbrar el REP. " + " ".join(errores.values())})
+
+    receptor["CfdiUse"] = "CP01"
+    pago = {
+        "Date": f"{cobro.fecha_cobro.isoformat()}T12:00:00",
+        "PaymentForm": forma,
+        "Currency": "MXN",
+        "Amount": _numero(sum((d.importe_aplicado for d in detalles), Decimal("0"))),
+        "RelatedDocuments": documentos,
+    }
+    if _texto(cobro.referencia_operacion):
+        pago["OperationNumber"] = _texto(cobro.referencia_operacion)[:100]
+    return {
+        "NameId": "14",
+        "CfdiType": "P",
+        "ExpeditionPlace": lugar,
+        "Receiver": receptor,
+        "Complemento": {"Payments": [pago]},
+    }
+
+
+def _cobros_previos(cobro):
+    """Cobros anteriores a éste: antes por fecha, o mismo día con id menor."""
+    from django.db.models import Q
+
+    return Q(cobro__fecha_cobro__lt=cobro.fecha_cobro) | Q(
+        cobro__fecha_cobro=cobro.fecha_cobro, cobro_id__lt=cobro.pk
+    )

@@ -1010,6 +1010,7 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
     class Meta:
         model = Cobro
         fields = "__all__"
+        read_only_fields = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado")
 
     def validate(self, attrs):
         req = self.context.get("request")
