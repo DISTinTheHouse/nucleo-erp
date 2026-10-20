@@ -25,6 +25,9 @@ class FacturaCancelacionService:
         """
         actual = Factura.objects.get(pk=factura.pk)
         if actual.estatus == Factura.FacturaStatus.CANCELADA:
+            # #567: cancelada en el ERP antes de cancelar su CFDI; se cancela ahora.
+            if actual.cfdi_uuid and not actual.cfdi_cancelado:
+                FacturaTimbradoService.cancelar_cfdi(factura)
             return None
         FacturaCancelacionService._exigir_sin_notas_emitidas(actual)
         if actual.cfdi_pendiente:  # #562

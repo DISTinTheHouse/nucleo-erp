@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
@@ -198,6 +198,10 @@ class CuentaPorCobrarSerializer(serializers.ModelSerializer):
         read_only_fields = ["fecha_emision", "saldo", "estatus", "fecha_ultimo_pago"]
 
     def validate(self, attrs):
+        # #568: el cliente debe ser de la empresa de la CxC.
+        cliente = attrs.get("cliente")
+        if self.instance is not None and cliente is not None and cliente.empresa_id != self.instance.empresa_id:
+            raise ValidationError({"cliente": "Cliente no pertenece a la empresa."})
         attrs = super().validate(attrs)
         if self.instance is not None and "total" in attrs and attrs["total"] != self.instance.total:
             raise serializers.ValidationError({"total": "El total de una CxC existente no se puede editar."})
@@ -1013,7 +1017,21 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
     class Meta:
         model = Cobro
         fields = "__all__"
-        read_only_fields = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado", "rep_pendiente")
+        # ``activo`` solo lo apaga el DELETE, que revierte saldos (#572).
+        read_only_fields = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado", "rep_pendiente", "activo")
+
+    def get_fields(self):
+        # #570: una CxC de otra empresa responde igual que una inexistente.
+        fields = super().get_fields()
+        if self.instance is not None and not hasattr(self.instance, "__iter__"):
+            empresa_id = self.instance.empresa_id
+        else:
+            request = self.context.get("request")
+            empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
+        fields["cobro_detalles"].child.fields["cxc"].queryset = CuentaPorCobrar.objects.filter(
+            Q(empresa_id=empresa_id) | Q(empresa__isnull=True, factura__empresa_id=empresa_id)
+        )
+        return fields
 
     def validate(self, attrs):
         req = self.context.get("request")
@@ -1023,6 +1041,8 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
             if user_empresa and emp and getattr(emp, "pk", emp) != getattr(user_empresa, "pk", user_empresa):
                 raise ValidationError({"empresa": "Empresa no autorizada."})
             emp_id = getattr(emp, "pk", emp) if emp else getattr(user_empresa, "pk", None)
+            if self.instance is not None:  # #569: en edición manda la empresa del cobro
+                emp_id = self.instance.empresa_id
             cliente = attrs.get("cliente")
             if cliente and emp_id and getattr(cliente, "empresa_id", None) and cliente.empresa_id != emp_id:
                 raise ValidationError({"cliente": "Cliente no pertenece a la empresa."})
