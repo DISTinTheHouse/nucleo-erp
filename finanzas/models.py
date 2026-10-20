@@ -286,6 +286,8 @@ class Factura(StatusLifecycleModel):
     cfdi_uuid = models.CharField(max_length=36, null=True, blank=True, unique=True)
     facturama_id = models.CharField(max_length=60, null=True, blank=True)
     cfdi_fecha_timbrado = models.DateTimeField(null=True, blank=True)
+    # Facturama no confirmó el timbrado: no se reintenta hasta revisarlo y desmarcarlo (admin).
+    cfdi_pendiente = models.BooleanField(default=False)
 
     history = HistoricalRecords()
 
@@ -561,6 +563,7 @@ class Cobro(models.Model):
     rep_uuid = models.CharField(max_length=36, null=True, blank=True, unique=True)
     rep_facturama_id = models.CharField(max_length=60, null=True, blank=True)
     rep_fecha_timbrado = models.DateTimeField(null=True, blank=True)
+    rep_pendiente = models.BooleanField(default=False)
 
     class Meta:
         db_table = "cobros"
