@@ -334,7 +334,7 @@ class FacturaSerializer(serializers.ModelSerializer):
             'moneda',
             # La fija el servidor (día local del alta); en PATCH se ignora.
             'fecha_emision',
-            # Los escribe solo el timbrado/cancelación con Facturama.
+            # Solo lectura: los escribe ``FacturaTimbradoService`` (timbrar/cancelar el CFDI).
             'cfdi_uuid',
             'facturama_id',
             'cfdi_fecha_timbrado',
