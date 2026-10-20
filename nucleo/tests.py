@@ -1798,3 +1798,36 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
         self.assertNotIn("Textil De Otra Empresa", muchas[self.a["admin"].username][1])
         self.assertEqual(len(muchas[self.a["admin"].username][1]), 22)
 
+
+class ImportSatProdServTests(TestCase):
+    """``manage.py import_sat_prodserv``: upsert por código y vigencia -> ``activo``."""
+
+    def test_importa_actualiza_y_marca_las_no_vigentes(self):
+        import datetime
+        import io
+        import os
+        import tempfile
+
+        import openpyxl
+        from django.core.management import call_command
+
+        from nucleo.models import SatClaveProdServ
+
+        SatClaveProdServ.objects.create(codigo="53102700", descripcion="vieja")
+        libro = openpyxl.Workbook()
+        hoja = libro.active
+        hoja.append(["c_ClaveProdServ", "Descripción", "Incluir IVA trasladado", "FechaFinVigencia"])
+        hoja.append(["53102700", "Uniformes", "Opcional", None])
+        hoja.append(["53103000", "Camisetas", "Opcional", None])
+        hoja.append(["10101501", "Gatos vivos", "Opcional", datetime.datetime(2023, 1, 1)])
+        fd, ruta = tempfile.mkstemp(suffix=".xlsx")
+        os.close(fd)
+        self.addCleanup(os.remove, ruta)
+        libro.save(ruta)
+
+        call_command("import_sat_prodserv", ruta, stdout=io.StringIO())
+
+        self.assertEqual(SatClaveProdServ.objects.count(), 3)
+        self.assertEqual(SatClaveProdServ.objects.get(codigo="53102700").descripcion, "Uniformes")
+        self.assertFalse(SatClaveProdServ.objects.get(codigo="10101501").activo)
+

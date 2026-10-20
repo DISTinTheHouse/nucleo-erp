@@ -3623,6 +3623,7 @@ Acción aparte de `emitir`: timbra el CFDI 4.0 de ingreso y guarda `cfdi_uuid`, 
 - Faltan datos → `400 {"cfdi": "No se puede timbrar. ..."}` con todos los faltantes, sin llamar a Facturama.
 - Facturama rechaza → `400 {"cfdi": "Facturama rechazó el CFDI: ..."}`. Ya timbrada → `400`.
 - Una factura cancelada no se timbra; un Borrador timbrado no se elimina.
+- Claves SAT de producto/servicio: se cargan una vez con `python manage.py import_sat_prodserv <c_ClaveProdServ.xlsx>` (Excel oficial del SAT; se puede volver a correr). Luego cada producto lleva `sat_prodserv` y `sat_unidad`.
 - Archivos: `GET /facturas/{id}/cfdi/?formato=pdf|xml` (base64 de Facturama).
 - Cancelar: `POST /facturas/{id}/cancelar/` de una factura timbrada cancela primero el CFDI ante el SAT (motivo 02). Si Facturama no responde `canceled` (p. ej. `requested`: el receptor debe aceptar) → `400 {"cfdi": ...}` y la factura no se toca.
 - Pendiente: MXN únicamente, REP y notas de crédito.
