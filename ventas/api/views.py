@@ -11,7 +11,7 @@ from datetime import timedelta
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import APIException, ValidationError
+from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
 from django.conf import settings
@@ -3055,6 +3055,16 @@ class PedidoViewSet(viewsets.ModelViewSet):
         campos_mesa_control = {"clasificacion", "fecha_confirmacion"}
         if campos_mesa_control & set(serializer.validated_data.keys()):
             self._require_mesa_control(self.request.user)
+        # Lo que la lectura le oculta (importes, forma/método de pago, uso CFDI)
+        # tampoco lo puede escribir (#537).
+        from ventas.services.pedido_field_filter_service import (
+            CAMPOS_CONTABILIDAD_PEDIDO,
+            puede_ver_contabilidad,
+        )
+        if not puede_ver_contabilidad(self.request.user):
+            ocultos = sorted(set(CAMPOS_CONTABILIDAD_PEDIDO) & set(serializer.validated_data))
+            if ocultos:
+                raise PermissionDenied(f"No puedes modificar: {', '.join(ocultos)}.")
         self._validar_cambio_estatus(serializer.instance, serializer.validated_data.get("estatus"))
         serializer.save()
         # ``UpdateModelMixin.update`` vacía el prefetch de ``serializer.instance``
@@ -3365,6 +3375,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
         """
         user = request.user
         pedido = self.get_object()
+        # Clona precios y montos que la lectura le oculta a quien no ve contabilidad (#537).
+        from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
+        if not puede_ver_contabilidad(request.user):
+            raise PermissionDenied("No tienes permiso para recomprar pedidos.")
 
         with transaction.atomic():
             cotizacion = Cotizacion.objects.create(
