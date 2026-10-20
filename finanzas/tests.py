@@ -8067,6 +8067,7 @@ RESPUESTA_TIMBRADO = {
 }
 
 
+@override_settings(FACTURAMA_EMPRESA_CODIGO="acme")
 class TimbrarFacturaTests(EmitirFacturaTests):
     """``POST /facturas/{id}/timbrar/`` con Facturama mockeado."""
 
@@ -8156,3 +8157,24 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.assertIn("receptor", str(resp.data["cfdi"]))
         factura.refresh_from_db()
         self.assertEqual(factura.estatus, Factura.FacturaStatus.BORRADOR)
+
+    def test_si_falla_el_erp_tras_cancelar_en_el_sat_el_reintento_no_vuelve_a_llamar(self):
+        factura = self._timbrada()
+        self._emitir(factura)
+        self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
+        with patch(
+            "finanzas.services.factura_cancelacion_service.FacturaPolizaService.cancelar",
+            side_effect=RuntimeError("contrapóliza rota"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._cancelar(factura)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.EMITIDA)
+        self.assertTrue(factura.cfdi_cancelado)
+
+        self.assertEqual(self._cancelar(factura).status_code, 200)
+
+        self.assertEqual(self.facturama.cancel_cfdi.call_count, 1)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
+
