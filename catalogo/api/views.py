@@ -4,6 +4,7 @@ from django.db.models.functions import Lower
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
+from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from catalogo.codigos import siguiente_codigo_producto
 from catalogo.tallas import talla_sort_key
@@ -46,8 +47,21 @@ class ColorViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return Color.objects.filter(activo=True).order_by(Lower("nombre"), "id")
 
+class SoloSuperusuarioEscribe(BasePermission):
+    """Catálogo global (sin empresa): todos leen, solo el superusuario escribe (#535)."""
+
+    def has_permission(self, request, view):
+        return request.method in SAFE_METHODS or request.user.is_superuser
+
+
 class TallaViewSet(viewsets.ModelViewSet):
     serializer_class = TallaSerializer
+    permission_classes = [IsAuthenticated, SoloSuperusuarioEscribe]
+
+    def perform_destroy(self, instance):
+        # Baja lógica: el borrado físico arrastraba en cascada variantes de todas las empresas.
+        instance.activo = False
+        instance.save(update_fields=["activo"])
 
     def get_queryset(self):
         qs = Talla.objects.filter(activo=True)
@@ -76,7 +90,7 @@ class ProductoViewSet(viewsets.ModelViewSet):
     serializer_class = ProductoSerializer
 
     def get_queryset(self):
-        qs = _alcance_empresa(super().get_queryset(), self.request.user)
+        qs = _alcance_empresa(super().get_queryset().filter(activo=True), self.request.user)
         # ``tipo_id`` acepta uno o varios: repetido (``?tipo_id=1&tipo_id=3``) o
         # separado por comas (``?tipo_id=1,3``). Un solo valor filtra igual que antes.
         tipo_ids = self.request.query_params.getlist('tipo_id')
@@ -94,6 +108,12 @@ class ProductoViewSet(viewsets.ModelViewSet):
                 | Q(cod_proscai__icontains=q)
             )
         return qs.order_by("-created_at", "-id")
+
+    def perform_destroy(self, instance):
+        # Baja lógica (#531): el DELETE físico arrastraba en cascada compras,
+        # inventario, producción y ventas del producto.
+        instance.activo = False
+        instance.save(update_fields=["activo", "updated_at"])
 
     def perform_create(self, serializer):
         # Mismo codigo que /onboarding/: sale del servidor via categoria, nunca
