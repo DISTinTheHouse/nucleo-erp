@@ -844,6 +844,15 @@ class FacturaViewSet(FinanzasBaseViewSet):
         FacturaTimbradoService.timbrar(factura)
         return Response(FacturaSerializer(factura).data)
 
+    @action(detail=True, methods=['post'], url_path='enviar-cfdi', url_name='enviar-cfdi')
+    def enviar_cfdi(self, request, pk=None):
+        """Envía por correo el PDF y XML del CFDI. ``email`` opcional: por defecto
+        el ``correo_facturas`` de la factura (pedido, luego cliente)."""
+        factura = self.get_object()  # otra empresa -> 404
+        email = (request.data.get('email') or '').strip() or FacturaSerializer(factura).get_correo_facturas(factura)
+        enviado_a = FacturaTimbradoService.enviar_cfdi(factura, email)
+        return Response({'enviado_a': enviado_a})
+
     @action(detail=True, methods=['get'], url_path='cfdi', url_name='cfdi')
     def cfdi(self, request, pk=None):
         """XML o PDF del CFDI timbrado (``?formato=xml|pdf``, pdf por defecto), en el

@@ -3,6 +3,11 @@
 Acción aparte de ``emitir``: no toca CxC, póliza ni estatus de la factura.
 """
 
+import base64
+
+from django.core.exceptions import ValidationError
+from django.core.mail import EmailMessage
+from django.core.validators import validate_email
 from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -136,6 +141,31 @@ class FacturaTimbradoService:
         error = _timbrar(bloqueado, construir_payload_rep(bloqueado), CAMPOS_REP, "rep", "REP")
         _copiar(bloqueado, cobro, CAMPOS_REP)
         return error
+
+    @staticmethod
+    def enviar_cfdi(factura, email):
+        """Manda por correo el PDF y el XML oficiales del CFDI (descargados de Facturama)."""
+        if not factura.facturama_id:
+            raise ErrorDeNegocio({"cfdi": "La factura no tiene CFDI timbrado."})
+        try:
+            validate_email(email or "")
+        except ValidationError:
+            raise ErrorDeNegocio({"email": "Correo inválido o vacío."})
+        servicio = FacturamaService()
+        nombre = factura.folio or str(factura.pk)
+        correo = EmailMessage(
+            subject=f"Factura {nombre}",
+            body=f"Adjuntamos el CFDI de la factura {nombre} (UUID {factura.cfdi_uuid}).",
+            to=[email],
+        )
+        try:
+            for formato, tipo in (("pdf", "application/pdf"), ("xml", "application/xml")):
+                archivo = servicio.get_cfdi_file(formato, "issued", factura.facturama_id) or {}
+                correo.attach(f"{nombre}.{formato}", base64.b64decode(archivo.get("Content") or ""), tipo)
+        except FacturamaAPIException as exc:
+            raise ErrorDeNegocio({"cfdi": f"Facturama no entregó el archivo: {_mensaje(exc)}"})
+        correo.send()
+        return email
 
     @staticmethod
     def timbrar_nota_credito(nota):
