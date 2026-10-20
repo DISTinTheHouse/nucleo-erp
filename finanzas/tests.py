@@ -8178,3 +8178,37 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         factura.refresh_from_db()
         self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
 
+    def _nota_emitida(self, factura):
+        return NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"], folio="NC-1", motivo="Descuento",
+            subtotal=Decimal("50.00"), impuestos=Decimal("8.00"), total=Decimal("58.00"),
+            estatus=NotaCredito.Estatus.EMITIDA.value,
+        )
+
+    def _timbrar_nota(self, nota):
+        return self._client(self.a["usuario"]).post(f"{NOTAS_CREDITO_URL}{nota.pk}/timbrar/", {}, format="json")
+
+    def test_timbra_la_nota_como_egreso_relacionado_a_la_factura(self):
+        factura = self._timbrada()
+        factura.refresh_from_db()
+        nota = self._nota_emitida(factura)
+
+        resp = self._timbrar_nota(nota)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["cfdi_uuid"], "fe3c73d5-7881-49e0-80a3-e6c7e2eece40")
+        payload = self.facturama.create_cfdi_emision.call_args.args[0]
+        self.assertEqual((payload["CfdiType"], payload["PaymentMethod"], payload["Receiver"]["CfdiUse"]), ("E", "PUE", "G02"))
+        self.assertEqual(payload["Relations"], {"Type": "01", "Cfdis": [{"Uuid": factura.cfdi_uuid}]})
+        (item,) = payload["Items"]
+        self.assertEqual((item["Subtotal"], item["Taxes"][0]["Total"], item["Total"]), (50.0, 8.0, 58.0))
+
+    def test_nota_de_una_factura_sin_timbrar_responde_400(self):
+        nota = self._nota_emitida(self._borrador())
+
+        resp = self._timbrar_nota(nota)
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("no está timbrada", str(resp.data["cfdi"]))
+        self.facturama.create_cfdi_emision.assert_not_called()
+

@@ -782,6 +782,11 @@ class NotaCredito(models.Model):
     total = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     estatus = models.CharField(max_length=30, choices=Estatus.choices, default=Estatus.BORRADOR)
     observaciones = models.TextField(null=True, blank=True)
+    # CFDI de egreso timbrado con Facturama (``POST /notas-credito/{id}/timbrar/``).
+    cfdi_uuid = models.CharField(max_length=36, null=True, blank=True, unique=True)
+    facturama_id = models.CharField(max_length=60, null=True, blank=True)
+    cfdi_fecha_timbrado = models.DateTimeField(null=True, blank=True)
+    cfdi_pendiente = models.BooleanField(default=False)
     created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
