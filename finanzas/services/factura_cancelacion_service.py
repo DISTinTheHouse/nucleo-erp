@@ -11,7 +11,6 @@ from finanzas.services.factura_timbrado_service import FacturaTimbradoService
 
 class FacturaCancelacionService:
     @staticmethod
-    @transaction.atomic
     def cancelar(factura, usuario=None, motivo=""):
         """Regresa la contrapóliza, o ``None`` si no hubo (Borrador, ya cancelada o sin póliza).
 
@@ -19,17 +18,35 @@ class FacturaCancelacionService:
         importe cobrado como saldo a favor. Las piezas facturadas regresan a existencia
         (solo lo que el pedido descontó y no se ha reintegrado) y se vuelven a
         descontar al refacturarlas (#513).
+
+        Timbrada: primero el SAT, y ``cfdi_cancelado`` se guarda en su propia
+        transacción. Si la parte del ERP falla, reintentar no vuelve a llamar al
+        SAT y el ERP no pierde que el CFDI ya está cancelado (#554).
         """
+        actual = Factura.objects.get(pk=factura.pk)
+        if actual.estatus == Factura.FacturaStatus.CANCELADA:
+            return None
+        FacturaCancelacionService._exigir_sin_notas_emitidas(actual)
+        if actual.cfdi_uuid and not actual.cfdi_cancelado:
+            FacturaTimbradoService.cancelar_cfdi(actual)
+            Factura.objects.filter(pk=actual.pk).update(cfdi_cancelado=True)
+            factura.cfdi_cancelado = True
+        return FacturaCancelacionService._cancelar_en_erp(factura, usuario, motivo)
+
+    @staticmethod
+    def _exigir_sin_notas_emitidas(factura):
+        if NotaCredito.objects.filter(
+            factura=factura, estatus=NotaCredito.Estatus.EMITIDA
+        ).exists():
+            raise ErrorDeNegocio({"estatus": "La factura tiene notas de crédito emitidas: cancélalas primero."})
+
+    @staticmethod
+    @transaction.atomic
+    def _cancelar_en_erp(factura, usuario, motivo):
         bloqueada = Factura.objects.select_for_update().get(pk=factura.pk)
         if bloqueada.estatus == Factura.FacturaStatus.CANCELADA:
             return None
-        if NotaCredito.objects.filter(
-            factura=bloqueada, estatus=NotaCredito.Estatus.EMITIDA
-        ).exists():
-            raise ErrorDeNegocio({"estatus": "La factura tiene notas de crédito emitidas: cancélalas primero."})
-        # Timbrada: primero el SAT; si no queda cancelado, no se toca nada en el ERP.
-        if bloqueada.cfdi_uuid:
-            FacturaTimbradoService.cancelar_cfdi(bloqueada)
+        FacturaCancelacionService._exigir_sin_notas_emitidas(bloqueada)
 
         era_emitida = bloqueada.estatus == Factura.FacturaStatus.EMITIDA
         bloqueada.estatus = Factura.FacturaStatus.CANCELADA

@@ -288,6 +288,8 @@ class Factura(StatusLifecycleModel):
     cfdi_fecha_timbrado = models.DateTimeField(null=True, blank=True)
     # Facturama no confirmó el timbrado: no se reintenta hasta revisarlo y desmarcarlo (admin).
     cfdi_pendiente = models.BooleanField(default=False)
+    # CFDI ya cancelado ante el SAT; se guarda aparte de la cancelación en el ERP (#554).
+    cfdi_cancelado = models.BooleanField(default=False)
 
     history = HistoricalRecords()
 
