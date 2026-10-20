@@ -39,6 +39,8 @@ class Cliente(StatusLifecycleModel):
     celular = models.CharField(max_length=20, blank=True, null=True)
     web = models.URLField(max_length=255, blank=True, null=True)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="clientes", null=True, blank=True)
+    # Id del cliente en Facturama (``terceros/facturama.py``).
+    facturama_id = models.CharField(max_length=60, null=True, blank=True)
 
     dias_credito = models.PositiveIntegerField(default=0, validators=[MaxValueValidator(365)])
     limite_credito = models.DecimalField(max_digits=14, decimal_places=2, default=0, validators=[MinValueValidator(0)])

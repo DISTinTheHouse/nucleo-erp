@@ -20,7 +20,7 @@ class ClienteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Cliente
         fields = "__all__"
-        read_only_fields = ["activo", "empresa", "vendedores"]
+        read_only_fields = ["activo", "empresa", "vendedores", "facturama_id"]
 
     def _validar_permiso_credito(self, attrs, user):
         """Sin el permiso de crédito solo se puede mandar el valor que ya tiene (o el de alta: 0)."""

@@ -1,7 +1,9 @@
 from datetime import timedelta
 from decimal import Decimal
 
-from django.test import TestCase
+from unittest.mock import patch
+
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 from usuarios.models import Usuario
@@ -958,4 +960,47 @@ class ClienteCarteraTests(TestCase):
         self._cxc("0.00", 10)
 
         self.assertEqual(self._cartera(), [])
+
+
+@override_settings(FACTURAMA_EMPRESA_CODIGO="fact")
+class ClienteFacturamaTests(TestCase):
+    """EC-510/511/512: el cliente vive en Facturama o no se guarda."""
+
+    def setUp(self):
+        from nucleo.models import Empresa
+        from rest_framework.test import APIClient
+        from usuarios.models import Usuario
+
+        empresa = Empresa.objects.create(codigo="fact", razon_social="Fact SA")
+        self.user = Usuario.objects.create(username="f@f.test", email="f@f.test", empresa=empresa, is_admin_empresa=True)
+        self.api = APIClient()
+        self.api.force_authenticate(self.user)
+        patcher = patch("terceros.facturama.FacturamaService")
+        self.fc = patcher.start().return_value.client
+        self.addCleanup(patcher.stop)
+
+    def _alta(self):
+        return self.api.post("/api/v1/terceros/clientes/", {"nombre": "Cli", "rfc": "URE180429TM6"}, format="json")
+
+    def test_alta_guarda_el_id_y_la_edicion_hace_put(self):
+        self.fc.post.return_value = {"Id": "abc"}
+
+        resp = self._alta()
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        cliente = Cliente.objects.get(pk=resp.data["id"])
+        self.assertEqual(cliente.facturama_id, "abc")
+        self.api.patch(f"/api/v1/terceros/clientes/{cliente.pk}/", {"nombre": "Otro"}, format="json")
+        self.assertEqual(self.fc.put.call_args.args[0], "/Client/abc")
+
+    def test_si_facturama_rechaza_no_se_guarda(self):
+        from finanzas.services.facturama.exceptions import FacturamaAPIException
+
+        self.fc.post.side_effect = FacturamaAPIException("error", status_code=400, details={"Message": "RFC inválido"})
+
+        resp = self._alta()
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("RFC inválido", str(resp.data["facturama"]))
+        self.assertFalse(Cliente.objects.exists())
 

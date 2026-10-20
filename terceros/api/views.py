@@ -8,20 +8,17 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
-from finanzas.services.facturama.acceso import empresa_usa_facturama
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import ProveedorSerializer, ClienteSerializer, DireccionClienteSerializer
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
 from terceros.cartera import cartera_de_cliente
+from terceros import facturama
 from terceros.scope import clientes_base, clientes_visibles
-import json
-import base64
 import logging
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
 
 logger = logging.getLogger(__name__)
 
@@ -126,64 +123,31 @@ class ClienteViewSet(viewsets.ModelViewSet):
             pass
         # La cuenta de Facturama es de UNA empresa: los clientes de las demás no se
         # le suben (antes se mandaban todos, de cualquier tenant).
-        if not empresa_usa_facturama(cliente.empresa):
-            logger.info("Cliente %s no se sube a Facturama: la empresa no es la dueña de la cuenta (FACTURAMA_EMPRESA_CODIGO).", cliente.pk)
-            return
-        serializer.facturama_sincronizado = False
-        try:
-            base_url = getattr(settings, "FACTURAMA_BASE_URL", "https://apisandbox.facturama.mx").rstrip("/")
-            url = f"{base_url}/Client"
-            headers = {"Accept": "application/json", "Content-Type": "application/json"}
-            usern = (getattr(settings, "FACTURAMA_USERNAME", "") or "").strip()
-            pwd = (getattr(settings, "FACTURAMA_PASSWORD", "") or "").strip()
-            if usern and pwd:
-                token = base64.b64encode(f"{usern}:{pwd}".encode("utf-8")).decode("ascii")
-                headers["Authorization"] = f"Basic {token}"
-            payload = {
-                "Email": (cliente.correo or "").strip(),
-                "Rfc": (cliente.rfc or "").strip().upper(),
-                "Name": (cliente.razon_social or cliente.nombre or "").strip(),
-                "FiscalRegime": getattr(getattr(cliente, "sat_regimen_fiscal", None), "codigo", ""),
-                "CfdiUse": getattr(getattr(cliente, "sat_uso_cfdi", None), "codigo", ""),
-                "TaxZipCode": (cliente.codigo_postal or "").strip(),
-            }
-            address = {
-                "Street": (cliente.direccion_fiscal or "").strip(),
-                "Neighborhood": (cliente.colonia or "").strip(),
-                "ZipCode": (cliente.codigo_postal or "").strip(),
-                "Municipality": (cliente.ciudad or "").strip(),
-                "State": (cliente.estado or "").strip(),
-                "Country": "MEXICO",
-            }
-            address = {k: v for k, v in address.items() if v}
-            if address:
-                payload["Address"] = address
-            payload = {k: v for k, v in payload.items() if v}
-            raw_body = json.dumps(payload).encode("utf-8")
-            try:
-                req = Request(url, data=raw_body, headers=headers, method="POST")
-                with urlopen(req, timeout=10) as resp:
-                    resp.read()  # ignore body; best-effort
-                serializer.facturama_sincronizado = True
-            except HTTPError as exc:
-                detalle = exc.read().decode("utf-8", "replace")[:500]
-                logger.warning("Facturama rechazó al cliente %s (HTTP %s): %s", cliente.pk, exc.code, detalle)
-            except (URLError, TimeoutError, ValueError) as exc:
-                logger.warning("No se pudo subir el cliente %s a Facturama: %s", cliente.pk, exc)
-        except Exception:
-            logger.exception("Error inesperado al subir el cliente %s a Facturama", cliente.pk)
+        serializer.facturama_sincronizado = facturama.sincronizar(cliente)
 
+    @transaction.atomic
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
         data = dict(serializer.data)
-        # ``None`` si la empresa no usa Facturama; ``False`` si se intentó y falló (ver logs).
+        # ``True`` si quedó en Facturama; ``False`` si la empresa no usa Facturama.
         data["facturama_sincronizado"] = getattr(serializer, "facturama_sincronizado", None)
         return Response(data, status=201, headers=self.get_success_headers(serializer.data))
 
+    @transaction.atomic
+    def perform_update(self, serializer):
+        facturama.sincronizar(serializer.save())
+
+    @transaction.atomic
     def perform_destroy(self, instance):
+        facturama.eliminar(instance)
         instance.soft_delete()
+
+    @action(detail=True, methods=["get"], url_path="facturama")
+    def en_facturama(self, request, pk=None):
+        """El cliente tal como está en Facturama (``GET /Client/{Id}``)."""
+        return Response(facturama.consultar(self.get_object()))
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-422): mismo
     # criterio que los demás ``kpis`` -- todo con ``aggregate()``/``Sum``/
