@@ -8154,7 +8154,7 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         resp = self._cancelar(factura)
 
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("receptor", str(resp.data["cfdi"]))
+        self.assertIn("receptor", str(resp.data["cancelacion_pendiente"]))
         factura.refresh_from_db()
         self.assertEqual(factura.estatus, Factura.FacturaStatus.BORRADOR)
 

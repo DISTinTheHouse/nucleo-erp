@@ -197,13 +197,35 @@ class FacturaTimbradoService:
 
     @staticmethod
     def cancelar_cfdi(factura):
-        """Cancela el CFDI ante el SAT (motivo 02). Levanta ``ErrorDeNegocio`` si no queda cancelado."""
+        """Cancela el CFDI ante el SAT (motivo 02) y guarda el resultado. Levanta si no quedó cancelado."""
+        error = FacturaTimbradoService._cancelar_cfdi(factura)
+        if error:
+            raise error
+
+    @staticmethod
+    @transaction.atomic
+    def _cancelar_cfdi(factura):
+        bloqueada = Factura.objects.select_for_update(of=("self",)).select_related("empresa").get(pk=factura.pk)
+        if bloqueada.cfdi_cancelado:
+            return None
+        _exigir_empresa_duena(bloqueada.empresa, "cfdi")  # #564
         try:
-            respuesta = FacturamaService().cancel_cfdi(factura.facturama_id)
+            respuesta = FacturamaService().cancel_cfdi(bloqueada.facturama_id)
         except FacturamaAPIException as exc:
-            raise ErrorDeNegocio({"cfdi": f"Facturama no canceló el CFDI: {_mensaje(exc)}"})
+            if exc.status_code and 400 <= exc.status_code < 500 and exc.status_code != 408:
+                return ErrorDeNegocio({"cfdi": f"Facturama no canceló el CFDI: {_mensaje(exc)}"})
+            # #563: sin respuesta no se sabe si se canceló; reintentar es seguro.
+            return ErrorDeNegocio({"cfdi": f"Facturama no respondió ({_mensaje(exc)}); no se sabe si se canceló. Vuelve a intentar."})
         estatus = str((respuesta or {}).get("Status") or "").lower()
-        if estatus == "requested":
-            raise ErrorDeNegocio({"cfdi": "El receptor debe aceptar la cancelación ante el SAT; vuelve a cancelar cuando la acepte."})
-        if estatus != "canceled":
-            raise ErrorDeNegocio({"cfdi": f"El SAT no canceló el CFDI (estatus: {estatus or 'vacío'})."})
+        if estatus == "canceled":
+            bloqueada.cfdi_cancelado, bloqueada.cfdi_cancelacion_solicitada = True, False
+        elif estatus == "requested":  # #565
+            bloqueada.cfdi_cancelacion_solicitada = True
+        else:
+            return ErrorDeNegocio({"cfdi": f"El SAT no canceló el CFDI (estatus: {estatus or 'vacío'})."})
+        bloqueada.save(update_fields=["cfdi_cancelado", "cfdi_cancelacion_solicitada", "updated_at"])
+        factura.cfdi_cancelado = bloqueada.cfdi_cancelado
+        factura.cfdi_cancelacion_solicitada = bloqueada.cfdi_cancelacion_solicitada
+        if not bloqueada.cfdi_cancelado:
+            return ErrorDeNegocio({"cancelacion_pendiente": "El receptor debe aceptar la cancelación ante el SAT; vuelve a cancelar cuando la acepte."})
+        return None

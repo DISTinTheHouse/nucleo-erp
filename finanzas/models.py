@@ -290,6 +290,8 @@ class Factura(StatusLifecycleModel):
     cfdi_pendiente = models.BooleanField(default=False)
     # CFDI ya cancelado ante el SAT; se guarda aparte de la cancelación en el ERP (#554).
     cfdi_cancelado = models.BooleanField(default=False)
+    # Cancelación solicitada; falta que el receptor la acepte (#565).
+    cfdi_cancelacion_solicitada = models.BooleanField(default=False)
 
     history = HistoricalRecords()
 
