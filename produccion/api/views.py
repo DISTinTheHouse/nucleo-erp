@@ -482,10 +482,11 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # Listado más reciente primero; el desempate usa la PK real del modelo
         # (``op_id``, no ``id``).
         queryset = (
-            OrdenProduccion.objects
-            .filter(empresa=empresa)
+            ordenes_produccion_visibles(OrdenProduccion.objects.all(), user)
             .order_by("-fecha_inicio", "-op_id")
         )
+        if self.action == "retrieve":
+            queryset = queryset.filter(activo=True)
         # El nested ``orden_produccion_detalle`` (con su cadena de FKs) solo lo
         # consumen retrieve/create/update; el listado usa un serializer ligero
         # que no lo toca, así que evitamos el prefetch pesado en ``list``.
@@ -569,7 +570,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         empresa = getattr(request.user, 'empresa', None)
         es_propia = (
             empresa is not None
-            and OrdenProduccion.objects.filter(pk=op_id, empresa=empresa).exists()
+            and ordenes_produccion_visibles(
+                OrdenProduccion.objects.filter(pk=op_id, activo=True), request.user
+            ).exists()
         )
         if not es_propia:
             return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
