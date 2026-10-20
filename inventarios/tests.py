@@ -154,10 +154,10 @@ class MovimientoOperacionViewSetScopeTenantTests(TestCase):
         url = f"{MOVIMIENTOS_URL}?empresa_id={self.a['empresa'].pk}"
         self.assertEqual(self._ids(self.a["usuario"], url), [self.a["evento"].pk])
 
-    def test_multi_empresa_puede_acotar_a_una_de_las_suyas(self):
-        """Con acceso a A y B, el param acota a B dentro de su propio universo."""
+    def test_multi_empresa_no_acota_a_una_que_no_es_la_activa(self):
+        """El M2M ``empresas`` no da alcance (#538): pedir B con A activa no regresa nada."""
         url = f"{MOVIMIENTOS_URL}?empresa_id={self.b['empresa'].pk}"
-        self.assertEqual(self._ids(self.multi_empresa, url), [self.b["evento"].pk])
+        self.assertEqual(self._ids(self.multi_empresa, url), [])
 
     def test_filtro_accion_sigue_vivo(self):
         AuditoriaEvento.objects.create(
@@ -172,12 +172,9 @@ class MovimientoOperacionViewSetScopeTenantTests(TestCase):
 
     # --- no regresión en las ramas que ya eran correctas ----------------------
 
-    def test_multi_empresa_ve_ambas_empresas_de_su_scope(self):
-        """El M2M ``empresas`` es acceso legítimo, igual que en el resto del app."""
-        self.assertEqual(
-            sorted(self._ids(self.multi_empresa)),
-            sorted([self.a["evento"].pk, self.b["evento"].pk]),
-        )
+    def test_multi_empresa_solo_ve_su_empresa_activa(self):
+        """Solo la empresa activa (#538), como ventas y producción."""
+        self.assertEqual(self._ids(self.multi_empresa), [self.a["evento"].pk])
 
     def test_superuser_ve_todo(self):
         self.assertEqual(

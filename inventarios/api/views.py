@@ -1546,7 +1546,7 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
         return response
 
     def _empresa_ids_permitidas(self, user):
-        """Empresas visibles para el usuario: la activa más el M2M ``empresas``.
+        """Empresas visibles para el usuario: solo la activa (#538).
 
         Mismo criterio que ``_movement_report_allowed_almacen_ids()`` en esta
         misma clase y que el resto de ViewSets del módulo. ``AuditoriaEvento``
@@ -1564,9 +1564,8 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
         # se degrada (y cualquier llamador futuro sin usuario autenticado
         # reventaría); un principal sin M2M no aporta empresas y cae en el
         # ``none()`` del llamador.
-        empresas = getattr(user, "empresas", None)
-        if empresas is not None:
-            empresa_ids += list(empresas.values_list("pk", flat=True))
+        # Solo la empresa activa, como el resto del proyecto (#538): el M2M
+        # ``empresas`` mostraba movimientos de otras empresas.
         return empresa_ids
 
     def get_queryset(self):
