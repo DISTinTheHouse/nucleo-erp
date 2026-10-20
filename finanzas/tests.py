@@ -8178,3 +8178,23 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         factura.refresh_from_db()
         self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
 
+    def test_envia_pdf_y_xml_del_cfdi_al_correo_de_la_factura(self):
+        from django.core import mail
+
+        factura = self._timbrada()
+        self.facturama.get_cfdi_file.return_value = {"Content": "UERG"}
+
+        resp = self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/enviar-cfdi/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["enviado_a"], "a@acme.test")
+        (correo,) = mail.outbox
+        self.assertEqual([a[0] for a in correo.attachments], [f"{factura.folio}.pdf", f"{factura.folio}.xml"])
+
+    def test_sin_cfdi_no_se_envia(self):
+        factura = self._borrador()
+
+        resp = self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/enviar-cfdi/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+
