@@ -13,9 +13,9 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from finanzas.exceptions import ErrorDeNegocio
-from finanzas.models import Cobro, Factura
+from finanzas.models import Cobro, Factura, NotaCredito
 from finanzas.services.facturama.acceso import empresa_usa_facturama
-from finanzas.services.facturama.cfdi_payload import construir_payload_cfdi, construir_payload_rep
+from finanzas.services.facturama.cfdi_payload import construir_payload_cfdi, construir_payload_nota_credito, construir_payload_rep
 from finanzas.services.facturama.exceptions import FacturamaAPIException
 from finanzas.services.facturama.service import FacturamaService
 
@@ -166,6 +166,34 @@ class FacturaTimbradoService:
             raise ErrorDeNegocio({"cfdi": f"Facturama no entregó el archivo: {_mensaje(exc)}"})
         correo.send()
         return email
+
+    @staticmethod
+    def timbrar_nota_credito(nota):
+        """Timbra el CFDI de egreso de una nota de crédito emitida. No toca saldos ni pólizas."""
+        error = FacturaTimbradoService._timbrar_nota(nota)
+        if error:
+            raise error
+        return nota
+
+    @staticmethod
+    @transaction.atomic
+    def _timbrar_nota(nota):
+        bloqueada = (
+            NotaCredito.objects.select_for_update(of=("self",))
+            .select_related("factura__empresa", "factura__pedido__cliente_regimen_fiscal",
+                            "factura__cliente__sat_regimen_fiscal", "factura__sucursal")
+            .get(pk=nota.pk)
+        )
+        _exigir_empresa_duena(bloqueada.factura.empresa, "cfdi")
+        if bloqueada.cfdi_uuid:
+            raise ErrorDeNegocio({"cfdi": f"La nota ya está timbrada (UUID {bloqueada.cfdi_uuid})."})
+        if bloqueada.cfdi_pendiente:
+            raise ErrorDeNegocio({"cfdi": PENDIENTE.format("cfdi_pendiente")})
+        if bloqueada.estatus != NotaCredito.Estatus.EMITIDA:
+            raise ErrorDeNegocio({"estatus": "Solo se timbra una nota de crédito Emitida."})
+        error = _timbrar(bloqueada, construir_payload_nota_credito(bloqueada), CAMPOS_CFDI, "cfdi", "CFDI")
+        _copiar(bloqueada, nota, CAMPOS_CFDI)
+        return error
 
     @staticmethod
     def cancelar_cfdi(factura):

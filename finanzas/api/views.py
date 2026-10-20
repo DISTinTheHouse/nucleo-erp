@@ -2452,6 +2452,15 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
             raise NotFound("La nota de crédito ya no existe.")
         return Response(NotaCreditoSerializer(nota).data)
 
+    @action(detail=True, methods=["post"], url_path="timbrar", url_name="timbrar")
+    def timbrar(self, request, pk=None):
+        """Timbra el CFDI de egreso de la nota con Facturama, relacionado a su factura."""
+        nota = self.get_object()  # otra empresa -> 404
+        if not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
+            raise PermissionDenied("No tienes permiso para timbrar notas de crédito.")
+        FacturaTimbradoService.timbrar_nota_credito(nota)
+        return Response(NotaCreditoSerializer(nota).data)
+
 
 class AlertaMoraViewSet(FinanzasBaseReadOnlyViewSet):
     queryset = AlertaMora.objects.all()
