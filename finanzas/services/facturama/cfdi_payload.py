@@ -17,6 +17,8 @@ siguiente faltante de uno en uno.
 import re
 from decimal import Decimal
 
+from django.db.models import Sum
+
 from finanzas.exceptions import ErrorDeNegocio
 
 RFC_RE = re.compile(r"^[A-Z&Ñ]{3,4}[0-9]{2}(0[1-9]|1[012])(0[1-9]|[12][0-9]|3[01])[A-Z0-9]{2}[0-9A]$")
@@ -210,8 +212,8 @@ def construir_payload_rep(cobro):
             cxc=d.cxc, cobro__activo=True, cobro__estatus="Aplicado",
         ).exclude(cobro=cobro).filter(_cobros_previos(cobro))
         pagado_antes = sum((p.importe_aplicado for p in previos), Decimal("0"))
-        tasa = (f.factura_detalles.values_list("porcentaje_impuesto", flat=True).first() or Decimal("0")) / Decimal("100")
-        base = (d.importe_aplicado / (1 + tasa)).quantize(CENTAVO)
+        # #579: las notas de crédito emitidas también bajan el saldo.
+        pagado_antes += f.nota_creditos.filter(estatus="Emitida").aggregate(t=Sum("total"))["t"] or Decimal("0")
         documentos.append({
             "Uuid": f.cfdi_uuid,
             "Serie": _texto(getattr(f.serie_folio, "serie", None)) or None,
@@ -222,11 +224,14 @@ def construir_payload_rep(cobro):
             "PreviousBalanceAmount": _numero(f.total - pagado_antes),
             "AmountPaid": _numero(d.importe_aplicado),
             "TaxObject": "02",
-            "Taxes": [{"Name": "IVA", "Rate": _numero(tasa), "Base": _numero(base),
-                       "Total": _numero(d.importe_aplicado - base), "IsRetention": False}],
+            "Taxes": _iva_proporcional(f, d.importe_aplicado),
         })
 
     factura = detalles[0].cxc.factura if detalles else None
+    rfcs = {(_texto(getattr(d.cxc.factura.pedido, "cliente_rfc", None)) or _texto(d.cxc.factura.cliente.rfc)).upper()
+            for d in detalles}
+    if len(rfcs) > 1:  # #582: un REP tiene un solo receptor
+        errores["receptor"] = "Las facturas del cobro tienen distinto RFC receptor: haz un cobro por receptor."
     receptor = _receptor(factura, errores) if factura else {}
     lugar = _texto(factura.sucursal.cp) if factura else ""
     if factura and not CP_RE.match(lugar):
@@ -251,6 +256,20 @@ def construir_payload_rep(cobro):
         "Receiver": receptor,
         "Complemento": {"Payments": [pago]},
     }
+
+
+def _iva_proporcional(factura, importe):
+    """IVA del pago por tasa (#580): cada tasa de la factura en proporción al pago."""
+    factor = importe / factura.total if factura.total else Decimal("0")
+    grupos = {}
+    for r in factura.factura_detalles.all():
+        base, iva = grupos.get(r.porcentaje_impuesto, (Decimal("0"), Decimal("0")))
+        grupos[r.porcentaje_impuesto] = (base + r.subtotal - r.descuento, iva + r.impuesto)
+    return [
+        {"Name": "IVA", "Rate": _numero(tasa / Decimal("100")), "Base": _numero((base * factor).quantize(CENTAVO)),
+         "Total": _numero((iva * factor).quantize(CENTAVO)), "IsRetention": False}
+        for tasa, (base, iva) in grupos.items()
+    ]
 
 
 def _cobros_previos(cobro):

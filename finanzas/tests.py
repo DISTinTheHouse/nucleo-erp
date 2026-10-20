@@ -168,6 +168,13 @@ class FinanzasBase(TestCase):
         cls.sat_metodo_pago = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
         cls.a = cls._tenant("acme", "MTY", "a@acme.test")
         cls.b = cls._tenant("globex", "GDL", "b@globex.test")
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        permiso = Permiso.objects.get_or_create(clave="E-FIN-FACTURAS", defaults={"nombre": "Facturas"})[0]
+        for t in (cls.a, cls.b):
+            UsuarioPermiso.objects.create(
+                usuario=t["usuario"], permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT, empresa=t["empresa"],
+            )
 
     def _client(self, user):
         client = APIClient()
@@ -1404,7 +1411,7 @@ class Defecto7ErroresDeNegocioYTransacciones(FinanzasBase):
     # Sin el mixin, DRF levanta AssertionError en raise_errors_on_nested_writes
     # y estas pruebas fallan con 500.
 
-    def test_cobro_patch_ignora_lineas_y_actualiza_encabezado(self):
+    def test_cobro_patch_con_lineas_responde_400(self):
         cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
         cxc = self._cxc()
         cobro = Cobro.objects.create(
@@ -1422,10 +1429,10 @@ class Defecto7ErroresDeNegocioYTransacciones(FinanzasBase):
             },
             format="json",
         )
-        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.status_code, 400, resp.data)
         cobro.refresh_from_db()
         self.assertEqual(cobro.cobro_detalles.count(), 0)
-        self.assertEqual(cobro.observaciones, "despues")
+        self.assertEqual(cobro.observaciones, "antes")
 
     def test_pago_patch_ignora_lineas_y_actualiza_encabezado(self):
         cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
@@ -7475,8 +7482,8 @@ class F5CancelarFacturaTests(MotorPolizasBase):
         super().setUp()
         from seguridad.models import Permiso, UsuarioPermiso
 
-        self.permiso_cancelar = Permiso.objects.create(clave="E-FIN-FACTURAS", nombre="Facturas")
-        UsuarioPermiso.objects.create(
+        self.permiso_cancelar = Permiso.objects.get_or_create(clave="E-FIN-FACTURAS", defaults={"nombre": "Facturas"})[0]
+        UsuarioPermiso.objects.get_or_create(
             usuario=self.a["usuario"], permiso=self.permiso_cancelar,
             tipo=UsuarioPermiso.TIPO_GRANT, empresa=self.empresa,
         )
@@ -7970,8 +7977,8 @@ class EmitirFacturaTests(MotorPolizasBase):
         super().setUp()
         from seguridad.models import Permiso, UsuarioPermiso
 
-        permiso = Permiso.objects.create(clave="E-FIN-FACTURAS", nombre="Facturas")
-        UsuarioPermiso.objects.create(
+        permiso = Permiso.objects.get_or_create(clave="E-FIN-FACTURAS", defaults={"nombre": "Facturas"})[0]
+        UsuarioPermiso.objects.get_or_create(
             usuario=self.a["usuario"], permiso=permiso,
             tipo=UsuarioPermiso.TIPO_GRANT, empresa=self.empresa,
         )

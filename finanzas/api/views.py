@@ -1856,8 +1856,16 @@ class CobroViewSet(FinanzasBaseViewSet):
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha_cobro")
         return _aplicar_ordering(qs, qp, ["-fecha_cobro", "-id"])
 
+    def _exigir_permiso(self):
+        # Mueve CxC, banco y póliza: mismo permiso que emitir/cancelar factura (#581).
+        if not self.request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
+            raise PermissionDenied("No tienes permiso para registrar o cancelar cobros.")
+
     @transaction.atomic
     def perform_create(self, serializer):
+        self._exigir_permiso()
+        if serializer.validated_data.get("estatus") == Cobro.Estatus.CANCELADO:  # #578
+            raise ValidationError({"estatus": "Un cobro no se crea Cancelado."})
         user = self.request.user
         empresa = _resolve_empresa(user, serializer.validated_data, required=True)
         cliente = serializer.validated_data.get("cliente")
@@ -1882,6 +1890,10 @@ class CobroViewSet(FinanzasBaseViewSet):
                     raise ValidationError(
                         {"cobro_detalles": [f"La CxC {cxc.pk} no pertenece a la misma empresa que el cobro."]}
                     )
+                if cxc.cliente_id != cobro.cliente_id:  # #576
+                    raise ValidationError(
+                        {"cobro_detalles": [f"La CxC {cxc.pk} es de otro cliente."]}
+                    )
             CobroDetalle.objects.create(cobro=cobro, **d)
         if cobro.estatus == Cobro.Estatus.APLICADO:
             CobroService.aplicar_cobro(cobro, user)
@@ -1893,9 +1905,21 @@ class CobroViewSet(FinanzasBaseViewSet):
             empresa = getattr(user, "empresa", None)
             if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
-        if serializer.instance.estatus == Cobro.Estatus.CANCELADO:
+        self._exigir_permiso()
+        # Bloqueo: dos PATCH a la vez aplicaban o revertían dos veces (#575).
+        bloqueado = Cobro.objects.select_for_update().get(pk=serializer.instance.pk)
+        if bloqueado.estatus == Cobro.Estatus.CANCELADO:
             raise ValidationError("No se puede editar un cobro cancelado.")
-        anterior_estatus = serializer.instance.estatus
+        if "cobro_detalles" in self.request.data:  # #573: antes se ignoraban con 200
+            raise ValidationError({"cobro_detalles": "Las líneas solo se capturan al crear el cobro."})
+        if bloqueado.estatus == Cobro.Estatus.APLICADO:  # #571: no reaplica saldos/banco/póliza
+            cambiados = {
+                k for k, v in serializer.validated_data.items()
+                if k not in ("estatus", "observaciones", "referencia_operacion") and getattr(bloqueado, k) != v
+            }
+            if cambiados:
+                raise ValidationError({c: "No editable en un cobro Aplicado: cancélalo y captura otro." for c in cambiados})
+        anterior_estatus = bloqueado.estatus
         nuevo_estatus = serializer.validated_data.get("estatus", anterior_estatus)
         _validar_transicion_estatus_cobro_pago(Cobro.Estatus, anterior_estatus, nuevo_estatus, "cobro")
         if nuevo_estatus == Cobro.Estatus.CANCELADO:
@@ -1910,6 +1934,7 @@ class CobroViewSet(FinanzasBaseViewSet):
             CobroService.aplicar_cobro(cobro, self.request.user)
 
     def perform_destroy(self, instance):
+        self._exigir_permiso()
         user = self.request.user
         if not _puede_ver_todo(user):
             empresa = getattr(user, "empresa", None)
@@ -1929,6 +1954,7 @@ class CobroViewSet(FinanzasBaseViewSet):
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         cobro = self.get_object()
+        self._exigir_permiso()
         with transaction.atomic():
             CobroService.cancelar_cobro(cobro, request.user)
         return Response(CobroSerializer(cobro).data)

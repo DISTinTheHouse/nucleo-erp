@@ -19,6 +19,7 @@ class CobroService:
     @staticmethod
     @transaction.atomic
     def aplicar_cobro(cobro: Cobro, usuario=None):
+        Cobro.objects.select_for_update().get(pk=cobro.pk)  # #575
         detalles = list(
             CobroDetalle.objects.select_for_update()
             .select_related("cxc")
@@ -137,8 +138,13 @@ class CobroService:
     @staticmethod
     @transaction.atomic
     def cancelar_cobro(cobro: Cobro, usuario=None):
+        # Bloqueo (#575): dos cancelaciones a la vez devolvían saldos dos veces.
+        bloqueado = Cobro.objects.select_for_update().get(pk=cobro.pk)
+        cobro.estatus = bloqueado.estatus
         if cobro.estatus == Cobro.Estatus.CANCELADO:
             return
+        if bloqueado.rep_uuid:  # #577
+            raise ErrorDeNegocio({"rep": "El cobro tiene REP timbrado: cancélalo ante el SAT antes de cancelar el cobro."})
         if cobro.estatus != Cobro.Estatus.APLICADO:
             # Un Borrador nunca descontó saldos ni tocó el banco: revertirlos
             # inflaría la CxC y el saldo bancario con dinero que no entró.
@@ -161,10 +167,18 @@ class CobroService:
                 continue
             importe = Decimal(str(det.importe_aplicado or 0))
             cxc.saldo = (Decimal(str(cxc.saldo or 0)) + importe).quantize(Decimal("0.01"))
-            if cxc.saldo >= Decimal(str(cxc.total or 0)) - Decimal("0.01"):
-                cxc.estatus = CuentaPorCobrar.EstatusCxC.PENDIENTE
-            else:
-                cxc.estatus = CuentaPorCobrar.EstatusCxC.PARCIAL
+            # #574: la CxC de una factura cancelada sigue cancelada; el último pago
+            # vuelve a ser el del cobro aplicado previo, si lo hay.
+            if cxc.estatus != CuentaPorCobrar.EstatusCxC.CANCELADA:
+                if cxc.saldo >= Decimal(str(cxc.total or 0)) - Decimal("0.01"):
+                    cxc.estatus = CuentaPorCobrar.EstatusCxC.PENDIENTE
+                else:
+                    cxc.estatus = CuentaPorCobrar.EstatusCxC.PARCIAL
+            cxc.fecha_ultimo_pago = (
+                CobroDetalle.objects.filter(cxc=cxc, cobro__estatus=Cobro.Estatus.APLICADO, cobro__activo=True)
+                .exclude(cobro=cobro).order_by("-cobro__fecha_cobro")
+                .values_list("cobro__fecha_cobro", flat=True).first()
+            )
             cxc.save()
 
         total_cobrado = Decimal(str(cobro.total_cobrado or 0))
