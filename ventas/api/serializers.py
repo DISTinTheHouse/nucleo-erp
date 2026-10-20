@@ -686,7 +686,8 @@ class PedidoSerializer(serializers.ModelSerializer):
     def get_documentos(self, obj):
         from ventas.services.pedido_documentos_service import listar_documentos_pedido
         try:
-            return listar_documentos_pedido(obj)
+            request = self.context.get("request")
+            return listar_documentos_pedido(obj, getattr(request, "user", None))
         except Exception:
             return []
 

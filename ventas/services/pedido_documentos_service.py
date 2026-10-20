@@ -173,12 +173,41 @@ def documentos_related_prefetch_args():
     return [c["related_name"] for c in DOCUMENTOS_CONFIG if not c["is_single"]]
 
 
-def listar_documentos_pedido(pedido):
+# Documentos cuyo detalle se acota por sucursal: listarlos fuera del alcance
+# daba folio/estatus de algo que al abrirlo responde 404 (#536).
+TIPOS_POR_SUCURSAL = {"orden_bordado", "orden_reflejante", "orden_corte_manga", "picking", "packing"}
+
+
+def _alcance(user):
+    """``(ve_facturas, sucursales)``; ``sucursales`` es ``None`` si ve todas."""
+    from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
+
+    if user is None:
+        return True, None
+    todas = user.is_superuser or user.is_admin_empresa
+    return puede_ver_contabilidad(user), None if todas else user.sucursales_permitidas()
+
+
+def _visible(doc, cfg, alcance):
+    if getattr(doc, "activo", True) is False:
+        return False
+    ve_facturas, sucursales = alcance
+    if cfg["tipo"] == "factura" and not ve_facturas:
+        return False
+    if cfg["tipo"] in TIPOS_POR_SUCURSAL and sucursales is not None:
+        return getattr(doc, "sucursal_id", None) in sucursales
+    return True
+
+
+def listar_documentos_pedido(pedido, user=None):
+    """Documentos del pedido. Con ``user``: sin bajas, sin facturas si no ve
+    contabilidad y, en los tipos por sucursal, solo los de sus sucursales."""
     documentos = []
+    alcance = _alcance(user)
     for cfg in DOCUMENTOS_CONFIG:
         if cfg["is_single"]:
             doc = getattr(pedido, cfg["related_name"], None)
-            if doc is None:
+            if doc is None or not _visible(doc, cfg, alcance):
                 continue
             documentos.append(
                 {
@@ -202,6 +231,8 @@ def listar_documentos_pedido(pedido):
         # y ``.iterator()`` nunca lee ``_result_cache`` — re-ejecutaba una
         # consulta por tipo de documento y desperdiciaba todo ese prefetch.
         for doc in qs:
+            if not _visible(doc, cfg, alcance):
+                continue
             documentos.append(
                 {
                     "id": doc.pk,
