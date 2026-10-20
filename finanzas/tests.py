@@ -8127,3 +8127,32 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.assertIn("RFC no registrado", str(resp.data["cfdi"]))
         factura.refresh_from_db()
         self.assertIsNone(factura.cfdi_uuid)
+
+    def _timbrada(self):
+        factura = self._borrador()
+        self.assertEqual(self._timbrar(factura).status_code, 200)
+        return factura
+
+    def _cancelar(self, factura):
+        return self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/cancelar/", {}, format="json")
+
+    def test_cancelar_una_timbrada_cancela_el_cfdi_y_la_factura(self):
+        factura = self._timbrada()
+        self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
+
+        self.assertEqual(self._cancelar(factura).status_code, 200)
+
+        self.facturama.cancel_cfdi.assert_called_once_with("J6MjEYRjnLnV6aMCK8dV-w2")
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
+
+    def test_si_el_sat_no_cancela_la_factura_no_se_toca(self):
+        factura = self._timbrada()
+        self.facturama.cancel_cfdi.return_value = {"Status": "requested"}
+
+        resp = self._cancelar(factura)
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("receptor", str(resp.data["cfdi"]))
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.BORRADOR)
