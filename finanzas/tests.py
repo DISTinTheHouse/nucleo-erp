@@ -5577,17 +5577,19 @@ class FacturamaAccesoTests(TestCase):
 
     def test_alta_de_cliente_solo_se_sube_a_facturama_desde_la_duena(self):
         with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"), patch(
-            "terceros.api.views.urlopen"
-        ) as urlopen:
+            "terceros.facturama.FacturamaService"
+        ) as servicio:
+            servicio.return_value.client.post.return_value = {"Id": "x"}
+            alta_facturama = servicio.return_value.client.post
             self.client.force_authenticate(user=self.admin_otra)
             r = self.client.post("/api/v1/terceros/clientes/", {"nombre": "Cliente otra"}, format="json")
             self.assertEqual(r.status_code, 201, r.content)
-            urlopen.assert_not_called()
+            alta_facturama.assert_not_called()
 
             self.client.force_authenticate(user=self.admin_duena)
             r = self.client.post("/api/v1/terceros/clientes/", {"nombre": "Cliente dueña"}, format="json")
             self.assertEqual(r.status_code, 201, r.content)
-            urlopen.assert_called_once()
+            alta_facturama.assert_called_once()
 
     def test_paginas_core_de_facturama_solo_superusuario(self):
         for url in ("/core/terceros/validar-rfc/", "/core/terceros/crear-cliente/"):

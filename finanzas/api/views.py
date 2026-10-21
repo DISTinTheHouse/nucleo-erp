@@ -11,7 +11,7 @@ from rest_framework.exceptions import APIException, MethodNotAllowed, NotFound, 
 from rest_framework.fields import get_error_detail
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
-from rest_framework.permissions import BasePermission, IsAuthenticated
+from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
 from finanzas.services.facturama.acceso import puede_usar_facturama
 from finanzas.services.facturama.service import FacturamaService
 from finanzas.services.facturama.exceptions import FacturamaAPIException
@@ -429,7 +429,7 @@ class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
         if estatus:
             qs = qs.filter(estatus=estatus)
         if _bool_param(saldo_pendiente):
-            qs = qs.filter(saldo__gt=0)
+            qs = qs.filter(saldo__gt=0).exclude(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA)
         if _bool_param(vencidas):
             qs = qs.filter(
                 fecha_vencimiento__isnull=False,
@@ -1856,14 +1856,15 @@ class CobroViewSet(FinanzasBaseViewSet):
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha_cobro")
         return _aplicar_ordering(qs, qp, ["-fecha_cobro", "-id"])
 
-    def _exigir_permiso(self):
-        # Mueve CxC, banco y póliza: mismo permiso que emitir/cancelar factura (#581).
-        if not self.request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
+    def check_permissions(self, request):
+        # Mueve CxC, banco y póliza: mismo permiso que emitir/cancelar factura (#581),
+        # revisado antes de validar el body (#589).
+        super().check_permissions(request)
+        if request.method not in SAFE_METHODS and not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
             raise PermissionDenied("No tienes permiso para registrar o cancelar cobros.")
 
     @transaction.atomic
     def perform_create(self, serializer):
-        self._exigir_permiso()
         if serializer.validated_data.get("estatus") == Cobro.Estatus.CANCELADO:  # #578
             raise ValidationError({"estatus": "Un cobro no se crea Cancelado."})
         user = self.request.user
@@ -1905,7 +1906,6 @@ class CobroViewSet(FinanzasBaseViewSet):
             empresa = getattr(user, "empresa", None)
             if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
-        self._exigir_permiso()
         # Bloqueo: dos PATCH a la vez aplicaban o revertían dos veces (#575).
         bloqueado = Cobro.objects.select_for_update().get(pk=serializer.instance.pk)
         if bloqueado.estatus == Cobro.Estatus.CANCELADO:
@@ -1934,7 +1934,6 @@ class CobroViewSet(FinanzasBaseViewSet):
             CobroService.aplicar_cobro(cobro, self.request.user)
 
     def perform_destroy(self, instance):
-        self._exigir_permiso()
         user = self.request.user
         if not _puede_ver_todo(user):
             empresa = getattr(user, "empresa", None)
@@ -1954,7 +1953,6 @@ class CobroViewSet(FinanzasBaseViewSet):
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         cobro = self.get_object()
-        self._exigir_permiso()
         with transaction.atomic():
             CobroService.cancelar_cobro(cobro, request.user)
         return Response(CobroSerializer(cobro).data)
