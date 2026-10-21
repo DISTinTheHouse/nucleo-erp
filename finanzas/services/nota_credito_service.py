@@ -12,6 +12,26 @@ from finanzas.models import (
 
 class NotaCreditoService:
     @staticmethod
+    def _validar_cxc(cxc, total_nc):
+        if cxc is None:
+            # Sin CxC no hay nada que acreditar: emitir devolvía 201 sin aplicar nada.
+            raise ErrorDeNegocio({"factura": (
+                "La factura de la nota no tiene una cuenta por cobrar; "
+                "no hay saldo al cual aplicar el crédito."
+            )})
+        saldo = Decimal(str(cxc.saldo or 0))
+        if total_nc > saldo + Decimal("0.0001"):
+            raise ErrorDeNegocio({"total": (
+                f"El total de la nota ({total_nc}) no puede superar el saldo de la CxC ({saldo})."
+            )})
+
+    @staticmethod
+    def validar_aplicable(factura_id, total):
+        """Misma validación que ``aplicar_nota_credito``, sin escribir: se corre antes de timbrar."""
+        cxc = CuentaPorCobrar.objects.filter(factura_id=factura_id).first()
+        NotaCreditoService._validar_cxc(cxc, Decimal(str(total or 0)))
+
+    @staticmethod
     @transaction.atomic
     def aplicar_nota_credito(nota: NotaCredito, usuario=None):
         # Orden de bloqueo de todo el módulo: primero la nota, después la CxC.
@@ -22,35 +42,12 @@ class NotaCreditoService:
         bloqueada = NotaCredito.objects.select_for_update().get(pk=nota.pk)
         if bloqueada.estatus != NotaCredito.Estatus.EMITIDA:
             return
-        cxc = (
-            CuentaPorCobrar.objects.select_for_update()
-            .filter(factura_id=bloqueada.factura_id)
-            .first()
-        )
-        if cxc is None:
-            # Sin CxC no hay nada que acreditar: emitir devolvía 201 y dejaba la
-            # nota como Emitida sin haber aplicado nada.
-            raise ErrorDeNegocio(
-                {
-                    "factura": (
-                        "La factura de la nota no tiene una cuenta por cobrar; "
-                        "no hay saldo al cual aplicar el crédito."
-                    )
-                }
-            )
+        cxc = CuentaPorCobrar.objects.select_for_update().filter(factura_id=bloqueada.factura_id).first()
         total_nc = Decimal(str(bloqueada.total or 0))
+        NotaCreditoService._validar_cxc(cxc, total_nc)
         if total_nc <= 0:
             return
         saldo = Decimal(str(cxc.saldo or 0))
-        if total_nc > saldo + Decimal("0.0001"):
-            raise ErrorDeNegocio(
-                {
-                    "total": (
-                        f"El total de la nota ({total_nc}) no puede superar "
-                        f"el saldo de la CxC ({saldo})."
-                    )
-                }
-            )
         cxc.saldo = (saldo - total_nc).quantize(Decimal("0.01"))
         if cxc.saldo <= Decimal("0.00"):
             cxc.saldo = Decimal("0.00")
