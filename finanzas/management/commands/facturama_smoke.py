@@ -12,6 +12,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from finanzas.services.factura_timbrado_service import _mensaje, _sello
+from finanzas.services.facturama.cfdi_payload import fecha_pago
 from finanzas.services.facturama.exceptions import FacturamaAPIException
 from finanzas.services.facturama.service import FacturamaService
 
@@ -40,7 +41,7 @@ def rep(lugar, uuid):
     return {
         "NameId": "14", "CfdiType": "P", "ExpeditionPlace": lugar, "Receiver": {**RECEPTOR, "CfdiUse": "CP01"},
         "Complemento": {"Payments": [{
-            "Date": f"{timezone.localdate().isoformat()}T12:00:00", "PaymentForm": "03", "Currency": "MXN", "Amount": 116.0,
+            "Date": fecha_pago(timezone.localdate()), "PaymentForm": "03", "Currency": "MXN", "Amount": 116.0,
             "RelatedDocuments": [{
                 "Uuid": uuid, "Folio": "SMOKE-1", "Currency": "MXN", "EquivalenceDocRel": 1, "PartialityNumber": 1,
                 "PreviousBalanceAmount": 232.0, "AmountPaid": 116.0, "TaxObject": "02", "Taxes": _iva(100.0),

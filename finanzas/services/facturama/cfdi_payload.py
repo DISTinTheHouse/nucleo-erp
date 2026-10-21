@@ -18,6 +18,7 @@ import re
 from decimal import Decimal
 
 from django.db.models import Sum
+from django.utils import timezone
 
 from finanzas.exceptions import ErrorDeNegocio
 
@@ -241,7 +242,7 @@ def construir_payload_rep(cobro):
 
     receptor["CfdiUse"] = "CP01"
     pago = {
-        "Date": f"{cobro.fecha_cobro.isoformat()}T12:00:00",
+        "Date": fecha_pago(cobro.fecha_cobro),
         "PaymentForm": forma,
         "Currency": "MXN",
         "Amount": _numero(sum((d.importe_aplicado for d in detalles), Decimal("0"))),
@@ -270,6 +271,14 @@ def _iva_proporcional(factura, importe):
          "Total": _numero((iva * factor).quantize(CENTAVO)), "IsRetention": False}
         for tasa, (base, iva) in grupos.items()
     ]
+
+
+def fecha_pago(fecha):
+    """Fecha del pago para el REP. El SAT rechaza fechas futuras: un cobro de hoy
+    lleva la hora actual (las 12:00 aún no llegan en la mañana); uno anterior, 12:00."""
+    ahora = timezone.localtime()
+    hora = ahora.strftime("%H:%M:%S") if fecha >= ahora.date() else "12:00:00"
+    return f"{fecha.isoformat()}T{hora}"
 
 
 def _cobros_previos(cobro):
