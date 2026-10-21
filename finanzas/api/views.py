@@ -12,7 +12,7 @@ from rest_framework.fields import get_error_detail
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
-from finanzas.services.facturama.acceso import puede_consultar_cfdis, puede_usar_facturama
+from finanzas.services.facturama.acceso import empresa_usa_facturama, puede_consultar_cfdis, puede_usar_facturama
 from finanzas.services.facturama.service import FacturamaService
 from finanzas.services.facturama.exceptions import FacturamaAPIException
 from finanzas.services.pdf_fusion_service import fusionar_pdf_factura_proveedor
@@ -2335,6 +2335,9 @@ def _mensaje_transicion_invalida(anterior, solicitado):
     )
 
 
+CAMPOS_EDITABLES_NOTA_EMITIDA = {"observaciones", "estatus"}
+
+
 class NotaCreditoViewSet(FinanzasBaseViewSet):
     queryset = NotaCredito.objects.all()
     serializer_class = NotaCreditoSerializer
@@ -2389,20 +2392,35 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
             factura_detalle = detalle_data.get("factura_detalle")
             if factura_detalle is not None and factura_detalle.factura_id != factura.pk:
                 raise ValidationError({"factura_detalle": "Detalle de factura no corresponde a la factura de la nota."})
-        # Emitida: Facturama timbra ANTES de guardar; si falla, no se escribe nada.
-        timbre = {}
-        if serializer.validated_data.get("estatus") == NotaCredito.Estatus.EMITIDA:
-            NotaCreditoService.validar_aplicable(factura.pk, serializer.validated_data.get("total"))
-            timbre = FacturaTimbradoService.timbre_previo_nota(NotaCredito(**serializer.validated_data))
+        # Emitida: se guarda y aplica con la CxC bloqueada (valida saldo) y SOLO después se timbra,
+        # con la reserva ``cfdi_pendiente`` de ``timbrar/`` (#613).
         with transaction.atomic():
-            nota = serializer.save(**timbre)
+            nota = serializer.save()
             for detalle_data in detalles_data:
                 NotaCreditoDetalle.objects.create(nota_credito=nota, **detalle_data)
             if nota.estatus == NotaCredito.Estatus.EMITIDA:
                 NotaCreditoService.aplicar_nota_credito(nota, user)
+        if nota.estatus == NotaCredito.Estatus.EMITIDA:
+            self._timbrar_al_emitir(nota, user)
 
-    @transaction.atomic
+    @staticmethod
+    def _timbrar_al_emitir(nota, user):
+        """Timbra la nota recién emitida. Si Facturama la rechaza (sin CFDI ni reserva) se revierte."""
+        if not empresa_usa_facturama(nota.factura.empresa):
+            return
+        error = FacturaTimbradoService._timbrar_nota(nota)
+        if error:
+            if not nota.cfdi_pendiente:
+                NotaCreditoService.cancelar_nota_credito(nota, user)
+            raise error
+
     def perform_update(self, serializer):
+        with transaction.atomic():
+            emite = self._actualizar(serializer)
+        if emite:
+            self._timbrar_al_emitir(serializer.instance, self.request.user)
+
+    def _actualizar(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
             empresa = getattr(user, "empresa", None)
@@ -2445,17 +2463,18 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
                 {"estatus": _mensaje_transicion_invalida(anterior, solicitado)}
             )
         emite = solicitado == NotaCredito.Estatus.EMITIDA and anterior != NotaCredito.Estatus.EMITIDA
-        timbre = {}
-        if emite:
-            # Con la nota bloqueada: una emisión concurrente espera y ya no re-timbra.
-            borrador = serializer.instance
-            for campo, valor in serializer.validated_data.items():
-                setattr(borrador, campo, valor)
-            NotaCreditoService.validar_aplicable(borrador.factura_id, borrador.total)
-            timbre = FacturaTimbradoService.timbre_previo_nota(borrador)
-        nota = serializer.save(**timbre)
+        if anterior == NotaCredito.Estatus.EMITIDA:
+            # Ya aplicada a la CxC y (quizá) timbrada: solo se edita lo que no cambia importes ni CFDI (#615).
+            cambiados = [
+                c for c, v in serializer.validated_data.items()
+                if c not in CAMPOS_EDITABLES_NOTA_EMITIDA and getattr(serializer.instance, c, None) != v
+            ]
+            if cambiados:
+                raise ValidationError({c: "No se edita en una nota Emitida; cancélala y emite otra." for c in cambiados})
+        nota = serializer.save()
         if emite:
             NotaCreditoService.aplicar_nota_credito(nota, user)
+        return emite
 
     @transaction.atomic
     def perform_destroy(self, instance):

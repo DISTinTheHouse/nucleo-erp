@@ -1152,6 +1152,10 @@ class NotaCreditoSerializer(CreateOnlyNestedLinesMixin, serializers.ModelSeriali
             cliente = attrs.get("cliente")
             if factura and user_empresa and getattr(factura, "empresa_id", None) and factura.empresa_id != getattr(user_empresa, "pk", None):
                 raise ValidationError({"factura": "Factura no pertenece a la empresa."})
+            # Un PATCH con solo uno de los dos se compara contra el otro ya guardado.
+            if self.instance is not None:
+                factura = factura or self.instance.factura
+                cliente = cliente or self.instance.cliente
             if cliente and factura and cliente.pk != getattr(factura, "cliente_id", None):
                 raise ValidationError({"cliente": "Cliente no coincide con la factura."})
         return attrs
