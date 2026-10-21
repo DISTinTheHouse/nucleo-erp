@@ -7,9 +7,15 @@ definición impide que las copias se separen.
 
 from terceros.models import Cliente
 from seguridad.role_identity import (
+    CLAVE_DEPARTAMENTO_CONTABILIDAD,
     CLAVE_DEPARTAMENTO_MESA_CONTROL,
-    usuario_tiene_clave_departamento,
+    claves_departamento_usuario,
 )
+
+# Ven todos los clientes de su empresa, no solo los asignados: Mesa de Control
+# atiende pedidos de cualquier vendedor y Contabilidad factura, cobra y emite
+# notas de crédito a cualquier cliente.
+DEPARTAMENTOS_TODOS_LOS_CLIENTES = frozenset({CLAVE_DEPARTAMENTO_MESA_CONTROL, CLAVE_DEPARTAMENTO_CONTABILIDAD})
 
 
 def clientes_base():
@@ -47,10 +53,10 @@ def clientes_visibles_entre(user, ids):
 
 
 def clientes_visibles(qs, user):
-    """Alcance de ``terceros.Cliente``: empresa + ``vendedores`` si no es admin/mesa de control.
+    """Alcance de ``terceros.Cliente``: empresa + ``vendedores`` si no es admin/mesa de control/contabilidad.
 
-    El superusuario ve todo; dentro de la empresa, ``is_admin_empresa`` y Mesa de
-    Control ven TODOS los clientes de la empresa (Mesa de Control atiende pedidos
+    El superusuario ve todo; dentro de la empresa, ``is_admin_empresa``, Mesa de
+    Control y Contabilidad ven TODOS los clientes de la empresa (Mesa de Control atiende pedidos
     de cualquier vendedor, no solo los suyos — mismo criterio de rol que
     ``ventas.api.views.PedidoViewSet._require_mesa_control``); el resto sólo ve
     los clientes que tiene asignados por el M2M ``vendedores``; sin empresa no se
@@ -64,6 +70,6 @@ def clientes_visibles(qs, user):
     qs = qs.filter(empresa=empresa)
     if getattr(user, "is_admin_empresa", False):
         return qs
-    if usuario_tiene_clave_departamento(user, CLAVE_DEPARTAMENTO_MESA_CONTROL, empresa=empresa):
+    if claves_departamento_usuario(user, empresa=empresa) & DEPARTAMENTOS_TODOS_LOS_CLIENTES:
         return qs
     return qs.filter(vendedores__id=getattr(user, "id", None))
