@@ -1004,3 +1004,21 @@ class ClienteFacturamaTests(TestCase):
         self.assertIn("RFC inválido", str(resp.data["facturama"]))
         self.assertFalse(Cliente.objects.exists())
 
+
+class ClientesContabilidadTests(TestCase):
+    """CONTABILIDAD ve todos los clientes de su empresa, no solo los asignados."""
+
+    def test_contabilidad_ve_clientes_sin_asignar_de_su_empresa(self):
+        from nucleo.models import Empresa
+        from terceros.scope import clientes_base, clientes_visibles
+        from usuarios.models import Usuario
+
+        empresa, otra = Empresa.objects.create(codigo="e1", razon_social="E1"), Empresa.objects.create(codigo="e2", razon_social="E2")
+        propio = Cliente.objects.create(empresa=empresa, nombre="Sin asignar")
+        Cliente.objects.create(empresa=otra, nombre="Ajeno")
+        user = Usuario.objects.create(username="c@e1.test", email="c@e1.test", empresa=empresa)
+
+        self.assertFalse(clientes_visibles(clientes_base(), user).exists())
+        with patch("terceros.scope.claves_departamento_usuario", return_value={"CONTABILIDAD"}):
+            self.assertEqual(list(clientes_visibles(clientes_base(), user)), [propio])
+
