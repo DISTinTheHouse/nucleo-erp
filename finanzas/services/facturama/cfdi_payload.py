@@ -206,6 +206,9 @@ def construir_payload_rep(cobro):
         if not f.cfdi_uuid:
             errores[f"f{f.pk}"] = f"La factura {f.folio} no está timbrada."
             continue
+        if f.estatus == "Cancelada" or f.cfdi_cancelado:  # #596
+            errores[f"f{f.pk}"] = f"La factura {f.folio} está cancelada."
+            continue
         if _texto(getattr(f.pedido, "metodo_pago", None)).upper() != "PPD":
             errores[f"f{f.pk}"] = f"La factura {f.folio} no es PPD: no lleva complemento de pago."
             continue
@@ -214,7 +217,7 @@ def construir_payload_rep(cobro):
         ).exclude(cobro=cobro).filter(_cobros_previos(cobro))
         pagado_antes = sum((p.importe_aplicado for p in previos), Decimal("0"))
         # #579: las notas de crédito emitidas también bajan el saldo.
-        pagado_antes += f.nota_creditos.filter(estatus="Emitida").aggregate(t=Sum("total"))["t"] or Decimal("0")
+        pagado_antes += f.nota_creditos.filter(estatus="Emitida", fecha_emision__lte=cobro.fecha_cobro).aggregate(t=Sum("total"))["t"] or Decimal("0")
         documentos.append({
             "Uuid": f.cfdi_uuid,
             "Serie": _texto(getattr(f.serie_folio, "serie", None)) or None,
