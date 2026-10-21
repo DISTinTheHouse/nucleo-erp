@@ -37,6 +37,7 @@ from produccion.models import (
     BordadoAvances,
     OrdenBordadoDetalle,
     OrdenesBordado,
+    OrdenesCorteManga,
     OrdenProduccion,
     OrdenProduccionRutaCritica,
 )
@@ -3770,8 +3771,8 @@ class PedidoKpisTests(TestCase):
 
 
 class PedidoReglasEstatusTests(TestCase):
-    """#250: CANCELADO es terminal, solo mesa de control cancela y elimina, no se
-    cancela con picking/factura vivos, y bloquea picking y facturación."""
+    """#250: CANCELADO es terminal, solo mesa de control cancela (``/cancelar/``), no se
+    cancela con picking/factura/órdenes vivas, y bloquea picking y facturación."""
 
     @classmethod
     def setUpTestData(cls):
@@ -3806,12 +3807,24 @@ class PedidoReglasEstatusTests(TestCase):
     def _estatus(self, user, estatus):
         return self._client(user).patch(self.url, {"estatus": estatus}, format="json")
 
-    def test_solo_mesa_de_control_cancela(self):
-        self.assertEqual(self._estatus(self.vendedor, 5).status_code, 400)
-        self.pedido.refresh_from_db()
-        self.assertEqual(self.pedido.estatus, 3)
+    def _cancelar(self, user):
+        return self._client(user).post(f"{self.url}cancelar/")
 
-        self.assertEqual(self._estatus(self.mesa, 5).status_code, 200)
+    def test_solo_mesa_de_control_cancela(self):
+        self.assertEqual(self._cancelar(self.vendedor).status_code, 400)
+        self.pedido.refresh_from_db()
+        self.assertEqual((self.pedido.estatus, self.pedido.activo), (3, True))
+
+        self.assertEqual(self._cancelar(self.mesa).status_code, 200)
+        self.pedido.refresh_from_db()
+        self.assertEqual((self.pedido.estatus, self.pedido.activo), (5, False))
+        self.assertEqual(self._client(self.mesa).get(self.url).status_code, 404)
+
+    def test_patch_no_cancela_ni_hay_delete(self):
+        self.assertEqual(self._estatus(self.mesa, 5).status_code, 400)
+        self.assertEqual(self._client(self.mesa).delete(self.url).status_code, 405)
+        self.pedido.refresh_from_db()
+        self.assertEqual((self.pedido.estatus, self.pedido.activo), (3, True))
 
     def test_cancelado_es_terminal(self):
         Pedido.objects.filter(pk=self.pedido.pk).update(estatus=5)
@@ -3827,22 +3840,36 @@ class PedidoReglasEstatusTests(TestCase):
             with self.subTest(estatus=estatus):
                 self.assertEqual(self._estatus(self.vendedor, estatus).status_code, 200)
 
-    def test_no_cancela_con_picking_o_factura_vivos(self):
+    def test_no_cancela_con_picking_factura_u_orden_viva(self):
         picking = Picking.objects.create(
             folio="PK-1", empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
             operador=self.vendedor, usuario=self.vendedor, almacen=self.almacen,
         )
-        self.assertEqual(self._estatus(self.mesa, 5).status_code, 400)
+        self.assertEqual(self._cancelar(self.mesa).status_code, 400)
 
         Picking.objects.filter(pk=picking.pk).update(estado=Picking.Estado.CANCELADO)
         factura = Factura.objects.create(
             empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente,
             moneda=self.moneda, pedido=self.pedido,
         )
-        self.assertEqual(self._estatus(self.mesa, 5).status_code, 400)
+        self.assertEqual(self._cancelar(self.mesa).status_code, 400)
 
         Factura.objects.filter(pk=factura.pk).update(estatus=Factura.FacturaStatus.CANCELADA)
-        self.assertEqual(self._estatus(self.mesa, 5).status_code, 200)
+        orden = OrdenesCorteManga.objects.create(
+            pedido=self.pedido, empresa=self.empresa, sucursal=self.sucursal, folio_ocm="OCM-1",
+        )
+        resp = self._cancelar(self.mesa)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("corte de manga", str(resp.data))
+
+        OrdenesCorteManga.objects.filter(pk=orden.pk).update(estatus_corte=OrdenesCorteManga.EstatusCorte.CANCELADO)
+        self.assertEqual(self._cancelar(self.mesa).status_code, 200)
+
+    def test_cancelar_es_rapido(self):
+        inicio = time.perf_counter()
+        with self.assertNumQueries(10):
+            self._cancelar(self.mesa)
+        self.assertLess(time.perf_counter() - inicio, 0.5)
 
     def test_patch_no_cambia_activo(self):
         resp = self._client(self.mesa).patch(self.url, {"activo": False}, format="json")
@@ -3850,13 +3877,6 @@ class PedidoReglasEstatusTests(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         self.pedido.refresh_from_db()
         self.assertTrue(self.pedido.activo)
-
-    def test_solo_mesa_de_control_elimina(self):
-        self.assertEqual(self._client(self.vendedor).delete(self.url).status_code, 400)
-        self.pedido.refresh_from_db()
-        self.assertTrue(self.pedido.activo)
-
-        self.assertEqual(self._client(self.mesa).delete(self.url).status_code, 204)
 
     def test_cancelado_bloquea_picking_y_facturacion(self):
         from finanzas.exceptions import ErrorDeNegocio
