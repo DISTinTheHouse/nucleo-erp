@@ -172,10 +172,10 @@ class CobroService:
             if cxc is None:
                 continue
             importe = Decimal(str(det.importe_aplicado or 0))
-            cxc.saldo = (Decimal(str(cxc.saldo or 0)) + importe).quantize(Decimal("0.01"))
-            # #574: la CxC de una factura cancelada sigue cancelada; el último pago
-            # vuelve a ser el del cobro aplicado previo, si lo hay.
+            # #574/#603: la CxC de una factura cancelada sigue cancelada y con su saldo
+            # congelado; el último pago vuelve a ser el del cobro aplicado previo.
             if cxc.estatus != CuentaPorCobrar.EstatusCxC.CANCELADA:
+                cxc.saldo = (Decimal(str(cxc.saldo or 0)) + importe).quantize(Decimal("0.01"))
                 if cxc.saldo >= Decimal(str(cxc.total or 0)) - Decimal("0.01"):
                     cxc.estatus = CuentaPorCobrar.EstatusCxC.PENDIENTE
                 else:

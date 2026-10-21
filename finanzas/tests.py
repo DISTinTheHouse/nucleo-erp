@@ -6689,6 +6689,63 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         self.assertEqual(cxc.saldo, Decimal("100.00"))
         self.assertEqual(self._client(self.a["usuario"]).get(f"{COBROS_URL}{cobro.pk}/").status_code, 404)
 
+    def test_cancelar_cobro_no_toca_el_saldo_de_una_cxc_cancelada(self):
+        # #603: la CxC de una factura cancelada conserva su saldo al cancelar el cobro.
+        cxc = self._cxc()
+        cobro = Cobro.objects.get(pk=self._cobrar(cxc, "40.00").data["id"])
+        banco = self._banco(cobro)
+        CuentaPorCobrar.objects.filter(pk=cxc.pk).update(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA)
+
+        resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cobro.refresh_from_db()
+        cxc.refresh_from_db()
+        self.assertEqual(cobro.estatus, Cobro.Estatus.CANCELADO)
+        self.assertEqual(cxc.saldo, Decimal("60.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.CANCELADA)
+        self.assertEqual(self._banco(cobro), banco - Decimal("40.00"))
+
+    def test_cobro_con_rep_no_se_cancela_por_ninguna_via(self):
+        # #604: rep_uuid / rep_pendiente -> 400 {"rep"} sin revertir nada.
+        vias = {
+            "post": lambda c, url: c.post(f"{url}cancelar/"),
+            "patch": lambda c, url: c.patch(url, {"estatus": "Cancelado"}, format="json"),
+            "delete": lambda c, url: c.delete(url),
+        }
+        for campo in ("rep_uuid", "rep_pendiente"):
+            for via, llamar in vias.items():
+                with self.subTest(campo=campo, via=via):
+                    cxc = self._cxc()
+                    cobro = Cobro.objects.get(pk=self._cobrar(cxc, "60.00").data["id"])
+                    Cobro.objects.filter(pk=cobro.pk).update(**{campo: str(cobro.pk).zfill(36) if campo == "rep_uuid" else True})
+                    banco = self._banco(cobro)
+
+                    resp = llamar(self._client(self.a["usuario"]), f"{COBROS_URL}{cobro.pk}/")
+
+                    self.assertEqual(resp.status_code, 400, resp.data)
+                    self.assertIn("rep", resp.data)
+                    cobro.refresh_from_db()
+                    cxc.refresh_from_db()
+                    self.assertEqual(cobro.estatus, Cobro.Estatus.APLICADO)
+                    self.assertTrue(cobro.activo)
+                    self.assertEqual(cxc.saldo, Decimal("40.00"))
+                    self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PARCIAL)
+                    self.assertEqual(self._banco(cobro), banco)
+                    self.assertEqual(
+                        cobro.movimientos_bancarios.get().estatus, MovimientoBancario.Estatus.PENDIENTE
+                    )
+
+    def test_cobro_ya_cancelado_con_rep_responde_ok_por_idempotencia(self):
+        # El guard de idempotencia va antes que el de REP.
+        cobro = Cobro.objects.get(pk=self._cobrar(self._cxc(), "60.00").data["id"])
+        self.assertEqual(self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/").status_code, 200)
+        Cobro.objects.filter(pk=cobro.pk).update(rep_uuid="B" * 36)
+
+        resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+
 
 class F0CuentaPorCobrarSoloLecturaTests(FinanzasBase):
     """Saldo y estatus de la CxC los mueven los servicios, no el cliente HTTP."""
