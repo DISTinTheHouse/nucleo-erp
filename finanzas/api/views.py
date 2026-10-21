@@ -2367,7 +2367,6 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha_emision")
         return _aplicar_ordering(qs, qp, ["-fecha_emision", "-id"])
 
-    @transaction.atomic
     def perform_create(self, serializer):
         user = self.request.user
         superuser = _puede_ver_todo(user)
@@ -2386,14 +2385,21 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
                 if cli_emp and cli_emp != user_emp.pk:
                     raise ValidationError({"cliente": "Cliente no pertenece a la empresa."})
         detalles_data = serializer.validated_data.pop("nota_credito_detalles", [])
-        nota = serializer.save()
         for detalle_data in detalles_data:
             factura_detalle = detalle_data.get("factura_detalle")
-            if factura_detalle is not None and factura_detalle.factura_id != nota.factura_id:
+            if factura_detalle is not None and factura_detalle.factura_id != factura.pk:
                 raise ValidationError({"factura_detalle": "Detalle de factura no corresponde a la factura de la nota."})
-            NotaCreditoDetalle.objects.create(nota_credito=nota, **detalle_data)
-        if nota.estatus == NotaCredito.Estatus.EMITIDA:
-            NotaCreditoService.aplicar_nota_credito(nota, self.request.user)
+        # Emitida: Facturama timbra ANTES de guardar; si falla, no se escribe nada.
+        timbre = {}
+        if serializer.validated_data.get("estatus") == NotaCredito.Estatus.EMITIDA:
+            NotaCreditoService.validar_aplicable(factura.pk, serializer.validated_data.get("total"))
+            timbre = FacturaTimbradoService.timbre_previo_nota(NotaCredito(**serializer.validated_data))
+        with transaction.atomic():
+            nota = serializer.save(**timbre)
+            for detalle_data in detalles_data:
+                NotaCreditoDetalle.objects.create(nota_credito=nota, **detalle_data)
+            if nota.estatus == NotaCredito.Estatus.EMITIDA:
+                NotaCreditoService.aplicar_nota_credito(nota, user)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -2438,8 +2444,17 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
             raise ErrorDeNegocio(
                 {"estatus": _mensaje_transicion_invalida(anterior, solicitado)}
             )
-        nota = serializer.save()
-        if nota.estatus == NotaCredito.Estatus.EMITIDA and anterior != NotaCredito.Estatus.EMITIDA:
+        emite = solicitado == NotaCredito.Estatus.EMITIDA and anterior != NotaCredito.Estatus.EMITIDA
+        timbre = {}
+        if emite:
+            # Con la nota bloqueada: una emisión concurrente espera y ya no re-timbra.
+            borrador = serializer.instance
+            for campo, valor in serializer.validated_data.items():
+                setattr(borrador, campo, valor)
+            NotaCreditoService.validar_aplicable(borrador.factura_id, borrador.total)
+            timbre = FacturaTimbradoService.timbre_previo_nota(borrador)
+        nota = serializer.save(**timbre)
+        if emite:
             NotaCreditoService.aplicar_nota_credito(nota, user)
 
     @transaction.atomic

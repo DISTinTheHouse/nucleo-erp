@@ -211,6 +211,26 @@ class FacturaTimbradoService:
         return error
 
     @staticmethod
+    def timbre_previo_nota(nota):
+        """Timbra una nota de crédito aún NO guardada y regresa los campos CFDI a guardar con ella.
+
+        Si Facturama no confirma levanta ``ErrorDeNegocio`` y el llamador no guarda nada. Para
+        empresas que no son la dueña de la cuenta de Facturama no hace nada (``{}``). Se llama
+        sin transacción abierta (create) o con la nota bloqueada (emisión por PATCH).
+        """
+        if not empresa_usa_facturama(nota.factura.empresa):
+            return {}
+        payload = construir_payload_nota_credito(nota)
+        try:
+            respuesta = FacturamaService().create_cfdi_emision(payload)
+        except FacturamaAPIException as exc:
+            raise ErrorDeNegocio({"cfdi": f"Facturama no timbró la nota de crédito; no se guardó. {_mensaje(exc)}"})
+        uuid, facturama_id, fecha = _sello(respuesta)
+        if not uuid:
+            raise ErrorDeNegocio({"cfdi": "Facturama respondió sin UUID; no se guardó la nota. Revisa Facturama antes de reintentar."})
+        return {"cfdi_uuid": uuid, "facturama_id": facturama_id, "cfdi_fecha_timbrado": fecha}
+
+    @staticmethod
     def cancelar_cfdi(factura):
         """Cancela el CFDI ante el SAT (motivo 02) y guarda el resultado. Levanta si no quedó cancelado."""
         error = FacturaTimbradoService._cancelar_cfdi(factura)

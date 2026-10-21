@@ -2130,6 +2130,65 @@ class Defecto9NotaCreditoFechaEmisionYCxCFaltante(FinanzasBase):
         self.assertEqual(cxc.saldo, Decimal("100.00"))
 
 
+class NotaCreditoTimbraAntesDeGuardar(Defecto9NotaCreditoFechaEmisionYCxCFaltante):
+    """Emitir una nota (create o PATCH) timbra en Facturama primero; si falla no se guarda nada."""
+
+    SVC = "finanzas.services.factura_timbrado_service"
+
+    def _post(self, estatus="Emitida"):
+        factura, cxc = self._factura_con_cxc()
+        client = self._client(self.a["usuario"])
+        resp = client.post(
+            NOTAS_CREDITO_URL,
+            {"factura": factura.pk, "cliente": self.a["cliente"].pk, "estatus": estatus, "total": "100.00"},
+            format="json",
+        )
+        return client, cxc, resp
+
+    def _timbra(self, **kw):
+        return patch(f"{self.SVC}.FacturamaService", **{"return_value.create_cfdi_emision": MagicMock(**kw)})
+
+    def _con_facturama(self):
+        return override_settings(FACTURAMA_EMPRESA_CODIGO=self.a["empresa"].codigo)
+
+    def test_rechazo_de_facturama_no_guarda_ni_toca_cxc(self):
+        err = FacturamaAPIException("rechazo", status_code=400, details={"Message": "RFC inválido"})
+        with self._con_facturama(), patch(f"{self.SVC}.construir_payload_nota_credito", return_value={}), \
+                self._timbra(side_effect=err):
+            _, cxc, resp = self._post()
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(NotaCredito.objects.count(), 0)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+
+    def test_timbre_exitoso_guarda_uuid_y_aplica(self):
+        ok = {"Id": "fid", "Complement": {"TaxStamp": {"Uuid": "U-1", "Date": "2026-01-01T10:00:00"}}}
+        with self._con_facturama(), patch(f"{self.SVC}.construir_payload_nota_credito", return_value={}), \
+                self._timbra(return_value=ok):
+            _, cxc, resp = self._post()
+        self.assertEqual(resp.status_code, 201, resp.data)
+        nota = NotaCredito.objects.get()
+        self.assertEqual((nota.cfdi_uuid, nota.facturama_id), ("U-1", "fid"))
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("900.00"))
+
+    def test_borrador_no_llama_a_facturama(self):
+        with self._con_facturama(), self._timbra() as mock:
+            _, _, resp = self._post("Borrador")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        mock.assert_not_called()
+
+    def test_patch_a_emitida_con_rechazo_deja_borrador(self):
+        _, _, resp = self._post("Borrador")
+        client = self._client(self.a["usuario"])
+        err = FacturamaAPIException("rechazo", status_code=400, details={"Message": "x"})
+        with self._con_facturama(), patch(f"{self.SVC}.construir_payload_nota_credito", return_value={}), \
+                self._timbra(side_effect=err):
+            r = client.patch(f"{NOTAS_CREDITO_URL}{resp.data['id']}/", {"estatus": "Emitida"}, format="json")
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertEqual(NotaCredito.objects.get().estatus, "Borrador")
+
+
 class Defecto10NotaCreditoDobleAplicacionConcurrente(FinanzasBase):
     """Emitir/cancelar la misma nota dos veces a la vez ya no duplica el crédito.
 
