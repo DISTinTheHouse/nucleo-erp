@@ -95,7 +95,7 @@ from ventas.services.pedido_field_filter_service import (
     filtrar_campos_contabilidad_pedido,
     puede_ver_contabilidad,
 )
-from wms.models import Picking, PickingDetalle
+from wms.models import Estado as EstadoWms, Picking, PickingDetalle
 
 logger = logging.getLogger(__name__)
 QTY_PRECISION = Decimal("0.0001")
@@ -2558,6 +2558,7 @@ class CotizacionDetalleViewSet(viewsets.ModelViewSet):
 
 
 class PedidoViewSet(viewsets.ModelViewSet):
+    http_method_names = ["get", "post", "put", "patch", "head", "options"]
     queryset = pedidos_base()
     serializer_class = PedidoSerializer
 
@@ -3027,7 +3028,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # El listado usa ``PedidoListSerializer`` (9 campos escalares) y NO los
         # toca, así que ahí se omite el prefetch — es lo que baja el tiempo del
         # listado de ~15s a <1s. ``documentos`` sólo lo añade ``retrieve()``.
-        if getattr(self, "action", None) != "list":
+        if getattr(self, "action", None) not in ("list", "cancelar"):
             qs = qs.prefetch_related(
                 _pedido_detalles_prefetch(),
                 _pedido_servicios_extras_prefetch(),
@@ -3039,10 +3040,12 @@ class PedidoViewSet(viewsets.ModelViewSet):
         return qs.order_by(F("created_at").desc(nulls_last=True), "-id")
 
     def perform_create(self, serializer):
-        # Mismos controles que ``perform_update`` (#532): clasificación, confirmación
-        # y nacer CANCELADO son de mesa de control.
+        # Mismos controles que ``perform_update`` (#532): clasificación y confirmación
+        # son de mesa de control; nacer CANCELADO no existe (``/cancelar/``).
         datos = serializer.validated_data
-        if {"clasificacion", "fecha_confirmacion"} & set(datos) or datos.get("estatus") == Pedido.ESTATUS_CANCELADO:
+        if datos.get("estatus") == Pedido.ESTATUS_CANCELADO:
+            raise ValidationError({"estatus": "Para cancelar usa POST /pedidos/{id}/cancelar/."})
+        if {"clasificacion", "fecha_confirmacion"} & set(datos):
             self._require_mesa_control(self.request.user)
         empresa = self.request.user.empresa
         with transaction.atomic():
@@ -3079,25 +3082,38 @@ class PedidoViewSet(viewsets.ModelViewSet):
         serializer.instance = self.get_queryset().get(pk=serializer.instance.pk)
 
     def _validar_cambio_estatus(self, pedido, nuevo):
-        """CANCELADO es terminal y solo lo pone mesa de control, sin avance vivo."""
+        """CANCELADO es terminal y solo se pone con ``POST /pedidos/{id}/cancelar/``."""
         if nuevo is None or nuevo == pedido.estatus:
             return
         if pedido.estatus == Pedido.ESTATUS_CANCELADO:
             raise ValidationError({"estatus": "Un pedido CANCELADO no cambia de estatus."})
-        if nuevo != Pedido.ESTATUS_CANCELADO:
-            return
-        from finanzas.models import Factura
-        from wms.models import Picking
+        if nuevo == Pedido.ESTATUS_CANCELADO:
+            raise ValidationError({"estatus": "Para cancelar usa POST /pedidos/{id}/cancelar/."})
 
-        self._require_mesa_control(self.request.user)
-        if pedido.pickings.exclude(estado=Picking.Estado.CANCELADO).exists():
-            raise ValidationError({"estatus": "El pedido tiene picking sin cancelar; cancélalo primero."})
-        if pedido.facturas.filter(activo=True).exclude(estatus=Factura.FacturaStatus.CANCELADA).exists():
-            raise ValidationError({"estatus": "El pedido tiene facturas vigentes; cancélalas primero."})
-
-    def perform_destroy(self, instance):
-        self._require_mesa_control(self.request.user)
-        instance.soft_delete()
+    @action(detail=True, methods=["post"], url_path="cancelar")
+    def cancelar(self, request, pk=None):
+        """Cancela y da de baja el pedido. Solo mesa de control, sin documentos vivos."""
+        self._require_mesa_control(request.user)
+        pedido = self.get_object()
+        vivos = [
+            nombre
+            for nombre, qs in (
+                ("picking", pedido.pickings.exclude(estado=Picking.Estado.CANCELADO)),
+                ("packing", pedido.packings.exclude(estado=EstadoWms.CANCELADO)),
+                ("factura", pedido.facturas.filter(activo=True).exclude(estatus=Factura.FacturaStatus.CANCELADA)),
+                ("orden de producción", OrdenProduccion.objects.filter(pedido=pedido, activo=True).exclude(estatus_op=OrdenProduccion.EstatusOrdenProduccion.CANCELADO)),
+                ("orden de bordado", OrdenesBordado.objects.filter(pedido=pedido, activo=True).exclude(estatus_bordado=OrdenesBordado.EstatusBordado.CANCELADO_LEGACY)),
+                ("orden de reflejante", OrdenesReflejante.objects.filter(pedido=pedido, activo=True).exclude(estatus_reflejante=OrdenesReflejante.EstatusReflejante.CANCELADO)),
+                ("orden de corte de manga", OrdenesCorteManga.objects.filter(pedido=pedido, activo=True).exclude(estatus_corte=OrdenesCorteManga.EstatusCorte.CANCELADO)),
+            )
+            if qs.exists()
+        ]
+        if vivos:
+            raise ValidationError({"pedido": f"Tiene documentos vivos: {', '.join(vivos)}. Cancélalos primero."})
+        pedido.estatus = Pedido.ESTATUS_CANCELADO
+        pedido.activo = False
+        pedido.save(update_fields=["estatus", "activo"])
+        return Response({"id": pedido.pk, "estatus": pedido.estatus, "activo": False})
 
     @action(detail=True, methods=["get"], url_path="editar-mesa-control-contexto")
     def editar_mesa_control_contexto(self, request, pk=None):
