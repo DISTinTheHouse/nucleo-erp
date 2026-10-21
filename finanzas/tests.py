@@ -5590,7 +5590,7 @@ class FacturamaAccesoTests(TestCase):
         Factura.objects.create(
             empresa=cls.duena, sucursal=Sucursal.objects.create(empresa=cls.duena, nombre="S"),
             cliente=Cliente.objects.create(empresa=cls.duena, nombre="C"),
-            moneda=Moneda.objects.create(codigo="MXN", nombre="Peso"), facturama_id="abc123",
+            moneda=Moneda.objects.create(codigo_iso="MXN", nombre="Peso"), facturama_id="abc123",
         )
 
     def setUp(self):
