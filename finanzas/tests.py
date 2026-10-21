@@ -5584,6 +5584,14 @@ class FacturamaAccesoTests(TestCase):
             usuario=cls.usuario_con_grant, permiso=permiso,
             tipo=UsuarioPermiso.TIPO_GRANT, empresa=cls.duena,
         )
+        from nucleo.models import Moneda, Sucursal
+        from terceros.models import Cliente
+
+        Factura.objects.create(
+            empresa=cls.duena, sucursal=Sucursal.objects.create(empresa=cls.duena, nombre="S"),
+            cliente=Cliente.objects.create(empresa=cls.duena, nombre="C"),
+            moneda=Moneda.objects.create(codigo="MXN", nombre="Peso"), facturama_id="abc123",
+        )
 
     def setUp(self):
         self.client = APIClient()
@@ -5614,7 +5622,6 @@ class FacturamaAccesoTests(TestCase):
     def test_admin_de_otra_empresa_no_usa_la_cuenta(self):
         with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"):
             self.assertEqual(self._get(self.admin_otra, self.PRODUCTOS).status_code, 403)
-            self.assertEqual(self._get(self.admin_otra, self.CFDI_XML).status_code, 403)
             self.client.force_authenticate(user=self.admin_otra)
             self.assertEqual(self.client.post(self.CFDI, {}, format="json").status_code, 403)
         self.servicio.get_products.assert_not_called()
@@ -5624,15 +5631,25 @@ class FacturamaAccesoTests(TestCase):
     def test_usuario_de_la_duena_sin_permiso_no_entra(self):
         with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"):
             self.assertEqual(self._get(self.usuario_duena, self.PRODUCTOS).status_code, 403)
-            self.assertEqual(self._get(self.usuario_duena, self.CFDI_XML).status_code, 403)
 
     def test_admin_y_grant_de_la_duena_si_entran(self):
         with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"):
             self.assertEqual(self._get(self.admin_duena, self.PRODUCTOS).status_code, 200)
-            self.assertEqual(self._get(self.usuario_con_grant, self.CFDI_XML).status_code, 200)
+            self.assertEqual(self._get(self.usuario_con_grant, self.PRODUCTOS).status_code, 200)
+
+    def test_descarga_cfdi_solo_de_registros_de_la_empresa_sin_permiso_facturama(self):
+        # #606: sin R-FIN-FACTURAMA se descarga el CFDI de la propia empresa...
+        self.assertEqual(self._get(self.usuario_duena, self.CFDI_XML).status_code, 200)
         self.servicio.get_cfdi_file.assert_called_once_with(
             file_format="xml", cfdi_type="issued", cfdi_id="abc123"
         )
+        # ...pero no el de otra empresa, ni ids sin registro (nómina, recibidos).
+        self.servicio.get_cfdi_file.reset_mock()
+        self.assertEqual(self._get(self.admin_otra, self.CFDI_XML).status_code, 404)
+        otro = "/api/v1/finanzas/facturama/cfdi/xml/payroll/zzz/"
+        self.assertEqual(self._get(self.admin_duena, otro).status_code, 404)
+        self.assertEqual(self._get(self.usuario_duena, otro.replace("cfdi/xml", "cfdi/acuse/xml")).status_code, 404)
+        self.servicio.get_cfdi_file.assert_not_called()
 
     def test_alta_de_cliente_solo_se_sube_a_facturama_desde_la_duena(self):
         with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"), patch(
