@@ -6677,6 +6677,45 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         cxc.refresh_from_db()
         self.assertEqual(cxc.saldo, Decimal("40.00"))
 
+    def test_cancelar_cobro_no_cambia_el_saldo_de_una_cxc_cancelada(self):
+        # #603: la factura se cancela con el cobro ya aplicado; el saldo queda como estaba.
+        cxc = self._cxc()
+        cobro = Cobro.objects.get(pk=self._cobrar(cxc, "40.00").data["id"])
+        CuentaPorCobrar.objects.filter(pk=cxc.pk).update(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA)
+
+        resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("60.00"))
+        self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.CANCELADA)
+
+    def test_cobro_con_rep_no_se_cancela_por_ningun_camino(self):
+        # #604: rep_uuid (#577) y rep_pendiente (#597) -> 400 "rep" y nada cambia.
+        cliente = self._client(self.a["usuario"])
+        for campos in ({"rep_uuid": "REP-UUID"}, {"rep_pendiente": True}):
+            cxc = self._cxc()
+            cobro = Cobro.objects.get(pk=self._cobrar(cxc, "60.00").data["id"])
+            Cobro.objects.filter(pk=cobro.pk).update(**campos)
+            banco = self._banco(cobro)
+            url = f"{COBROS_URL}{cobro.pk}/"
+            caminos = {
+                "cancelar": lambda: cliente.post(url + "cancelar/"),
+                "patch": lambda: cliente.patch(url, {"estatus": "Cancelado"}, format="json"),
+                "delete": lambda: cliente.delete(url),
+            }
+            for nombre, llamar in caminos.items():
+                with self.subTest(campos=campos, camino=nombre):
+                    resp = llamar()
+                    self.assertEqual(resp.status_code, 400, resp.data)
+                    self.assertIn("rep", resp.data)
+                    cobro.refresh_from_db()
+                    cxc.refresh_from_db()
+                    self.assertEqual(cobro.estatus, Cobro.Estatus.APLICADO)
+                    self.assertTrue(cobro.activo)
+                    self.assertEqual(cxc.saldo, Decimal("40.00"))
+                    self.assertEqual(self._banco(cobro), banco)
+
     def test_cancelar_un_borrador_no_toca_saldos_ni_banco(self):
         cxc = self._cxc()
         resp = self._cobrar(cxc, "60.00", estatus=Cobro.Estatus.BORRADOR.value)
