@@ -31,12 +31,14 @@ class CobroService:
             )
 
         cxc_ids = [d.cxc_id for d in detalles]
+        if len(set(cxc_ids)) != len(cxc_ids):  # #586
+            raise ErrorDeNegocio({"cobro_detalles": "Una CxC aparece dos veces en el cobro."})
         cxcs = {
             cxc.pk: cxc
             for cxc in CuentaPorCobrar.objects.select_for_update()
-            .filter(pk__in=cxc_ids)
-            .all()
+            .select_related("factura").filter(pk__in=cxc_ids)
         }
+        moneda_cuenta = CuentaBancaria.objects.values_list("moneda_id", flat=True).get(pk=cobro.cuenta_bancaria_id)
 
         suma_aplicado = Decimal("0.00")
         for det in detalles:
@@ -54,6 +56,10 @@ class CobroService:
                 if cxc.factura_id
                 else None
             )
+            if cxc.factura.moneda_id != moneda_cuenta:  # #587
+                raise ErrorDeNegocio(
+                    {"cuenta_bancaria": f"La CxC {cxc.pk} está en otra moneda que la cuenta bancaria."}
+                )
             if factura_estatus == Factura.FacturaStatus.CANCELADA:
                 raise ErrorDeNegocio(
                     {"cobro_detalles": f"La factura de la CxC {cxc.pk} está cancelada y no admite cobros."}
@@ -95,7 +101,7 @@ class CobroService:
             cxc = cxcs[det.cxc_id]
             importe = Decimal(str(det.importe_aplicado or 0))
             cxc.saldo = (Decimal(str(cxc.saldo or 0)) - importe).quantize(Decimal("0.01"))
-            cxc.fecha_ultimo_pago = hoy
+            cxc.fecha_ultimo_pago = cobro.fecha_cobro or hoy  # #588
             if cxc.saldo <= Decimal("0.00"):
                 cxc.saldo = Decimal("0.00")
                 cxc.estatus = CuentaPorCobrar.EstatusCxC.PAGADA

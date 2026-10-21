@@ -4,6 +4,7 @@ from django.db.models import Q, Sum
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
+from terceros.models import Cliente
 from finanzas.models import (
     AlertaMora,
     Banco,
@@ -1028,6 +1029,8 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
         else:
             request = self.context.get("request")
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
+        fields["cliente"].queryset = Cliente.objects.filter(empresa_id=empresa_id, activo=True)
+        fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id, activo=True)
         fields["cobro_detalles"].child.fields["cxc"].queryset = CuentaPorCobrar.objects.filter(
             Q(empresa_id=empresa_id) | Q(empresa__isnull=True, factura__empresa_id=empresa_id)
         )
@@ -1044,10 +1047,10 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
             if self.instance is not None:  # #569: en edición manda la empresa del cobro
                 emp_id = self.instance.empresa_id
             cliente = attrs.get("cliente")
-            if cliente and emp_id and getattr(cliente, "empresa_id", None) and cliente.empresa_id != emp_id:
+            if cliente and emp_id and cliente.empresa_id != emp_id:
                 raise ValidationError({"cliente": "Cliente no pertenece a la empresa."})
             cta = attrs.get("cuenta_bancaria")
-            if cta and emp_id and getattr(cta, "empresa_id", None) and cta.empresa_id != emp_id:
+            if cta and emp_id and cta.empresa_id != emp_id:
                 raise ValidationError({"cuenta_bancaria": "Cuenta bancaria no pertenece a la empresa."})
         return attrs
 
