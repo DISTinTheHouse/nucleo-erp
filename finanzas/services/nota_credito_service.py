@@ -6,6 +6,7 @@ from finanzas.exceptions import ErrorDeNegocio
 from finanzas.services.nota_credito_poliza_service import NotaCreditoPolizaService
 from finanzas.models import (
     CuentaPorCobrar,
+    Factura,
     NotaCredito,
 )
 
@@ -19,6 +20,8 @@ class NotaCreditoService:
                 "La factura de la nota no tiene una cuenta por cobrar; "
                 "no hay saldo al cual aplicar el crédito."
             )})
+        if cxc.estatus == CuentaPorCobrar.EstatusCxC.CANCELADA:
+            raise ErrorDeNegocio({"factura": "La cuenta por cobrar de la factura está cancelada."})
         saldo = Decimal(str(cxc.saldo or 0))
         if total_nc > saldo + Decimal("0.0001"):
             raise ErrorDeNegocio({"total": (
@@ -26,8 +29,19 @@ class NotaCreditoService:
             )})
 
     @staticmethod
+    def validar_factura(factura):
+        """No se emite ni timbra una nota sobre una factura cancelada o con cancelación en curso (#614)."""
+        if (
+            factura.estatus == Factura.FacturaStatus.CANCELADA
+            or factura.cfdi_cancelado
+            or factura.cfdi_cancelacion_solicitada
+        ):
+            raise ErrorDeNegocio({"factura": "La factura está cancelada o su cancelación está en proceso."})
+
+    @staticmethod
     def validar_aplicable(factura_id, total):
-        """Misma validación que ``aplicar_nota_credito``, sin escribir: se corre antes de timbrar."""
+        """Misma validación que ``aplicar_nota_credito``, sin escribir."""
+        NotaCreditoService.validar_factura(Factura.objects.get(pk=factura_id))
         cxc = CuentaPorCobrar.objects.filter(factura_id=factura_id).first()
         NotaCreditoService._validar_cxc(cxc, Decimal(str(total or 0)))
 
@@ -44,6 +58,7 @@ class NotaCreditoService:
             return
         cxc = CuentaPorCobrar.objects.select_for_update().filter(factura_id=bloqueada.factura_id).first()
         total_nc = Decimal(str(bloqueada.total or 0))
+        NotaCreditoService.validar_factura(bloqueada.factura)
         NotaCreditoService._validar_cxc(cxc, total_nc)
         if total_nc <= 0:
             return
@@ -82,6 +97,12 @@ class NotaCreditoService:
         nota.refresh_from_db()
         if nota.estatus == NotaCredito.Estatus.CANCELADA:
             return
+        # El ERP no cancela CFDI de egreso: cancelar aquí dejaría el CFDI vigente ante el SAT (#612).
+        if nota.cfdi_uuid or nota.cfdi_pendiente:
+            raise ErrorDeNegocio({"cfdi": (
+                "La nota tiene CFDI de egreso timbrado o pendiente de confirmar; "
+                "cancélalo en Facturama antes de cancelarla aquí."
+            )})
         # Sólo se revierte lo que realmente se aplicó: una nota en Borrador
         # nunca tocó la CxC.
         if nota.estatus == NotaCredito.Estatus.EMITIDA:

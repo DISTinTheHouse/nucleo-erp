@@ -2151,15 +2151,50 @@ class NotaCreditoTimbraAntesDeGuardar(Defecto9NotaCreditoFechaEmisionYCxCFaltant
     def _con_facturama(self):
         return override_settings(FACTURAMA_EMPRESA_CODIGO=self.a["empresa"].codigo)
 
-    def test_rechazo_de_facturama_no_guarda_ni_toca_cxc(self):
+    def test_rechazo_de_facturama_revierte_nota_y_cxc(self):
         err = FacturamaAPIException("rechazo", status_code=400, details={"Message": "RFC inválido"})
         with self._con_facturama(), patch(f"{self.SVC}.construir_payload_nota_credito", return_value={}), \
                 self._timbra(side_effect=err):
             _, cxc, resp = self._post()
         self.assertEqual(resp.status_code, 400, resp.data)
-        self.assertEqual(NotaCredito.objects.count(), 0)
+        self.assertEqual(NotaCredito.objects.get().estatus, "Cancelada")
         cxc.refresh_from_db()
         self.assertEqual(cxc.saldo, Decimal("1000.00"))
+
+    def test_timeout_deja_reserva_y_no_revierte(self):
+        err = FacturamaAPIException("timeout", status_code=None, details={})
+        with self._con_facturama(), patch(f"{self.SVC}.construir_payload_nota_credito", return_value={}), \
+                self._timbra(side_effect=err):
+            _, cxc, resp = self._post()
+        self.assertEqual(resp.status_code, 400, resp.data)
+        nota = NotaCredito.objects.get()
+        self.assertEqual((nota.estatus, nota.cfdi_pendiente), ("Emitida", True))
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("900.00"))
+
+    def test_cancelar_nota_timbrada_o_pendiente_se_rechaza(self):
+        factura, _ = self._factura_con_cxc()
+        nota = NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"],
+            estatus="Emitida", total=Decimal("100.00"), cfdi_uuid="U-9",
+        )
+        r = self._client(self.a["usuario"]).post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/")
+        self.assertEqual(r.status_code, 400, r.data)
+
+    def test_emitida_no_edita_importes_ni_factura_cancelada_no_emite(self):
+        client, _, resp = self._post()
+        r = client.patch(f"{NOTAS_CREDITO_URL}{resp.data['id']}/", {"total": "10.00"}, format="json")
+        self.assertEqual(r.status_code, 400, r.data)
+        r = client.patch(f"{NOTAS_CREDITO_URL}{resp.data['id']}/", {"observaciones": "ok"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        factura, _ = self._factura_con_cxc()
+        Factura.objects.filter(pk=factura.pk).update(estatus="Cancelada")
+        r = client.post(
+            NOTAS_CREDITO_URL,
+            {"factura": factura.pk, "cliente": self.a["cliente"].pk, "estatus": "Emitida", "total": "10.00"},
+            format="json",
+        )
+        self.assertEqual(r.status_code, 400, r.data)
 
     def test_timbre_exitoso_guarda_uuid_y_aplica(self):
         ok = {"Id": "fid", "Complement": {"TaxStamp": {"Uuid": "U-1", "Date": "2026-01-01T10:00:00"}}}
@@ -2178,7 +2213,7 @@ class NotaCreditoTimbraAntesDeGuardar(Defecto9NotaCreditoFechaEmisionYCxCFaltant
         self.assertEqual(resp.status_code, 201, resp.data)
         mock.assert_not_called()
 
-    def test_patch_a_emitida_con_rechazo_deja_borrador(self):
+    def test_patch_a_emitida_con_rechazo_revierte(self):
         _, _, resp = self._post("Borrador")
         client = self._client(self.a["usuario"])
         err = FacturamaAPIException("rechazo", status_code=400, details={"Message": "x"})
@@ -2186,7 +2221,7 @@ class NotaCreditoTimbraAntesDeGuardar(Defecto9NotaCreditoFechaEmisionYCxCFaltant
                 self._timbra(side_effect=err):
             r = client.patch(f"{NOTAS_CREDITO_URL}{resp.data['id']}/", {"estatus": "Emitida"}, format="json")
         self.assertEqual(r.status_code, 400, r.data)
-        self.assertEqual(NotaCredito.objects.get().estatus, "Borrador")
+        self.assertEqual(NotaCredito.objects.get().estatus, "Cancelada")
 
 
 class Defecto10NotaCreditoDobleAplicacionConcurrente(FinanzasBase):

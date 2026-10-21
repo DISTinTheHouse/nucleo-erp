@@ -14,6 +14,7 @@ from django.utils.dateparse import parse_datetime
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import Cobro, Factura, NotaCredito
+from finanzas.services.nota_credito_service import NotaCreditoService
 from finanzas.services.facturama.acceso import empresa_usa_facturama
 from finanzas.services.facturama.cfdi_payload import construir_payload_cfdi, construir_payload_nota_credito, construir_payload_rep
 from finanzas.services.facturama.exceptions import FacturamaAPIException
@@ -204,31 +205,12 @@ class FacturaTimbradoService:
                 raise ErrorDeNegocio({"cfdi": PENDIENTE.format("cfdi_pendiente")})
             if n.estatus != NotaCredito.Estatus.EMITIDA:
                 raise ErrorDeNegocio({"estatus": "Solo se timbra una nota de crédito Emitida."})
+            NotaCreditoService.validar_factura(n.factura)
             return construir_payload_nota_credito(n)
 
         obj, error = _timbrar(NotaCredito, nota.pk, preparar, CAMPOS_CFDI, "cfdi", "CFDI")
         _copiar(obj, nota, CAMPOS_CFDI)
         return error
-
-    @staticmethod
-    def timbre_previo_nota(nota):
-        """Timbra una nota de crédito aún NO guardada y regresa los campos CFDI a guardar con ella.
-
-        Si Facturama no confirma levanta ``ErrorDeNegocio`` y el llamador no guarda nada. Para
-        empresas que no son la dueña de la cuenta de Facturama no hace nada (``{}``). Se llama
-        sin transacción abierta (create) o con la nota bloqueada (emisión por PATCH).
-        """
-        if not empresa_usa_facturama(nota.factura.empresa):
-            return {}
-        payload = construir_payload_nota_credito(nota)
-        try:
-            respuesta = FacturamaService().create_cfdi_emision(payload)
-        except FacturamaAPIException as exc:
-            raise ErrorDeNegocio({"cfdi": f"Facturama no timbró la nota de crédito; no se guardó. {_mensaje(exc)}"})
-        uuid, facturama_id, fecha = _sello(respuesta)
-        if not uuid:
-            raise ErrorDeNegocio({"cfdi": "Facturama respondió sin UUID; no se guardó la nota. Revisa Facturama antes de reintentar."})
-        return {"cfdi_uuid": uuid, "facturama_id": facturama_id, "cfdi_fecha_timbrado": fecha}
 
     @staticmethod
     def cancelar_cfdi(factura):
