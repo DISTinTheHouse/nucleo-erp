@@ -149,7 +149,7 @@ class CobroService:
         cobro.estatus = bloqueado.estatus
         if cobro.estatus == Cobro.Estatus.CANCELADO:
             return
-        if bloqueado.rep_uuid:  # #577
+        if bloqueado.rep_uuid or bloqueado.rep_pendiente:  # #577, #597
             raise ErrorDeNegocio({"rep": "El cobro tiene REP timbrado: cancélalo ante el SAT antes de cancelar el cobro."})
         if cobro.estatus != Cobro.Estatus.APLICADO:
             # Un Borrador nunca descontó saldos ni tocó el banco: revertirlos
