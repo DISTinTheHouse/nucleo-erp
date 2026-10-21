@@ -8125,6 +8125,24 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.assertIn("RFC", str(resp.data["cfdi"]))
         self.facturama.create_cfdi_emision.assert_not_called()
 
+    def test_reserva_pendiente_ya_esta_en_db_al_llamar_a_facturama(self):
+        """#601: si la plataforma mata el proceso en la llamada, el reintento queda bloqueado."""
+        factura = self._borrador()
+        vistos = []
+
+        def espiar(payload):
+            vistos.append(Factura.objects.get(pk=factura.pk).cfdi_pendiente)
+            raise KeyboardInterrupt  # simula el proceso muerto: nada se guarda después
+
+        self.facturama.create_cfdi_emision.side_effect = espiar
+        with self.assertRaises(KeyboardInterrupt):
+            self._timbrar(factura)
+        self.assertEqual(vistos, [True])
+        self.facturama.create_cfdi_emision.side_effect = None
+        resp = self._timbrar(factura)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("cfdi_pendiente", str(resp.data["cfdi"]))
+
     def test_rechazo_de_facturama_responde_400_con_su_mensaje(self):
         factura = self._borrador()
         self.facturama.create_cfdi_emision.side_effect = FacturamaAPIException(

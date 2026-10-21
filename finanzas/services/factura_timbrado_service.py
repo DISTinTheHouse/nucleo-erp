@@ -40,33 +40,47 @@ def _sello(respuesta):
     return sello.get("Uuid"), respuesta.get("Id"), timezone.make_aware(fecha) if timezone.is_naive(fecha) else fecha
 
 
-def _timbrar(obj, payload, campos, clave, nombre):
-    """Manda ``payload`` y guarda el timbre en ``obj`` (ya bloqueado). Regresa el error a levantar.
+def _timbrar(modelo, pk, preparar, campos, clave, nombre):
+    """Timbra con reserva previa: ``pendiente`` se confirma ANTES de llamar a Facturama (#601, #600).
 
-    ``campos`` = (uuid, facturama_id, fecha, pendiente). 4xx: Facturama rechazó, no hay
-    CFDI y se puede reintentar. Timeout, red, 5xx o 2xx sin UUID: pudo timbrarse, así que
-    se marca ``pendiente`` y no se reintenta hasta revisarlo (#544).
+    1) ``atomic`` corto: bloquea, ``preparar(obj)`` valida y arma el payload, y se guarda
+       ``pendiente=True``. 2) Facturama, fuera de toda transacción. 3) ``atomic`` corto: guarda
+       el timbre. Si la plataforma mata el proceso en (2), la reserva ya está en la DB y un
+       reintento queda bloqueado hasta revisar Facturama. Regresa ``(obj, error)``.
+
+    ``campos`` = (uuid, facturama_id, fecha, pendiente). 4xx: Facturama rechazó, no hay CFDI,
+    se libera la reserva y se puede reintentar. Timeout, red, 5xx o 2xx sin UUID: pudo
+    timbrarse, así que sigue ``pendiente`` (#544).
     """
     f_uuid, f_id, f_fecha, f_pendiente = campos
+    with transaction.atomic():
+        obj = modelo.objects.select_for_update(of=("self",)).get(pk=pk)
+        payload = preparar(obj)
+        setattr(obj, f_pendiente, True)
+        obj.save(update_fields=[f_pendiente, "updated_at"])
+    rechazo = None
     try:
         respuesta = FacturamaService().create_cfdi_emision(payload)
     except FacturamaAPIException as exc:
         if exc.status_code and 400 <= exc.status_code < 500 and exc.status_code != 408:
-            return ErrorDeNegocio({clave: f"Facturama rechazó el {nombre}: {_mensaje(exc)}"})
+            rechazo = ErrorDeNegocio({clave: f"Facturama rechazó el {nombre}: {_mensaje(exc)}"})
         respuesta, detalle = None, _mensaje(exc)
     else:
         detalle = "respondió sin UUID"
     uuid, facturama_id, fecha = _sello(respuesta)
+    with transaction.atomic():
+        obj = modelo.objects.select_for_update(of=("self",)).get(pk=pk)
+        if uuid:
+            setattr(obj, f_uuid, uuid)
+            setattr(obj, f_fecha, fecha)
+            setattr(obj, f_pendiente, False)
+        elif rechazo:
+            setattr(obj, f_pendiente, False)
+        setattr(obj, f_id, facturama_id)
+        obj.save(update_fields=[*campos, "updated_at"])
     if uuid:
-        setattr(obj, f_uuid, uuid)
-        setattr(obj, f_fecha, fecha)
-    else:
-        setattr(obj, f_pendiente, True)
-    setattr(obj, f_id, facturama_id)
-    obj.save(update_fields=[*campos, "updated_at"])
-    if uuid:
-        return None
-    return ErrorDeNegocio({clave: (
+        return obj, None
+    return obj, rechazo or ErrorDeNegocio({clave: (
         f"Facturama no confirmó el {nombre} ({detalle}). Pudo generarse: revísalo en Facturama "
         f"y, si no existe, desmarca '{f_pendiente}' en el admin antes de reintentar."
     )})
@@ -108,38 +122,39 @@ class FacturaTimbradoService:
     # levantarlo dentro del ``atomic`` lo desharía.
 
     @staticmethod
-    @transaction.atomic
     def _timbrar_factura(factura):
-        bloqueada = (
-            Factura.objects.select_for_update(of=("self",))
-            .select_related("empresa", "pedido__cliente_regimen_fiscal", "cliente__sat_regimen_fiscal",
-                            "cliente__sat_uso_cfdi", "sucursal", "moneda", "serie_folio")
-            .get(pk=factura.pk)
-        )
-        _exigir_empresa_duena(bloqueada.empresa, "cfdi")
-        if bloqueada.cfdi_uuid:
-            raise ErrorDeNegocio({"cfdi": f"La factura ya está timbrada (UUID {bloqueada.cfdi_uuid})."})
-        if bloqueada.cfdi_pendiente:
-            raise ErrorDeNegocio({"cfdi": PENDIENTE.format("cfdi_pendiente")})
-        if not bloqueada.activo or bloqueada.estatus == Factura.FacturaStatus.CANCELADA:
-            raise ErrorDeNegocio({"estatus": "Solo se timbra una factura activa y no cancelada."})
-        error = _timbrar(bloqueada, construir_payload_cfdi(bloqueada), CAMPOS_CFDI, "cfdi", "CFDI")
-        _copiar(bloqueada, factura, CAMPOS_CFDI)
+        def preparar(f):
+            f = Factura.objects.select_related(
+                "empresa", "pedido__cliente_regimen_fiscal", "cliente__sat_regimen_fiscal",
+                "cliente__sat_uso_cfdi", "sucursal", "moneda", "serie_folio",
+            ).get(pk=f.pk)
+            _exigir_empresa_duena(f.empresa, "cfdi")
+            if f.cfdi_uuid:
+                raise ErrorDeNegocio({"cfdi": f"La factura ya está timbrada (UUID {f.cfdi_uuid})."})
+            if f.cfdi_pendiente:
+                raise ErrorDeNegocio({"cfdi": PENDIENTE.format("cfdi_pendiente")})
+            if not f.activo or f.estatus == Factura.FacturaStatus.CANCELADA:
+                raise ErrorDeNegocio({"estatus": "Solo se timbra una factura activa y no cancelada."})
+            return construir_payload_cfdi(f)
+
+        obj, error = _timbrar(Factura, factura.pk, preparar, CAMPOS_CFDI, "cfdi", "CFDI")
+        _copiar(obj, factura, CAMPOS_CFDI)
         return error
 
     @staticmethod
-    @transaction.atomic
     def _timbrar_rep(cobro):
-        bloqueado = Cobro.objects.select_for_update(of=("self",)).select_related("empresa").get(pk=cobro.pk)
-        _exigir_empresa_duena(bloqueado.empresa, "rep")
-        if bloqueado.rep_uuid:
-            raise ErrorDeNegocio({"rep": f"El cobro ya tiene REP (UUID {bloqueado.rep_uuid})."})
-        if bloqueado.rep_pendiente:
-            raise ErrorDeNegocio({"rep": PENDIENTE.format("rep_pendiente")})
-        if not bloqueado.activo or bloqueado.estatus != Cobro.Estatus.APLICADO:
-            raise ErrorDeNegocio({"rep": "Solo se timbra el REP de un cobro activo y aplicado."})
-        error = _timbrar(bloqueado, construir_payload_rep(bloqueado), CAMPOS_REP, "rep", "REP")
-        _copiar(bloqueado, cobro, CAMPOS_REP)
+        def preparar(c):
+            _exigir_empresa_duena(Cobro.objects.select_related("empresa").get(pk=c.pk).empresa, "rep")
+            if c.rep_uuid:
+                raise ErrorDeNegocio({"rep": f"El cobro ya tiene REP (UUID {c.rep_uuid})."})
+            if c.rep_pendiente:
+                raise ErrorDeNegocio({"rep": PENDIENTE.format("rep_pendiente")})
+            if not c.activo or c.estatus != Cobro.Estatus.APLICADO:
+                raise ErrorDeNegocio({"rep": "Solo se timbra el REP de un cobro activo y aplicado."})
+            return construir_payload_rep(c)
+
+        obj, error = _timbrar(Cobro, cobro.pk, preparar, CAMPOS_REP, "rep", "REP")
+        _copiar(obj, cobro, CAMPOS_REP)
         return error
 
     @staticmethod
@@ -176,23 +191,23 @@ class FacturaTimbradoService:
         return nota
 
     @staticmethod
-    @transaction.atomic
     def _timbrar_nota(nota):
-        bloqueada = (
-            NotaCredito.objects.select_for_update(of=("self",))
-            .select_related("factura__empresa", "factura__pedido__cliente_regimen_fiscal",
-                            "factura__cliente__sat_regimen_fiscal", "factura__sucursal")
-            .get(pk=nota.pk)
-        )
-        _exigir_empresa_duena(bloqueada.factura.empresa, "cfdi")
-        if bloqueada.cfdi_uuid:
-            raise ErrorDeNegocio({"cfdi": f"La nota ya está timbrada (UUID {bloqueada.cfdi_uuid})."})
-        if bloqueada.cfdi_pendiente:
-            raise ErrorDeNegocio({"cfdi": PENDIENTE.format("cfdi_pendiente")})
-        if bloqueada.estatus != NotaCredito.Estatus.EMITIDA:
-            raise ErrorDeNegocio({"estatus": "Solo se timbra una nota de crédito Emitida."})
-        error = _timbrar(bloqueada, construir_payload_nota_credito(bloqueada), CAMPOS_CFDI, "cfdi", "CFDI")
-        _copiar(bloqueada, nota, CAMPOS_CFDI)
+        def preparar(n):
+            n = NotaCredito.objects.select_related(
+                "factura__empresa", "factura__pedido__cliente_regimen_fiscal",
+                "factura__cliente__sat_regimen_fiscal", "factura__sucursal",
+            ).get(pk=n.pk)
+            _exigir_empresa_duena(n.factura.empresa, "cfdi")
+            if n.cfdi_uuid:
+                raise ErrorDeNegocio({"cfdi": f"La nota ya está timbrada (UUID {n.cfdi_uuid})."})
+            if n.cfdi_pendiente:
+                raise ErrorDeNegocio({"cfdi": PENDIENTE.format("cfdi_pendiente")})
+            if n.estatus != NotaCredito.Estatus.EMITIDA:
+                raise ErrorDeNegocio({"estatus": "Solo se timbra una nota de crédito Emitida."})
+            return construir_payload_nota_credito(n)
+
+        obj, error = _timbrar(NotaCredito, nota.pk, preparar, CAMPOS_CFDI, "cfdi", "CFDI")
+        _copiar(obj, nota, CAMPOS_CFDI)
         return error
 
     @staticmethod
