@@ -2738,9 +2738,30 @@ class FacturamaProductsViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
         except FacturamaAPIException as exc:
             return self.handle_facturama_error(exc)
 
+def _cfdi_es_de_la_empresa(user, cfdi_id):
+    """``True`` si el id de Facturama es de una factura, nota de crédito o REP del
+    alcance de la empresa del usuario (superusuario: cualquiera)."""
+    consultas = (
+        _aplicar_scope_empresa(Factura.objects.filter(facturama_id=cfdi_id), user),
+        _aplicar_scope_empresa(NotaCredito.objects.filter(facturama_id=cfdi_id), user, "factura__empresa"),
+        _aplicar_scope_empresa(Cobro.objects.filter(rep_facturama_id=cfdi_id), user),
+    )
+    return any(qs.exists() for qs in consultas)
+
+
 class FacturamaCfdiEmisionViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
+    """Timbrar (``create``) exige ``PuedeUsarFacturama``. Descargar archivo/acuse
+    sólo pide sesión: el id debe ser de un CFDI de la empresa del usuario (404 si
+    no), así contabilidad descarga sin ``R-FIN-FACTURAMA`` y nadie baja nómina,
+    recibidos ni CFDIs ajenos."""
+
     permission_classes = [IsAuthenticated, PuedeUsarFacturama]
     service_class = FacturamaService
+
+    def get_permissions(self):
+        if self.action in ("cfdi_file", "acuse"):
+            return [IsAuthenticated()]
+        return super().get_permissions()
 
     def get_service(self):
         return self.service_class()
@@ -2791,6 +2812,8 @@ class FacturamaCfdiEmisionViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet
             }
         )
         serializer.is_valid(raise_exception=True)
+        if not _cfdi_es_de_la_empresa(request.user, cfdi_id):
+            raise NotFound("CFDI no encontrado.")
 
         try:
             service = self.get_service()
@@ -2825,6 +2848,8 @@ class FacturamaCfdiEmisionViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet
             }
         )
         serializer.is_valid(raise_exception=True)
+        if not _cfdi_es_de_la_empresa(request.user, cfdi_id):
+            raise NotFound("CFDI no encontrado.")
 
         try:
             service = self.get_service()
