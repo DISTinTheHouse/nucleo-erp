@@ -5648,7 +5648,7 @@ class FacturamaAccesoTests(TestCase):
         self.assertEqual(self._get(self.admin_otra, self.CFDI_XML).status_code, 404)
         otro = "/api/v1/finanzas/facturama/cfdi/xml/payroll/zzz/"
         self.assertEqual(self._get(self.admin_duena, otro).status_code, 404)
-        self.assertEqual(self._get(self.usuario_duena, otro.replace("cfdi/xml", "cfdi/acuse/xml")).status_code, 404)
+        self.assertEqual(self._get(self.usuario_duena, otro.replace("cfdi/xml", "cfdi/acuse/pdf")).status_code, 404)
         self.servicio.get_cfdi_file.assert_not_called()
 
     def test_listar_cfdis_con_permiso_de_contabilidad_sin_r_fin_facturama(self):
