@@ -19,6 +19,7 @@ La regla:
 from django.conf import settings
 
 CLAVE_PERMISO_FACTURAMA = "R-FIN-FACTURAMA"
+CLAVE_PERMISO_CONSULTA_CFDI = "R-CONTABILIDAD-FACTURACION"
 
 
 def codigo_empresa_facturama():
@@ -39,3 +40,15 @@ def puede_usar_facturama(user):
     if not empresa_usa_facturama(getattr(user, "empresa", None)):
         return False
     return user.tiene_permiso(CLAVE_PERMISO_FACTURAMA)
+
+
+def puede_consultar_cfdis(user):
+    """Listar/consultar CFDIs emitidos: misma empresa dueña de la cuenta, pero basta
+    el permiso de facturación de Contabilidad (sin ``R-FIN-FACTURAMA``)."""
+    if not getattr(user, "is_authenticated", False):
+        return False
+    if user.is_superuser:
+        return True
+    if not empresa_usa_facturama(getattr(user, "empresa", None)):
+        return False
+    return user.tiene_permiso(CLAVE_PERMISO_CONSULTA_CFDI)
