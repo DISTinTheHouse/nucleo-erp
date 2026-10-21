@@ -12,7 +12,7 @@ from rest_framework.fields import get_error_detail
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
-from finanzas.services.facturama.acceso import puede_usar_facturama
+from finanzas.services.facturama.acceso import puede_consultar_cfdis, puede_usar_facturama
 from finanzas.services.facturama.service import FacturamaService
 from finanzas.services.facturama.exceptions import FacturamaAPIException
 from finanzas.services.pdf_fusion_service import fusionar_pdf_factura_proveedor
@@ -2749,6 +2749,16 @@ def _cfdi_es_de_la_empresa(user, cfdi_id):
     return any(qs.exists() for qs in consultas)
 
 
+class PuedeConsultarCfdis(BasePermission):
+    message = "No tienes acceso a los CFDIs de Facturama."
+
+    def has_permission(self, request, view):
+        return puede_consultar_cfdis(request.user)
+
+
+CFDI_FILTROS = ("keyword", "status", "rfc", "taxEntityName", "folioStart", "folioEnd", "dateStart", "dateEnd")
+
+
 class FacturamaCfdiEmisionViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
     """Timbrar (``create``) exige ``PuedeUsarFacturama``. Descargar archivo/acuse
     sólo pide sesión: el id debe ser de un CFDI de la empresa del usuario (404 si
@@ -2761,6 +2771,8 @@ class FacturamaCfdiEmisionViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet
     def get_permissions(self):
         if self.action in ("cfdi_file", "acuse"):
             return [IsAuthenticated()]
+        if self.action in ("list", "retrieve"):
+            return [IsAuthenticated(), PuedeConsultarCfdis()]
         return super().get_permissions()
 
     def get_service(self):
@@ -2779,6 +2791,19 @@ class FacturamaCfdiEmisionViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet
                 else status.HTTP_502_BAD_GATEWAY
             )
         )
+
+    def list(self, request):
+        params = {k: v for k, v in request.query_params.items() if k in CFDI_FILTROS}
+        try:
+            return Response(self.get_service().list_cfdis(**params))
+        except FacturamaAPIException as exc:
+            return self.handle_facturama_error(exc)
+
+    def retrieve(self, request, pk=None):
+        try:
+            return Response(self.get_service().get_cfdi(pk))
+        except FacturamaAPIException as exc:
+            return self.handle_facturama_error(exc)
 
     def create(self, request):
         serializer = FacturamaCfdiCreateSerializer(data=request.data)

@@ -5648,8 +5648,26 @@ class FacturamaAccesoTests(TestCase):
         self.assertEqual(self._get(self.admin_otra, self.CFDI_XML).status_code, 404)
         otro = "/api/v1/finanzas/facturama/cfdi/xml/payroll/zzz/"
         self.assertEqual(self._get(self.admin_duena, otro).status_code, 404)
-        self.assertEqual(self._get(self.usuario_duena, otro.replace("cfdi/xml", "cfdi/acuse/xml")).status_code, 404)
+        self.assertEqual(self._get(self.usuario_duena, otro.replace("cfdi/xml", "cfdi/acuse/pdf")).status_code, 404)
         self.servicio.get_cfdi_file.assert_not_called()
+
+    def test_listar_cfdis_con_permiso_de_contabilidad_sin_r_fin_facturama(self):
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        self.servicio.list_cfdis.return_value = [{"Id": "abc123"}]
+        self.servicio.get_cfdi.return_value = {"Id": "abc123"}
+        conta = Usuario.objects.create(username="conta@duena.test", email="conta@duena.test", empresa=self.duena)
+        with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"):
+            self.assertEqual(self._get(conta, self.CFDI).status_code, 403)
+            UsuarioPermiso.objects.create(
+                usuario=conta, permiso=Permiso.objects.create(clave="R-CONTABILIDAD-FACTURACION", nombre="Fact"),
+                tipo=UsuarioPermiso.TIPO_GRANT, empresa=self.duena,
+            )
+            r = self._get(conta, self.CFDI + "?rfc=XAXX010101000&otro=1")
+            self.assertEqual(r.status_code, 200)
+            self.servicio.list_cfdis.assert_called_once_with(rfc="XAXX010101000")  # filtros en lista blanca
+            self.assertEqual(self._get(conta, self.CFDI + "abc123/").status_code, 200)
+            self.assertEqual(self._get(self.admin_otra, self.CFDI).status_code, 403)
 
     def test_alta_de_cliente_solo_se_sube_a_facturama_desde_la_duena(self):
         with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"), patch(

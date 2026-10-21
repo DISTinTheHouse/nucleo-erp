@@ -23,6 +23,13 @@ class FacturamaService:
     def create_cfdi_emision(self, payload):
         return self.client.post("/3/cfdis", json=payload)
 
+    def list_cfdis(self, **params):
+        """``GET /cfdi?type=issued``: listado/búsqueda de CFDIs emitidos."""
+        return self.client.get("/cfdi", params={**params, "type": "issued"})
+
+    def get_cfdi(self, cfdi_id):
+        return self.client.get(f"/cfdi/{cfdi_id}", params={"type": "issued"})
+
     def cancel_cfdi(self, cfdi_id, motive="02"):
         """``DELETE /cfdi/{id}``: ``Status`` = canceled | requested | rejected."""
         return self.client.delete(f"/cfdi/{cfdi_id}", params={"type": "issued", "motive": motive})
