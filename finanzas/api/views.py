@@ -1970,6 +1970,22 @@ class CobroViewSet(FinanzasBaseViewSet):
         FacturaTimbradoService.timbrar_rep(cobro)
         return Response(CobroSerializer(cobro).data)
 
+    @action(detail=True, methods=["get"], url_path="rep", url_name="rep")
+    def rep(self, request, pk=None):
+        """XML o PDF del REP timbrado (``?formato=xml|pdf``, pdf por defecto), en el base64
+        de Facturama (``Content``/``ContentType``). Sin permiso de Facturama: basta poder
+        ver el cobro (otra empresa -> 404)."""
+        cobro = self.get_object()
+        formato = (request.query_params.get("formato") or "pdf").lower()
+        if formato not in ("pdf", "xml"):
+            raise ValidationError({"formato": "Usa pdf o xml."})
+        if not cobro.rep_uuid or not cobro.rep_facturama_id:
+            raise ValidationError({"rep": "El cobro no tiene un REP timbrado."})
+        try:
+            return Response(FacturamaService().get_cfdi_file(formato, "issued", cobro.rep_facturama_id))
+        except FacturamaAPIException as exc:
+            return Response({"rep": f"Facturama no entregó el archivo: {exc.message}"}, status=status.HTTP_502_BAD_GATEWAY)
+
     @action(detail=True, methods=["post"], url_path="cancelar-rep", url_name="cancelar-rep")
     def cancelar_rep(self, request, pk=None):
         """Cancela el REP del cobro ante el SAT (Facturama)."""
