@@ -5999,23 +5999,20 @@ class FacturaListadoLigeroTests(FinanzasBase):
         self.assertEqual(fila["total"], "232.00")
         self.assertEqual(fila["moneda_nombre"], "MXN")
 
-    def test_flags_cfdi_en_falso_en_una_factura_nueva(self):
+    def test_flags_cfdi_reflejan_la_factura(self):
+        FLAGS = ("cfdi_cancelacion_solicitada", "cfdi_cancelado", "cfdi_pendiente")
+        base = dict.fromkeys(FLAGS, False)
         self._facturar()
         fila = self._listar()[0]
-        self.assertIs(fila["cfdi_cancelacion_solicitada"], False)
-        self.assertIs(fila["cfdi_cancelado"], False)
-        self.assertIs(fila["cfdi_pendiente"], False)
-
-    def test_flags_cfdi_reflejan_la_factura(self):
-        factura_id = self._facturar()
-        for flag in ("cfdi_cancelacion_solicitada", "cfdi_cancelado", "cfdi_pendiente"):
+        self.assertEqual({f: fila[f] for f in FLAGS}, base)
+        for flag in FLAGS:
             with self.subTest(flag):
-                Factura.objects.filter(pk=factura_id).update(
-                    cfdi_cancelacion_solicitada=False, cfdi_cancelado=False, cfdi_pendiente=False,
+                factura = Factura.objects.create(
+                    empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+                    moneda=self.moneda, folio=f"F-{flag}", **{flag: True},
                 )
-                Factura.objects.filter(pk=factura_id).update(**{flag: True})
-                fila = self._listar()[0]
-                self.assertIs(fila[flag], True)
+                fila = next(f for f in self._listar() if f["id"] == factura.pk)
+                self.assertEqual({f: fila[f] for f in FLAGS}, {**base, flag: True})
 
     def test_sin_vendedor_ni_pedido(self):
         Factura.objects.create(
