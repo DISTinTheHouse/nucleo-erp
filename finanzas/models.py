@@ -558,6 +558,10 @@ class Cobro(models.Model):
     referencia_operacion = models.CharField(max_length=100, null=True, blank=True)
 
     total_cobrado = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    # Moneda del cobro = la de la cuenta bancaria (la fija el servidor). El tipo de
+    # cambio (MXN por unidad) va al REP; en MXN siempre es 1.
+    moneda = models.ForeignKey('nucleo.Moneda', on_delete=models.PROTECT, related_name="cobros", null=True, blank=True)
+    tipo_cambio = models.DecimalField(max_digits=18, decimal_places=6, default=1)
     estatus = models.CharField(max_length=30, choices=Estatus.choices, default=Estatus.APLICADO)
     observaciones = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -1019,7 +1019,7 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
         model = Cobro
         fields = "__all__"
         # ``activo`` solo lo apaga el DELETE, que revierte saldos (#572).
-        read_only_fields = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado", "rep_pendiente", "activo")
+        read_only_fields = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado", "rep_pendiente", "activo", "moneda")
 
     def get_fields(self):
         # #570: una CxC de otra empresa responde igual que una inexistente.
@@ -1030,7 +1030,7 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
             request = self.context.get("request")
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
         fields["cliente"].queryset = Cliente.objects.filter(empresa_id=empresa_id, activo=True)
-        fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id, activo=True)
+        fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id, activo=True).select_related("moneda")
         fields["cobro_detalles"].child.fields["cxc"].queryset = CuentaPorCobrar.objects.filter(
             Q(empresa_id=empresa_id) | Q(empresa__isnull=True, factura__empresa_id=empresa_id)
         )
@@ -1052,6 +1052,17 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
             cta = attrs.get("cuenta_bancaria")
             if cta and emp_id and cta.empresa_id != emp_id:
                 raise ValidationError({"cuenta_bancaria": "Cuenta bancaria no pertenece a la empresa."})
+        # EC-537: la moneda sale de la cuenta; fuera de MXN el tipo de cambio es obligatorio.
+        cta = attrs.get("cuenta_bancaria") or getattr(self.instance, "cuenta_bancaria", None)
+        if cta:
+            attrs["moneda"] = cta.moneda
+            if cta.moneda.codigo_iso.upper() == "MXN":
+                attrs["tipo_cambio"] = Decimal("1")
+            else:
+                previo = self.instance if self.instance and self.instance.moneda_id == cta.moneda_id else None
+                tc = attrs.get("tipo_cambio", previo.tipo_cambio if previo else None)
+                if tc is None or tc <= 0:
+                    raise ValidationError({"tipo_cambio": f"Indica el tipo de cambio (MXN por {cta.moneda.codigo_iso})."})
         return attrs
 
 
