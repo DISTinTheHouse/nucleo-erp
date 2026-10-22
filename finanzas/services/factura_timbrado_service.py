@@ -186,6 +186,8 @@ class FacturaTimbradoService:
         """Manda por correo el PDF y el XML oficiales del CFDI (descargados de Facturama)."""
         if not factura.facturama_id:
             raise ErrorDeNegocio({"cfdi": "La factura no tiene CFDI timbrado."})
+        if factura.cfdi_cancelado:
+            raise ErrorDeNegocio({"cfdi": "El CFDI está cancelado ante el SAT; no se envía."})
         try:
             validate_email(email or "")
         except ValidationError:

@@ -6810,6 +6810,20 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         self.assertEqual(resp.status_code, 400, resp.data)
         cancel.assert_not_called()
 
+    def test_descarga_del_rep_sin_permiso_de_facturama_y_acotada_a_la_empresa(self):
+        cobro = Cobro.objects.get(pk=self._cobrar(self._cxc(), "60.00").data["id"])
+        url = f"{COBROS_URL}{cobro.pk}/rep/"
+        cliente = self._client(self.a["usuario"])
+        with patch("finanzas.api.views.FacturamaService") as servicio:
+            servicio.return_value.get_cfdi_file.return_value = {"Content": "UERG", "ContentType": "application/pdf"}
+            self.assertEqual(cliente.get(url).status_code, 400)  # sin REP timbrado
+            Cobro.objects.filter(pk=cobro.pk).update(rep_uuid="U", rep_facturama_id="REP-ID")
+            resp = cliente.get(url, {"formato": "xml"})
+            self.assertEqual(cliente.get(url, {"formato": "doc"}).status_code, 400)
+            self.assertEqual(self._client(self.b["usuario"]).get(url).status_code, 404)
+        self.assertEqual((resp.status_code, resp.data["Content"]), (200, "UERG"))
+        servicio.return_value.get_cfdi_file.assert_called_once_with("xml", "issued", "REP-ID")
+
     def test_cancelar_un_borrador_no_toca_saldos_ni_banco(self):
         cxc = self._cxc()
         resp = self._cobrar(cxc, "60.00", estatus=Cobro.Estatus.BORRADOR.value)
@@ -8512,6 +8526,15 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         resp = self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/enviar-cfdi/", {}, format="json")
 
         self.assertEqual(resp.status_code, 400)
+
+    def test_cfdi_cancelado_no_se_envia(self):
+        factura = self._timbrada()
+        Factura.objects.filter(pk=factura.pk).update(cfdi_cancelado=True)
+
+        resp = self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/enviar-cfdi/", {}, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("cfdi", resp.data)
 
     def _nota_emitida(self, factura):
         return NotaCredito.objects.create(
