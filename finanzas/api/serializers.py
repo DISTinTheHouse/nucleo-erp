@@ -1010,7 +1010,7 @@ class CobroDetalleSerializer(serializers.ModelSerializer):
 
 
 class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
-    nested_write_on_create_only = ("cobro_detalles",)
+    nested_write_on_create_only = ()  # EC-541: las líneas también se editan en Borrador (lo decide la vista)
     cobro_detalles = CobroDetalleSerializer(many=True, required=False)
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)

@@ -12,6 +12,7 @@ semántica del lock.
 
 import importlib
 import inspect
+import time
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -1411,7 +1412,7 @@ class Defecto7ErroresDeNegocioYTransacciones(FinanzasBase):
     # Sin el mixin, DRF levanta AssertionError en raise_errors_on_nested_writes
     # y estas pruebas fallan con 500.
 
-    def test_cobro_patch_con_lineas_responde_400(self):
+    def test_cobro_borrador_patch_reemplaza_lineas(self):  # EC-541
         cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
         cxc = self._cxc()
         cobro = Cobro.objects.create(
@@ -1420,19 +1421,73 @@ class Defecto7ErroresDeNegocioYTransacciones(FinanzasBase):
             estatus=Cobro.Estatus.BORRADOR.value, observaciones="antes",
         )
         client = self._client(self.a["usuario"])
+        url = f"{COBROS_URL}{cobro.pk}/"
 
         resp = client.patch(
+            url,
+            {"observaciones": "despues", "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "10.00"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cobro.refresh_from_db()
+        self.assertEqual(cobro.observaciones, "despues")
+        self.assertEqual([str(d.importe_aplicado) for d in cobro.cobro_detalles.all()], ["10.00"])
+        self.assertTrue(cobro.folio or cobro.folio is None)  # folio solo si hay serie COBROS
+
+        resp = client.patch(url, {"cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "25.00"}]}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual([str(d.importe_aplicado) for d in cobro.cobro_detalles.all()], ["25.00"])
+
+        resp = client.patch(url, {"observaciones": "x"}, format="json")  # sin la llave: no toca líneas
+        self.assertEqual(cobro.cobro_detalles.count(), 1)
+
+    def test_cobro_borrador_patch_muchas_lineas_es_rapido(self):  # EC-541
+        cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
+        cxc = self._cxc()
+        cobro = Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"],
+            cuenta_bancaria=cuenta_bancaria, total_cobrado=Decimal("0.00"),
+            estatus=Cobro.Estatus.BORRADOR.value,
+        )
+        lineas = [{"cxc": cxc.pk, "importe_aplicado": "1.00"} for _ in range(30)]
+        inicio = time.perf_counter()
+        resp = self._client(self.a["usuario"]).patch(
+            f"{COBROS_URL}{cobro.pk}/", {"cobro_detalles": lineas}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(cobro.cobro_detalles.count(), 30)
+        self.assertLess(time.perf_counter() - inicio, 2.0)
+
+    def test_cobro_borrador_patch_lineas_cxc_ajena_400(self):  # EC-541
+        cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
+        cobro = Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"],
+            cuenta_bancaria=cuenta_bancaria, total_cobrado=Decimal("0.00"),
+            estatus=Cobro.Estatus.BORRADOR.value,
+        )
+        resp = self._client(self.a["usuario"]).patch(
             f"{COBROS_URL}{cobro.pk}/",
-            {
-                "observaciones": "despues",
-                "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "10.00"}],
-            },
+            {"cobro_detalles": [{"cxc": 999999, "importe_aplicado": "10.00"}]},
             format="json",
         )
         self.assertEqual(resp.status_code, 400, resp.data)
-        cobro.refresh_from_db()
         self.assertEqual(cobro.cobro_detalles.count(), 0)
-        self.assertEqual(cobro.observaciones, "antes")
+
+    def test_cobro_aplicado_patch_con_lineas_responde_400(self):  # EC-541, #573
+        cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])
+        cxc = self._cxc()
+        cobro = Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"],
+            cuenta_bancaria=cuenta_bancaria, total_cobrado=Decimal("0.00"),
+            estatus=Cobro.Estatus.APLICADO.value,
+        )
+        resp = self._client(self.a["usuario"]).patch(
+            f"{COBROS_URL}{cobro.pk}/",
+            {"cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "10.00"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(cobro.cobro_detalles.count(), 0)
 
     def test_pago_patch_ignora_lineas_y_actualiza_encabezado(self):
         cuenta_bancaria = self._crear_cuenta_bancaria(self.a["empresa"])

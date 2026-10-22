@@ -1875,6 +1875,13 @@ class CobroViewSet(FinanzasBaseViewSet):
         _validate_fk_empresa(user, cta, "cuenta_bancaria", empresa)
         detalles_data = serializer.validated_data.pop("cobro_detalles", [])
         cobro = serializer.save(empresa=empresa)
+        self._guardar_detalles(cobro, detalles_data)
+        if cobro.estatus == Cobro.Estatus.APLICADO:
+            CobroService.aplicar_cobro(cobro, user)
+
+    @staticmethod
+    def _guardar_detalles(cobro, detalles_data):
+        """Crea las líneas validando empresa/cliente y asigna folio si aún no tiene."""
         for d in detalles_data:
             # El campo real de ``CobroDetalle`` es ``cxc``: leer
             # ``cuenta_por_cobrar`` devolvía siempre ``None`` y esta validación no
@@ -1896,12 +1903,10 @@ class CobroViewSet(FinanzasBaseViewSet):
                         {"cobro_detalles": [f"La CxC {cxc.pk} es de otro cliente."]}
                     )
             CobroDetalle.objects.create(cobro=cobro, **d)
-        if detalles_data:
+        if detalles_data and not cobro.folio:
             sucursal_id = detalles_data[0]["cxc"].factura.sucursal_id
             cobro.folio = generate_cobro_folio(cobro.empresa_id, sucursal_id)
             cobro.save(update_fields=["folio"])
-        if cobro.estatus == Cobro.Estatus.APLICADO:
-            CobroService.aplicar_cobro(cobro, user)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -1914,8 +1919,10 @@ class CobroViewSet(FinanzasBaseViewSet):
         bloqueado = Cobro.objects.select_for_update().get(pk=serializer.instance.pk)
         if bloqueado.estatus == Cobro.Estatus.CANCELADO:
             raise ValidationError("No se puede editar un cobro cancelado.")
-        if "cobro_detalles" in self.request.data:  # #573: antes se ignoraban con 200
-            raise ValidationError({"cobro_detalles": "Las líneas solo se capturan al crear el cobro."})
+        # EC-541: en Borrador las líneas se reemplazan completas; Aplicado no las admite (#573).
+        detalles_data = serializer.validated_data.pop("cobro_detalles", None)
+        if detalles_data is not None and bloqueado.estatus != Cobro.Estatus.BORRADOR:
+            raise ValidationError({"cobro_detalles": "Las líneas solo se editan mientras el cobro es Borrador."})
         if bloqueado.estatus == Cobro.Estatus.APLICADO:  # #571: no reaplica saldos/banco/póliza
             cambiados = {
                 k for k, v in serializer.validated_data.items()
@@ -1932,6 +1939,9 @@ class CobroViewSet(FinanzasBaseViewSet):
             # guard de idempotencia sin devolver saldos ni banco.
             serializer.validated_data["estatus"] = anterior_estatus
         cobro = serializer.save()
+        if detalles_data is not None:
+            cobro.cobro_detalles.all().delete()  # líneas de Borrador: aún no mueven saldos
+            self._guardar_detalles(cobro, detalles_data)
         if nuevo_estatus == Cobro.Estatus.CANCELADO:
             CobroService.cancelar_cobro(cobro, self.request.user)
         elif nuevo_estatus == Cobro.Estatus.APLICADO and anterior_estatus != Cobro.Estatus.APLICADO:
