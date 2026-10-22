@@ -6839,6 +6839,69 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         self.assertEqual(cxc.saldo, Decimal("100.00"))
         self.assertEqual(self._client(self.a["usuario"]).get(f"{COBROS_URL}{cobro.pk}/").status_code, 404)
 
+    # EC-537: moneda del cobro = la de su cuenta; fuera de MXN exige tipo de cambio y el REP lo usa.
+    @property
+    def usd(self):
+        return Moneda.objects.get_or_create(codigo_iso="USD", defaults={"nombre": "Dolar"})[0]
+
+    def _cobrar_usd(self, **extra):
+        empresa = self.a["empresa"]
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"], cliente=self.a["cliente"], moneda=self.usd,
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=empresa, cliente=self.a["cliente"], factura=factura, total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+        cuenta = self._crear_cuenta_bancaria(empresa)
+        CuentaBancaria.objects.filter(pk=cuenta.pk).update(moneda=self.usd)
+        cuenta.refresh_from_db()
+        return self._cobrar(cxc, "100.00", cuenta=cuenta, **extra)
+
+    def test_cobro_en_mxn_toma_la_moneda_de_la_cuenta_y_fuerza_tipo_cambio_1(self):
+        resp = self._cobrar(self._cxc(), "50.00", tipo_cambio="17.5")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["moneda"], self.moneda.pk)
+        self.assertEqual(Decimal(resp.data["tipo_cambio"]), 1)
+
+    def test_cobro_en_usd_exige_tipo_cambio(self):
+        resp = self._cobrar_usd()
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("tipo_cambio", resp.data)
+        self.assertEqual(Cobro.objects.count(), 0)
+
+    def test_cobro_en_usd_guarda_tipo_cambio(self):
+        resp = self._cobrar_usd(tipo_cambio="17.250000")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["moneda"], self.usd.pk)
+        self.assertEqual(Decimal(resp.data["tipo_cambio"]), Decimal("17.25"))
+
+    def test_cuenta_en_otra_moneda_que_la_factura_se_rechaza(self):
+        cxc = self._cxc()
+        Factura.objects.filter(pk=cxc.factura_id).update(moneda=self.usd)
+
+        resp = self._cobrar(cxc)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cuenta_bancaria", resp.data)
+
+    def test_rep_en_usd_lleva_moneda_y_tipo_de_cambio(self):
+        from types import SimpleNamespace
+        from finanzas.services.facturama import cfdi_payload
+
+        cobro = Cobro.objects.get(pk=self._cobrar_usd(tipo_cambio="17.25").data["id"])
+        Factura.objects.update(cfdi_uuid="UUID-USD")
+        ppd = SimpleNamespace(metodo_pago="PPD", cliente_rfc="XAXX010101000")
+        self.a["sucursal"].__class__.objects.filter(pk=self.a["sucursal"].pk).update(cp="64000")
+        with patch.object(Factura, "pedido", ppd, create=True), patch.object(cfdi_payload, "_receptor", return_value={}):
+            payload = cfdi_payload.construir_payload_rep(cobro)
+        pago = payload["Complemento"]["Payments"][0]
+        self.assertEqual(pago["Currency"], "USD")
+        self.assertEqual(pago["ExchangeRate"], 17.25)
+        self.assertEqual(pago["RelatedDocuments"][0]["Currency"], "USD")
+
 
 class F0CuentaPorCobrarSoloLecturaTests(FinanzasBase):
     """Saldo y estatus de la CxC los mueven los servicios, no el cliente HTTP."""
@@ -8467,4 +8530,5 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("no está timbrada", str(resp.data["cfdi"]))
         self.facturama.create_cfdi_emision.assert_not_called()
+
 

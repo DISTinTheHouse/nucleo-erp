@@ -199,6 +199,9 @@ def construir_payload_rep(cobro):
     forma = FORMA_PAGO_COBRO.get(cobro.metodo_pago)
     if not forma:
         errores["forma_pago"] = f"Método de cobro sin forma de pago SAT ({cobro.metodo_pago})."
+    moneda = (cobro.moneda or cobro.cuenta_bancaria.moneda).codigo_iso.upper()
+    if moneda != "MXN" and cobro.tipo_cambio <= 0:
+        errores["tipo_cambio"] = "El cobro no tiene tipo de cambio."
 
     documentos = []
     for d in detalles:
@@ -212,6 +215,9 @@ def construir_payload_rep(cobro):
         if _texto(getattr(f.pedido, "metodo_pago", None)).upper() != "PPD":
             errores[f"f{f.pk}"] = f"La factura {f.folio} no es PPD: no lleva complemento de pago."
             continue
+        if f.moneda.codigo_iso.upper() != moneda:
+            errores[f"f{f.pk}"] = f"La factura {f.folio} está en {f.moneda.codigo_iso} y el cobro en {moneda}."
+            continue
         previos = CobroDetalle.objects.filter(
             cxc=d.cxc, cobro__activo=True, cobro__estatus="Aplicado",
         ).exclude(cobro=cobro).filter(_cobros_previos(cobro))
@@ -222,7 +228,7 @@ def construir_payload_rep(cobro):
             "Uuid": f.cfdi_uuid,
             "Serie": _texto(getattr(f.serie_folio, "serie", None)) or None,
             "Folio": f.folio,
-            "Currency": "MXN",
+            "Currency": moneda,
             "EquivalenceDocRel": 1,
             "PartialityNumber": len(previos) + 1,
             "PreviousBalanceAmount": _numero(f.total - pagado_antes),
@@ -247,10 +253,12 @@ def construir_payload_rep(cobro):
     pago = {
         "Date": fecha_pago(cobro.fecha_cobro),
         "PaymentForm": forma,
-        "Currency": "MXN",
+        "Currency": moneda,
         "Amount": _numero(sum((d.importe_aplicado for d in detalles), Decimal("0"))),
         "RelatedDocuments": documentos,
     }
+    if moneda != "MXN":
+        pago["ExchangeRate"] = _numero(cobro.tipo_cambio)
     if _texto(cobro.referencia_operacion):
         pago["OperationNumber"] = _texto(cobro.referencia_operacion)[:100]
     return {
