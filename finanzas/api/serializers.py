@@ -418,6 +418,9 @@ class FacturaListSerializer(serializers.ModelSerializer):
             'moneda',
             'moneda_nombre',
             'cfdi_uuid',
+            'cfdi_cancelacion_solicitada',
+            'cfdi_cancelado',
+            'cfdi_pendiente',
         ]
         read_only_fields = fields
 
