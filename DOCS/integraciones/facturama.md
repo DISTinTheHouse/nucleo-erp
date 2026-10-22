@@ -278,6 +278,16 @@ POST /api/v1/finanzas/facturama/cfdi/
 
 Mas informacion en: [Facturama CFDI docs.](https://facturama.mx/docs/es/api-web/crear-cfdi#tipos-de-cfdi)
 
+__Listar y consultar CFDIs emitidos__
+```
+GET /api/v1/finanzas/facturama/cfdi/?rfc=&status=&keyword=&taxEntityName=&folioStart=&folioEnd=&dateStart=&dateEnd=
+GET /api/v1/finanzas/facturama/cfdi/{cfdi_id}/
+```
+
+Solo CFDIs emitidos (`type=issued`); la respuesta es la de Facturama tal cual (la lista no se pagina). Los filtros son opcionales y cualquier otro parámetro se ignora.
+
+Acceso: empresa dueña de la cuenta de Facturama + permiso `R-CONTABILIDAD-FACTURACION` (o admin/superusuario). Si no, `403`. Errores de Facturama: su código si es 4xx, `502` si es 5xx o no responde.
+
 __Descargar por formato__
 ```
 GET /api/v1/finanzas/facturama/cfdi/{file_format}/{cfdi_type}/{cfdi_id}/
