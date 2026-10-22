@@ -3636,6 +3636,7 @@ Errores (`400`, cada clave trae una **lista** de mensajes):
 - Datos que usa: `Sucursal.cp`, receptor del pedido (respaldo en `Cliente`), forma/método de pago del pedido (PPD → forma `99`), un concepto por renglón con `sat_prodserv`/`sat_unidad` del producto e IVA del renglón, `Factura.folio` y `serie_folio.serie`.
 - Cancelar (`POST /facturas/{id}/cancelar/`) de una timbrada cancela primero el CFDI ante el SAT (motivo 02) y guarda `cfdi_cancelado`; si no queda `canceled` → `400 {"cfdi": [...]}` y la factura no se toca.
 - REP: `POST /cobros/{id}/timbrar-rep/` (facturas PPD timbradas; errores bajo `rep`).
+- Cancelar REP: `POST /cobros/{id}/cancelar-rep/` cancela el REP ante el SAT (motivo 02) y limpia `rep_uuid`, `rep_facturama_id`, `rep_fecha_timbrado` y `rep_pendiente`, así que se puede volver a timbrar o cancelar el cobro. Si Facturama rechaza, no responde o el SAT queda en `requested` → `400` (`rep` o `cancelacion_pendiente`) y no se guarda nada. Mismo permiso que timbrar-rep.
 - Archivos: `GET /facturas/{id}/cfdi/?formato=pdf|xml`.
 - Claves SAT: `python manage.py import_sat_prodserv <xlsx>` y `import_sat_unidades <xlsx>`.
 - Pendiente: MXN únicamente y notas de crédito (CFDI de egreso).

@@ -1966,6 +1966,15 @@ class CobroViewSet(FinanzasBaseViewSet):
         FacturaTimbradoService.timbrar_rep(cobro)
         return Response(CobroSerializer(cobro).data)
 
+    @action(detail=True, methods=["post"], url_path="cancelar-rep", url_name="cancelar-rep")
+    def cancelar_rep(self, request, pk=None):
+        """Cancela el REP del cobro ante el SAT (Facturama)."""
+        cobro = self.get_object()  # otra empresa -> 404
+        if not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
+            raise PermissionDenied("No tienes permiso para cancelar complementos de pago.")
+        FacturaTimbradoService.cancelar_rep(cobro)
+        return Response(CobroSerializer(cobro).data)
+
 
 class PagoViewSet(FinanzasBaseViewSet):
     queryset = Pago.objects.all()

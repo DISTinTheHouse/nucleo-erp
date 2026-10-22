@@ -119,6 +119,29 @@ class FacturaTimbradoService:
             raise error
         return cobro
 
+    @staticmethod
+    @transaction.atomic
+    def cancelar_rep(cobro):
+        """Cancela el REP ante el SAT (motivo 02) y limpia sus campos. Facturama primero: si no cancela, no se guarda nada."""
+        bloqueado = Cobro.objects.select_for_update(of=("self",)).select_related("empresa").get(pk=cobro.pk)
+        _exigir_empresa_duena(bloqueado.empresa, "rep")
+        if not bloqueado.rep_uuid or not bloqueado.rep_facturama_id:
+            raise ErrorDeNegocio({"rep": "El cobro no tiene un REP timbrado y confirmado que cancelar."})
+        try:
+            respuesta = FacturamaService().cancel_cfdi(bloqueado.rep_facturama_id)
+        except FacturamaAPIException as exc:
+            raise ErrorDeNegocio({"rep": f"Facturama no canceló el REP: {_mensaje(exc)}"})
+        estatus = str((respuesta or {}).get("Status") or "").lower()
+        if estatus == "requested":
+            raise ErrorDeNegocio({"cancelacion_pendiente": "El receptor debe aceptar la cancelación ante el SAT; vuelve a cancelar cuando la acepte."})
+        if estatus != "canceled":
+            raise ErrorDeNegocio({"rep": f"El SAT no canceló el REP (estatus: {estatus or 'vacío'})."})
+        bloqueado.rep_uuid = bloqueado.rep_facturama_id = bloqueado.rep_fecha_timbrado = None
+        bloqueado.rep_pendiente = False
+        bloqueado.save(update_fields=[*CAMPOS_REP, "updated_at"])
+        _copiar(bloqueado, cobro, CAMPOS_REP)
+        return cobro
+
     # Los ``_privados`` REGRESAN el error: lo que respondió Facturama se guarda, y
     # levantarlo dentro del ``atomic`` lo desharía.
 
