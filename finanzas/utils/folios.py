@@ -5,6 +5,7 @@ from nucleo.models import SerieFolio
 
 TIPOS_DOCUMENTO_FACTURA = ["Factura", "FACTURA", "Facturas", "FAC"]
 TIPOS_DOCUMENTO_POLIZA = ["Poliza", "POLIZA", "Polizas", "POL"]
+TIPOS_DOCUMENTO_COBRO = ["COBROS", "Cobro", "Cobros"]
 
 
 @transaction.atomic
@@ -61,4 +62,18 @@ def generate_poliza_folio(empresa_id, sucursal_id):
         sucursal_id,
         TIPOS_DOCUMENTO_POLIZA,
         descripcion_documento="Póliza",
+    )
+
+
+@transaction.atomic
+def generate_cobro_folio(empresa_id, sucursal_id):
+    """Folio del cobro (serie ``COBROS``) o ``None`` si la sucursal no tiene serie activa.
+
+    El folio del cobro es de control interno: sin serie configurada el cobro se
+    registra igual, a diferencia de la factura.
+    """
+    if SerieFolio.resolve(empresa_id, sucursal_id, TIPOS_DOCUMENTO_COBRO) is None:
+        return None
+    return SerieFolio.consumir_siguiente_folio(
+        empresa_id, sucursal_id, TIPOS_DOCUMENTO_COBRO, descripcion_documento="Cobro"
     )

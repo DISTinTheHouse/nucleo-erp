@@ -562,6 +562,8 @@ class Cobro(models.Model):
     # cambio (MXN por unidad) va al REP; en MXN siempre es 1.
     moneda = models.ForeignKey('nucleo.Moneda', on_delete=models.PROTECT, related_name="cobros", null=True, blank=True)
     tipo_cambio = models.DecimalField(max_digits=18, decimal_places=6, default=1)
+    # Serie ``COBROS`` de la sucursal de la primera factura cobrada (nulo si no hay serie).
+    folio = models.CharField(max_length=30, null=True, blank=True)
     estatus = models.CharField(max_length=30, choices=Estatus.choices, default=Estatus.APLICADO)
     observaciones = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
