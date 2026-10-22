@@ -1022,3 +1022,93 @@ class ClientesContabilidadTests(TestCase):
         with patch("terceros.scope.claves_departamento_usuario", return_value={"CONTABILIDAD"}):
             self.assertEqual(list(clientes_visibles(clientes_base(), user)), [propio])
 
+
+
+CSF_MORAL = """CÉDULA DE IDENTIFICACIÓN FISCAL
+Datos de Identificación del Contribuyente:
+RFC: AAA010101AA1
+Denominación/Razón Social: ACME SA DE CV
+Fecha inicio de operaciones: 01 DE ENERO DE 2020
+Datos del domicilio registrado
+Código Postal: 06600 Tipo de Vialidad: CALLE
+Nombre de Vialidad: REFORMA Número Exterior: 100
+Número Interior: 2 Nombre de la Colonia: JUAREZ
+Nombre de la Localidad: CIUDAD DE MEXICO Nombre del Municipio o Demarcación Territorial: CUAUHTEMOC
+Nombre de la Entidad Federativa: CIUDAD DE MEXICO Entre Calle: X Y Calle: Z
+Regímenes:
+Régimen Fecha Inicio Fecha Fin
+General de Ley Personas Morales 01/01/2020
+Obligaciones:
+"""
+
+CSF_FISICA_LINEAS = """RFC:
+XAXX010101000
+CURP:
+PEPJ800101HDFRRN09
+Nombre (s):
+JUAN
+Primer Apellido:
+PEREZ
+Segundo Apellido:
+LOPEZ
+Estatus en el padrón: ACTIVO
+Código Postal:
+44100
+Nombre de Vialidad:
+HIDALGO
+Nombre del Municipio o Demarcación Territorial:
+GUADALAJARA
+Nombre de la Entidad Federativa:
+JALISCO
+"""
+
+
+class ImportarCsfTests(TestCase):
+    def setUp(self):
+        self.empresa = Empresa.objects.create(codigo="csf", razon_social="Csf Empresa")
+        self.user = Usuario.objects.create(
+            username="csf", email="csf@test.com", empresa=self.empresa, is_admin_empresa=True
+        )
+        self.api = APIClient()
+        self.api.force_authenticate(user=self.user)
+        from nucleo.models import SatRegimenFiscal
+        SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley Personas Morales", aplica_moral=True)
+
+    def _post(self, contenido, texto=CSF_MORAL):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        archivo = SimpleUploadedFile("csf.pdf", contenido, content_type="application/pdf")
+        with patch("terceros.csf.extraer_texto", return_value=texto):
+            return self.api.post("/api/v1/terceros/clientes/importar-csf/", {"archivo": archivo}, format="multipart")
+
+    def test_persona_moral_prellena_datos_y_no_crea(self):
+        resp = self._post(b"%PDF-1.4 x")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        d = resp.data["datos"]
+        self.assertEqual((d["rfc"], d["razon_social"], d["codigo_postal"]), ("AAA010101AA1", "ACME SA DE CV", "06600"))
+        self.assertEqual((d["direccion_fiscal"], d["numero_exterior"], d["numero_interior"]), ("CALLE REFORMA", "100", "2"))
+        self.assertEqual((d["colonia"], d["delegacion"], d["estado"]), ("JUAREZ", "CUAUHTEMOC", "CIUDAD DE MEXICO"))
+        self.assertEqual(d["sat_regimen_fiscal_codigo"], "601")
+        self.assertIsNone(resp.data["cliente_existente_id"])
+        self.assertEqual(Cliente.objects.count(), 0)
+
+    def test_persona_fisica_con_valores_en_lineas_aparte(self):
+        d = self._post(b"%PDF-1.4 x", CSF_FISICA_LINEAS).data["datos"]
+        self.assertEqual((d["rfc"], d["razon_social"], d["curp"]), ("XAXX010101000", "JUAN PEREZ LOPEZ", "PEPJ800101HDFRRN09"))
+        self.assertEqual((d["codigo_postal"], d["estado"]), ("44100", "JALISCO"))
+
+    def test_avisa_si_el_rfc_ya_es_cliente(self):
+        c = Cliente.objects.create(empresa=self.empresa, nombre="Acme", rfc="AAA010101AA1")
+        self.assertEqual(self._post(b"%PDF-1.4 x").data["cliente_existente_id"], c.id)
+
+    def test_rechaza_no_pdf_sin_rfc_y_sin_archivo(self):
+        self.assertEqual(self._post(b"hola").status_code, 400)
+        self.assertEqual(self._post(b"%PDF-1.4 x", "texto cualquiera").status_code, 400)
+        self.assertEqual(self.api.post("/api/v1/terceros/clientes/importar-csf/", {}, format="multipart").status_code, 400)
+
+    def test_lectura_es_rapida(self):
+        import time
+        from terceros import csf
+        inicio = time.perf_counter()
+        for _ in range(50):
+            csf.interpretar(CSF_MORAL)
+        self.assertLess(time.perf_counter() - inicio, 2.0)

@@ -6,6 +6,7 @@ from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from django.conf import settings
 from django.db import transaction
@@ -16,7 +17,7 @@ from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import ProveedorSerializer, ClienteSerializer, DireccionClienteSerializer
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
 from terceros.cartera import cartera_de_cliente
-from terceros import facturama
+from terceros import csf, facturama
 from terceros.scope import clientes_base, clientes_visibles
 import logging
 
@@ -148,6 +149,27 @@ class ClienteViewSet(viewsets.ModelViewSet):
     def en_facturama(self, request, pk=None):
         """El cliente tal como está en Facturama (``GET /Client/{Id}``)."""
         return Response(facturama.consultar(self.get_object()))
+
+    @action(detail=False, methods=["post"], url_path="importar-csf", parser_classes=[MultiPartParser])
+    def importar_csf(self, request):
+        """Lee una Constancia de Situación Fiscal (PDF, campo ``archivo``) y devuelve los datos
+        para prellenar el alta. No crea ni guarda nada: el alta sigue siendo ``POST /clientes/``."""
+        archivo = request.FILES.get("archivo")
+        if archivo is None:
+            raise ValidationError({"archivo": "Adjunta la constancia en PDF."})
+        if archivo.size > csf.MAX_BYTES:
+            raise ValidationError({"archivo": "El PDF excede 5 MB."})
+        if archivo.read(5) != b"%PDF-":
+            raise ValidationError({"archivo": "El archivo debe ser un PDF."})
+        archivo.seek(0)
+        try:
+            datos = csf.leer_csf(archivo)
+        except csf.CsfInvalida as e:
+            raise ValidationError({"archivo": str(e)})
+        existente = clientes_visibles(clientes_base(), request.user).filter(
+            rfc=datos["rfc"], activo=True
+        ).values_list("id", flat=True).first()
+        return Response({"datos": datos, "cliente_existente_id": existente})
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-422): mismo
     # criterio que los demás ``kpis`` -- todo con ``aggregate()``/``Sum``/
