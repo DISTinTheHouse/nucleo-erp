@@ -100,7 +100,7 @@ from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
 from finanzas.services.reporte_contable_service import LIMITE_OMISION, ReporteContableService
-from finanzas.utils.folios import generate_factura_folio
+from finanzas.utils.folios import generate_cobro_folio, generate_factura_folio
 from nucleo.models import Empresa, Moneda, Sucursal
 
 PERMISO_CANCELAR_FACTURA = 'E-FIN-FACTURAS'
@@ -1896,6 +1896,10 @@ class CobroViewSet(FinanzasBaseViewSet):
                         {"cobro_detalles": [f"La CxC {cxc.pk} es de otro cliente."]}
                     )
             CobroDetalle.objects.create(cobro=cobro, **d)
+        if detalles_data:
+            sucursal_id = detalles_data[0]["cxc"].factura.sucursal_id
+            cobro.folio = generate_cobro_folio(cobro.empresa_id, sucursal_id)
+            cobro.save(update_fields=["folio"])
         if cobro.estatus == Cobro.Estatus.APLICADO:
             CobroService.aplicar_cobro(cobro, user)
 
