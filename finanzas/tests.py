@@ -6769,6 +6769,47 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
                     self.assertEqual(cxc.saldo, Decimal("40.00"))
                     self.assertEqual(self._banco(cobro), banco)
 
+    def _cancelar_rep(self, respuesta=None, error=None, **campos):
+        cobro = Cobro.objects.get(pk=self._cobrar(self._cxc(), "60.00").data["id"])
+        Cobro.objects.filter(pk=cobro.pk).update(
+            **{"rep_uuid": f"REP-UUID-{cobro.pk}", "rep_facturama_id": "REP-ID", **campos}
+        )
+        with self.settings(FACTURAMA_EMPRESA_CODIGO=self.a["empresa"].codigo), patch(
+            "finanzas.services.factura_timbrado_service.FacturamaService"
+        ) as servicio:
+            servicio.return_value.cancel_cfdi.return_value = respuesta
+            servicio.return_value.cancel_cfdi.side_effect = error
+            resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar-rep/")
+        cobro.refresh_from_db()
+        return resp, cobro, servicio.return_value.cancel_cfdi
+
+    def test_cancelar_rep_limpia_el_rep_y_deja_cancelar_el_cobro(self):
+        resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, rep_pendiente=True)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cancel.assert_called_once_with("REP-ID")
+        self.assertEqual((cobro.rep_uuid, cobro.rep_facturama_id, cobro.rep_pendiente), (None, None, False))
+        self.assertEqual(self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/").status_code, 200)
+
+    def test_cancelar_rep_si_el_sat_no_cancela_no_se_toca_nada(self):
+        casos = {
+            "requested": ({"Status": "requested"}, None, "cancelacion_pendiente"),
+            "rejected": ({"Status": "rejected"}, None, "rep"),
+            "facturama 4xx": (None, FacturamaAPIException("error", status_code=400, details={"Message": "No"}), "rep"),
+        }
+        for nombre, (respuesta, error, clave) in casos.items():
+            with self.subTest(nombre):
+                resp, cobro, _ = self._cancelar_rep(respuesta, error)
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIn(clave, resp.data)
+                self.assertEqual(cobro.rep_uuid, f"REP-UUID-{cobro.pk}")
+
+    def test_cancelar_rep_sin_rep_confirmado_no_llama_a_facturama(self):
+        resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, rep_uuid=None)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        cancel.assert_not_called()
+
     def test_cancelar_un_borrador_no_toca_saldos_ni_banco(self):
         cxc = self._cxc()
         resp = self._cobrar(cxc, "60.00", estatus=Cobro.Estatus.BORRADOR.value)
