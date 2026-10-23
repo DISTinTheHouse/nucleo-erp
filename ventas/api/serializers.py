@@ -39,6 +39,55 @@ def _exigir_codigos_postales(serializer, attrs, campos):
     exigir_codigos_postales(attrs, campos, cliente_actual)
 
 
+# --- Anticipo, flete y seguros de cotización/pedido (EC-571, CO-03/CO-07) -------
+#
+# ``gran_total`` lo calcula el frontend; aquí sólo se exige coherencia: montos no
+# negativos (a nivel de campo) y ``anticipo <= gran_total`` (en ``validate()``, solo
+# si el payload trae alguno de los dos). ``enviar_revision``/``autorizar`` revisan
+# lo guardado con ``errores_montos_guardados``.
+MSJ_MONTO_NEGATIVO = "Debe ser mayor o igual a 0"
+MSJ_ANTICIPO_MAYOR_AL_TOTAL = "El anticipo no puede ser mayor al total"
+CAMPOS_MONTO_NO_NEGATIVO = ("anticipo", "flete", "seguros")
+_NO_NEGATIVO = {"min_value": Decimal("0"), "error_messages": {"min_value": MSJ_MONTO_NEGATIVO}}
+
+
+def _documento_actual(serializer):
+    """El documento que se edita: ``instance`` o, si el serializer va anidado sin
+    ``instance`` (onboarding, editar-mesa-control), ``context["documento_actual"]``."""
+    if serializer.instance is not None:
+        return serializer.instance
+    return serializer.context.get("documento_actual")
+
+
+def _exigir_anticipo_no_mayor_al_total(serializer, attrs):
+    if "anticipo" not in attrs and "gran_total" not in attrs:
+        return
+    documento = _documento_actual(serializer)
+    modelo = serializer.Meta.model
+
+    def valor(campo):
+        if campo in attrs:
+            return attrs[campo]
+        if documento is not None:
+            return getattr(documento, campo)
+        return modelo._meta.get_field(campo).get_default()
+
+    anticipo, gran_total = valor("anticipo"), valor("gran_total")
+    if anticipo is not None and gran_total is not None and anticipo > gran_total:
+        raise serializers.ValidationError({"anticipo": [MSJ_ANTICIPO_MAYOR_AL_TOTAL]})
+
+
+def errores_montos_guardados(documento):
+    """Las mismas reglas sobre los valores ya guardados de ``documento``."""
+    errores = {}
+    for campo in CAMPOS_MONTO_NO_NEGATIVO:
+        if (getattr(documento, campo) or 0) < 0:
+            errores[campo] = [MSJ_MONTO_NEGATIVO]
+    if "anticipo" not in errores and (documento.anticipo or 0) > (documento.gran_total or 0):
+        errores["anticipo"] = [MSJ_ANTICIPO_MAYOR_AL_TOTAL]
+    return errores
+
+
 # --- Aislamiento multi-tenant de las FKs en ESCRITURA (#249) -------------------
 #
 # Con ``fields='__all__'`` cada FK es un ``PrimaryKeyRelatedField`` sobre
@@ -165,6 +214,7 @@ class CotizacionSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         _exigir_codigos_postales(self, attrs, CAMPOS_CP_COTIZACION)
+        _exigir_anticipo_no_mayor_al_total(self, attrs)
         return attrs
 
     class Meta:
@@ -189,6 +239,9 @@ class CotizacionSerializer(serializers.ModelSerializer):
             'forma_pago': {'required': False, 'allow_null': True, 'allow_blank': True},
             'metodo_pago': {'required': False, 'allow_null': True, 'allow_blank': True},
             'uso_cfdi': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'anticipo': _NO_NEGATIVO,
+            'flete': _NO_NEGATIVO,
+            'seguros': _NO_NEGATIVO,
         }
 
 class CotizacionComentarioSerializer(serializers.ModelSerializer):
@@ -701,6 +754,7 @@ class PedidoSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         _exigir_codigos_postales(self, attrs, CAMPOS_CP_PEDIDO)
+        _exigir_anticipo_no_mayor_al_total(self, attrs)
         return attrs
 
     def get_servicios_extras(self, obj):
@@ -804,6 +858,9 @@ class PedidoSerializer(serializers.ModelSerializer):
             'telefono_pagos': _VALIDA_TELEFONO,
             'telefono_envio': _VALIDA_TELEFONO,
             'celular_envio': _VALIDA_TELEFONO,
+            'anticipo': _NO_NEGATIVO,
+            'flete': _NO_NEGATIVO,
+            'seguros': _NO_NEGATIVO,
         }
 
 class PedidoServicioExtraSerializer(serializers.ModelSerializer):
@@ -956,12 +1013,17 @@ class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
             "telefono_pagos": _VALIDA_TELEFONO,
             "telefono_envio": _VALIDA_TELEFONO,
             "celular_envio": _VALIDA_TELEFONO,
+            "anticipo": _NO_NEGATIVO,
+            "flete": _NO_NEGATIVO,
+            "seguros": _NO_NEGATIVO,
         }
 
     def validate(self, attrs):
         # Anidado en ``PedidoMesaControlUpdateSerializer``, sin ``instance``: el
-        # cliente siempre viene en ``attrs`` (es obligatorio en ``Pedido``).
+        # cliente siempre viene en ``attrs`` (es obligatorio en ``Pedido``); los
+        # montos que falten se toman del pedido (``context["documento_actual"]``).
         _exigir_codigos_postales(self, attrs, CAMPOS_CP_PEDIDO)
+        _exigir_anticipo_no_mayor_al_total(self, attrs)
         return attrs
 
     def validate_cliente(self, cliente):
