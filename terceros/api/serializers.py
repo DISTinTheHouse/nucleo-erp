@@ -9,6 +9,23 @@ PERMISO_CREDITO_CLIENTE = "E-CRM-CLIENTES-CREDITO"
 CAMPOS_CREDITO_CLIENTE = ("dias_credito", "limite_credito")
 
 
+def verificar_rfc_cliente(rfc, empresa):
+    """``(aplica, error)`` del RFC de un cliente de ``empresa``; ``rfc`` ya normalizado.
+
+    Facturama rechaza los RFC mal formados: si la empresa sube sus clientes allá
+    (``aplica``), se valida formato + dígito verificador para no guardar un cliente
+    que nunca se podrá sincronizar. ``error`` es el mensaje con el que el guardado
+    rechaza el campo ``rfc``, o ``None``. Única definición para
+    ``ClienteSerializer.validate()`` y ``GET clientes/verificar-rfc/`` (EC-570,
+    CL-04): verificar y guardar no pueden dar resultados distintos.
+    """
+    aplica = bool(rfc) and empresa_usa_facturama(empresa)
+    if not aplica:
+        return aplica, None
+    rfc_valido, error_rfc = validate_rfc(rfc)
+    return aplica, None if rfc_valido else error_rfc
+
+
 class ClienteSerializer(serializers.ModelSerializer):
     razon_social = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     correo = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
@@ -44,13 +61,9 @@ class ClienteSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         self._validar_permiso_credito(attrs, getattr(request, "user", None))
         empresa = getattr(getattr(request, "user", None), "empresa", None)
-        # Facturama rechaza los RFC mal formados: si la empresa sube sus clientes
-        # allá, se valida aquí (formato + dígito verificador) para no guardar un
-        # cliente que nunca se podrá sincronizar.
-        if rfc and empresa_usa_facturama(self.instance.empresa if self.instance else empresa):
-            rfc_valido, error_rfc = validate_rfc(rfc)
-            if not rfc_valido:
-                raise serializers.ValidationError({"rfc": error_rfc})
+        _, error_rfc = verificar_rfc_cliente(rfc, self.instance.empresa if self.instance else empresa)
+        if error_rfc:
+            raise serializers.ValidationError({"rfc": error_rfc})
         # Los RFC genéricos (público en general / extranjero) los comparten
         # muchos clientes: no cuentan como duplicado (EC-570, CL-03).
         if empresa and rfc and rfc not in RFCS_GENERICOS:
