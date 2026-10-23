@@ -15,7 +15,7 @@ from ventas.services.sku_produccion_service import (
     cargar_variantes_produccion,
     skus_produccion_por_talla,
 )
-from nucleo.utils import errores_codigo_postal, validate_telefono
+from nucleo.utils import exigir_codigos_postales, validate_telefono
 
 
 # --- CP y teléfonos de cotización/pedido (EC-570, CL-01/CL-02) -----------------
@@ -30,10 +30,13 @@ CAMPOS_CP_PEDIDO = ("codigo_postal", "cliente_codigo_postal")
 
 
 def _exigir_codigos_postales(serializer, attrs, campos):
-    cliente = attrs["cliente"] if "cliente" in attrs else getattr(serializer.instance, "cliente", None)
-    errores = errores_codigo_postal(attrs, campos, getattr(cliente, "rfc", None))
-    if errores:
-        raise serializers.ValidationError(errores)
+    # Sin ``instance`` (anidado en onboarding aun al editar), el caller puede pasar
+    # en ``context["cliente_documento"]`` el cliente que el documento ya tiene.
+    if serializer.instance is not None:
+        cliente_actual = serializer.instance.cliente
+    else:
+        cliente_actual = serializer.context.get("cliente_documento")
+    exigir_codigos_postales(attrs, campos, cliente_actual)
 
 
 # --- Aislamiento multi-tenant de las FKs en ESCRITURA (#249) -------------------

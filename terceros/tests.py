@@ -1010,7 +1010,9 @@ VERIFICAR_RFC_URL = "/api/v1/terceros/clientes/verificar-rfc/"
 DIRECCIONES_URL = "/api/v1/terceros/direcciones-clientes/"
 CP_INVALIDOS = ("ABCDE123", "1234", "123456", "12 34", "１２３４５")
 TELEFONOS_VALIDOS = ("8112345678", "+52 (81) 1234-5678")
-TELEFONOS_INVALIDOS = ("ABC TELEFONO", "81-1234-567x", "81.1234.5678")
+TELEFONOS_INVALIDOS = ("ABC TELEFONO", "81-1234-567x", "81.1234.5678", "---", "()", "+")
+# Solo caracteres permitidos, pero más largo que la columna (20): 400, no un 500 de la BD.
+TELEFONO_LARGO = "+52 (81) 1234-5678 990"
 
 
 class ClienteCodigoPostalTelefonoTests(TestCase):
@@ -1075,6 +1077,12 @@ class ClienteCodigoPostalTelefonoTests(TestCase):
     def test_vacios_siguen_permitidos(self):
         resp = self._alta(telefono="", telefono_2=None, codigo_postal="")
         self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_telefono_mas_largo_que_el_modelo_es_400(self):
+        self.assertGreater(len(TELEFONO_LARGO), 20)
+        resp = self._alta(telefono=TELEFONO_LARGO, telefono_2=TELEFONO_LARGO)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.data), {"telefono", "telefono_2"})
 
     def test_patch_sin_esos_campos_pasa_con_valores_heredados_invalidos(self):
         cliente = Cliente.objects.create(
@@ -1191,6 +1199,34 @@ class VerificarRfcTests(TestCase):
         self.assertEqual(api.get(VERIFICAR_RFC_URL, {"rfc": "  "}).status_code, 400)
         self.assertEqual(api.get(VERIFICAR_RFC_URL, {"rfc": "QAZ010101AB8", "otro": "1"}).status_code, 400)
         self.assertIn(APIClient().get(VERIFICAR_RFC_URL, {"rfc": "QAZ010101AB8"}).status_code, (401, 403))
+        self.assertEqual(api.get(VERIFICAR_RFC_URL, {"rfc": "QAZ010101AB8", "cliente": "x"}).status_code, 400)
+
+    def test_con_cliente_aplica_la_regla_de_su_empresa_como_la_edicion(self):
+        """Un superusuario sin empresa: sin ``cliente`` no aplica el dígito; con el
+        cliente de la empresa con Facturama, el mismo resultado que editarlo."""
+        superusuario = Usuario.objects.create(username="su@x.test", email="su@x.test", is_superuser=True)
+        cliente = Cliente.objects.create(empresa=self.con_facturama, nombre="Cli", rfc="QAZ010101AB8")
+        api = self._api(superusuario)
+        self.assertTrue(api.get(VERIFICAR_RFC_URL, {"rfc": "QAZ010101AB1"}).data["valido"])
+        for rfc in ("QAZ010101AB1", "URE180429TM6"):
+            with self.subTest(rfc=rfc):
+                verificado = api.get(VERIFICAR_RFC_URL, {"rfc": rfc, "cliente": cliente.pk})
+                self.assertEqual(verificado.status_code, 200)
+                self.assertTrue(verificado.data["formato_verificado"])
+                guardado = api.patch(f"{CLIENTES_URL}{cliente.pk}/", {"rfc": rfc}, format="json")
+                self.assertEqual(verificado.data["valido"], guardado.status_code == 200, guardado.data)
+                if guardado.status_code == 400:
+                    self.assertEqual(verificado.data["error"], str(guardado.data["rfc"][0]))
+
+    def test_cliente_de_otra_empresa_es_404(self):
+        ajeno = Cliente.objects.create(empresa=self.con_facturama, nombre="Ajeno")
+        propio = Cliente.objects.create(empresa=self.sin_facturama, nombre="Propio")
+        api = self._api(self.user_otra)
+        self.assertEqual(api.get(VERIFICAR_RFC_URL, {"rfc": "QAZ010101AB1", "cliente": ajeno.pk}).status_code, 404)
+        self.assertEqual(api.get(VERIFICAR_RFC_URL, {"rfc": "QAZ010101AB1", "cliente": 999999}).status_code, 404)
+        resp = api.get(VERIFICAR_RFC_URL, {"rfc": "QAZ010101AB1", "cliente": propio.pk})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual((resp.data["valido"], resp.data["formato_verificado"]), (True, False))
 
 
 class DireccionClienteTests(TestCase):
@@ -1302,6 +1338,38 @@ class DireccionClienteTests(TestCase):
         resp = self._alta(self.admin, self.cliente, telefono_envio="ABC", celular_envio="81 (12) 34-56+7")
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(set(resp.data), {"telefono_envio"})
+        resp = self._alta(self.admin, self.cliente, telefono_envio=TELEFONO_LARGO, celular_envio="---")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.data), {"telefono_envio", "celular_envio"})
+
+    def test_cliente_dado_de_baja_sigue_editable(self):
+        from terceros.models import DireccionCliente
+
+        inactivo = Cliente.objects.create(empresa=self.empresa, nombre="Baja")
+        direccion = DireccionCliente.objects.create(cliente=inactivo, empresa=self.empresa, **self._datos_modelo())
+        inactivo.soft_delete()
+        url = f"{DIRECCIONES_URL}{direccion.pk}/"
+        self.assertIn(direccion.pk, self._ids(self.admin))
+        # El formulario del front manda ``cliente`` en cada guardado.
+        resp = self._api(self.admin).patch(url, {"cliente": inactivo.pk, "destinatario": "Nuevo"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_cliente_heredado_sin_empresa_conserva_la_de_la_direccion(self):
+        from terceros.models import DireccionCliente
+
+        sin_empresa = Cliente.objects.create(nombre="Heredado")
+        direccion = DireccionCliente.objects.create(cliente=sin_empresa, empresa=self.otra, **self._datos_modelo())
+        url = f"{DIRECCIONES_URL}{direccion.pk}/"
+        for datos in ({"destinatario": "Nuevo"}, {"cliente": sin_empresa.pk, "destinatario": "Otro"}):
+            with self.subTest(datos=datos):
+                resp = self._api(self.superusuario).patch(url, datos, format="json")
+                self.assertEqual(resp.status_code, 200, resp.data)
+                direccion.refresh_from_db()
+                self.assertEqual(direccion.empresa_id, self.otra.pk)
+        # Para crear una nueva o mover otra a ese cliente sí hace falta empresa.
+        resp = self._alta(self.superusuario, sin_empresa)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("cliente", resp.data)
 
     def test_patch_parcial_con_valores_heredados_invalidos(self):
         from terceros.models import DireccionCliente

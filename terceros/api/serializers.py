@@ -1,9 +1,14 @@
 from rest_framework import serializers
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from nucleo.models import SatRegimenFiscal, SatUsoCfdi
-from nucleo.utils import RFCS_GENERICOS, errores_codigo_postal, validate_rfc, validate_telefono
+from nucleo.utils import (
+    RFCS_GENERICOS,
+    errores_codigo_postal,
+    exigir_codigos_postales,
+    validate_rfc,
+    validate_telefono,
+)
 from finanzas.services.facturama.acceso import empresa_usa_facturama
-from terceros.scope import clientes_base
 
 # Definir o cambiar el crédito del cliente es una capacidad aparte de editarlo (#462).
 PERMISO_CREDITO_CLIENTE = "E-CRM-CLIENTES-CREDITO"
@@ -30,7 +35,10 @@ def verificar_rfc_cliente(rfc, empresa):
 class ClienteSerializer(serializers.ModelSerializer):
     razon_social = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     correo = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
-    telefono = serializers.CharField(required=False, allow_blank=True, allow_null=True, validators=[validate_telefono])
+    telefono = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True, max_length=Cliente._meta.get_field("telefono").max_length,
+        validators=[validate_telefono],
+    )
     giro_empresarial = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     sat_regimen_fiscal_codigo = serializers.CharField(write_only=True, required=False, allow_blank=True)
     sat_uso_cfdi_codigo = serializers.CharField(write_only=True, required=False, allow_blank=True)
@@ -126,27 +134,26 @@ class ProveedorSerializer(serializers.ModelSerializer):
 
 class DireccionClienteSerializer(serializers.ModelSerializer):
     def validate_cliente(self, cliente):
-        # Solo un cliente de la empresa del usuario (el superusuario, de cualquiera).
-        # Uno de otra empresa responde igual que un pk inexistente, sin delatar que existe.
+        # Solo un cliente de la empresa del usuario (el superusuario, de cualquiera),
+        # activo o dado de baja. Uno de otra empresa responde igual que un pk
+        # inexistente, sin delatar que existe.
         user = getattr(self.context.get("request"), "user", None)
-        clientes = clientes_base()
-        if not getattr(user, "is_superuser", False):
-            clientes = clientes.filter(empresa_id=getattr(user, "empresa_id", None)).exclude(empresa_id=None)
-        if not clientes.filter(pk=cliente.pk).exists():
+        if not getattr(user, "is_superuser", False) and (
+            cliente.empresa_id is None or cliente.empresa_id != getattr(user, "empresa_id", None)
+        ):
             raise serializers.ValidationError(
                 self.fields["cliente"].error_messages["does_not_exist"].format(pk_value=cliente.pk),
                 code="does_not_exist",
             )
-        # La dirección toma la empresa del cliente (``DireccionClienteViewSet``).
-        if cliente.empresa_id is None:
+        # La dirección toma la empresa del cliente (``DireccionClienteViewSet``); al
+        # editar sin cambiar de cliente se conserva la que ya tiene.
+        cambia_cliente = self.instance is None or self.instance.cliente_id != cliente.pk
+        if cliente.empresa_id is None and cambia_cliente:
             raise serializers.ValidationError("El cliente no tiene empresa asignada.")
         return cliente
 
     def validate(self, attrs):
-        cliente = attrs["cliente"] if "cliente" in attrs else getattr(self.instance, "cliente", None)
-        errores_cp = errores_codigo_postal(attrs, ("codigo_postal",), getattr(cliente, "rfc", None))
-        if errores_cp:
-            raise serializers.ValidationError(errores_cp)
+        exigir_codigos_postales(attrs, ("codigo_postal",), getattr(self.instance, "cliente", None))
         return attrs
 
     class Meta:

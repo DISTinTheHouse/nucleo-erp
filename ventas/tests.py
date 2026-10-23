@@ -5724,6 +5724,46 @@ class CodigoPostalTelefonoVentasTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(set(resp.data), set(self.TELEFONOS))
         self.assertEqual(self._patch(self._cotizacion(), telefono_pagos="", telefono_envio=None).status_code, 200)
+        # Sin dígitos, o más largo que la columna (20): 400 de campo.
+        resp = self._patch(self._cotizacion(), telefono_pagos="---", telefono_envio="+52 (81) 1234-5678 990")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.data), {"telefono_pagos", "telefono_envio"})
+        resp = self._patch(self._pedido(), telefono_pagos="()", celular_envio="+52 (81) 1234-5678 990")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.data), {"telefono_pagos", "celular_envio"})
+
+    def _onboarding_edicion(self, cotizacion, codigo_postal):
+        # Payload sin ``cliente``: la cotización conserva el que ya tiene.
+        return self.api.post(
+            COTIZACION_ONBOARDING_URL,
+            {
+                "cotizacion_id": cotizacion.pk,
+                "cotizacion": {"sucursal": self.sucursal.pk, "moneda": self.moneda.pk, "codigo_postal": codigo_postal},
+                "detalle": [],
+            },
+            format="json",
+        )
+
+    def test_onboarding_editando_usa_el_cliente_guardado_para_la_excepcion(self):
+        resp = self._onboarding_edicion(self.cotizacion_extranjero, "SW1A 1AA")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.cotizacion_extranjero.refresh_from_db()
+        self.assertEqual(
+            (self.cotizacion_extranjero.cliente_id, self.cotizacion_extranjero.codigo_postal),
+            (self.extranjero.pk, "SW1A 1AA"),
+        )
+        resp = self._onboarding_edicion(self.cotizacion_borrador, "SW1A 1AA")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("codigo_postal", resp.data["cotizacion"])
+
+    def test_onboarding_no_toma_el_cliente_de_una_cotizacion_de_otra_empresa(self):
+        ajena = Cotizacion.objects.create(
+            empresa=self.empresa_b, sucursal=self.sucursal_b, moneda=self.moneda, estatus=1,
+            cliente=Cliente.objects.create(empresa=self.empresa_b, nombre="Ext B", rfc="XEXX010101000"),
+        )
+        resp = self._onboarding_edicion(ajena, "SW1A 1AA")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("codigo_postal", resp.data["cotizacion"])
 
     def test_cotizacion_patch_parcial_con_valores_heredados_invalidos(self):
         Cotizacion.objects.filter(pk=self.cotizacion_borrador.pk).update(

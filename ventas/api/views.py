@@ -1566,11 +1566,26 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 ) or empresa_documento_id
             except (TypeError, ValueError):
                 pass
+        # Al editar, el cliente que la cotización ya tiene decide la excepción del CP
+        # de extranjero si el payload no manda ``cliente`` (EC-570). Solo de la
+        # empresa del documento: una cotización ajena no aporta nada.
+        cliente_documento = None
+        if cotizacion_id_raw not in (None, ""):
+            try:
+                cotizacion_actual = (
+                    Cotizacion.objects.select_related("cliente")
+                    .filter(pk=int(cotizacion_id_raw), empresa_id=empresa_documento_id)
+                    .first()
+                )
+            except (TypeError, ValueError):
+                cotizacion_actual = None
+            cliente_documento = getattr(cotizacion_actual, "cliente", None)
         serializer = CotizacionOnboardingCreateSerializer(
             data=normalized,
             context={
                 **self.get_serializer_context(),
                 "empresa_documento_id": empresa_documento_id,
+                "cliente_documento": cliente_documento,
             },
         )
         serializer.is_valid(raise_exception=True)
