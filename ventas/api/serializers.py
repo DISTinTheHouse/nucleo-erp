@@ -647,6 +647,17 @@ class PedidoListSerializer(serializers.ModelSerializer):
     # de ``programacion_conf``. Cada item: destino/cantidad/comentarios/
     # fecha/usuario_id/usuario_nombre (mismo shape que arma ``programar``).
     parcialidades = serializers.SerializerMethodField()
+    # EC-571, PE-01. ``piezas`` la anota ``PedidoViewSet.get_queryset`` en el
+    # listado (todas las tallas, muestras incluidas); ``vendedor_nombre`` sale de
+    # ``cotizacion.vendedor`` (``select_related``), ``None`` sin cotización.
+    piezas = serializers.IntegerField(read_only=True)
+    vendedor_nombre = serializers.SerializerMethodField()
+
+    def get_vendedor_nombre(self, obj):
+        vendedor = obj.cotizacion.vendedor if obj.cotizacion_id else None
+        if vendedor is None:
+            return None
+        return vendedor.get_full_name().strip() or vendedor.email
 
     def get_fecha_entrega_min(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
@@ -687,6 +698,8 @@ class PedidoListSerializer(serializers.ModelSerializer):
             "activo",
             "cliente",
             "moneda",
+            "piezas",
+            "vendedor_nombre",
         ]
 
 class PedidoSerializer(serializers.ModelSerializer):
