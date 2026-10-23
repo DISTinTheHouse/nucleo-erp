@@ -3193,7 +3193,10 @@ class FkCrossTenantEscrituraTests(TestCase):
                 self.assertEqual(getattr(pedido, f"{campo}_id"), original)
 
     def test_pedido_put_con_cliente_de_otra_empresa_es_400(self):
-        client = self._client(self.a["usuario"])
+        # El PUT completo trae forma/método de pago y uso CFDI: quien no ve
+        # contabilidad recibe 403 antes de validar (#537, EC-571), así que el
+        # aislamiento de la FK se prueba con quien sí puede escribirlos.
+        client = self._client(self.a["admin"])
         url = f"{PEDIDOS_URL}{self.a['pedido'].pk}/"
         self._assert_rechazo_como_inexistente(
             lambda pk: client.put(
@@ -5762,8 +5765,10 @@ class CodigoPostalTelefonoVentasTests(TestCase):
             cliente=Cliente.objects.create(empresa=self.empresa_b, nombre="Ext B", rfc="XEXX010101000"),
         )
         resp = self._onboarding_edicion(ajena, "SW1A 1AA")
+        # Se rechaza por acceso antes de validar el CP (EC-571): la cotización
+        # ajena no aporta su cliente ni filtra nada por la validación.
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("codigo_postal", resp.data["cotizacion"])
+        self.assertEqual(set(resp.data), {"cotizacion_id"})
 
     def test_cotizacion_patch_parcial_con_valores_heredados_invalidos(self):
         Cotizacion.objects.filter(pk=self.cotizacion_borrador.pk).update(
@@ -5945,6 +5950,68 @@ class MontosCotizacionPedidoTests(TestCase):
         self.assertEqual(api.patch(self._url_ped(), {"observaciones": "x"}, format="json").status_code, 200)
         self.assertEqual(api.patch(self._url_ped(), {"anticipo": "10.00"}, format="json").status_code, 403)
 
+    def test_sin_contabilidad_es_403_con_cualquier_valor(self):
+        """El 403 de #537 va antes de validar: valores válidos o inválidos dan la
+        misma respuesta y no dejan deducir el gran_total oculto."""
+        api = APIClient()
+        api.force_authenticate(self.usuario_sin_permiso)
+        respuestas = [
+            api.patch(self._url_ped(), datos, format="json")
+            for datos in ({"anticipo": "1.00"}, {"anticipo": "999999.00"}, {"anticipo": "-1"},
+                          {"gran_total": "0.01"}, {"anticipo": "1.00", "telefono_envio": "ABC"})
+        ]
+        self.assertEqual({r.status_code for r in respuestas}, {403})
+        self.assertEqual(respuestas[0].content, respuestas[1].content)
+        self.assertEqual(respuestas[0].content, respuestas[2].content)
+        # Un pedido de otra empresa sigue siendo 404, no 403.
+        ajeno = APIClient()
+        ajeno.force_authenticate(Usuario.objects.create(username="vend-b", email="vend-b@globex.test", empresa=self.empresa_b))
+        self.assertEqual(ajeno.patch(self._url_ped(), {"anticipo": "1.00"}, format="json").status_code, 404)
+
+    def test_onboarding_revisa_el_acceso_antes_que_los_montos(self):
+        """Un vendedor no admin con la cotización de otro: "No tienes acceso" antes
+        de validar el anticipo contra el total ajeno."""
+        api = APIClient()
+        api.force_authenticate(self.usuario_sin_permiso)
+        for anticipo in ("1.00", "200.00"):  # el segundo excede el total guardado (116)
+            with self.subTest(anticipo=anticipo):
+                resp = api.post(
+                    COTIZACION_ONBOARDING_URL,
+                    {"cotizacion_id": self.borrador.pk,
+                     "cotizacion": {"sucursal": self.sucursal.pk, "anticipo": anticipo}, "detalle": []},
+                    format="json",
+                )
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(set(resp.data), {"cotizacion_id"})
+                self.assertEqual(str(resp.data["cotizacion_id"]), "No tienes acceso a esta cotización.")
+
+    def test_respuestas_de_edicion_filtran_contabilidad(self):
+        sin_conta = APIClient()
+        sin_conta.force_authenticate(self.usuario_sin_permiso)
+        resp = sin_conta.patch(self._url_ped(), {"observaciones": "x"}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        for campo in ("importe_iva", "gran_total", "anticipo", "forma_pago"):
+            self.assertNotIn(campo, resp.data)
+        resp = self._patch(self._url_ped(), observaciones="y")
+        self.assertEqual(resp.status_code, 200)
+        for campo in ("importe_iva", "gran_total", "anticipo", "forma_pago"):
+            self.assertIn(campo, resp.data)
+
+    def test_reglas_de_montos_en_una_sola_funcion(self):
+        from ventas.api.serializers import errores_montos
+
+        valores = {"anticipo": Decimal("500"), "flete": Decimal("-1"), "seguros": Decimal("0"), "gran_total": Decimal("100")}
+        self.assertEqual(
+            errores_montos(valores),
+            {"flete": [MontosCotizacionPedidoTests.NEGATIVO], "anticipo": [MontosCotizacionPedidoTests.MAYOR]},
+        )
+        # Solo los campos que vienen: sin anticipo ni gran_total no se compara el total.
+        self.assertEqual(errores_montos(valores, {"seguros"}), {})
+        self.assertEqual(set(errores_montos(valores, {"gran_total"})), {"anticipo"})
+        # Un anticipo negativo no se reporta además como mayor al total.
+        self.assertEqual(errores_montos({**valores, "anticipo": Decimal("-5")}, {"anticipo"}),
+                         {"anticipo": [MontosCotizacionPedidoTests.NEGATIVO]})
+
 
 class MontosEnviarRevisionAutorizarTests(TestCase):
     """EC-571: enviar-revision y autorizar revisan los montos guardados antes de
@@ -5998,6 +6065,39 @@ class MontosEnviarRevisionAutorizarTests(TestCase):
         self.assertEqual(resp.status_code, 201, resp.content)
         self.assertEqual(Pedido.objects.get(cotizacion=cot).anticipo, Decimal("500.00"))
 
+    def test_aceptar_cambios(self):
+        cot = self._cot(2, anticipo="100.00")
+        self.assertEqual(self.api.post(f"{COTIZACIONES_URL}{cot.pk}/autorizar/").status_code, 201)
+        pedido = Pedido.objects.get(cotizacion=cot)
+        Cotizacion.objects.filter(pk=cot.pk).update(estatus=5, anticipo="999999.00")
+        resp = self.api.post(f"{COTIZACIONES_URL}{cot.pk}/aceptar-cambios/")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual([str(m) for m in resp.data["anticipo"]], ["El anticipo no puede ser mayor al total"])
+        pedido.refresh_from_db()
+        cot.refresh_from_db()
+        self.assertEqual((pedido.anticipo, cot.estatus), (Decimal("100.00"), 5))
+        Cotizacion.objects.filter(pk=cot.pk).update(anticipo="200.00")
+        resp = self.api.post(f"{COTIZACIONES_URL}{cot.pk}/aceptar-cambios/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        pedido.refresh_from_db()
+        self.assertEqual(pedido.anticipo, Decimal("200.00"))
+
+    def test_alta_de_pedido_filtra_contabilidad_en_la_respuesta(self):
+        vendedor = Usuario.objects.create(username="v@acme-mt.test", email="v@acme-mt.test", empresa=self.empresa)
+        datos = {
+            "sucursal": self.sucursal.pk, "cliente": self.cliente.pk, "moneda": self.moneda.pk,
+            "persona_pagos": "P", "correo_facturas": "p@acme-mt.test", "telefono_pagos": "8100000000",
+            "forma_pago": "03", "metodo_pago": "PUE", "uso_cfdi": "G03", "gran_total": "116.00",
+        }
+        for usuario, ve in ((vendedor, False), (self.mesa, True)):
+            with self.subTest(ve_contabilidad=ve):
+                api = APIClient()
+                api.force_authenticate(usuario)
+                resp = api.post(PEDIDOS_URL, datos, format="json")
+                self.assertEqual(resp.status_code, 201, resp.content)
+                for campo in ("importe_iva", "gran_total", "forma_pago"):
+                    self.assertEqual(campo in resp.data, ve, campo)
+
 
 class ImporteIvaTests(TestCase):
     """EC-571 CO-08: importe_iva = gran_total - importe_sin_iva, en los serializers
@@ -6011,18 +6111,19 @@ class ImporteIvaTests(TestCase):
         from ventas.api.serializers import importes_iva
 
         casos = [
-            (Decimal("1018.48"), 16, Decimal("878.00"), Decimal("140.48")),
-            (Decimal("948.88"), 16, Decimal("818.00"), Decimal("130.88")),
+            (Decimal("1018.48"), 16, Decimal("878.00"), "140.48"),
+            (Decimal("948.88"), 16, Decimal("818.00"), "130.88"),
             # Con cargos: subtotal 878 + flete 100 + seguros 22 = 1000; IVA 160.
-            (Decimal("1160.00"), 16, Decimal("1000.00"), Decimal("160.00")),
-            (Decimal("100.00"), 0, Decimal("100.00"), Decimal("0.00")),
-            (Decimal("10.01"), 16, Decimal("8.63"), Decimal("1.38")),
+            (Decimal("1160.00"), 16, Decimal("1000.00"), "160.00"),
+            (Decimal("100.00"), 0, Decimal("100.00"), "0.00"),
+            (Decimal("10.01"), 16, Decimal("8.63"), "1.38"),
         ]
         for gran_total, iva, sin_iva, importe_iva in casos:
             with self.subTest(gran_total=gran_total):
                 doc = Cotizacion(gran_total=gran_total, iva=iva)
+                # importe_sin_iva sigue siendo Decimal; importe_iva es texto, como gran_total.
                 self.assertEqual(importes_iva(doc), (sin_iva, importe_iva))
-                self.assertEqual(sum(importes_iva(doc)), gran_total)
+                self.assertEqual(importes_iva(doc)[0] + Decimal(importes_iva(doc)[1]), gran_total)
 
     def _api(self, user):
         api = APIClient()
@@ -6040,6 +6141,10 @@ class ImporteIvaTests(TestCase):
         fila = next(f for f in filas if f["id"] == self.cotizacion.pk)
         self.assertEqual(str(fila["importe_iva"]), "140.48")
         self.assertEqual(str(api.get(f"{PEDIDOS_URL}{self.pedido.pk}/").data["importe_iva"]), "140.48")
+        # En el JSON, importe_iva es texto como gran_total; importe_sin_iva conserva su tipo.
+        cuerpo = api.get(f"{COTIZACIONES_URL}{self.cotizacion.pk}/").json()
+        self.assertEqual((cuerpo["gran_total"], cuerpo["importe_iva"], cuerpo["importe_sin_iva"]), ("1018.48", "140.48", 878.0))
+        self.assertEqual(api.get(f"{PEDIDOS_URL}{self.pedido.pk}/").json()["importe_iva"], "140.48")
         resp = api.post(
             COTIZACION_ONBOARDING_URL,
             {
@@ -6136,6 +6241,10 @@ class PedidoListadoPiezasVendedorTests(TestCase):
             filas = self._listado()
         self.assertEqual(len(filas), 6)
         self.assertEqual(len(varios), len(uno))
+        # Solo las columnas del nombre del vendedor, no la fila completa de la cotización.
+        sql_listado = " ".join(q["sql"] for q in varios.captured_queries if '"pedidos"' in q["sql"])
+        self.assertNotIn("aprobado_snapshot", sql_listado)
+        self.assertNotIn("password", sql_listado)
 
 
 class MetodoPagoEtiquetaTests(TestCase):

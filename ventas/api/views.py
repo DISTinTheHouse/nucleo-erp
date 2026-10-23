@@ -85,6 +85,7 @@ from ventas.utils.helpers import (
     _save_servicios_extras,
     _save_pedido_detalle,
     _save_pedido_servicios_extras,
+    nombre_para_mostrar,
 )
 from ventas.services.sku_produccion_service import (
     TALLAS_DE_LINEA_NO_MUESTRA_Q,
@@ -93,6 +94,7 @@ from ventas.services.sku_produccion_service import (
     variantes_produccion_prefetch,
 )
 from ventas.services.pedido_field_filter_service import (
+    CAMPOS_CONTABILIDAD_PEDIDO,
     filtrar_campos_contabilidad_pedido,
     puede_ver_contabilidad,
 )
@@ -1571,16 +1573,22 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         # de extranjero si el payload no manda ``cliente`` (EC-570), y sus montos
         # guardados completan la regla ``anticipo <= gran_total`` (EC-571). Solo de
         # la empresa del documento: una cotización ajena no aporta nada.
+        #
+        # El acceso (empresa y vendedor/admin) se revisa ANTES de validar: con una
+        # cotización ajena, un 400 por CP o montos dejaría deducir sus datos.
         cliente_documento = cotizacion_actual = None
         if cotizacion_id_raw not in (None, ""):
             try:
-                cotizacion_actual = (
-                    Cotizacion.objects.select_related("cliente")
-                    .filter(pk=int(cotizacion_id_raw), empresa_id=empresa_documento_id)
-                    .first()
-                )
+                cotizacion_id_previa = int(cotizacion_id_raw)
             except (TypeError, ValueError):
-                cotizacion_actual = None
+                cotizacion_id_previa = None  # lo rechaza el serializer
+            if cotizacion_id_previa is not None:
+                cotizacion_previa = (
+                    Cotizacion.objects.select_related("cliente").filter(pk=cotizacion_id_previa).first()
+                )
+                self._exigir_acceso_cotizacion_onboarding(cotizacion_previa, user, empresa)
+                if cotizacion_previa.empresa_id == empresa_documento_id:
+                    cotizacion_actual = cotizacion_previa
             cliente_documento = getattr(cotizacion_actual, "cliente", None)
         serializer = CotizacionOnboardingCreateSerializer(
             data=normalized,
@@ -1615,18 +1623,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                         .filter(pk=cotizacion_id)
                         .first()
                     )
-                    if not cotizacion:
-                        raise ValidationError({"cotizacion_id": "Cotización no encontrada."})
-                    if (
-                        not getattr(user, "is_superuser", False)
-                        and empresa
-                        and cotizacion.empresa_id != empresa.pk
-                    ):
-                        raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
-                    if not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
-                        if (cotizacion.vendedor_id and cotizacion.vendedor_id != getattr(user, "id", None)
-                        ):
-                            raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
+                    self._exigir_acceso_cotizacion_onboarding(cotizacion, user, empresa)
 
                     if cotizacion.estatus == 3 and cotizacion.autorizada_at:
                         limite = cotizacion.autorizada_at + timedelta(
@@ -1694,6 +1691,23 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_201_CREATED,
             )
+
+    @staticmethod
+    def _exigir_acceso_cotizacion_onboarding(cotizacion, user, empresa):
+        """Quién puede editar ``cotizacion`` por onboarding: de su empresa y, salvo
+        superusuario o admin de empresa, su vendedor."""
+        if not cotizacion:
+            raise ValidationError({"cotizacion_id": "Cotización no encontrada."})
+        if (
+            not getattr(user, "is_superuser", False)
+            and empresa
+            and cotizacion.empresa_id != empresa.pk
+        ):
+            raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
+        if not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
+            if (cotizacion.vendedor_id and cotizacion.vendedor_id != getattr(user, "id", None)
+            ):
+                raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
 
     def _require_mesa_control(self, user):
         if getattr(user, "is_superuser", False):
@@ -2375,6 +2389,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 raise ValidationError(
                     {"cotizacion": "La cotización no tiene cambios pendientes."}
                 )
+            # Antes de copiar nada al pedido, como en ``autorizar`` (EC-571).
+            errores_montos = errores_montos_guardados(cotizacion)
+            if errores_montos:
+                raise ValidationError(errores_montos)
             pedido = (
                 Pedido.objects.select_for_update()
                 .filter(cotizacion=cotizacion, activo=True)
@@ -3059,8 +3077,14 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 .annotate(total=Sum("cantidad"))
                 .values("total")
             )
-            qs = qs.select_related("cotizacion__vendedor").annotate(
-                piezas=Coalesce(Subquery(piezas_qs[:1]), 0)
+            # Solo las columnas del nombre, no las filas completas de cotización y
+            # usuario (``aprobado_snapshot`` es un JSONB) en un listado sin paginar.
+            qs = qs.annotate(
+                piezas=Coalesce(Subquery(piezas_qs[:1]), 0),
+                vendedor_cotizacion_id=F("cotizacion__vendedor_id"),
+                vendedor_first_name=F("cotizacion__vendedor__first_name"),
+                vendedor_last_name=F("cotizacion__vendedor__last_name"),
+                vendedor_email=F("cotizacion__vendedor__email"),
             )
         # El shape de detalle (retrieve/create/update) serializa ``detalles`` +
         # ``tallas`` vía ``PedidoSerializer``: se prefetchean para evitar el N+1.
@@ -3077,6 +3101,33 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # (migración 0007) y los pedidos previos siguen en NULL; en PostgreSQL
         # un DESC los pondría al principio del listado.
         return qs.order_by(F("created_at").desc(nulls_last=True), "-id")
+
+    def _exigir_permiso_campos_contabilidad(self, request):
+        """#537: lo que la lectura le oculta (importes, forma/método de pago, uso
+        CFDI) tampoco lo puede escribir. Corre ANTES de validar el payload: un 400
+        por el valor (p. ej. anticipo contra gran_total) le dejaría deducir lo oculto,
+        así que con cualquier valor la respuesta es el mismo 403."""
+        if puede_ver_contabilidad(request.user):
+            return
+        escribibles = {n for n, f in self.get_serializer().fields.items() if not f.read_only}
+        ocultos = sorted(set(CAMPOS_CONTABILIDAD_PEDIDO) & escribibles & set(request.data))
+        if ocultos:
+            self.get_object()  # un pedido ajeno sigue siendo 404, no 403
+            raise PermissionDenied(f"No puedes modificar: {', '.join(ocultos)}.")
+
+    def _filtrar_respuesta_contabilidad(self, response):
+        # Mismo filtro que ``retrieve`` y ``editar-mesa-control``: la respuesta del
+        # alta o la edición no muestra lo que el detalle oculta.
+        response.data = filtrar_campos_contabilidad_pedido(response.data, self.request.user)
+        return response
+
+    def create(self, request, *args, **kwargs):
+        return self._filtrar_respuesta_contabilidad(super().create(request, *args, **kwargs))
+
+    def update(self, request, *args, **kwargs):
+        # ``partial_update`` pasa por aquí con ``partial=True``.
+        self._exigir_permiso_campos_contabilidad(request)
+        return self._filtrar_respuesta_contabilidad(super().update(request, *args, **kwargs))
 
     def perform_create(self, serializer):
         # Mismos controles que ``perform_update`` (#532): clasificación y confirmación
@@ -3102,16 +3153,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
         campos_mesa_control = {"clasificacion", "fecha_confirmacion"}
         if campos_mesa_control & set(serializer.validated_data.keys()):
             self._require_mesa_control(self.request.user)
-        # Lo que la lectura le oculta (importes, forma/método de pago, uso CFDI)
-        # tampoco lo puede escribir (#537).
-        from ventas.services.pedido_field_filter_service import (
-            CAMPOS_CONTABILIDAD_PEDIDO,
-            puede_ver_contabilidad,
-        )
-        if not puede_ver_contabilidad(self.request.user):
-            ocultos = sorted(set(CAMPOS_CONTABILIDAD_PEDIDO) & set(serializer.validated_data))
-            if ocultos:
-                raise PermissionDenied(f"No puedes modificar: {', '.join(ocultos)}.")
+        # La restricción #537 (campos de contabilidad) ya corrió en ``update()``,
+        # antes de validar el payload.
         self._validar_cambio_estatus(serializer.instance, serializer.validated_data.get("estatus"))
         serializer.save()
         # ``UpdateModelMixin.update`` vacía el prefetch de ``serializer.instance``
@@ -3326,7 +3369,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             # Sello del servidor, mismo criterio que el reporte de movimientos
             # de inventarios (``usuario_id`` / ``usuario_nombre``).
             fecha = timezone.now().isoformat()
-            usuario_nombre = user.get_full_name().strip() or user.email
+            usuario_nombre = nombre_para_mostrar(user.first_name, user.last_name, user.email)
             pedido.programacion_conf = {
                 "programaciones": [
                     {
