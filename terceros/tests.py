@@ -1194,8 +1194,9 @@ class VerificarRfcTests(TestCase):
 
 
 class DireccionClienteTests(TestCase):
-    """EC-570: alcance multi-tenant de ``direcciones-clientes`` (empresa la fija el
-    servidor, cliente acotado con ``clientes_visibles``) y CL-01/CL-02."""
+    """EC-570: alcance multi-tenant de ``direcciones-clientes`` (lectura y cliente a
+    nivel empresa, sin subalcance por vendedor; empresa la fija el servidor) y
+    CL-01/CL-02."""
 
     @classmethod
     def setUpTestData(cls):
@@ -1271,10 +1272,24 @@ class DireccionClienteTests(TestCase):
         self.assertEqual(self._api(self.admin_otra).patch(url, {"destinatario": "X"}, format="json").status_code, 404)
         self.assertEqual(self._api(self.admin_otra).delete(url).status_code, 404)
 
-    def test_vendedor_solo_ve_las_direcciones_de_sus_clientes(self):
-        self.assertEqual(self._ids(self.vendedor), {self.direccion.pk})
-        self.assertEqual(self._ids(self.admin), {self.direccion.pk, self.direccion_sin_asignar.pk})
-        self.assertEqual(self._alta(self.vendedor, self.cliente_sin_asignar).status_code, 400)
+    def test_vendedor_ve_y_edita_direcciones_de_clientes_no_asignados_de_su_empresa(self):
+        # Quien edita una cotización necesita las direcciones de su cliente aunque
+        # no lo tenga asignado: el alcance es la empresa, no el vendedor.
+        propias = {self.direccion.pk, self.direccion_sin_asignar.pk}
+        self.assertEqual(self._ids(self.vendedor), propias)
+        self.assertEqual(self._ids(self.admin), propias)
+        self.assertEqual(self._alta(self.vendedor, self.cliente_sin_asignar).status_code, 201)
+        url = f"{DIRECCIONES_URL}{self.direccion_sin_asignar.pk}/"
+        resp = self._api(self.vendedor).patch(url, {"cliente": self.cliente_sin_asignar.pk, "destinatario": "Nuevo"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._alta(self.vendedor, self.ajeno).status_code, 400)
+
+    def test_sin_empresa_no_ve_ni_crea(self):
+        sin_empresa = Usuario.objects.create(username="x@x.test", email="x@x.test")
+        self.assertEqual(self._ids(sin_empresa), set())
+        resp = self._alta(sin_empresa, self.cliente)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.data["cliente"][0].code, "does_not_exist")
 
     def test_cp_y_telefonos(self):
         for cp in CP_INVALIDOS:

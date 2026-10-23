@@ -611,14 +611,21 @@ class DireccionClienteViewSet(viewsets.ModelViewSet):
     serializer_class = DireccionClienteSerializer
 
     def get_queryset(self):
-        # Mismo alcance que ``ClienteViewSet`` (``terceros.scope``): solo las
-        # direcciones de clientes que el usuario ve. Antes acotaba por la
-        # ``empresa`` de la dirección, que mandaba el cliente HTTP sin validar.
-        visibles = clientes_visibles(clientes_base(), self.request.user)
-        return super().get_queryset().filter(cliente__in=visibles)
+        # Nivel empresa, no por vendedor: quien edita una cotización necesita las
+        # direcciones de su cliente aunque no lo tenga asignado. Se exige también
+        # la empresa del cliente porque ``empresa`` de la dirección venía del
+        # payload antes de EC-570.
+        user = self.request.user
+        qs = super().get_queryset()
+        if getattr(user, "is_superuser", False):
+            return qs
+        empresa = getattr(user, "empresa", None)
+        if empresa:
+            return qs.filter(empresa=empresa, cliente__empresa=empresa)
+        return qs.none()
 
     def perform_create(self, serializer):
-        # ``validate_cliente`` ya garantizó que el cliente es visible y tiene empresa.
+        # ``validate_cliente`` ya garantizó que el cliente es de la empresa y tiene empresa.
         serializer.save(empresa=serializer.validated_data["cliente"].empresa)
 
     def perform_update(self, serializer):
