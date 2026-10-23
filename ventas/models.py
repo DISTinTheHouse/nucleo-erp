@@ -117,7 +117,7 @@ class Cotizacion(models.Model):
         TARJETA = '04', '04 - TARJETA'
 
     class MetodoPago(models.TextChoices):
-        PUE = 'PUE', 'PUE - PAGO EN UNA SOLA EXIBICIÓN'
+        PUE = 'PUE', 'PUE - PAGO EN UNA SOLA EXHIBICIÓN'
         PPD = 'PPD', 'PPD - PAGO EN PARCIALIDADES'
         NA = 'NA', 'N/A'
 
@@ -352,7 +352,7 @@ class Pedido(StatusLifecycleModel):
         TARJETA = '04', '04 - TARJETA'
 
     class MetodoPago(models.TextChoices):
-        PUE = 'PUE', 'PUE - PAGO EN UNA SOLA EXIBICIÓN'
+        PUE = 'PUE', 'PUE - PAGO EN UNA SOLA EXHIBICIÓN'
         PPD = 'PPD', 'PPD - PAGO EN PARCIALIDADES'
         NA = 'NA', 'N/A'
 
