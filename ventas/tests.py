@@ -5827,3 +5827,322 @@ class CodigoPostalTelefonoVentasTests(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         self.pedido.refresh_from_db()
         self.assertEqual(self.pedido.cliente_codigo_postal, "1234")
+
+
+class MontosCotizacionPedidoTests(TestCase):
+    """EC-571 CO-03/CO-07: anticipo, flete y seguros >= 0 y anticipo <= gran_total
+    en cotización (PATCH y onboarding), pedido (PATCH) y editar-mesa-control."""
+
+    NEGATIVO = "Debe ser mayor o igual a 0"
+    MAYOR = "El anticipo no puede ser mayor al total"
+
+    @classmethod
+    def setUpTestData(cls):
+        # Escenario de ``PedidoMesaControlUpdateTests`` sin heredar sus tests.
+        PedidoMesaControlUpdateTests.setUpTestData.__func__(cls)
+
+    _payload = PedidoMesaControlUpdateTests._payload
+
+    def setUp(self):
+        self.api = APIClient()
+        self.api.force_authenticate(self.admin_mesa)
+        self.borrador = Cotizacion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
+            estatus=1, vendedor=self.admin_mesa, gran_total="116.00",
+        )
+
+    def _patch(self, url, **datos):
+        return self.api.patch(url, datos, format="json")
+
+    def _url_cot(self):
+        return f"{COTIZACIONES_URL}{self.borrador.pk}/"
+
+    def _url_ped(self):
+        return f"{PEDIDOS_URL}{self.pedido.pk}/"
+
+    def test_negativos_rechazados_en_cada_serializer(self):
+        negativos = {"anticipo": "-1.00", "flete": "-0.01", "seguros": "-5"}
+        for url in (self._url_cot(), self._url_ped()):
+            with self.subTest(url=url):
+                resp = self._patch(url, **negativos)
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(
+                    {k: [str(m) for m in v] for k, v in resp.data.items()},
+                    {campo: [self.NEGATIVO] for campo in negativos},
+                )
+        payload = self._payload()
+        payload["pedido"].update(flete="-1.00", seguros="-1.00")
+        resp = self.api.post(pedido_editar_mesa_control_url(self.pedido.pk), payload, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.data["pedido"]), {"flete", "seguros"})
+        self.assertEqual(str(resp.data["pedido"]["flete"][0]), self.NEGATIVO)
+        # Cero sigue permitido.
+        self.assertEqual(self._patch(self._url_cot(), anticipo="0", flete="0", seguros="0").status_code, 200)
+
+    def test_anticipo_contra_gran_total_del_payload_y_guardado(self):
+        for url in (self._url_cot(), self._url_ped()):
+            with self.subTest(url=url):
+                resp = self._patch(url, anticipo="200.00", gran_total="100.00")
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual([str(m) for m in resp.data["anticipo"]], [self.MAYOR])
+                # Sin gran_total en el payload: contra el guardado (116).
+                resp = self._patch(url, anticipo="200.00")
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("anticipo", resp.data)
+                self.assertEqual(self._patch(url, anticipo="116.00").status_code, 200)
+                # Bajar el total por debajo del anticipo guardado también se rechaza.
+                resp = self._patch(url, gran_total="50.00")
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("anticipo", resp.data)
+
+    def test_editar_mesa_control_compara_contra_el_pedido_si_falta_el_total(self):
+        url = pedido_editar_mesa_control_url(self.pedido.pk)
+        payload = self._payload()
+        payload["pedido"]["anticipo"] = "300.00"  # gran_total del payload: 290
+        resp = self.api.post(url, payload, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual([str(m) for m in resp.data["pedido"]["anticipo"]], [self.MAYOR])
+        payload["pedido"].pop("gran_total")
+        payload["pedido"]["anticipo"] = "200.00"  # guardado: 116
+        resp = self.api.post(url, payload, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("anticipo", resp.data["pedido"])
+
+    def test_onboarding_compara_contra_la_cotizacion_que_edita(self):
+        def onboarding(cotizacion, cotizacion_id=None):
+            payload = {"cotizacion": {"sucursal": self.sucursal.pk, **cotizacion}, "detalle": []}
+            if cotizacion_id:
+                payload["cotizacion_id"] = cotizacion_id
+            return self.api.post(COTIZACION_ONBOARDING_URL, payload, format="json")
+
+        # Alta sin gran_total: se compara contra el default (0).
+        resp = onboarding({"cliente": self.cliente.pk, "moneda": self.moneda.pk, "anticipo": "10.00"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("anticipo", resp.data["cotizacion"])
+        # Edición sin gran_total: contra el guardado de esa cotización (116).
+        resp = onboarding({"anticipo": "200.00"}, cotizacion_id=self.borrador.pk)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("anticipo", resp.data["cotizacion"])
+        resp = onboarding({"anticipo": "100.00"}, cotizacion_id=self.borrador.pk)
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_patch_parcial_con_anticipo_heredado_invalido(self):
+        Cotizacion.objects.filter(pk=self.borrador.pk).update(anticipo="999999.00")
+        Pedido.objects.filter(pk=self.pedido.pk).update(anticipo="999999.00", flete="-1.00")
+        self.assertEqual(self._patch(self._url_cot(), observaciones="Sin montos").status_code, 200)
+        self.assertEqual(self._patch(self._url_ped(), observaciones="Sin montos").status_code, 200)
+        # Si el payload trae el anticipo, error de campo normal.
+        resp = self._patch(self._url_ped(), anticipo="999999.00")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("anticipo", resp.data)
+
+    def test_usuarios_sin_contabilidad_siguen_igual(self):
+        """#537: quien no ve contabilidad no recibe errores por montos que no manda,
+        y mandar un monto válido sigue siendo 403."""
+        Pedido.objects.filter(pk=self.pedido.pk).update(anticipo="999999.00")
+        api = APIClient()
+        api.force_authenticate(self.usuario_sin_permiso)
+        self.assertEqual(api.patch(self._url_ped(), {"observaciones": "x"}, format="json").status_code, 200)
+        self.assertEqual(api.patch(self._url_ped(), {"anticipo": "10.00"}, format="json").status_code, 403)
+
+
+class MontosEnviarRevisionAutorizarTests(TestCase):
+    """EC-571: enviar-revision y autorizar revisan los montos guardados antes de
+    cambiar de estatus."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme-mt", razon_social="acme-mt SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="AMT", nombre="acme-mt")
+        SerieFolio.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="PEDIDO", serie="P")
+        cls.mesa = Usuario.objects.create(
+            username="mesa@acme-mt.test", email="mesa@acme-mt.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+
+    def setUp(self):
+        self.api = APIClient()
+        self.api.force_authenticate(self.mesa)
+
+    def _cot(self, estatus, **montos):
+        return Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.mesa, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, estatus=estatus, persona_pagos="Pagos", correo_facturas="p@acme-mt.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            gran_total="1018.48", **montos,
+        )
+
+    def test_enviar_revision(self):
+        cot = self._cot(1, anticipo="999999.00")
+        resp = self.api.post(f"{COTIZACIONES_URL}{cot.pk}/enviar-revision/")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual([str(m) for m in resp.data["anticipo"]], ["El anticipo no puede ser mayor al total"])
+        cot.refresh_from_db()
+        self.assertEqual(cot.estatus, 1)
+        Cotizacion.objects.filter(pk=cot.pk).update(anticipo="1018.48")
+        self.assertEqual(self.api.post(f"{COTIZACIONES_URL}{cot.pk}/enviar-revision/").status_code, 200)
+        cot.refresh_from_db()
+        self.assertEqual(cot.estatus, 2)
+
+    def test_autorizar(self):
+        cot = self._cot(2, flete="-5.00", seguros="-1.00")
+        resp = self.api.post(f"{COTIZACIONES_URL}{cot.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.data), {"flete", "seguros"})
+        cot.refresh_from_db()
+        self.assertEqual(cot.estatus, 2)
+        self.assertFalse(Pedido.objects.filter(cotizacion=cot).exists())
+        Cotizacion.objects.filter(pk=cot.pk).update(flete="0", seguros="0", anticipo="500.00")
+        resp = self.api.post(f"{COTIZACIONES_URL}{cot.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(Pedido.objects.get(cotizacion=cot).anticipo, Decimal("500.00"))
+
+
+class ImporteIvaTests(TestCase):
+    """EC-571 CO-08: importe_iva = gran_total - importe_sin_iva, en los serializers
+    de cotización y pedido, oculto donde se oculta importe_sin_iva."""
+
+    @classmethod
+    def setUpTestData(cls):
+        PedidoMesaControlUpdateTests.setUpTestData.__func__(cls)
+
+    def test_desglose(self):
+        from ventas.api.serializers import importes_iva
+
+        casos = [
+            (Decimal("1018.48"), 16, Decimal("878.00"), Decimal("140.48")),
+            (Decimal("948.88"), 16, Decimal("818.00"), Decimal("130.88")),
+            # Con cargos: subtotal 878 + flete 100 + seguros 22 = 1000; IVA 160.
+            (Decimal("1160.00"), 16, Decimal("1000.00"), Decimal("160.00")),
+            (Decimal("100.00"), 0, Decimal("100.00"), Decimal("0.00")),
+            (Decimal("10.01"), 16, Decimal("8.63"), Decimal("1.38")),
+        ]
+        for gran_total, iva, sin_iva, importe_iva in casos:
+            with self.subTest(gran_total=gran_total):
+                doc = Cotizacion(gran_total=gran_total, iva=iva)
+                self.assertEqual(importes_iva(doc), (sin_iva, importe_iva))
+                self.assertEqual(sum(importes_iva(doc)), gran_total)
+
+    def _api(self, user):
+        api = APIClient()
+        api.force_authenticate(user)
+        return api
+
+    def test_expuesto_en_cotizacion_y_pedido(self):
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(gran_total="1018.48")
+        Pedido.objects.filter(pk=self.pedido.pk).update(gran_total="1018.48")
+        api = self._api(self.admin_mesa)
+        detalle = api.get(f"{COTIZACIONES_URL}{self.cotizacion.pk}/").data
+        self.assertEqual((str(detalle["importe_sin_iva"]), str(detalle["importe_iva"])), ("878.00", "140.48"))
+        listado = api.get(COTIZACIONES_URL).data
+        filas = listado["results"] if isinstance(listado, dict) else listado
+        fila = next(f for f in filas if f["id"] == self.cotizacion.pk)
+        self.assertEqual(str(fila["importe_iva"]), "140.48")
+        self.assertEqual(str(api.get(f"{PEDIDOS_URL}{self.pedido.pk}/").data["importe_iva"]), "140.48")
+        resp = api.post(
+            COTIZACION_ONBOARDING_URL,
+            {
+                "cotizacion": {
+                    "sucursal": self.sucursal.pk, "cliente": self.cliente.pk, "moneda": self.moneda.pk,
+                    "gran_total": "1160.00",
+                },
+                "detalle": [],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(str(resp.data["cotizacion"]["importe_iva"]), "160.00")
+
+    def test_oculto_a_quien_no_ve_contabilidad(self):
+        from ventas.services.pedido_field_filter_service import CAMPOS_CONTABILIDAD_PEDIDO
+
+        self.assertIn("importe_iva", CAMPOS_CONTABILIDAD_PEDIDO)
+        data = self._api(self.usuario_sin_permiso).get(f"{PEDIDOS_URL}{self.pedido.pk}/").data
+        self.assertNotIn("importe_iva", data)
+        self.assertNotIn("gran_total", data)
+
+
+class PedidoListadoPiezasVendedorTests(TestCase):
+    """EC-571 PE-01: el listado de pedidos trae piezas (todas las tallas, muestras
+    incluidas) y vendedor_nombre, sin consultas por fila."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme-pz", razon_social="acme-pz SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="APZ", nombre="acme-pz")
+        cls.admin = Usuario.objects.create(
+            username="adm@acme-pz.test", email="adm@acme-pz.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.ana = Usuario.objects.create(
+            username="ana@acme-pz.test", email="ana@acme-pz.test", empresa=cls.empresa,
+            first_name="Ana", last_name="López",
+        )
+        cls.sin_nombre = Usuario.objects.create(username="sn@acme-pz.test", email="sn@acme-pz.test", empresa=cls.empresa)
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.talla = Talla.objects.create(nombre="M")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera", codigo="PLY")
+
+    def _pedido(self, folio, vendedor=None, tallas=()):
+        cot = None
+        if vendedor is not None:
+            cot = Cotizacion.objects.create(
+                empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
+                vendedor=vendedor,
+            )
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, cotizacion=cot,
+            moneda=self.moneda, folio=folio, persona_pagos="P", correo_facturas="p@acme-pz.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        for cantidad, muestra in tallas:
+            det = PedidoDetalle.objects.create(
+                pedido=pedido, producto=None if muestra else self.producto,
+                producto_nombre_externo="Muestra especial" if muestra else None,
+            )
+            PedidoDetalleTalla.objects.create(pedido_detalle=det, talla=self.talla, cantidad=cantidad)
+        return pedido
+
+    def _listado(self):
+        api = APIClient()
+        api.force_authenticate(self.admin)
+        resp = api.get(PEDIDOS_URL)
+        self.assertEqual(resp.status_code, 200)
+        filas = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+        return {f["id"]: f for f in filas}
+
+    def test_piezas_y_vendedor(self):
+        con_muestra = self._pedido("P-1", self.ana, tallas=[(2, False), (49, True)])
+        vacio = self._pedido("P-2", self.sin_nombre)
+        sin_cotizacion = self._pedido("P-3", tallas=[(5, False)])
+        filas = self._listado()
+        self.assertEqual(
+            (filas[con_muestra.pk]["piezas"], filas[con_muestra.pk]["vendedor_nombre"]), (51, "Ana López")
+        )
+        self.assertEqual((filas[vacio.pk]["piezas"], filas[vacio.pk]["vendedor_nombre"]), (0, "sn@acme-pz.test"))
+        self.assertEqual(
+            (filas[sin_cotizacion.pk]["piezas"], filas[sin_cotizacion.pk]["vendedor_nombre"]), (5, None)
+        )
+
+    def test_sin_consultas_por_fila(self):
+        self._pedido("P-1", self.ana, tallas=[(2, False)])
+        self._listado()
+        with CaptureQueriesContext(connection) as uno:
+            self._listado()
+        for i in range(5):
+            self._pedido(f"P-{i + 10}", self.ana if i % 2 else self.sin_nombre, tallas=[(i + 1, i % 2 == 0)])
+        with CaptureQueriesContext(connection) as varios:
+            filas = self._listado()
+        self.assertEqual(len(filas), 6)
+        self.assertEqual(len(varios), len(uno))
+
+
+class MetodoPagoEtiquetaTests(TestCase):
+    """EC-571 UX-01: la etiqueta de PUE dice EXHIBICIÓN; el valor sigue siendo PUE."""
+
+    def test_etiqueta(self):
+        for modelo in (Cotizacion, Pedido):
+            with self.subTest(modelo=modelo.__name__):
+                self.assertEqual(modelo.MetodoPago.PUE.value, "PUE")
+                self.assertEqual(modelo.MetodoPago.PUE.label, "PUE - PAGO EN UNA SOLA EXHIBICIÓN")
