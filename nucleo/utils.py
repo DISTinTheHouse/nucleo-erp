@@ -23,6 +23,11 @@ def entero_acotado(valor, por_defecto, minimo, maximo):
     return max(minimo, min(entero, maximo))
 
 
+RFC_GENERICO_NACIONAL = "XAXX010101000"
+RFC_GENERICO_EXTRANJERO = "XEXX010101000"
+RFCS_GENERICOS = frozenset({RFC_GENERICO_NACIONAL, RFC_GENERICO_EXTRANJERO})
+
+
 def validate_rfc(rfc):
     """
     Valida un RFC (Persona Física o Moral) según el algoritmo oficial del SAT.
@@ -43,7 +48,7 @@ def validate_rfc(rfc):
         return False, "El formato del RFC es incorrecto. Debe ser: AAAA######HOM (Física) o AAA######HOM (Moral)."
 
     # RFCs Genéricos (Excepciones válidas)
-    if rfc in ['XAXX010101000', 'XEXX010101000']:
+    if rfc in RFCS_GENERICOS:
         return True, "RFC Genérico Válido"
 
     # 2. Validación de Dígito Verificador (Checksum)
@@ -135,14 +140,11 @@ def _validar_digito_verificador(rfc):
     return dv_calculado == dv_real
 
 
-RFC_GENERICO_NACIONAL = "XAXX010101000"
-RFC_GENERICO_EXTRANJERO = "XEXX010101000"
-RFCS_GENERICOS = frozenset({RFC_GENERICO_NACIONAL, RFC_GENERICO_EXTRANJERO})
-
 # Texto, no número: un CP como 01234 conserva el cero inicial. ``[0-9]`` y no
 # ``\d``, que en Python también acepta dígitos Unicode no ASCII.
 _CODIGO_POSTAL_RE = re.compile(r"[0-9]{5}")
-_TELEFONO_RE = re.compile(r"[0-9+() -]+")
+# Solo los caracteres permitidos y al menos un dígito ("---" o "()" no son teléfonos).
+_TELEFONO_RE = re.compile(r"(?=.*[0-9])[0-9+() -]+")
 
 
 def validate_codigo_postal(valor):
@@ -157,7 +159,8 @@ def validate_codigo_postal(valor):
 
 
 def validate_telefono(valor):
-    """Teléfono sin letras: solo dígitos, ``+``, espacios, guiones y paréntesis (EC-570, CL-02).
+    """Teléfono sin letras: solo dígitos, ``+``, espacios, guiones y paréntesis, con al
+    menos un dígito (EC-570, CL-02).
 
     Vacío o ``None`` pasa, igual que ``validate_codigo_postal``.
     """
@@ -183,6 +186,19 @@ def errores_codigo_postal(attrs, campos, rfc_cliente):
         except ValidationError as exc:
             errores[campo] = exc.messages
     return errores
+
+
+def exigir_codigos_postales(attrs, campos, cliente_actual=None):
+    """``errores_codigo_postal`` con el RFC del cliente del documento; lanza
+    ``ValidationError`` ``{campo: [mensaje]}``, que DRF convierte en errores de campo.
+
+    El cliente es el que viene en ``attrs`` o, si no viene, ``cliente_actual`` (el
+    que el documento ya tiene).
+    """
+    cliente = attrs["cliente"] if "cliente" in attrs else cliente_actual
+    errores = errores_codigo_postal(attrs, campos, getattr(cliente, "rfc", None))
+    if errores:
+        raise ValidationError(errores)
 
 def check_sat_status_mock(rfc):
     """
