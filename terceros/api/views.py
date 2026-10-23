@@ -13,7 +13,12 @@ from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from terceros.models import Proveedor, Cliente, DireccionCliente
-from terceros.api.serializers import ProveedorSerializer, ClienteSerializer, DireccionClienteSerializer
+from terceros.api.serializers import (
+    ClienteSerializer,
+    DireccionClienteSerializer,
+    ProveedorSerializer,
+    verificar_rfc_cliente,
+)
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
 from terceros.cartera import cartera_de_cliente
 from terceros import facturama
@@ -175,6 +180,29 @@ class ClienteViewSet(viewsets.ModelViewSet):
             "cartera_antiguedad": self._kpi_cartera_antiguedad(clientes_qs),
         }
         return Response(data)
+
+    @action(detail=False, methods=["get"], url_path="verificar-rfc")
+    def verificar_rfc(self, request):
+        """Botón "Verificar RFC" (EC-570, CL-04): ``?rfc=`` da el mismo resultado y
+        el mismo mensaje que guardar ese RFC en el campo ``rfc`` de un cliente de la
+        empresa del usuario. No revisa duplicados ni consulta Facturama."""
+        validar_parametros(request, {"rfc"})
+        rfc = (request.query_params.get("rfc") or "").strip().upper()
+        if not rfc:
+            raise ValidationError({"rfc": "Indica el RFC a verificar."})
+        # Primero la validación del campo (longitud máxima), como en el guardado.
+        try:
+            self.get_serializer().fields["rfc"].run_validation(rfc)
+        except ValidationError as exc:
+            aplica, error = False, str(exc.detail[0])
+        else:
+            aplica, error = verificar_rfc_cliente(rfc, getattr(request.user, "empresa", None))
+        return Response({
+            "rfc": rfc,
+            "valido": error is None,
+            "error": error,
+            "formato_verificado": aplica,
+        })
 
     def _kpis_vacio(self):
         motivo = {"disponible": False, "motivo": "Usuario sin empresa asignada."}
