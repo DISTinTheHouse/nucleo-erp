@@ -5657,3 +5657,133 @@ class CotizacionFlujoEndurecidoTests(TestCase):
         self.cotizacion.refresh_from_db()
         self.assertEqual(self.cotizacion.estatus, 4)
         self.assertEqual(self.cotizacion.comentarios.count(), 0)
+
+
+class CodigoPostalTelefonoVentasTests(TestCase):
+    """EC-570 CL-01/CL-02 en cotización, pedido (PATCH) y editar-mesa-control:
+    CP de 5 dígitos (salvo cliente XEXX010101000, también ``cliente_codigo_postal``
+    del pedido) y teléfonos sin letras, sin romper PATCH parciales."""
+
+    CP_INVALIDOS = ("ABCDE123", "1234", "123456")
+    TELEFONOS = ("telefono_pagos", "telefono_envio", "celular_envio")
+
+    @classmethod
+    def setUpTestData(cls):
+        # Mismo escenario que ``PedidoMesaControlUpdateTests`` (pedido con cotización
+        # y renglón) sin heredar la clase, para no volver a correr sus tests.
+        PedidoMesaControlUpdateTests.setUpTestData.__func__(cls)
+        cls.extranjero = Cliente.objects.create(
+            empresa=cls.empresa, nombre="Foreign Co", razon_social="Foreign Co", rfc="XEXX010101000"
+        )
+        cls.cotizacion_extranjero = Cotizacion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.extranjero, moneda=cls.moneda, estatus=1
+        )
+        cls.pedido_extranjero = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.extranjero, moneda=cls.moneda,
+            estatus=3, folio="P-000003", folio_consecutivo=3, persona_pagos="Pagos",
+            correo_facturas="p@foreign.test", telefono_pagos="8100000000", forma_pago="03",
+            metodo_pago="PUE", uso_cfdi="G03",
+        )
+
+    _payload = PedidoMesaControlUpdateTests._payload
+
+    def setUp(self):
+        self.api = APIClient()
+        self.api.force_authenticate(self.admin_mesa)
+        self.cotizacion_borrador = Cotizacion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda, estatus=1
+        )
+
+    def _patch(self, url, **datos):
+        return self.api.patch(url, datos, format="json")
+
+    def _cotizacion(self, cotizacion=None):
+        return f"{COTIZACIONES_URL}{(cotizacion or self.cotizacion_borrador).pk}/"
+
+    def _pedido(self, pedido=None):
+        return f"{PEDIDOS_URL}{(pedido or self.pedido).pk}/"
+
+    def test_cotizacion_cp(self):
+        for cp in self.CP_INVALIDOS:
+            with self.subTest(cp=cp):
+                resp = self._patch(self._cotizacion(), codigo_postal=cp)
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("codigo_postal", resp.data)
+        self.assertEqual(self._patch(self._cotizacion(), codigo_postal="01234").status_code, 200)
+        self.cotizacion_borrador.refresh_from_db()
+        self.assertEqual(self.cotizacion_borrador.codigo_postal, "01234")
+        # Cliente extranjero: por el de la cotización o por el que se manda.
+        self.assertEqual(self._patch(self._cotizacion(self.cotizacion_extranjero), codigo_postal="ABCDE123").status_code, 200)
+        resp = self._patch(self._cotizacion(), cliente=self.extranjero.pk, codigo_postal="ABCDE123")
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_cotizacion_telefonos(self):
+        resp = self._patch(self._cotizacion(), **{campo: "+52 (81) 1234-5678" for campo in self.TELEFONOS})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        resp = self._patch(self._cotizacion(), **{campo: "ABC DOS TELEFONOS" for campo in self.TELEFONOS})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.data), set(self.TELEFONOS))
+        self.assertEqual(self._patch(self._cotizacion(), telefono_pagos="", telefono_envio=None).status_code, 200)
+
+    def test_cotizacion_patch_parcial_con_valores_heredados_invalidos(self):
+        Cotizacion.objects.filter(pk=self.cotizacion_borrador.pk).update(
+            codigo_postal="3400", telefono_pagos="sadfsd", celular_envio="sadfsd"
+        )
+        self.assertEqual(self._patch(self._cotizacion(), observaciones="Sin tocar CP").status_code, 200)
+
+    def test_onboarding_valida_la_cotizacion_anidada(self):
+        resp = self.api.post(
+            COTIZACION_ONBOARDING_URL,
+            {
+                "cotizacion": {
+                    "sucursal": self.sucursal.pk, "cliente": self.cliente.pk, "moneda": self.moneda.pk,
+                    "codigo_postal": "ABCDE123", "telefono_envio": "ABC",
+                },
+                "detalle": [],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("telefono_envio", resp.data["cotizacion"])
+        self.assertFalse(Cotizacion.objects.filter(codigo_postal="ABCDE123").exists())
+
+    def test_pedido_cp_de_envio_y_fiscal(self):
+        for campo in ("codigo_postal", "cliente_codigo_postal"):
+            for cp in self.CP_INVALIDOS:
+                with self.subTest(campo=campo, cp=cp):
+                    resp = self._patch(self._pedido(), **{campo: cp})
+                    self.assertEqual(resp.status_code, 400)
+                    self.assertIn(campo, resp.data)
+        resp = self._patch(self._pedido(), codigo_postal="01234", cliente_codigo_postal="06600")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.pedido.refresh_from_db()
+        self.assertEqual((self.pedido.codigo_postal, self.pedido.cliente_codigo_postal), ("01234", "06600"))
+        resp = self._patch(self._pedido(self.pedido_extranjero), codigo_postal="ABCDE123", cliente_codigo_postal="SW1A")
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_pedido_telefonos_y_patch_parcial(self):
+        resp = self._patch(self._pedido(), **{campo: "81-1234-567x" for campo in self.TELEFONOS})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.data), set(self.TELEFONOS))
+        Pedido.objects.filter(pk=self.pedido.pk).update(
+            codigo_postal="3400", cliente_codigo_postal="ABBBABB", telefono_pagos="ABC DOS TELEFONOS"
+        )
+        self.assertEqual(self._patch(self._pedido(), observaciones="Sin tocar CP").status_code, 200)
+
+    def test_editar_mesa_control_valida_cp_y_telefonos(self):
+        url = pedido_editar_mesa_control_url(self.pedido.pk)
+        payload = self._payload()
+        payload["pedido"].update(codigo_postal="ABCDE123", cliente_codigo_postal="1234", celular_envio="sadfsd")
+        resp = self.api.post(url, payload, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.data["pedido"]), {"celular_envio"})
+        payload["pedido"]["celular_envio"] = "8333333333"
+        resp = self.api.post(url, payload, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.data["pedido"]), {"codigo_postal", "cliente_codigo_postal"})
+        # Con cliente extranjero la misma captura pasa.
+        payload["pedido"]["cliente"] = self.extranjero.pk
+        resp = self.api.post(url, payload, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.pedido.refresh_from_db()
+        self.assertEqual(self.pedido.cliente_codigo_postal, "1234")

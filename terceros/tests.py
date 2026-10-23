@@ -1005,6 +1005,305 @@ class ClienteFacturamaTests(TestCase):
         self.assertFalse(Cliente.objects.exists())
 
 
+CLIENTES_URL = "/api/v1/terceros/clientes/"
+VERIFICAR_RFC_URL = "/api/v1/terceros/clientes/verificar-rfc/"
+DIRECCIONES_URL = "/api/v1/terceros/direcciones-clientes/"
+CP_INVALIDOS = ("ABCDE123", "1234", "123456", "12 34", "１２３４５")
+TELEFONOS_VALIDOS = ("8112345678", "+52 (81) 1234-5678")
+TELEFONOS_INVALIDOS = ("ABC TELEFONO", "81-1234-567x", "81.1234.5678")
+
+
+class ClienteCodigoPostalTelefonoTests(TestCase):
+    """EC-570 CL-01/CL-02 en ``ClienteSerializer``: CP de 5 dígitos (salvo
+    XEXX010101000) y teléfonos sin letras, sin romper PATCH parciales."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="cp", razon_social="CP SA")
+        cls.user = Usuario.objects.create(username="cp@cp.test", email="cp@cp.test", empresa=cls.empresa, is_admin_empresa=True)
+
+    def setUp(self):
+        self.api = APIClient()
+        self.api.force_authenticate(self.user)
+
+    def _alta(self, **datos):
+        return self.api.post(CLIENTES_URL, {"nombre": "Cli", **datos}, format="json")
+
+    def _patch(self, cliente, **datos):
+        return self.api.patch(f"{CLIENTES_URL}{cliente.pk}/", datos, format="json")
+
+    def test_cp_de_5_digitos_se_guarda_como_texto_con_su_cero(self):
+        resp = self._alta(codigo_postal="01234")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(Cliente.objects.get(pk=resp.data["id"]).codigo_postal, "01234")
+
+    def test_cp_invalido_se_rechaza_en_el_campo(self):
+        for cp in CP_INVALIDOS:
+            with self.subTest(cp=cp):
+                resp = self._alta(codigo_postal=cp)
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("codigo_postal", resp.data)
+        self.assertFalse(Cliente.objects.exists())
+
+    def test_cliente_extranjero_no_exige_cp_de_5_digitos(self):
+        resp = self._alta(rfc="xexx010101000", codigo_postal="ABCDE123")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        # Edición sin mandar el RFC: se toma el del cliente.
+        cliente = Cliente.objects.get(pk=resp.data["id"])
+        self.assertEqual(self._patch(cliente, codigo_postal="SW1A 1AA").status_code, 200)
+        # Si deja de ser extranjero, el CP que manda vuelve a revisarse.
+        resp = self._patch(cliente, rfc="URE180429TM6", codigo_postal="SW1A 1AA")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("codigo_postal", resp.data)
+
+    def test_el_generico_nacional_no_es_extranjero(self):
+        resp = self._alta(rfc="XAXX010101000", codigo_postal="ABCDE")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("codigo_postal", resp.data)
+
+    def test_telefonos(self):
+        for telefono in TELEFONOS_VALIDOS:
+            with self.subTest(telefono=telefono):
+                resp = self._alta(telefono=telefono, telefono_2=telefono)
+                self.assertEqual(resp.status_code, 201, resp.data)
+        for telefono in TELEFONOS_INVALIDOS:
+            with self.subTest(telefono=telefono):
+                resp = self._alta(telefono=telefono, telefono_2=telefono)
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(set(resp.data), {"telefono", "telefono_2"})
+
+    def test_vacios_siguen_permitidos(self):
+        resp = self._alta(telefono="", telefono_2=None, codigo_postal="")
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_patch_sin_esos_campos_pasa_con_valores_heredados_invalidos(self):
+        cliente = Cliente.objects.create(
+            empresa=self.empresa, nombre="Legado", codigo_postal="ABCDE123", telefono="ABC TELEFONO", telefono_2="xx"
+        )
+        self.assertEqual(self._patch(cliente, nombre="Legado 2").status_code, 200)
+        # Si el payload sí los trae (p. ej. el PUT completo del front), error normal de campo.
+        resp = self.api.put(
+            f"{CLIENTES_URL}{cliente.pk}/",
+            {"nombre": "Legado 3", "codigo_postal": "ABCDE123", "telefono": "ABC TELEFONO"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("telefono", resp.data)
+        resp = self._patch(cliente, codigo_postal="ABCDE123")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("codigo_postal", resp.data)
+
+
+class ClienteRfcGenericoDuplicadoTests(TestCase):
+    """EC-570 CL-03: los RFC genéricos no cuentan como duplicado; los demás sí."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="dup", razon_social="Dup SA")
+        cls.user = Usuario.objects.create(username="d@d.test", email="d@d.test", empresa=cls.empresa, is_admin_empresa=True)
+
+    def setUp(self):
+        self.api = APIClient()
+        self.api.force_authenticate(self.user)
+
+    def _alta(self, rfc, codigo_postal="64000"):
+        return self.api.post(CLIENTES_URL, {"nombre": "Cli", "rfc": rfc, "codigo_postal": codigo_postal}, format="json")
+
+    def test_genericos_se_repiten(self):
+        for rfc in ("XAXX010101000", " xaxx010101000 ", "XEXX010101000", "xexx010101000"):
+            with self.subTest(rfc=rfc):
+                self.assertEqual(self._alta(rfc).status_code, 201)
+        self.assertEqual(Cliente.objects.filter(rfc="XAXX010101000").count(), 2)
+        self.assertEqual(Cliente.objects.filter(rfc="XEXX010101000").count(), 2)
+
+    def test_un_rfc_normal_sigue_sin_poder_repetirse(self):
+        self.assertEqual(self._alta("URE180429TM6").status_code, 201)
+        resp = self._alta("ure180429tm6")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("RFC duplicado", str(resp.data["rfc"]))
+
+
+class VerificarRfcTests(TestCase):
+    """EC-570 CL-04: ``verificar-rfc`` da el mismo resultado y mensaje que guardar
+    ese RFC, en una empresa con Facturama (formato + dígito) y en una sin él."""
+
+    RFCS = ("QAZ010101AB1", "QAZ010101AB8", "qaz010101ab8", "XAXX010101000", "XAXX010101001", "ABC123", "QAZ010101AB8XX")
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.con_facturama = Empresa.objects.create(codigo="fact", razon_social="Fact SA")
+        cls.sin_facturama = Empresa.objects.create(codigo="otra", razon_social="Otra SA")
+        cls.user_fact = Usuario.objects.create(username="a@f.test", email="a@f.test", empresa=cls.con_facturama, is_admin_empresa=True)
+        cls.user_otra = Usuario.objects.create(username="a@o.test", email="a@o.test", empresa=cls.sin_facturama, is_admin_empresa=True)
+
+    def setUp(self):
+        patcher = patch("terceros.facturama.FacturamaService")
+        patcher.start().return_value.client.post.return_value = {"Id": "x"}
+        self.addCleanup(patcher.stop)
+        settings_patcher = override_settings(FACTURAMA_EMPRESA_CODIGO="fact")
+        settings_patcher.enable()
+        self.addCleanup(settings_patcher.disable)
+
+    def _api(self, user):
+        api = APIClient()
+        api.force_authenticate(user)
+        return api
+
+    def _comparar(self, user):
+        api = self._api(user)
+        resultados = {}
+        for rfc in self.RFCS:
+            with self.subTest(rfc=rfc, empresa=user.empresa.codigo):
+                verificado = api.get(VERIFICAR_RFC_URL, {"rfc": rfc})
+                self.assertEqual(verificado.status_code, 200, verificado.data)
+                Cliente.objects.all().delete()  # el guardado no debe chocar por duplicado
+                guardado = api.post(CLIENTES_URL, {"nombre": "Cli", "rfc": rfc}, format="json")
+                self.assertIn(guardado.status_code, (201, 400))
+                self.assertEqual(verificado.data["valido"], guardado.status_code == 201, guardado.data)
+                if guardado.status_code == 400:
+                    self.assertEqual(verificado.data["error"], str(guardado.data["rfc"][0]))
+                else:
+                    self.assertIsNone(verificado.data["error"])
+                resultados[rfc] = verificado.data
+        return resultados
+
+    def test_empresa_con_facturama_valida_formato_y_digito(self):
+        r = self._comparar(self.user_fact)
+        self.assertFalse(r["QAZ010101AB1"]["valido"])
+        self.assertIn("dígito verificador", r["QAZ010101AB1"]["error"])
+        self.assertTrue(r["QAZ010101AB8"]["valido"])
+        self.assertEqual(r["qaz010101ab8"]["rfc"], "QAZ010101AB8")
+        self.assertTrue(r["XAXX010101000"]["valido"])
+        self.assertFalse(r["ABC123"]["valido"])
+        self.assertTrue(r["QAZ010101AB8"]["formato_verificado"])
+        self.assertEqual(set(r["QAZ010101AB8"]), {"rfc", "valido", "error", "formato_verificado"})
+
+    def test_empresa_sin_facturama_no_valida_el_digito(self):
+        r = self._comparar(self.user_otra)
+        self.assertTrue(r["QAZ010101AB1"]["valido"])
+        self.assertFalse(r["QAZ010101AB1"]["formato_verificado"])
+        # La longitud máxima del campo aplica a todas las empresas.
+        self.assertFalse(r["QAZ010101AB8XX"]["valido"])
+
+    def test_parametros(self):
+        api = self._api(self.user_fact)
+        self.assertEqual(api.get(VERIFICAR_RFC_URL).status_code, 400)
+        self.assertEqual(api.get(VERIFICAR_RFC_URL, {"rfc": "  "}).status_code, 400)
+        self.assertEqual(api.get(VERIFICAR_RFC_URL, {"rfc": "QAZ010101AB8", "otro": "1"}).status_code, 400)
+        self.assertIn(APIClient().get(VERIFICAR_RFC_URL, {"rfc": "QAZ010101AB8"}).status_code, (401, 403))
+
+
+class DireccionClienteTests(TestCase):
+    """EC-570: alcance multi-tenant de ``direcciones-clientes`` (empresa la fija el
+    servidor, cliente acotado con ``clientes_visibles``) y CL-01/CL-02."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from terceros.models import DireccionCliente
+
+        cls.empresa = Empresa.objects.create(codigo="a", razon_social="A SA")
+        cls.otra = Empresa.objects.create(codigo="b", razon_social="B SA")
+        cls.admin = Usuario.objects.create(username="adm@a.test", email="adm@a.test", empresa=cls.empresa, is_admin_empresa=True)
+        cls.admin_otra = Usuario.objects.create(username="adm@b.test", email="adm@b.test", empresa=cls.otra, is_admin_empresa=True)
+        cls.vendedor = Usuario.objects.create(username="v@a.test", email="v@a.test", empresa=cls.empresa)
+        cls.superusuario = Usuario.objects.create(username="su@x.test", email="su@x.test", is_superuser=True)
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Propio", rfc="URE180429TM6")
+        cls.cliente.vendedores.add(cls.vendedor)
+        cls.cliente_sin_asignar = Cliente.objects.create(empresa=cls.empresa, nombre="Sin asignar")
+        cls.extranjero = Cliente.objects.create(empresa=cls.empresa, nombre="Extranjero", rfc="XEXX010101000")
+        cls.ajeno = Cliente.objects.create(empresa=cls.otra, nombre="Ajeno")
+        datos = cls._datos_modelo()
+        cls.direccion = DireccionCliente.objects.create(cliente=cls.cliente, empresa=cls.empresa, **datos)
+        cls.direccion_sin_asignar = DireccionCliente.objects.create(cliente=cls.cliente_sin_asignar, empresa=cls.empresa, **datos)
+        cls.direccion_ajena = DireccionCliente.objects.create(cliente=cls.ajeno, empresa=cls.otra, **datos)
+
+    @staticmethod
+    def _datos_modelo(**extra):
+        return {
+            "destinatario": "Recibe", "empresa_envio": "Paquetería", "telefono_envio": "8100000000",
+            "celular_envio": "8100000001", "direccion_envio": "Calle 1", "colonia_envio": "Centro",
+            "codigo_postal": "64000", "ciudad_envio": "Monterrey", "estado_envio": "NL", **extra,
+        }
+
+    def _api(self, user):
+        api = APIClient()
+        api.force_authenticate(user)
+        return api
+
+    def _alta(self, user, cliente, **extra):
+        return self._api(user).post(DIRECCIONES_URL, {"cliente": cliente.pk, **self._datos_modelo(**extra)}, format="json")
+
+    def _ids(self, user):
+        resp = self._api(user).get(DIRECCIONES_URL)
+        self.assertEqual(resp.status_code, 200)
+        filas = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+        return {fila["id"] for fila in filas}
+
+    def test_alta_con_cliente_de_otra_empresa_se_rechaza(self):
+        resp = self._alta(self.admin, self.ajeno)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("cliente", resp.data)
+        # Mismo error que un pk inexistente: no delata que el cliente existe.
+        self.assertEqual(resp.data["cliente"][0].code, "does_not_exist")
+
+    def test_empresa_la_fija_el_servidor_con_la_del_cliente(self):
+        resp = self._alta(self.admin, self.cliente, empresa=self.otra.pk)
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["empresa"], self.empresa.pk)
+        resp = self._alta(self.superusuario, self.ajeno)
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["empresa"], self.otra.pk)
+
+    def test_edicion_no_mueve_la_direccion_a_un_cliente_ajeno(self):
+        url = f"{DIRECCIONES_URL}{self.direccion.pk}/"
+        resp = self._api(self.admin).patch(url, {"cliente": self.ajeno.pk}, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("cliente", resp.data)
+        resp = self._api(self.admin).patch(url, {"empresa": self.otra.pk, "destinatario": "Otro"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.direccion.refresh_from_db()
+        self.assertEqual((self.direccion.empresa_id, self.direccion.cliente_id), (self.empresa.pk, self.cliente.pk))
+
+    def test_otra_empresa_no_lee_ni_edita(self):
+        url = f"{DIRECCIONES_URL}{self.direccion.pk}/"
+        self.assertNotIn(self.direccion.pk, self._ids(self.admin_otra))
+        self.assertEqual(self._api(self.admin_otra).get(url).status_code, 404)
+        self.assertEqual(self._api(self.admin_otra).patch(url, {"destinatario": "X"}, format="json").status_code, 404)
+        self.assertEqual(self._api(self.admin_otra).delete(url).status_code, 404)
+
+    def test_vendedor_solo_ve_las_direcciones_de_sus_clientes(self):
+        self.assertEqual(self._ids(self.vendedor), {self.direccion.pk})
+        self.assertEqual(self._ids(self.admin), {self.direccion.pk, self.direccion_sin_asignar.pk})
+        self.assertEqual(self._alta(self.vendedor, self.cliente_sin_asignar).status_code, 400)
+
+    def test_cp_y_telefonos(self):
+        for cp in CP_INVALIDOS:
+            with self.subTest(cp=cp):
+                resp = self._alta(self.admin, self.cliente, codigo_postal=cp)
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("codigo_postal", resp.data)
+        self.assertEqual(self._alta(self.admin, self.cliente, codigo_postal="01234").data["codigo_postal"], "01234")
+        self.assertEqual(self._alta(self.admin, self.extranjero, codigo_postal="ABCDE123").status_code, 201)
+        resp = self._alta(self.admin, self.cliente, telefono_envio="ABC", celular_envio="81 (12) 34-56+7")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.data), {"telefono_envio"})
+
+    def test_patch_parcial_con_valores_heredados_invalidos(self):
+        from terceros.models import DireccionCliente
+
+        legado = DireccionCliente.objects.create(
+            cliente=self.cliente, empresa=self.empresa, **self._datos_modelo(codigo_postal="1234", celular_envio="sadfsd")
+        )
+        url = f"{DIRECCIONES_URL}{legado.pk}/"
+        self.assertEqual(self._api(self.admin).patch(url, {"destinatario": "Nuevo"}, format="json").status_code, 200)
+        resp = self._api(self.admin).patch(url, {"codigo_postal": "1234"}, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("codigo_postal", resp.data)
+        # Al cambiar a un cliente extranjero, el CP que se manda ya no se exige.
+        resp = self._api(self.admin).patch(url, {"cliente": self.extranjero.pk, "codigo_postal": "1234"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+
 class ClientesContabilidadTests(TestCase):
     """CONTABILIDAD ve todos los clientes de su empresa, no solo los asignados."""
 
