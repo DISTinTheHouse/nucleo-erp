@@ -3,7 +3,7 @@ from terceros.models import Proveedor, Cliente, DireccionCliente
 from nucleo.models import SatRegimenFiscal, SatUsoCfdi
 from nucleo.utils import RFCS_GENERICOS, errores_codigo_postal, validate_rfc, validate_telefono
 from finanzas.services.facturama.acceso import empresa_usa_facturama
-from terceros.scope import clientes_base, clientes_visibles
+from terceros.scope import clientes_base
 
 # Definir o cambiar el crédito del cliente es una capacidad aparte de editarlo (#462).
 PERMISO_CREDITO_CLIENTE = "E-CRM-CLIENTES-CREDITO"
@@ -126,10 +126,13 @@ class ProveedorSerializer(serializers.ModelSerializer):
 
 class DireccionClienteSerializer(serializers.ModelSerializer):
     def validate_cliente(self, cliente):
-        # Solo un cliente que el usuario ve (mismo alcance que ``ClienteViewSet``).
-        # Uno ajeno responde igual que un pk inexistente, sin delatar que existe.
+        # Solo un cliente de la empresa del usuario (el superusuario, de cualquiera).
+        # Uno de otra empresa responde igual que un pk inexistente, sin delatar que existe.
         user = getattr(self.context.get("request"), "user", None)
-        if not clientes_visibles(clientes_base(), user).filter(pk=cliente.pk).exists():
+        clientes = clientes_base()
+        if not getattr(user, "is_superuser", False):
+            clientes = clientes.filter(empresa_id=getattr(user, "empresa_id", None)).exclude(empresa_id=None)
+        if not clientes.filter(pk=cliente.pk).exists():
             raise serializers.ValidationError(
                 self.fields["cliente"].error_messages["does_not_exist"].format(pk_value=cliente.pk),
                 code="does_not_exist",
