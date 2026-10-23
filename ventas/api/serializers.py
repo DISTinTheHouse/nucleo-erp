@@ -39,6 +39,37 @@ def _exigir_codigos_postales(serializer, attrs, campos):
     exigir_codigos_postales(attrs, campos, cliente_actual)
 
 
+def importes_iva(documento):
+    """``(importe_sin_iva, importe_iva)`` de una cotización o pedido (EC-571, CO-08).
+
+    ``gran_total`` ya trae el IVA (lo calcula el frontend sobre subtotal + cargos),
+    así que se desglosa: ``importe_sin_iva = gran_total / (1 + iva/100)`` redondeado
+    a centavos e ``importe_iva = gran_total - importe_sin_iva``. Los dos salen de la
+    misma cuenta y siempre suman ``gran_total``.
+    """
+    gran_total = getattr(documento, "gran_total", None)
+    iva = getattr(documento, "iva", None)
+    try:
+        iva_int = int(iva or 0)
+    except Exception:
+        iva_int = 0
+    if gran_total in (None, ""):
+        base = Decimal("0")
+    else:
+        try:
+            base = Decimal(str(gran_total))
+        except (InvalidOperation, TypeError, ValueError):
+            base = Decimal("0")
+    if iva_int <= 0:
+        return base, Decimal("0.00")
+    factor = Decimal("1") + (Decimal(iva_int) / Decimal("100"))
+    try:
+        sin_iva = (base / factor).quantize(Decimal("0.01"))
+    except Exception:
+        sin_iva = base / factor
+    return sin_iva, base - sin_iva
+
+
 # --- Anticipo, flete y seguros de cotización/pedido (EC-571, CO-03/CO-07) -------
 #
 # ``gran_total`` lo calcula el frontend; aquí sólo se exige coherencia: montos no
@@ -193,6 +224,12 @@ def _exigir_empresa_del_padre(serializer, attrs, campo_padre, empresa_id, campos
 
 
 class CotizacionSerializer(serializers.ModelSerializer):
+    # Solo lectura (EC-571, CO-08): ver ``importes_iva``.
+    importe_iva = serializers.SerializerMethodField()
+
+    def get_importe_iva(self, obj):
+        return importes_iva(obj)[1]
+
     def validate_sucursal(self, sucursal):
         return _exigir_empresa_documento(self, "sucursal", sucursal)
 
@@ -270,6 +307,7 @@ class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
     pedido_folio = serializers.CharField(read_only=True)
     piezas = serializers.SerializerMethodField()
     importe_sin_iva = serializers.SerializerMethodField()
+    importe_iva = serializers.SerializerMethodField()
 
     def get_piezas(self, obj):
         piezas = getattr(obj, "piezas", None)
@@ -293,28 +331,10 @@ class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
         return total
 
     def get_importe_sin_iva(self, obj):
-        gran_total = getattr(obj, "gran_total", None)
-        iva = getattr(obj, "iva", None)
-        try:
-            iva_int = int(iva or 0)
-        except Exception:
-            iva_int = 0
-        if gran_total in (None, ""):
-            base = Decimal("0")
-        else:
-            try:
-                base = Decimal(str(gran_total))
-            except (InvalidOperation, TypeError, ValueError):
-                base = Decimal("0")
-        if iva_int <= 0:
-            return base
-        factor = Decimal("1") + (Decimal(iva_int) / Decimal("100"))
-        if factor == 0:
-            return base
-        try:
-            return (base / factor).quantize(Decimal("0.01"))
-        except Exception:
-            return base / factor
+        return importes_iva(obj)[0]
+
+    def get_importe_iva(self, obj):
+        return importes_iva(obj)[1]
 
     class Meta:
         model = Cotizacion
@@ -331,6 +351,7 @@ class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
             "uso_cfdi",
             "gran_total",
             "importe_sin_iva",
+            "importe_iva",
             "piezas",
             "autorizada_at",
             "cambios_solicitados_at",
@@ -417,6 +438,7 @@ class CotizacionFullSerializer(serializers.ModelSerializer):
     cliente_razon_social = serializers.CharField(source="cliente.razon_social", read_only=True)
     piezas = serializers.SerializerMethodField()
     importe_sin_iva = serializers.SerializerMethodField()
+    importe_iva = serializers.SerializerMethodField()
 
     def get_piezas(self, obj):
         piezas = getattr(obj, "piezas", None)
@@ -440,28 +462,10 @@ class CotizacionFullSerializer(serializers.ModelSerializer):
         return total
 
     def get_importe_sin_iva(self, obj):
-        gran_total = getattr(obj, "gran_total", None)
-        iva = getattr(obj, "iva", None)
-        try:
-            iva_int = int(iva or 0)
-        except Exception:
-            iva_int = 0
-        if gran_total in (None, ""):
-            base = Decimal("0")
-        else:
-            try:
-                base = Decimal(str(gran_total))
-            except (InvalidOperation, TypeError, ValueError):
-                base = Decimal("0")
-        if iva_int <= 0:
-            return base
-        factor = Decimal("1") + (Decimal(iva_int) / Decimal("100"))
-        if factor == 0:
-            return base
-        try:
-            return (base / factor).quantize(Decimal("0.01"))
-        except Exception:
-            return base / factor
+        return importes_iva(obj)[0]
+
+    def get_importe_iva(self, obj):
+        return importes_iva(obj)[1]
 
     class Meta:
         model = Cotizacion
@@ -715,6 +719,12 @@ class PedidoSerializer(serializers.ModelSerializer):
     # en top-level (ver ``PedidoListSerializer.parcialidades`` — mismo campo,
     # mismo cálculo, para que el detalle y el listado sean consistentes).
     parcialidades = serializers.SerializerMethodField()
+    # Solo lectura (EC-571, CO-08): ver ``importes_iva``. Contabilidad: se oculta
+    # junto con ``iva``/``gran_total`` (``CAMPOS_CONTABILIDAD_PEDIDO``).
+    importe_iva = serializers.SerializerMethodField()
+
+    def get_importe_iva(self, obj):
+        return importes_iva(obj)[1]
 
     def get_fecha_entrega_min(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
