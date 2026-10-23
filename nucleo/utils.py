@@ -2,6 +2,7 @@ import re
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
+from django.core.exceptions import ValidationError
 
 
 def entero_acotado(valor, por_defecto, minimo, maximo):
@@ -132,6 +133,56 @@ def _validar_digito_verificador(rfc):
             
     dv_real = rfc_calculo[12]
     return dv_calculado == dv_real
+
+
+RFC_GENERICO_NACIONAL = "XAXX010101000"
+RFC_GENERICO_EXTRANJERO = "XEXX010101000"
+RFCS_GENERICOS = frozenset({RFC_GENERICO_NACIONAL, RFC_GENERICO_EXTRANJERO})
+
+# Texto, no número: un CP como 01234 conserva el cero inicial. ``[0-9]`` y no
+# ``\d``, que en Python también acepta dígitos Unicode no ASCII.
+_CODIGO_POSTAL_RE = re.compile(r"[0-9]{5}")
+_TELEFONO_RE = re.compile(r"[0-9+() -]+")
+
+
+def validate_codigo_postal(valor):
+    """CP mexicano: exactamente 5 dígitos (EC-570, CL-01).
+
+    Vacío o ``None`` pasa: si el campo es obligatorio lo decide el serializer.
+    Lanza ``django.core.exceptions.ValidationError``, que DRF convierte en error
+    del campo. La excepción del cliente extranjero vive en ``errores_codigo_postal``.
+    """
+    if valor and not _CODIGO_POSTAL_RE.fullmatch(valor):
+        raise ValidationError("El código postal debe tener exactamente 5 dígitos.")
+
+
+def validate_telefono(valor):
+    """Teléfono sin letras: solo dígitos, ``+``, espacios, guiones y paréntesis (EC-570, CL-02).
+
+    Vacío o ``None`` pasa, igual que ``validate_codigo_postal``.
+    """
+    if valor and not _TELEFONO_RE.fullmatch(valor):
+        raise ValidationError("El teléfono solo admite dígitos, espacios, +, guiones y paréntesis.")
+
+
+def errores_codigo_postal(attrs, campos, rfc_cliente):
+    """``{campo: [mensaje]}`` de los CP de ``campos`` que vienen en ``attrs`` y no son válidos.
+
+    Con el RFC genérico de extranjero (``XEXX010101000``) no se exige el formato.
+    Solo revisa los campos presentes: un PATCH parcial que no manda el CP no se
+    rechaza aunque el registro ya tenga uno inválido.
+    """
+    if (rfc_cliente or "").strip().upper() == RFC_GENERICO_EXTRANJERO:
+        return {}
+    errores = {}
+    for campo in campos:
+        if campo not in attrs:
+            continue
+        try:
+            validate_codigo_postal(attrs[campo])
+        except ValidationError as exc:
+            errores[campo] = exc.messages
+    return errores
 
 def check_sat_status_mock(rfc):
     """
