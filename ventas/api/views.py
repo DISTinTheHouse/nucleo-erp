@@ -53,6 +53,7 @@ from ventas.api.serializers import (
     CotizacionOnboardingCreateSerializer,
     PedidoMesaControlUpdateSerializer,
     PedidoProgramarSerializer,
+    errores_montos_guardados,
 )
 
 from nucleo.models import SerieFolio, Empresa
@@ -2139,6 +2140,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             raise ValidationError(
                 {"estatus": "La cotización ya está en revisión o autorizada."}
             )
+        # Mismas reglas de montos que el guardado, sobre lo guardado (EC-571).
+        errores_montos = errores_montos_guardados(cotizacion)
+        if errores_montos:
+            raise ValidationError(errores_montos)
 
         comentario = _texto_comentario(request.data)
         with transaction.atomic():
@@ -2239,6 +2244,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 raise ValidationError(
                     {"cotizacion": "La cotización debe estar EN REVISION para ser autorizada."}
                 )
+            # Antes de generar el pedido, que copia estos montos tal cual (EC-571).
+            errores_montos = errores_montos_guardados(cotizacion)
+            if errores_montos:
+                raise ValidationError(errores_montos)
 
             pedido_existente = (
                 Pedido.objects.select_for_update()
