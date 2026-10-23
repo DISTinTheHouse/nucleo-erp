@@ -15,6 +15,25 @@ from ventas.services.sku_produccion_service import (
     cargar_variantes_produccion,
     skus_produccion_por_talla,
 )
+from nucleo.utils import errores_codigo_postal, validate_telefono
+
+
+# --- CP y teléfonos de cotización/pedido (EC-570, CL-01/CL-02) -----------------
+#
+# Los teléfonos se validan a nivel de campo. El CP depende del RFC del cliente
+# (XEXX010101000 queda exento), así que se revisa en ``validate()`` y solo si
+# viene en el payload: un PATCH parcial sin CP sigue pasando.
+_VALIDA_TELEFONO = {"validators": [validate_telefono]}
+CAMPOS_CP_COTIZACION = ("codigo_postal",)
+# ``cliente_codigo_postal`` es el CP fiscal que el pedido congela y que el CFDI usa.
+CAMPOS_CP_PEDIDO = ("codigo_postal", "cliente_codigo_postal")
+
+
+def _exigir_codigos_postales(serializer, attrs, campos):
+    cliente = attrs["cliente"] if "cliente" in attrs else getattr(serializer.instance, "cliente", None)
+    errores = errores_codigo_postal(attrs, campos, getattr(cliente, "rfc", None))
+    if errores:
+        raise serializers.ValidationError(errores)
 
 
 # --- Aislamiento multi-tenant de las FKs en ESCRITURA (#249) -------------------
@@ -141,6 +160,10 @@ class CotizacionSerializer(serializers.ModelSerializer):
         # misma que usa ``UsuarioViewSet.get_queryset``; el M2M ``empresas`` no cuenta.
         return _exigir_empresa_documento(self, "vendedor", vendedor)
 
+    def validate(self, attrs):
+        _exigir_codigos_postales(self, attrs, CAMPOS_CP_COTIZACION)
+        return attrs
+
     class Meta:
         model = Cotizacion
         # El estatus y sus marcas de flujo solo cambian por las acciones
@@ -155,7 +178,9 @@ class CotizacionSerializer(serializers.ModelSerializer):
             'oc': {'required': False, 'allow_null': True},
             'persona_pagos': {'required': False, 'allow_null': True, 'allow_blank': True},
             'correo_facturas': {'required': False, 'allow_null': True, 'allow_blank': True},
-            'telefono_pagos': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'telefono_pagos': {'required': False, 'allow_null': True, 'allow_blank': True, **_VALIDA_TELEFONO},
+            'telefono_envio': _VALIDA_TELEFONO,
+            'celular_envio': _VALIDA_TELEFONO,
             'cliente': {'required': False, 'allow_null': True},
             'moneda': {'required': False, 'allow_null': True},
             'forma_pago': {'required': False, 'allow_null': True, 'allow_blank': True},
@@ -671,6 +696,10 @@ class PedidoSerializer(serializers.ModelSerializer):
     def validate_moneda(self, moneda):
         return _exigir_empresa_documento(self, "moneda", moneda, _moneda_de_la_empresa)
 
+    def validate(self, attrs):
+        _exigir_codigos_postales(self, attrs, CAMPOS_CP_PEDIDO)
+        return attrs
+
     def get_servicios_extras(self, obj):
         # Sin ``.order_by("id")``: el orden lo impone el ``Prefetch`` del
         # viewset (``_pedido_servicios_extras_prefetch()``); encadenarlo aquí
@@ -769,6 +798,9 @@ class PedidoSerializer(serializers.ModelSerializer):
         fields = '__all__'
         extra_kwargs = {
             'cotizacion': {'required': False, 'allow_null': True},
+            'telefono_pagos': _VALIDA_TELEFONO,
+            'telefono_envio': _VALIDA_TELEFONO,
+            'celular_envio': _VALIDA_TELEFONO,
         }
 
 class PedidoServicioExtraSerializer(serializers.ModelSerializer):
@@ -917,6 +949,17 @@ class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
         # Sólo se escribe vía ``PATCH /pedidos/{id}/programar/``: aceptarlo aquí
         # dejaba que un formulario abierto antes revirtiera la programación nueva.
         read_only_fields = ["programacion_conf"]
+        extra_kwargs = {
+            "telefono_pagos": _VALIDA_TELEFONO,
+            "telefono_envio": _VALIDA_TELEFONO,
+            "celular_envio": _VALIDA_TELEFONO,
+        }
+
+    def validate(self, attrs):
+        # Anidado en ``PedidoMesaControlUpdateSerializer``, sin ``instance``: el
+        # cliente siempre viene en ``attrs`` (es obligatorio en ``Pedido``).
+        _exigir_codigos_postales(self, attrs, CAMPOS_CP_PEDIDO)
+        return attrs
 
     def validate_cliente(self, cliente):
         request = self.context.get("request")
