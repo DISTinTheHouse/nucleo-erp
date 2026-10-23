@@ -3049,6 +3049,19 @@ class PedidoViewSet(viewsets.ModelViewSet):
             programado = self.request.query_params.get("programado", "")
             if programado.lower() in ("true", "1"):
                 qs = qs.filter(programacion_conf__programaciones__0__isnull=False)
+            # ``piezas`` (EC-571, PE-01): todas las tallas del pedido, muestras
+            # incluidas. Subquery y no ``Sum`` sobre el join, igual que el listado de
+            # cotizaciones: sin ``GROUP BY`` ni JOINs multivaluados en la consulta
+            # principal. ``vendedor_nombre`` sale de ``cotizacion.vendedor``.
+            piezas_qs = (
+                PedidoDetalleTalla.objects.filter(pedido_detalle__pedido_id=OuterRef("pk"))
+                .values("pedido_detalle__pedido_id")
+                .annotate(total=Sum("cantidad"))
+                .values("total")
+            )
+            qs = qs.select_related("cotizacion__vendedor").annotate(
+                piezas=Coalesce(Subquery(piezas_qs[:1]), 0)
+            )
         # El shape de detalle (retrieve/create/update) serializa ``detalles`` +
         # ``tallas`` vía ``PedidoSerializer``: se prefetchean para evitar el N+1.
         # El listado usa ``PedidoListSerializer`` (9 campos escalares) y NO los
