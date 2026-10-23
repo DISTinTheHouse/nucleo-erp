@@ -16,6 +16,7 @@ from ventas.services.sku_produccion_service import (
     skus_produccion_por_talla,
 )
 from nucleo.utils import exigir_codigos_postales, validate_telefono
+from ventas.utils.helpers import nombre_para_mostrar
 
 
 # --- CP y teléfonos de cotización/pedido (EC-570, CL-01/CL-02) -----------------
@@ -45,7 +46,8 @@ def importes_iva(documento):
     ``gran_total`` ya trae el IVA (lo calcula el frontend sobre subtotal + cargos),
     así que se desglosa: ``importe_sin_iva = gran_total / (1 + iva/100)`` redondeado
     a centavos e ``importe_iva = gran_total - importe_sin_iva``. Los dos salen de la
-    misma cuenta y siempre suman ``gran_total``.
+    misma cuenta y siempre suman ``gran_total``. ``importe_sin_iva`` es ``Decimal``
+    (contrato previo); ``importe_iva`` es texto con dos decimales, como ``gran_total``.
     """
     gran_total = getattr(documento, "gran_total", None)
     iva = getattr(documento, "iva", None)
@@ -61,25 +63,65 @@ def importes_iva(documento):
         except (InvalidOperation, TypeError, ValueError):
             base = Decimal("0")
     if iva_int <= 0:
-        return base, Decimal("0.00")
+        return base, "0.00"
     factor = Decimal("1") + (Decimal(iva_int) / Decimal("100"))
     try:
         sin_iva = (base / factor).quantize(Decimal("0.01"))
     except Exception:
         sin_iva = base / factor
-    return sin_iva, base - sin_iva
+    return sin_iva, str((base - sin_iva).quantize(Decimal("0.01")))
+
+
+class _ImportesIvaMixin:
+    """El par de ``importes_iva`` se calcula una sola vez por documento: con
+    ``many=True`` el serializer hijo es el mismo para todas las filas y sus campos se
+    evalúan fila por fila, así que basta recordar el último documento."""
+
+    def _importes_iva(self, obj):
+        ultimo = getattr(self, "_importes_iva_de", None)
+        if ultimo is None or ultimo[0] is not obj:
+            ultimo = self._importes_iva_de = (obj, importes_iva(obj))
+        return ultimo[1]
+
+    def get_importe_sin_iva(self, obj):
+        return self._importes_iva(obj)[0]
+
+    def get_importe_iva(self, obj):
+        return self._importes_iva(obj)[1]
 
 
 # --- Anticipo, flete y seguros de cotización/pedido (EC-571, CO-03/CO-07) -------
 #
-# ``gran_total`` lo calcula el frontend; aquí sólo se exige coherencia: montos no
-# negativos (a nivel de campo) y ``anticipo <= gran_total`` (en ``validate()``, solo
-# si el payload trae alguno de los dos). ``enviar_revision``/``autorizar`` revisan
-# lo guardado con ``errores_montos_guardados``.
+# ``gran_total`` lo calcula el frontend; aquí sólo se exige coherencia. Una sola
+# definición de las reglas (``errores_montos``) sobre los valores efectivos: la usan
+# los serializers (payload sobre lo guardado, solo los campos que vienen) y
+# ``enviar_revision``/``autorizar``/``aceptar_cambios`` (todo lo guardado).
 MSJ_MONTO_NEGATIVO = "Debe ser mayor o igual a 0"
 MSJ_ANTICIPO_MAYOR_AL_TOTAL = "El anticipo no puede ser mayor al total"
 CAMPOS_MONTO_NO_NEGATIVO = ("anticipo", "flete", "seguros")
-_NO_NEGATIVO = {"min_value": Decimal("0"), "error_messages": {"min_value": MSJ_MONTO_NEGATIVO}}
+CAMPOS_MONTO = (*CAMPOS_MONTO_NO_NEGATIVO, "gran_total")
+
+
+def errores_montos(valores, campos=CAMPOS_MONTO):
+    """``{campo: [mensaje]}`` de las reglas de montos sobre ``valores`` (efectivos).
+
+    Solo se revisan ``campos``: cada monto no negativo si viene, y
+    ``anticipo <= gran_total`` si viene cualquiera de los dos. Así un PATCH parcial
+    sin montos no se rechaza por lo que ya estaba guardado.
+    """
+    errores = {}
+    for campo in CAMPOS_MONTO_NO_NEGATIVO:
+        if campo in campos and (valores.get(campo) or 0) < 0:
+            errores[campo] = [MSJ_MONTO_NEGATIVO]
+    revisa_total = "anticipo" in campos or "gran_total" in campos
+    if revisa_total and "anticipo" not in errores and (valores.get("anticipo") or 0) > (valores.get("gran_total") or 0):
+        errores["anticipo"] = [MSJ_ANTICIPO_MAYOR_AL_TOTAL]
+    return errores
+
+
+def errores_montos_guardados(documento):
+    """``errores_montos`` sobre todo lo guardado de ``documento``."""
+    return errores_montos({campo: getattr(documento, campo) for campo in CAMPOS_MONTO})
 
 
 def _documento_actual(serializer):
@@ -90,8 +132,9 @@ def _documento_actual(serializer):
     return serializer.context.get("documento_actual")
 
 
-def _exigir_anticipo_no_mayor_al_total(serializer, attrs):
-    if "anticipo" not in attrs and "gran_total" not in attrs:
+def _exigir_montos(serializer, attrs):
+    campos = {campo for campo in CAMPOS_MONTO if campo in attrs}
+    if not campos:
         return
     documento = _documento_actual(serializer)
     modelo = serializer.Meta.model
@@ -103,20 +146,9 @@ def _exigir_anticipo_no_mayor_al_total(serializer, attrs):
             return getattr(documento, campo)
         return modelo._meta.get_field(campo).get_default()
 
-    anticipo, gran_total = valor("anticipo"), valor("gran_total")
-    if anticipo is not None and gran_total is not None and anticipo > gran_total:
-        raise serializers.ValidationError({"anticipo": [MSJ_ANTICIPO_MAYOR_AL_TOTAL]})
-
-
-def errores_montos_guardados(documento):
-    """Las mismas reglas sobre los valores ya guardados de ``documento``."""
-    errores = {}
-    for campo in CAMPOS_MONTO_NO_NEGATIVO:
-        if (getattr(documento, campo) or 0) < 0:
-            errores[campo] = [MSJ_MONTO_NEGATIVO]
-    if "anticipo" not in errores and (documento.anticipo or 0) > (documento.gran_total or 0):
-        errores["anticipo"] = [MSJ_ANTICIPO_MAYOR_AL_TOTAL]
-    return errores
+    errores = errores_montos({campo: valor(campo) for campo in CAMPOS_MONTO}, campos)
+    if errores:
+        raise serializers.ValidationError(errores)
 
 
 # --- Aislamiento multi-tenant de las FKs en ESCRITURA (#249) -------------------
@@ -251,7 +283,7 @@ class CotizacionSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         _exigir_codigos_postales(self, attrs, CAMPOS_CP_COTIZACION)
-        _exigir_anticipo_no_mayor_al_total(self, attrs)
+        _exigir_montos(self, attrs)
         return attrs
 
     class Meta:
@@ -276,9 +308,6 @@ class CotizacionSerializer(serializers.ModelSerializer):
             'forma_pago': {'required': False, 'allow_null': True, 'allow_blank': True},
             'metodo_pago': {'required': False, 'allow_null': True, 'allow_blank': True},
             'uso_cfdi': {'required': False, 'allow_null': True, 'allow_blank': True},
-            'anticipo': _NO_NEGATIVO,
-            'flete': _NO_NEGATIVO,
-            'seguros': _NO_NEGATIVO,
         }
 
 class CotizacionComentarioSerializer(serializers.ModelSerializer):
@@ -296,7 +325,7 @@ class CotizacionComentarioSerializer(serializers.ModelSerializer):
         return autor.get_full_name() or getattr(autor, "email", None)
 
 
-class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
+class CotizacionDashboardItemSerializer(_ImportesIvaMixin, serializers.ModelSerializer):
     estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)
     tipo_pedido_label = serializers.CharField(
         source="get_tipo_pedido_display", read_only=True
@@ -329,12 +358,6 @@ class CotizacionDashboardItemSerializer(serializers.ModelSerializer):
             for t in tallas:
                 total += int(getattr(t, "cantidad", 0) or 0)
         return total
-
-    def get_importe_sin_iva(self, obj):
-        return importes_iva(obj)[0]
-
-    def get_importe_iva(self, obj):
-        return importes_iva(obj)[1]
 
     class Meta:
         model = Cotizacion
@@ -430,7 +453,7 @@ class CotizacionServicioExtraSerializer(serializers.ModelSerializer):
         model = CotizacionServicioExtra
         fields = "__all__"
 
-class CotizacionFullSerializer(serializers.ModelSerializer):
+class CotizacionFullSerializer(_ImportesIvaMixin, serializers.ModelSerializer):
     estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)
     detalles = CotizacionDetalleWithTallasSerializer(source="cotizaciondetalle", many=True, read_only=True)
     servicios_extras = CotizacionServicioExtraSerializer(many=True, read_only=True)
@@ -460,12 +483,6 @@ class CotizacionFullSerializer(serializers.ModelSerializer):
             for t in tallas:
                 total += int(getattr(t, "cantidad", 0) or 0)
         return total
-
-    def get_importe_sin_iva(self, obj):
-        return importes_iva(obj)[0]
-
-    def get_importe_iva(self, obj):
-        return importes_iva(obj)[1]
 
     class Meta:
         model = Cotizacion
@@ -647,17 +664,17 @@ class PedidoListSerializer(serializers.ModelSerializer):
     # de ``programacion_conf``. Cada item: destino/cantidad/comentarios/
     # fecha/usuario_id/usuario_nombre (mismo shape que arma ``programar``).
     parcialidades = serializers.SerializerMethodField()
-    # EC-571, PE-01. ``piezas`` la anota ``PedidoViewSet.get_queryset`` en el
-    # listado (todas las tallas, muestras incluidas); ``vendedor_nombre`` sale de
-    # ``cotizacion.vendedor`` (``select_related``), ``None`` sin cotización.
+    # EC-571, PE-01. ``piezas`` y las columnas del vendedor de
+    # ``cotizacion.vendedor`` las anota ``PedidoViewSet.get_queryset`` en el
+    # listado (piezas: todas las tallas, muestras incluidas); ``vendedor_nombre``
+    # es ``None`` sin cotización o sin vendedor.
     piezas = serializers.IntegerField(read_only=True)
     vendedor_nombre = serializers.SerializerMethodField()
 
     def get_vendedor_nombre(self, obj):
-        vendedor = obj.cotizacion.vendedor if obj.cotizacion_id else None
-        if vendedor is None:
+        if obj.vendedor_cotizacion_id is None:
             return None
-        return vendedor.get_full_name().strip() or vendedor.email
+        return nombre_para_mostrar(obj.vendedor_first_name, obj.vendedor_last_name, obj.vendedor_email)
 
     def get_fecha_entrega_min(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
@@ -777,7 +794,7 @@ class PedidoSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         _exigir_codigos_postales(self, attrs, CAMPOS_CP_PEDIDO)
-        _exigir_anticipo_no_mayor_al_total(self, attrs)
+        _exigir_montos(self, attrs)
         return attrs
 
     def get_servicios_extras(self, obj):
@@ -881,9 +898,6 @@ class PedidoSerializer(serializers.ModelSerializer):
             'telefono_pagos': _VALIDA_TELEFONO,
             'telefono_envio': _VALIDA_TELEFONO,
             'celular_envio': _VALIDA_TELEFONO,
-            'anticipo': _NO_NEGATIVO,
-            'flete': _NO_NEGATIVO,
-            'seguros': _NO_NEGATIVO,
         }
 
 class PedidoServicioExtraSerializer(serializers.ModelSerializer):
@@ -1036,9 +1050,6 @@ class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
             "telefono_pagos": _VALIDA_TELEFONO,
             "telefono_envio": _VALIDA_TELEFONO,
             "celular_envio": _VALIDA_TELEFONO,
-            "anticipo": _NO_NEGATIVO,
-            "flete": _NO_NEGATIVO,
-            "seguros": _NO_NEGATIVO,
         }
 
     def validate(self, attrs):
@@ -1046,7 +1057,7 @@ class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
         # cliente siempre viene en ``attrs`` (es obligatorio en ``Pedido``); los
         # montos que falten se toman del pedido (``context["documento_actual"]``).
         _exigir_codigos_postales(self, attrs, CAMPOS_CP_PEDIDO)
-        _exigir_anticipo_no_mayor_al_total(self, attrs)
+        _exigir_montos(self, attrs)
         return attrs
 
     def validate_cliente(self, cliente):

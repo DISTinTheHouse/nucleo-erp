@@ -633,3 +633,13 @@ def _save_pedido_servicios_extras(pedido_obj, rows):
         # Eliminar los que no vienen en el payload actual
         ids_a_eliminar = [existentes[i].pk for i in range(len(rows), len(existentes))]
         PedidoServicioExtra.objects.filter(pk__in=ids_a_eliminar).delete()
+
+
+def nombre_para_mostrar(first_name, last_name, email):
+    """Nombre de un usuario para mostrar: ``get_full_name().strip() or email``.
+
+    Recibe las partes y no el usuario para servir también a un listado que solo
+    anota esas columnas (``PedidoListSerializer``). ``Usuario`` no redefine
+    ``get_full_name``: es el ``"first last".strip()`` de ``AbstractUser``.
+    """
+    return f"{first_name or ''} {last_name or ''}".strip() or email
