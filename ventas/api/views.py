@@ -1567,9 +1567,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 pass
         # Al editar, el cliente que la cotización ya tiene decide la excepción del CP
-        # de extranjero si el payload no manda ``cliente`` (EC-570). Solo de la
-        # empresa del documento: una cotización ajena no aporta nada.
-        cliente_documento = None
+        # de extranjero si el payload no manda ``cliente`` (EC-570), y sus montos
+        # guardados completan la regla ``anticipo <= gran_total`` (EC-571). Solo de
+        # la empresa del documento: una cotización ajena no aporta nada.
+        cliente_documento = cotizacion_actual = None
         if cotizacion_id_raw not in (None, ""):
             try:
                 cotizacion_actual = (
@@ -1586,6 +1587,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 **self.get_serializer_context(),
                 "empresa_documento_id": empresa_documento_id,
                 "cliente_documento": cliente_documento,
+                "documento_actual": cotizacion_actual,
             },
         )
         serializer.is_valid(raise_exception=True)
@@ -3184,8 +3186,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_409_CONFLICT,
                 )
 
+            # ``documento_actual``: el header no trae ``instance``; si el payload
+            # omite ``anticipo`` o ``gran_total`` se compara contra lo guardado (EC-571).
             serializer = PedidoMesaControlUpdateSerializer(
-                data=request.data, context=self.get_serializer_context()
+                data=request.data,
+                context={**self.get_serializer_context(), "documento_actual": pedido},
             )
             serializer.is_valid(raise_exception=True)
 
