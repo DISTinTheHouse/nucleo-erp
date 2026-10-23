@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from nucleo.models import SatRegimenFiscal, SatUsoCfdi
-from nucleo.utils import errores_codigo_postal, validate_rfc, validate_telefono
+from nucleo.utils import RFCS_GENERICOS, errores_codigo_postal, validate_rfc, validate_telefono
 from finanzas.services.facturama.acceso import empresa_usa_facturama
 
 # Definir o cambiar el crédito del cliente es una capacidad aparte de editarlo (#462).
@@ -51,7 +51,9 @@ class ClienteSerializer(serializers.ModelSerializer):
             rfc_valido, error_rfc = validate_rfc(rfc)
             if not rfc_valido:
                 raise serializers.ValidationError({"rfc": error_rfc})
-        if empresa and rfc:
+        # Los RFC genéricos (público en general / extranjero) los comparten
+        # muchos clientes: no cuentan como duplicado (EC-570, CL-03).
+        if empresa and rfc and rfc not in RFCS_GENERICOS:
             qs = Cliente.objects.filter(empresa=empresa, rfc__iexact=rfc, activo=True)
             if self.instance:
                 qs = qs.exclude(pk=self.instance.pk)
