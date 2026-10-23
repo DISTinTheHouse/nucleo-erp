@@ -16,7 +16,7 @@ CAMPOS_CONTABILIDAD_PEDIDO = [
     "flete", "seguros", "anticipo",
     "subtotal", "descuento_global", "ieps", "iva", "gran_total",
     "forma_pago", "metodo_pago", "uso_cfdi",
-    "importe_sin_iva",
+    "importe_sin_iva", "importe_iva",
 ]
 CAMPOS_CONTABILIDAD_DETALLE = [
     "precio_lista", "precio_unitario", "costo_unitario", "subtotal_linea",
