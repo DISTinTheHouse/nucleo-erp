@@ -75,13 +75,16 @@ def _categoria_de(talla):
     return None
 
 
-def reglas_por_categoria(empresa_id):
+def reglas_por_categoria(empresa_id, todas_las_empresas=False):
     """``{categoria_id: {proceso: {ubicaciones normalizadas}}}`` de las filas activas
-    de la empresa (una consulta). ``""`` en el conjunto = cualquier ubicación."""
+    de la empresa, o de todas con ``todas_las_empresas`` (una consulta). ``""`` en el
+    conjunto = cualquier ubicación. Cada categoría es de una sola empresa, así que la
+    clave por categoría no mezcla reglas entre empresas."""
+    filas = CategoriaProductoProceso.objects.filter(activo=True)
+    if not todas_las_empresas:
+        filas = filas.filter(empresa_id=empresa_id)
     reglas = {}
-    for categoria_id, proceso, ubicacion in CategoriaProductoProceso.objects.filter(
-        empresa_id=empresa_id, activo=True
-    ).values_list("categoria_producto_id", "proceso", "ubicacion"):
+    for categoria_id, proceso, ubicacion in filas.values_list("categoria_producto_id", "proceso", "ubicacion"):
         reglas.setdefault(categoria_id, {}).setdefault(proceso, set()).add(_norm(ubicacion))
     return reglas
 
@@ -92,15 +95,17 @@ def matriz_onboarding(empresa_id):
     ``{"<categoria_id>": {"bordado": ["*"] | ["A", "C"], "reflejante": [...],
     "corte_manga": ["*"]}}``. Una categoría ausente no se restringe; una categoría
     presente sin un proceso no lo admite; ``["*"]`` = cualquier ubicación. Una consulta.
+    Sin ``empresa_id`` (superusuario sin empresa, cuyo onboarding lista productos de
+    todas las empresas) trae las filas activas de todas.
     """
-    if empresa_id is None:
-        return {}
     return {
         str(categoria_id): {
             proceso: [CUALQUIER_UBICACION] if "" in ubicaciones else sorted(u.upper() for u in ubicaciones)
             for proceso, ubicaciones in sorted(por_proceso.items())
         }
-        for categoria_id, por_proceso in reglas_por_categoria(empresa_id).items()
+        for categoria_id, por_proceso in reglas_por_categoria(
+            empresa_id, todas_las_empresas=empresa_id is None
+        ).items()
     }
 
 
@@ -136,7 +141,7 @@ def errores_compatibilidad(empresa_id, tallas, procesos=None):
                     if not ubic & permitidas:
                         msg = (
                             f"La categoría «{categoria.nombre}» no admite {etiqueta} en "
-                            f"«{sorted(ubic)[0]}»."
+                            f"«{normalizar_ubicacion(sorted(ubic)[0])}»."
                         )
                         break
                 if not msg:

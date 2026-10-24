@@ -6369,7 +6369,7 @@ class CompatibilidadPrendaProcesoVentasTests(TestCase):
     def test_solo_las_ubicaciones_listadas_sin_distinguir_mayusculas(self):
         self._rechazo(
             self._guardar(producto=self.p_playera, lleva_reflejante=True, reflejante_config=[{"posicion": "ESPALDA"}]),
-            "La categoría «Playera» no admite Reflejante en «espalda».",
+            "La categoría «Playera» no admite Reflejante en «ESPALDA».",
         )
         resp = self._guardar(producto=self.p_playera, lleva_reflejante=True, reflejante_config=[{"posicion": "hombros"}])
         self.assertEqual(resp.status_code, 201, resp.content)
@@ -6460,6 +6460,82 @@ class CompatibilidadPrendaProcesoVentasTests(TestCase):
         self._rechazo(self.api.patch(url, {"producto": self.p_pantalon.pk}, format="json"),
                       "La categoría «Pantalón» no admite Bordado.")
         self.assertEqual(self.api.patch(url, {"precio_unitario": "12.00"}, format="json").status_code, 200)
+
+    # --- enviar-revision, autorizar y programar con la regla por categoría --
+    def _cot(self, estatus, producto, **talla):
+        cot = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.admin, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, estatus=estatus, persona_pagos="P", correo_facturas="p@x.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            subtotal="20.00", gran_total="23.20",
+        )
+        det = CotizacionDetalle.objects.create(cotizacion=cot, producto=producto, precio_unitario="10.00")
+        CotizacionDetalleTalla.objects.create(cotizacion_detalle=det, talla=self.talla, cantidad=2, **talla)
+        return cot
+
+    def test_enviar_revision_y_autorizar_con_la_regla_por_categoria(self):
+        SerieFolio.objects.create(empresa=self.empresa, sucursal=self.sucursal, tipo_documento="PEDIDO", serie="P75")
+        # Autorizar descuenta inventario: el caso libre necesita existencia.
+        almacen = Almacen.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, codigo="A75", nombre="A75",
+            permite_salida=True, permite_entrada=True,
+        )
+        Existencia.objects.create(producto=self.p_libre, almacen=almacen, stock=10, cantidad=Decimal("10"))
+        for accion, estatus in (("enviar-revision", 1), ("autorizar", 2)):
+            with self.subTest(accion=accion):
+                libre = self._cot(estatus, self.p_libre, lleva_bordado=True)
+                resp = self.api.post(f"{COTIZACIONES_URL}{libre.pk}/{accion}/")
+                self.assertIn(resp.status_code, (200, 201), resp.content)
+                sin_proceso = self._cot(estatus, self.p_pantalon, lleva_bordado=True)
+                self._rechazo(self.api.post(f"{COTIZACIONES_URL}{sin_proceso.pk}/{accion}/"),
+                              "La categoría «Pantalón» no admite Bordado.")
+                sin_proceso.refresh_from_db()
+                self.assertEqual(sin_proceso.estatus, estatus)
+
+    def test_programar_con_la_regla_por_categoria(self):
+        payload = {"programaciones": [{"destino": "EMBARQUE", "cantidad": 1}]}
+        _, libre = self._pedido_con_talla(self.p_libre, lleva_bordado=True)
+        resp = self.api.patch(f"{PEDIDOS_URL}{libre.pedido_detalle.pedido_id}/programar/", payload, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        _, sin_proceso = self._pedido_con_talla(self.p_pantalon, lleva_bordado=True)
+        self._rechazo(
+            self.api.patch(f"{PEDIDOS_URL}{sin_proceso.pedido_detalle.pedido_id}/programar/", payload, format="json"),
+            "La categoría «Pantalón» no admite Bordado.",
+        )
+
+    # --- PATCH que repite valores en una línea que ya no cumple la matriz ---
+    def test_patch_con_los_mismos_valores_no_revalida(self):
+        detalle, talla = self._pedido_con_talla(self.p_pantalon, lleva_bordado=True)  # ya incompatible
+        resp = self.api.patch(f"{PEDIDO_DETALLE_URL}{detalle.pk}/",
+                              {"producto": self.p_pantalon.pk, "precio_unitario": "11.00"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        resp = self.api.patch(f"{PEDIDO_DETALLE_TALLA_URL}{talla.pk}/",
+                              {"pedido_detalle": detalle.pk, "lleva_bordado": True, "cantidad": 5}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+        cot = self._cot(1, self.p_pantalon, lleva_bordado=True)
+        cot_det = cot.cotizaciondetalle.get()
+        resp = self.api.patch(f"{COTIZACION_DETALLE_URL}{cot_det.pk}/",
+                              {"producto": self.p_pantalon.pk, "categoria_producto": None, "precio_unitario": "12.00"},
+                              format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    # --- superusuario sin empresa -------------------------------------------
+    def test_superusuario_sin_empresa_recibe_la_matriz_de_todas_las_empresas(self):
+        from catalogo.models import CategoriaProductoProceso
+
+        otra = Empresa.objects.create(codigo="ec575o", razon_social="Otra SA")
+        cat_otra = CategoriaProducto.objects.create(empresa=otra, nombre="Chamarra", codigo="CHA", descripcion="x")
+        CategoriaProductoProceso.objects.create(empresa=otra, categoria_producto=cat_otra, proceso="bordado", ubicacion="c")
+        superuser = Usuario.objects.create(username="ec575-su@x.test", email="ec575-su@x.test", is_superuser=True)
+        api = APIClient()
+        api.force_authenticate(superuser)
+        bloque = api.get(COTIZACION_ONBOARDING_URL).json()["catalogos"]["matriz_compatibilidad"]
+        self.assertEqual(bloque[str(cat_otra.pk)], {"bordado": ["C"]})
+        self.assertEqual(bloque[str(self.pantalon.pk)], {"corte_manga": ["*"]})
+        # El admin de la empresa sigue viendo solo la suya.
+        propio = self.api.get(COTIZACION_ONBOARDING_URL).json()["catalogos"]["matriz_compatibilidad"]
+        self.assertNotIn(str(cat_otra.pk), propio)
 
     # --- onboarding --------------------------------------------------------
     def test_onboarding_trae_categoria_y_bloque_de_la_matriz(self):
