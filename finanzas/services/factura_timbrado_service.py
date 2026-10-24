@@ -4,6 +4,7 @@ Acción aparte de ``emitir``: no toca CxC, póliza ni estatus de la factura.
 """
 
 import base64
+from smtplib import SMTPException
 
 from django.core.exceptions import ValidationError
 from django.core.mail import EmailMessage
@@ -184,10 +185,10 @@ class FacturaTimbradoService:
     @staticmethod
     def enviar_cfdi(factura, email):
         """Manda por correo el PDF y el XML oficiales del CFDI (descargados de Facturama)."""
-        if not factura.facturama_id:
-            raise ErrorDeNegocio({"cfdi": "La factura no tiene CFDI timbrado."})
-        if factura.cfdi_cancelado:
-            raise ErrorDeNegocio({"cfdi": "El CFDI está cancelado ante el SAT; no se envía."})
+        if not factura.facturama_id or not factura.cfdi_uuid or factura.cfdi_pendiente:
+            raise ErrorDeNegocio({"cfdi": "La factura no tiene CFDI timbrado y confirmado."})
+        if not factura.activo or factura.estatus == Factura.FacturaStatus.CANCELADA or factura.cfdi_cancelado:
+            raise ErrorDeNegocio({"cfdi": "La factura o su CFDI está cancelado; no se envía."})
         try:
             validate_email(email or "")
         except ValidationError:
@@ -201,11 +202,17 @@ class FacturaTimbradoService:
         )
         try:
             for formato, tipo in (("pdf", "application/pdf"), ("xml", "application/xml")):
-                archivo = servicio.get_cfdi_file(formato, "issued", factura.facturama_id) or {}
-                correo.attach(f"{nombre}.{formato}", base64.b64decode(archivo.get("Content") or ""), tipo)
+                archivo = servicio.get_cfdi_file(formato, "issued", factura.facturama_id)
+                contenido = archivo.get("Content") if isinstance(archivo, dict) else None
+                if not contenido:
+                    raise ErrorDeNegocio({"cfdi": f"Facturama no entregó el {formato.upper()} del CFDI."})
+                correo.attach(f"{nombre}.{formato}", base64.b64decode(contenido), tipo)
         except FacturamaAPIException as exc:
             raise ErrorDeNegocio({"cfdi": f"Facturama no entregó el archivo: {_mensaje(exc)}"})
-        correo.send()
+        try:
+            correo.send()
+        except (SMTPException, OSError) as exc:
+            raise ErrorDeNegocio({"email": f"No se pudo enviar el correo: {exc}"})
         return email
 
     @staticmethod
