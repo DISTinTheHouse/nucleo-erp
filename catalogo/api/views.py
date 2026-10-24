@@ -41,10 +41,21 @@ class CategoriaProductoViewSet(viewsets.ModelViewSet):
         qs = CategoriaProducto.objects.filter(activo=True).order_by("-created_at", "-id")
         return _alcance_empresa(qs, self.request.user)
 
+class SoloAdminEmpresaEscribe(BasePermission):
+    """Todos leen; solo el superusuario o el admin de empresa escriben (EC-575)."""
+
+    def has_permission(self, request, view):
+        user = request.user
+        return request.method in SAFE_METHODS or bool(
+            getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)
+        )
+
+
 class CategoriaProductoProcesoViewSet(viewsets.ModelViewSet):
     """Matriz prenda/proceso (EC-572). Filtro opcional ``?categoria_producto=``; baja lógica."""
 
     serializer_class = CategoriaProductoProcesoSerializer
+    permission_classes = [IsAuthenticated, SoloAdminEmpresaEscribe]
 
     def get_queryset(self):
         qs = CategoriaProductoProceso.objects.filter(activo=True).order_by("categoria_producto_id", "proceso", "ubicacion")
