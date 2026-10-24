@@ -14,6 +14,9 @@ from catalogo.models import CategoriaProductoProceso
 
 Proceso = CategoriaProductoProceso.Proceso
 
+# Ubicación comodín en el bloque del onboarding: el proceso se admite en cualquiera.
+CUALQUIER_UBICACION = "*"
+
 
 def _norm(valor):
     return str(valor).strip().lower() if valor not in (None, "") else ""
@@ -81,6 +84,24 @@ def reglas_por_categoria(empresa_id):
     ).values_list("categoria_producto_id", "proceso", "ubicacion"):
         reglas.setdefault(categoria_id, {}).setdefault(proceso, set()).add(_norm(ubicacion))
     return reglas
+
+
+def matriz_onboarding(empresa_id):
+    """Bloque de la matriz para el front (EC-575), por id de categoría (str).
+
+    ``{"<categoria_id>": {"bordado": ["*"] | ["A", "C"], "reflejante": [...],
+    "corte_manga": ["*"]}}``. Una categoría ausente no se restringe; una categoría
+    presente sin un proceso no lo admite; ``["*"]`` = cualquier ubicación. Una consulta.
+    """
+    if empresa_id is None:
+        return {}
+    return {
+        str(categoria_id): {
+            proceso: [CUALQUIER_UBICACION] if "" in ubicaciones else sorted(u.upper() for u in ubicaciones)
+            for proceso, ubicaciones in sorted(por_proceso.items())
+        }
+        for categoria_id, por_proceso in reglas_por_categoria(empresa_id).items()
+    }
 
 
 def errores_compatibilidad(empresa_id, tallas, procesos=None):
