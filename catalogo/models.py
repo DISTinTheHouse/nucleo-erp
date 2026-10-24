@@ -237,8 +237,9 @@ class CategoriaProductoProceso(models.Model):
     """Matriz de compatibilidad prenda/proceso (EC-572).
 
     Una fila = la ``categoria_producto`` admite ``proceso``; si trae ``ubicacion``
-    sólo admite el proceso en esa ubicación (vacía = en cualquiera). Si la empresa
-    no tiene ninguna fila activa de un proceso, ese proceso no se restringe.
+    sólo admite el proceso en esa ubicación (vacía = en cualquiera). Una categoría
+    con alguna fila activa solo admite los procesos que tiene; una categoría sin
+    filas activas no se restringe (EC-575, ver ``catalogo.compatibilidad``).
     """
 
     class Proceso(models.TextChoices):

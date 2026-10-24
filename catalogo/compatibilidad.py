@@ -1,4 +1,11 @@
-"""Validación de la matriz prenda/proceso (``CategoriaProductoProceso``, EC-572)."""
+"""Validación de la matriz prenda/proceso (``CategoriaProductoProceso``, EC-572 / EC-575).
+
+Regla por categoría (EC-575): una categoría con al menos una fila activa está
+"configurada" y solo admite los procesos que tiene en la matriz; en cada proceso
+admitido, una fila con ``ubicacion`` vacía admite cualquier ubicación y, si no,
+solo las listadas (sin distinguir mayúsculas). Una categoría sin filas activas no
+se restringe. En corte de manga una fila significa "lo admite".
+"""
 
 from django.db.models import Q
 from rest_framework.exceptions import ValidationError
@@ -33,41 +40,64 @@ def ubicaciones_usadas(proceso, cfg):
     return [u for u in usadas if u]
 
 
-def _procesos_de(talla):
-    if talla.lleva_bordado:
-        yield Proceso.BORDADO, talla.bordado_config
-    if talla.lleva_reflejante:
-        yield Proceso.REFLEJANTE, talla.reflejante_config
-    if talla.lleva_corte_manga:
-        yield Proceso.CORTE_MANGA, talla.corte_manga_config
+def _procesos_de(talla, procesos=None):
+    for proceso, lleva, cfg in (
+        (Proceso.BORDADO, "lleva_bordado", "bordado_config"),
+        (Proceso.REFLEJANTE, "lleva_reflejante", "reflejante_config"),
+        (Proceso.CORTE_MANGA, "lleva_corte_manga", "corte_manga_config"),
+    ):
+        if (procesos is None or proceso in procesos) and getattr(talla, lleva, False):
+            yield proceso, getattr(talla, cfg, None)
 
 
-def errores_compatibilidad(empresa_id, tallas):
+def _categoria_de(talla):
+    """Categoría con la que se evalúa la talla: la del producto; en una muestra de
+    cotización (sin producto), la ``categoria_producto`` de la línea. Las muestras
+    de pedido quedan fuera de la matriz (``PedidoDetalle`` no guarda categoría)."""
+    detalle = getattr(talla, "cotizacion_detalle", None)
+    de_cotizacion = detalle is not None
+    if detalle is None:
+        detalle = getattr(talla, "pedido_detalle", None)
+    producto = getattr(detalle, "producto", None)
+    if producto is not None:
+        return getattr(producto, "categoria_producto", None)
+    if de_cotizacion:
+        return getattr(detalle, "categoria_producto", None)
+    return None
+
+
+def reglas_por_categoria(empresa_id):
+    """``{categoria_id: {proceso: {ubicaciones normalizadas}}}`` de las filas activas
+    de la empresa (una consulta). ``""`` en el conjunto = cualquier ubicación."""
+    reglas = {}
+    for categoria_id, proceso, ubicacion in CategoriaProductoProceso.objects.filter(
+        empresa_id=empresa_id, activo=True
+    ).values_list("categoria_producto_id", "proceso", "ubicacion"):
+        reglas.setdefault(categoria_id, {}).setdefault(proceso, set()).add(_norm(ubicacion))
+    return reglas
+
+
+def errores_compatibilidad(empresa_id, tallas, procesos=None):
     """Lista de errores de las ``tallas`` (de cotización o pedido) contra la matriz.
 
-    ``tallas``: iterable con ``select_related`` a ``<detalle>__producto__categoria_producto``
-    y el detalle accesible como ``cotizacion_detalle`` o ``pedido_detalle``.
+    ``tallas``: iterable con ``select_related`` hasta la categoría y el detalle
+    accesible como ``cotizacion_detalle`` o ``pedido_detalle``. ``procesos``
+    (opcional) limita la revisión a esos procesos.
     """
     # Una sola consulta chica; sin filas no se toca la lista de tallas (lazy).
-    reglas = {}
-    for fila in CategoriaProductoProceso.objects.filter(empresa_id=empresa_id, activo=True):
-        reglas.setdefault(fila.proceso, {}).setdefault(fila.categoria_producto_id, set()).add(_norm(fila.ubicacion))
+    reglas = reglas_por_categoria(empresa_id)
     if not reglas:
         return []
 
     errores = []
     vistos = set()
     for talla in tallas:
-        detalle = getattr(talla, "cotizacion_detalle", None) or getattr(talla, "pedido_detalle", None)
-        producto = getattr(detalle, "producto", None)
-        categoria = getattr(producto, "categoria_producto", None)
-        if categoria is None:
+        categoria = _categoria_de(talla)
+        if categoria is None or categoria.pk not in reglas:
             continue
-        for proceso, cfg in _procesos_de(talla):
-            por_categoria = reglas.get(proceso)
-            if por_categoria is None:
-                continue
-            permitidas = por_categoria.get(categoria.pk)
+        admitidos = reglas[categoria.pk]
+        for proceso, cfg in _procesos_de(talla, procesos):
+            permitidas = admitidos.get(proceso)
             etiqueta = Proceso(proceso).label
             if permitidas is None:
                 msg = f"La categoría «{categoria.nombre}» no admite {etiqueta}."
@@ -90,14 +120,19 @@ def errores_compatibilidad(empresa_id, tallas):
     return errores
 
 
-def exigir_compatibilidad(empresa_id, tallas):
+def exigir_compatibilidad(empresa_id, tallas, procesos=None):
     """Lanza 400 si alguna talla viola la matriz. ``tallas`` puede ser un queryset (se reduce a
     las que llevan algún proceso y se trae la categoría en el mismo JOIN) o una lista."""
     if hasattr(tallas, "select_related"):
-        detalle = "cotizacion_detalle" if hasattr(tallas.model, "cotizacion_detalle") else "pedido_detalle"
+        relaciones = ["pedido_detalle__producto__categoria_producto"]
+        if hasattr(tallas.model, "cotizacion_detalle"):
+            relaciones = [
+                "cotizacion_detalle__producto__categoria_producto",
+                "cotizacion_detalle__categoria_producto",
+            ]
         tallas = tallas.filter(
             Q(lleva_bordado=True) | Q(lleva_reflejante=True) | Q(lleva_corte_manga=True)
-        ).select_related(f"{detalle}__producto__categoria_producto")
-    errores = errores_compatibilidad(empresa_id, tallas)
+        ).select_related(*relaciones)
+    errores = errores_compatibilidad(empresa_id, tallas, procesos)
     if errores:
         raise ValidationError({"compatibilidad_proceso": errores})

@@ -1,5 +1,5 @@
 from django.db import transaction
-from catalogo.compatibilidad import exigir_compatibilidad
+from catalogo.compatibilidad import Proceso, exigir_compatibilidad
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesCorteManga, OrdenCorteMangaDetalle
 from produccion.services.common import (
@@ -142,8 +142,12 @@ class OrdenCorteMangaService:
             )
         )
 
-        # Matriz prenda/proceso (EC-572).
-        exigir_compatibilidad(pedido.empresa_id, OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id))
+        # Matriz prenda/proceso (EC-572): la orden solo revisa su propio proceso (EC-575).
+        exigir_compatibilidad(
+            pedido.empresa_id,
+            OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id),
+            procesos={Proceso.CORTE_MANGA},
+        )
 
         if not detalle_tallas_raw:
             raise ValidationError({
