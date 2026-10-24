@@ -15,8 +15,38 @@ from ventas.services.sku_produccion_service import (
     cargar_variantes_produccion,
     skus_produccion_por_talla,
 )
+from types import SimpleNamespace
+
+from catalogo.compatibilidad import exigir_compatibilidad
 from nucleo.utils import exigir_codigos_postales, validate_telefono
 from ventas.utils.helpers import nombre_para_mostrar
+
+
+# --- Matriz prenda/proceso en los endpoints de renglón (EC-575) ----------------
+#
+# ``cotizacion-detalle``, ``pedido-detalle`` y ``pedido-detalle-talla`` escriben
+# renglones y tallas fuera del onboarding. Se valida la talla (o las tallas del
+# renglón) como quedaría guardada, armada en memoria, y solo cuando el payload
+# toca algo que cambia el resultado: un PATCH parcial ajeno sigue pasando.
+CAMPOS_PROCESO_TALLA = (
+    "lleva_bordado",
+    "bordado_config",
+    "lleva_reflejante",
+    "reflejante_config",
+    "lleva_corte_manga",
+    "corte_manga_config",
+)
+
+
+def _tallas_con_detalle(tallas, clave, **detalle):
+    """Las ``tallas`` (con proceso) vistas con el renglón efectivo ``detalle``, colgado
+    de ``clave`` (``cotizacion_detalle`` o ``pedido_detalle``)."""
+    renglon = SimpleNamespace(**detalle)
+    return [
+        SimpleNamespace(**{clave: renglon}, **{c: getattr(t, c) for c in CAMPOS_PROCESO_TALLA})
+        for t in tallas
+        if t.lleva_bordado or t.lleva_reflejante or t.lleva_corte_manga
+    ]
 
 
 # --- CP y teléfonos de cotización/pedido (EC-570, CL-01/CL-02) -----------------
@@ -424,6 +454,18 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
             self, attrs, "cotizacion", cotizacion.empresa_id,
             ("producto", "direccion_envio_cliente", "categoria_producto"),
         )
+        # Matriz prenda/proceso (EC-575): un renglón nuevo aún no tiene tallas; en uno
+        # existente, cambiar producto o categoría re-evalúa sus tallas.
+        if self.instance is not None and ("producto" in attrs or "categoria_producto" in attrs):
+            exigir_compatibilidad(
+                cotizacion.empresa_id,
+                _tallas_con_detalle(
+                    self.instance.tallas.all(),
+                    "cotizacion_detalle",
+                    producto=attrs.get("producto", self.instance.producto),
+                    categoria_producto=attrs.get("categoria_producto", self.instance.categoria_producto),
+                ),
+            )
         return attrs
 
     class Meta:
@@ -941,6 +983,15 @@ class PedidoDetalleSerializer(serializers.ModelSerializer):
             self, attrs, "pedido", pedido.empresa_id,
             ("producto", "direccion_envio_cliente"),
         )
+        # Matriz prenda/proceso (EC-575): cambiar el producto de un renglón existente
+        # re-evalúa sus tallas (uno nuevo aún no tiene).
+        if self.instance is not None and "producto" in attrs:
+            exigir_compatibilidad(
+                pedido.empresa_id,
+                _tallas_con_detalle(
+                    self.instance.tallas.all(), "pedido_detalle", producto=attrs["producto"]
+                ),
+            )
         return attrs
 
     class Meta:
@@ -985,6 +1036,23 @@ class PedidoDetalleTallaSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"talla": "No se puede cambiar la talla de un renglón existente."}
             )
+        # Matriz prenda/proceso (EC-575): la talla como quedaría guardada, solo si el
+        # payload toca el renglón o un proceso (o es un alta).
+        if self.instance is None or {"pedido_detalle", *CAMPOS_PROCESO_TALLA} & set(attrs):
+            talla = SimpleNamespace(
+                pedido_detalle=pedido_detalle,
+                **{
+                    campo: attrs[campo]
+                    if campo in attrs
+                    else (
+                        getattr(self.instance, campo)
+                        if self.instance is not None
+                        else PedidoDetalleTalla._meta.get_field(campo).get_default()
+                    )
+                    for campo in CAMPOS_PROCESO_TALLA
+                },
+            )
+            exigir_compatibilidad(pedido_detalle.pedido.empresa_id, [talla])
         return attrs
 
     class Meta:
