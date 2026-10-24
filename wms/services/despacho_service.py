@@ -1,13 +1,25 @@
 from collections import defaultdict
+from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from rest_framework.exceptions import ValidationError
 
 from logistica.models import Envio
 from ventas.models import PedidoDetalleTalla
 from ventas.services.sku_produccion_service import TALLAS_DE_LINEA_NO_MUESTRA_Q
 from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle
+
+# Mismo criterio que ``TALLAS_DE_LINEA_NO_MUESTRA_Q`` visto desde la línea de
+# packing: la línea del pedido no es una muestra (sin ``producto_nombre_externo``).
+PACKING_DETALLE_NO_MUESTRA_Q = Q(
+    picking_detalle__pedido_detalle__producto_nombre_externo__isnull=True
+) | Q(picking_detalle__pedido_detalle__producto_nombre_externo__exact="")
+
+
+def _piezas(cantidad):
+    """``Decimal`` de piezas sin ceros de relleno (``188.0000`` -> ``188``)."""
+    return f"{cantidad.normalize():f}"
 
 
 class DespachoService:
@@ -273,10 +285,11 @@ class DespachoService:
             raise ValidationError("El envío no corresponde a la sucursal del packing.")
 
     @classmethod
-    def _validar_embarque_parcial(cls, packing, rows):
-        """Con ``pedido.embarque_parcial`` apagado el pedido sale en un solo
-        despacho: lo ya despachado más lo de este debe cubrir las piezas del
-        pedido (sin líneas de muestra, que tienen su propio flujo) (EC-573 / WM-02)."""
+    def _validar_embarque_parcial(cls, packing):
+        """Con ``pedido.embarque_parcial`` apagado solo se despacha cuando todo lo
+        pedido ya está empacado; desde ahí sale un despacho por packing
+        (EC-574 / WM-02, regla O1). Cuentan packings y líneas vivos, y las
+        líneas de muestra (con su propio flujo) quedan fuera de ambos lados."""
         pedido = packing.pedido
         if pedido.embarque_parcial:
             return
@@ -286,20 +299,21 @@ class DespachoService:
             .aggregate(total=Sum("cantidad"))["total"]
             or 0
         )
-        ya_despachado = (
-            PackingDetalle.objects.filter(
-                despacho_detalle__isnull=False, packing__pedido_id=pedido.pk
-            ).aggregate(total=Sum("cantidad_empacada"))["total"]
-            or 0
+        empacado = (
+            PackingDetalle.objects.filter(packing__pedido_id=pedido.pk)
+            .exclude(packing__estado="CANCELADO")
+            .exclude(estado="CANCELADO")
+            .filter(PACKING_DETALLE_NO_MUESTRA_Q)
+            .aggregate(total=Sum("cantidad_empacada"))["total"]
+            or Decimal("0")
         )
-        este_despacho = sum((row.cantidad_empacada for row in rows), 0)
-        if ya_despachado + este_despacho < total:
+        faltan = Decimal(total) - empacado
+        if faltan > 0:
             raise ValidationError(
                 {
                     "despacho_detalle": (
-                        "El pedido no permite embarque parcial: el despacho debe "
-                        f"cubrir las {total} piezas del pedido "
-                        f"(despachadas con este: {ya_despachado + este_despacho})."
+                        "El pedido no permite embarque parcial: faltan "
+                        f"{_piezas(faltan)} piezas por empacar de las {total} del pedido."
                     )
                 }
             )
@@ -370,7 +384,7 @@ class DespachoService:
 
         DespachoService._validate_context(packing, envio, user)
         resolved_rows = DespachoService._resolve_requested_rows(packing, despacho_detalle)
-        DespachoService._validar_embarque_parcial(packing, resolved_rows)
+        DespachoService._validar_embarque_parcial(packing)
 
         despacho = Despacho.objects.create(
             packing=packing,
