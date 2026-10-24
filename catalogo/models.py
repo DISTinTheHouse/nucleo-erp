@@ -231,3 +231,40 @@ class VarianteProductoProduccion(StatusLifecycleModel):
         ]
 
 
+
+
+class CategoriaProductoProceso(models.Model):
+    """Matriz de compatibilidad prenda/proceso (EC-572).
+
+    Una fila = la ``categoria_producto`` admite ``proceso``; si trae ``ubicacion``
+    sólo admite el proceso en esa ubicación (vacía = en cualquiera). Si la empresa
+    no tiene ninguna fila activa de un proceso, ese proceso no se restringe.
+    """
+
+    class Proceso(models.TextChoices):
+        BORDADO = "bordado", "Bordado"
+        REFLEJANTE = "reflejante", "Reflejante"
+        CORTE_MANGA = "corte_manga", "Corte de manga"
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="categoria_producto_procesos")
+    categoria_producto = models.ForeignKey(CategoriaProducto, on_delete=models.CASCADE, related_name="procesos_permitidos")
+    proceso = models.CharField(max_length=20, choices=Proceso.choices)
+    ubicacion = models.CharField(max_length=100, blank=True, default="")
+    activo = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "categorias_producto_procesos"
+        verbose_name = "Proceso por Categoria"
+        verbose_name_plural = "Procesos por Categoria"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["categoria_producto", "proceso", "ubicacion"],
+                condition=models.Q(activo=True),
+                name="uq_categoria_proceso_ubicacion_activo",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.categoria_producto_id} - {self.proceso} {self.ubicacion}".strip()
