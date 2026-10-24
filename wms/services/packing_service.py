@@ -312,9 +312,10 @@ class PackingService:
         )
         for picking_detalle_id, cantidad_solicitada in requested_by_picking_detalle.items():
             picking_row = picking_rows[picking_detalle_id]
-            cantidad_asignada = cls._normalize_quantity(picking_row.cantidad_asignada)
+            # Se empaca lo realmente surtido, no lo asignado (EC-573 / WM-01).
+            cantidad_surtida = cls._normalize_quantity(picking_row.cantidad_surtida)
             cantidad_ya_empacada = previously_packed_quantities[picking_detalle_id]
-            cantidad_pendiente = cantidad_asignada - cantidad_ya_empacada
+            cantidad_pendiente = cantidad_surtida - cantidad_ya_empacada
 
             if cantidad_pendiente <= 0:
                 raise ValidationError(

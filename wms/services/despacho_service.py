@@ -1,9 +1,12 @@
 from collections import defaultdict
 
 from django.db import transaction
+from django.db.models import Sum
 from rest_framework.exceptions import ValidationError
 
 from logistica.models import Envio
+from ventas.models import PedidoDetalleTalla
+from ventas.services.sku_produccion_service import TALLAS_DE_LINEA_NO_MUESTRA_Q
 from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle
 
 
@@ -270,6 +273,38 @@ class DespachoService:
             raise ValidationError("El envío no corresponde a la sucursal del packing.")
 
     @classmethod
+    def _validar_embarque_parcial(cls, packing, rows):
+        """Con ``pedido.embarque_parcial`` apagado el pedido sale en un solo
+        despacho: lo ya despachado más lo de este debe cubrir las piezas del
+        pedido (sin líneas de muestra, que tienen su propio flujo) (EC-573 / WM-02)."""
+        pedido = packing.pedido
+        if pedido.embarque_parcial:
+            return
+        total = (
+            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido_id=pedido.pk)
+            .filter(TALLAS_DE_LINEA_NO_MUESTRA_Q)
+            .aggregate(total=Sum("cantidad"))["total"]
+            or 0
+        )
+        ya_despachado = (
+            PackingDetalle.objects.filter(
+                despacho_detalle__isnull=False, packing__pedido_id=pedido.pk
+            ).aggregate(total=Sum("cantidad_empacada"))["total"]
+            or 0
+        )
+        este_despacho = sum((row.cantidad_empacada for row in rows), 0)
+        if ya_despachado + este_despacho < total:
+            raise ValidationError(
+                {
+                    "despacho_detalle": (
+                        "El pedido no permite embarque parcial: el despacho debe "
+                        f"cubrir las {total} piezas del pedido "
+                        f"(despachadas con este: {ya_despachado + este_despacho})."
+                    )
+                }
+            )
+
+    @classmethod
     def _resolve_requested_rows(cls, packing, requested_rows):
         if not requested_rows:
             raise ValidationError(
@@ -335,6 +370,7 @@ class DespachoService:
 
         DespachoService._validate_context(packing, envio, user)
         resolved_rows = DespachoService._resolve_requested_rows(packing, despacho_detalle)
+        DespachoService._validar_embarque_parcial(packing, resolved_rows)
 
         despacho = Despacho.objects.create(
             packing=packing,
