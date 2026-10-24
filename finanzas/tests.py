@@ -6840,17 +6840,22 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
                     self.assertEqual(cxc.saldo, Decimal("40.00"))
                     self.assertEqual(self._banco(cobro), banco)
 
-    def _cancelar_rep(self, respuesta=None, error=None, **campos):
+    def _cancelar_rep(self, respuesta=None, error=None, usuario=None, codigo_duena=None, sin_permiso=False, **campos):
         cobro = Cobro.objects.get(pk=self._cobrar(self._cxc(), "60.00").data["id"])
         Cobro.objects.filter(pk=cobro.pk).update(
             **{"rep_uuid": f"REP-UUID-{cobro.pk}", "rep_facturama_id": "REP-ID", **campos}
         )
-        with self.settings(FACTURAMA_EMPRESA_CODIGO=self.a["empresa"].codigo), patch(
+        if sin_permiso:
+            from seguridad.models import UsuarioPermiso
+
+            UsuarioPermiso.objects.filter(usuario=self.a["usuario"]).delete()
+        codigo = self.a["empresa"].codigo if codigo_duena is None else codigo_duena
+        with self.settings(FACTURAMA_EMPRESA_CODIGO=codigo), patch(
             "finanzas.services.factura_timbrado_service.FacturamaService"
         ) as servicio:
             servicio.return_value.cancel_cfdi.return_value = respuesta
             servicio.return_value.cancel_cfdi.side_effect = error
-            resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar-rep/")
+            resp = self._client(usuario or self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar-rep/")
         cobro.refresh_from_db()
         return resp, cobro, servicio.return_value.cancel_cfdi
 
@@ -6880,6 +6885,21 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
 
         self.assertEqual(resp.status_code, 400, resp.data)
         cancel.assert_not_called()
+
+    def test_cancelar_rep_sin_permiso_otra_empresa_o_empresa_no_duena_no_llama_a_facturama(self):
+        casos = {
+            "otra empresa": ({"usuario": self.b["usuario"]}, 404, None),
+            "empresa no dueña": ({"codigo_duena": "otra"}, 400, "rep"),
+            "sin permiso": ({"sin_permiso": True}, 403, None),
+        }
+        for nombre, (kwargs, status_esperado, clave) in casos.items():
+            with self.subTest(nombre):
+                resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, **kwargs)
+                self.assertEqual(resp.status_code, status_esperado, resp.data)
+                if clave:
+                    self.assertIn(clave, resp.data)
+                cancel.assert_not_called()
+                self.assertEqual(cobro.rep_uuid, f"REP-UUID-{cobro.pk}")
 
     def test_cancelar_rep_conserva_el_uuid_cancelado(self):
         resp, cobro, _ = self._cancelar_rep({"Status": "canceled"})
