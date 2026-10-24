@@ -848,7 +848,9 @@ class FacturaViewSet(FinanzasBaseViewSet):
     def enviar_cfdi(self, request, pk=None):
         """Envía por correo el PDF y XML del CFDI. ``email`` opcional: por defecto
         el ``correo_facturas`` de la factura (pedido, luego cliente)."""
-        factura = self.get_object()  # otra empresa -> 404
+        factura = self.get_object()  # otra empresa -> 404 antes que 403
+        if not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
+            raise PermissionDenied('No tienes permiso para enviar facturas.')
         email = (request.data.get('email') or '').strip() or FacturaSerializer(factura).get_correo_facturas(factura)
         enviado_a = FacturaTimbradoService.enviar_cfdi(factura, email)
         return Response({'enviado_a': enviado_a})

@@ -8607,6 +8607,38 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("cfdi", resp.data)
 
+    def _enviar_cfdi(self, factura):
+        return self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/enviar-cfdi/", {}, format="json")
+
+    def test_enviar_cfdi_sin_permiso_responde_403(self):
+        from seguridad.models import UsuarioPermiso
+
+        factura = self._timbrada()
+        UsuarioPermiso.objects.filter(usuario=self.a["usuario"]).delete()
+
+        self.assertEqual(self._enviar_cfdi(factura).status_code, 403)
+
+    def test_enviar_cfdi_de_factura_cancelada_o_eliminada_responde_400(self):
+        factura = self._timbrada()
+        for cambio, original in (
+            ({"estatus": Factura.FacturaStatus.CANCELADA}, {"estatus": factura.estatus}),
+            ({"activo": False}, {"activo": True}),
+        ):
+            Factura.objects.filter(pk=factura.pk).update(**cambio)
+            self.assertEqual(self._enviar_cfdi(factura).status_code, 400, cambio)
+            Factura.objects.filter(pk=factura.pk).update(**original)
+
+    def test_enviar_cfdi_sin_contenido_o_con_smtp_caido_responde_400(self):
+        from smtplib import SMTPException
+
+        factura = self._timbrada()
+        self.facturama.get_cfdi_file.return_value = {}
+        self.assertEqual(self._enviar_cfdi(factura).status_code, 400)
+
+        self.facturama.get_cfdi_file.return_value = {"Content": "UERG"}
+        with patch("django.core.mail.EmailMessage.send", side_effect=SMTPException("caído")):
+            self.assertEqual(self._enviar_cfdi(factura).status_code, 400)
+
     def _nota_emitida(self, factura):
         return NotaCredito.objects.create(
             factura=factura, cliente=self.a["cliente"], folio="NC-1", motivo="Descuento",
