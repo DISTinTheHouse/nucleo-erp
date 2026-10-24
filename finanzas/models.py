@@ -573,6 +573,10 @@ class Cobro(models.Model):
     rep_uuid = models.CharField(max_length=36, null=True, blank=True, unique=True)
     rep_facturama_id = models.CharField(max_length=60, null=True, blank=True)
     rep_fecha_timbrado = models.DateTimeField(null=True, blank=True)
+    # Cancelación del REP: en espera de aceptación del receptor, o ya cancelado (trazabilidad).
+    rep_cancelacion_solicitada = models.BooleanField(default=False)
+    rep_cancelado_uuid = models.CharField(max_length=36, null=True, blank=True)
+    rep_fecha_cancelacion = models.DateTimeField(null=True, blank=True)
     rep_pendiente = models.BooleanField(default=False)
 
     class Meta:

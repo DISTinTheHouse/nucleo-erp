@@ -6876,10 +6876,34 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
                 self.assertEqual(cobro.rep_uuid, f"REP-UUID-{cobro.pk}")
 
     def test_cancelar_rep_sin_rep_confirmado_no_llama_a_facturama(self):
-        resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, rep_uuid=None)
+        resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, rep_uuid=None, rep_facturama_id=None)
 
         self.assertEqual(resp.status_code, 400, resp.data)
         cancel.assert_not_called()
+
+    def test_cancelar_rep_conserva_el_uuid_cancelado(self):
+        resp, cobro, _ = self._cancelar_rep({"Status": "canceled"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["rep_cancelado_uuid"], f"REP-UUID-{cobro.pk}")
+        self.assertIsNotNone(cobro.rep_fecha_cancelacion)
+
+    def test_cancelar_rep_pending_guarda_la_solicitud_y_5xx_es_incierto(self):
+        resp, cobro, _ = self._cancelar_rep({"Status": "pending"})
+        self.assertIn("cancelacion_pendiente", resp.data)
+        self.assertTrue(cobro.rep_cancelacion_solicitada)
+        self.assertEqual(cobro.rep_uuid, f"REP-UUID-{cobro.pk}")
+
+        resp, cobro, _ = self._cancelar_rep(None, FacturamaAPIException("caído", status_code=503))
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("rep_incierto", resp.data)
+
+    def test_cancelar_rep_sin_uuid_pero_con_id_de_facturama_se_destraba(self):
+        resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, rep_uuid=None, rep_pendiente=True)
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cancel.assert_called_once_with("REP-ID")
+        self.assertFalse(cobro.rep_pendiente)
 
     def test_descarga_del_rep_sin_permiso_de_facturama_y_acotada_a_la_empresa(self):
         cobro = Cobro.objects.get(pk=self._cobrar(self._cxc(), "60.00").data["id"])
@@ -8577,6 +8601,14 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.assertEqual(self.facturama.cancel_cfdi.call_count, 1)
         factura.refresh_from_db()
         self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
+
+    def test_si_el_receptor_rechaza_la_cancelacion_se_libera_la_solicitud(self):
+        factura = self._timbrada()
+        for respuesta, solicitada in (({"Status": "pending"}, True), ({"Status": "active"}, False)):
+            self.facturama.cancel_cfdi.return_value = respuesta
+            self.assertEqual(self._cancelar(factura).status_code, 400)
+            factura.refresh_from_db()
+            self.assertEqual(factura.cfdi_cancelacion_solicitada, solicitada)
 
     def test_envia_pdf_y_xml_del_cfdi_al_correo_de_la_factura(self):
         from django.core import mail

@@ -1022,7 +1022,7 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
         model = Cobro
         fields = "__all__"
         # ``activo`` solo lo apaga el DELETE, que revierte saldos (#572).
-        read_only_fields = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado", "rep_pendiente", "activo", "moneda", "folio")
+        read_only_fields = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado", "rep_pendiente", "rep_cancelacion_solicitada", "rep_cancelado_uuid", "rep_fecha_cancelacion", "activo", "moneda", "folio")
 
     def get_fields(self):
         # #570: una CxC de otra empresa responde igual que una inexistente.
