@@ -40,21 +40,26 @@ class PackingService:
     def _pickings_totalmente_empacados(cls, base_qs):
         """IDs de pickings de ``base_qs`` donde ya no queda nada por empacar.
 
+        Se compara contra ``cantidad_asignada``, el mismo tope que valida el
+        packing (EC-574): ``cantidad_surtida`` ya no sirve aquí porque empacar
+        la confirma y siempre igualaría a lo empacado.
+
         Dos agregaciones separadas (no un ``.annotate()`` con ambos ``Sum`` a
-        la vez): ``picking_detalle__cantidad_surtida`` es un JOIN de un nivel
+        la vez): ``picking_detalle__cantidad_asignada`` es un JOIN de un nivel
         y ``picking_detalle__packing_detalle__cantidad_empacada`` es de dos;
         sumarlos en la misma consulta infla ambos totales por el fan-out del
-        JOIN (cada combinación surtida×empacada se cuenta de más).
+        JOIN (cada combinación asignada×empacada se cuenta de más).
         """
-        surtida_por_picking = dict(
+        asignada_por_picking = dict(
             PickingDetalle.objects.filter(picking__in=base_qs)
             .exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
             .values("picking_id")
-            .annotate(total=Sum("cantidad_surtida"))
+            .annotate(total=Sum("cantidad_asignada"))
             .values_list("picking_id", "total")
         )
         empacado_por_picking = dict(
             PackingDetalle.objects.filter(picking_detalle__picking__in=base_qs)
+            .exclude(picking_detalle__estado=PickingDetalle.EstadoLinea.CANCELADA)
             .exclude(estado="CANCELADO")
             .exclude(packing__estado="CANCELADO")
             .values("picking_detalle__picking_id")
@@ -63,8 +68,8 @@ class PackingService:
         )
         return {
             picking_id
-            for picking_id, surtida in surtida_por_picking.items()
-            if surtida and empacado_por_picking.get(picking_id, Decimal("0")) >= surtida
+            for picking_id, asignada in asignada_por_picking.items()
+            if asignada and empacado_por_picking.get(picking_id, Decimal("0")) >= asignada
         }
 
     @classmethod
