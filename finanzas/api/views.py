@@ -12,6 +12,7 @@ from rest_framework.fields import get_error_detail
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
+from nucleo.permisos import permisos_efectivos
 from finanzas.services.facturama.acceso import empresa_usa_facturama, puede_consultar_cfdis, puede_usar_facturama
 from finanzas.services.facturama.service import FacturamaService
 from finanzas.services.facturama.exceptions import FacturamaAPIException
@@ -325,18 +326,26 @@ class ConcurrencyConflictsAs409Mixin:
 # HTTP cambia: ``AlertaMoraViewSet`` sigue siendo de sólo lectura y
 # ``DashboardFinancieroViewSet`` sigue sin rutas de detalle. El mapeo de choques
 # de concurrencia a 409 va en las mismas bases por la misma razón.
+class LecturaContabilidad(BasePermission):
+    """Las lecturas de finanzas exigen ``R-CONTABILIDAD`` (#636). Las escrituras no cambian:
+    cada acción conserva su propio chequeo. Superusuario y admin de empresa pasan siempre."""
+
+    def has_permission(self, request, view):
+        return request.method not in SAFE_METHODS or 'R-CONTABILIDAD' in permisos_efectivos(request.user)
+
+
 class FinanzasBaseViewSet(ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
-    pass
+    permission_classes = [IsAuthenticated, LecturaContabilidad]
 
 
 class FinanzasBaseReadOnlyViewSet(
     ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ReadOnlyModelViewSet
 ):
-    pass
+    permission_classes = [IsAuthenticated, LecturaContabilidad]
 
 
 class FinanzasBaseSimpleViewSet(ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
-    pass
+    permission_classes = [IsAuthenticated, LecturaContabilidad]
 
 
 def _aplicar_filtros_fecha(qs, params, fecha_campo="fecha"):

@@ -171,11 +171,12 @@ class FinanzasBase(TestCase):
         cls.b = cls._tenant("globex", "GDL", "b@globex.test")
         from seguridad.models import Permiso, UsuarioPermiso
 
-        permiso = Permiso.objects.get_or_create(clave="E-FIN-FACTURAS", defaults={"nombre": "Facturas"})[0]
-        for t in (cls.a, cls.b):
-            UsuarioPermiso.objects.create(
-                usuario=t["usuario"], permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT, empresa=t["empresa"],
-            )
+        for clave in ("E-FIN-FACTURAS", "R-CONTABILIDAD"):
+            permiso = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})[0]
+            for t in (cls.a, cls.b):
+                UsuarioPermiso.objects.create(
+                    usuario=t["usuario"], permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT, empresa=t["empresa"],
+                )
 
     def _client(self, user):
         client = APIClient()
@@ -8367,6 +8368,24 @@ class F9ReportesContablesTests(MotorPolizasBase):
 
         self.assertEqual(pocas, consultas())
 
+
+
+class LecturasFinanzasPermisoTests(FinanzasBase):
+    """#636: las lecturas de finanzas exigen R-CONTABILIDAD; no cambia nada más."""
+
+    RUTAS = ("cobros", "facturas", "cuentas-por-cobrar", "polizas", "bancos", "alertas-mora", "dashboard", "reportes-contables/balanza")
+
+    def test_sin_r_contabilidad_las_lecturas_responden_403(self):
+        from seguridad.models import UsuarioPermiso
+
+        UsuarioPermiso.objects.filter(usuario=self.a["usuario"], permiso__clave="R-CONTABILIDAD").delete()
+        for ruta in self.RUTAS:
+            with self.subTest(ruta):
+                self.assertEqual(self._client(self.a["usuario"]).get(f"/api/v1/finanzas/{ruta}/").status_code, 403)
+
+    def test_con_r_contabilidad_las_lecturas_siguen_igual(self):
+        resp = self._client(self.a["usuario"]).get("/api/v1/finanzas/cobros/")
+        self.assertEqual(resp.status_code, 200)
 
 
 class EmitirFacturaTests(MotorPolizasBase):
