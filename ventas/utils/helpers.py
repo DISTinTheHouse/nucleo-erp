@@ -21,6 +21,57 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 def _is_empty_json(value):
     return value in (None, "", [], {})
 
+
+# --- Reflejante «Del inventario» (CO-06) ---------------------------------------
+#
+# La opción ``catalogo`` del reflejante (prenda del inventario + cinta) admite hasta
+# 50 piezas por partida: la suma de las tallas de la partida que la llevan.
+# ``reflejante_config`` es una lista de ``{opcion, posicion, tipo}``. Se revisa al
+# guardar los renglones y, sobre lo guardado, al enviar a revisión, autorizar y
+# aceptar cambios.
+OPCION_REFLEJANTE_INVENTARIO = "catalogo"
+MAX_PIEZAS_REFLEJANTE_INVENTARIO = 50
+
+
+def _es_reflejante_inventario(lleva_reflejante, reflejante_config):
+    if not lleva_reflejante:
+        return False
+    specs = [reflejante_config] if isinstance(reflejante_config, dict) else reflejante_config
+    return isinstance(specs, list) and any(
+        isinstance(s, dict)
+        and str(s.get("opcion") or "").strip().lower() == OPCION_REFLEJANTE_INVENTARIO
+        for s in specs
+    )
+
+
+def _exigir_maximo_reflejante_inventario(numero, piezas):
+    if piezas > MAX_PIEZAS_REFLEJANTE_INVENTARIO:
+        raise ValidationError(
+            {
+                "detalle": (
+                    f"Partida {numero}: el reflejante «Del inventario» admite máximo "
+                    f"{MAX_PIEZAS_REFLEJANTE_INVENTARIO} piezas y lleva {piezas}. "
+                    "Cámbialo a «Fabricación especial» o reduce las piezas."
+                )
+            }
+        )
+
+
+def exigir_reflejante_inventario_guardado(detalles):
+    """La misma regla sobre lo guardado. ``detalles``: los renglones de UN documento
+    (``CotizacionDetalle`` o ``PedidoDetalle``); la partida N es el N-ésimo por id,
+    el orden en que la API los devuelve. Una sola consulta (renglón x talla)."""
+    piezas = {}
+    for detalle_id, cantidad, lleva_reflejante, reflejante_config in detalles.order_by(
+        "id"
+    ).values_list("id", "tallas__cantidad", "tallas__lleva_reflejante", "tallas__reflejante_config"):
+        piezas.setdefault(detalle_id, 0)
+        if _es_reflejante_inventario(lleva_reflejante, reflejante_config):
+            piezas[detalle_id] += cantidad or 0
+    for numero, total in enumerate(piezas.values(), start=1):
+        _exigir_maximo_reflejante_inventario(numero, total)
+
+
 def _merge_detalle(rows):
     agrupado = {}
     for row in rows:
@@ -207,7 +258,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
 
     detalles = []
     tallas_por_detalle = []
-    for item in rows:
+    for numero, item in enumerate(rows, start=1):
         producto = None
         producto_nombre_externo = item.get("producto_nombre_externo")
         producto_id = item.get("producto")
@@ -283,6 +334,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
         )
         tallas_nuevas = []
         tallas_por_detalle.append(tallas_nuevas)
+        piezas_inventario = 0
         for t in item.get("tallas") or []:
             try:
                 talla = tallas_catalogo.get(int(t["talla"]))
@@ -334,6 +386,8 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                         "detalle": "Falta cambio_talla_config en una talla marcada con lleva_cambio_talla=true."
                     }
                 )
+            if _es_reflejante_inventario(lleva_reflejante, reflejante_config):
+                piezas_inventario += int(t["cantidad"])
 
             variante_obj = None
             if producto:
@@ -377,6 +431,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
                     variante=variante_obj,
                 )
             )
+        _exigir_maximo_reflejante_inventario(numero, piezas_inventario)
 
     # Dos INSERT en lote (renglones, luego tallas) en vez de uno por fila.
     CotizacionDetalle.objects.bulk_create(detalles)
@@ -409,7 +464,7 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
         for detalle in PedidoDetalle.objects.filter(pedido=pedido_obj).prefetch_related("tallas")
     }
     touched_ids = set()
-    for item in rows or []:
+    for numero, item in enumerate(rows or [], start=1):
         producto = None
         producto_nombre_externo = item.get("producto_nombre_externo")
         producto_id = item.get("producto")
@@ -512,6 +567,7 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
         for talla_row in tallas_actuales:
             existing_tallas.setdefault(talla_row.pedido_detalle_id, []).append(talla_row)
         tallas_usadas = set()
+        piezas_inventario = 0
 
         for t in item.get("tallas") or []:
             talla = Talla.objects.filter(pk=t["talla"], activo=True).first()
@@ -562,6 +618,8 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
                         "detalle": "Falta cambio_talla_config en una talla marcada con lleva_cambio_talla=true."
                     }
                 )
+            if _es_reflejante_inventario(lleva_reflejante, reflejante_config):
+                piezas_inventario += int(t["cantidad"])
 
             variante_obj = None
             if producto:
@@ -601,6 +659,7 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
                 talla_existente.sku_muestra = None
             talla_existente.save()
             tallas_usadas.add(talla_existente.pk)
+        _exigir_maximo_reflejante_inventario(numero, piezas_inventario)
 
         sobrantes = [row for row in tallas_actuales if row.pk not in tallas_usadas]
         if sobrantes:
