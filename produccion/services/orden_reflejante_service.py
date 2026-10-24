@@ -1,6 +1,6 @@
 import math
 
-from catalogo.compatibilidad import exigir_compatibilidad
+from catalogo.compatibilidad import Proceso, exigir_compatibilidad
 from django.db import transaction
 from django.db.models import Sum
 from rest_framework.exceptions import ValidationError, APIException
@@ -356,8 +356,12 @@ class OrdenReflejanteService:
             )
         )
 
-        # Matriz prenda/proceso (EC-572).
-        exigir_compatibilidad(pedido.empresa_id, OrdenReflejanteService._tallas_reflejante_qs(pedido.id))
+        # Matriz prenda/proceso (EC-572): la orden solo revisa su propio proceso (EC-575).
+        exigir_compatibilidad(
+            pedido.empresa_id,
+            OrdenReflejanteService._tallas_reflejante_qs(pedido.id),
+            procesos={Proceso.REFLEJANTE},
+        )
 
         if not detalle_tallas_raw:
              raise ValidationError({
