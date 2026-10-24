@@ -86,6 +86,7 @@ from ventas.utils.helpers import (
     _save_servicios_extras,
     _save_pedido_detalle,
     _save_pedido_servicios_extras,
+    exigir_reflejante_inventario_guardado,
     nombre_para_mostrar,
 )
 from ventas.services.sku_produccion_service import (
@@ -2164,6 +2165,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             cotizacion.empresa_id,
             CotizacionDetalleTalla.objects.filter(cotizacion_detalle__cotizacion=cotizacion),
         )
+        # Reflejante «Del inventario»: máximo 50 piezas por partida (CO-06).
+        exigir_reflejante_inventario_guardado(CotizacionDetalle.objects.filter(cotizacion=cotizacion))
 
         comentario = _texto_comentario(request.data)
         with transaction.atomic():
@@ -2273,6 +2276,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 cotizacion.empresa_id,
                 CotizacionDetalleTalla.objects.filter(cotizacion_detalle__cotizacion=cotizacion),
             )
+            # Reflejante «Del inventario»: máximo 50 piezas por partida (CO-06).
+            exigir_reflejante_inventario_guardado(CotizacionDetalle.objects.filter(cotizacion=cotizacion))
 
             pedido_existente = (
                 Pedido.objects.select_for_update()
@@ -2404,6 +2409,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             errores_montos = errores_montos_guardados(cotizacion)
             if errores_montos:
                 raise ValidationError(errores_montos)
+            # Reflejante «Del inventario»: máximo 50 piezas por partida (CO-06).
+            exigir_reflejante_inventario_guardado(CotizacionDetalle.objects.filter(cotizacion=cotizacion))
             pedido = (
                 Pedido.objects.select_for_update()
                 .filter(cotizacion=cotizacion, activo=True)
