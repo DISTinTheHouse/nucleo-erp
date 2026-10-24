@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from terceros.api.views import ProveedorViewSet, ClienteViewSet, ClienteViewSetMesaControl, DireccionClienteViewSet
+from terceros.api.views import ProveedorViewSet, ClienteViewSet, ClienteViewSetMesaControl, DireccionClienteViewSet, VerificarRfcView
 
 router = DefaultRouter()
 router.register(r'proveedores', ProveedorViewSet, basename='proveedor')
@@ -9,5 +9,6 @@ router.register(r'clientes-mesa-control', ClienteViewSetMesaControl, basename='c
 router.register(r'direcciones-clientes', DireccionClienteViewSet, basename='direccion-cliente')
 
 urlpatterns = [
+    path('verificar-rfc/', VerificarRfcView.as_view(), name='verificar-rfc'),
     path('', include(router.urls)),
 ]

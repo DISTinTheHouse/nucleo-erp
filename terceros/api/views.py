@@ -3,6 +3,8 @@ from datetime import timedelta
 from decimal import Decimal
 
 from rest_framework import viewsets
+from rest_framework.permissions import BasePermission, IsAuthenticated
+from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
@@ -24,6 +26,9 @@ from terceros.api.serializers import (
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
 from terceros.cartera import cartera_de_cliente
 from terceros import csf, facturama
+from finanzas.services.facturama.acceso import puede_consultar_cfdis
+from finanzas.services.facturama.client import FacturamaClient
+from finanzas.services.facturama.exceptions import FacturamaAPIException
 from terceros.scope import clientes_base, clientes_visibles
 import logging
 
@@ -670,3 +675,35 @@ class DireccionClienteViewSet(viewsets.ModelViewSet):
 
 
 
+
+
+class PuedeVerificarRfc(BasePermission):
+    message = "No tienes acceso a la verificación de RFC en Facturama."
+
+    def has_permission(self, request, view):
+        return puede_consultar_cfdis(request.user)
+
+
+class VerificarRfcView(APIView):
+    """GET ``?rfc=`` -> estatus del RFC en el SAT vía Facturama (EC-534).
+
+    Misma regla de acceso que la consulta de CFDIs: empresa dueña de la cuenta
+    de Facturama + ``R-CONTABILIDAD-FACTURACION`` (superusuario siempre)."""
+
+    permission_classes = [IsAuthenticated, PuedeVerificarRfc]
+
+    def get(self, request):
+        rfc = (request.query_params.get("rfc") or "").strip().upper()
+        if not rfc:
+            raise ValidationError({"rfc": "Este parámetro es obligatorio."})
+        try:
+            data = FacturamaClient().get("customers/status", params={"rfc": rfc}) or {}
+        except FacturamaAPIException as exc:
+            code = exc.status_code if exc.status_code and exc.status_code < 500 else 502
+            return Response({"error": exc.code, "message": exc.message}, status=code)
+        return Response({
+            "Rfc": data.get("Rfc") or rfc,
+            "FormatoCorrecto": bool(data.get("FormatoCorrecto")),
+            "Activo": bool(data.get("Activo")),
+            "Localizado": bool(data.get("Localizado")),
+        })

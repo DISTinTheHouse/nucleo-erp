@@ -1494,3 +1494,36 @@ class ImportarCsfTests(TestCase):
         for _ in range(50):
             csf.interpretar(CSF_MORAL)
         self.assertLess(time.perf_counter() - inicio, 2.0)
+
+
+@override_settings(FACTURAMA_EMPRESA_CODIGO="duena")
+class VerificarRfcTest(TestCase):
+    URL = "/api/v1/terceros/verificar-rfc/"
+
+    def setUp(self):
+        self.duena = Empresa.objects.create(codigo="duena", razon_social="Dueña")
+        self.otra = Empresa.objects.create(codigo="otra", razon_social="Otra")
+        self.api = APIClient()
+
+    def _login(self, empresa, **kw):
+        user = Usuario.objects.create(
+            username=f"u-{empresa.codigo}", email=f"u@{empresa.codigo}.test", empresa=empresa, **kw
+        )
+        self.api.force_authenticate(user=user)
+
+    def test_empresa_duena_consulta_rfc(self):
+        self._login(self.duena, is_admin_empresa=True)
+        respuesta = {"Rfc": "XAXX010101000", "FormatoCorrecto": True, "Activo": True, "Localizado": False, "Extra": 1}
+        with patch("terceros.api.views.FacturamaClient.get", return_value=respuesta) as get:
+            r = self.api.get(self.URL, {"rfc": " xaxx010101000 "})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"Rfc": "XAXX010101000", "FormatoCorrecto": True, "Activo": True, "Localizado": False})
+        get.assert_called_once_with("customers/status", params={"rfc": "XAXX010101000"})
+
+    def test_rfc_obligatorio(self):
+        self._login(self.duena, is_admin_empresa=True)
+        self.assertEqual(self.api.get(self.URL).status_code, 400)
+
+    def test_otra_empresa_403(self):
+        self._login(self.otra, is_admin_empresa=True)
+        self.assertEqual(self.api.get(self.URL, {"rfc": "XAXX010101000"}).status_code, 403)
