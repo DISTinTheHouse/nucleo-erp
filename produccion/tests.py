@@ -7181,3 +7181,60 @@ class BordadoAvancesRegresionesTests(TestCase):
         self._client(self.op).patch(f"{self.URL}{av.pk}/", {"comentario": "x"}, format="json")
         av.refresh_from_db()
         self.assertEqual(av.puntadas_total, 1000)
+
+
+class MatrizPrendaProcesoOrdenesTests(TestCase):
+    """EC-575: cada orden de trabajo revisa la matriz solo para su propio proceso.
+
+    «Playera» está configurada solo con corte de manga y reflejante en HOMBROS; la
+    talla además lleva bordado, que la categoría no admite.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from catalogo.models import CategoriaProducto, CategoriaProductoProceso
+
+        cls.empresa = Empresa.objects.create(codigo="ec575p", razon_social="EC575P SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="M75", nombre="M75")
+        for tipo_documento, serie in SERIES:
+            SerieFolio.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento=tipo_documento, serie=serie)
+        cls.usuario = Usuario.objects.create(
+            username="ec575p", email="ec575p@x.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        categoria = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Playera", codigo="PLA", descripcion="x")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera", categoria_producto=categoria)
+        cls.talla = Talla.objects.create(nombre="M575p")
+        for proceso, ubicacion in (("corte_manga", ""), ("reflejante", "HOMBROS")):
+            CategoriaProductoProceso.objects.create(
+                empresa=cls.empresa, categoria_producto=categoria, proceso=proceso, ubicacion=ubicacion
+            )
+
+    def _pedido(self, **talla):
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
+            persona_pagos="P", correo_facturas="p@x.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=self.talla, cantidad=4,
+            lleva_bordado=True, bordado_config={"ubicaciones": [{"codigo": "A"}]}, **talla,
+        )
+        return pedido
+
+    def test_corte_de_manga_se_crea_aunque_el_bordado_no_se_admita(self):
+        pedido = self._pedido(lleva_corte_manga=True, corte_manga_config={"tipo": "1"})
+        orden = OrdenCorteMangaService.save({"pedido": pedido}, self.usuario)
+        self.assertTrue(OrdenesCorteManga.objects.filter(pk=orden.pk, pedido=pedido).exists())
+
+    def test_reflejante_revisa_su_propio_proceso(self):
+        pedido = self._pedido(lleva_reflejante=True, reflejante_config=[{"posicion": "ESPALDA"}])
+        with self.assertRaises(DRFValidationError) as ctx:
+            OrdenReflejanteService.save({"pedido": pedido}, self.usuario)
+        self.assertEqual(
+            ctx.exception.detail,
+            {"compatibilidad_proceso": ["La categoría «Playera» no admite Reflejante en «espalda»."]},
+        )
+        self.assertFalse(OrdenesReflejante.objects.filter(pedido=pedido).exists())

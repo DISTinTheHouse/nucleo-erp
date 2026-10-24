@@ -638,7 +638,9 @@ class ProductoFiltroTipoMultipleTests(TestCase):
 
 
 class CompatibilidadPrendaProcesoTests(TestCase):
-    """EC-572: matriz categoría/proceso/ubicación."""
+    """EC-572 / EC-575: matriz categoría/proceso/ubicación (regla por categoría) y su CRUD."""
+
+    URL = "/api/v1/catalogo/categoria-producto-proceso/"
 
     @classmethod
     def setUpTestData(cls):
@@ -648,6 +650,8 @@ class CompatibilidadPrendaProcesoTests(TestCase):
         cls.playera = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Playera", codigo="PLA", descripcion="p")
         cls.pantalon = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Pantalón", codigo="PAN", descripcion="p")
         cls.user = Usuario.objects.create(username="cmp", email="cmp@x.test", empresa=cls.empresa, is_admin_empresa=True)
+        cls.vendedor = Usuario.objects.create(username="cmp-v", email="cmp-v@x.test", empresa=cls.empresa)
+        cls.superuser = Usuario.objects.create(username="cmp-su", email="cmp-su@x.test", is_superuser=True)
 
     def _talla(self, categoria, **kw):
         from types import SimpleNamespace as NS
@@ -660,33 +664,85 @@ class CompatibilidadPrendaProcesoTests(TestCase):
         from catalogo.models import CategoriaProductoProceso
         CategoriaProductoProceso.objects.create(empresa=self.empresa, categoria_producto=categoria, proceso=proceso, ubicacion=ubicacion)
 
+    def _api(self, user=None):
+        api = APIClient()
+        api.force_authenticate(user=user or self.user)
+        return api
+
+    def _alta(self, user=None, **datos):
+        return self._api(user).post(self.URL, {
+            "empresa": self.empresa.pk, "categoria_producto": self.playera.pk, "proceso": "bordado", **datos,
+        }, format="json")
+
+    # --- regla -------------------------------------------------------------
     def test_sin_reglas_no_restringe(self):
         from catalogo.compatibilidad import errores_compatibilidad
         self.assertEqual(errores_compatibilidad(self.empresa.pk, [self._talla(self.pantalon, lleva_corte_manga=True)]), [])
 
-    def test_categoria_sin_regla_y_ubicacion(self):
+    def test_regla_por_categoria(self):
+        """Solo «Playera» está configurada: «Pantalón» queda libre (antes, la primera
+        fila de un proceso lo prohibía a las demás categorías)."""
         from catalogo.compatibilidad import errores_compatibilidad
         self._regla(self.playera, self.Proceso.CORTE_MANGA)
-        self._regla(self.playera, self.Proceso.REFLEJANTE, "Espalda")
+        self._regla(self.playera, self.Proceso.REFLEJANTE, "ESPALDA")
         err = errores_compatibilidad(self.empresa.pk, [
-            self._talla(self.pantalon, lleva_corte_manga=True),
+            self._talla(self.pantalon, lleva_corte_manga=True, lleva_bordado=True),
             self._talla(self.playera, lleva_corte_manga=True),
             self._talla(self.playera, lleva_reflejante=True, reflejante_config=[{"posicion": "espalda"}]),
             self._talla(self.playera, lleva_reflejante=True, reflejante_config=[{"posicion": "Manga"}]),
-            self._talla(self.playera, lleva_bordado=True, bordado_config={"ubicaciones": [{"nombre": "Pecho"}]}),
+            self._talla(self.playera, lleva_bordado=True, bordado_config={"ubicaciones": [{"codigo": "A"}]}),
         ])
-        self.assertEqual(len(err), 2)
-        self.assertIn("«Pantalón» no admite Corte de manga", err[0])
-        self.assertIn("«Playera» no admite Reflejante en «manga»", err[1])
+        self.assertEqual(err, [
+            "La categoría «Playera» no admite Reflejante en «manga».",
+            "La categoría «Playera» no admite Bordado.",
+        ])
 
+    def test_procesos_limita_la_revision(self):
+        from catalogo.compatibilidad import errores_compatibilidad
+        self._regla(self.playera, self.Proceso.CORTE_MANGA)
+        talla = self._talla(self.playera, lleva_corte_manga=True, lleva_bordado=True)
+        self.assertEqual(errores_compatibilidad(self.empresa.pk, [talla], procesos={self.Proceso.CORTE_MANGA}), [])
+        self.assertEqual(len(errores_compatibilidad(self.empresa.pk, [talla])), 1)
+
+    # --- CRUD, permiso, duplicados ------------------------------------------
     def test_api_crud_con_baja_logica(self):
-        api = APIClient()
-        api.force_authenticate(user=self.user)
-        r = api.post("/api/v1/catalogo/categoria-producto-proceso/", {
-            "empresa": self.empresa.pk, "categoria_producto": self.playera.pk, "proceso": "bordado", "ubicacion": " Pecho "}, format="json")
+        api = self._api()
+        r = self._alta(ubicacion=" Pecho ")
         self.assertEqual(r.status_code, 201, r.content)
-        self.assertEqual(r.json()["ubicacion"], "Pecho")
+        self.assertEqual(r.json()["ubicacion"], "PECHO")
         pk = r.json()["id"]
-        self.assertEqual(len(api.get("/api/v1/catalogo/categoria-producto-proceso/", {"categoria_producto": self.playera.pk}).json()), 1)
-        self.assertEqual(api.delete(f"/api/v1/catalogo/categoria-producto-proceso/{pk}/").status_code, 204)
-        self.assertEqual(api.get("/api/v1/catalogo/categoria-producto-proceso/").json(), [])
+        self.assertEqual(len(api.get(self.URL, {"categoria_producto": self.playera.pk}).json()), 1)
+        # Un PATCH sin ubicación la conserva.
+        r = api.patch(f"{self.URL}{pk}/", {"proceso": "reflejante"}, format="json")
+        self.assertEqual((r.status_code, r.json()["ubicacion"]), (200, "PECHO"), r.content)
+        self.assertEqual(api.delete(f"{self.URL}{pk}/").status_code, 204)
+        self.assertEqual(api.get(self.URL).json(), [])
+
+    def test_escribir_exige_superusuario_o_admin_de_empresa(self):
+        self.assertEqual(self._alta(self.vendedor, ubicacion="A").status_code, 403)
+        self.assertEqual(self._alta(self.user, ubicacion="A").status_code, 201)
+        self.assertEqual(self._alta(self.superuser, ubicacion="B").status_code, 201)
+        # Leer sigue abierto a la empresa.
+        self.assertEqual(len(self._api(self.vendedor).get(self.URL).json()), 2)
+        pk = self._api(self.vendedor).get(self.URL).json()[0]["id"]
+        self.assertEqual(self._api(self.vendedor).delete(f"{self.URL}{pk}/").status_code, 403)
+
+    def test_duplicado_y_mayusculas_son_400(self):
+        from catalogo.api.serializers import REGLA_DUPLICADA
+        self.assertEqual(self._alta(ubicacion="Espalda").status_code, 201)
+        for ubicacion in ("Espalda", "espalda", " ESPALDA "):
+            r = self._alta(ubicacion=ubicacion)
+            self.assertEqual((r.status_code, r.json()), (400, {"non_field_errors": [REGLA_DUPLICADA]}), ubicacion)
+        # Otra ubicación o proceso sí entra; y la propia fila se puede editar.
+        otra = self._alta(ubicacion="Frente")
+        self.assertEqual(otra.status_code, 201)
+        r = self._api().patch(f"{self.URL}{otra.json()['id']}/", {"ubicacion": "frente"}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+
+    def test_integrity_error_de_una_carrera_es_400(self):
+        from unittest import mock
+        from django.db import IntegrityError
+        from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer
+        with mock.patch.object(CategoriaProductoProcesoSerializer, "save", side_effect=IntegrityError("uq")):
+            r = self._alta(ubicacion="A")
+        self.assertEqual((r.status_code, r.json()), (400, {"non_field_errors": [REGLA_DUPLICADA]}))
