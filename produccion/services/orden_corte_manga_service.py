@@ -143,7 +143,7 @@ class OrdenCorteMangaService:
         )
 
         # Matriz prenda/proceso (EC-572).
-        exigir_compatibilidad(pedido.empresa, OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id))
+        exigir_compatibilidad(pedido.empresa_id, OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id))
 
         if not detalle_tallas_raw:
             raise ValidationError({

@@ -662,13 +662,13 @@ class CompatibilidadPrendaProcesoTests(TestCase):
 
     def test_sin_reglas_no_restringe(self):
         from catalogo.compatibilidad import errores_compatibilidad
-        self.assertEqual(errores_compatibilidad(self.empresa, [self._talla(self.pantalon, lleva_corte_manga=True)]), [])
+        self.assertEqual(errores_compatibilidad(self.empresa.pk, [self._talla(self.pantalon, lleva_corte_manga=True)]), [])
 
     def test_categoria_sin_regla_y_ubicacion(self):
         from catalogo.compatibilidad import errores_compatibilidad
         self._regla(self.playera, self.Proceso.CORTE_MANGA)
         self._regla(self.playera, self.Proceso.REFLEJANTE, "Espalda")
-        err = errores_compatibilidad(self.empresa, [
+        err = errores_compatibilidad(self.empresa.pk, [
             self._talla(self.pantalon, lleva_corte_manga=True),
             self._talla(self.playera, lleva_corte_manga=True),
             self._talla(self.playera, lleva_reflejante=True, reflejante_config=[{"posicion": "espalda"}]),

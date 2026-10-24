@@ -2161,7 +2161,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             raise ValidationError(errores_montos)
         # Matriz prenda/proceso (EC-572).
         exigir_compatibilidad(
-            cotizacion.empresa,
+            cotizacion.empresa_id,
             CotizacionDetalleTalla.objects.filter(cotizacion_detalle__cotizacion=cotizacion),
         )
 
@@ -2270,7 +2270,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 raise ValidationError(errores_montos)
             # Matriz prenda/proceso (EC-572).
             exigir_compatibilidad(
-                empresa,
+                cotizacion.empresa_id,
                 CotizacionDetalleTalla.objects.filter(cotizacion_detalle__cotizacion=cotizacion),
             )
 
@@ -3358,7 +3358,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             serializer.is_valid(raise_exception=True)
             # Matriz prenda/proceso (EC-572).
             exigir_compatibilidad(
-                pedido.empresa,
+                pedido.empresa_id,
                 PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido),
             )
 

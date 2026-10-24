@@ -357,7 +357,7 @@ class OrdenReflejanteService:
         )
 
         # Matriz prenda/proceso (EC-572).
-        exigir_compatibilidad(pedido.empresa, OrdenReflejanteService._tallas_reflejante_qs(pedido.id))
+        exigir_compatibilidad(pedido.empresa_id, OrdenReflejanteService._tallas_reflejante_qs(pedido.id))
 
         if not detalle_tallas_raw:
              raise ValidationError({

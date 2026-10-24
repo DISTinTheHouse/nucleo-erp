@@ -1,5 +1,6 @@
 """Validación de la matriz prenda/proceso (``CategoriaProductoProceso``, EC-572)."""
 
+from django.db.models import Q
 from rest_framework.exceptions import ValidationError
 
 from catalogo.models import CategoriaProductoProceso
@@ -41,14 +42,15 @@ def _procesos_de(talla):
         yield Proceso.CORTE_MANGA, talla.corte_manga_config
 
 
-def errores_compatibilidad(empresa, tallas):
+def errores_compatibilidad(empresa_id, tallas):
     """Lista de errores de las ``tallas`` (de cotización o pedido) contra la matriz.
 
     ``tallas``: iterable con ``select_related`` a ``<detalle>__producto__categoria_producto``
     y el detalle accesible como ``cotizacion_detalle`` o ``pedido_detalle``.
     """
+    # Una sola consulta chica; sin filas no se toca la lista de tallas (lazy).
     reglas = {}
-    for fila in CategoriaProductoProceso.objects.filter(empresa=empresa, activo=True):
+    for fila in CategoriaProductoProceso.objects.filter(empresa_id=empresa_id, activo=True):
         reglas.setdefault(fila.proceso, {}).setdefault(fila.categoria_producto_id, set()).add(_norm(fila.ubicacion))
     if not reglas:
         return []
@@ -88,12 +90,14 @@ def errores_compatibilidad(empresa, tallas):
     return errores
 
 
-def exigir_compatibilidad(empresa, tallas):
-    """Lanza 400 si alguna talla viola la matriz. ``tallas`` puede ser un queryset (se le hace
-    ``select_related`` hasta la categoría) o una lista."""
+def exigir_compatibilidad(empresa_id, tallas):
+    """Lanza 400 si alguna talla viola la matriz. ``tallas`` puede ser un queryset (se reduce a
+    las que llevan algún proceso y se trae la categoría en el mismo JOIN) o una lista."""
     if hasattr(tallas, "select_related"):
         detalle = "cotizacion_detalle" if hasattr(tallas.model, "cotizacion_detalle") else "pedido_detalle"
-        tallas = tallas.select_related(f"{detalle}__producto__categoria_producto")
-    errores = errores_compatibilidad(empresa, tallas)
+        tallas = tallas.filter(
+            Q(lleva_bordado=True) | Q(lleva_reflejante=True) | Q(lleva_corte_manga=True)
+        ).select_related(f"{detalle}__producto__categoria_producto")
+    errores = errores_compatibilidad(empresa_id, tallas)
     if errores:
         raise ValidationError({"compatibilidad_proceso": errores})
