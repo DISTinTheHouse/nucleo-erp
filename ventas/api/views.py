@@ -11,6 +11,7 @@ from datetime import timedelta
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from catalogo.compatibilidad import exigir_compatibilidad
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
@@ -2158,6 +2159,11 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         errores_montos = errores_montos_guardados(cotizacion)
         if errores_montos:
             raise ValidationError(errores_montos)
+        # Matriz prenda/proceso (EC-572).
+        exigir_compatibilidad(
+            cotizacion.empresa_id,
+            CotizacionDetalleTalla.objects.filter(cotizacion_detalle__cotizacion=cotizacion),
+        )
 
         comentario = _texto_comentario(request.data)
         with transaction.atomic():
@@ -2262,6 +2268,11 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             errores_montos = errores_montos_guardados(cotizacion)
             if errores_montos:
                 raise ValidationError(errores_montos)
+            # Matriz prenda/proceso (EC-572).
+            exigir_compatibilidad(
+                cotizacion.empresa_id,
+                CotizacionDetalleTalla.objects.filter(cotizacion_detalle__cotizacion=cotizacion),
+            )
 
             pedido_existente = (
                 Pedido.objects.select_for_update()
@@ -3345,6 +3356,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 data=request.data, context={"total_piezas": total_piezas}
             )
             serializer.is_valid(raise_exception=True)
+            # Matriz prenda/proceso (EC-572).
+            exigir_compatibilidad(
+                pedido.empresa_id,
+                PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido),
+            )
 
             # No dejar programar un servicio que el pedido no lleva (ej.
             # CORTE_MANGA en un pedido sin ninguna talla de corte de manga) —

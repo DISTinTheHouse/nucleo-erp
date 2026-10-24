@@ -9,8 +9,8 @@ from rest_framework.response import Response
 from catalogo.codigos import siguiente_codigo_producto
 from catalogo.tallas import talla_sort_key
 from catalogo.validaciones import talla_permitida_para_producto
-from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
-from catalogo.api.serializers import TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
+from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso
+from catalogo.api.serializers import CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
 from produccion.models import ListaMaterialBom
 
 # Solo Producto Terminado exige talla en el onboarding de variante; materia
@@ -40,6 +40,26 @@ class CategoriaProductoViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = CategoriaProducto.objects.filter(activo=True).order_by("-created_at", "-id")
         return _alcance_empresa(qs, self.request.user)
+
+class CategoriaProductoProcesoViewSet(viewsets.ModelViewSet):
+    """Matriz prenda/proceso (EC-572). Filtro opcional ``?categoria_producto=``; baja lógica."""
+
+    serializer_class = CategoriaProductoProcesoSerializer
+
+    def get_queryset(self):
+        qs = CategoriaProductoProceso.objects.filter(activo=True).order_by("categoria_producto_id", "proceso", "ubicacion")
+        categoria_id = self.request.query_params.get("categoria_producto")
+        if categoria_id:
+            try:
+                qs = qs.filter(categoria_producto_id=int(categoria_id))
+            except (TypeError, ValueError):
+                raise ValidationError({"categoria_producto": "Debe ser un entero."})
+        return _alcance_empresa(qs, self.request.user)
+
+    def perform_destroy(self, instance):
+        instance.activo = False
+        instance.save(update_fields=["activo", "updated_at"])
+
 
 class ColorViewSet(viewsets.ModelViewSet):
     serializer_class = ColorSerializer

@@ -635,3 +635,58 @@ class ProductoFiltroTipoMultipleTests(TestCase):
     def test_varios_tipos_no_amplian_el_alcance_de_empresa(self):
         ids = self._ids("tipo_id=1&tipo_id=3")
         self.assertTrue(ids.isdisjoint({p.pk for p in self.ajenos}))
+
+
+class CompatibilidadPrendaProcesoTests(TestCase):
+    """EC-572: matriz categoría/proceso/ubicación."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from catalogo.models import CategoriaProductoProceso
+        cls.Proceso = CategoriaProductoProceso.Proceso
+        cls.empresa = Empresa.objects.create(codigo="cmp", razon_social="Cmp SA")
+        cls.playera = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Playera", codigo="PLA", descripcion="p")
+        cls.pantalon = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Pantalón", codigo="PAN", descripcion="p")
+        cls.user = Usuario.objects.create(username="cmp", email="cmp@x.test", empresa=cls.empresa, is_admin_empresa=True)
+
+    def _talla(self, categoria, **kw):
+        from types import SimpleNamespace as NS
+        base = dict(lleva_bordado=False, bordado_config=None, lleva_reflejante=False, reflejante_config=None,
+                    lleva_corte_manga=False, corte_manga_config=None)
+        base.update(kw)
+        return NS(pedido_detalle=NS(producto=NS(categoria_producto=categoria)), **base)
+
+    def _regla(self, categoria, proceso, ubicacion=""):
+        from catalogo.models import CategoriaProductoProceso
+        CategoriaProductoProceso.objects.create(empresa=self.empresa, categoria_producto=categoria, proceso=proceso, ubicacion=ubicacion)
+
+    def test_sin_reglas_no_restringe(self):
+        from catalogo.compatibilidad import errores_compatibilidad
+        self.assertEqual(errores_compatibilidad(self.empresa.pk, [self._talla(self.pantalon, lleva_corte_manga=True)]), [])
+
+    def test_categoria_sin_regla_y_ubicacion(self):
+        from catalogo.compatibilidad import errores_compatibilidad
+        self._regla(self.playera, self.Proceso.CORTE_MANGA)
+        self._regla(self.playera, self.Proceso.REFLEJANTE, "Espalda")
+        err = errores_compatibilidad(self.empresa.pk, [
+            self._talla(self.pantalon, lleva_corte_manga=True),
+            self._talla(self.playera, lleva_corte_manga=True),
+            self._talla(self.playera, lleva_reflejante=True, reflejante_config=[{"posicion": "espalda"}]),
+            self._talla(self.playera, lleva_reflejante=True, reflejante_config=[{"posicion": "Manga"}]),
+            self._talla(self.playera, lleva_bordado=True, bordado_config={"ubicaciones": [{"nombre": "Pecho"}]}),
+        ])
+        self.assertEqual(len(err), 2)
+        self.assertIn("«Pantalón» no admite Corte de manga", err[0])
+        self.assertIn("«Playera» no admite Reflejante en «manga»", err[1])
+
+    def test_api_crud_con_baja_logica(self):
+        api = APIClient()
+        api.force_authenticate(user=self.user)
+        r = api.post("/api/v1/catalogo/categoria-producto-proceso/", {
+            "empresa": self.empresa.pk, "categoria_producto": self.playera.pk, "proceso": "bordado", "ubicacion": " Pecho "}, format="json")
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertEqual(r.json()["ubicacion"], "Pecho")
+        pk = r.json()["id"]
+        self.assertEqual(len(api.get("/api/v1/catalogo/categoria-producto-proceso/", {"categoria_producto": self.playera.pk}).json()), 1)
+        self.assertEqual(api.delete(f"/api/v1/catalogo/categoria-producto-proceso/{pk}/").status_code, 204)
+        self.assertEqual(api.get("/api/v1/catalogo/categoria-producto-proceso/").json(), [])

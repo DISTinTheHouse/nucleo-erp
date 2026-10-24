@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante
+from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso
 from catalogo.validaciones import talla_permitida_para_producto
 from finanzas.api.serializers import EmpresaResueltaEnServidorMixin
 
@@ -145,4 +145,18 @@ class ProductoVarianteSerializer(EmpresaValidadaEnCreateMixin, serializers.Model
             raise serializers.ValidationError(
                 {"talla": "Esta talla no esta permitida para la categoria de este producto."}
             )
+        return attrs
+
+
+class CategoriaProductoProcesoSerializer(EmpresaValidadaEnCreateMixin, serializers.ModelSerializer):
+    class Meta:
+        model = CategoriaProductoProceso
+        exclude = ['activo', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        categoria = attrs.get('categoria_producto') or getattr(self.instance, 'categoria_producto', None)
+        empresa = attrs.get('empresa') or getattr(self.instance, 'empresa', None)
+        if categoria and empresa and categoria.empresa_id != empresa.pk:
+            raise serializers.ValidationError({'categoria_producto': 'La categoría no es de la empresa.'})
+        attrs['ubicacion'] = (attrs.get('ubicacion') or '').strip()
         return attrs

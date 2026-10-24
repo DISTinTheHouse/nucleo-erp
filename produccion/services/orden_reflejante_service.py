@@ -1,5 +1,6 @@
 import math
 
+from catalogo.compatibilidad import exigir_compatibilidad
 from django.db import transaction
 from django.db.models import Sum
 from rest_framework.exceptions import ValidationError, APIException
@@ -354,6 +355,9 @@ class OrdenReflejanteService:
                 "pedido_detalle", "talla"
             )
         )
+
+        # Matriz prenda/proceso (EC-572).
+        exigir_compatibilidad(pedido.empresa_id, OrdenReflejanteService._tallas_reflejante_qs(pedido.id))
 
         if not detalle_tallas_raw:
              raise ValidationError({
