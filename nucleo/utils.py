@@ -212,7 +212,6 @@ def check_sat_status_mock(rfc):
     
     # Aquí podrías usar `requests.get('https://api.validarfc.com/check', params={'rfc': rfc})`
     
-    print(f"Sistema: Simulando consulta SAT para RFC {rfc}...")
     return {
         'exists': True, 
         'status': 'active', 
