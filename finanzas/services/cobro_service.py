@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.services.cobro_poliza_service import CobroPolizaService
+from finanzas.utils.folios import generate_cobro_folio
 from finanzas.models import (
     Cobro,
     CobroDetalle,
@@ -13,6 +14,7 @@ from finanzas.models import (
     Factura,
     MovimientoBancario,
 )
+from terceros.models import Cliente
 
 
 class CobroService:
@@ -24,11 +26,15 @@ class CobroService:
             CobroDetalle.objects.select_for_update()
             .select_related("cxc")
             .filter(cobro=cobro)
+            .order_by("id")
         )
         if not detalles:
             raise ErrorDeNegocio(
                 {"cobro_detalles": "El cobro debe tener al menos un detalle."}
             )
+        # #645: el cliente y la cuenta EFECTIVOS del cobro, vengan o no en el PATCH.
+        if not Cliente.objects.filter(pk=cobro.cliente_id, activo=True).exists():
+            raise ErrorDeNegocio({"cliente": "El cliente está dado de baja."})
 
         cxc_ids = [d.cxc_id for d in detalles]
         if len(set(cxc_ids)) != len(cxc_ids):  # #586
@@ -38,7 +44,11 @@ class CobroService:
             for cxc in CuentaPorCobrar.objects.select_for_update()
             .select_related("factura").filter(pk__in=cxc_ids)
         }
-        moneda_cuenta = CuentaBancaria.objects.values_list("moneda_id", flat=True).get(pk=cobro.cuenta_bancaria_id)
+        moneda_cuenta, cuenta_activa = CuentaBancaria.objects.values_list("moneda_id", "activo").get(
+            pk=cobro.cuenta_bancaria_id
+        )
+        if not cuenta_activa:
+            raise ErrorDeNegocio({"cuenta_bancaria": "La cuenta bancaria está inactiva."})
 
         suma_aplicado = Decimal("0.00")
         for det in detalles:
@@ -47,6 +57,8 @@ class CobroService:
                 raise ErrorDeNegocio(
                     {"cobro_detalles": f"CxC {det.cxc_id} no encontrada."}
                 )
+            if cxc.cliente_id != cobro.cliente_id:  # #643: también si el cliente cambió por PATCH
+                raise ErrorDeNegocio({"cobro_detalles": f"La CxC {cxc.pk} es de otro cliente."})
             if cxc.estatus == CuentaPorCobrar.EstatusCxC.CANCELADA:
                 raise ErrorDeNegocio(
                     {"cobro_detalles": f"La CxC {cxc.pk} está cancelada y no admite cobros."}
@@ -95,6 +107,12 @@ class CobroService:
                     )
                 }
             )
+
+        # #644: el folio se consume al aplicar (no en Borrador), con la sucursal de la
+        # factura de la primera línea por id.
+        if not cobro.folio:
+            cobro.folio = generate_cobro_folio(cobro.empresa_id, cxcs[detalles[0].cxc_id].factura.sucursal_id)
+            cobro.save(update_fields=["folio"])
 
         hoy = timezone.localdate()
         for det in detalles:

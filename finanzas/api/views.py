@@ -2,6 +2,7 @@ from datetime import timedelta
 from django.utils.dateparse import parse_date
 from decimal import Decimal
 from django.db import OperationalError, transaction
+from django.db.models.deletion import ProtectedError, RestrictedError
 from django.db.models import BooleanField, Case, DecimalField, Max, Min, OuterRef, Q, Subquery, Sum, Value, When
 from django.http import HttpResponse
 from django.utils import timezone
@@ -101,7 +102,7 @@ from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
 from finanzas.services.reporte_contable_service import LIMITE_OMISION, ReporteContableService
-from finanzas.utils.folios import generate_cobro_folio, generate_factura_folio
+from finanzas.utils.folios import generate_factura_folio
 from nucleo.models import Empresa, Moneda, Sucursal
 
 PERMISO_CANCELAR_FACTURA = 'E-FIN-FACTURAS'
@@ -318,6 +319,31 @@ class ConcurrencyConflictsAs409Mixin:
         return super().handle_exception(exc)
 
 
+class BorradoConDependencias(APIException):
+    status_code = status.HTTP_409_CONFLICT
+    default_code = "con_dependencias"
+
+
+class BorradoProtegidoComo409Mixin:
+    """Borrar un registro con documentos ligados por FK ``PROTECT``/``RESTRICT`` daba 500
+    (#648). Sale como 409 ``{"detail": ...}`` con lo que lo bloquea, el formato que el
+    frontend ya muestra en un 409; mismo criterio que ``ventas`` (``PedidoConDependencias``)."""
+
+    def handle_exception(self, exc):
+        if isinstance(exc, (ProtectedError, RestrictedError)):
+            objetos = getattr(exc, "protected_objects", None) or getattr(exc, "restricted_objects", None) or ()
+            ligados = sorted({str(type(o)._meta.verbose_name_plural).lower() for o in objetos}) or ["registros"]
+            texto = ligados[0] if len(ligados) == 1 else f"{', '.join(ligados[:-1])} y {ligados[-1]}"
+            modelo = getattr(getattr(self, "queryset", None), "model", None)
+            sugerencia = (
+                " En su lugar, desactiva el registro."
+                if modelo is not None and any(f.name == "activo" for f in modelo._meta.concrete_fields)
+                else ""
+            )
+            exc = BorradoConDependencias(f"No se puede eliminar porque tiene {texto} ligados.{sugerencia}")
+        return super().handle_exception(exc)
+
+
 # Los tres viewsets base de finanzas. Existen para que la traducción de errores
 # de negocio sea por construcción y no por memoria: antes el mixin se aplicaba
 # clase por clase y siete viewsets se habían quedado fuera, de modo que volvían a
@@ -334,17 +360,21 @@ class LecturaContabilidad(BasePermission):
         return request.method not in SAFE_METHODS or 'R-CONTABILIDAD' in permisos_efectivos(request.user)
 
 
-class FinanzasBaseViewSet(ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated, LecturaContabilidad]
-
-
-class FinanzasBaseReadOnlyViewSet(
-    ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ReadOnlyModelViewSet
+class FinanzasBaseViewSet(
+    BorradoProtegidoComo409Mixin, ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet
 ):
     permission_classes = [IsAuthenticated, LecturaContabilidad]
 
 
-class FinanzasBaseSimpleViewSet(ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
+class FinanzasBaseReadOnlyViewSet(
+    BorradoProtegidoComo409Mixin, ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ReadOnlyModelViewSet
+):
+    permission_classes = [IsAuthenticated, LecturaContabilidad]
+
+
+class FinanzasBaseSimpleViewSet(
+    BorradoProtegidoComo409Mixin, ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ViewSet
+):
     permission_classes = [IsAuthenticated, LecturaContabilidad]
 
 
@@ -1892,7 +1922,7 @@ class CobroViewSet(FinanzasBaseViewSet):
 
     @staticmethod
     def _guardar_detalles(cobro, detalles_data):
-        """Crea las líneas validando empresa/cliente y asigna folio si aún no tiene."""
+        """Crea las líneas validando empresa/cliente. El folio se asigna al aplicar (#644)."""
         for d in detalles_data:
             # El campo real de ``CobroDetalle`` es ``cxc``: leer
             # ``cuenta_por_cobrar`` devolvía siempre ``None`` y esta validación no
@@ -1914,10 +1944,6 @@ class CobroViewSet(FinanzasBaseViewSet):
                         {"cobro_detalles": [f"La CxC {cxc.pk} es de otro cliente."]}
                     )
             CobroDetalle.objects.create(cobro=cobro, **d)
-        if detalles_data and not cobro.folio:
-            sucursal_id = detalles_data[0]["cxc"].factura.sucursal_id
-            cobro.folio = generate_cobro_folio(cobro.empresa_id, sucursal_id)
-            cobro.save(update_fields=["folio"])
 
     @transaction.atomic
     def perform_update(self, serializer):
