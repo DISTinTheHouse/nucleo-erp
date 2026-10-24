@@ -6,7 +6,7 @@ from django.db.models import Q, Sum
 from rest_framework.exceptions import ValidationError
 
 from logistica.models import Envio
-from ventas.models import PedidoDetalleTalla
+from ventas.models import Pedido, PedidoDetalleTalla
 from ventas.services.sku_produccion_service import TALLAS_DE_LINEA_NO_MUESTRA_Q
 from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle
 
@@ -185,7 +185,8 @@ class DespachoService:
             "estado": packing.estado,
         }
 
-        rows = list(packing.packing_detalle.all().order_by("id"))
+        # Las líneas canceladas no se ofrecen para despachar (EC-574).
+        rows = list(packing.packing_detalle.exclude(estado="CANCELADO").order_by("id"))
         already_dispatched = cls._despachado_map(
             packing, packing_detalle_ids=[row.id for row in rows]
         )
@@ -328,6 +329,7 @@ class DespachoService:
         packing_rows = {
             row.id: row for row in packing.packing_detalle.all().order_by("id")
         }
+        cancelados = {row_id for row_id, row in packing_rows.items() if row.estado == "CANCELADO"}
         requested_ids = []
         for row in requested_rows:
             packing_detalle_id = row.get("packing_detalle")
@@ -352,6 +354,17 @@ class DespachoService:
                 }
             )
 
+        cancelados_pedidos = cancelados.intersection(requested_ids)
+        if cancelados_pedidos:
+            raise ValidationError(
+                {
+                    "despacho_detalle": (
+                        "Los siguientes packing_detalle están cancelados y no se "
+                        f"pueden despachar: {sorted(cancelados_pedidos)}"
+                    )
+                }
+            )
+
         already_dispatched = cls._despachado_map(packing, packing_detalle_ids=requested_ids)
         for packing_detalle_id in requested_ids:
             if already_dispatched[packing_detalle_id]:
@@ -368,10 +381,15 @@ class DespachoService:
     @staticmethod
     @transaction.atomic
     def handle_store(data, user):
+        packing_input = data.pop("packing")
+        # Orden fijo de bloqueo: Pedido -> Packing -> Envio (EC-574). El pedido
+        # serializa los despachos de sus distintos packings mientras se valida
+        # el embarque parcial.
+        Pedido.objects.select_for_update().filter(pk=packing_input.pedido_id).first()
         packing = (
             Packing.objects.select_for_update()
             .select_related("empresa", "sucursal", "pedido", "picking", "picking__almacen")
-            .get(pk=data.pop("packing").pk)
+            .get(pk=packing_input.pk)
         )
         envio_input = data.pop("envio", None)
         envio = None
