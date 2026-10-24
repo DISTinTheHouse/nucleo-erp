@@ -2011,9 +2011,7 @@ class CobroViewSet(FinanzasBaseViewSet):
     @action(detail=True, methods=["post"], url_path="timbrar-rep", url_name="timbrar-rep")
     def timbrar_rep(self, request, pk=None):
         """Timbra el complemento de pago (REP) del cobro con Facturama."""
-        cobro = self.get_object()  # otra empresa -> 404
-        if not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
-            raise PermissionDenied("No tienes permiso para timbrar complementos de pago.")
+        cobro = self.get_object()  # otra empresa -> 404; sin E-FIN-FACTURAS ya es 403 (check_permissions)
         FacturaTimbradoService.timbrar_rep(cobro)
         return Response(CobroSerializer(cobro).data)
 
@@ -2036,9 +2034,7 @@ class CobroViewSet(FinanzasBaseViewSet):
     @action(detail=True, methods=["post"], url_path="cancelar-rep", url_name="cancelar-rep")
     def cancelar_rep(self, request, pk=None):
         """Cancela el REP del cobro ante el SAT (Facturama)."""
-        cobro = self.get_object()  # otra empresa -> 404
-        if not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
-            raise PermissionDenied("No tienes permiso para cancelar complementos de pago.")
+        cobro = self.get_object()  # otra empresa -> 404; sin E-FIN-FACTURAS ya es 403 (check_permissions)
         FacturaTimbradoService.cancelar_rep(cobro)
         return Response(CobroSerializer(cobro).data)
 

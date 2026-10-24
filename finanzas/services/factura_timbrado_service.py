@@ -131,14 +131,14 @@ class FacturaTimbradoService:
         queda ``rep_cancelacion_solicitada`` (#624) y se reintenta cuando el receptor acepte.
         Se cancela con ``rep_facturama_id`` aunque falte el UUID (timbrado sin confirmar, #622).
         """
-        with transaction.atomic():
-            bloqueado = Cobro.objects.select_for_update(of=("self",)).select_related("empresa").get(pk=cobro.pk)
-            _exigir_empresa_duena(bloqueado.empresa, "rep")
-            if not bloqueado.rep_facturama_id:
-                raise ErrorDeNegocio({"rep": "El cobro no tiene un REP en Facturama que cancelar."})
+        # Validar es una lectura simple: un bloqueo aquí se soltaba antes de llamar a Facturama.
+        actual = Cobro.objects.select_related("empresa").get(pk=cobro.pk)
+        _exigir_empresa_duena(actual.empresa, "rep")
+        if not actual.rep_facturama_id:
+            raise ErrorDeNegocio({"rep": "El cobro no tiene un REP en Facturama que cancelar."})
         error = None
         try:
-            respuesta = FacturamaService().cancel_cfdi(bloqueado.rep_facturama_id)
+            respuesta = FacturamaService().cancel_cfdi(actual.rep_facturama_id)
         except FacturamaAPIException as exc:
             if exc.status_code and 400 <= exc.status_code < 500 and exc.status_code != 408:
                 raise ErrorDeNegocio({"rep": f"Facturama no canceló el REP: {_mensaje(exc)}"})
