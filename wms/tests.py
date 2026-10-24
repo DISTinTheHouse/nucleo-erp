@@ -1159,3 +1159,111 @@ class PackingDespachoEC574Tests(TestCase):
         resp = self._despachar(primero)
         self.assertEqual(resp.status_code, 400)
         self.assertIn("faltan 2 piezas por empacar de las 6", self._mensaje(resp, "despacho_detalle"))
+
+    # --- revisión de código ------------------------------------------------
+    def test_despacho_de_parte_de_un_packing(self):
+        from ventas.models import Pedido
+
+        packing = self._empacar_ok((self.linea_m, 4), (self.linea_g, 2))
+        solo_m = {**packing, "packing_detalle": packing["packing_detalle"][:1]}
+        resp = self._despachar(solo_m)
+        self.assertEqual(resp.status_code, 400)
+        mensaje = self._mensaje(resp, "despacho_detalle")
+        self.assertIn("todas las líneas del packing", mensaje)
+        self.assertIsNone(self.STALE_DESPACHO_RE.search(mensaje))
+        self.assertIsNone(self.STALE_PACKING_RE.search(mensaje))
+
+        Pedido.objects.filter(pk=self.pedido.pk).update(embarque_parcial=True)
+        self.assertEqual(self._despachar(solo_m).status_code, 201)
+
+    def test_reempacar_tras_cancelar_no_infla_el_surtido(self):
+        from wms.models import Packing, PickingDetalle
+
+        primero = self._empacar_ok((self.linea_m, 4))
+        Packing.objects.filter(pk=primero["id"]).update(estado="CANCELADO")
+        self._empacar_ok((self.linea_m, 4))
+        self.linea_m.refresh_from_db()
+        self.assertEqual(self.linea_m.cantidad_surtida, Decimal("4"))
+        self.assertEqual(self.linea_m.estado, PickingDetalle.EstadoLinea.SURTIDA)
+
+    def test_linea_empacada_antes_del_cambio_llega_a_surtida(self):
+        from wms.models import Packing, PackingDetalle, PickingDetalle
+
+        # Packing previo a EC-574: dejó 3 piezas empacadas sin tocar el surtido.
+        previo = Packing.objects.create(
+            folio="PA-PREVIO", empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            picking=self.picking, operador=self.usuario, usuario=self.usuario,
+        )
+        PackingDetalle.objects.create(packing=previo, picking_detalle=self.linea_m, cantidad_empacada=3)
+        self.linea_m.refresh_from_db()
+        self.assertEqual(self.linea_m.cantidad_surtida, 0)
+
+        self._empacar_ok((self.linea_m, 1))
+        self.linea_m.refresh_from_db()
+        self.assertEqual(self.linea_m.cantidad_surtida, Decimal("4"))
+        self.assertEqual(self.linea_m.estado, PickingDetalle.EstadoLinea.SURTIDA)
+        self.linea_g.refresh_from_db()
+        self.assertEqual(self.linea_g.cantidad_surtida, 0)  # no tocada: no se recalcula
+
+    def test_linea_de_picking_cancelada_no_cuenta_en_o1(self):
+        from wms.models import PickingDetalle
+
+        packing = self._empacar_ok((self.linea_m, 4), (self.linea_g, 2))
+        PickingDetalle.objects.filter(pk=self.linea_g.pk).update(estado=PickingDetalle.EstadoLinea.CANCELADA)
+        resp = self._despachar(packing)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("faltan 2 piezas", self._mensaje(resp, "despacho_detalle"))
+
+    def test_otra_empresa_rechazada_antes_de_bloquear(self):
+        from ventas.models import Pedido
+
+        packing = self._empacar_ok((self.linea_m, 4), (self.linea_g, 2))
+        intruso = Usuario.objects.create(
+            username="ec574-x@example.com", email="ec574-x@example.com",
+            empresa=Empresa.objects.create(codigo="ec574x", razon_social="Otra SA"),
+        )
+        api = APIClient()
+        api.force_authenticate(intruso)
+        with patch.object(Pedido.objects, "select_for_update", wraps=Pedido.objects.select_for_update) as lock:
+            resp_despacho = api.post(
+                "/api/v1/wms/despachos/",
+                {"packing": packing["id"], "despacho_detalle": [{"packing_detalle": d["id"]} for d in packing["packing_detalle"]]},
+                format="json",
+            )
+            resp_packing = api.post(
+                "/api/v1/wms/packings/",
+                {"picking": self.picking.pk, "packing_detalle": [{"picking_detalle": self.linea_m.pk, "cantidad_empacada": "1"}]},
+                format="json",
+            )
+        self.assertIn(resp_despacho.status_code, (400, 404))
+        self.assertIn(resp_packing.status_code, (400, 404))
+        lock.assert_not_called()
+
+    def test_onboarding_de_despacho_explica_o1(self):
+        def onboarding(packing):
+            resp = self.api.get("/api/v1/wms/despachos/onboarding/", {"packing": packing["id"]})
+            self.assertEqual(resp.status_code, 200, resp.content)
+            return resp.json()
+
+        primero = self._empacar_ok((self.linea_m, 4))
+        datos = onboarding(primero)
+        self.assertEqual(
+            datos["embarque"],
+            {
+                "embarque_parcial": False,
+                "total_piezas_pedido": "6",
+                "piezas_empacadas": "4",
+                "piezas_por_empacar": "2",
+                "despachable": False,
+                "motivo": "El pedido no permite embarque parcial: faltan 2 piezas por empacar de las 6 del pedido.",
+            },
+        )
+        self.assertFalse(any(d["disponible_para_despacho"] for d in datos["despacho_detalle"]))
+        self.assertTrue(all(not d["ya_despachado"] for d in datos["despacho_detalle"]))
+
+        self._empacar_ok((self.linea_g, 2))
+        datos = onboarding(primero)
+        self.assertTrue(datos["embarque"]["despachable"])
+        self.assertIsNone(datos["embarque"]["motivo"])
+        self.assertEqual(datos["embarque"]["piezas_por_empacar"], "0")
+        self.assertTrue(all(d["disponible_para_despacho"] for d in datos["despacho_detalle"]))

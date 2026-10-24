@@ -2,11 +2,12 @@ from collections import defaultdict
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import F, Sum
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from auditoria.models import AuditoriaEvento
+from ventas.models import Pedido
 from wms.utils.decimales import normalizar_decimal
 from wms.utils.folios import generate_folio
 from wms.models import Packing, PackingDetalle, Picking, PickingDetalle
@@ -357,12 +358,20 @@ class PackingService:
     @staticmethod
     @transaction.atomic
     def handle_store(data, user):
-        picking = (
-            Picking.objects.select_for_update()
-            .select_related("empresa", "sucursal", "pedido", "operador")
-            .get(pk=data.pop("picking").pk)
-        )
+        picking_input = data.pop("picking")
         packing_detalle = data.pop("packing_detalle")
+
+        # Tenencia antes de bloquear nada; después, el orden de bloqueo común a
+        # packing y despacho (EC-574): Pedido -> Picking -> líneas de picking ->
+        # Packing -> Envio, siempre ``of=("self",)`` para no bloquear de paso
+        # empresa, sucursal ni las demás filas del ``select_related``.
+        PackingService._validate_context(picking_input, user)
+        Pedido.objects.select_for_update(of=("self",)).filter(pk=picking_input.pedido_id).first()
+        picking = (
+            Picking.objects.select_for_update(of=("self",))
+            .select_related("empresa", "sucursal", "pedido", "operador")
+            .get(pk=picking_input.pk)
+        )
 
         PackingService._validate_context(picking, user)
         resolved_rows = PackingService._resolve_requested_rows(picking, packing_detalle)
@@ -397,47 +406,34 @@ class PackingService:
     def _confirmar_surtido(picking, packing, resolved_rows, user):
         """Empacar confirma el surtido (EC-574 / WM-01, opción B).
 
-        Suma lo empacado a ``cantidad_surtida`` de cada línea, recalcula el
-        estado de la línea y del picking, y deja un ``AuditoriaEvento`` por
-        packing. Corre dentro de la transacción de ``handle_store`` con el
-        picking ya bloqueado; las líneas se bloquean en orden de ``id``.
+        La ``cantidad_surtida`` de cada línea que toca este packing se recalcula
+        como lo empacado en packings y líneas vivos (no se incrementa): un packing
+        cancelado y vuelto a empacar no la infla, y una línea empacada antes de
+        este cambio llega a ``SURTIDA`` al completarse. Solo se recalculan las
+        líneas de este packing. De ahí salen el estado de la línea y del picking,
+        y un ``AuditoriaEvento`` por packing. Corre dentro de la transacción de
+        ``handle_store`` con el picking ya bloqueado; las líneas se bloquean en
+        orden de ``id``.
         """
-        empacado_por_linea = defaultdict(lambda: Decimal("0"))
-        for item in resolved_rows:
-            empacado_por_linea[item["picking_detalle"].pk] += item["cantidad_empacada"]
-
+        ids = sorted({item["picking_detalle"].pk for item in resolved_rows})
         lineas = list(
-            PickingDetalle.objects.select_for_update()
-            .filter(pk__in=list(empacado_por_linea))
+            PickingDetalle.objects.select_for_update(of=("self",))
+            .filter(pk__in=ids)
             .order_by("id")
         )
-        antes = {
-            "estado": picking.estado,
-            "lineas": {
-                str(linea.pk): {
-                    "cantidad_surtida": str(normalizar_decimal(linea.cantidad_surtida)),
-                    "estado": linea.estado,
-                }
-                for linea in lineas
-            },
-        }
+        antes = {"estado": picking.estado, "lineas": PackingService._snapshot_lineas(lineas)}
 
+        empacado = PackingService._historical_packed_map(picking, picking_detalle_ids=ids)
         ahora = timezone.now()
         for linea in lineas:
-            # La línea está bloqueada: su surtida leída arriba es la vigente, así
-            # que el estado se decide aquí y la suma se escribe con ``F()``.
-            empacado = empacado_por_linea[linea.pk]
-            linea.cantidad_surtida = normalizar_decimal(linea.cantidad_surtida) + empacado
+            linea.cantidad_surtida = empacado[linea.pk]
+            linea.fecha_surtido = ahora
             linea.estado = (
                 PickingDetalle.EstadoLinea.SURTIDA
                 if linea.cantidad_surtida >= linea.cantidad_asignada
                 else PickingDetalle.EstadoLinea.PARCIAL
             )
-            PickingDetalle.objects.filter(pk=linea.pk).update(
-                cantidad_surtida=F("cantidad_surtida") + empacado,
-                fecha_surtido=ahora,
-                estado=linea.estado,
-            )
+        PickingDetalle.objects.bulk_update(lineas, ["cantidad_surtida", "fecha_surtido", "estado"])
 
         vivas = picking.picking_detalle.exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
         completas = vivas.filter(estado=PickingDetalle.EstadoLinea.SURTIDA).count()
@@ -461,14 +457,18 @@ class PackingService:
             antes_json=antes,
             despues_json={
                 "estado": picking.estado,
-                "lineas": {
-                    str(linea.pk): {
-                        "cantidad_surtida": str(normalizar_decimal(linea.cantidad_surtida)),
-                        "estado": linea.estado,
-                    }
-                    for linea in lineas
-                },
+                "lineas": PackingService._snapshot_lineas(lineas),
                 "packing_id": packing.pk,
                 "packing_folio": packing.folio,
             },
         )
+
+    @staticmethod
+    def _snapshot_lineas(lineas):
+        return {
+            str(linea.pk): {
+                "cantidad_surtida": str(normalizar_decimal(linea.cantidad_surtida)),
+                "estado": linea.estado,
+            }
+            for linea in lineas
+        }

@@ -2,19 +2,17 @@ from collections import defaultdict
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Q, Sum
+from django.db.models import Sum
 from rest_framework.exceptions import ValidationError
 
 from logistica.models import Envio
 from ventas.models import Pedido, PedidoDetalleTalla
-from ventas.services.sku_produccion_service import TALLAS_DE_LINEA_NO_MUESTRA_Q
-from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle
+from ventas.services.sku_produccion_service import TALLAS_DE_LINEA_NO_MUESTRA_Q, linea_no_muestra_q
+from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle, PickingDetalle
 
-# Mismo criterio que ``TALLAS_DE_LINEA_NO_MUESTRA_Q`` visto desde la línea de
-# packing: la línea del pedido no es una muestra (sin ``producto_nombre_externo``).
-PACKING_DETALLE_NO_MUESTRA_Q = Q(
-    picking_detalle__pedido_detalle__producto_nombre_externo__isnull=True
-) | Q(picking_detalle__pedido_detalle__producto_nombre_externo__exact="")
+# Línea de packing cuya línea de pedido no es muestra (mismo criterio que
+# ``TALLAS_DE_LINEA_NO_MUESTRA_Q``).
+PACKING_DETALLE_NO_MUESTRA_Q = linea_no_muestra_q("picking_detalle__pedido_detalle__")
 
 
 def _piezas(cantidad):
@@ -71,6 +69,7 @@ class DespachoService:
                 "envios": [],
                 "packing": None,
                 "despacho_detalle": [],
+                "embarque": None,
             }
 
         es_staff = getattr(user, "is_superuser", False) or getattr(
@@ -123,6 +122,7 @@ class DespachoService:
             "envios": [],
             "packing": None,
             "despacho_detalle": [],
+            "embarque": None,
         }
 
         if not packing_id:
@@ -190,6 +190,11 @@ class DespachoService:
         already_dispatched = cls._despachado_map(
             packing, packing_detalle_ids=[row.id for row in rows]
         )
+        # Sin embarque parcial y con el pedido sin empacar completo, la regla O1
+        # rechazaría cualquier despacho: las líneas no se ofrecen y ``embarque``
+        # dice por qué (EC-574).
+        embarque = cls._resumen_embarque(packing.pedido)
+        payload["embarque"] = embarque
         payload["despacho_detalle"] = [
             {
                 "packing_detalle": row.id,
@@ -249,7 +254,8 @@ class DespachoService:
                 "cantidad_empacada": str(row.cantidad_empacada),
                 "estado": row.estado,
                 "ya_despachado": bool(already_dispatched[row.id]),
-                "disponible_para_despacho": not bool(already_dispatched[row.id]),
+                "disponible_para_despacho": not bool(already_dispatched[row.id])
+                and embarque["despachable"],
             }
             for row in rows
         ]
@@ -286,15 +292,12 @@ class DespachoService:
             raise ValidationError("El envío no corresponde a la sucursal del packing.")
 
     @classmethod
-    def _validar_embarque_parcial(cls, packing):
-        """Con ``pedido.embarque_parcial`` apagado solo se despacha cuando todo lo
-        pedido ya está empacado; desde ahí sale un despacho por packing
-        (EC-574 / WM-02, regla O1). Cuentan packings y líneas vivos, y las
-        líneas de muestra (con su propio flujo) quedan fuera de ambos lados."""
-        pedido = packing.pedido
-        if pedido.embarque_parcial:
-            return
-        total = (
+    def _resumen_embarque(cls, pedido):
+        """Piezas del pedido contra lo empacado vivo, con el criterio de la regla
+        O1 (EC-574 / WM-02): cuentan packings y líneas vivos de líneas de picking
+        no canceladas, y las muestras (con su propio flujo) quedan fuera de ambos
+        lados. ``despachable`` dice si O1 deja despachar."""
+        total = Decimal(
             PedidoDetalleTalla.objects.filter(pedido_detalle__pedido_id=pedido.pk)
             .filter(TALLAS_DE_LINEA_NO_MUESTRA_Q)
             .aggregate(total=Sum("cantidad"))["total"]
@@ -304,17 +307,52 @@ class DespachoService:
             PackingDetalle.objects.filter(packing__pedido_id=pedido.pk)
             .exclude(packing__estado="CANCELADO")
             .exclude(estado="CANCELADO")
+            .exclude(picking_detalle__estado=PickingDetalle.EstadoLinea.CANCELADA)
             .filter(PACKING_DETALLE_NO_MUESTRA_Q)
             .aggregate(total=Sum("cantidad_empacada"))["total"]
             or Decimal("0")
         )
-        faltan = Decimal(total) - empacado
-        if faltan > 0:
+        faltan = max(total - empacado, Decimal("0"))
+        despachable = bool(pedido.embarque_parcial) or faltan == 0
+        return {
+            "embarque_parcial": bool(pedido.embarque_parcial),
+            "total_piezas_pedido": _piezas(total),
+            "piezas_empacadas": _piezas(empacado),
+            "piezas_por_empacar": _piezas(faltan),
+            "despachable": despachable,
+            "motivo": None
+            if despachable
+            else (
+                "El pedido no permite embarque parcial: faltan "
+                f"{_piezas(faltan)} piezas por empacar de las {_piezas(total)} del pedido."
+            ),
+        }
+
+    @classmethod
+    def _validar_embarque_parcial(cls, packing, rows):
+        """Con ``pedido.embarque_parcial`` apagado solo se despacha cuando todo lo
+        pedido ya está empacado, y cada despacho lleva todas las líneas vivas
+        pendientes de su packing: un despacho por packing (EC-574 / WM-02,
+        regla O1)."""
+        pedido = packing.pedido
+        if pedido.embarque_parcial:
+            return
+        embarque = cls._resumen_embarque(pedido)
+        if not embarque["despachable"]:
+            raise ValidationError({"despacho_detalle": embarque["motivo"]})
+
+        vivas = set(
+            packing.packing_detalle.exclude(estado="CANCELADO")
+            .exclude(despacho_detalle__isnull=False)
+            .values_list("id", flat=True)
+        )
+        faltantes = vivas - {row.pk for row in rows}
+        if faltantes:
             raise ValidationError(
                 {
                     "despacho_detalle": (
-                        "El pedido no permite embarque parcial: faltan "
-                        f"{_piezas(faltan)} piezas por empacar de las {total} del pedido."
+                        "El pedido no permite embarque parcial: el despacho debe llevar "
+                        f"todas las líneas del packing (faltan: {sorted(faltantes)})."
                     )
                 }
             )
@@ -382,27 +420,33 @@ class DespachoService:
     @transaction.atomic
     def handle_store(data, user):
         packing_input = data.pop("packing")
-        # Orden fijo de bloqueo: Pedido -> Packing -> Envio (EC-574). El pedido
-        # serializa los despachos de sus distintos packings mientras se valida
-        # el embarque parcial.
-        Pedido.objects.select_for_update().filter(pk=packing_input.pedido_id).first()
-        packing = (
-            Packing.objects.select_for_update()
-            .select_related("empresa", "sucursal", "pedido", "picking", "picking__almacen")
-            .get(pk=packing_input.pk)
-        )
         envio_input = data.pop("envio", None)
-        envio = None
-        if envio_input is not None:
-            envio = Envio.objects.select_for_update().select_related("transportista").get(
-                pk=envio_input.pk
-            )
         despacho_detalle = data.pop("despacho_detalle")
         guia = data.pop("guia", "") or ""
 
+        # Tenencia antes de bloquear nada; después, el orden de bloqueo común a
+        # packing y despacho (EC-574): Pedido -> Picking -> líneas de picking ->
+        # Packing -> Envio (el despacho no toca el picking), siempre
+        # ``of=("self",)`` para no bloquear de paso empresa ni sucursal. El
+        # pedido serializa los despachos de sus packings mientras se valida O1.
+        DespachoService._validate_context(packing_input, envio_input, user)
+        Pedido.objects.select_for_update(of=("self",)).filter(pk=packing_input.pedido_id).first()
+        packing = (
+            Packing.objects.select_for_update(of=("self",))
+            .select_related("empresa", "sucursal", "pedido", "picking", "picking__almacen")
+            .get(pk=packing_input.pk)
+        )
+        envio = None
+        if envio_input is not None:
+            envio = (
+                Envio.objects.select_for_update(of=("self",))
+                .select_related("transportista")
+                .get(pk=envio_input.pk)
+            )
+
         DespachoService._validate_context(packing, envio, user)
         resolved_rows = DespachoService._resolve_requested_rows(packing, despacho_detalle)
-        DespachoService._validar_embarque_parcial(packing)
+        DespachoService._validar_embarque_parcial(packing, resolved_rows)
 
         despacho = Despacho.objects.create(
             packing=packing,
