@@ -11,7 +11,7 @@ from datetime import timedelta
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from catalogo.compatibilidad import exigir_compatibilidad
+from catalogo.compatibilidad import exigir_compatibilidad, matriz_onboarding
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
@@ -1342,6 +1342,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 "nombre",
                 "descripcion",
                 "precio_base",
+                # Para filtrar procesos/ubicaciones por línea con
+                # ``catalogos.matriz_compatibilidad`` (EC-575).
+                "categoria_producto",
             )
         )
 
@@ -1469,6 +1472,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     "colores": colores,
                     "tipos_pedido": tipos_pedido,
                     "regimenes_fiscales": regimenes_fiscales,
+                    "matriz_compatibilidad": matriz_onboarding(getattr(empresa, "pk", None)),
                 },
                 "busqueda": {
                     "clientes": clientes,
