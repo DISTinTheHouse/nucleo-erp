@@ -67,10 +67,16 @@ def detalles_de_muestra():
     )
 
 
+def linea_no_muestra_q(prefijo):
+    """``Q`` de filas cuya línea de pedido NO es muestra, vista desde el modelo
+    que llega a ``PedidoDetalle`` por ``prefijo`` (p. ej. ``"pedido_detalle__"``)."""
+    return Q(**{f"{prefijo}producto_nombre_externo__isnull": True}) | Q(
+        **{f"{prefijo}producto_nombre_externo__exact": ""}
+    )
+
+
 # Complemento sobre ``PedidoDetalleTalla``: tallas cuya línea NO es muestra.
-TALLAS_DE_LINEA_NO_MUESTRA_Q = Q(pedido_detalle__producto_nombre_externo__isnull=True) | Q(
-    pedido_detalle__producto_nombre_externo__exact=""
-)
+TALLAS_DE_LINEA_NO_MUESTRA_Q = linea_no_muestra_q("pedido_detalle__")
 
 
 def cargar_variantes_produccion(pedido_detalles):
