@@ -1,7 +1,12 @@
 from rest_framework import serializers
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso
+from catalogo.compatibilidad import normalizar_ubicacion
 from catalogo.validaciones import talla_permitida_para_producto
 from finanzas.api.serializers import EmpresaResueltaEnServidorMixin
+
+# Mismo 400 para el chequeo del serializer y para la carrera que llega al
+# ``UniqueConstraint`` (``IntegrityError``) en la matriz prenda/proceso (EC-575).
+REGLA_DUPLICADA = "Ya existe una regla activa para esa categoría, proceso y ubicación."
 
 
 class EmpresaValidadaEnCreateMixin:
@@ -158,5 +163,16 @@ class CategoriaProductoProcesoSerializer(EmpresaValidadaEnCreateMixin, serialize
         empresa = attrs.get('empresa') or getattr(self.instance, 'empresa', None)
         if categoria and empresa and categoria.empresa_id != empresa.pk:
             raise serializers.ValidationError({'categoria_producto': 'La categoría no es de la empresa.'})
-        attrs['ubicacion'] = (attrs.get('ubicacion') or '').strip()
+        # Valor efectivo: un PATCH que no manda ``ubicacion`` conserva la guardada.
+        ubicacion = attrs['ubicacion'] if 'ubicacion' in attrs else getattr(self.instance, 'ubicacion', '')
+        attrs['ubicacion'] = normalizar_ubicacion(ubicacion)
+        proceso = attrs.get('proceso') or getattr(self.instance, 'proceso', None)
+        duplicada = CategoriaProductoProceso.objects.filter(
+            activo=True, empresa=empresa, categoria_producto=categoria, proceso=proceso,
+            ubicacion__iexact=attrs['ubicacion'],
+        )
+        if self.instance is not None:
+            duplicada = duplicada.exclude(pk=self.instance.pk)
+        if duplicada.exists():
+            raise serializers.ValidationError(REGLA_DUPLICADA)
         return attrs
