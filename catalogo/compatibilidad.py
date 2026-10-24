@@ -19,6 +19,12 @@ def _norm(valor):
     return str(valor).strip().lower() if valor not in (None, "") else ""
 
 
+def normalizar_ubicacion(valor):
+    """Cómo se guarda ``ubicacion``: sin espacios en los extremos y en mayúsculas,
+    igual que los códigos del front (``HOMBROS``, ``A``...)."""
+    return (valor or "").strip().upper()
+
+
 def _dicts(cfg):
     if isinstance(cfg, dict):
         return [cfg]

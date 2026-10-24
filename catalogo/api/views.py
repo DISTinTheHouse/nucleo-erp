@@ -1,4 +1,4 @@
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Exists, OuterRef, Q
 from django.db.models.functions import Lower
 from rest_framework import viewsets
@@ -10,7 +10,7 @@ from catalogo.codigos import siguiente_codigo_producto
 from catalogo.tallas import talla_sort_key
 from catalogo.validaciones import talla_permitida_para_producto
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso
-from catalogo.api.serializers import CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
+from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
 from produccion.models import ListaMaterialBom
 
 # Solo Producto Terminado exige talla en el onboarding de variante; materia
@@ -66,6 +66,22 @@ class CategoriaProductoProcesoViewSet(viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 raise ValidationError({"categoria_producto": "Debe ser un entero."})
         return _alcance_empresa(qs, self.request.user)
+
+    def perform_create(self, serializer):
+        self._guardar_sin_duplicar(serializer)
+
+    def perform_update(self, serializer):
+        self._guardar_sin_duplicar(serializer)
+
+    @staticmethod
+    def _guardar_sin_duplicar(serializer):
+        # El serializer ya rechaza el duplicado; esto cubre la carrera entre dos
+        # altas simultáneas, que llega al ``UniqueConstraint`` (EC-575).
+        try:
+            with transaction.atomic():
+                serializer.save()
+        except IntegrityError:
+            raise ValidationError({"non_field_errors": [REGLA_DUPLICADA]})
 
     def perform_destroy(self, instance):
         instance.activo = False
