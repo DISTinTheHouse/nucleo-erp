@@ -2,9 +2,11 @@ from collections import defaultdict
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import F, Sum
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
+from auditoria.models import AuditoriaEvento
 from wms.utils.decimales import normalizar_decimal
 from wms.utils.folios import generate_folio
 from wms.models import Packing, PackingDetalle, Picking, PickingDetalle
@@ -312,10 +314,11 @@ class PackingService:
         )
         for picking_detalle_id, cantidad_solicitada in requested_by_picking_detalle.items():
             picking_row = picking_rows[picking_detalle_id]
-            # Se empaca lo realmente surtido, no lo asignado (EC-573 / WM-01).
-            cantidad_surtida = cls._normalize_quantity(picking_row.cantidad_surtida)
+            # Empacar confirma el surtido (EC-574 / WM-01, opción B): el tope es
+            # lo asignado menos lo ya empacado en packings vivos.
+            cantidad_asignada = cls._normalize_quantity(picking_row.cantidad_asignada)
             cantidad_ya_empacada = previously_packed_quantities[picking_detalle_id]
-            cantidad_pendiente = cantidad_surtida - cantidad_ya_empacada
+            cantidad_pendiente = cantidad_asignada - cantidad_ya_empacada
 
             if cantidad_pendiente <= 0:
                 raise ValidationError(
@@ -382,4 +385,85 @@ class PackingService:
         ]
 
         PackingDetalle.objects.bulk_create(bulk_rows)
+        PackingService._confirmar_surtido(picking, packing, resolved_rows, user)
         return packing
+
+    @staticmethod
+    def _confirmar_surtido(picking, packing, resolved_rows, user):
+        """Empacar confirma el surtido (EC-574 / WM-01, opción B).
+
+        Suma lo empacado a ``cantidad_surtida`` de cada línea, recalcula el
+        estado de la línea y del picking, y deja un ``AuditoriaEvento`` por
+        packing. Corre dentro de la transacción de ``handle_store`` con el
+        picking ya bloqueado; las líneas se bloquean en orden de ``id``.
+        """
+        empacado_por_linea = defaultdict(lambda: Decimal("0"))
+        for item in resolved_rows:
+            empacado_por_linea[item["picking_detalle"].pk] += item["cantidad_empacada"]
+
+        lineas = list(
+            PickingDetalle.objects.select_for_update()
+            .filter(pk__in=list(empacado_por_linea))
+            .order_by("id")
+        )
+        antes = {
+            "estado": picking.estado,
+            "lineas": {
+                str(linea.pk): {
+                    "cantidad_surtida": str(normalizar_decimal(linea.cantidad_surtida)),
+                    "estado": linea.estado,
+                }
+                for linea in lineas
+            },
+        }
+
+        ahora = timezone.now()
+        for linea in lineas:
+            # La línea está bloqueada: su surtida leída arriba es la vigente, así
+            # que el estado se decide aquí y la suma se escribe con ``F()``.
+            empacado = empacado_por_linea[linea.pk]
+            linea.cantidad_surtida = normalizar_decimal(linea.cantidad_surtida) + empacado
+            linea.estado = (
+                PickingDetalle.EstadoLinea.SURTIDA
+                if linea.cantidad_surtida >= linea.cantidad_asignada
+                else PickingDetalle.EstadoLinea.PARCIAL
+            )
+            PickingDetalle.objects.filter(pk=linea.pk).update(
+                cantidad_surtida=F("cantidad_surtida") + empacado,
+                fecha_surtido=ahora,
+                estado=linea.estado,
+            )
+
+        vivas = picking.picking_detalle.exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
+        completas = vivas.filter(estado=PickingDetalle.EstadoLinea.SURTIDA).count()
+        picking.total_lineas_completas = completas
+        update_fields = ["total_lineas_completas", "estado", "updated_at"]
+        if completas == vivas.count():
+            picking.estado = Picking.Estado.COMPLETADO
+            picking.fecha_fin = ahora
+            update_fields.append("fecha_fin")
+        else:
+            picking.estado = Picking.Estado.PARCIAL
+        picking.save(update_fields=update_fields)
+
+        AuditoriaEvento.objects.create(
+            empresa=picking.empresa,
+            usuario=user,
+            modulo="wms",
+            accion="SURTIDO_POR_PACKING",
+            tabla="picking",
+            id_registro=str(picking.pk),
+            antes_json=antes,
+            despues_json={
+                "estado": picking.estado,
+                "lineas": {
+                    str(linea.pk): {
+                        "cantidad_surtida": str(normalizar_decimal(linea.cantidad_surtida)),
+                        "estado": linea.estado,
+                    }
+                    for linea in lineas
+                },
+                "packing_id": packing.pk,
+                "packing_folio": packing.folio,
+            },
+        )
