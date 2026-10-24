@@ -100,6 +100,9 @@ def _copiar(origen, destino, campos):
 
 CAMPOS_CFDI = ("cfdi_uuid", "facturama_id", "cfdi_fecha_timbrado", "cfdi_pendiente")
 CAMPOS_REP = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado", "rep_pendiente")
+# Facturama documenta ``pending``; ``requested`` es el valor que el ERP ya manejaba (#630).
+CANCELACION_PENDIENTE = ("pending", "requested")
+MSG_CANCELACION_PENDIENTE = "El receptor debe aceptar la cancelación ante el SAT; vuelve a cancelar cuando la acepte."
 PENDIENTE = "Hay un timbrado sin confirmar: revísalo en Facturama y desmarca '{}' en el admin."
 
 
@@ -120,26 +123,44 @@ class FacturaTimbradoService:
         return cobro
 
     @staticmethod
-    @transaction.atomic
     def cancelar_rep(cobro):
-        """Cancela el REP ante el SAT (motivo 02) y limpia sus campos. Facturama primero: si no cancela, no se guarda nada."""
-        bloqueado = Cobro.objects.select_for_update(of=("self",)).select_related("empresa").get(pk=cobro.pk)
-        _exigir_empresa_duena(bloqueado.empresa, "rep")
-        if not bloqueado.rep_uuid or not bloqueado.rep_facturama_id:
-            raise ErrorDeNegocio({"rep": "El cobro no tiene un REP timbrado y confirmado que cancelar."})
+        """Cancela el REP ante el SAT (motivo 02). Facturama va fuera de toda transacción (#627).
+
+        ``canceled``: el UUID pasa a ``rep_cancelado_uuid`` (#625). ``pending``/``requested``:
+        queda ``rep_cancelacion_solicitada`` (#624) y se reintenta cuando el receptor acepte.
+        Se cancela con ``rep_facturama_id`` aunque falte el UUID (timbrado sin confirmar, #622).
+        """
+        with transaction.atomic():
+            bloqueado = Cobro.objects.select_for_update(of=("self",)).select_related("empresa").get(pk=cobro.pk)
+            _exigir_empresa_duena(bloqueado.empresa, "rep")
+            if not bloqueado.rep_facturama_id:
+                raise ErrorDeNegocio({"rep": "El cobro no tiene un REP en Facturama que cancelar."})
+        error = None
         try:
             respuesta = FacturamaService().cancel_cfdi(bloqueado.rep_facturama_id)
         except FacturamaAPIException as exc:
-            raise ErrorDeNegocio({"rep": f"Facturama no canceló el REP: {_mensaje(exc)}"})
+            if exc.status_code and 400 <= exc.status_code < 500 and exc.status_code != 408:
+                raise ErrorDeNegocio({"rep": f"Facturama no canceló el REP: {_mensaje(exc)}"})
+            # #623: sin respuesta no se sabe si se canceló.
+            raise ErrorDeNegocio({"rep_incierto": f"Facturama no respondió ({_mensaje(exc)}); no se sabe si se canceló. Vuelve a intentar."})
         estatus = str((respuesta or {}).get("Status") or "").lower()
-        if estatus == "requested":
-            raise ErrorDeNegocio({"cancelacion_pendiente": "El receptor debe aceptar la cancelación ante el SAT; vuelve a cancelar cuando la acepte."})
-        if estatus != "canceled":
-            raise ErrorDeNegocio({"rep": f"El SAT no canceló el REP (estatus: {estatus or 'vacío'})."})
-        bloqueado.rep_uuid = bloqueado.rep_facturama_id = bloqueado.rep_fecha_timbrado = None
-        bloqueado.rep_pendiente = False
-        bloqueado.save(update_fields=[*CAMPOS_REP, "updated_at"])
-        _copiar(bloqueado, cobro, CAMPOS_REP)
+        with transaction.atomic():
+            bloqueado = Cobro.objects.select_for_update(of=("self",)).get(pk=cobro.pk)
+            if estatus == "canceled":
+                bloqueado.rep_cancelado_uuid = bloqueado.rep_uuid or bloqueado.rep_cancelado_uuid
+                bloqueado.rep_fecha_cancelacion = timezone.now()
+                bloqueado.rep_uuid = bloqueado.rep_facturama_id = bloqueado.rep_fecha_timbrado = None
+                bloqueado.rep_pendiente = bloqueado.rep_cancelacion_solicitada = False
+            elif estatus in CANCELACION_PENDIENTE:
+                bloqueado.rep_cancelacion_solicitada = True
+                error = ErrorDeNegocio({"cancelacion_pendiente": MSG_CANCELACION_PENDIENTE})
+            else:
+                bloqueado.rep_cancelacion_solicitada = False
+                error = ErrorDeNegocio({"rep": f"El SAT no canceló el REP (estatus: {estatus or 'vacío'})."})
+            bloqueado.save(update_fields=[*CAMPOS_REP, "rep_cancelado_uuid", "rep_fecha_cancelacion", "rep_cancelacion_solicitada", "updated_at"])
+        _copiar(bloqueado, cobro, [*CAMPOS_REP, "rep_cancelado_uuid", "rep_fecha_cancelacion", "rep_cancelacion_solicitada"])
+        if error:
+            raise error
         return cobro
 
     # Los ``_privados`` REGRESAN el error: lo que respondió Facturama se guarda, y
@@ -261,13 +282,16 @@ class FacturaTimbradoService:
         estatus = str((respuesta or {}).get("Status") or "").lower()
         if estatus == "canceled":
             bloqueada.cfdi_cancelado, bloqueada.cfdi_cancelacion_solicitada = True, False
-        elif estatus == "requested":  # #565
+        elif estatus in CANCELACION_PENDIENTE:  # #565, #630
             bloqueada.cfdi_cancelacion_solicitada = True
         else:
-            return ErrorDeNegocio({"cfdi": f"El SAT no canceló el CFDI (estatus: {estatus or 'vacío'})."})
+            # Rechazo del receptor (``active``): ya no hay solicitud en curso (#633).
+            bloqueada.cfdi_cancelacion_solicitada = False
         bloqueada.save(update_fields=["cfdi_cancelado", "cfdi_cancelacion_solicitada", "updated_at"])
         factura.cfdi_cancelado = bloqueada.cfdi_cancelado
         factura.cfdi_cancelacion_solicitada = bloqueada.cfdi_cancelacion_solicitada
+        if estatus in CANCELACION_PENDIENTE:
+            return ErrorDeNegocio({"cancelacion_pendiente": MSG_CANCELACION_PENDIENTE})
         if not bloqueada.cfdi_cancelado:
-            return ErrorDeNegocio({"cancelacion_pendiente": "El receptor debe aceptar la cancelación ante el SAT; vuelve a cancelar cuando la acepte."})
+            return ErrorDeNegocio({"cfdi": f"El SAT no canceló el CFDI (estatus: {estatus or 'vacío'})."})
         return None
