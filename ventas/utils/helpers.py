@@ -1,4 +1,5 @@
 from django.db.models import Q
+from catalogo.compatibilidad import exigir_compatibilidad
 from catalogo.models import Talla, Producto, ProductoVariante
 from ventas.services.sku_produccion_service import nombre_es_muestra
 from ventas.models import (
@@ -170,7 +171,9 @@ def _ids_validos(valores):
     return ids
 
 
-def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
+def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user, validar_matriz=True):
+    # ``validar_matriz``: al final se exige la matriz prenda/proceso (EC-575), dentro
+    # de la transacción del llamador. Solo una copia del servidor la apaga.
     # Las líneas se recrean: el ``sku_muestra`` (lo escribe sólo
     # ``vincular-sku-muestra``) se arrastra por (nombre externo, color, talla)
     # para que no se pierda en cada edición.
@@ -441,6 +444,11 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user):
             t.cotizacion_detalle = detalle
             todas.append(t)
     CotizacionDetalleTalla.objects.bulk_create(todas)
+    if validar_matriz:
+        exigir_compatibilidad(
+            cotizacion_obj.empresa_id,
+            CotizacionDetalleTalla.objects.filter(cotizacion_detalle__cotizacion=cotizacion_obj),
+        )
 
 def _save_servicios_extras(cotizacion_obj, rows):
     CotizacionServicioExtra.objects.filter(cotizacion=cotizacion_obj).delete()
@@ -675,6 +683,10 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
         # Mesa de control puede eliminar renglones desde edición estricta
         # porque ya validamos en _get_bloqueos_edicion_estricta() que no hay documentos ligados
         PedidoDetalle.objects.filter(pk__in=sobrantes_detalle).delete()
+    # Matriz prenda/proceso (EC-575), dentro de la transacción del llamador.
+    exigir_compatibilidad(
+        pedido_obj.empresa_id, PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido_obj)
+    )
 
 
 def _save_pedido_servicios_extras(pedido_obj, rows):

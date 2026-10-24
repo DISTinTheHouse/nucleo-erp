@@ -1668,12 +1668,6 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
             _save_cotizacion_detalle(cotizacion, detalle_data, empresa, user)
             _save_servicios_extras(cotizacion, servicios_extras_data)
-            # Matriz prenda/proceso al guardar (EC-575): dentro del ``atomic``, un 400
-            # revierte la cotización y sus renglones.
-            exigir_compatibilidad(
-                cotizacion.empresa_id,
-                CotizacionDetalleTalla.objects.filter(cotizacion_detalle__cotizacion=cotizacion),
-            )
 
             # ``select_related``/``prefetch`` cubren los ``*_nombre`` del
             # serializer: sin ellos eran 3-4 queries por renglón y 1 por talla.
@@ -2817,8 +2811,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
             update_fields=list(PEDIDO_COTIZACION_MIRROR_FIELDS)
             + ["estatus", "cambios_solicitados_at", "updated_at"]
         )
+        # Copia del pedido (ya validado en ``_save_pedido_detalle``) a la cotización:
+        # copia del servidor, fuera del alcance de la matriz (EC-575).
         _save_cotizacion_detalle(
-            cotizacion, detalle_data, cotizacion.empresa, self.request.user
+            cotizacion, detalle_data, cotizacion.empresa, self.request.user, validar_matriz=False
         )
         _save_servicios_extras(cotizacion, servicios_extras_data)
 
@@ -3303,12 +3299,6 @@ class PedidoViewSet(viewsets.ModelViewSet):
             pedido.save(update_fields=list(pedido_data.keys()) + ["updated_at"])
             self._snapshot_facturacion(pedido)
             _save_pedido_detalle(pedido, detalle_data, pedido.empresa, user)
-            # Matriz prenda/proceso (EC-575): dentro del ``atomic``, un 400 revierte
-            # el pedido y sus renglones antes de tocar la cotización.
-            exigir_compatibilidad(
-                pedido.empresa_id,
-                PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido),
-            )
             _save_pedido_servicios_extras(pedido, servicios_extras_data)
             self._aplicar_pedido_a_cotizacion(
                 pedido, cotizacion, detalle_data, servicios_extras_data

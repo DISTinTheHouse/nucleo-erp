@@ -7235,6 +7235,6 @@ class MatrizPrendaProcesoOrdenesTests(TestCase):
             OrdenReflejanteService.save({"pedido": pedido}, self.usuario)
         self.assertEqual(
             ctx.exception.detail,
-            {"compatibilidad_proceso": ["La categoría «Playera» no admite Reflejante en «espalda»."]},
+            {"compatibilidad_proceso": ["La categoría «Playera» no admite Reflejante en «ESPALDA»."]},
         )
         self.assertFalse(OrdenesReflejante.objects.filter(pedido=pedido).exists())

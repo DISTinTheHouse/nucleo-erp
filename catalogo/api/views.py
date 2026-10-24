@@ -41,6 +41,10 @@ class CategoriaProductoViewSet(viewsets.ModelViewSet):
         qs = CategoriaProducto.objects.filter(activo=True).order_by("-created_at", "-id")
         return _alcance_empresa(qs, self.request.user)
 
+# Nombre del ``UniqueConstraint`` parcial de ``CategoriaProductoProceso`` (models.py).
+UNIQUE_REGLA_ACTIVA = "uq_categoria_proceso_ubicacion_activo"
+
+
 class SoloAdminEmpresaEscribe(BasePermission):
     """Todos leen; solo el superusuario o el admin de empresa escriben (EC-575)."""
 
@@ -80,7 +84,11 @@ class CategoriaProductoProcesoViewSet(viewsets.ModelViewSet):
         try:
             with transaction.atomic():
                 serializer.save()
-        except IntegrityError:
+        except IntegrityError as exc:
+            # Solo la violación del unique parcial es un duplicado; cualquier otra
+            # (FK, NOT NULL...) sigue su curso.
+            if UNIQUE_REGLA_ACTIVA not in str(exc):
+                raise
             raise ValidationError({"non_field_errors": [REGLA_DUPLICADA]})
 
     def perform_destroy(self, instance):

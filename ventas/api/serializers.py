@@ -1,4 +1,6 @@
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
+
 from rest_framework import serializers
 from ventas.models import (
     Cotizacion,
@@ -15,8 +17,6 @@ from ventas.services.sku_produccion_service import (
     cargar_variantes_produccion,
     skus_produccion_por_talla,
 )
-from types import SimpleNamespace
-
 from catalogo.compatibilidad import exigir_compatibilidad
 from nucleo.utils import exigir_codigos_postales, validate_telefono
 from ventas.utils.helpers import nombre_para_mostrar
@@ -27,7 +27,8 @@ from ventas.utils.helpers import nombre_para_mostrar
 # ``cotizacion-detalle``, ``pedido-detalle`` y ``pedido-detalle-talla`` escriben
 # renglones y tallas fuera del onboarding. Se valida la talla (o las tallas del
 # renglón) como quedaría guardada, armada en memoria, y solo cuando el payload
-# toca algo que cambia el resultado: un PATCH parcial ajeno sigue pasando.
+# cambia algo que cambia el resultado (comparado con lo guardado): un PATCH que
+# repite valores o toca otros campos sigue pasando.
 CAMPOS_PROCESO_TALLA = (
     "lleva_bordado",
     "bordado_config",
@@ -36,6 +37,22 @@ CAMPOS_PROCESO_TALLA = (
     "lleva_corte_manga",
     "corte_manga_config",
 )
+
+
+def _cambia(instance, attrs, campos):
+    """Alta, o algún ``campo`` del payload difiere de lo guardado."""
+    return instance is None or any(c in attrs and attrs[c] != getattr(instance, c) for c in campos)
+
+
+def _procesos_efectivos(attrs, instance, modelo):
+    """Los ``CAMPOS_PROCESO_TALLA`` como quedarían: del payload si vienen; si no, los
+    guardados o, en un alta, los default del ``modelo``."""
+    return SimpleNamespace(**{
+        c: attrs[c] if c in attrs
+        else getattr(instance, c) if instance is not None
+        else modelo._meta.get_field(c).get_default()
+        for c in CAMPOS_PROCESO_TALLA
+    })
 
 
 def _tallas_con_detalle(tallas, clave, **detalle):
@@ -456,7 +473,7 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
         )
         # Matriz prenda/proceso (EC-575): un renglón nuevo aún no tiene tallas; en uno
         # existente, cambiar producto o categoría re-evalúa sus tallas.
-        if self.instance is not None and ("producto" in attrs or "categoria_producto" in attrs):
+        if self.instance is not None and _cambia(self.instance, attrs, ("producto", "categoria_producto")):
             exigir_compatibilidad(
                 cotizacion.empresa_id,
                 _tallas_con_detalle(
@@ -985,7 +1002,7 @@ class PedidoDetalleSerializer(serializers.ModelSerializer):
         )
         # Matriz prenda/proceso (EC-575): cambiar el producto de un renglón existente
         # re-evalúa sus tallas (uno nuevo aún no tiene).
-        if self.instance is not None and "producto" in attrs:
+        if self.instance is not None and _cambia(self.instance, attrs, ("producto",)):
             exigir_compatibilidad(
                 pedido.empresa_id,
                 _tallas_con_detalle(
@@ -1036,23 +1053,17 @@ class PedidoDetalleTallaSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"talla": "No se puede cambiar la talla de un renglón existente."}
             )
-        # Matriz prenda/proceso (EC-575): la talla como quedaría guardada, solo si el
-        # payload toca el renglón o un proceso (o es un alta).
-        if self.instance is None or {"pedido_detalle", *CAMPOS_PROCESO_TALLA} & set(attrs):
-            talla = SimpleNamespace(
-                pedido_detalle=pedido_detalle,
-                **{
-                    campo: attrs[campo]
-                    if campo in attrs
-                    else (
-                        getattr(self.instance, campo)
-                        if self.instance is not None
-                        else PedidoDetalleTalla._meta.get_field(campo).get_default()
-                    )
-                    for campo in CAMPOS_PROCESO_TALLA
-                },
+        # Matriz prenda/proceso (EC-575): la talla como quedaría guardada, solo en un
+        # alta o si cambia el renglón o un proceso.
+        if _cambia(self.instance, attrs, ("pedido_detalle", *CAMPOS_PROCESO_TALLA)):
+            exigir_compatibilidad(
+                pedido_detalle.pedido.empresa_id,
+                _tallas_con_detalle(
+                    [_procesos_efectivos(attrs, self.instance, PedidoDetalleTalla)],
+                    "pedido_detalle",
+                    producto=pedido_detalle.producto,
+                ),
             )
-            exigir_compatibilidad(pedido_detalle.pedido.empresa_id, [talla])
         return attrs
 
     class Meta:

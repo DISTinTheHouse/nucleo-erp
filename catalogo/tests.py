@@ -693,7 +693,7 @@ class CompatibilidadPrendaProcesoTests(TestCase):
             self._talla(self.playera, lleva_bordado=True, bordado_config={"ubicaciones": [{"codigo": "A"}]}),
         ])
         self.assertEqual(err, [
-            "La categoría «Playera» no admite Reflejante en «manga».",
+            "La categoría «Playera» no admite Reflejante en «MANGA».",
             "La categoría «Playera» no admite Bordado.",
         ])
 
@@ -743,6 +743,19 @@ class CompatibilidadPrendaProcesoTests(TestCase):
         from unittest import mock
         from django.db import IntegrityError
         from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer
-        with mock.patch.object(CategoriaProductoProcesoSerializer, "save", side_effect=IntegrityError("uq")):
+        # Texto con el que PostgreSQL reporta la violación del unique parcial.
+        carrera = IntegrityError(
+            'duplicate key value violates unique constraint "uq_categoria_proceso_ubicacion_activo"'
+        )
+        with mock.patch.object(CategoriaProductoProcesoSerializer, "save", side_effect=carrera):
             r = self._alta(ubicacion="A")
         self.assertEqual((r.status_code, r.json()), (400, {"non_field_errors": [REGLA_DUPLICADA]}))
+
+    def test_otro_integrity_error_no_se_reporta_como_duplicado(self):
+        from unittest import mock
+        from django.db import IntegrityError
+        from catalogo.api.serializers import CategoriaProductoProcesoSerializer
+        otro = IntegrityError('null value in column "empresa_id" violates not-null constraint')
+        with mock.patch.object(CategoriaProductoProcesoSerializer, "save", side_effect=otro):
+            with self.assertRaises(IntegrityError):
+                self._alta(ubicacion="A")
