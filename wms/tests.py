@@ -890,3 +890,66 @@ class PickingTrasladoTests(TestCase):
             username="trs-x", email="trs-x@example.com", empresa=self.otra_empresa
         )
         self.assertEqual(self._post(self.apartados, intruso).status_code, 404)
+
+
+class PackingDespachoEC573Tests(TestCase):
+    """EC-573: el packing sale de lo surtido (WM-01) y respeta ``embarque_parcial`` (WM-02)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from decimal import Decimal
+        from catalogo.models import Talla
+        from inventarios.models import Almacen
+        from nucleo.models import Moneda
+        from terceros.models import Cliente
+        from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+        from wms.models import Packing, PackingDetalle, Picking, PickingDetalle
+
+        empresa = Empresa.objects.create(codigo="wm", razon_social="WM SA")
+        sucursal = Sucursal.objects.create(empresa=empresa, codigo="S1", nombre="S1")
+        usuario = Usuario.objects.create(username="wm", email="wm@x.test", empresa=empresa)
+        cliente = Cliente.objects.create(empresa=empresa, nombre="C", correo="c@x.test")
+        cls.pedido = Pedido.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=cliente,
+            moneda=Moneda.objects.create(codigo_iso="MXN", nombre="Peso"), folio="P-1",
+            persona_pagos="P", correo_facturas="c@x.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(
+            pedido=cls.pedido, producto=Producto.objects.create(empresa=empresa, nombre="P"),
+            precio_unitario=Decimal("1"),
+        )
+        PedidoDetalleTalla.objects.create(pedido_detalle=detalle, talla=Talla.objects.create(nombre="M"), cantidad=10)
+        almacen = Almacen.objects.create(empresa=empresa, sucursal=sucursal, codigo="A", nombre="A")
+        cls.picking = Picking.objects.create(
+            folio="PK-1", empresa=empresa, sucursal=sucursal, pedido=cls.pedido, operador=usuario, usuario=usuario, almacen=almacen,
+        )
+        cls.linea = PickingDetalle.objects.create(
+            picking=cls.picking, pedido_detalle=detalle,
+            cantidad_solicitada=10, cantidad_asignada=10, cantidad_surtida=4,
+        )
+        cls.packing = Packing.objects.create(
+            folio="PA-1", empresa=empresa, sucursal=sucursal, pedido=cls.pedido, picking=cls.picking,
+            operador=usuario, usuario=usuario,
+        )
+        cls.pack_detalle = PackingDetalle.objects.create(
+            packing=cls.packing, picking_detalle=cls.linea, cantidad_empacada=2,
+        )
+
+    def test_empacar_mas_de_lo_surtido_es_400(self):
+        from wms.services.packing_service import PackingService
+
+        filas = lambda n: [{"picking_detalle": self.linea.pk, "cantidad_empacada": n}]
+        PackingService._resolve_requested_rows(self.picking, filas(2))  # surtido 4, empacado 2
+        with self.assertRaises(ValidationError):
+            PackingService._resolve_requested_rows(self.picking, filas(3))  # asignado 10, pero surtido 4
+
+    def test_despacho_parcial_bloqueado_si_el_pedido_no_lo_permite(self):
+        from wms.services.despacho_service import DespachoService
+
+        with self.assertRaises(ValidationError):
+            DespachoService._validar_embarque_parcial(self.packing, [self.pack_detalle])  # 2 de 10
+        self.pedido.embarque_parcial = True
+        self.pedido.save(update_fields=["embarque_parcial"])
+        self.packing.refresh_from_db()
+        DespachoService._validar_embarque_parcial(self.packing, [self.pack_detalle])  # permitido
