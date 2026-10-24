@@ -1331,6 +1331,26 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(self.pedido.programacion_conf, self.PROGRAMACION_VIGENTE)
         self.assertEqual(self.pedido.oc, "OC-PATCH-01")
 
+    def test_edicion_rechaza_talla_incompatible_con_la_matriz(self):
+        """EC-575: el payload pone bordado en una categoría configurada solo para
+        reflejante; 400 y el pedido queda como estaba."""
+        from catalogo.models import CategoriaProductoProceso
+
+        categoria = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Playera", codigo="PLA", descripcion="x")
+        Producto.objects.filter(pk=self.producto_a.pk).update(categoria_producto=categoria)
+        CategoriaProductoProceso.objects.create(
+            empresa=self.empresa, categoria_producto=categoria, proceso="reflejante"
+        )
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk), self._payload(), format="json"
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json(), {"compatibilidad_proceso": ["La categoría «Playera» no admite Bordado."]})
+        talla = PedidoDetalleTalla.objects.get(pedido_detalle__pedido=self.pedido)
+        self.assertEqual((talla.cantidad, talla.lleva_bordado), (2, False))
+        self.pedido.refresh_from_db()
+        self.assertNotEqual(self.pedido.oc, "OC-MESA-01")
+
 
 class MesaControlListScopeTests(TestCase):
     """``MesaControlViewSet.get_queryset()``: quién ve el listado en revisión.
@@ -6255,3 +6275,208 @@ class MetodoPagoEtiquetaTests(TestCase):
             with self.subTest(modelo=modelo.__name__):
                 self.assertEqual(modelo.MetodoPago.PUE.value, "PUE")
                 self.assertEqual(modelo.MetodoPago.PUE.label, "PUE - PAGO EN UNA SOLA EXHIBICIÓN")
+
+
+class CompatibilidadPrendaProcesoVentasTests(TestCase):
+    """EC-575: la matriz por categoría al guardar la cotización, en aceptar-cambios,
+    en los endpoints de renglón y en el onboarding.
+
+    Matriz de la empresa: «Playera» admite reflejante en HOMBROS/BRAZOS y bordado
+    en cualquier ubicación; «Pantalón» solo corte de manga; «Libre» sin filas.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from catalogo.models import CategoriaProductoProceso
+
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="ec575", razon_social="EC575 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="S75", nombre="S75")
+        cls.admin = Usuario.objects.create(
+            username="ec575@x.test", email="ec575@x.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente", razon_social="Cliente SA")
+        cls.talla = Talla.objects.create(nombre="M575")
+        cls.color = Color.objects.create(nombre="Azul575", codigo="AZ5", codigo_hex="#00f")
+        categoria = lambda nombre: CategoriaProducto.objects.create(
+            empresa=cls.empresa, nombre=nombre, codigo=nombre[:3].upper(), descripcion="x"
+        )
+        cls.playera, cls.pantalon, cls.libre = categoria("Playera"), categoria("Pantalón"), categoria("Libre")
+        producto = lambda nombre, cat: Producto.objects.create(
+            empresa=cls.empresa, nombre=nombre, codigo=nombre[:4], categoria_producto=cat
+        )
+        cls.p_playera = producto("Playera polo", cls.playera)
+        cls.p_pantalon = producto("Pantalón cargo", cls.pantalon)
+        cls.p_libre = producto("Libre gorra", cls.libre)
+        for cat, proceso, ubicacion in (
+            (cls.playera, "reflejante", "HOMBROS"), (cls.playera, "reflejante", "BRAZOS"),
+            (cls.playera, "bordado", ""), (cls.pantalon, "corte_manga", ""),
+        ):
+            CategoriaProductoProceso.objects.create(
+                empresa=cls.empresa, categoria_producto=cat, proceso=proceso, ubicacion=ubicacion
+            )
+
+    def setUp(self):
+        self.api = APIClient()
+        self.api.force_authenticate(self.admin)
+
+    # --- helpers -----------------------------------------------------------
+    # El onboarding exige ``*_config`` con cada ``lleva_*``; estos son los de por omisión.
+    CONFIG_POR_OMISION = {
+        "bordado": {"ubicaciones": [{"codigo": "A"}]},
+        "reflejante": [{"posicion": "HOMBROS"}],
+        "corte_manga": {"tipo": "1"},
+    }
+
+    def _guardar(self, cotizacion_id=None, producto=None, categoria=None, **talla):
+        for proceso, config in self.CONFIG_POR_OMISION.items():
+            if talla.get(f"lleva_{proceso}"):
+                talla.setdefault(f"{proceso}_config", config)
+        detalle = {"color": self.color.pk, "precio_unitario": "10.00",
+                   "tallas": [{"talla": self.talla.pk, "cantidad": 2, **talla}]}
+        if producto is not None:
+            detalle["producto"] = producto.pk
+        else:  # muestra: sin SKU, con la categoría de la línea
+            detalle.update(producto_nombre_externo="Muestra 575", categoria_producto=categoria.pk)
+        payload = {
+            "cotizacion": {"cliente": self.cliente.pk, "sucursal": self.sucursal.pk,
+                           "subtotal": "20.00", "gran_total": "23.20"},
+            "detalle": [detalle],
+        }
+        if cotizacion_id:
+            payload["cotizacion_id"] = cotizacion_id
+        return self.api.post(COTIZACION_ONBOARDING_URL, payload, format="json")
+
+    def _rechazo(self, resp, mensaje):
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"compatibilidad_proceso": [mensaje]})
+
+    # --- regla por categoría (por el onboarding) ---------------------------
+    def test_categoria_sin_filas_no_se_restringe(self):
+        resp = self._guardar(producto=self.p_libre, lleva_reflejante=True,
+                             reflejante_config=[{"posicion": "ESPALDA"}], lleva_corte_manga=True)
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_categoria_configurada_sin_el_proceso_se_rechaza_y_no_guarda(self):
+        antes = Cotizacion.objects.count()
+        resp = self._guardar(producto=self.p_pantalon, lleva_bordado=True,
+                             bordado_config={"ubicaciones": [{"codigo": "A"}]})
+        self._rechazo(resp, "La categoría «Pantalón» no admite Bordado.")
+        self.assertEqual(Cotizacion.objects.count(), antes)
+        self.assertFalse(CotizacionDetalleTalla.objects.filter(cotizacion_detalle__cotizacion__empresa=self.empresa).exists())
+
+    def test_solo_las_ubicaciones_listadas_sin_distinguir_mayusculas(self):
+        self._rechazo(
+            self._guardar(producto=self.p_playera, lleva_reflejante=True, reflejante_config=[{"posicion": "ESPALDA"}]),
+            "La categoría «Playera» no admite Reflejante en «espalda».",
+        )
+        resp = self._guardar(producto=self.p_playera, lleva_reflejante=True, reflejante_config=[{"posicion": "hombros"}])
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_ubicacion_vacia_admite_cualquiera(self):
+        resp = self._guardar(producto=self.p_playera, lleva_bordado=True,
+                             bordado_config={"ubicaciones": [{"codigo": "K"}]})
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_corte_de_manga_es_admitido_o_no(self):
+        self.assertEqual(self._guardar(producto=self.p_pantalon, lleva_corte_manga=True,
+                                       corte_manga_config={"tipo": "1"}).status_code, 201)
+        self._rechazo(self._guardar(producto=self.p_playera, lleva_corte_manga=True, corte_manga_config={"tipo": "1"}),
+                      "La categoría «Playera» no admite Corte de manga.")
+
+    def test_edicion_incompatible_se_rechaza_y_conserva_lo_guardado(self):
+        resp = self._guardar(producto=self.p_pantalon, lleva_corte_manga=True)
+        cot_id = resp.json()["cotizacion"]["id"]
+        self._rechazo(self._guardar(cot_id, producto=self.p_pantalon, lleva_bordado=True),
+                      "La categoría «Pantalón» no admite Bordado.")
+        talla = CotizacionDetalleTalla.objects.get(cotizacion_detalle__cotizacion_id=cot_id)
+        self.assertEqual((talla.lleva_corte_manga, talla.lleva_bordado), (True, False))
+
+    def test_muestra_de_cotizacion_usa_la_categoria_de_la_linea(self):
+        self._rechazo(self._guardar(categoria=self.pantalon, lleva_bordado=True),
+                      "La categoría «Pantalón» no admite Bordado.")
+        self.assertEqual(self._guardar(categoria=self.libre, lleva_bordado=True).status_code, 201)
+
+    # --- aceptar-cambios ---------------------------------------------------
+    def test_aceptar_cambios_rechaza_antes_de_copiar(self):
+        cot = Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=self.admin, sucursal=self.sucursal, cliente=self.cliente,
+            moneda=self.moneda, estatus=5, persona_pagos="P", correo_facturas="p@x.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03", gran_total="23.20",
+        )
+        det = CotizacionDetalle.objects.create(cotizacion=cot, producto=self.p_pantalon, precio_unitario="10.00")
+        CotizacionDetalleTalla.objects.create(cotizacion_detalle=det, talla=self.talla, cantidad=2, lleva_bordado=True)
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, cotizacion=cot, moneda=self.moneda,
+            persona_pagos="P", correo_facturas="p@x.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        self._rechazo(self.api.post(f"{COTIZACIONES_URL}{cot.pk}/aceptar-cambios/"),
+                      "La categoría «Pantalón» no admite Bordado.")
+        cot.refresh_from_db()
+        self.assertEqual(cot.estatus, 5)
+        self.assertFalse(PedidoDetalle.objects.filter(pedido=pedido).exists())
+
+    # --- endpoints de renglón ----------------------------------------------
+    def _pedido_con_talla(self, producto, **talla):
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
+            persona_pagos="P", correo_facturas="p@x.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=pedido, producto=producto, precio_unitario="10.00")
+        return detalle, PedidoDetalleTalla.objects.create(pedido_detalle=detalle, talla=self.talla, cantidad=2, **talla)
+
+    def test_pedido_detalle_talla_valida_solo_si_toca_procesos(self):
+        detalle, talla = self._pedido_con_talla(self.p_pantalon, lleva_corte_manga=True)
+        url = f"{PEDIDO_DETALLE_TALLA_URL}{talla.pk}/"
+        self._rechazo(self.api.patch(url, {"lleva_bordado": True}, format="json"),
+                      "La categoría «Pantalón» no admite Bordado.")
+        # Una talla ya incompatible (escrita fuera de la API) no bloquea un PATCH ajeno.
+        PedidoDetalleTalla.objects.filter(pk=talla.pk).update(lleva_bordado=True)
+        self.assertEqual(self.api.patch(url, {"cantidad": 3}, format="json").status_code, 200)
+        resp = self.api.post(PEDIDO_DETALLE_TALLA_URL, {
+            "pedido_detalle": detalle.pk, "talla": Talla.objects.create(nombre="G575").pk, "cantidad": 1,
+            "lleva_reflejante": True,
+        }, format="json")
+        self._rechazo(resp, "La categoría «Pantalón» no admite Reflejante.")
+
+    def test_pedido_detalle_cambiar_producto_revalida_sus_tallas(self):
+        detalle, _ = self._pedido_con_talla(self.p_libre, lleva_bordado=True)
+        url = f"{PEDIDO_DETALLE_URL}{detalle.pk}/"
+        self._rechazo(self.api.patch(url, {"producto": self.p_pantalon.pk}, format="json"),
+                      "La categoría «Pantalón» no admite Bordado.")
+        self.assertEqual(self.api.patch(url, {"precio_unitario": "11.00"}, format="json").status_code, 200)
+        self.assertEqual(self.api.patch(url, {"producto": self.p_playera.pk}, format="json").status_code, 200)
+
+    def test_cotizacion_detalle_cambiar_producto_o_categoria_revalida(self):
+        resp = self._guardar(categoria=self.libre, lleva_bordado=True)
+        cot = Cotizacion.objects.get(pk=resp.json()["cotizacion"]["id"])
+        detalle = cot.cotizaciondetalle.get()
+        url = f"{COTIZACION_DETALLE_URL}{detalle.pk}/"
+        self._rechazo(self.api.patch(url, {"categoria_producto": self.pantalon.pk}, format="json"),
+                      "La categoría «Pantalón» no admite Bordado.")
+        self._rechazo(self.api.patch(url, {"producto": self.p_pantalon.pk}, format="json"),
+                      "La categoría «Pantalón» no admite Bordado.")
+        self.assertEqual(self.api.patch(url, {"precio_unitario": "12.00"}, format="json").status_code, 200)
+
+    # --- onboarding --------------------------------------------------------
+    def test_onboarding_trae_categoria_y_bloque_de_la_matriz(self):
+        # El onboarding solo lista productos con alguna variante activa.
+        ProductoVariante.objects.create(
+            producto=self.p_playera, empresa=self.empresa, color=self.color, talla=self.talla,
+            sku="PLAY-575", precio_base=100,
+        )
+        resp = self.api.get(COTIZACION_ONBOARDING_URL)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        datos = resp.json()
+        self.assertEqual(
+            datos["catalogos"]["matriz_compatibilidad"],
+            {
+                str(self.playera.pk): {"bordado": ["*"], "reflejante": ["BRAZOS", "HOMBROS"]},
+                str(self.pantalon.pk): {"corte_manga": ["*"]},
+            },
+        )
+        productos = {p["id"]: p for p in datos["busqueda"]["productos"]}
+        self.assertEqual(productos[self.p_playera.pk]["categoria_producto"], self.playera.pk)
