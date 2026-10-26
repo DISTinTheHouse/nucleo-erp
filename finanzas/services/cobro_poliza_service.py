@@ -3,6 +3,7 @@
 from finanzas.models import CobroDetalle, ConceptoContable, Poliza
 from finanzas.services.plan_contable_service import PlanContableService
 from finanzas.services.poliza_motor_service import PolizaMotorService
+from finanzas.utils.moneda import a_mxn
 
 ORIGEN = "Cobro"
 
@@ -18,6 +19,9 @@ class CobroPolizaService:
             .values_list("cxc__factura__sucursal_id", flat=True).first()
         )
         referencia = cobro.referencia_operacion or str(cobro.pk)
+        # En pesos con el tipo de cambio del cobro (MXN = 1). La diferencia contra el de la
+        # factura (fluctuación cambiaria) queda para la fase 2 de EC-581.
+        importe = a_mxn(cobro.total_cobrado, cobro.tipo_cambio)
         return PolizaMotorService.generar(
             empresa_id=cobro.empresa_id,
             sucursal_id=PolizaMotorService.sucursal_id(cobro.empresa_id, sucursal_factura, usuario),
@@ -28,9 +32,9 @@ class CobroPolizaService:
             concepto=f"Cobro {cobro.pk} - {cobro.cliente.nombre}",
             lineas=[
                 {"cuenta": PlanContableService.cuenta_de_banco(cobro.cuenta_bancaria),
-                 "cargo": cobro.total_cobrado, "cobro": cobro, "referencia": referencia},
+                 "cargo": importe, "cobro": cobro, "referencia": referencia},
                 {"concepto": ConceptoContable.CLIENTES,
-                 "abono": cobro.total_cobrado, "cobro": cobro, "referencia": referencia},
+                 "abono": importe, "cobro": cobro, "referencia": referencia},
             ],
             usuario=usuario,
         )

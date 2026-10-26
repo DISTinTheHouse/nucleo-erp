@@ -130,8 +130,9 @@ def construir_payload_cfdi(factura):
             f"La sucursal {factura.sucursal.nombre} no tiene código postal válido "
             "(5 dígitos) para el lugar de expedición."
         )
-    if _texto(factura.moneda.codigo_iso).upper() != "MXN":
-        errores["moneda"] = "Por ahora solo se timbran facturas en MXN (la factura no guarda tipo de cambio)."
+    moneda, tipo_cambio = _texto(factura.moneda.codigo_iso).upper(), factura.tipo_cambio_mxn()
+    if tipo_cambio is None:
+        errores["tipo_cambio"] = f"La factura está en {moneda} y no tiene tipo de cambio."
     if not _texto(factura.folio):
         errores["folio"] = "La factura no tiene folio."
 
@@ -158,7 +159,7 @@ def construir_payload_cfdi(factura):
         "NameId": "1",
         "CfdiType": "I",
         "ExpeditionPlace": lugar,
-        "Currency": "MXN",
+        "Currency": moneda,
         "Exportation": "01",
         "PaymentForm": forma,
         "PaymentMethod": metodo,
@@ -166,6 +167,8 @@ def construir_payload_cfdi(factura):
         "Receiver": receptor,
         "Items": conceptos,
     }
+    if moneda != "MXN":  # EC-581: Facturama lo llama ``CurrencyExchangeRate`` (no ``ExchangeRate``)
+        payload["CurrencyExchangeRate"] = _numero(tipo_cambio)
     serie = _texto(getattr(factura.serie_folio, "serie", None))
     if serie:
         payload["Serie"] = serie
@@ -322,6 +325,10 @@ def construir_payload_nota_credito(nota):
     lugar = _texto(factura.sucursal.cp)
     if not CP_RE.match(lugar):
         errores["sucursal"] = "La sucursal de la factura no tiene código postal válido."
+    # La nota va en la moneda y con el tipo de cambio de su factura (EC-581).
+    moneda, tipo_cambio = _texto(factura.moneda.codigo_iso).upper(), factura.tipo_cambio_mxn()
+    if tipo_cambio is None:
+        errores["tipo_cambio"] = f"La factura está en {moneda} y no tiene tipo de cambio."
     receptor = _receptor(factura, errores)
     if errores:
         raise ErrorDeNegocio({"cfdi": "No se puede timbrar la nota. " + " ".join(errores.values())})
@@ -332,7 +339,7 @@ def construir_payload_nota_credito(nota):
         "NameId": "2",
         "CfdiType": "E",
         "ExpeditionPlace": lugar,
-        "Currency": "MXN",
+        "Currency": moneda,
         "Exportation": "01",
         "PaymentForm": forma,
         "PaymentMethod": "PUE",
@@ -354,5 +361,7 @@ def construir_payload_nota_credito(nota):
     }
     if _texto(nota.folio):
         payload["Folio"] = _texto(nota.folio)[:40]
+    if moneda != "MXN":
+        payload["CurrencyExchangeRate"] = _numero(tipo_cambio)
     return payload
 

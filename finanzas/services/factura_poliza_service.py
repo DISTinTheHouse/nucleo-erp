@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from finanzas.models import ConceptoContable, Poliza
 from finanzas.services.poliza_motor_service import PolizaMotorService
+from finanzas.utils.moneda import a_mxn
 
 ORIGEN = "Factura"
 
@@ -14,10 +15,14 @@ class FacturaPolizaService:
         folio = factura.folio or str(factura.pk)
         referencia = folio
         neto = (factura.subtotal or Decimal("0")) - (factura.descuento or Decimal("0"))
+        # En pesos (EC-581): fuera de MXN, el ingreso se queda con el redondeo para que cuadre.
+        tc = factura.tipo_cambio_mxn() or Decimal("1")
+        total, impuestos = a_mxn(factura.total, tc), a_mxn(factura.impuestos, tc)
+        neto = neto if tc == 1 else total - impuestos
         return [
             {
                 "concepto": ConceptoContable.CLIENTES,
-                "cargo": factura.total,
+                "cargo": total,
                 "factura": factura,
                 "referencia": referencia,
                 "observaciones": f"Cargo por cuenta por cobrar de factura {folio}.",
@@ -31,7 +36,7 @@ class FacturaPolizaService:
             },
             {
                 "concepto": ConceptoContable.IVA_TRASLADADO,
-                "abono": factura.impuestos,
+                "abono": impuestos,
                 "factura": factura,
                 "referencia": referencia,
                 "observaciones": f"Abono por impuestos de factura {folio}.",

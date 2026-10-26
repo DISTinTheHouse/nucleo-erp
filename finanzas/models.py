@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.conf import settings
 from django.contrib.postgres.indexes import OpClass
 from django.db import models
@@ -292,8 +294,16 @@ class Factura(StatusLifecycleModel):
     cfdi_cancelado = models.BooleanField(default=False)
     # Cancelación solicitada; falta que el receptor la acepte (#565).
     cfdi_cancelacion_solicitada = models.BooleanField(default=False)
+    # Pesos por unidad de ``moneda`` (EC-581). Obligatorio para emitir o timbrar si no es MXN.
+    tipo_cambio = models.DecimalField(max_digits=18, decimal_places=6, null=True, blank=True)
 
     history = HistoricalRecords()
+
+    def tipo_cambio_mxn(self):
+        """Pesos por unidad: ``1`` en MXN; si no, el capturado (``None`` si falta)."""
+        if (self.moneda.codigo_iso or "").upper() == "MXN":
+            return Decimal("1")
+        return self.tipo_cambio
 
     class Meta:
         db_table = "facturas"
