@@ -1,5 +1,58 @@
+from django import forms
 from django.contrib import admin
-from catalogo.models import TipoProducto, CategoriaProducto, CategoriaProductoTalla, Color, Talla, Producto, ProductoVariante
+from catalogo.compatibilidad import normalizar_ubicacion
+from catalogo.models import (
+    TipoProducto, CategoriaProducto, CategoriaProductoProceso, CategoriaProductoTalla, Color, Talla, Producto,
+    ProductoVariante,
+)
+
+
+# --- Matriz prenda/proceso (EC-572) -------------------------------------------
+# La empresa sale de la categoría y ``ubicacion`` se guarda en mayúsculas, como en
+# la API (``CategoriaProductoProcesoSerializer``).
+class CategoriaProductoProcesoForm(forms.ModelForm):
+    class Meta:
+        model = CategoriaProductoProceso
+        fields = ("categoria_producto", "proceso", "ubicacion", "activo")
+        help_texts = {"ubicacion": "Vacía = cualquier ubicación. Ej.: HOMBROS, RODILLAS, A."}
+
+    def clean_ubicacion(self):
+        return normalizar_ubicacion(self.cleaned_data.get("ubicacion"))
+
+    def clean(self):
+        # El mensaje de la API, no el nombre de la restricción de BD.
+        datos = super().clean()
+        categoria_id = getattr(datos.get("categoria_producto"), "pk", None) or self.instance.categoria_producto_id
+        if datos.get("activo") and CategoriaProductoProceso.objects.filter(
+            categoria_producto_id=categoria_id, proceso=datos.get("proceso"),
+            ubicacion=datos.get("ubicacion", ""), activo=True,
+        ).exclude(pk=self.instance.pk).exists():
+            raise forms.ValidationError("Ya existe una regla activa para esa categoría, proceso y ubicación.")
+        return datos
+
+
+class CategoriaProductoProcesoInline(admin.TabularInline):
+    model = CategoriaProductoProceso
+    form = CategoriaProductoProcesoForm
+    fields = ("proceso", "ubicacion", "activo")
+    extra = 1
+    verbose_name = "proceso permitido"
+    verbose_name_plural = "Procesos permitidos (sin filas = sin restricción)"
+
+
+@admin.register(CategoriaProductoProceso)
+class CategoriaProductoProcesoAdmin(admin.ModelAdmin):
+    form = CategoriaProductoProcesoForm
+    list_display = ("categoria_producto", "proceso", "ubicacion", "activo", "empresa")
+    list_filter = ("proceso", "activo", "empresa")
+    search_fields = ("categoria_producto__nombre", "ubicacion")
+    ordering = ("categoria_producto__nombre", "proceso", "ubicacion")
+    autocomplete_fields = ("categoria_producto",)
+    list_select_related = ("categoria_producto", "empresa")
+
+    def save_model(self, request, obj, form, change):
+        obj.empresa_id = obj.categoria_producto.empresa_id
+        super().save_model(request, obj, form, change)
 
 @admin.register(TipoProducto)
 class TipoProductoAdmin(admin.ModelAdmin):
@@ -22,7 +75,17 @@ class CategoriaProductoAdmin(admin.ModelAdmin):
     ordering = ("nombre", "id")
     autocomplete_fields = ("empresa", "unidad_medida")
     list_select_related = ("empresa", "unidad_medida")
-    inlines = (CategoriaProductoTallaInline,)
+    inlines = (CategoriaProductoTallaInline, CategoriaProductoProcesoInline)
+
+    def save_formset(self, request, form, formset, change):
+        if formset.model is CategoriaProductoProceso:
+            for obj in formset.save(commit=False):
+                obj.empresa_id = form.instance.empresa_id
+                obj.save()
+            for obj in formset.deleted_objects:
+                obj.delete()
+            return
+        super().save_formset(request, form, formset, change)
 
 
 @admin.register(Color)
