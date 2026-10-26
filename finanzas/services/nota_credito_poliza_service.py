@@ -17,9 +17,21 @@ class NotaCreditoPolizaService:
         tipo de cambio de su factura (EC-581)."""
         factura = nota.factura
         folio = nota.folio or str(nota.pk)
-        tc = tipo_cambio_de(factura)
-        total, impuestos = a_mxn(nota.total, tc), a_mxn(nota.impuestos, tc)
-        subtotal = nota.subtotal if tc == 1 else total - impuestos
+
+        def lineas():
+            # Solo si la empresa contabiliza: sin póliza no se exige tipo de cambio (#676).
+            tc = tipo_cambio_de(factura)
+            total, impuestos = a_mxn(nota.total, tc), a_mxn(nota.impuestos, tc)
+            subtotal = nota.subtotal if tc == 1 else total - impuestos
+            return [
+                {"concepto": ConceptoContable.DEVOLUCIONES_VENTAS, "cargo": subtotal,
+                 "referencia": folio},
+                {"concepto": ConceptoContable.IVA_TRASLADADO, "cargo": impuestos,
+                 "referencia": folio},
+                {"concepto": ConceptoContable.CLIENTES, "abono": total,
+                 "factura": factura, "referencia": folio},
+            ]
+
         return PolizaMotorService.generar(
             empresa_id=factura.empresa_id,
             sucursal_id=factura.sucursal_id,
@@ -28,14 +40,7 @@ class NotaCreditoPolizaService:
             fecha=nota.fecha_emision or timezone.localdate(),
             tipo=Poliza.PolizaTipo.DIARIO,
             concepto=f"Nota de crédito {folio} - {nota.cliente.nombre}",
-            lineas=[
-                {"concepto": ConceptoContable.DEVOLUCIONES_VENTAS, "cargo": subtotal,
-                 "referencia": folio},
-                {"concepto": ConceptoContable.IVA_TRASLADADO, "cargo": impuestos,
-                 "referencia": folio},
-                {"concepto": ConceptoContable.CLIENTES, "abono": total,
-                 "factura": factura, "referencia": folio},
-            ],
+            lineas=lineas,
             usuario=usuario,
         )
 

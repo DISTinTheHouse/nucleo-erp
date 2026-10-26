@@ -3,7 +3,9 @@ from django.core import signing
 from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.utils.text import slugify
+from django.db import transaction
 from rest_framework import permissions, status
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 import json
@@ -14,6 +16,7 @@ import urllib.request
 from nucleo.models import Empresa
 from nucleo.api.serializers import EmpresaSerializer
 from seguridad.models import Rol
+from terceros import facturama
 from terceros.api.serializers import ClienteSerializer
 from usuarios.api.serializers import UsuarioSerializer
 from usuarios.models import Usuario
@@ -660,13 +663,23 @@ class AIAssistantAPIView(APIView):
         if not serializer.is_valid():
             return {"ok": False, "error": "Validación falló", "details": serializer.errors}
 
-        cliente = serializer.save(empresa=empresa)
+        # Igual que ``POST /terceros/clientes/``: si Facturama no lo guarda, tampoco el ERP (#671).
         try:
-            cliente.vendedores.add(user)
-        except Exception:
-            pass
+            with transaction.atomic():
+                cliente = serializer.save(empresa=empresa)
+                try:
+                    cliente.vendedores.add(user)
+                except Exception:
+                    pass
+                sincronizado = facturama.sincronizar(cliente)
+        except ValidationError as exc:
+            return {"ok": False, "error": "Facturama no guardó el cliente", "details": exc.detail}
 
-        return {"ok": True, "cliente": {"id": cliente.pk, "razon_social": cliente.razon_social, "empresa_id": cliente.empresa_id}}
+        return {
+            "ok": True,
+            "cliente": {"id": cliente.pk, "razon_social": cliente.razon_social, "empresa_id": cliente.empresa_id},
+            "facturama_sincronizado": sincronizado,
+        }
 
     def _tool_create_calendar_event(self, request, args):
         user = request.user

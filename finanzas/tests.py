@@ -8815,3 +8815,20 @@ class FacturaTipoCambioTests(MotorPolizasBase):
 
         self.assertIn("tipo_cambio", ctx.exception.message_dict)
         self.assertIn("cfdi", ctx.exception.message_dict)
+
+    def test_sin_contabilizacion_la_poliza_no_exige_tipo_de_cambio(self):  # #676
+        from finanzas.services.nota_credito_poliza_service import NotaCreditoPolizaService
+
+        factura = self._usd()
+        nota = NotaCredito.objects.create(
+            factura=factura, cliente=self.a["cliente"], total=Decimal("58.00"), impuestos=Decimal("8.00"),
+            subtotal=Decimal("50.00"), estatus=NotaCredito.Estatus.EMITIDA.value, motivo="devolución",
+        )
+        ParametrosContabilidad.objects.filter(empresa=self.empresa).update(contabilizacion_automatica=False)
+
+        self.assertIsNone(FacturaPolizaService.generar(factura))
+        self.assertIsNone(NotaCreditoPolizaService.generar(nota))
+
+        self._encender()
+        with self.assertRaises(ErrorDeNegocio):
+            NotaCreditoPolizaService.generar(nota)

@@ -69,7 +69,7 @@ class FacturaPolizaService:
             fecha=factura.fecha_emision,
             tipo=Poliza.PolizaTipo.INGRESO,
             concepto=f"Factura por cobrar {factura.folio or factura.pk} - {factura.cliente.nombre}",
-            lineas=FacturaPolizaService.lineas(factura),
+            lineas=lambda: FacturaPolizaService.lineas(factura),
             usuario=usuario,
         )
 

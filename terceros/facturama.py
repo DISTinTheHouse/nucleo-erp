@@ -17,7 +17,7 @@ def _payload(cliente):
     datos = {
         "Email": (cliente.correo or "").strip(),
         "Rfc": (cliente.rfc or "").strip().upper(),
-        "Name": (cliente.razon_social or cliente.nombre or "").strip(),
+        "Name": (cliente.razon_social or "").strip(),
         "FiscalRegime": getattr(cliente.sat_regimen_fiscal, "codigo", ""),
         "CfdiUse": getattr(cliente.sat_uso_cfdi, "codigo", ""),
         "TaxZipCode": (cliente.codigo_postal or "").strip(),
@@ -43,11 +43,12 @@ def _llamar(metodo, ruta, **kwargs):
 
 def faltantes(cliente):
     """Campos del ERP que Facturama exige para el cliente y aún están vacíos (#659).
-    Sin faltantes el cliente está completo y se puede sincronizar ("verificado")."""
+    Sin faltantes el cliente está completo y se puede sincronizar ("verificado").
+    La razón social no se completa con ``nombre``: el CFDI la exige tal cual (#672)."""
     valores = {
         "correo": cliente.correo,
         "rfc": cliente.rfc,
-        "razon_social": cliente.razon_social or cliente.nombre,
+        "razon_social": cliente.razon_social,
         "sat_regimen_fiscal": cliente.sat_regimen_fiscal_id,
         "sat_uso_cfdi": cliente.sat_uso_cfdi_id,
         "codigo_postal": cliente.codigo_postal,
@@ -65,8 +66,12 @@ def sincronizar(cliente):
     if cliente.facturama_id:
         _llamar("put", f"/Client/{cliente.facturama_id}", json={**datos, "Id": cliente.facturama_id})
     else:
-        respuesta = _llamar("post", "/Client", json=datos) or {}
-        cliente.facturama_id = respuesta.get("Id")
+        respuesta = _llamar("post", "/Client", json=datos)
+        facturama_id = respuesta.get("Id") if isinstance(respuesta, dict) else None
+        if not facturama_id:
+            # Sin Id cada guardado volvería a crearlo en Facturama (#675): no se guarda nada.
+            raise ValidationError({"facturama": "Facturama no regresó el Id del cliente; intenta de nuevo."})
+        cliente.facturama_id = facturama_id
         cliente.save(update_fields=["facturama_id"])
     return True
 

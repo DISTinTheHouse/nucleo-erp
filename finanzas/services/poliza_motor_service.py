@@ -34,7 +34,8 @@ class PolizaMotorService:
         ``lineas``: lista de dicts con ``concepto`` (``ConceptoContable``, más
         ``clave`` opcional) o ``cuenta`` ya resuelta, ``cargo`` o ``abono``, y
         opcionalmente ``referencia``, ``observaciones`` y las FK del documento
-        (``factura``, ``cobro``, ...).
+        (``factura``, ``cobro``, ...). También puede ser una función que las regrese:
+        así no se calculan si la empresa no contabiliza.
 
         Regresa ``None`` si la empresa no contabiliza (interruptor apagado o
         documento anterior a la fecha de inicio). Si el documento ya tiene
@@ -45,6 +46,8 @@ class PolizaMotorService:
         existente = _origen(origen_tipo, origen_id)
         if existente:
             return existente
+        if callable(lineas):  # se arman solo si hay póliza que crear (#676)
+            lineas = lineas()
         try:
             with transaction.atomic():
                 return PolizaMotorService._crear(

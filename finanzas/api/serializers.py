@@ -143,7 +143,7 @@ class FacturaPendienteCobroInputSerializer(serializers.Serializer):
         default=Decimal("0.00"),
     )
     total = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=Decimal("0.01"))
-    # Obligatorio fuera de MXN (#668); en MXN se ignora.
+    # Obligatorio fuera de MXN (#668); en MXN no se guarda, pero se valida si viene (#676).
     tipo_cambio = serializers.DecimalField(
         max_digits=18, decimal_places=6, min_value=Decimal("0.000001"), required=False, allow_null=True
     )

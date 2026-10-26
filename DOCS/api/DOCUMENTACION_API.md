@@ -3361,7 +3361,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 - `cliente`: obligatorio, debe pertenecer a la empresa del usuario.
 - `moneda`: obligatorio, debe estar activa y disponible para la empresa.
-- `tipo_cambio`: pesos por unidad (`> 0`). **Obligatorio si la moneda no es MXN**, si no `400 {"tipo_cambio": [...]}` (#668); en MXN se ignora.
+- `tipo_cambio`: pesos por unidad (`> 0`). **Obligatorio si la moneda no es MXN**, si no `400 {"tipo_cambio": [...]}` (#668). En MXN no se guarda, pero si se manda debe ser válido (`> 0`, hasta 6 decimales), igual que en `PATCH`; lo más simple es no mandarlo (#676).
 - `pedido`: opcional; si se envía, debe pertenecer a la empresa y coincidir con el mismo cliente y moneda.
 - `folio`: opcional; si no se envía, el backend genera uno automáticamente.
 - `fecha_vencimiento`: opcional.

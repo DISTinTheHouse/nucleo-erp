@@ -982,7 +982,8 @@ class ClienteFacturamaTests(TestCase):
 
         # Lo que Facturama exige para dar de alta al cliente (#659).
         self.completo = {
-            "nombre": "Cli", "rfc": "URE180429TM6", "correo": "pagos@cli.test", "codigo_postal": "64000",
+            "nombre": "Cli", "razon_social": "CLI SA DE CV", "rfc": "URE180429TM6", "correo": "pagos@cli.test",
+            "codigo_postal": "64000",
             "sat_regimen_fiscal": SatRegimenFiscal.objects.create(codigo="601", descripcion="General").pk,
             "sat_uso_cfdi": SatUsoCfdi.objects.create(codigo="G03", descripcion="Gastos").pk,
         }
@@ -1021,6 +1022,44 @@ class ClienteFacturamaTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("RFC inválido", str(resp.data["facturama"]))
         self.assertFalse(Cliente.objects.exists())
+
+    def test_sin_razon_social_no_esta_verificado_aunque_tenga_nombre(self):  # #672
+        resp = self._alta(razon_social="")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual((resp.data["facturama_verificado"], resp.data["facturama_faltantes"]), (False, ["razon_social"]))
+        self.fc.post.assert_not_called()
+
+    def test_el_asistente_de_ia_tambien_lo_sube_a_facturama(self):  # #671
+        from types import SimpleNamespace
+
+        from ia.api.views import AIAssistantAPIView
+
+        self.fc.post.return_value = {"Id": "ia1"}
+        request = SimpleNamespace(user=self.user)
+
+        resultado = AIAssistantAPIView()._tool_create_cliente(request, self.completo)
+
+        self.assertTrue(resultado["ok"], resultado)
+        self.assertTrue(resultado["facturama_sincronizado"])
+        self.assertEqual(Cliente.objects.get(pk=resultado["cliente"]["id"]).facturama_id, "ia1")
+
+        Cliente.objects.all().delete()
+        self.fc.post.return_value = {}
+        resultado = AIAssistantAPIView()._tool_create_cliente(request, self.completo)
+        self.assertEqual((resultado["ok"], list(resultado["details"])), (False, ["facturama"]))
+        self.assertFalse(Cliente.objects.exists())
+
+    def test_si_facturama_no_regresa_id_no_se_guarda(self):  # #675
+        for respuesta in ({}, "", {"Id": ""}, "ok"):
+            with self.subTest(respuesta=respuesta):
+                self.fc.post.return_value = respuesta
+
+                resp = self._alta()
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIn("facturama", resp.data)
+                self.assertFalse(Cliente.objects.exists())
 
 
 CLIENTES_URL = "/api/v1/terceros/clientes/"
