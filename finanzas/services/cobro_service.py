@@ -109,9 +109,16 @@ class CobroService:
             )
 
         # #644: el folio se consume al aplicar (no en Borrador), con la sucursal de la
-        # factura de la primera línea por id.
+        # factura de la primera línea por id. Sin serie no se aplica (#662) y un folio
+        # repetido en la empresa se rechaza (#663; la BD también lo impide).
         if not cobro.folio:
-            cobro.folio = generate_cobro_folio(cobro.empresa_id, cxcs[detalles[0].cxc_id].factura.sucursal_id)
+            sucursal = cxcs[detalles[0].cxc_id].factura.sucursal
+            folio = generate_cobro_folio(cobro.empresa_id, sucursal.pk)
+            if not folio:
+                raise ErrorDeNegocio({"folio": f"La sucursal {sucursal.nombre} no tiene serie COBROS activa: dala de alta en series y folios."})
+            if Cobro.objects.filter(empresa_id=cobro.empresa_id, folio=folio).exists():
+                raise ErrorDeNegocio({"folio": f"El folio {folio} ya existe en otro cobro: revisa que las series COBROS de las sucursales no se repitan."})
+            cobro.folio = folio
             cobro.save(update_fields=["folio"])
 
         hoy = timezone.localdate()
@@ -142,7 +149,7 @@ class CobroService:
                 cuenta_bancaria=cuenta,
                 cobro=cobro,
                 fecha=cobro.fecha_cobro or hoy,
-                concepto=(f"Cobro {cobro.pk} - Cliente {cobro.cliente_id}")[:255],
+                concepto=(f"Cobro {cobro.folio or cobro.pk} - Cliente {cobro.cliente_id}")[:255],
                 referencia=(cobro.referencia_operacion or str(cobro.pk))[:100],
                 importe=total_cobrado,
                 saldo=cuenta.saldo_actual,

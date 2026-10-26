@@ -149,6 +149,10 @@ class FinanzasBase(TestCase):
             serie="A",
             folio_actual=0,
         )
+        # Aplicar un cobro exige serie COBROS en la sucursal (#662).
+        SerieFolio.objects.create(
+            empresa=empresa, sucursal=sucursal, tipo_documento="COBROS", serie="COB", folio_actual=0,
+        )
         return {
             "empresa": empresa,
             "sucursal": sucursal,
@@ -6968,20 +6972,27 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         return self._cobrar(cxc, "100.00", cuenta=cuenta, **extra)
 
     def test_cobro_toma_folio_de_la_serie_cobros(self):
-        SerieFolio.objects.create(
-            empresa=self.a["empresa"], sucursal=self.a["sucursal"], tipo_documento="COBROS", serie="COB",
-        )
-
         primero = self._cobrar(self._cxc(), "10.00")
         segundo = self._cobrar(self._cxc(), "10.00")
 
         self.assertEqual((primero.data["folio"], segundo.data["folio"]), ("COB-000001", "COB-000002"))
 
-    def test_cobro_sin_serie_cobros_se_crea_sin_folio(self):
+    def test_cobro_sin_serie_cobros_no_se_aplica(self):  # #662
+        SerieFolio.objects.filter(sucursal=self.a["sucursal"], tipo_documento="COBROS").delete()
+
         resp = self._cobrar(self._cxc(), "10.00")
 
-        self.assertEqual(resp.status_code, 201, resp.data)
-        self.assertIsNone(resp.data["folio"])
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("folio", resp.data)
+
+    def test_folio_repetido_en_la_empresa_no_se_aplica(self):  # #663
+        self._cobrar(self._cxc(), "10.00")
+        SerieFolio.objects.filter(sucursal=self.a["sucursal"], tipo_documento="COBROS").update(folio_actual=0)
+
+        resp = self._cobrar(self._cxc(), "10.00")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("folio", resp.data)
 
     def test_cobro_en_mxn_toma_la_moneda_de_la_cuenta_y_fuerza_tipo_cambio_1(self):
         resp = self._cobrar(self._cxc(), "50.00", tipo_cambio="17.5")
