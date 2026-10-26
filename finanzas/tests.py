@@ -8736,3 +8736,82 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.facturama.create_cfdi_emision.assert_not_called()
 
 
+class FacturaTipoCambioTests(MotorPolizasBase):
+    """#668/#669: tipo de cambio de la factura de venta fuera de MXN."""
+
+    @property
+    def usd(self):
+        return Moneda.objects.get_or_create(codigo_iso="USD", defaults={"nombre": "Dolar"})[0]
+
+    def _usd(self, **extra):
+        return Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.a["cliente"], moneda=self.usd,
+            folio="F-USD", subtotal=Decimal("100.00"), impuestos=Decimal("16.00"), total=Decimal("116.00"), **extra
+        )
+
+    def _pendiente(self, moneda, **extra):
+        return self._client(self.a["usuario"]).post(PENDIENTE_COBRO_URL, {
+            "cliente": self.a["cliente"].pk, "moneda": moneda.pk,
+            "subtotal": "100.00", "impuestos": "16.00", "total": "116.00", **extra,
+        }, format="json")
+
+    def _patch(self, factura, body):
+        return self._client(self.a["usuario"]).patch(f"{FACTURAS_URL}{factura.pk}/", body, format="json")
+
+    def test_pendiente_de_cobro_en_usd_sin_tipo_de_cambio_responde_400(self):
+        resp = self._pendiente(self.usd)
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("tipo_cambio", resp.data)
+        self.assertFalse(Factura.objects.filter(moneda=self.usd).exists())
+
+    def test_pendiente_de_cobro_en_usd_guarda_el_tipo_de_cambio_y_la_poliza_va_en_pesos(self):
+        resp = self._pendiente(self.usd, tipo_cambio="17.5")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        factura = Factura.objects.get(pk=resp.data["factura"]["id"])
+        self.assertEqual(factura.tipo_cambio, Decimal("17.5"))
+        poliza = Poliza.objects.get(origen_tipo="Factura", origen_id=factura.pk)
+        self.assertEqual(poliza.poliza_detalles.get(cuenta_contable=self.clientes).cargo, Decimal("2030.00"))
+
+    def test_pendiente_de_cobro_en_mxn_no_guarda_tipo_de_cambio(self):
+        resp = self._pendiente(self.moneda, tipo_cambio="17.5")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertIsNone(Factura.objects.get(pk=resp.data["factura"]["id"]).tipo_cambio)
+
+    def test_sin_tipo_de_cambio_la_poliza_no_va_a_1_a_1(self):
+        with self.assertRaises(ErrorDeNegocio) as ctx:
+            FacturaPolizaService.lineas(self._usd())
+
+        self.assertIn("tipo_cambio", ctx.exception.message_dict)
+
+    def test_patch_tipo_de_cambio_solo_en_borrador_y_sin_timbrar(self):
+        factura = self._usd()
+        self.assertEqual(self._patch(factura, {"tipo_cambio": "18"}).status_code, 200)
+
+        Factura.objects.filter(pk=factura.pk).update(cfdi_uuid="fe3c73d5-7881-49e0-80a3-e6c7e2eece40")
+        resp = self._patch(factura, {"tipo_cambio": "19"})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("tipo_cambio", resp.data)
+
+        Factura.objects.filter(pk=factura.pk).update(cfdi_uuid=None, estatus=Factura.FacturaStatus.EMITIDA)
+        self.assertEqual(self._patch(factura, {"tipo_cambio": "19"}).status_code, 400)
+        factura.refresh_from_db()
+        self.assertEqual(factura.tipo_cambio, Decimal("18"))
+
+    def test_patch_tipo_de_cambio_en_mxn_no_se_guarda(self):
+        resp = self._patch(self.factura, {"tipo_cambio": "17.5"})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.factura.refresh_from_db()
+        self.assertIsNone(self.factura.tipo_cambio)
+
+    def test_timbrar_sin_tipo_de_cambio_lo_reporta_en_su_campo(self):
+        from finanzas.services.facturama.cfdi_payload import construir_payload_cfdi
+
+        with self.assertRaises(ErrorDeNegocio) as ctx:
+            construir_payload_cfdi(self._usd())
+
+        self.assertIn("tipo_cambio", ctx.exception.message_dict)
+        self.assertIn("cfdi", ctx.exception.message_dict)

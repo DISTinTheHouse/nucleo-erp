@@ -3361,6 +3361,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 - `cliente`: obligatorio, debe pertenecer a la empresa del usuario.
 - `moneda`: obligatorio, debe estar activa y disponible para la empresa.
+- `tipo_cambio`: pesos por unidad (`> 0`). **Obligatorio si la moneda no es MXN**, si no `400 {"tipo_cambio": [...]}` (#668); en MXN se ignora.
 - `pedido`: opcional; si se envía, debe pertenecer a la empresa y coincidir con el mismo cliente y moneda.
 - `folio`: opcional; si no se envía, el backend genera uno automáticamente.
 - `fecha_vencimiento`: opcional.
@@ -3641,7 +3642,7 @@ Errores (`400`, cada clave trae una **lista** de mensajes):
 | Empresa que no es dueña de la cuenta | `{"cfdi": ["Solo la empresa dueña de la cuenta de Facturama puede timbrar."]}` |
 
 - Datos que usa: `Sucursal.cp`, receptor del pedido (respaldo en `Cliente`), forma/método de pago del pedido (PPD → forma `99`), un concepto por renglón con `sat_prodserv`/`sat_unidad` del producto e IVA del renglón, `Factura.folio` y `serie_folio.serie`.
-- **Moneda distinta de MXN (EC-581):** la factura necesita `tipo_cambio` (pesos por unidad). Se captura con `PATCH /facturas/{id}/ {"tipo_cambio": "18.25"}` **solo en Borrador** (`> 0`; emitida → `400 {"tipo_cambio": [...]}`). Sin él, `emitir` responde `400 {"tipo_cambio": ["La factura está en USD: captura su tipo de cambio antes de emitirla."]}` y `timbrar` lo incluye en `cfdi`. El CFDI de la factura y el de sus notas de crédito van con `Currency` y `CurrencyExchangeRate` (el de la factura). Las pólizas de factura, nota de crédito y cobro se registran en pesos (importe × tipo de cambio; el cobro con el suyo). La diferencia cambiaria entre factura y cobro aún no se contabiliza.
+- **Moneda distinta de MXN (EC-581):** la factura necesita `tipo_cambio` (pesos por unidad). Se captura con `PATCH /facturas/{id}/ {"tipo_cambio": "18.25"}` **solo en Borrador y antes de timbrar** (`> 0`; emitida o timbrada → `400 {"tipo_cambio": [...]}`, #669). En MXN no aplica: se ignora y queda `null`. Sin él, `emitir` responde `400 {"tipo_cambio": ["La factura está en USD: captura su tipo de cambio antes de emitirla."]}` y `timbrar` (factura o nota) responde `400` con el resumen en `cfdi` y el detalle también en `tipo_cambio`. `registrar-pendiente-cobro/` lo exige desde el alta (#668). El CFDI de la factura y el de sus notas de crédito van con `Currency` y `CurrencyExchangeRate` (el de la factura). Las pólizas de factura, nota de crédito y cobro se registran en pesos (importe × tipo de cambio; el cobro con el suyo). La diferencia cambiaria entre factura y cobro aún no se contabiliza.
 - Cancelar (`POST /facturas/{id}/cancelar/`) de una timbrada cancela primero el CFDI ante el SAT (motivo 02) y guarda `cfdi_cancelado`; si no queda `canceled` → `400 {"cfdi": [...]}` y la factura no se toca.
 - REP: `POST /cobros/{id}/timbrar-rep/` (facturas PPD timbradas; errores bajo `rep`).
 - Editar líneas (EC-541): `PATCH /cobros/{id}/` con `cobro_detalles: [{cxc, importe_aplicado}]` **reemplaza todas** las líneas, solo si el cobro es `Borrador` (Aplicado/Cancelado → `400`). Sin la llave `cobro_detalles` no se tocan. Se puede mandar junto con `estatus: "Aplicado"` para aplicar en la misma llamada. El folio se asigna al aplicar, no en Borrador (#644).

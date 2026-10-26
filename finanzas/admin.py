@@ -117,6 +117,11 @@ class FacturaAdmin(admin.ModelAdmin):
     ordering = ("-fecha_emision", "-id")
     autocomplete_fields = ("empresa", "sucursal", "cliente", "pedido", "serie_folio", "moneda")
     list_select_related = ("empresa", "sucursal", "cliente", "pedido", "serie_folio", "moneda")
+    # Emitir, timbrar y el tipo de cambio van por la API, con CxC y póliza (#669).
+    readonly_fields = (
+        "estatus", "tipo_cambio", "cfdi_uuid", "facturama_id", "cfdi_fecha_timbrado",
+        "cfdi_pendiente", "cfdi_cancelado", "cfdi_cancelacion_solicitada",
+    )
     inlines = (FacturaDetalleInline,)
 
 

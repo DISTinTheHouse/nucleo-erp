@@ -2,9 +2,8 @@
 
 from django.utils import timezone
 
-from decimal import Decimal
-
 from finanzas.models import ConceptoContable, Poliza
+from finanzas.services.factura_poliza_service import tipo_cambio_de
 from finanzas.services.poliza_motor_service import PolizaMotorService
 from finanzas.utils.moneda import a_mxn
 
@@ -18,7 +17,7 @@ class NotaCreditoPolizaService:
         tipo de cambio de su factura (EC-581)."""
         factura = nota.factura
         folio = nota.folio or str(nota.pk)
-        tc = factura.tipo_cambio_mxn() or Decimal("1")
+        tc = tipo_cambio_de(factura)
         total, impuestos = a_mxn(nota.total, tc), a_mxn(nota.impuestos, tc)
         subtotal = nota.subtotal if tc == 1 else total - impuestos
         return PolizaMotorService.generar(

@@ -644,6 +644,12 @@ class FacturaViewSet(FinanzasBaseViewSet):
         ).first()
         if moneda is None:
             raise ValidationError({'moneda': 'Moneda no encontrada o sin acceso.'})
+        # Nace Emitida, con CxC y póliza en pesos: fuera de MXN el tipo de cambio va desde el alta (#668).
+        tipo_cambio = None
+        if (moneda.codigo_iso or '').upper() != 'MXN':
+            tipo_cambio = data.get('tipo_cambio')
+            if tipo_cambio is None:
+                raise ValidationError({'tipo_cambio': f'La factura está en {moneda.codigo_iso}: indica su tipo de cambio.'})
 
         pedido = None
         pedido_id = data.get('pedido')
@@ -693,6 +699,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
                 cliente=cliente,
                 pedido=pedido,
                 moneda=moneda,
+                tipo_cambio=tipo_cambio,
                 folio=folio,
                 fecha_vencimiento=fecha_vencimiento,
                 subtotal=data['subtotal'],
