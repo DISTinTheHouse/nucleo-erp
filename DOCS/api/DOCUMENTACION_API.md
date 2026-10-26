@@ -1554,7 +1554,14 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
 - **Listar**: `GET /api/v1/ventas/pedidos/`
 - **Detalle**: `GET /api/v1/ventas/pedidos/{id}/`
-- **Cancelar**: `POST /api/v1/ventas/pedidos/{id}/cancelar/` (sin body). Solo mesa de control / admin. Deja `estatus=5` y `activo=false` (el pedido deja de listarse). `400` si hay picking, packing, factura, OP u orden de bordado/reflejante/corte de manga sin cancelar. No hay `DELETE` de pedidos ni cancelar por `PATCH estatus=5`.
+- **Cancelar**: `POST /api/v1/ventas/pedidos/{id}/cancelar/` con `{"motivo": "..."}`. Solo mesa de control / admin. En una transacción:
+  - devuelve al inventario lo que el pedido descontó al autorizar (movimiento `ENTRADA` + auditoría);
+  - libera sus reservas `ACTIVA`;
+  - deja `estatus=5` y `activo=false` (el pedido deja de listarse) y guarda el motivo en la auditoría (`modulo=ventas`, `accion=CANCELAR`).
+
+  `200`: `{"id", "folio", "estatus": 5, "activo": false, "motivo", "inventario_devuelto": [{"producto_id", "producto_variante_id", "cantidad"}], "reservas_liberadas"}`.
+
+  Errores (`400`): `motivo` (falta), `permiso` (no es mesa de control), `pedido` (ya cancelado, o tiene picking, packing, factura, OP u orden de bordado/reflejante/corte de manga sin cancelar). `404` si ya no existe o es de otra empresa. No hay `DELETE` de pedidos ni cancelar por `PATCH estatus=5`.
   - Campos de contabilidad (dinero / forma*pago / metodos_pago / uso_cfdi / subtotal / iva / gran_total / precios_unitarios*$\_en_detalles_tallas_servicios):
     - ✅ Se envían **completos** si el usuario tiene rol `Mesa-de-Control` o `Ventas` (o es `is_superuser` / `is_admin_empresa`).
     - ❌ Se **eliminan del JSON** (no vienen en el response) para roles `WMS`, `Compras` o cualquier otro.
