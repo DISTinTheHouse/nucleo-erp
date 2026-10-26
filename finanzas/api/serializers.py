@@ -143,6 +143,10 @@ class FacturaPendienteCobroInputSerializer(serializers.Serializer):
         default=Decimal("0.00"),
     )
     total = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=Decimal("0.01"))
+    # Obligatorio fuera de MXN (#668); en MXN se ignora.
+    tipo_cambio = serializers.DecimalField(
+        max_digits=18, decimal_places=6, min_value=Decimal("0.000001"), required=False, allow_null=True
+    )
     referencia = serializers.CharField(max_length=100, required=False, allow_blank=True)
     observaciones = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
@@ -291,21 +295,25 @@ class FacturaSerializer(serializers.ModelSerializer):
     CAMPOS_FIJOS = ('pedido', 'serie_folio', 'activo')
 
     def validate(self, attrs):
-        if self.instance is None:
+        factura = self.instance
+        # En MXN el tipo de cambio siempre es 1: no se guarda (#669).
+        moneda = factura.moneda if factura is not None else getattr(attrs.get('pedido'), 'moneda', None)
+        if 'tipo_cambio' in attrs and (getattr(moneda, 'codigo_iso', '') or '').upper() == 'MXN':
+            attrs['tipo_cambio'] = None
+        if factura is None:
             # Alta: la serie es la del folio y la factura nace activa (#341).
             attrs.pop('serie_folio', None)
             attrs.pop('activo', None)
             return attrs
-        if self.instance.estatus == Factura.FacturaStatus.CANCELADA:
+        if factura.estatus == Factura.FacturaStatus.CANCELADA:
             raise ValidationError({'estatus': 'Una factura cancelada no se puede editar.'})
-        # Emitida, la CxC y la póliza ya usan el tipo de cambio (EC-581).
-        if (
-            'tipo_cambio' in attrs and attrs['tipo_cambio'] != self.instance.tipo_cambio
-            and self.instance.estatus != Factura.FacturaStatus.BORRADOR
+        # Emitida, la CxC y la póliza ya lo usan (EC-581); timbrada, el CFDI (#669).
+        if 'tipo_cambio' in attrs and attrs['tipo_cambio'] != factura.tipo_cambio and (
+            factura.estatus != Factura.FacturaStatus.BORRADOR or factura.cfdi_uuid or factura.cfdi_pendiente
         ):
-            raise ValidationError({'tipo_cambio': 'El tipo de cambio solo se captura mientras la factura es Borrador.'})
+            raise ValidationError({'tipo_cambio': 'El tipo de cambio solo se captura en Borrador y antes de timbrar.'})
         errores = {
-            campo: 'No editable; por PATCH solo fecha_vencimiento y observaciones.'
+            campo: 'No editable; por PATCH solo fecha_vencimiento, observaciones y tipo_cambio (en Borrador).'
             for campo in self.CAMPOS_FIJOS
             if campo in attrs and attrs[campo] != getattr(self.instance, campo)
         }

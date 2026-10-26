@@ -39,6 +39,15 @@ def _numero(valor):
     return float(valor or Decimal("0"))
 
 
+def _no_se_puede_timbrar(titulo, errores):
+    # Un solo mensaje en ``cfdi`` (el frontend muestra el primero de la primera clave);
+    # el tipo de cambio va además en su campo, como en ``emitir/`` (#669).
+    detalle = {"cfdi": f"{titulo} " + " ".join(errores.values())}
+    if "tipo_cambio" in errores:
+        detalle["tipo_cambio"] = errores["tipo_cambio"]
+    return ErrorDeNegocio(detalle)
+
+
 def _receptor(factura, errores):
     pedido, cliente = factura.pedido, factura.cliente
     rfc = _texto(getattr(pedido, "cliente_rfc", None)) or _texto(cliente.rfc)
@@ -152,8 +161,7 @@ def construir_payload_cfdi(factura):
     receptor = _receptor(factura, errores)
     conceptos = _conceptos(factura, errores)
     if errores:
-        # Un solo mensaje: el frontend muestra el primero de la primera clave.
-        raise ErrorDeNegocio({"cfdi": "No se puede timbrar. " + " ".join(errores.values())})
+        raise _no_se_puede_timbrar("No se puede timbrar.", errores)
 
     payload = {
         "NameId": "1",
@@ -331,7 +339,7 @@ def construir_payload_nota_credito(nota):
         errores["tipo_cambio"] = f"La factura está en {moneda} y no tiene tipo de cambio."
     receptor = _receptor(factura, errores)
     if errores:
-        raise ErrorDeNegocio({"cfdi": "No se puede timbrar la nota. " + " ".join(errores.values())})
+        raise _no_se_puede_timbrar("No se puede timbrar la nota.", errores)
 
     tasa = (factura.factura_detalles.values_list("porcentaje_impuesto", flat=True).first() or Decimal("0")) / Decimal("100")
     receptor["CfdiUse"] = "G02"

@@ -2,11 +2,22 @@
 
 from decimal import Decimal
 
+from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import ConceptoContable, Poliza
 from finanzas.services.poliza_motor_service import PolizaMotorService
 from finanzas.utils.moneda import a_mxn
 
 ORIGEN = "Factura"
+
+
+def tipo_cambio_de(factura):
+    """Pesos por unidad de la factura; sin él no hay asiento en pesos (antes iba a 1:1, #668)."""
+    tc = factura.tipo_cambio_mxn()
+    if tc is None:
+        raise ErrorDeNegocio(
+            {"tipo_cambio": f"La factura está en {factura.moneda.codigo_iso} y no tiene tipo de cambio."}
+        )
+    return tc
 
 
 class FacturaPolizaService:
@@ -16,7 +27,7 @@ class FacturaPolizaService:
         referencia = folio
         neto = (factura.subtotal or Decimal("0")) - (factura.descuento or Decimal("0"))
         # En pesos (EC-581): fuera de MXN, el ingreso se queda con el redondeo para que cuadre.
-        tc = factura.tipo_cambio_mxn() or Decimal("1")
+        tc = tipo_cambio_de(factura)
         total, impuestos = a_mxn(factura.total, tc), a_mxn(factura.impuestos, tc)
         neto = neto if tc == 1 else total - impuestos
         return [
