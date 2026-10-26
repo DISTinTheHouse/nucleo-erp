@@ -1103,8 +1103,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     # Un item = una existencia (filtrada por la variante del
                     # renglón, o sin variante si el renglón no trae).
                     producto_variante_id=item["producto_variante_id"],
-                    ubicacion_origen_id=item["ubicacion_id"],
-                    ubicacion_destino_id=None,
+                    # La ubicación sale (SALIDA) o recibe (ENTRADA), como el resto de las entradas (#665).
+                    ubicacion_origen_id=item["ubicacion_id"] if tipo_movimiento == TipoMovimiento.SALIDA else None,
+                    ubicacion_destino_id=item["ubicacion_id"] if tipo_movimiento == TipoMovimiento.ENTRADA else None,
                     lote_id=None,
                     serie_id=None,
                     cantidad=item["cantidad_movimiento"],
