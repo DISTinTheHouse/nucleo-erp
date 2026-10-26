@@ -20,7 +20,7 @@ class FacturaEmisionService:
         factura en Borrador. Emitir fecha la factura hoy y fija su vencimiento con el
         plazo de crédito del cliente si no traía uno.
         """
-        bloqueada = Factura.objects.select_for_update().select_related("cliente").get(pk=factura.pk)
+        bloqueada = Factura.objects.select_for_update().select_related("cliente", "moneda").get(pk=factura.pk)
         if not bloqueada.activo:
             raise ErrorDeNegocio({"estatus": "La factura está eliminada y no se puede emitir."})
         if bloqueada.estatus != Factura.FacturaStatus.BORRADOR:
@@ -29,6 +29,10 @@ class FacturaEmisionService:
             )
         if (bloqueada.total or 0) <= 0:
             raise ErrorDeNegocio({"total": "La factura debe tener un total mayor a 0 para emitirse."})
+        if bloqueada.tipo_cambio_mxn() is None:  # EC-581: la póliza va en pesos
+            raise ErrorDeNegocio(
+                {"tipo_cambio": f"La factura está en {bloqueada.moneda.codigo_iso}: captura su tipo de cambio antes de emitirla."}
+            )
 
         hoy = timezone.localdate()
         bloqueada.estatus = Factura.FacturaStatus.EMITIDA

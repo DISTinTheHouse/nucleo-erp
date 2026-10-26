@@ -298,6 +298,12 @@ class FacturaSerializer(serializers.ModelSerializer):
             return attrs
         if self.instance.estatus == Factura.FacturaStatus.CANCELADA:
             raise ValidationError({'estatus': 'Una factura cancelada no se puede editar.'})
+        # Emitida, la CxC y la póliza ya usan el tipo de cambio (EC-581).
+        if (
+            'tipo_cambio' in attrs and attrs['tipo_cambio'] != self.instance.tipo_cambio
+            and self.instance.estatus != Factura.FacturaStatus.BORRADOR
+        ):
+            raise ValidationError({'tipo_cambio': 'El tipo de cambio solo se captura mientras la factura es Borrador.'})
         errores = {
             campo: 'No editable; por PATCH solo fecha_vencimiento y observaciones.'
             for campo in self.CAMPOS_FIJOS
@@ -348,6 +354,7 @@ class FacturaSerializer(serializers.ModelSerializer):
             'cfdi_cancelacion_solicitada',
         ]
         fields = '__all__'
+        extra_kwargs = {'tipo_cambio': {'min_value': Decimal('0.000001')}}
 
 
 class FacturaListSerializer(serializers.ModelSerializer):
