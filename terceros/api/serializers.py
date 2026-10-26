@@ -42,6 +42,34 @@ class ClienteSerializer(serializers.ModelSerializer):
     giro_empresarial = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     sat_regimen_fiscal_codigo = serializers.CharField(write_only=True, required=False, allow_blank=True)
     sat_uso_cfdi_codigo = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    # #659: ``null`` si la empresa no usa Facturama; si la usa, ``true`` cuando el
+    # cliente ya está en Facturama y completo. ``facturama_faltantes``: qué le falta.
+    facturama_verificado = serializers.SerializerMethodField()
+    facturama_faltantes = serializers.SerializerMethodField()
+
+    def _usa_facturama(self, obj):
+        # Una consulta por respuesta (el contexto lo comparte todo el listado), no por cliente.
+        if "_empresa_facturama_id" not in self.context:
+            from finanzas.services.facturama.acceso import codigo_empresa_facturama
+            from nucleo.models import Empresa
+
+            codigo = codigo_empresa_facturama()
+            self.context["_empresa_facturama_id"] = (
+                Empresa.objects.filter(codigo=codigo).values_list("pk", flat=True).first() if codigo else None
+            )
+        return obj.empresa_id is not None and obj.empresa_id == self.context["_empresa_facturama_id"]
+
+    def get_facturama_faltantes(self, obj):
+        from terceros.facturama import faltantes
+
+        return faltantes(obj) if self._usa_facturama(obj) else []
+
+    def get_facturama_verificado(self, obj):
+        from terceros.facturama import faltantes
+
+        if not self._usa_facturama(obj):
+            return None
+        return bool(obj.facturama_id) and not faltantes(obj)
 
     class Meta:
         model = Cliente

@@ -41,9 +41,25 @@ def _llamar(metodo, ruta, **kwargs):
         raise ValidationError({"facturama": f"Facturama no guardó el cambio: {_mensaje(exc)}"})
 
 
+def faltantes(cliente):
+    """Campos del ERP que Facturama exige para el cliente y aún están vacíos (#659).
+    Sin faltantes el cliente está completo y se puede sincronizar ("verificado")."""
+    valores = {
+        "correo": cliente.correo,
+        "rfc": cliente.rfc,
+        "razon_social": cliente.razon_social or cliente.nombre,
+        "sat_regimen_fiscal": cliente.sat_regimen_fiscal_id,
+        "sat_uso_cfdi": cliente.sat_uso_cfdi_id,
+        "codigo_postal": cliente.codigo_postal,
+    }
+    return [campo for campo, valor in valores.items() if not str(valor or "").strip()]
+
+
 def sincronizar(cliente):
-    """Alta (guarda el Id) o actualización en Facturama. ``False`` si la empresa no usa Facturama."""
-    if not empresa_usa_facturama(cliente.empresa):
+    """Alta (guarda el Id) o actualización en Facturama. ``False`` si la empresa no usa
+    Facturama o si al cliente le falta algo que Facturama exige: se guarda en el ERP sin
+    verificar y se sube al completarlo (#659)."""
+    if not empresa_usa_facturama(cliente.empresa) or faltantes(cliente):
         return False
     datos = _payload(cliente)
     if cliente.facturama_id:

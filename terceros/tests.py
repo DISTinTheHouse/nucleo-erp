@@ -978,9 +978,27 @@ class ClienteFacturamaTests(TestCase):
         patcher = patch("terceros.facturama.FacturamaService")
         self.fc = patcher.start().return_value.client
         self.addCleanup(patcher.stop)
+        from nucleo.models import SatRegimenFiscal, SatUsoCfdi
 
-    def _alta(self):
-        return self.api.post("/api/v1/terceros/clientes/", {"nombre": "Cli", "rfc": "URE180429TM6"}, format="json")
+        # Lo que Facturama exige para dar de alta al cliente (#659).
+        self.completo = {
+            "nombre": "Cli", "rfc": "URE180429TM6", "correo": "pagos@cli.test", "codigo_postal": "64000",
+            "sat_regimen_fiscal": SatRegimenFiscal.objects.create(codigo="601", descripcion="General").pk,
+            "sat_uso_cfdi": SatUsoCfdi.objects.create(codigo="G03", descripcion="Gastos").pk,
+        }
+
+    def _alta(self, **datos):
+        return self.api.post("/api/v1/terceros/clientes/", {**self.completo, **datos}, format="json")
+
+    def test_sin_correo_se_guarda_sin_verificar_y_sin_llamar_a_facturama(self):  # #659
+        resp = self._alta(correo="")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual((resp.data["facturama_verificado"], resp.data["facturama_faltantes"]), (False, ["correo"]))
+        self.fc.post.assert_not_called()
+        self.fc.post.return_value = {"Id": "abc"}
+        resp = self.api.patch(f"/api/v1/terceros/clientes/{resp.data['id']}/", {"correo": "pagos@cli.test"}, format="json")
+        self.assertEqual((resp.data["facturama_verificado"], resp.data["facturama_faltantes"]), (True, []))
 
     def test_alta_guarda_el_id_y_la_edicion_hace_put(self):
         self.fc.post.return_value = {"Id": "abc"}

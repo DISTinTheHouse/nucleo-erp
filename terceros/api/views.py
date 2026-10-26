@@ -55,8 +55,9 @@ class ClienteViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         # El predicado de aislamiento vive en ``terceros.scope`` para que el
         # buscador global (``/api/v1/search/``) reutilice EXACTAMENTE éste y no
-        # una copia que pueda separarse de él.
-        return clientes_visibles(super().get_queryset(), self.request.user)
+        # una copia que pueda separarse de él. ``vendedores`` (M2M del serializer)
+        # en una sola consulta, no una por cliente.
+        return clientes_visibles(super().get_queryset(), self.request.user).prefetch_related("vendedores")
 
     def retrieve(self, request, *args, **kwargs):
         # Sólo el detalle (no el listado) lleva ``resumen_comercial``: es la
