@@ -593,6 +593,8 @@ class Cobro(models.Model):
         db_table = "cobros"
         verbose_name = "Cobro"
         verbose_name_plural = "Cobros"
+        # Folio único por empresa; los NULL (Borrador, cobros viejos) no chocan (#663).
+        constraints = [models.UniqueConstraint(fields=["empresa", "folio"], name="uq_cobro_empresa_folio")]
 
     def __str__(self):
         return str(self.id)

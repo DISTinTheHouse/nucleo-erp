@@ -29,7 +29,7 @@ class CobroPolizaService:
             origen_id=cobro.pk,
             fecha=cobro.fecha_cobro,
             tipo=Poliza.PolizaTipo.INGRESO,
-            concepto=f"Cobro {cobro.pk} - {cobro.cliente.nombre}",
+            concepto=f"Cobro {cobro.folio or cobro.pk} - {cobro.cliente.nombre}",
             lineas=[
                 {"cuenta": PlanContableService.cuenta_de_banco(cobro.cuenta_bancaria),
                  "cargo": importe, "cobro": cobro, "referencia": referencia},
