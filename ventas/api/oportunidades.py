@@ -10,7 +10,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 
@@ -69,6 +69,29 @@ def con_estado(qs):
             output_field=CharField(),
         )
     )
+
+
+def filas_cotizaciones(qs, user, limite=None):
+    """Cotizaciones visibles para la pantalla de la oportunidad, con su pedido (si ya lo hay).
+    Una consulta, sin importar cuántas sean."""
+    pedido = Pedido.objects.filter(cotizacion=OuterRef("pk")).order_by("-id")
+    filas = (
+        cotizaciones_visibles(qs, user)
+        .annotate(pedido_id_=Subquery(pedido.values("id")[:1]), pedido_folio=Subquery(pedido.values("folio")[:1]))
+        .order_by("-id")
+        .values("id", "estatus", "gran_total", "created_at", "autorizada_at", "pedido_id_", "pedido_folio")
+    )
+    if limite:
+        filas = filas[:limite]
+    estatus = dict(Cotizacion.CHOICES_ESTATUS)
+    return [
+        {
+            "id": c["id"], "estatus": c["estatus"], "estatus_display": estatus.get(c["estatus"]),
+            "gran_total": str(c["gran_total"]), "created_at": c["created_at"], "autorizada_at": c["autorizada_at"],
+            "pedido_id": c["pedido_id_"], "pedido_folio": c["pedido_folio"],
+        }
+        for c in filas
+    ]
 
 
 class ClienteVisibleMixin:
@@ -268,14 +291,6 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         recientes = list(seguimientos[:50])
         for seguimiento in recientes:
             seguimiento.oportunidad = oportunidad
-        pedido = Pedido.objects.filter(cotizacion=OuterRef("pk")).order_by("-id")
-        cotizaciones = (
-            cotizaciones_visibles(Cotizacion.objects.filter(oportunidad=oportunidad), request.user)
-            .annotate(pedido_id_=Subquery(pedido.values("id")[:1]), pedido_folio=Subquery(pedido.values("folio")[:1]))
-            .order_by("-id")
-            .values("id", "estatus", "created_at", "autorizada_at", "pedido_id_", "pedido_folio")
-        )
-        estatus = dict(Cotizacion.CHOICES_ESTATUS)
         return Response({
             "oportunidad": self.get_serializer(oportunidad).data,
             "seguimientos": SeguimientoSerializer(
@@ -283,16 +298,61 @@ class OportunidadViewSet(viewsets.ModelViewSet):
             ).data,
             "pendientes": pendientes.count(),
             "proximo_recordatorio": pendientes.aggregate(m=Min("fecha_recordatorio"))["m"],
-            "cotizaciones": [
-                {
-                    "id": c["id"], "estatus": c["estatus"], "estatus_display": estatus.get(c["estatus"]),
-                    "created_at": c["created_at"], "autorizada_at": c["autorizada_at"],
-                    "pedido_id": c["pedido_id_"], "pedido_folio": c["pedido_folio"],
-                }
-                for c in cotizaciones
-            ],
+            "cotizaciones": filas_cotizaciones(Cotizacion.objects.filter(oportunidad=oportunidad), request.user),
             "cartera": self._cartera(oportunidad),
         })
+
+    @action(detail=True, methods=["get", "post"])
+    def cotizaciones(self, request, pk=None):
+        """GET: ``ligadas`` y ``disponibles`` (del mismo cliente y sin oportunidad, las 100 más
+        recientes). POST ``{"cotizaciones": [ids]}``: liga cotizaciones ya hechas y responde lo mismo."""
+        oportunidad = self.get_object()
+        if request.method == "POST":
+            self._ligar(oportunidad, request.data.get("cotizaciones"))
+        disponibles = Cotizacion.objects.none()
+        if oportunidad.cliente_id:
+            disponibles = Cotizacion.objects.filter(
+                empresa_id=oportunidad.empresa_id, cliente_id=oportunidad.cliente_id, oportunidad__isnull=True
+            )
+        return Response({
+            "ligadas": filas_cotizaciones(Cotizacion.objects.filter(oportunidad=oportunidad), request.user),
+            "disponibles": filas_cotizaciones(disponibles, request.user, limite=100),
+        })
+
+    def _ligar(self, oportunidad, ids):
+        if oportunidad.etapa == Oportunidad.Etapa.PERDIDA:
+            raise ValidationError({"etapa": "No se ligan cotizaciones a una oportunidad perdida."})
+        if not oportunidad.cliente_id:
+            raise ValidationError({"cliente": "La oportunidad no tiene cliente."})
+        if not isinstance(ids, list) or not ids:
+            raise ValidationError({"cotizaciones": "Manda una lista de ids."})
+        ids = {_id_valido(i, "cotizaciones") for i in ids}
+        ligables = cotizaciones_visibles(
+            Cotizacion.objects.filter(pk__in=ids, empresa_id=oportunidad.empresa_id, cliente_id=oportunidad.cliente_id),
+            self.request.user,
+        ).filter(Q(oportunidad__isnull=True) | Q(oportunidad=oportunidad))
+        faltan = ids - set(ligables.values_list("pk", flat=True))
+        if faltan:
+            raise ValidationError({"cotizaciones": (
+                f"No se pueden ligar: {sorted(faltan)}. Deben ser tuyas, del cliente de la oportunidad "
+                "y no estar en otra oportunidad."
+            )})
+        ligables.update(oportunidad=oportunidad)
+
+    @action(detail=True, methods=["delete"], url_path=r"cotizaciones/(?P<cotizacion_id>[^/.]+)")
+    def desligar_cotizacion(self, request, pk=None, cotizacion_id=None):
+        """Quita la cotización de la oportunidad (no la borra). Una autorizada no se quita."""
+        oportunidad = self.get_object()
+        cotizacion = cotizaciones_visibles(
+            Cotizacion.objects.filter(pk=_id_valido(cotizacion_id, "cotizacion"), oportunidad=oportunidad),
+            request.user,
+        ).first()
+        if cotizacion is None:
+            raise NotFound("La cotización no está ligada a esta oportunidad.")
+        if cotizacion.estatus == ESTATUS_AUTORIZADA:
+            raise ValidationError({"cotizacion": "Una cotización autorizada no se quita de la oportunidad."})
+        Cotizacion.objects.filter(pk=cotizacion.pk).update(oportunidad=None)
+        return Response(status=204)
 
     @action(detail=True, methods=["post"])
     def cotizar(self, request, pk=None):

@@ -10,7 +10,10 @@ Base: `/api/v1/ventas/oportunidades/`
 | POST | `/` | Crea. Empresa y vendedor los pone el servidor. |
 | GET/PATCH | `/{id}/` | Detalle y edición. |
 | DELETE | `/{id}/` | Baja lógica (`activo=false`). |
-| POST | `/{id}/cotizar/` | Crea una cotización en Borrador ligada a la oportunidad. Responde `cotizacion_id`. |
+| POST | `/{id}/cotizar/` | Crea una cotización en Borrador ligada a la oportunidad. Responde `cotizacion_id`. Se puede llamar varias veces. |
+| GET | `/{id}/cotizaciones/` | Cotizaciones `ligadas` y `disponibles` para ligar. |
+| POST | `/{id}/cotizaciones/` | Liga cotizaciones que ya existen. |
+| DELETE | `/{id}/cotizaciones/{cotizacion_id}/` | Quita una cotización de la oportunidad (no la borra). |
 | GET | `/embudo/` | Cantidad y monto por estado. |
 
 ## Estado
@@ -23,6 +26,37 @@ Base: `/api/v1/ventas/oportunidades/`
 
 - Perdida exige `motivo_perdida`. Una oportunidad Ganada no se puede perder. No se cotiza una Perdida.
 - Borrar una oportunidad (admin, ORM) no borra sus cotizaciones: la FK es `SET_NULL`.
+
+## Varias cotizaciones por oportunidad
+
+Una oportunidad tiene **N cotizaciones**: nuevas con `cotizar/` o ya hechas con `cotizaciones/`.
+
+**`GET /{id}/cotizaciones/`**
+
+```json
+{
+  "ligadas": [{ "id": 152, "estatus": 1, "estatus_display": "BORRADOR", "gran_total": "11600.00", "created_at": "...", "autorizada_at": null, "pedido_id": null, "pedido_folio": null }],
+  "disponibles": [{ "id": 100, "...": "mismos campos" }]
+}
+```
+
+- `disponibles`: del mismo cliente y empresa, sin oportunidad, que el usuario puede ver. Las 100 más recientes. Vacía si la oportunidad no tiene cliente.
+
+**`POST /{id}/cotizaciones/`** con body `{"cotizaciones": [100, 99]}` → `200` con la misma forma del GET.
+
+- Cada cotización debe ser visible para el usuario (el vendedor, las suyas; el admin, las de su empresa), del cliente de la oportunidad y no estar en otra oportunidad. Si alguna no cumple, no se liga ninguna: `400 {"cotizaciones": "No se pueden ligar: [ids]. ..."}`.
+- Repetir el POST con una ya ligada no falla.
+- Oportunidad Perdida → `400 {"etapa"}`. Sin cliente → `400 {"cliente"}`. Lista vacía o ids no numéricos → `400 {"cotizaciones"}`.
+- No cambia el vendedor de la cotización.
+
+**`DELETE /{id}/cotizaciones/{cotizacion_id}/`** → `204`. La cotización queda sin oportunidad.
+
+- Autorizada → `400 {"cotizacion"}` (la oportunidad dejaría de estar Ganada).
+- No ligada a esta oportunidad o no visible → `404`.
+
+Integración rápida: botón "Ligar cotización" → GET, mostrar `disponibles` con checkbox → POST con los ids → pintar `ligadas` de la respuesta. En cada fila de `ligadas`, "Quitar" → DELETE y quitarla de la lista.
+
+Rendimiento: el GET hace 3 consultas fijas y el POST 5, sin importar cuántas cotizaciones haya. En producción, desde fuera de Vercel: GET ~0.3–0.5 s y POST ~0.5–0.8 s, casi todo latencia de red a Supabase.
 
 ## Quién ve qué
 El vendedor ve las suyas. El admin de empresa ve todas las de su empresa. Otra empresa u otro vendedor: 404. El cliente debe ser de la misma empresa.
@@ -72,7 +106,7 @@ Toda la pantalla de una oportunidad en una llamada:
   "seguimientos": [ "...los 50 más recientes..." ],
   "pendientes": 2,
   "proximo_recordatorio": "2026-11-03",
-  "cotizaciones": [{ "id": 12, "estatus": 3, "estatus_display": "AUTORIZADA", "created_at": "...", "autorizada_at": "...", "pedido_id": 7, "pedido_folio": "PED-001" }],
+  "cotizaciones": [{ "id": 12, "estatus": 3, "estatus_display": "AUTORIZADA", "gran_total": "11600.00", "created_at": "...", "autorizada_at": "...", "pedido_id": 7, "pedido_folio": "PED-001" }],
   "cartera": [{ "moneda": "MXN", "saldo_total": "0.00", "por_vencer": "0.00", "vencido_1_30": "0.00", "...": "..." }]
 }
 ```

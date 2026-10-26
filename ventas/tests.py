@@ -6556,3 +6556,93 @@ class CompatibilidadPrendaProcesoVentasTests(TestCase):
         )
         productos = {p["id"]: p for p in datos["busqueda"]["productos"]}
         self.assertEqual(productos[self.p_playera.pk]["categoria_producto"], self.playera.pk)
+
+
+class OportunidadLigarCotizacionesTests(OportunidadesBase):
+    """Una oportunidad con varias cotizaciones: ligar y quitar las que ya existen."""
+
+    def _cot(self, vendedor=None, cliente=None, **extra):
+        return Cotizacion.objects.create(
+            empresa=self.empresa, vendedor=vendedor or self.ana, cliente=cliente or self.cliente, **extra
+        )
+
+    def _url(self, op, cot=None):
+        return f"{OPORTUNIDADES_URL}{op.pk}/cotizaciones/" + (f"{cot.pk}/" if cot else "")
+
+    def test_liga_varias_y_las_regresa_ligadas(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        a, b = self._cot(), self._cot()
+
+        resp = self._client(self.ana).post(self._url(op), {"cotizaciones": [a.pk, b.pk]}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual({c["id"] for c in resp.data["ligadas"]}, {a.pk, b.pk})
+        self.assertEqual(resp.data["disponibles"], [])
+        self.assertEqual(Cotizacion.objects.filter(oportunidad=op).count(), 2)
+
+    def test_get_trae_disponibles_del_mismo_cliente_sin_oportunidad(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        libre = self._cot()
+        self._cot(oportunidad=self._op(self.ana, cliente=self.cliente))
+        self._cot(cliente=Cliente.objects.create(empresa=self.empresa, nombre="Otro"))
+
+        resp = self._client(self.ana).get(self._url(op))
+
+        self.assertEqual([c["id"] for c in resp.data["disponibles"]], [libre.pk])
+
+    def test_no_liga_ajenas_de_otro_cliente_o_de_otra_oportunidad(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        de_beto = self._cot(vendedor=self.beto)
+        en_otra = self._cot(oportunidad=self._op(self.ana, cliente=self.cliente))
+        otro_cliente = self._cot(cliente=Cliente.objects.create(empresa=self.empresa, nombre="Otro"))
+
+        for cot in (de_beto, en_otra, otro_cliente):
+            resp = self._client(self.ana).post(self._url(op), {"cotizaciones": [cot.pk]}, format="json")
+            self.assertEqual(resp.status_code, 400, resp.data)
+            self.assertIn("cotizaciones", resp.data)
+        self.assertFalse(Cotizacion.objects.filter(oportunidad=op).exists())
+
+    def test_ids_invalidos_o_lista_vacia_responden_400(self):
+        op = self._op(self.ana, cliente=self.cliente)
+
+        for body in ({"cotizaciones": []}, {"cotizaciones": ["x"]}, {}):
+            self.assertEqual(self._client(self.ana).post(self._url(op), body, format="json").status_code, 400)
+
+    def test_perdida_o_sin_cliente_no_liga(self):
+        perdida = self._op(self.ana, cliente=self.cliente, etapa="Perdida", motivo_perdida="Precio")
+        sin_cliente = self._op(self.ana)
+        cot = self._cot()
+
+        for op in (perdida, sin_cliente):
+            resp = self._client(self.ana).post(self._url(op), {"cotizaciones": [cot.pk]}, format="json")
+            self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_quitar_la_desliga_sin_borrarla_y_una_autorizada_no(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        borrador, autorizada = self._cot(oportunidad=op), self._cot(oportunidad=op, estatus=3)
+
+        self.assertEqual(self._client(self.ana).delete(self._url(op, borrador)).status_code, 204)
+        self.assertEqual(self._client(self.ana).delete(self._url(op, autorizada)).status_code, 400)
+        self.assertEqual(self._client(self.ana).delete(self._url(op, borrador)).status_code, 404)
+        borrador.refresh_from_db()
+        self.assertIsNone(borrador.oportunidad_id)
+        self.assertEqual(list(Cotizacion.objects.filter(oportunidad=op)), [autorizada])
+
+    def test_otro_vendedor_responde_404(self):
+        op = self._op(self.beto, cliente=self.cliente)
+
+        self.assertEqual(self._client(self.ana).get(self._url(op)).status_code, 404)
+
+    def test_consultas_fijas(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        cliente = self._client(self.ana)
+        cliente.get(self._url(op))
+        with CaptureQueriesContext(connection) as pocas:
+            cliente.get(self._url(op))
+        for _ in range(10):
+            self._cot(oportunidad=op)
+            self._cot()
+        with CaptureQueriesContext(connection) as muchas:
+            cliente.get(self._url(op))
+
+        self.assertEqual(len(pocas), len(muchas))
