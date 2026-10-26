@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from nucleo.models import SatRegimenFiscal, SatUsoCfdi
@@ -59,11 +60,13 @@ class ClienteSerializer(serializers.ModelSerializer):
             )
         return obj.empresa_id is not None and obj.empresa_id == self.context["_empresa_facturama_id"]
 
+    @extend_schema_field(serializers.ListField(child=serializers.CharField()))  # #673
     def get_facturama_faltantes(self, obj):
         from terceros.facturama import faltantes
 
         return faltantes(obj) if self._usa_facturama(obj) else []
 
+    @extend_schema_field(serializers.BooleanField(allow_null=True))
     def get_facturama_verificado(self, obj):
         from terceros.facturama import faltantes
 
