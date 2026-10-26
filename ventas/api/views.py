@@ -3203,9 +3203,100 @@ class PedidoViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
-        """Cancela y da de baja el pedido. Solo mesa de control, sin documentos vivos."""
+        """Cancela y da de baja el pedido. Solo mesa de control, sin documentos vivos y con
+        ``motivo``. En una transacción devuelve el inventario que se descontó al autorizar,
+        libera sus reservas activas y deja el motivo en la auditoría."""
         self._require_mesa_control(request.user)
+        motivo = str(request.data.get("motivo") or "").strip()[:500] if hasattr(request.data, "get") else ""
+        if not motivo:
+            raise ValidationError({"motivo": "Indica el motivo de la cancelación."})
         pedido = self.get_object()
+        with transaction.atomic():
+            pedido = Pedido.objects.select_for_update(of=("self",)).get(pk=pedido.pk)
+            if pedido.estatus == Pedido.ESTATUS_CANCELADO:
+                raise ValidationError({"pedido": "El pedido ya está cancelado."})
+            self._exigir_pedido_sin_documentos_vivos(pedido)
+            entradas = self._devolver_inventario_pedido(pedido)
+            # Movimiento y auditoría de inventario: los mismos helpers de autorizar.
+            inventario = CotizacionViewSet()
+            if entradas:
+                inventario._registrar_movimiento_inventario_pedido(
+                    pedido=pedido, user=request.user, items=entradas, tipo_movimiento=TipoMovimiento.ENTRADA,
+                    observaciones=f"Reintegro por cancelación del pedido {pedido.folio or pedido.pk}",
+                )
+                inventario._registrar_auditoria_inventario_pedido(
+                    pedido=pedido, user=request.user, items=entradas, accion="ENTRADA", request=request
+                )
+            reservas = inventario_reservas.objects.filter(
+                pedido_detalle__pedido=pedido, estado=inventario_reservas.Estado.ACTIVA
+            ).update(estado=inventario_reservas.Estado.LIBERADA, fecha_devolucion=timezone.now())
+            estatus_anterior = pedido.estatus
+            pedido.estatus = Pedido.ESTATUS_CANCELADO
+            pedido.activo = False
+            pedido.save(update_fields=["estatus", "activo", "updated_at"])
+            devuelto = [
+                {"producto_id": e["producto_id"], "producto_variante_id": e["producto_variante_id"],
+                 "cantidad": str(e["cantidad_movimiento"])}
+                for e in entradas
+            ]
+            ip, user_agent = inventario._get_request_meta(request)
+            AuditoriaEvento.objects.create(
+                empresa=pedido.empresa, usuario=request.user, modulo="ventas", accion="CANCELAR",
+                tabla="pedidos", id_registro=str(pedido.pk), ip=ip, user_agent=user_agent,
+                antes_json={"estatus": estatus_anterior, "activo": True},
+                despues_json={"estatus": pedido.estatus, "activo": False, "motivo": motivo,
+                              "inventario_devuelto": devuelto, "reservas_liberadas": reservas},
+            )
+        return Response({
+            "id": pedido.pk, "folio": pedido.folio, "estatus": pedido.estatus, "activo": False,
+            "motivo": motivo, "inventario_devuelto": devuelto, "reservas_liberadas": reservas,
+        })
+
+    def _devolver_inventario_pedido(self, pedido):
+        """Devuelve a cada existencia lo que este pedido le sigue debiendo: el neto de su
+        auditoría de inventario (salidas al autorizar menos reintegros) por producto,
+        variante, almacén y ubicación. Nada si nunca descontó. Queries fijas: una lectura,
+        un bloqueo y una escritura en lote, sin importar cuántos renglones tenga."""
+        neto = {}
+        for payload in AuditoriaEvento.objects.filter(
+            modulo="inventarios", tabla="existencias", id_registro=str(pedido.pk)
+        ).values_list("despues_json", flat=True):
+            if not payload or payload.get("pedido_id") != pedido.pk:
+                continue
+            for item in payload.get("items", []):
+                if item.get("almacen_id") is None:
+                    continue
+                clave = (item.get("producto_id"), item.get("producto_variante_id"), item["almacen_id"], item.get("ubicacion_id"))
+                neto[clave] = neto.get(clave, Decimal("0")) - Decimal(str(item.get("delta") or 0))
+        neto = {clave: cantidad for clave, cantidad in neto.items() if cantidad > 0}
+        if not neto:
+            return []
+        existentes = {}
+        for e in Existencia.objects.select_for_update().filter(
+            producto_id__in={c[0] for c in neto}, almacen_id__in={c[2] for c in neto}
+        ).order_by("id"):
+            existentes.setdefault((e.producto_id, e.producto_variante_id, e.almacen_id, e.ubicacion_id), e)
+        ahora, entradas, modificadas, nuevas = timezone.now(), [], [], []
+        for (producto_id, variante_id, almacen_id, ubicacion_id), cantidad in neto.items():
+            e = existentes.get((producto_id, variante_id, almacen_id, ubicacion_id)) or Existencia(
+                producto_id=producto_id, producto_variante_id=variante_id, almacen_id=almacen_id,
+                ubicacion_id=ubicacion_id, cantidad=Decimal("0"),
+            )
+            antes = Decimal(str(e.cantidad or 0))
+            e.cantidad = (antes + cantidad).quantize(QTY_PRECISION, rounding=ROUND_HALF_UP)
+            e.stock = max(int(e.cantidad), 0)
+            e.fecha_actualizacion = ahora
+            (modificadas if e.pk else nuevas).append(e)
+            entradas.append({
+                "producto_id": producto_id, "producto_variante_id": variante_id, "almacen_id": almacen_id,
+                "ubicacion_id": ubicacion_id, "cantidad_before": antes, "cantidad_after": e.cantidad,
+                "cantidad_movimiento": cantidad, "delta": cantidad,
+            })
+        Existencia.objects.bulk_update(modificadas, ["cantidad", "stock", "fecha_actualizacion"])
+        Existencia.objects.bulk_create(nuevas)
+        return entradas
+
+    def _exigir_pedido_sin_documentos_vivos(self, pedido):
         vivos = [
             nombre
             for nombre, qs in (
@@ -3221,10 +3312,6 @@ class PedidoViewSet(viewsets.ModelViewSet):
         ]
         if vivos:
             raise ValidationError({"pedido": f"Tiene documentos vivos: {', '.join(vivos)}. Cancélalos primero."})
-        pedido.estatus = Pedido.ESTATUS_CANCELADO
-        pedido.activo = False
-        pedido.save(update_fields=["estatus", "activo"])
-        return Response({"id": pedido.pk, "estatus": pedido.estatus, "activo": False})
 
     @action(detail=True, methods=["get"], url_path="editar-mesa-control-contexto")
     def editar_mesa_control_contexto(self, request, pk=None):
