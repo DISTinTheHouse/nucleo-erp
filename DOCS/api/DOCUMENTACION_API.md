@@ -5249,8 +5249,9 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 
 - **Endpoint**: `POST /api/v1/wms/pickings/{id}/trasladar/`
 - **Body**: `{"almacen": <id>, "observaciones": "opcional"}`
-- Cambia el almacén desde el que se surte el picking (p. ej. de Bordados a Apartados). No mueve inventario ni crea transferencias (el picking es un tracker).
-- Solo estados Pendiente/Asignado/En proceso/Pausado/Parcial. El almacén debe ser de la misma empresa y sucursal y permitir salidas; distinto al actual. Si coincide con `almacen_destino`, este queda en `null`. Se limpian las `ubicacion` de línea de otro almacén y se registra en observaciones y en auditoría (`TRASLADO_PICKING`).
+- Mueve el picking y **sus prendas** a otro almacén (p. ej. de Bordados a Apartados). Genera una transferencia (folio TR) del almacén donde están hoy las prendas al nuevo; se puede trasladar varias veces y cada una deja su TR. Dónde están hoy: `almacen_destino` si el picking tiene TR y destino; si no, `almacen`.
+- Después: `almacen` = el nuevo, `almacen_destino` = `null`, `transferencia` = la TR del traslado.
+- Solo estados Pendiente/Asignado/En proceso/Pausado/Parcial y sin líneas surtidas. El almacén debe ser de la misma empresa y sucursal, activo, permitir entradas y ser distinto al actual. Sin existencia suficiente en el almacén actual → `400` y no se mueve nada. Se limpian las `ubicacion` de línea de otro almacén y se registra en observaciones y en auditoría (`TRASLADO_PICKING`).
 - Respuesta `200` con el picking actualizado; `400` si no cumple; `404` si es de otra empresa/sucursal.
 
 ### 3) Listar Pickings

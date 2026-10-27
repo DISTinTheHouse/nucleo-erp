@@ -1067,6 +1067,30 @@ class PackingDespachoEC574Tests(TestCase):
         self.linea_m.refresh_from_db()
         self.assertEqual(self.linea_m.cantidad_surtida, Decimal("4"))
 
+    def test_trasladar_genera_transferencia_y_mueve_las_prendas(self):
+        from inventarios.models import Existencia
+
+        def cantidad(almacen):
+            return sum(e.cantidad for e in Existencia.objects.filter(almacen=almacen))
+
+        tr_alta = self.picking.transferencia_id
+        for almacen in (self.otro, self.destino):  # ida y vuelta: cada traslado deja su TR
+            resp = self.api.post(
+                f"/api/v1/wms/pickings/{self.picking.pk}/trasladar/", {"almacen": almacen.pk}, format="json"
+            )
+            self.assertEqual(resp.status_code, 200, resp.content)
+            self.picking.refresh_from_db()
+            self.assertEqual((self.picking.almacen_id, self.picking.almacen_destino_id), (almacen.pk, None))
+            self.assertNotEqual(self.picking.transferencia_id, tr_alta)
+            self.assertEqual(self.picking.transferencia.almacen_destino_id, almacen.pk)
+            tr_alta = self.picking.transferencia_id
+
+        self.assertEqual((cantidad(self.origen), cantidad(self.otro), cantidad(self.destino)), (14, 0, 6))
+        resp = self.api.post(
+            f"/api/v1/wms/pickings/{self.picking.pk}/trasladar/", {"almacen": self.destino.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)  # ya está ahí
+
     def test_traslado_rechazado_tras_empacar(self):
         self._empacar_ok((self.linea_m, 1))
         resp = self.api.post(
