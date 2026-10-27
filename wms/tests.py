@@ -1199,6 +1199,15 @@ class PackingDespachoEC574Tests(TestCase):
         self.picking.refresh_from_db()
         self.assertEqual(self.picking.transferencia.sucursal_id, self.sucursal.pk)
 
+    def test_tr_no_completada_no_cuenta_como_movida(self):  # #701
+        from wms.models import Picking, Transferencia
+
+        self.assertEqual(self.picking.almacen_actual, self.destino)
+        Transferencia.objects.filter(pk=self.picking.transferencia_id).update(
+            status=Transferencia.TransferenciaStatus.CANCELADA
+        )
+        self.assertEqual(Picking.objects.get(pk=self.picking.pk).almacen_actual, self.origen)
+
     def test_traslado_rechazado_tras_empacar(self):
         self._empacar_ok((self.linea_m, 1))
         resp = self.api.post(

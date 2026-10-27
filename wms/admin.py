@@ -92,6 +92,7 @@ class TransferenciaAdmin(admin.ModelAdmin):
     )
     readonly_fields = (
         "folio",
+        "status",  # cambiarlo no revierte el stock (#701)
         "fecha_creacion",
         "usuario_nombre",
         "total_renglones",
