@@ -5106,7 +5106,7 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 ### 2) Crear Picking desde Onboarding
 
 - **Endpoint**: `POST /api/v1/wms/pickings/onboarding/` (o `POST /api/v1/wms/pickings/`)
-- **Objetivo (rediseño v2: _Tracker de prendas_)**: **solo crear el documento** `Picking` + `PickingDetalle` con su folio único. Este paso **no mueve inventario, no crea transferencias, no crea reservas ni órdenes de producción**. El documento registra la intención de ruta: `almacén origen → almacén destino` + cantidades asignadas.
+- **Objetivo (rediseño v2: _Tracker de prendas_)**: crea `Picking` + `PickingDetalle` con su folio y una **transferencia (folio TR)** que mueve las prendas de `almacén origen → almacén destino` (`Existencia` + `MovimientoInventario`), timbrada con la empresa/sucursal del pedido. No crea reservas ni órdenes de producción.
 
 **Qué hace el POST (3 pasos)**
 
@@ -5254,7 +5254,8 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 - **Endpoint**: `POST /api/v1/wms/pickings/{id}/trasladar/`
 - **Body**: `{"almacen": <id>, "observaciones": "opcional"}`
 - Mueve el picking y **sus prendas** a otro almacén (p. ej. de Bordados a Apartados). Genera una transferencia (folio TR) del almacén donde están hoy las prendas al nuevo; se puede trasladar varias veces y cada una deja su TR. Dónde están hoy: `almacen_destino` si el picking tiene TR y destino; si no, `almacen`.
-- Después: `almacen` = el nuevo, `almacen_destino` = `null`, `transferencia` = la TR del traslado.
+- Después: `almacen` = el nuevo, `almacen_destino` = `null`, `transferencia` = la TR del traslado (`null` si el picking no tiene líneas que mover).
+- Exige el permiso `C-WMS-PICKING` (`403` sin él). La TR se timbra con la empresa/sucursal del picking, no la del usuario.
 - El picking expone ese almacén ya resuelto como `almacen_actual` / `almacen_actual_nombre` (solo lectura) en el listado, el detalle, el alta y esta respuesta.
 - Solo estados Pendiente/Asignado/En proceso/Pausado/Parcial y sin líneas surtidas. El almacén debe ser de la misma empresa y sucursal, activo, permitir entradas y ser distinto al actual. Sin existencia suficiente en el almacén actual → `400` y no se mueve nada. Se limpian las `ubicacion` de línea de otro almacén y se registra en observaciones y en auditoría (`TRASLADO_PICKING`).
 - Respuesta `200` con el picking actualizado; `400` si no cumple; `404` si es de otra empresa/sucursal.

@@ -907,6 +907,14 @@ class PickingTrasladoTests(TestCase):
         Picking.objects.filter(pk=self.picking.pk).update(estado=Picking.Estado.COMPLETADO)
         self.assertEqual(self._post(self.apartados).status_code, 400)
 
+    def test_sin_permiso_c_wms_picking_responde_403(self):  # #695: mueve inventario
+        operador = Usuario.objects.create(
+            username="trs-op", email="trs-op@example.com", empresa=self.empresa, sucursal_default=self.sucursal
+        )
+        self.assertEqual(self._post(self.apartados, operador).status_code, 403)
+        self.picking.refresh_from_db()
+        self.assertEqual(self.picking.almacen_id, self.bordados.pk)
+
     def test_otra_empresa_recibe_404(self):
         intruso = Usuario.objects.create(
             username="trs-x", email="trs-x@example.com", empresa=self.otra_empresa
@@ -927,7 +935,7 @@ class PickingTrasladoTests(TestCase):
     def test_almacen_actual_no_agrega_consultas_al_listado(self):
         """EC-607: ``GET /pickings/`` resuelve ``almacen_actual`` sin consultas por picking.
 
-        Los pickings van sin TR: ``transferencia_folio`` aún consulta la TR por fila (#698).
+        Los pickings van sin TR para aislar los campos nuevos de la TR.
         """
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
@@ -1175,6 +1183,21 @@ class PackingDespachoEC574Tests(TestCase):
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(actual(resp.json()), (self.otro.pk, "Bordados"))
         self.assertEqual([actual(f) for f in listar_folios_picking(self.pedido)], [(self.otro.pk, "Bordados")])
+
+    def test_la_tr_del_traslado_es_de_la_sucursal_del_picking(self):
+        # #693: no la del usuario, aunque su sucursal por defecto sea otra.
+        Usuario.objects.filter(pk=self.usuario.pk).update(
+            sucursal_default=Sucursal.objects.create(empresa=self.empresa, codigo="NTE", nombre="Norte")
+        )
+        self.api.force_authenticate(Usuario.objects.get(pk=self.usuario.pk))
+
+        resp = self.api.post(
+            f"/api/v1/wms/pickings/{self.picking.pk}/trasladar/", {"almacen": self.otro.pk}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.picking.refresh_from_db()
+        self.assertEqual(self.picking.transferencia.sucursal_id, self.sucursal.pk)
 
     def test_traslado_rechazado_tras_empacar(self):
         self._empacar_ok((self.linea_m, 1))
