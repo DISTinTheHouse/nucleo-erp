@@ -1589,6 +1589,8 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
       almacen_origen_nombre: string | null; // DÓNDE SE TOMARON LAS PRENDAS
       almacen_destino: number | null;
       almacen_destino_nombre: string | null; // DÓNDE SE MANDARON (APARTADOS, PROCESO, MP, PT, etc.) — el valor clave para trazabilidad de ubicación
+      almacen_actual: number; // dónde están hoy las prendas (misma regla que el traslado)
+      almacen_actual_nombre: string;
       operador: number | null;
       operador_nombre: string | null;
       total_lineas: number;
@@ -5253,6 +5255,7 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 - **Body**: `{"almacen": <id>, "observaciones": "opcional"}`
 - Mueve el picking y **sus prendas** a otro almacén (p. ej. de Bordados a Apartados). Genera una transferencia (folio TR) del almacén donde están hoy las prendas al nuevo; se puede trasladar varias veces y cada una deja su TR. Dónde están hoy: `almacen_destino` si el picking tiene TR y destino; si no, `almacen`.
 - Después: `almacen` = el nuevo, `almacen_destino` = `null`, `transferencia` = la TR del traslado.
+- El picking expone ese almacén ya resuelto como `almacen_actual` / `almacen_actual_nombre` (solo lectura) en el listado, el detalle, el alta y esta respuesta.
 - Solo estados Pendiente/Asignado/En proceso/Pausado/Parcial y sin líneas surtidas. El almacén debe ser de la misma empresa y sucursal, activo, permitir entradas y ser distinto al actual. Sin existencia suficiente en el almacén actual → `400` y no se mueve nada. Se limpian las `ubicacion` de línea de otro almacén y se registra en observaciones y en auditoría (`TRASLADO_PICKING`).
 - Respuesta `200` con el picking actualizado; `400` si no cumple; `404` si es de otra empresa/sucursal.
 
@@ -5260,7 +5263,7 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 
 - **Endpoint**: `GET /api/v1/wms/pickings/`
 - **Descripción**: devuelve los pickings visibles para la empresa y sucursales del usuario autenticado.
-- **Nota**: cada registro incluye `almacen_destino`, `almacen_destino_nombre` y el nested `ordenes_trabajo[]` (vacío para pickings creados con el flujo tradicional; con valores cuando OT se vinculan manualmente por PickingOrdenTrabajo desde Producción).
+- **Nota**: cada registro incluye `almacen_destino`, `almacen_destino_nombre`, `almacen_actual`, `almacen_actual_nombre` (dónde están hoy las prendas, ver Trasladar) y el nested `ordenes_trabajo[]` (vacío para pickings creados con el flujo tradicional; con valores cuando OT se vinculan manualmente por PickingOrdenTrabajo desde Producción).
 
 ### 4) Detalle de Picking
 

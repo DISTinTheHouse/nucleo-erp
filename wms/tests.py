@@ -893,6 +893,44 @@ class PickingTrasladoTests(TestCase):
         )
         self.assertEqual(self._post(self.apartados, intruso).status_code, 404)
 
+    def test_almacen_actual_sin_transferencia_es_almacen(self):
+        """EC-607: con ``almacen_destino`` pero sin TR las prendas siguen en ``almacen``."""
+        client = APIClient()
+        client.force_authenticate(self.admin)
+        resp = client.get(f"/api/v1/wms/pickings/{self.picking.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            (resp.json()["almacen_actual"], resp.json()["almacen_actual_nombre"]),
+            (self.bordados.pk, "Bordados"),
+        )
+
+    def test_almacen_actual_no_agrega_consultas_al_listado(self):
+        """EC-607: ``almacen_actual`` sale de FK que el listado ya trae en ``select_related``."""
+        from types import SimpleNamespace
+
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from wms.api.views import PickingViewSet
+        from wms.models import Picking, Transferencia
+
+        tr = Transferencia.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, almacen_origen=self.bordados,
+            almacen_destino=self.apartados, folio="TR-1", usuario=self.admin,
+        )
+        Picking.objects.create(
+            folio="PK-2", empresa=self.empresa, sucursal=self.sucursal, pedido=self.picking.pedido,
+            operador=self.admin, almacen=self.bordados, almacen_destino=self.apartados,
+            usuario=self.admin, transferencia=tr,
+        )
+        vista = PickingViewSet()
+        vista.request, vista.action, vista.format_kwarg = SimpleNamespace(user=self.admin), "list", None
+        pickings = list(vista.get_queryset())
+        with CaptureQueriesContext(connection) as consultas:
+            actuales = {p.folio: p.almacen_actual.nombre for p in pickings}
+        self.assertEqual(len(consultas), 0)
+        self.assertEqual(actuales, {"PK-1": "Bordados", "PK-2": "Apartados"})
+
 
 class PackingDespachoEC574Tests(TestCase):
     """EC-574: empacar confirma el surtido (WM-01, opción B) y, sin embarque
@@ -1090,6 +1128,29 @@ class PackingDespachoEC574Tests(TestCase):
             f"/api/v1/wms/pickings/{self.picking.pk}/trasladar/", {"almacen": self.destino.pk}, format="json"
         )
         self.assertEqual(resp.status_code, 400, resp.content)  # ya está ahí
+
+    def test_almacen_actual_en_las_respuestas_del_picking(self):
+        """EC-607: con TR y destino las prendas están en el destino; tras trasladar, en el nuevo."""
+        from wms.services.picking_pipeline.pendientes import listar_folios_picking
+
+        def actual(fila):
+            return fila["almacen_actual"], fila["almacen_actual_nombre"]
+
+        self.assertIsNotNone(self.picking.transferencia_id)
+        esperado = (self.destino.pk, "Apartados")
+        detalle = self.api.get(f"/api/v1/wms/pickings/{self.picking.pk}/").json()
+        self.assertEqual((detalle["almacen"], actual(detalle)), (self.origen.pk, esperado))
+        listado = self.api.get("/api/v1/wms/pickings/").json()
+        filas = listado.get("results", listado) if isinstance(listado, dict) else listado
+        self.assertEqual([actual(f) for f in filas if f["id"] == self.picking.pk], [esperado])
+        self.assertEqual([actual(f) for f in listar_folios_picking(self.pedido)], [esperado])
+
+        resp = self.api.post(
+            f"/api/v1/wms/pickings/{self.picking.pk}/trasladar/", {"almacen": self.otro.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(actual(resp.json()), (self.otro.pk, "Bordados"))
+        self.assertEqual([actual(f) for f in listar_folios_picking(self.pedido)], [(self.otro.pk, "Bordados")])
 
     def test_traslado_rechazado_tras_empacar(self):
         self._empacar_ok((self.linea_m, 1))

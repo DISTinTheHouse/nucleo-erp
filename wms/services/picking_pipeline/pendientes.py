@@ -336,6 +336,8 @@ def listar_folios_picking(pedido):
             "almacen_origen_nombre": getattr(pk.almacen, "nombre", None),
             "almacen_destino": pk.almacen_destino_id,
             "almacen_destino_nombre": getattr(pk.almacen_destino, "nombre", None),
+            "almacen_actual": pk.almacen_actual.pk,
+            "almacen_actual_nombre": pk.almacen_actual.nombre,
             "operador": pk.operador_id,
             "operador_nombre": (
                 pk.operador.get_full_name().strip()

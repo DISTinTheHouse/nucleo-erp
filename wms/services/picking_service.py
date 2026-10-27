@@ -375,11 +375,8 @@ class PickingService:
 
     @staticmethod
     def almacen_actual(picking):
-        """Dónde están hoy las prendas: en el destino si la TR del picking ya las movió;
-        si no (picking sin TR o ya trasladado), en ``almacen``."""
-        if picking.transferencia_id and picking.almacen_destino_id:
-            return picking.almacen_destino
-        return picking.almacen
+        """La regla vive en ``Picking.almacen_actual`` (el serializer la expone)."""
+        return picking.almacen_actual
 
     @classmethod
     @transaction.atomic
