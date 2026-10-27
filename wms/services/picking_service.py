@@ -373,22 +373,31 @@ class PickingService:
         Picking.Estado.PARCIAL,
     )
 
+    @staticmethod
+    def almacen_actual(picking):
+        """Dónde están hoy las prendas: en el destino si la TR del picking ya las movió;
+        si no (picking sin TR o ya trasladado), en ``almacen``."""
+        if picking.transferencia_id and picking.almacen_destino_id:
+            return picking.almacen_destino
+        return picking.almacen
+
     @classmethod
     @transaction.atomic
     def trasladar(cls, picking, almacen, user, observaciones=None):
         """Mueve un picking abierto a otro almacén (p. ej. de bordados a APARTADOS).
 
-        No mueve inventario ni crea otra transferencia (la del folio TR se
-        generó al crear el picking), solo cambia el almacén desde el que se surte. Si el nuevo almacén era
-        el destino, el picking queda sin destino (las prendas ya están ahí).
-        Las ubicaciones de línea del almacén anterior se limpian.
+        Genera una transferencia (folio TR) con las prendas del picking desde el
+        almacén donde están hoy hasta el nuevo, para que el inventario no las pierda.
+        Después el picking queda en el nuevo almacén y sin destino (las prendas ya
+        están ahí). Las ubicaciones de línea del almacén anterior se limpian.
         """
         picking = Picking.objects.select_for_update().get(pk=picking.pk)
         if picking.estado not in cls.ESTADOS_TRASLADABLES:
             raise ValidationError(
                 {"estado": f"No se puede trasladar un picking en estado {picking.estado}."}
             )
-        if picking.almacen_id == almacen.pk:
+        actual = cls.almacen_actual(picking)
+        if actual.pk == almacen.pk:
             raise ValidationError({"almacen": "El picking ya está en ese almacén."})
         # Un almacén sin empresa o sin sucursal tampoco pertenece al picking (#510).
         if almacen.empresa_id != picking.empresa_id:
@@ -397,8 +406,8 @@ class PickingService:
             raise ValidationError({"almacen": "El almacén no pertenece a la sucursal del picking."})
         if almacen.estatus != "ACTIVO":
             raise ValidationError({"almacen": "El almacén está inactivo."})
-        if not bool(getattr(almacen, "permite_salida", False)):
-            raise ValidationError({"almacen": "Este almacén no permite salidas."})
+        if not bool(getattr(almacen, "permite_entrada", False)):
+            raise ValidationError({"almacen": "Este almacén no permite entradas."})
         if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
             if picking.sucursal_id not in user.sucursales_permitidas():
                 raise ValidationError({"picking": "No tiene acceso a la sucursal del picking."})
@@ -409,16 +418,40 @@ class PickingService:
                 {"estado": "No se puede trasladar un picking con líneas ya surtidas."}
             )
 
-        anterior = picking.almacen
-        destino_anterior_id = picking.almacen_destino_id
+        lineas = [
+            {"producto": d.producto, "producto_variante": d.producto_variante, "cantidad": d.cantidad_asignada}
+            for d in picking.picking_detalle.exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
+            .filter(cantidad_asignada__gt=0)
+            .exclude(producto__isnull=True, producto_variante__isnull=True)
+            .select_related("producto", "producto_variante")
+        ]
+        # Las prendas cambian de almacén: la TR las saca del actual y las mete al nuevo.
+        transferencia = None
+        if lineas:
+            transferencia = TransferenciaService.handle_store(
+                {
+                    "almacen_origen": actual,
+                    "almacen_destino": almacen,
+                    "observaciones": f"Traslado del picking {picking.folio}",
+                    "transferencia_detalle": lineas,
+                },
+                user,
+            )
+
+        antes = {
+            "almacen_id": picking.almacen_id, "almacen_destino_id": picking.almacen_destino_id,
+            "transferencia_id": picking.transferencia_id,
+        }
         picking.almacen = almacen
-        if picking.almacen_destino_id == almacen.pk:
-            picking.almacen_destino = None
-        nota = f"Trasladado de {anterior.nombre} a {almacen.nombre}."
+        picking.almacen_destino = None
+        picking.transferencia = transferencia or picking.transferencia
+        nota = f"Trasladado de {actual.nombre} a {almacen.nombre}."
+        if transferencia is not None:
+            nota += f" Transferencia {transferencia.folio}."
         if observaciones:
             nota += f" {observaciones}"
         picking.observaciones = f"{picking.observaciones}\n{nota}" if picking.observaciones else nota
-        picking.save(update_fields=["almacen", "almacen_destino", "observaciones", "updated_at"])
+        picking.save(update_fields=["almacen", "almacen_destino", "transferencia", "observaciones", "updated_at"])
         picking.picking_detalle.exclude(ubicacion__isnull=True).exclude(
             ubicacion__almacen=almacen
         ).update(ubicacion=None)
@@ -430,7 +463,10 @@ class PickingService:
             accion="TRASLADO_PICKING",
             tabla="picking",
             id_registro=str(picking.pk),
-            antes_json={"almacen_id": anterior.pk, "almacen_destino_id": destino_anterior_id},
-            despues_json={"almacen_id": almacen.pk, "almacen_destino_id": picking.almacen_destino_id},
+            antes_json=antes,
+            despues_json={
+                "almacen_id": almacen.pk, "almacen_destino_id": None,
+                "transferencia_id": picking.transferencia_id,
+            },
         )
         return picking
