@@ -906,3 +906,60 @@ class DetallesMovimientoFormalTests(TestCase):
 
     def test_movimiento_de_otra_empresa_es_404(self):
         self.assertEqual(self._get(self.ajeno.pk).status_code, 404)
+
+
+class AlmacenPermiteEntradaTests(TestCase):
+    """EC-607: ``permite_entrada`` se lee en ``/inventarios/almacenes/`` pero no se
+    edita por esta API (el selector del traslado de picking filtra con ella)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="ec607-alm", razon_social="EC607 Almacenes SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTZ", nombre="Matriz")
+        cls.usuario = Usuario.objects.create(
+            username="ec607-alm", email="ec607-alm@example.com", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,  # escribir almacenes lo exige
+        )
+        cls.usuario.sucursales.add(cls.sucursal)
+        cls.con_entrada = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="APA", nombre="Apartados", permite_entrada=True
+        )
+        cls.sin_entrada = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="PT", nombre="Terminado"
+        )
+
+    def setUp(self):
+        self.api = APIClient()
+        self.api.force_authenticate(self.usuario)
+
+    def test_listado_y_detalle_exponen_permite_entrada(self):
+        resp = self.api.get("/api/v1/inventarios/almacenes/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        filas = resp.json()
+        filas = filas.get("results", filas) if isinstance(filas, dict) else filas
+        self.assertEqual(
+            {f["id_almacen"]: f["permite_entrada"] for f in filas},
+            {self.con_entrada.pk: True, self.sin_entrada.pk: False},
+        )
+        resp = self.api.get(f"/api/v1/inventarios/almacenes/{self.sin_entrada.pk}/")
+        self.assertIs(resp.json()["permite_entrada"], False)
+
+    def test_patch_no_cambia_permite_entrada(self):
+        resp = self.api.patch(
+            f"/api/v1/inventarios/almacenes/{self.sin_entrada.pk}/",
+            {"permite_entrada": True, "nombre": "Terminado 2"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertIs(resp.json()["permite_entrada"], False)
+        self.sin_entrada.refresh_from_db()
+        self.assertEqual((self.sin_entrada.nombre, self.sin_entrada.permite_entrada), ("Terminado 2", False))
+
+    def test_alta_ignora_permite_entrada(self):
+        resp = self.api.post(
+            "/api/v1/inventarios/almacenes/",
+            {"sucursal": self.sucursal.pk, "codigo": "NUEVO", "nombre": "Nuevo", "permite_entrada": True},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertIs(Almacen.objects.get(pk=resp.json()["id_almacen"]).permite_entrada, False)

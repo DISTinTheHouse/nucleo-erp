@@ -764,6 +764,26 @@ class PickingGeneraTransferenciaTests(TestCase):
             ],
         }
 
+    def test_alta_expone_almacen_actual(self):
+        """EC-607: el alta (normal y por onboarding) responde dónde quedan las prendas."""
+        api = APIClient()
+        api.force_authenticate(self.usuario)
+        cuerpo = {
+            "pedido": self.pedido.pk,
+            "operador": self.usuario.pk,
+            "almacen": self.origen.pk,
+            "almacen_destino": self.destino.pk,
+            "picking_detalle": [{"pedido_detalle_talla": self.talla_row.pk, "cantidad_asignada": "1"}],
+        }
+        for url in ("/api/v1/wms/pickings/", "/api/v1/wms/pickings/onboarding/"):
+            resp = api.post(url, cuerpo, format="json")
+            self.assertEqual(resp.status_code, 201, resp.content)
+            self.assertIsNotNone(resp.json()["transferencia"])
+            self.assertEqual(
+                (resp.json()["almacen_actual"], resp.json()["almacen_actual_nombre"]),
+                (self.destino.pk, "Apartados"),
+            )
+
     def test_picking_crea_transferencia_con_folio_tr_y_mueve_stock(self):
         from wms.services.picking_service import PickingService
 
@@ -901,6 +921,48 @@ class PickingTrasladoTests(TestCase):
         )
         self.assertEqual(self._post(self.apartados, intruso).status_code, 404)
 
+    def test_almacen_actual_sin_transferencia_es_almacen(self):
+        """EC-607: con ``almacen_destino`` pero sin TR las prendas siguen en ``almacen``."""
+        client = APIClient()
+        client.force_authenticate(self.admin)
+        resp = client.get(f"/api/v1/wms/pickings/{self.picking.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            (resp.json()["almacen_actual"], resp.json()["almacen_actual_nombre"]),
+            (self.bordados.pk, "Bordados"),
+        )
+
+    def test_almacen_actual_no_agrega_consultas_al_listado(self):
+        """EC-607: ``GET /pickings/`` resuelve ``almacen_actual`` sin consultas por picking.
+
+        Los pickings van sin TR para aislar los campos nuevos de la TR.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from wms.models import Picking
+
+        client = APIClient()
+        client.force_authenticate(self.admin)
+
+        def listar():
+            with CaptureQueriesContext(connection) as consultas:
+                resp = client.get("/api/v1/wms/pickings/")
+            self.assertEqual(resp.status_code, 200, resp.content)
+            datos = resp.json()
+            filas = datos.get("results", datos) if isinstance(datos, dict) else datos
+            return len(consultas), {f["folio"]: (f["almacen_actual"], f["almacen_actual_nombre"]) for f in filas}
+
+        pocas, actuales = listar()
+        self.assertEqual(actuales, {"PK-1": (self.bordados.pk, "Bordados")})
+        for n in range(2, 5):
+            Picking.objects.create(
+                folio=f"PK-{n}", empresa=self.empresa, sucursal=self.sucursal, pedido=self.picking.pedido,
+                operador=self.admin, almacen=self.apartados, usuario=self.admin,
+            )
+        muchas, actuales = listar()
+        self.assertEqual(muchas, pocas)
+        self.assertEqual(actuales["PK-4"], (self.apartados.pk, "Apartados"))
 
 class PackingDespachoEC574Tests(TestCase):
     """EC-574: empacar confirma el surtido (WM-01, opción B) y, sin embarque
@@ -1098,6 +1160,29 @@ class PackingDespachoEC574Tests(TestCase):
             f"/api/v1/wms/pickings/{self.picking.pk}/trasladar/", {"almacen": self.destino.pk}, format="json"
         )
         self.assertEqual(resp.status_code, 400, resp.content)  # ya está ahí
+
+    def test_almacen_actual_en_las_respuestas_del_picking(self):
+        """EC-607: con TR y destino las prendas están en el destino; tras trasladar, en el nuevo."""
+        from wms.services.picking_pipeline.pendientes import listar_folios_picking
+
+        def actual(fila):
+            return fila["almacen_actual"], fila["almacen_actual_nombre"]
+
+        self.assertIsNotNone(self.picking.transferencia_id)
+        esperado = (self.destino.pk, "Apartados")
+        detalle = self.api.get(f"/api/v1/wms/pickings/{self.picking.pk}/").json()
+        self.assertEqual((detalle["almacen"], actual(detalle)), (self.origen.pk, esperado))
+        listado = self.api.get("/api/v1/wms/pickings/").json()
+        filas = listado.get("results", listado) if isinstance(listado, dict) else listado
+        self.assertEqual([actual(f) for f in filas if f["id"] == self.picking.pk], [esperado])
+        self.assertEqual([actual(f) for f in listar_folios_picking(self.pedido)], [esperado])
+
+        resp = self.api.post(
+            f"/api/v1/wms/pickings/{self.picking.pk}/trasladar/", {"almacen": self.otro.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(actual(resp.json()), (self.otro.pk, "Bordados"))
+        self.assertEqual([actual(f) for f in listar_folios_picking(self.pedido)], [(self.otro.pk, "Bordados")])
 
     def test_la_tr_del_traslado_es_de_la_sucursal_del_picking(self):
         # #693: no la del usuario, aunque su sucursal por defecto sea otra.

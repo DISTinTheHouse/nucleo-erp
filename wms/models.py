@@ -149,6 +149,14 @@ class Picking(models.Model):
     def __str__(self):
         return self.folio
 
+    @property
+    def almacen_actual(self):
+        """Dónde están hoy las prendas: en el destino si la TR del picking ya las movió;
+        si no (picking sin TR o ya trasladado), en ``almacen``."""
+        if self.transferencia_id and self.almacen_destino_id:
+            return self.almacen_destino
+        return self.almacen
+
 class PickingDetalle(models.Model):
     class EstadoLinea(models.TextChoices):
         PENDIENTE = "PENDIENTE", "Pendiente"

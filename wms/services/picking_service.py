@@ -374,14 +374,6 @@ class PickingService:
         Picking.Estado.PARCIAL,
     )
 
-    @staticmethod
-    def almacen_actual(picking):
-        """Dónde están hoy las prendas: en el destino si la TR del picking ya las movió;
-        si no (picking sin TR o ya trasladado), en ``almacen``."""
-        if picking.transferencia_id and picking.almacen_destino_id:
-            return picking.almacen_destino
-        return picking.almacen
-
     @classmethod
     @transaction.atomic
     def trasladar(cls, picking, almacen, user, observaciones=None):
@@ -397,7 +389,7 @@ class PickingService:
             raise ValidationError(
                 {"estado": f"No se puede trasladar un picking en estado {picking.estado}."}
             )
-        actual = cls.almacen_actual(picking)
+        actual = picking.almacen_actual
         if actual.pk == almacen.pk:
             raise ValidationError({"almacen": "El picking ya está en ese almacén."})
         # Un almacén sin empresa o sin sucursal tampoco pertenece al picking (#510).
