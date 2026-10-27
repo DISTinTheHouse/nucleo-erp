@@ -10,7 +10,7 @@ Base: `/api/v1/ventas/oportunidades/`
 | POST | `/` | Crea. Empresa y vendedor los pone el servidor. |
 | GET/PATCH | `/{id}/` | Detalle y edición. |
 | DELETE | `/{id}/` | Baja lógica (`activo=false`). |
-| POST | `/{id}/cotizar/` | Crea una cotización en Borrador ligada a la oportunidad. Responde `cotizacion_id`. Se puede llamar varias veces. |
+| POST | `/{id}/cotizar/` | Crea una cotización en Borrador ligada a la oportunidad. Responde `cotizacion_id`. Se puede llamar varias veces mientras siga abierta. |
 | GET | `/{id}/cotizaciones/` | Cotizaciones `ligadas` y `disponibles` para ligar. |
 | POST | `/{id}/cotizaciones/` | Liga cotizaciones que ya existen. |
 | DELETE | `/{id}/cotizaciones/{cotizacion_id}/` | Quita una cotización de la oportunidad (no la borra). |
@@ -24,7 +24,8 @@ Base: `/api/v1/ventas/oportunidades/`
 3. `Cotizada` si tiene cotizaciones.
 4. Si no, la etapa.
 
-- Perdida exige `motivo_perdida`. Una oportunidad Ganada no se puede perder. No se cotiza una Perdida.
+- Perdida exige `motivo_perdida`. Una oportunidad Ganada no se puede perder.
+- Ganada (el cliente aceptó) y Perdida están cerradas: `cotizar/` y ligar responden `400 {"etapa"}`; para vender más, otra oportunidad. Sin vendedor → `400 {"vendedor"}` (transferirla primero).
 - Borrar una oportunidad (admin, ORM) no borra sus cotizaciones: la FK es `SET_NULL`.
 
 ## Varias cotizaciones por oportunidad
@@ -47,12 +48,12 @@ Una oportunidad tiene **N cotizaciones**: nuevas con `cotizar/` o ya hechas con 
 
 - Cada cotización debe ser visible para el usuario (el vendedor, las suyas; el admin, las de su empresa), del cliente de la oportunidad, sin autorizar y no estar en otra oportunidad. Si alguna no cumple, no se liga ninguna: `400 {"cotizaciones": "No se pueden ligar: [ids]. ..."}`.
 - Repetir el POST con una ya ligada no falla.
-- Oportunidad Ganada o Perdida → `400 {"etapa"}` (para vender más, otra oportunidad). Sin cliente → `400 {"cliente"}`. Lista vacía, ids no numéricos o body que no es objeto → `400 {"cotizaciones"}`.
+- Oportunidad Ganada o Perdida → `400 {"etapa"}` (para vender más, otra oportunidad). Sin vendedor → `400 {"vendedor"}`. Sin cliente → `400 {"cliente"}`. Lista vacía, ids no numéricos o body que no es objeto → `400 {"cotizaciones"}`.
 - Una autorizada no se liga: autorizar es lo que gana la oportunidad, y ya no se podría quitar.
 - La cotización pasa al dueño de la oportunidad, también si liga un admin (igual que `transferir` y `cotizar`).
 - Si otra persona liga una de esas cotizaciones al mismo tiempo, no se liga ninguna: `400 {"cotizaciones"}`; volver a pedir el GET.
 
-**`DELETE /{id}/cotizaciones/{cotizacion_id}/`** → `204`. La cotización queda sin oportunidad.
+**`DELETE /{id}/cotizaciones/{cotizacion_id}/`** → `204`. La cotización queda sin oportunidad y sigue siendo del dueño de la oportunidad (no regresa a su vendedor anterior).
 
 - Autorizada → `400 {"cotizacion"}` (la oportunidad dejaría de estar Ganada).
 - No ligada a esta oportunidad o no visible → `404`.

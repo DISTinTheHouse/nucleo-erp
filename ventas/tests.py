@@ -4546,6 +4546,31 @@ class OportunidadesTests(OportunidadesBase):
 
         self.assertEqual(self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/").status_code, 400)
 
+    def test_no_se_cotiza_una_ganada(self):
+        # #689: misma regla que ligar; ganada es pedido aceptado.
+        op = self._op(cliente=self.cliente)
+        Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, cliente=self.cliente, oportunidad=op, estatus=3)
+
+        resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("etapa", resp.data)
+        self.assertEqual(Cotizacion.objects.filter(oportunidad=op).count(), 1)
+
+    def test_sin_vendedor_no_se_cotiza_ni_se_liga(self):
+        # #690: la cotización quedaría sin vendedor y ningún vendedor la vería.
+        op = Oportunidad.objects.create(empresa=self.empresa, titulo="Sin dueño", cliente=self.cliente)
+        libre = Cotizacion.objects.create(empresa=self.empresa, vendedor=self.beto, cliente=self.cliente)
+        cliente = self._client(self.jefe)
+
+        resp = cliente.post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("vendedor", resp.data)
+        resp = cliente.post(f"{OPORTUNIDADES_URL}{op.pk}/cotizaciones/", {"cotizaciones": [libre.pk]}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        libre.refresh_from_db()
+        self.assertEqual((libre.oportunidad_id, libre.vendedor_id), (None, self.beto.pk))
+
     def test_con_cotizacion_autorizada_esta_ganada_y_ya_no_se_pierde(self):
         op = self._op()
         Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op, estatus=3)
@@ -6665,6 +6690,17 @@ class OportunidadLigarCotizacionesTests(OportunidadesBase):
         de_beto.refresh_from_db()
         self.assertEqual(de_beto.vendedor, self.ana)
         self.assertEqual([c["id"] for c in self._client(self.ana).get(self._url(op)).data["ligadas"]], [de_beto.pk])
+
+    def test_al_quitarla_sigue_siendo_del_dueno_de_la_oportunidad(self):
+        # #688: decisión documentada; no se guarda el vendedor anterior.
+        op = self._op(self.ana, cliente=self.cliente)
+        de_beto = self._cot(vendedor=self.beto)
+        self._client(self.jefe).post(self._url(op), {"cotizaciones": [de_beto.pk]}, format="json")
+
+        self.assertEqual(self._client(self.jefe).delete(self._url(op, de_beto)).status_code, 204)
+
+        de_beto.refresh_from_db()
+        self.assertEqual((de_beto.oportunidad_id, de_beto.vendedor_id), (None, self.ana.pk))
 
     def test_body_que_no_es_objeto_responde_400(self):
         # #680: un arreglo, texto o número en el body era 500.
