@@ -4446,6 +4446,10 @@ class OportunidadesBase(TestCase):
         cls.sin_empresa = Usuario.objects.create(username="nadie", email="n@x.test")
         cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente Acme")
         cls.cliente_ajeno = Cliente.objects.create(empresa=cls.otra, nombre="Cliente Globex")
+        # Ana y Beto son de Ventas: solo a ellos se transfiere una oportunidad (#709).
+        ventas = Rol.objects.create(empresa=cls.empresa, codigo="VENTAS-01", nombre="Ventas", estatus=Rol.Estatus.ACTIVO)
+        for vendedor in (cls.ana, cls.beto):
+            UsuarioRol.objects.create(usuario=vendedor, rol=ventas, empresa=cls.empresa)
 
     def _client(self, user):
         client = APIClient()
@@ -4570,6 +4574,17 @@ class OportunidadesTests(OportunidadesBase):
         self.assertEqual(resp.status_code, 400, resp.data)
         libre.refresh_from_db()
         self.assertEqual((libre.oportunidad_id, libre.vendedor_id), (None, self.beto.pk))
+
+    def test_transferir_solo_a_alguien_de_ventas(self):  # #709
+        almacen = Usuario.objects.create(username="alm", email="alm@acme.test", empresa=self.empresa)
+        op = self._op(self.ana)
+
+        resp = self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", {"vendedor": almacen.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("vendedor", resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.vendedor, self.ana)
 
     def test_sin_cliente_no_se_cotiza(self):  # #707: igual que ligar
         op = self._op()
@@ -5601,7 +5616,7 @@ class AutorizarCotizacionRendimientoTests(TestCase):
             f"\n[PERF autorizar] {self.N_PRODUCTOS}x{self.N_TALLAS} tallas: "
             f"{len(ctx)} queries {elapsed:.0f}ms"
         )
-        # Resultado intacto: renglones, tallas, servicios y descuento de inventario.
+        # Resultado intacto: renglones, tallas y servicios. Sin salida de inventario (#704).
         pedido = Pedido.objects.get(pk=resp.data["pedido"]["id"])
         self.assertEqual(pedido.detalles.count(), self.N_PRODUCTOS)
         self.assertEqual(
@@ -5611,13 +5626,9 @@ class AutorizarCotizacionRendimientoTests(TestCase):
         self.assertEqual(pedido.servicios_extras.count(), 3)
         self.assertEqual(
             sum(Existencia.objects.values_list("cantidad", flat=True)),
-            Decimal("50") * self.N_PRODUCTOS * self.N_TALLAS - 3 * self.N_PRODUCTOS * self.N_TALLAS,
+            Decimal("50") * self.N_PRODUCTOS * self.N_TALLAS,
         )
-        mov = MovimientoInventario.objects.get(pedido=pedido)
-        self.assertEqual(mov.detalles.count(), self.N_PRODUCTOS * self.N_TALLAS)
-        self.assertEqual(
-            AuditoriaEvento.objects.filter(modulo="inventarios", id_registro=str(pedido.pk)).count(), 1
-        )
+        self.assertFalse(MovimientoInventario.objects.filter(pedido=pedido).exists())
         # Techo holgado (hoy 59): antes eran 261 y crecían con renglones × tallas.
         self.assertLessEqual(len(ctx), 70)
 

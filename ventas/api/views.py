@@ -1158,88 +1158,6 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             user_agent=user_agent,
         )
 
-    def _descontar_existencias_pedido(self, pedido, user, request=None):
-        plan = self._build_pedido_inventory_plan(pedido)
-        if not plan:
-            return None, None
-
-        consumos = self._discount_existencias_pedido(
-            plan=plan,
-            empresa=pedido.empresa,
-            sucursal=pedido.sucursal,
-        )
-        movimiento = self._registrar_movimiento_inventario_pedido(
-            pedido=pedido,
-            user=user,
-            items=consumos,
-            tipo_movimiento=TipoMovimiento.SALIDA,
-            observaciones=(
-                f"Descuento automático por autorización de pedido {pedido.folio or pedido.pk}"
-            ),
-        )
-        auditoria = self._registrar_auditoria_inventario_pedido(
-            pedido=pedido,
-            user=user,
-            items=consumos,
-            accion="SALIDA",
-            request=request,
-        )
-        return movimiento, auditoria
-
-    def _ajustar_existencias_cambios_pedido(self, cotizacion, pedido, user, request=None):
-        plan_actual = self._build_pedido_inventory_plan(pedido)
-        plan_objetivo = self._build_cotizacion_inventory_plan(cotizacion)
-        salidas, entradas = self._compute_inventory_delta(plan_actual, plan_objetivo)
-
-        resultados = {"salida": None, "entrada": None}
-        if entradas:
-            items_entrada = self._restore_existencias_pedido(pedido=pedido, plan=entradas)
-            resultados["entrada"] = (
-                self._registrar_movimiento_inventario_pedido(
-                    pedido=pedido,
-                    user=user,
-                    items=items_entrada,
-                    tipo_movimiento=TipoMovimiento.ENTRADA,
-                    observaciones=(
-                        f"Reintegro automático por cambios aceptados en pedido {pedido.folio or pedido.pk}"
-                    ),
-                ),
-                self._registrar_auditoria_inventario_pedido(
-                    pedido=pedido,
-                    user=user,
-                    items=items_entrada,
-                    accion="ENTRADA",
-                    request=request,
-                ),
-            )
-
-        if salidas:
-            items_salida = self._discount_existencias_pedido(
-                plan=salidas,
-                empresa=pedido.empresa,
-                sucursal=pedido.sucursal,
-            )
-            resultados["salida"] = (
-                self._registrar_movimiento_inventario_pedido(
-                    pedido=pedido,
-                    user=user,
-                    items=items_salida,
-                    tipo_movimiento=TipoMovimiento.SALIDA,
-                    observaciones=(
-                        f"Descuento automático por cambios aceptados en pedido {pedido.folio or pedido.pk}"
-                    ),
-                ),
-                self._registrar_auditoria_inventario_pedido(
-                    pedido=pedido,
-                    user=user,
-                    items=items_salida,
-                    accion="SALIDA",
-                    request=request,
-                ),
-            )
-
-        return resultados
-
     def handle_get_onboarding(self, request):
         from catalogo.models import Producto, Color
         from terceros.models import Cliente, DireccionCliente
@@ -2300,12 +2218,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     {"cotizacion": "La cotización ya tiene un pedido generado."}
                 )
 
+            # Autorizar no saca inventario: las prendas se mueven con las TR de la orden
+            # de surtido (picking). Antes había SALIDA aquí y se descontaba dos veces (#704).
             pedido = self._copiar_cotizacion_a_pedido(cotizacion, empresa)
-            self._descontar_existencias_pedido(
-                pedido=pedido,
-                user=user,
-                request=request,
-            )
             cotizacion.estatus = 3
             cotizacion.autorizada_at = timezone.now()
             cotizacion.cambios_solicitados_at = None
@@ -2439,12 +2354,6 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             # ligado a ellos (factura, picking, órdenes, reservas...) eso daba 500 o
             # lo borraba en cascada sin avisar (#420). Se rechaza antes de escribir.
             _exigir_renglones_sin_dependencias(pedido)
-            self._ajustar_existencias_cambios_pedido(
-                cotizacion=cotizacion,
-                pedido=pedido,
-                user=user,
-                request=request,
-            )
             self._aplicar_cotizacion_a_pedido(cotizacion, pedido)
             cotizacion.estatus = 3
             cotizacion.cambios_solicitados_at = None

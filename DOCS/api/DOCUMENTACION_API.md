@@ -1861,9 +1861,8 @@ En qué paso va el pedido, cuánto lleva y si va a tiempo. Todo se calcula en el
     - detalle (productos/tallas) + precios snapshot (`precio_lista` / `precio_unitario`)
     - servicios por talla (bordado/serigrafía + configs)
     - servicios extras ilimitados (`servicios_extras`)
-    - se descuenta inventario de las existencias de la misma empresa/sucursal según los productos y variantes del pedido
-    - **solo de almacenes `ACTIVO` con `permite_salida=True`** (misma regla que el picking de WMS; materia prima y demás quedan fuera), la existencia con más piezas primero. Sin suficiente ahí → `400 {"inventario": "Existencia insuficiente ... en almacenes con salida permitida..."}`. Mismo criterio en el descuento de `aceptar-cambios`.
-    - se registra `MovimientoInventario` tipo `SALIDA` ligado al `pedido` y su `AuditoriaEvento`
+    - **no mueve inventario** (#704): las prendas se mueven con las transferencias (TR) de la orden de surtido (picking). `aceptar-cambios` tampoco.
+    - cancelar un pedido viejo que sí tuvo `SALIDA` al autorizar la sigue devolviendo.
     - se marca la cotización como `Autorizada (3)` y se guarda un `aprobado_snapshot` del estado aprobado.
   - Regla crítica: **NO se generan órdenes de trabajo automáticamente** (OB/OR/OP/OCM). Las OT se crean de forma manual a través de los endpoints onboarding de Producción / WMS.
   - Defaults de facturación: si `cotizacion.persona_pagos / correo_facturas / telefono_pagos / forma_pago / metodo_pago / uso_cfdi` vienen `null`, el backend usa sensible defaults derivados del cliente (`razon_social`/`email`/`telefono`) y los TextChoices de `Cotizacion.FormaPago.TRANSFERENCIA`, `MetodoPago.PUE`, `UsoCfdi.G03`. Esto garantiza que la conversión `Cotizacion → Pedido` nunca falle por campos `NOT NULL` de facturación.
