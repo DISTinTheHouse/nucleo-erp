@@ -1584,3 +1584,59 @@ class VerificarRfcTest(TestCase):
     def test_otra_empresa_403(self):
         self._login(self.otra, is_admin_empresa=True)
         self.assertEqual(self.api.get(self.URL, {"rfc": "XAXX010101000"}).status_code, 403)
+
+
+class ClienteEmpresaSucursalTests(TestCase):
+    """#685: la sucursal es de la empresa del cliente. #686: sin empresa no hay alta."""
+
+    URL = "/api/v1/terceros/clientes/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from nucleo.models import Sucursal
+
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        cls.propia = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.ajena = Sucursal.objects.create(empresa=cls.otra, codigo="GDL", nombre="GDL")
+        cls.usuario = Usuario.objects.create(
+            username="v@acme.test", email="v@acme.test", empresa=cls.empresa, is_admin_empresa=True
+        )
+        cls.root = Usuario.objects.create(username="root@x.test", email="root@x.test", is_superuser=True)
+
+    def _api(self, user):
+        api = APIClient()
+        api.force_authenticate(user)
+        return api
+
+    def test_sucursal_de_otra_empresa_responde_400_al_crear_y_editar(self):
+        api = self._api(self.usuario)
+
+        resp = api.post(self.URL, {"nombre": "Cli", "sucursal": self.ajena.pk}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("sucursal", resp.data)
+
+        resp = api.post(self.URL, {"nombre": "Cli", "sucursal": self.propia.pk}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        url = f"{self.URL}{resp.data['id']}/"
+        self.assertEqual(api.patch(url, {"sucursal": self.ajena.pk}, format="json").status_code, 400)
+        self.assertEqual(Cliente.objects.get(pk=resp.data["id"]).sucursal_id, self.propia.pk)
+
+    def test_sin_empresa_no_crea_cliente_ni_el_superusuario(self):
+        sin_empresa = Usuario.objects.create(username="libre@x.test", email="libre@x.test")
+
+        for user in (sin_empresa, self.root):
+            resp = self._api(user).post(self.URL, {"nombre": "Cli"}, format="json")
+            self.assertEqual(resp.status_code, 400, resp.data)
+            self.assertIn("empresa", resp.data)
+        self.assertFalse(Cliente.objects.exists())
+
+    def test_asistente_ia_sin_empresa_no_crea_cliente(self):
+        from types import SimpleNamespace
+
+        from ia.api.views import AIAssistantAPIView
+
+        resultado = AIAssistantAPIView()._tool_create_cliente(SimpleNamespace(user=self.root), {"nombre": "Cli"})
+
+        self.assertFalse(resultado["ok"])
+        self.assertFalse(Cliente.objects.exists())
