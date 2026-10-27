@@ -764,6 +764,26 @@ class PickingGeneraTransferenciaTests(TestCase):
             ],
         }
 
+    def test_alta_expone_almacen_actual(self):
+        """EC-607: el alta (normal y por onboarding) responde dónde quedan las prendas."""
+        api = APIClient()
+        api.force_authenticate(self.usuario)
+        cuerpo = {
+            "pedido": self.pedido.pk,
+            "operador": self.usuario.pk,
+            "almacen": self.origen.pk,
+            "almacen_destino": self.destino.pk,
+            "picking_detalle": [{"pedido_detalle_talla": self.talla_row.pk, "cantidad_asignada": "1"}],
+        }
+        for url in ("/api/v1/wms/pickings/", "/api/v1/wms/pickings/onboarding/"):
+            resp = api.post(url, cuerpo, format="json")
+            self.assertEqual(resp.status_code, 201, resp.content)
+            self.assertIsNotNone(resp.json()["transferencia"])
+            self.assertEqual(
+                (resp.json()["almacen_actual"], resp.json()["almacen_actual_nombre"]),
+                (self.destino.pk, "Apartados"),
+            )
+
     def test_picking_crea_transferencia_con_folio_tr_y_mueve_stock(self):
         from wms.services.picking_service import PickingService
 
@@ -905,32 +925,36 @@ class PickingTrasladoTests(TestCase):
         )
 
     def test_almacen_actual_no_agrega_consultas_al_listado(self):
-        """EC-607: ``almacen_actual`` sale de FK que el listado ya trae en ``select_related``."""
-        from types import SimpleNamespace
+        """EC-607: ``GET /pickings/`` resuelve ``almacen_actual`` sin consultas por picking.
 
+        Los pickings van sin TR: ``transferencia_folio`` aún consulta la TR por fila (#698).
+        """
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
-        from wms.api.views import PickingViewSet
-        from wms.models import Picking, Transferencia
+        from wms.models import Picking
 
-        tr = Transferencia.objects.create(
-            empresa=self.empresa, sucursal=self.sucursal, almacen_origen=self.bordados,
-            almacen_destino=self.apartados, folio="TR-1", usuario=self.admin,
-        )
-        Picking.objects.create(
-            folio="PK-2", empresa=self.empresa, sucursal=self.sucursal, pedido=self.picking.pedido,
-            operador=self.admin, almacen=self.bordados, almacen_destino=self.apartados,
-            usuario=self.admin, transferencia=tr,
-        )
-        vista = PickingViewSet()
-        vista.request, vista.action, vista.format_kwarg = SimpleNamespace(user=self.admin), "list", None
-        pickings = list(vista.get_queryset())
-        with CaptureQueriesContext(connection) as consultas:
-            actuales = {p.folio: p.almacen_actual.nombre for p in pickings}
-        self.assertEqual(len(consultas), 0)
-        self.assertEqual(actuales, {"PK-1": "Bordados", "PK-2": "Apartados"})
+        client = APIClient()
+        client.force_authenticate(self.admin)
 
+        def listar():
+            with CaptureQueriesContext(connection) as consultas:
+                resp = client.get("/api/v1/wms/pickings/")
+            self.assertEqual(resp.status_code, 200, resp.content)
+            datos = resp.json()
+            filas = datos.get("results", datos) if isinstance(datos, dict) else datos
+            return len(consultas), {f["folio"]: (f["almacen_actual"], f["almacen_actual_nombre"]) for f in filas}
+
+        pocas, actuales = listar()
+        self.assertEqual(actuales, {"PK-1": (self.bordados.pk, "Bordados")})
+        for n in range(2, 5):
+            Picking.objects.create(
+                folio=f"PK-{n}", empresa=self.empresa, sucursal=self.sucursal, pedido=self.picking.pedido,
+                operador=self.admin, almacen=self.apartados, usuario=self.admin,
+            )
+        muchas, actuales = listar()
+        self.assertEqual(muchas, pocas)
+        self.assertEqual(actuales["PK-4"], (self.apartados.pk, "Apartados"))
 
 class PackingDespachoEC574Tests(TestCase):
     """EC-574: empacar confirma el surtido (WM-01, opción B) y, sin embarque

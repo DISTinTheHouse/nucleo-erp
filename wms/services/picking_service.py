@@ -373,11 +373,6 @@ class PickingService:
         Picking.Estado.PARCIAL,
     )
 
-    @staticmethod
-    def almacen_actual(picking):
-        """La regla vive en ``Picking.almacen_actual`` (el serializer la expone)."""
-        return picking.almacen_actual
-
     @classmethod
     @transaction.atomic
     def trasladar(cls, picking, almacen, user, observaciones=None):
@@ -393,7 +388,7 @@ class PickingService:
             raise ValidationError(
                 {"estado": f"No se puede trasladar un picking en estado {picking.estado}."}
             )
-        actual = cls.almacen_actual(picking)
+        actual = picking.almacen_actual
         if actual.pk == almacen.pk:
             raise ValidationError({"almacen": "El picking ya está en ese almacén."})
         # Un almacén sin empresa o sin sucursal tampoco pertenece al picking (#510).

@@ -327,6 +327,7 @@ def listar_folios_picking(pedido):
     out = []
     for pk in picks_qs:
         agg = by_picking[pk.id]
+        actual = pk.almacen_actual
         out.append({
             "id": pk.id,
             "folio": pk.folio,
@@ -336,8 +337,8 @@ def listar_folios_picking(pedido):
             "almacen_origen_nombre": getattr(pk.almacen, "nombre", None),
             "almacen_destino": pk.almacen_destino_id,
             "almacen_destino_nombre": getattr(pk.almacen_destino, "nombre", None),
-            "almacen_actual": pk.almacen_actual.pk,
-            "almacen_actual_nombre": pk.almacen_actual.nombre,
+            "almacen_actual": getattr(actual, "pk", None),
+            "almacen_actual_nombre": getattr(actual, "nombre", None),
             "operador": pk.operador_id,
             "operador_nombre": (
                 pk.operador.get_full_name().strip()

@@ -318,7 +318,7 @@ class PickingSerializer(serializers.ModelSerializer):
         source="transferencia.folio", read_only=True, default=None
     )
     # Dónde están hoy las prendas (``Picking.almacen_actual``, misma regla que el traslado).
-    almacen_actual = serializers.IntegerField(source="almacen_actual.pk", read_only=True)
+    almacen_actual = serializers.PrimaryKeyRelatedField(read_only=True)
     almacen_actual_nombre = serializers.CharField(source="almacen_actual.nombre", read_only=True)
 
     class Meta:
