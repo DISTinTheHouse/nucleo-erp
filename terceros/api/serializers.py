@@ -101,6 +101,14 @@ class ClienteSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         self._validar_permiso_credito(attrs, getattr(request, "user", None))
         empresa = getattr(getattr(request, "user", None), "empresa", None)
+        if self.instance is None and empresa is None:  # sin empresa sería un cliente huérfano (#686)
+            raise serializers.ValidationError({"empresa": "No tienes empresa activa para crear clientes."})
+        sucursal = attrs.get("sucursal")
+        empresa_cliente_id = self.instance.empresa_id if self.instance else empresa.pk
+        if sucursal and sucursal.empresa_id != empresa_cliente_id:
+            # De otra empresa responde igual que un id inexistente, sin delatar que existe (#685).
+            raise serializers.ValidationError({"sucursal": self.fields["sucursal"].error_messages[
+                "does_not_exist"].format(pk_value=sucursal.pk)})
         _, error_rfc = verificar_rfc_cliente(rfc, self.instance.empresa if self.instance else empresa)
         if error_rfc:
             raise serializers.ValidationError({"rfc": error_rfc})

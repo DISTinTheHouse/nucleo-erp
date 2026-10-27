@@ -655,7 +655,7 @@ class AIAssistantAPIView(APIView):
     def _tool_create_cliente(self, request, args):
         user = request.user
         empresa = getattr(user, "empresa", None)
-        if not getattr(user, "is_superuser", False) and not empresa:
+        if not empresa:  # también el superusuario: sin empresa el cliente queda huérfano (#686)
             return {"ok": False, "error": "No tienes empresa activa para crear clientes."}
 
         payload = dict(args or {})
