@@ -17,12 +17,18 @@ from rest_framework.response import Response
 
 from terceros.cartera import cartera_de_cliente
 from terceros.scope import clientes_base, clientes_visibles, clientes_visibles_entre
+from seguridad.role_identity import (
+    CLAVE_DEPARTAMENTO_MESA_CONTROL_Y_VENTAS,
+    CLAVE_DEPARTAMENTO_VENTAS,
+    claves_departamento_usuario,
+)
 from usuarios.models import Usuario
 from ventas.models import Cotizacion, Oportunidad, OportunidadSeguimiento, Pedido
 from ventas.scope import cotizaciones_visibles, oportunidades_base, oportunidades_visibles
 
 ESTATUS_BORRADOR = 1
 ESTATUS_AUTORIZADA = 3
+DEPARTAMENTOS_VENTAS = {CLAVE_DEPARTAMENTO_VENTAS, CLAVE_DEPARTAMENTO_MESA_CONTROL_Y_VENTAS}
 ESTADOS = ["Nueva", "Contactada", "Cotizada", "Ganada", "Perdida"]
 ID_MAXIMO = 2**63 - 1  # tope de un BigAutoField
 
@@ -288,6 +294,9 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         ).first()
         if vendedor is None:
             raise ValidationError({"vendedor": "Vendedor no encontrado en la empresa."})
+        # Solo a alguien de Ventas: cualquier otro recibiría la oportunidad y sus cotizaciones (#709).
+        if not claves_departamento_usuario(vendedor, oportunidad.empresa_id) & DEPARTAMENTOS_VENTAS:
+            raise ValidationError({"vendedor": "El usuario no es del departamento de Ventas."})
         oportunidad.vendedor = vendedor
         oportunidad.save(update_fields=["vendedor", "updated_at"])
         # Las cotizaciones siguen al dueño: si no, las vería en el onboarding pero no podría abrirlas.

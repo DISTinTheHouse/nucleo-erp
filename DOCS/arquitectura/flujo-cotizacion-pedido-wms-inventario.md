@@ -49,7 +49,7 @@ Conversión: `_copiar_cotizacion_a_pedido()`, [ventas/api/views.py:1443-1583](..
 |---|---|---|---|---|
 | Crear cotización | `POST /api/v1/ventas/cotizaciones/onboarding/` | vendedor | — | `estatus=1` |
 | Enviar a revisión | `POST /cotizaciones/{id}/enviar-revision/` | vendedor/admin | `estatus in {1,4,5}` | `estatus=2`, notifica rol Mesa de Control |
-| **Autorizar** | `POST /cotizaciones/{id}/autorizar/` | mesa control | `estatus==2`, sin Pedido activo previo | crea Pedido + descuenta inventario + `estatus=3` |
+| **Autorizar** | `POST /cotizaciones/{id}/autorizar/` | mesa control | `estatus==2`, sin Pedido activo previo | crea Pedido + `estatus=3` (no mueve inventario; lo mueve el picking, #704) |
 | Rechazar | `POST /cotizaciones/{id}/rechazar/` | mesa control | `estatus!=3` | `estatus=4` |
 | Aceptar cambios | `POST /cotizaciones/{id}/aceptar-cambios/` | mesa control | `estatus==5`, Pedido ya existe | ajusta delta de inventario, reaplica campos al Pedido, `estatus=3` |
 | Rechazar cambios | `POST /cotizaciones/{id}/rechazar-cambios/` | mesa control | `estatus==5` | revierte Cotizacion desde `aprobado_snapshot`, `estatus=3` |
