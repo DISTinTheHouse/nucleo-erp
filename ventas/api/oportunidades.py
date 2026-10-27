@@ -55,6 +55,15 @@ def _cuerpo(request):
     return request.data if isinstance(request.data, dict) else {}
 
 
+def _se_puede_cotizar(oportunidad):
+    """Para ligar y para cotizar. Ganada (el cliente aceptó) y Perdida están cerradas (#689);
+    sin vendedor la cotización no la vería ningún vendedor (#690)."""
+    if oportunidad.estado in ("Ganada", "Perdida"):
+        raise ValidationError({"etapa": f"La oportunidad está {oportunidad.estado.lower()}; para vender más, abre otra."})
+    if not oportunidad.vendedor_id:
+        raise ValidationError({"vendedor": "La oportunidad no tiene vendedor; transfiérela primero."})
+
+
 def con_estado(qs):
     """Anota ``avance`` (Cotizada/Ganada) y ``estado`` con dos EXISTS, sin una consulta por fila."""
     cotizaciones = Cotizacion.objects.filter(oportunidad=OuterRef("pk"))
@@ -332,8 +341,7 @@ class OportunidadViewSet(viewsets.ModelViewSet):
     def _ligar(self, oportunidad, ids):
         """Todo o nada. Solo cotizaciones sin autorizar: autorizar es lo que gana la oportunidad,
         y una autorizada ya no se quita (#678)."""
-        if oportunidad.estado in ("Ganada", "Perdida"):
-            raise ValidationError({"etapa": f"No se ligan cotizaciones a una oportunidad {oportunidad.estado.lower()}."})
+        _se_puede_cotizar(oportunidad)
         if not oportunidad.cliente_id:
             raise ValidationError({"cliente": "La oportunidad no tiene cliente."})
         if not isinstance(ids, list) or not ids:
@@ -361,7 +369,8 @@ class OportunidadViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["delete"], url_path=r"cotizaciones/(?P<cotizacion_id>[^/.]+)")
     def desligar_cotizacion(self, request, pk=None, cotizacion_id=None):
-        """Quita la cotización de la oportunidad (no la borra). Una autorizada no se quita."""
+        """Quita la cotización de la oportunidad (no la borra). Una autorizada no se quita. Sigue
+        siendo del dueño de la oportunidad: al ligarla pasó a él y no se guarda el anterior (#688)."""
         oportunidad = self.get_object()
         cotizacion = cotizaciones_visibles(
             Cotizacion.objects.filter(pk=_id_valido(cotizacion_id, "cotizacion"), oportunidad=oportunidad),
@@ -378,8 +387,7 @@ class OportunidadViewSet(viewsets.ModelViewSet):
     def cotizar(self, request, pk=None):
         """Crea una cotización en Borrador ligada a la oportunidad. Desde ahí sigue el flujo de siempre."""
         oportunidad = self.get_object()
-        if oportunidad.etapa == Oportunidad.Etapa.PERDIDA:
-            raise ValidationError({"etapa": "No se cotiza una oportunidad perdida."})
+        _se_puede_cotizar(oportunidad)
         sucursal = getattr(request.user, "sucursal_default", None)
         if sucursal is not None and sucursal.empresa_id != oportunidad.empresa_id:
             raise ValidationError({"sucursal": "Tu sucursal no pertenece a la empresa de la oportunidad."})
