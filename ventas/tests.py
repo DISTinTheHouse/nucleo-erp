@@ -4571,6 +4571,31 @@ class OportunidadesTests(OportunidadesBase):
         libre.refresh_from_db()
         self.assertEqual((libre.oportunidad_id, libre.vendedor_id), (None, self.beto.pk))
 
+    def test_sin_cliente_no_se_cotiza(self):  # #707: igual que ligar
+        op = self._op()
+
+        resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("cliente", resp.data)
+        self.assertFalse(Cotizacion.objects.filter(oportunidad=op).exists())
+
+    def test_vendedor_inactivo_no_recibe_cotizaciones(self):  # #708: como sin vendedor
+        inactivo = Usuario.objects.create(
+            username="ex", email="ex@acme.test", empresa=self.empresa, estatus=Usuario.Estatus.BLOQUEADO
+        )
+        op = self._op(inactivo, cliente=self.cliente)
+        libre = Cotizacion.objects.create(empresa=self.empresa, vendedor=self.beto, cliente=self.cliente)
+        cliente = self._client(self.jefe)
+
+        resp = cliente.post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("vendedor", resp.data)
+        resp = cliente.post(f"{OPORTUNIDADES_URL}{op.pk}/cotizaciones/", {"cotizaciones": [libre.pk]}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        libre.refresh_from_db()
+        self.assertEqual((libre.oportunidad_id, libre.vendedor_id), (None, self.beto.pk))
+
     def test_con_cotizacion_autorizada_esta_ganada_y_ya_no_se_pierde(self):
         op = self._op()
         Cotizacion.objects.create(empresa=self.empresa, vendedor=self.ana, oportunidad=op, estatus=3)
@@ -5105,7 +5130,7 @@ class OportunidadesValidacionesTests(OportunidadesBase):
         self.assertEqual(self._client(self.ana).get(url).data["cliente_nombre"], "Cliente Acme")
 
     def test_transferir_pasa_las_cotizaciones_al_nuevo_dueno(self):
-        op = self._op(self.ana)
+        op = self._op(self.ana, cliente=self.cliente)
         resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
         cot = resp.data["cotizacion_id"]
 
@@ -5115,7 +5140,7 @@ class OportunidadesValidacionesTests(OportunidadesBase):
         self.assertEqual(self._client(self.beto).get(f"/api/v1/ventas/cotizaciones/{cot}/").status_code, 200)
 
     def test_cotizar_como_admin_deja_la_cotizacion_al_dueno(self):
-        op = self._op(self.ana)
+        op = self._op(self.ana, cliente=self.cliente)
         cot = self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/").data["cotizacion_id"]
 
         self.assertEqual(Cotizacion.objects.get(pk=cot).vendedor, self.ana)
@@ -5125,7 +5150,7 @@ class OportunidadesValidacionesTests(OportunidadesBase):
         otra_sucursal = Sucursal.objects.create(empresa=self.otra, codigo="GDL", nombre="GDL")
         self.ana.sucursal_default = otra_sucursal
         self.ana.save()
-        op = self._op(self.ana)
+        op = self._op(self.ana, cliente=self.cliente)
 
         resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
 
