@@ -17,11 +17,13 @@ class TransferenciaService:
 
     @staticmethod
     @transaction.atomic
-    def handle_store(data, user, request=None):
+    def handle_store(data, user, request=None, empresa=None, sucursal=None):
+        """``empresa``/``sucursal``: las del documento que origina la TR (el picking, #693).
+        Sin ellas, la TR manual se timbra con las del usuario."""
         almacen_origen = data["almacen_origen"]
         almacen_destino = data["almacen_destino"]
-        empresa = user.empresa
-        sucursal = user.sucursal_default
+        empresa = empresa or user.empresa
+        sucursal = sucursal or user.sucursal_default
 
         if sucursal is None:
             raise ValidationError("El usuario no tiene una sucursal asignada.")

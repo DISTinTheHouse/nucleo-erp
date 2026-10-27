@@ -287,8 +287,9 @@ class PickingSerializer(serializers.ModelSerializer):
     ``TransferenciaListSerializer``—. Todos los ``*_nombre`` son de solo lectura,
     así que el contrato de escritura del ``POST /pickings/`` no cambia.
 
-    ``pedido``/``operador``/``almacen``/``almacen_destino``/``usuario`` son NOT NULL
-    en el modelo (``pedido_folio`` aun así puede ser ``null``: ``Pedido.folio`` es
+    ``pedido``/``operador``/``almacen``/``usuario`` son NOT NULL en el modelo;
+    ``almacen_destino`` y ``transferencia`` son nullable (``trasladar`` deja el destino
+    en ``null``) (``pedido_folio`` aun así puede ser ``null``: ``Pedido.folio`` es
     nullable). ``oleada``/``zona_almacen``/``lote`` son FK opcionales y resuelven
     a ``null`` cuando faltan. ``Oleada`` y ``LotePicking`` no tienen campo
     ``nombre``: su etiqueta se compone en ``__str__`` (id + estado), por eso se

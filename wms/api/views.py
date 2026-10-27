@@ -139,6 +139,7 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
                 "operador",
                 "almacen",
                 "almacen_destino",
+                "transferencia",
                 "usuario",
                 "oleada",
                 "zona_almacen",
@@ -224,7 +225,9 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
     @action(detail=True, methods=["post"], url_path="trasladar", url_name="trasladar")
     def trasladar(self, request, pk=None):
         """Mueve el picking a otro almacén (p. ej. de bordados a APARTADOS)."""
-        picking = self.get_object()
+        picking = self.get_object()  # otra empresa: 404 antes que 403
+        if not request.user.tiene_permiso("C-WMS-PICKING"):  # mueve inventario (#695)
+            raise PermissionDenied("No tienes permiso para trasladar pickings.")
         serializer = PickingTrasladoSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         picking = PickingService.trasladar(
