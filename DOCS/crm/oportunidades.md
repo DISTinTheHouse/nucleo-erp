@@ -35,19 +35,22 @@ Una oportunidad tiene **N cotizaciones**: nuevas con `cotizar/` o ya hechas con 
 
 ```json
 {
-  "ligadas": [{ "id": 152, "estatus": 1, "estatus_display": "BORRADOR", "gran_total": "11600.00", "created_at": "...", "autorizada_at": null, "pedido_id": null, "pedido_folio": null }],
+  "ligadas": [{ "id": 152, "estatus": 1, "estatus_display": "BORRADOR", "gran_total": "11600.00", "moneda": "MXN", "created_at": "...", "autorizada_at": null, "pedido_id": null, "pedido_folio": null }],
   "disponibles": [{ "id": 100, "...": "mismos campos" }]
 }
 ```
 
-- `disponibles`: del mismo cliente y empresa, sin oportunidad, que el usuario puede ver. Las 100 más recientes. Vacía si la oportunidad no tiene cliente.
+- `moneda`: código ISO de la cotización (`MXN`, `USD`) o `null`. Viene también en `onboarding.cotizaciones`.
+- `disponibles`: del mismo cliente y empresa, sin oportunidad y **sin autorizar**, que el usuario puede ver. Las 100 más recientes. Vacía si la oportunidad no tiene cliente.
 
 **`POST /{id}/cotizaciones/`** con body `{"cotizaciones": [100, 99]}` → `200` con la misma forma del GET.
 
-- Cada cotización debe ser visible para el usuario (el vendedor, las suyas; el admin, las de su empresa), del cliente de la oportunidad y no estar en otra oportunidad. Si alguna no cumple, no se liga ninguna: `400 {"cotizaciones": "No se pueden ligar: [ids]. ..."}`.
+- Cada cotización debe ser visible para el usuario (el vendedor, las suyas; el admin, las de su empresa), del cliente de la oportunidad, sin autorizar y no estar en otra oportunidad. Si alguna no cumple, no se liga ninguna: `400 {"cotizaciones": "No se pueden ligar: [ids]. ..."}`.
 - Repetir el POST con una ya ligada no falla.
-- Oportunidad Perdida → `400 {"etapa"}`. Sin cliente → `400 {"cliente"}`. Lista vacía o ids no numéricos → `400 {"cotizaciones"}`.
-- No cambia el vendedor de la cotización.
+- Oportunidad Ganada o Perdida → `400 {"etapa"}` (para vender más, otra oportunidad). Sin cliente → `400 {"cliente"}`. Lista vacía, ids no numéricos o body que no es objeto → `400 {"cotizaciones"}`.
+- Una autorizada no se liga: autorizar es lo que gana la oportunidad, y ya no se podría quitar.
+- La cotización pasa al dueño de la oportunidad, también si liga un admin (igual que `transferir` y `cotizar`).
+- Si otra persona liga una de esas cotizaciones al mismo tiempo, no se liga ninguna: `400 {"cotizaciones"}`; volver a pedir el GET.
 
 **`DELETE /{id}/cotizaciones/{cotizacion_id}/`** → `204`. La cotización queda sin oportunidad.
 
@@ -106,7 +109,7 @@ Toda la pantalla de una oportunidad en una llamada:
   "seguimientos": [ "...los 50 más recientes..." ],
   "pendientes": 2,
   "proximo_recordatorio": "2026-11-03",
-  "cotizaciones": [{ "id": 12, "estatus": 3, "estatus_display": "AUTORIZADA", "gran_total": "11600.00", "created_at": "...", "autorizada_at": "...", "pedido_id": 7, "pedido_folio": "PED-001" }],
+  "cotizaciones": [{ "id": 12, "estatus": 3, "estatus_display": "AUTORIZADA", "gran_total": "11600.00", "moneda": "MXN", "created_at": "...", "autorizada_at": "...", "pedido_id": 7, "pedido_folio": "PED-001" }],
   "cartera": [{ "moneda": "MXN", "saldo_total": "0.00", "por_vencer": "0.00", "vencido_1_30": "0.00", "...": "..." }]
 }
 ```

@@ -5,6 +5,7 @@ Cotizada y Ganada no se guardan, se calculan de las cotizaciones ligadas.
 
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import Case, CharField, Count, Exists, F, Min, OuterRef, Q, Subquery, Sum, Value, When
 from django.utils import timezone
 from django.utils.dateparse import parse_date
@@ -49,6 +50,11 @@ def _entero(params, nombre):
     return _id_valido(valor, nombre)
 
 
+def _cuerpo(request):
+    """Body como objeto; un arreglo u otro JSON cuenta como vacío y da 400, no 500 (#680)."""
+    return request.data if isinstance(request.data, dict) else {}
+
+
 def con_estado(qs):
     """Anota ``avance`` (Cotizada/Ganada) y ``estado`` con dos EXISTS, sin una consulta por fila."""
     cotizaciones = Cotizacion.objects.filter(oportunidad=OuterRef("pk"))
@@ -79,7 +85,10 @@ def filas_cotizaciones(qs, user, limite=None):
         cotizaciones_visibles(qs, user)
         .annotate(pedido_id_=Subquery(pedido.values("id")[:1]), pedido_folio=Subquery(pedido.values("folio")[:1]))
         .order_by("-id")
-        .values("id", "estatus", "gran_total", "created_at", "autorizada_at", "pedido_id_", "pedido_folio")
+        .values(
+            "id", "estatus", "gran_total", "moneda__codigo_iso", "created_at", "autorizada_at",
+            "pedido_id_", "pedido_folio",
+        )
     )
     if limite:
         filas = filas[:limite]
@@ -87,7 +96,7 @@ def filas_cotizaciones(qs, user, limite=None):
     return [
         {
             "id": c["id"], "estatus": c["estatus"], "estatus_display": estatus.get(c["estatus"]),
-            "gran_total": str(c["gran_total"]), "created_at": c["created_at"], "autorizada_at": c["autorizada_at"],
+            "gran_total": str(c["gran_total"]), "moneda": c["moneda__codigo_iso"], "created_at": c["created_at"], "autorizada_at": c["autorizada_at"],
             "pedido_id": c["pedido_id_"], "pedido_folio": c["pedido_folio"],
         }
         for c in filas
@@ -260,7 +269,7 @@ class OportunidadViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Solo el administrador de la empresa puede transferir oportunidades.")
         oportunidad = self.get_object()
         # Misma validación que los parámetros del query string; el id llega como número o texto.
-        dato = request.data.get("vendedor")
+        dato = _cuerpo(request).get("vendedor")
         vendedor_id = 0 if dato in (None, "") else _id_valido(dato, "vendedor")
         vendedor = Usuario.objects.filter(
             pk=vendedor_id, empresa_id=oportunidad.empresa_id, is_active=True
@@ -304,40 +313,51 @@ class OportunidadViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get", "post"])
     def cotizaciones(self, request, pk=None):
-        """GET: ``ligadas`` y ``disponibles`` (del mismo cliente y sin oportunidad, las 100 más
-        recientes). POST ``{"cotizaciones": [ids]}``: liga cotizaciones ya hechas y responde lo mismo."""
+        """GET: ``ligadas`` y ``disponibles`` (del mismo cliente, sin oportunidad y sin autorizar,
+        las 100 más recientes). POST ``{"cotizaciones": [ids]}``: liga cotizaciones ya hechas y
+        responde lo mismo."""
         oportunidad = self.get_object()
         if request.method == "POST":
-            self._ligar(oportunidad, request.data.get("cotizaciones"))
+            self._ligar(oportunidad, _cuerpo(request).get("cotizaciones"))
         disponibles = Cotizacion.objects.none()
         if oportunidad.cliente_id:
             disponibles = Cotizacion.objects.filter(
                 empresa_id=oportunidad.empresa_id, cliente_id=oportunidad.cliente_id, oportunidad__isnull=True
-            )
+            ).exclude(estatus=ESTATUS_AUTORIZADA)
         return Response({
             "ligadas": filas_cotizaciones(Cotizacion.objects.filter(oportunidad=oportunidad), request.user),
             "disponibles": filas_cotizaciones(disponibles, request.user, limite=100),
         })
 
     def _ligar(self, oportunidad, ids):
-        if oportunidad.etapa == Oportunidad.Etapa.PERDIDA:
-            raise ValidationError({"etapa": "No se ligan cotizaciones a una oportunidad perdida."})
+        """Todo o nada. Solo cotizaciones sin autorizar: autorizar es lo que gana la oportunidad,
+        y una autorizada ya no se quita (#678)."""
+        if oportunidad.estado in ("Ganada", "Perdida"):
+            raise ValidationError({"etapa": f"No se ligan cotizaciones a una oportunidad {oportunidad.estado.lower()}."})
         if not oportunidad.cliente_id:
             raise ValidationError({"cliente": "La oportunidad no tiene cliente."})
         if not isinstance(ids, list) or not ids:
             raise ValidationError({"cotizaciones": "Manda una lista de ids."})
         ids = {_id_valido(i, "cotizaciones") for i in ids}
+        libres = (Q(oportunidad__isnull=True) | Q(oportunidad=oportunidad)) & ~Q(estatus=ESTATUS_AUTORIZADA)
         ligables = cotizaciones_visibles(
             Cotizacion.objects.filter(pk__in=ids, empresa_id=oportunidad.empresa_id, cliente_id=oportunidad.cliente_id),
             self.request.user,
-        ).filter(Q(oportunidad__isnull=True) | Q(oportunidad=oportunidad))
+        ).filter(libres)
         faltan = ids - set(ligables.values_list("pk", flat=True))
         if faltan:
             raise ValidationError({"cotizaciones": (
-                f"No se pueden ligar: {sorted(faltan)}. Deben ser tuyas, del cliente de la oportunidad "
-                "y no estar en otra oportunidad."
+                f"No se pueden ligar: {sorted(faltan)}. Deben ser tuyas, del cliente de la oportunidad, "
+                "sin autorizar y no estar en otra oportunidad."
             )})
-        ligables.update(oportunidad=oportunidad)
+        with transaction.atomic():
+            # Pasan al dueño, como en ``transferir`` y ``cotizar`` (#679). El UPDATE repite el
+            # filtro: si otra petición ligó una en medio, no se liga ninguna (#681).
+            ligadas = Cotizacion.objects.filter(pk__in=ids).filter(libres).update(
+                oportunidad=oportunidad, vendedor_id=oportunidad.vendedor_id
+            )
+            if ligadas != len(ids):
+                raise ValidationError({"cotizaciones": "Otra persona cambió alguna de estas cotizaciones; vuelve a intentar."})
 
     @action(detail=True, methods=["delete"], url_path=r"cotizaciones/(?P<cotizacion_id>[^/.]+)")
     def desligar_cotizacion(self, request, pk=None, cotizacion_id=None):
