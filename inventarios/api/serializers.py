@@ -8,9 +8,10 @@ class AlmacenSerializer(serializers.ModelSerializer):
         model = Almacen
         fields = [
             'id_almacen', 'empresa', 'sucursal', 'codigo', 'nombre', 'estatus',
-            'created_at', 'updated_at'
+            'permite_entrada', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id_almacen', 'created_at', 'updated_at', 'empresa']
+        # permite_entrada se lee (selector del traslado de picking) pero no se edita aquí.
+        read_only_fields = ['id_almacen', 'created_at', 'updated_at', 'empresa', 'permite_entrada']
 
     def validate(self, attrs):
         request = self.context.get('request')

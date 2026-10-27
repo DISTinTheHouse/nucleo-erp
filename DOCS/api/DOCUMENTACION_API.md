@@ -546,11 +546,13 @@ Gestión de almacenes y ubicaciones para operaciones de inventario.
       "codigo": "ALM-MTY-01",
       "nombre": "Almacén Principal Monterrey",
       "estatus": "ACTIVO",
+      "permite_entrada": true,
       "created_at": "2024-01-15T10:00:00Z",
       "updated_at": "2024-01-15T10:00:00Z"
     }
   ]
   ```
+- `permite_entrada` es de solo lectura: se ignora si se envía al crear o editar.
 - **Detalle**: `GET /api/v1/inventarios/almacenes/{id_almacen}/`
 - **Crear**: `POST /api/v1/inventarios/almacenes/`
 - **Editar**: `PATCH /api/v1/inventarios/almacenes/{id_almacen}/`
