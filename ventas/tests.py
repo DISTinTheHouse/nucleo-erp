@@ -5399,6 +5399,15 @@ class RechazoCotizacionComentarioTests(TestCase):
         self.assertEqual([c["tipo"] for c in hist.data], ["RECHAZO", "REENVIO"])
         self.assertEqual([c["comentario"] for c in hist.data], ["Precio mal", "Ya corregí el precio"])
 
+    def test_cambios_solicitados_no_se_envian_a_revision(self):  # #710
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=5)
+
+        resp = self._como(self.vendedor).post(self.url + "enviar-revision/")
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.estatus, 5)
+
     def test_reenviar_sin_comentario_sigue_permitido(self):
         self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Precio mal"}, format="json")
         resp = self._como(self.vendedor).post(self.url + "enviar-revision/")
