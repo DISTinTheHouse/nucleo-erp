@@ -152,8 +152,11 @@ class Picking(models.Model):
     @property
     def almacen_actual(self):
         """Dónde están hoy las prendas: en el destino si la TR del picking ya las movió;
-        si no (picking sin TR o ya trasladado), en ``almacen``."""
-        if self.transferencia_id and self.almacen_destino_id:
+        si no (picking sin TR, TR no completada o ya trasladado), en ``almacen`` (#701)."""
+        if (
+            self.transferencia_id and self.almacen_destino_id
+            and self.transferencia.status == Transferencia.TransferenciaStatus.COMPLETADA
+        ):
             return self.almacen_destino
         return self.almacen
 
