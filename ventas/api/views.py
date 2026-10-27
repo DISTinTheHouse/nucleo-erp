@@ -2153,14 +2153,18 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     }
                 )
 
-        if cotizacion.estatus not in [
-            1,
-            4,
-            5,
-        ]:  # Borrador, Rechazada o Cambios Solicitados
+        # Cambios solicitados (5) va por aceptar/rechazar-cambios: en revisión normal
+        # ya no se podría autorizar, porque tiene pedido (#710).
+        if cotizacion.estatus == 5:
+            raise ValidationError(
+                {"estatus": "Tiene cambios solicitados: usa aceptar-cambios o rechazar-cambios."}
+            )
+        if cotizacion.estatus not in [1, 4]:  # Borrador o Rechazada
             raise ValidationError(
                 {"estatus": "La cotización ya está en revisión o autorizada."}
             )
+        if Pedido.objects.filter(cotizacion=cotizacion, activo=True).exists():
+            raise ValidationError({"cotizacion": "La cotización ya tiene un pedido generado."})
         # Mismas reglas de montos que el guardado, sobre lo guardado (EC-571).
         errores_montos = errores_montos_guardados(cotizacion)
         if errores_montos:
