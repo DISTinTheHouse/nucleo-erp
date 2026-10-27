@@ -25,7 +25,7 @@ Base: `/api/v1/ventas/oportunidades/`
 4. Si no, la etapa.
 
 - Perdida exige `motivo_perdida`. Una oportunidad Ganada no se puede perder.
-- Ganada (el cliente aceptó) y Perdida están cerradas: `cotizar/` y ligar responden `400 {"etapa"}`; para vender más, otra oportunidad. Sin vendedor → `400 {"vendedor"}` (transferirla primero).
+- Ganada (el cliente aceptó) y Perdida están cerradas: `cotizar/` y ligar responden `400 {"etapa"}`; para vender más, otra oportunidad. Sin vendedor activo → `400 {"vendedor"}` (transferirla primero). Sin cliente → `400 {"cliente"}`.
 - Borrar una oportunidad (admin, ORM) no borra sus cotizaciones: la FK es `SET_NULL`.
 
 ## Varias cotizaciones por oportunidad

@@ -106,7 +106,7 @@ class TransferenciaService:
             producto = row.get("producto")
             producto_variante = row.get("producto_variante")
             cantidad = TransferenciaService._normalize(row["cantidad"])
-            producto_id = producto.id if producto else producto_variante.id
+            producto_id = producto_variante.id if producto_variante else producto.id  # la clave del stock (#706)
 
             if not saldos_origen.filas(producto, producto_variante):
                 raise ValidationError(

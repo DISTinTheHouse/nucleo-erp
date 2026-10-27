@@ -57,11 +57,14 @@ def _cuerpo(request):
 
 def _se_puede_cotizar(oportunidad):
     """Para ligar y para cotizar. Ganada (el cliente aceptó) y Perdida están cerradas (#689);
-    sin vendedor la cotización no la vería ningún vendedor (#690)."""
+    sin vendedor activo la cotización no la vería ningún vendedor (#690, #708); sin cliente
+    no hay a quién cotizar (#707)."""
     if oportunidad.estado in ("Ganada", "Perdida"):
         raise ValidationError({"etapa": f"La oportunidad está {oportunidad.estado.lower()}; para vender más, abre otra."})
-    if not oportunidad.vendedor_id:
-        raise ValidationError({"vendedor": "La oportunidad no tiene vendedor; transfiérela primero."})
+    if not oportunidad.vendedor_id or not oportunidad.vendedor.is_active:
+        raise ValidationError({"vendedor": "La oportunidad no tiene vendedor activo; transfiérela primero."})
+    if not oportunidad.cliente_id:
+        raise ValidationError({"cliente": "La oportunidad no tiene cliente."})
 
 
 def con_estado(qs):
@@ -342,8 +345,6 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         """Todo o nada. Solo cotizaciones sin autorizar: autorizar es lo que gana la oportunidad,
         y una autorizada ya no se quita (#678)."""
         _se_puede_cotizar(oportunidad)
-        if not oportunidad.cliente_id:
-            raise ValidationError({"cliente": "La oportunidad no tiene cliente."})
         if not isinstance(ids, list) or not ids:
             raise ValidationError({"cotizaciones": "Manda una lista de ids."})
         ids = {_id_valido(i, "cotizaciones") for i in ids}
