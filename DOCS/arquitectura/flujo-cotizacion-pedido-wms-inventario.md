@@ -75,7 +75,7 @@ WMS no valida `Pedido.estatus`. La única señal de "listo para picking" es que 
 
 - Creación: `PickingService.handle_store()`, [wms/services/picking_service.py:254-346](../../wms/services/picking_service.py).
 - Endpoints: `POST /api/v1/wms/pickings/` y `POST /api/v1/wms/pickings/onboarding/`.
-- Contrato explícito en el docstring del servicio: crea `Picking` + `PickingDetalle` + folio. **No mueve inventario, no crea transferencias, no crea reservas.**
+- Contrato explícito en el docstring del servicio: crea `Picking` + `PickingDetalle` + folio y una transferencia (TR) origen → destino que mueve inventario. `trasladar` genera otra TR por cada traslado. No crea reservas.
 - `tipo` (ORDER/BATCH/WAVE/ZONE picking) se guarda pero no hay lógica que agrupe varios pedidos en un mismo picking — es siempre un pedido por picking.
 - `cantidad_surtida` nunca se escribe en código no-test (solo un literal en `ventas/tests.py:1099`). Sin endpoint de update: no hay forma de marcar una línea como surtida ni de avanzar `Picking.estado`.
 

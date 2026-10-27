@@ -48,9 +48,8 @@ class PickingService:
 
     Flujo real operativo:
       1. ``GET onboarding`` → seleccionar pedido / origen / destino / cantidades.
-      2. ``POST create`` → documento picking listo para operar (tracking).
-      3. **La operación física (tomar prendas del origen y moverlas al destino)
-      queda fuera del create del picking**, en pasos posteriores.
+      2. ``POST create`` → picking + TR que deja las prendas en el destino.
+      3. ``trasladar`` → otra TR por cada cambio de almacén.
 
     No crea reservas ni órdenes de producción dentro de este endpoint:
     - Reservas y órdenes de trabajo quedan en sus propios endpoints/services de
@@ -314,6 +313,8 @@ class PickingService:
                 ],
             },
             user,
+            empresa=pedido.empresa,
+            sucursal=pedido.sucursal,
         )
 
         # 5. Crear encabezado Picking
@@ -436,6 +437,8 @@ class PickingService:
                     "transferencia_detalle": lineas,
                 },
                 user,
+                empresa=picking.empresa,
+                sucursal=picking.sucursal,
             )
 
         antes = {
@@ -444,7 +447,7 @@ class PickingService:
         }
         picking.almacen = almacen
         picking.almacen_destino = None
-        picking.transferencia = transferencia or picking.transferencia
+        picking.transferencia = transferencia  # sin líneas no hay TR que describa el traslado (#697)
         nota = f"Trasladado de {actual.nombre} a {almacen.nombre}."
         if transferencia is not None:
             nota += f" Transferencia {transferencia.folio}."
