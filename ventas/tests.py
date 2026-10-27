@@ -7,11 +7,13 @@ de producción. Ejemplo con un settings de override a SQLite en memoria:
 """
 
 import time
+from types import SimpleNamespace
+from unittest.mock import patch
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import connection
+from django.db import connection, transaction
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -6632,6 +6634,103 @@ class OportunidadLigarCotizacionesTests(OportunidadesBase):
         op = self._op(self.beto, cliente=self.cliente)
 
         self.assertEqual(self._client(self.ana).get(self._url(op)).status_code, 404)
+
+    def test_autorizada_no_se_liga_ni_sale_disponible(self):
+        # #678: ligarla ganaría la oportunidad de un clic y ya no se podría quitar.
+        op = self._op(self.ana, cliente=self.cliente)
+        autorizada = self._cot(estatus=3)
+
+        self.assertEqual(self._client(self.ana).get(self._url(op)).data["disponibles"], [])
+        resp = self._client(self.ana).post(self._url(op), {"cotizaciones": [autorizada.pk]}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(Cotizacion.objects.filter(oportunidad=op).exists())
+
+    def test_ganada_no_acepta_mas_cotizaciones(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        self._cot(oportunidad=op, estatus=3)
+
+        resp = self._client(self.ana).post(self._url(op), {"cotizaciones": [self._cot().pk]}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("etapa", resp.data)
+
+    def test_admin_liga_la_de_otro_vendedor_y_pasa_al_dueno(self):
+        # #679: como en transferir/cotizar, el dueño ve y abre las cotizaciones de su oportunidad.
+        op = self._op(self.ana, cliente=self.cliente)
+        de_beto = self._cot(vendedor=self.beto)
+
+        resp = self._client(self.jefe).post(self._url(op), {"cotizaciones": [de_beto.pk]}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        de_beto.refresh_from_db()
+        self.assertEqual(de_beto.vendedor, self.ana)
+        self.assertEqual([c["id"] for c in self._client(self.ana).get(self._url(op)).data["ligadas"]], [de_beto.pk])
+
+    def test_body_que_no_es_objeto_responde_400(self):
+        # #680: un arreglo, texto o número en el body era 500.
+        op = self._op(self.ana, cliente=self.cliente)
+        cot = self._cot()
+
+        for body in ([cot.pk], "x", 5):
+            resp = self._client(self.ana).post(self._url(op), body, format="json")
+            self.assertEqual(resp.status_code, 400, resp.data)
+        resp = self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", [self.beto.pk], format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_si_otra_peticion_liga_una_en_medio_no_liga_ninguna(self):
+        # #681: entre validar y actualizar, otra petición liga B a otra oportunidad.
+        op, otra = self._op(self.ana, cliente=self.cliente), self._op(self.ana, cliente=self.cliente)
+        a, b = self._cot(), self._cot()
+
+        def atomic_con_carrera():
+            Cotizacion.objects.filter(pk=b.pk).update(oportunidad=otra)
+            return transaction.atomic()
+
+        with patch("ventas.api.oportunidades.transaction", SimpleNamespace(atomic=atomic_con_carrera)):
+            resp = self._client(self.ana).post(self._url(op), {"cotizaciones": [a.pk, b.pk]}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(Cotizacion.objects.filter(oportunidad=op).exists())
+        self.assertEqual(Cotizacion.objects.get(pk=b.pk).oportunidad, otra)
+
+    def test_filas_traen_la_moneda(self):
+        # #682: sin moneda el front no distingue MXN de USD.
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        op = self._op(self.ana, cliente=self.cliente)
+        self._cot(oportunidad=op, moneda=usd)
+        self._cot()
+
+        datos = self._client(self.ana).get(self._url(op)).data
+
+        self.assertEqual([c["moneda"] for c in datos["ligadas"]], ["USD"])
+        self.assertEqual([c["moneda"] for c in datos["disponibles"]], [None])
+
+    # -- otra empresa (#683) ---------------------------------------------------
+
+    def test_no_liga_cotizaciones_de_otra_empresa(self):
+        op = self._op(self.ana, cliente=self.cliente)
+        ajena = Cotizacion.objects.create(empresa=self.otra, vendedor=self.ajeno, cliente=self.cliente_ajeno)
+
+        for user in (self.ana, self.jefe):
+            self.assertNotIn(ajena.pk, [c["id"] for c in self._client(user).get(self._url(op)).data["disponibles"]])
+            resp = self._client(user).post(self._url(op), {"cotizaciones": [ajena.pk]}, format="json")
+            self.assertEqual(resp.status_code, 400, resp.data)
+        ajena.refresh_from_db()
+        self.assertIsNone(ajena.oportunidad_id)
+
+    def test_oportunidad_de_otra_empresa_responde_404(self):
+        op = self._op(self.ajeno, empresa=self.otra, cliente=self.cliente_ajeno)
+        ligada = Cotizacion.objects.create(
+            empresa=self.otra, vendedor=self.ajeno, cliente=self.cliente_ajeno, oportunidad=op
+        )
+        libre = Cotizacion.objects.create(empresa=self.otra, vendedor=self.ajeno, cliente=self.cliente_ajeno)
+
+        for user in (self.ana, self.jefe):
+            cliente = self._client(user)
+            self.assertEqual(cliente.get(self._url(op)).status_code, 404)
+            self.assertEqual(cliente.post(self._url(op), {"cotizaciones": [libre.pk]}, format="json").status_code, 404)
+            self.assertEqual(cliente.delete(self._url(op, ligada)).status_code, 404)
+        self.assertEqual(list(Cotizacion.objects.filter(oportunidad=op)), [ligada])
 
     def test_consultas_fijas(self):
         op = self._op(self.ana, cliente=self.cliente)
