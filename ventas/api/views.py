@@ -13,8 +13,10 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from catalogo.compatibilidad import exigir_compatibilidad, matriz_onboarding
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
+from rest_framework.filters import OrderingFilter
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
+from rest_framework.settings import api_settings
 from django.conf import settings
 
 from auditoria.models import AuditoriaEvento
@@ -363,10 +365,20 @@ def _texto_comentario(data):
     return valor.strip()
 
 
+# Los backends globales menos ``OrderingFilter`` (EC-619), para los listados de orden
+# fijo: sin ``ordering_fields``, DRF acepta en ``?ordering=`` los ``source`` del
+# serializer, que reemplazaban ese orden y daban 500 con los que no son columnas
+# (``get_estatus_display``). Así el parámetro se ignora y sale del schema.
+FILTER_BACKENDS_SIN_ORDERING = [
+    backend for backend in api_settings.DEFAULT_FILTER_BACKENDS if not issubclass(backend, OrderingFilter)
+]
+
+
 class CotizacionViewSet(viewsets.ModelViewSet):
     queryset = cotizaciones_base()
     serializer_class = CotizacionSerializer
     http_method_names = ["get", "post", "patch"]
+    filter_backends = FILTER_BACKENDS_SIN_ORDERING
 
     def get_serializer_class(self):
         if getattr(self, "action", None) == "list":
@@ -523,7 +535,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         # Ya no se admite ``?ordering=`` del cliente: el requisito de producto es
         # que el listado siempre salga en ese orden, y el parámetro permitía
         # romperlo (p. ej. ``?ordering=created_at`` devolvía lo más viejo arriba).
-        # Si llega el parámetro se ignora en silencio.
+        # Quitarlo de aquí no bastaba: el ``OrderingFilter`` global corre después
+        # de ``get_queryset`` y reemplazaba este orden. Lo que hace que el
+        # parámetro se ignore en silencio es ``filter_backends`` sin
+        # ``OrderingFilter`` en el ViewSet (EC-619).
         # ``nulls_last``: ``Cotizacion.created_at`` es NULL-able y las filas
         # anteriores a la migración que lo agregó siguen en NULL; en PostgreSQL
         # un DESC las pondría al principio del listado.
@@ -2546,6 +2561,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "put", "patch", "head", "options"]
     queryset = pedidos_base()
     serializer_class = PedidoSerializer
+    filter_backends = FILTER_BACKENDS_SIN_ORDERING
 
     def get_serializer_class(self):
         # Listado: serializer minimalista (9 campos escalares). Resto de acciones
