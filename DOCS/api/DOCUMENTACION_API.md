@@ -2042,6 +2042,30 @@ En qué paso va el pedido, cuánto lleva y si va a tiempo. Todo se calcula en el
 
 Una vez que el pedido ya fue aceptado/autorizado, mesa de control reparte sus piezas en una o más entregas parciales por destino (bordado, embarque, etc.) — **no** reescribe renglones ni cantidades del pedido, solo registra el plan de entrega. Vive **separado** de `editar-mesa-control`: no valida los bloqueos de documentos ligados (facturas, órdenes, picking) porque no toca ningún renglón, y no sincroniza la cotización relacionada (la programación es propia del pedido).
 
+#### `GET /api/v1/ventas/pedidos/{id}/programar/` — pantalla única
+
+Una sola llamada con lo que hoy se ve en 3 pestañas (detalle con servicios, stock, programar). Mismo permiso que el `PATCH` (mesa de control → si no, `400`); otra empresa → `404`. 4 queries fijas.
+
+```json
+{
+  "pedido_id": 333, "folio": "P-00105-2026",
+  "almacen_surtido": "ALM-00",
+  "total_piezas": 8,
+  "destinos_aplicables": ["BORDADO", "EMBARQUE", "APARTADO"],
+  "programacion_conf": { "programaciones": [] },
+  "renglones": [
+    { "pedido_detalle_talla_id": 1198, "producto": "FILIPINA MEDICA LA DAMA", "color": "MARINO",
+      "talla": "G", "sku": "1022703G", "variante_id": 1564, "es_muestra": false,
+      "cantidad": 2, "servicios": ["BORDADO"], "stock_disponible": 2000, "faltante": 0 }
+  ]
+}
+```
+
+- `stock_disponible`: existencia en **ALM-00 (PRODUCTO TERMINADO)** menos reservas activas de otros pedidos. `null` si el renglón no tiene variante o es muestra.
+- `faltante`: `max(cantidad - stock_disponible, 0)`; `null` igual que arriba.
+- `servicios`: `BORDADO`, `REFLEJANTE`, `CORTE_MANGA`, `CAMBIO_TALLA` que lleva esa talla.
+- Front: pinta la tabla de `renglones`, el `<select>` de destino con `destinos_aplicables`, precarga `programacion_conf.programaciones` y guarda con el `PATCH` de abajo.
+
 - **Endpoint**: `PATCH /api/v1/ventas/pedidos/{id}/programar/`
 - Permiso: mesa de control (`is_superuser`, `is_admin_empresa`, o rol activo de Mesa de Control) — mismo criterio que el resto de esta sección.
 - Body — **reemplaza completo** el plan de programación anterior (no hace merge/append):

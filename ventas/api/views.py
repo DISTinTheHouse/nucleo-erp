@@ -3357,9 +3357,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
             }
         )
 
-    @action(detail=True, methods=["patch"], url_path="programar")
+    @action(detail=True, methods=["get", "patch"], url_path="programar")
     def programar(self, request, pk=None):
-        """Reemplaza ``programacion_conf`` del pedido; no toca nada más.
+        """GET: todo lo que necesita la pantalla de programar (renglones, servicios,
+        stock en PRODUCTO TERMINADO, destinos y programación actual).
+        PATCH: reemplaza ``programacion_conf`` del pedido; no toca nada más.
 
         Mismo permiso (mesa de control) y mismo alcance por empresa
         (``get_object`` -> ``pedidos_visibles``) que ``editar-mesa-control``,
@@ -3369,6 +3371,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
         """
         user = request.user
         self._require_mesa_control(user)
+        if request.method == "GET":
+            # Sin ``get_object()``: su queryset prefetchea renglones que aquí no se usan.
+            pedido = get_object_or_404(pedidos_visibles(pedidos_base(), user), pk=pk)
+            return Response(self._programar_contexto(pedido))
         base_pedido = self.get_object()
 
         with transaction.atomic():
@@ -3450,6 +3456,69 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 "programacion_conf": pedido.programacion_conf,
             }
         )
+
+    # Las prendas siempre salen de PRODUCTO TERMINADO hacia el destino (#694).
+    ALMACEN_SURTIDO = "ALM-00"
+
+    def _programar_contexto(self, pedido):
+        """Renglones del pedido con servicios y stock disponible en ALM-00 (existencia
+        menos reservas activas de otros pedidos). Queries fijas, sin importar renglones."""
+        from ventas.services.programacion_service import _DESTINOS_LOGISTICA, _DESTINOS_POR_SERVICIO
+
+        tallas = list(
+            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
+            .select_related("pedido_detalle__producto", "pedido_detalle__color", "talla", "variante")
+            .order_by("pedido_detalle_id", "id")
+        )
+        variantes = {t.variante_id for t in tallas if t.variante_id}
+        almacen = dict(producto_variante_id__in=variantes, almacen__empresa_id=pedido.empresa_id,
+                       almacen__codigo=self.ALMACEN_SURTIDO)
+        stock = dict(
+            Existencia.objects.filter(**almacen).values("producto_variante_id")
+            .annotate(t=Sum("cantidad")).values_list("producto_variante_id", "t")
+        ) if variantes else {}
+        reservado = dict(
+            inventario_reservas.objects.filter(
+                estado=inventario_reservas.Estado.ACTIVA,
+                existencia__producto_variante_id__in=variantes,
+                almacen__empresa_id=pedido.empresa_id, almacen__codigo=self.ALMACEN_SURTIDO,
+            ).exclude(pedido_detalle__pedido=pedido)
+            .values("existencia__producto_variante_id").annotate(t=Sum("cantidad"))
+            .values_list("existencia__producto_variante_id", "t")
+        ) if variantes else {}
+
+        renglones = []
+        for t in tallas:
+            det = t.pedido_detalle
+            muestra = es_muestra(det)
+            disponible = None
+            if t.variante_id and not muestra:
+                disponible = max(int((stock.get(t.variante_id) or 0) - (reservado.get(t.variante_id) or 0)), 0)
+            renglones.append({
+                "pedido_detalle_talla_id": t.pk,
+                "producto": det.producto.nombre if det.producto else det.producto_nombre_externo,
+                "color": det.color.nombre if det.color else None,
+                "talla": t.talla.nombre,
+                "sku": t.variante.sku if t.variante else t.sku_muestra,
+                "variante_id": t.variante_id,
+                "es_muestra": muestra,
+                "cantidad": t.cantidad,
+                "servicios": [s for s, f in (("BORDADO", t.lleva_bordado), ("REFLEJANTE", t.lleva_reflejante),
+                              ("CORTE_MANGA", t.lleva_corte_manga), ("CAMBIO_TALLA", t.lleva_cambio_talla)) if f],
+                "stock_disponible": disponible,
+                "faltante": None if disponible is None else max(t.cantidad - disponible, 0),
+            })
+        return {
+            "pedido_id": pedido.pk,
+            "folio": pedido.folio,
+            "almacen_surtido": self.ALMACEN_SURTIDO,
+            "total_piezas": sum(r["cantidad"] for r in renglones if not r["es_muestra"]),
+            # Mismo criterio que ``destinos_aplicables``, sin volver a consultar.
+            "destinos_aplicables": [d for d, campo in _DESTINOS_POR_SERVICIO if any(getattr(t, campo) for t in tallas)]
+            + list(_DESTINOS_LOGISTICA),
+            "programacion_conf": pedido.programacion_conf or {"programaciones": []},
+            "renglones": renglones,
+        }
 
     @action(detail=True, methods=["post"], url_path="vincular-sku-muestra")
     def vincular_sku_muestra(self, request, pk=None):
