@@ -6343,6 +6343,85 @@ class CotizacionListadoMonedaTests(TestCase):
         self._sin_consultas_por_fila(MESA_CONTROL_URL, self.mesa_no_admin)
 
 
+class VentasOrderingIgnoradoTests(TestCase):
+    """EC-619: ``?ordering=`` no cambia el orden fijo (``-created_at, -id``) de
+    cotizaciones, mesa de control y pedidos, ni da 500 con fuentes que no son
+    columnas (``get_*_display``). El ``created_at`` va escalonado al revés del id
+    para que ``-id`` o un orden ascendente se distingan del orden fijo."""
+
+    TERMINOS_COTIZACION = (
+        "created_at", "-id", "gran_total", "moneda__codigo_iso",
+        "get_estatus_display", "-get_tipo_pedido_display", "no_existe",
+    )
+    TERMINOS_PEDIDO = ("created_at", "-id", "get_estatus_display", "get_clasificacion_display", "no_existe")
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-ord", razon_social="acme-ord SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="AOR", nombre="acme-ord")
+        cls.mxn = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.admin = Usuario.objects.create(
+            username="adm@acme-ord.test", email="adm@acme-ord.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        ahora = timezone.now()
+        # (días atrás, gran_total, moneda): por id, la primera es la más reciente.
+        datos = [(1, "30.00", cls.usd), (3, "10.00", cls.mxn), (2, "20.00", None)]
+        cotizaciones, pedidos = [], []
+        for i, (dias, total, moneda) in enumerate(datos):
+            cot = Cotizacion.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente, moneda=moneda,
+                gran_total=total, estatus=2,
+            )
+            pedido = Pedido.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente, moneda=cls.mxn,
+                folio=f"P-ORD-{i}", persona_pagos="P", correo_facturas="p@acme-ord.test",
+                telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            )
+            Cotizacion.objects.filter(pk=cot.pk).update(created_at=ahora - timedelta(days=dias))
+            Pedido.objects.filter(pk=pedido.pk).update(created_at=ahora - timedelta(days=dias))
+            cotizaciones.append(cot)
+            pedidos.append(pedido)
+        # Orden fijo: created_at descendente.
+        cls.orden_cotizaciones = [cotizaciones[0].pk, cotizaciones[2].pk, cotizaciones[1].pk]
+        cls.orden_pedidos = [pedidos[0].pk, pedidos[2].pk, pedidos[1].pk]
+        cls.cotizacion = cotizaciones[0]
+
+    def _get(self, url, ordering=None):
+        api = APIClient(raise_request_exception=False)
+        api.force_authenticate(self.admin)
+        resp = api.get(url, {"ordering": ordering} if ordering else {})
+        self.assertEqual(resp.status_code, 200, ordering)
+        return resp.data
+
+    def _ids(self, url, ordering=None):
+        data = self._get(url, ordering)
+        filas = data["results"] if isinstance(data, dict) else data
+        return [f["id"] for f in filas]
+
+    def _revisar(self, url, terminos, esperado):
+        self.assertEqual(self._ids(url), esperado)
+        for termino in terminos:
+            with self.subTest(url=url, ordering=termino):
+                self.assertEqual(self._ids(url, termino), esperado)
+
+    def test_cotizaciones(self):
+        self._revisar(COTIZACIONES_URL, self.TERMINOS_COTIZACION, self.orden_cotizaciones)
+
+    def test_mesa_control(self):
+        self._revisar(MESA_CONTROL_URL, self.TERMINOS_COTIZACION, self.orden_cotizaciones)
+
+    def test_detalle_de_cotizacion(self):
+        for url in (COTIZACIONES_URL, MESA_CONTROL_URL):
+            with self.subTest(url=url):
+                data = self._get(f"{url}{self.cotizacion.pk}/", "get_estatus_display")
+                self.assertEqual(data["id"], self.cotizacion.pk)
+
+    def test_pedidos(self):
+        self._revisar(PEDIDOS_URL, self.TERMINOS_PEDIDO, self.orden_pedidos)
+
+
 class PedidoListadoPiezasVendedorTests(TestCase):
     """EC-571 PE-01: el listado de pedidos trae piezas (todas las tallas, muestras
     incluidas) y vendedor_nombre, sin consultas por fila."""
