@@ -166,7 +166,7 @@ class ProveedorSerializer(serializers.ModelSerializer):
         # ``empresa`` la asigna el servidor (``ProveedorViewSet.perform_create``);
         # ``fecha_baja`` la llena el DELETE. Los acumulados no se escriben por API.
         read_only_fields = [
-            "activo", "empresa", "fecha_baja",
+            "activo", "empresa", "fecha_baja", "codigo",
             "saldo_anterior", "saldo_actual", "saldo_acumulado",
             "plazo_real_dias", "fecha_ultima_compra", "fecha_ultimo_pago",
         ]
