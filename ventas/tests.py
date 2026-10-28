@@ -6260,6 +6260,71 @@ class ImporteIvaTests(TestCase):
         self.assertNotIn("gran_total", data)
 
 
+class CotizacionListadoMonedaTests(TestCase):
+    """EC-617: los listados de cotizaciones y de mesa de control traen ``moneda`` (id)
+    y ``moneda_codigo`` en todas las filas; sin moneda, ambos salen ``null``."""
+
+    @classmethod
+    def setUpTestData(cls):
+        PedidoMesaControlUpdateTests.setUpTestData.__func__(cls)
+        cls.usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        # Mesa de control lista EN REVISIÓN (2) y CAMBIOS SOLICITADOS (5).
+        cls.cot_mxn = cls._cotizacion(cls.moneda, estatus=2)
+        cls.cot_usd = cls._cotizacion(cls.usd, estatus=2)
+        cls.cot_sin_moneda = cls._cotizacion(None, estatus=5)
+
+    @classmethod
+    def _cotizacion(cls, moneda, estatus):
+        return Cotizacion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente, moneda=moneda, estatus=estatus,
+        )
+
+    def _filas(self, url):
+        api = APIClient()
+        api.force_authenticate(self.admin_mesa)
+        resp = api.get(url)
+        self.assertEqual(resp.status_code, 200)
+        # El JSON, no ``resp.data``: lo que importa es que la llave llegue al front.
+        return {f["id"]: f for f in resp.json()}
+
+    def _revisar(self, filas):
+        for fila in filas.values():
+            with self.subTest(cotizacion=fila["id"]):
+                self.assertIn("moneda", fila)
+                self.assertIn("moneda_codigo", fila)
+        esperado = {
+            self.cot_mxn.pk: (self.moneda.pk, "MXN"),
+            self.cot_usd.pk: (self.usd.pk, "USD"),
+            self.cot_sin_moneda.pk: (None, None),
+        }
+        for pk, (moneda, codigo) in esperado.items():
+            with self.subTest(cotizacion=pk):
+                self.assertEqual((filas[pk]["moneda"], filas[pk]["moneda_codigo"]), (moneda, codigo))
+
+    def test_listado_de_cotizaciones(self):
+        filas = self._filas(COTIZACIONES_URL)
+        self.assertIn(self.cotizacion.pk, filas)
+        self._revisar(filas)
+
+    def test_listado_de_mesa_control(self):
+        filas = self._filas(MESA_CONTROL_URL)
+        # Sólo los estatus de mesa de control: la autorizada (3) no aparece.
+        self.assertNotIn(self.cotizacion.pk, filas)
+        self._revisar(filas)
+
+    def test_sin_consultas_por_fila(self):
+        for url in (COTIZACIONES_URL, MESA_CONTROL_URL):
+            with self.subTest(url=url):
+                self._filas(url)
+                with CaptureQueriesContext(connection) as base:
+                    antes = self._filas(url)
+                otras = [self._cotizacion(m, estatus=2) for m in (self.moneda, self.usd, None, self.usd)]
+                with self.assertNumQueries(len(base)):
+                    despues = self._filas(url)
+                self.assertEqual(len(despues), len(antes) + len(otras))
+                Cotizacion.objects.filter(pk__in=[c.pk for c in otras]).delete()
+
+
 class PedidoListadoPiezasVendedorTests(TestCase):
     """EC-571 PE-01: el listado de pedidos trae piezas (todas las tallas, muestras
     incluidas) y vendedor_nombre, sin consultas por fila."""
