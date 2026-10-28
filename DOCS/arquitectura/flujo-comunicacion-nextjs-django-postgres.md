@@ -100,7 +100,7 @@ Como la cookie usa `SameSite=None`, cualquier página podría disparar requests 
 `ERP/settings.py:328-343`:
 
 - `CORS_ALLOW_ALL_ORIGINS=False`, `CORS_ALLOW_CREDENTIALS=True` (obligatorio para cookies cross-site).
-- `CORS_ALLOWED_ORIGINS` por env var (default solo `localhost:3000`).
+- `CORS_ALLOWED_ORIGINS` por env var (default solo `localhost:3000`, `:3001` y `:3002`, http y https).
 - `CORS_ALLOWED_ORIGIN_REGEXES`: cualquier `*.onrender.com` y `*.vercel.app` — **incluye previews de Vercel**, no solo producción. Amplio a propósito para no bloquear PRs de Next.js, pero es superficie extra.
 - `CORS_URLS_REGEX = r'^/api/.*$'` — CORS solo aplica a `/api/`, no a las vistas HTML del Core (`/`, `/QA/`, etc.), que son same-origin por diseño.
 
