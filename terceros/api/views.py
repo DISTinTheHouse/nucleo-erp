@@ -16,6 +16,7 @@ from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.shortcuts import get_object_or_404
+from nucleo.models import Empresa
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import (
     ClienteSerializer,
@@ -452,7 +453,17 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         empresa = getattr(self.request.user, "empresa", None)
         if empresa is None:
             raise ValidationError({"empresa": "El usuario no tiene una empresa asignada."})
-        serializer.save(empresa=empresa)
+        # Codigo consecutivo por empresa: PROV00001, PROV00002...; se bloquea la
+        # empresa para que dos altas simultaneas no tomen el mismo numero.
+        with transaction.atomic():
+            Empresa.objects.select_for_update().filter(pk=empresa.pk).first()
+            ultimo = max(
+                (int(c[4:]) for c in Proveedor.objects.filter(
+                    empresa=empresa, codigo__regex=r"^PROV[0-9]+$"
+                ).values_list("codigo", flat=True)),
+                default=0,
+            )
+            serializer.save(empresa=empresa, codigo=f"PROV{ultimo + 1:05d}")
 
     def perform_destroy(self, instance):
         instance.activo = False
