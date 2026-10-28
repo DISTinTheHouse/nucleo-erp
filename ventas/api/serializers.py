@@ -379,6 +379,8 @@ class CotizacionDashboardItemSerializer(_ImportesIvaMixin, serializers.ModelSeri
     )
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     cliente_razon_social = serializers.CharField(source="cliente.razon_social", read_only=True)
+    # ``moneda`` admite null: sin ``allow_null`` DRF omite la llave en vez de mandar null.
+    moneda_codigo = serializers.CharField(source="moneda.codigo_iso", read_only=True, allow_null=True)
     pedido_id = serializers.IntegerField(read_only=True)
     pedido_folio = serializers.CharField(read_only=True)
     piezas = serializers.SerializerMethodField()
@@ -430,8 +432,10 @@ class CotizacionDashboardItemSerializer(_ImportesIvaMixin, serializers.ModelSeri
             "updated_at",
             "pedido_id",
             "pedido_folio",
+            "moneda",
+            "moneda_codigo",
         ]
-        read_only_fields = ["motivo_rechazo"]
+        read_only_fields = ["motivo_rechazo", "moneda"]
 
 class CotizacionDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
