@@ -6279,13 +6279,15 @@ class CotizacionListadoMonedaTests(TestCase):
             empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente, moneda=moneda, estatus=estatus,
         )
 
-    def _filas(self, url):
+    def _filas(self, url, user=None):
         api = APIClient()
-        api.force_authenticate(self.admin_mesa)
+        api.force_authenticate(user or self.admin_mesa)
         resp = api.get(url)
         self.assertEqual(resp.status_code, 200)
         # El JSON, no ``resp.data``: lo que importa es que la llave llegue al front.
-        return {f["id"]: f for f in resp.json()}
+        listado = resp.json()
+        filas = listado["results"] if isinstance(listado, dict) else listado
+        return {f["id"]: f for f in filas}
 
     def _revisar(self, filas):
         for fila in filas.values():
@@ -6312,17 +6314,33 @@ class CotizacionListadoMonedaTests(TestCase):
         self.assertNotIn(self.cotizacion.pk, filas)
         self._revisar(filas)
 
-    def test_sin_consultas_por_fila(self):
-        for url in (COTIZACIONES_URL, MESA_CONTROL_URL):
-            with self.subTest(url=url):
-                self._filas(url)
-                with CaptureQueriesContext(connection) as base:
-                    antes = self._filas(url)
-                otras = [self._cotizacion(m, estatus=2) for m in (self.moneda, self.usd, None, self.usd)]
-                with self.assertNumQueries(len(base)):
-                    despues = self._filas(url)
-                self.assertEqual(len(despues), len(antes) + len(otras))
-                Cotizacion.objects.filter(pk__in=[c.pk for c in otras]).delete()
+    def test_listado_de_mesa_control_operador_no_admin(self):
+        # ``mesa_no_admin`` no es admin ni superusuario: entra por la rama
+        # ``base.filter(empresa=empresa)`` de ``MesaControlViewSet.get_queryset``,
+        # no por ``cotizaciones_visibles``. Si no lo reconociera como mesa de
+        # control, el listado saldría vacío y ``_revisar`` fallaría.
+        self.assertFalse(self.mesa_no_admin.is_admin_empresa or self.mesa_no_admin.is_superuser)
+        filas = self._filas(MESA_CONTROL_URL, self.mesa_no_admin)
+        self.assertEqual(set(filas), {self.cot_mxn.pk, self.cot_usd.pk, self.cot_sin_moneda.pk})
+        self._revisar(filas)
+
+    def _sin_consultas_por_fila(self, url, user=None):
+        self._filas(url, user)
+        with CaptureQueriesContext(connection) as base:
+            antes = self._filas(url, user)
+        otras = [self._cotizacion(m, estatus=2) for m in (self.moneda, self.usd, None, self.usd)]
+        with self.assertNumQueries(len(base)):
+            despues = self._filas(url, user)
+        self.assertEqual(len(despues), len(antes) + len(otras))
+
+    def test_cotizaciones_sin_consultas_por_fila(self):
+        self._sin_consultas_por_fila(COTIZACIONES_URL)
+
+    def test_mesa_control_sin_consultas_por_fila(self):
+        self._sin_consultas_por_fila(MESA_CONTROL_URL)
+
+    def test_mesa_control_operador_no_admin_sin_consultas_por_fila(self):
+        self._sin_consultas_por_fila(MESA_CONTROL_URL, self.mesa_no_admin)
 
 
 class PedidoListadoPiezasVendedorTests(TestCase):
