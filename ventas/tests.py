@@ -6421,6 +6421,28 @@ class VentasOrderingIgnoradoTests(TestCase):
     def test_pedidos(self):
         self._revisar(PEDIDOS_URL, self.TERMINOS_PEDIDO, self.orden_pedidos)
 
+    def test_backends_sin_ordering(self):
+        from django_filters.rest_framework import DjangoFilterBackend
+        from rest_framework.filters import SearchFilter
+        from ventas.api.views import MesaControlViewSet
+
+        # Exactamente los dos globales que no ordenan, en el mismo orden.
+        for viewset in (CotizacionViewSet, MesaControlViewSet, PedidoViewSet):
+            with self.subTest(viewset=viewset.__name__):
+                self.assertEqual(tuple(viewset.filter_backends), (DjangoFilterBackend, SearchFilter))
+
+    def test_schema_sin_parametro_ordering(self):
+        from drf_spectacular.generators import SchemaGenerator
+
+        # Mismo generador que ``/api/schema/`` (y que el test de esquema de finanzas).
+        schema = SchemaGenerator().get_schema(request=None, public=True)
+        for url in (COTIZACIONES_URL, MESA_CONTROL_URL, PEDIDOS_URL):
+            with self.subTest(url=url):
+                parametros = {p["name"] for p in schema["paths"][url]["get"].get("parameters", [])}
+                self.assertNotIn("ordering", parametros)
+                # ``SearchFilter`` se conserva: su parámetro sigue en el schema.
+                self.assertIn("search", parametros)
+
 
 class PedidoListadoPiezasVendedorTests(TestCase):
     """EC-571 PE-01: el listado de pedidos trae piezas (todas las tallas, muestras

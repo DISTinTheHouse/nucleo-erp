@@ -368,10 +368,11 @@ def _texto_comentario(data):
 # Los backends globales menos ``OrderingFilter`` (EC-619), para los listados de orden
 # fijo: sin ``ordering_fields``, DRF acepta en ``?ordering=`` los ``source`` del
 # serializer, que reemplazaban ese orden y daban 500 con los que no son columnas
-# (``get_estatus_display``). Así el parámetro se ignora y sale del schema.
-FILTER_BACKENDS_SIN_ORDERING = [
+# (``get_estatus_display``). Así el parámetro se ignora y sale del schema. Tupla: el
+# mismo objeto lo comparten varios ViewSets y ninguno debe poder mutarlo.
+FILTER_BACKENDS_SIN_ORDERING = tuple(
     backend for backend in api_settings.DEFAULT_FILTER_BACKENDS if not issubclass(backend, OrderingFilter)
-]
+)
 
 
 class CotizacionViewSet(viewsets.ModelViewSet):
@@ -3059,6 +3060,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # ``nulls_last``: ``Pedido.created_at`` se agregó como NULL-able
         # (migración 0007) y los pedidos previos siguen en NULL; en PostgreSQL
         # un DESC los pondría al principio del listado.
+        # El orden es fijo porque ``filter_backends`` no incluye ``OrderingFilter``:
+        # el global corre después de ``get_queryset`` y lo reemplazaría con
+        # ``?ordering=`` (EC-619, igual que en ``CotizacionViewSet``).
         return qs.order_by(F("created_at").desc(nulls_last=True), "-id")
 
     def _exigir_permiso_campos_contabilidad(self, request):
