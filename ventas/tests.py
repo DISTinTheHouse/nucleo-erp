@@ -1710,6 +1710,33 @@ class PedidoProgramarTests(TestCase):
             pedido_programar_url((pedido or self.pedido).pk), payload, format="json"
         )
 
+    def test_get_contexto_con_stock_en_alm00(self):
+        alm00 = Almacen.objects.create(empresa=self.empresa, sucursal=self.sucursal, codigo="ALM-00",
+                                       nombre="PRODUCTO TERMINADO", tipo_almacen=TipoAlmacen.PRODUCTO_TERMINADO)
+        color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000")
+        variante = ProductoVariante.objects.create(producto=self.producto, empresa=self.empresa, color=color,
+                                                   talla=self.talla_m, sku="PLAY-M", precio_base="1")
+        PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=self.pedido, cantidad=50).update(variante=variante)
+        Existencia.objects.create(producto=self.producto, producto_variante=variante, almacen=alm00, cantidad=20)
+        Existencia.objects.create(producto=self.producto, producto_variante=variante, almacen=self.almacen, cantidad=999)
+        client = APIClient()
+        client.force_authenticate(user=self.mesa_no_admin)
+        resp = client.get(pedido_programar_url(self.pedido.pk))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["total_piezas"], 120)
+        self.assertEqual(resp.data["destinos_aplicables"], ["BORDADO", "REFLEJANTE", "CORTE_MANGA", "EMBARQUE", "APARTADO"])
+        con_stock = next(r for r in resp.data["renglones"] if r["variante_id"] == variante.pk)
+        # Solo cuenta ALM-00, no el otro almacén PT.
+        self.assertEqual((con_stock["stock_disponible"], con_stock["faltante"]), (20, 30))
+        sin_variante = next(r for r in resp.data["renglones"] if r["variante_id"] is None)
+        self.assertIsNone(sin_variante["stock_disponible"])
+
+    def test_get_contexto_solo_mesa_control_y_su_empresa(self):
+        for user, esperado in ((self.vendedor, 400), (self.admin_otra_empresa, 404)):
+            client = APIClient()
+            client.force_authenticate(user=user)
+            self.assertEqual(client.get(pedido_programar_url(self.pedido.pk)).status_code, esperado)
+
     def _programacion_db(self, pedido=None):
         pedido = pedido or self.pedido
         pedido.refresh_from_db(fields=["programacion_conf"])
