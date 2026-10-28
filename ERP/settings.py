@@ -336,14 +336,14 @@ SPECTACULAR_SETTINGS = {
 # =========================
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = config('CORS_ALLOW_CREDENTIALS', default=True, cast=bool)
-CORS_ALLOWED_ORIGINS = [o.strip() for o in config('CORS_ALLOWED_ORIGINS', default='http://localhost:3000,https://localhost:3000').split(',') if o.strip()]
+CORS_ALLOWED_ORIGINS = [o.strip() for o in config('CORS_ALLOWED_ORIGINS', default='http://localhost:3000,https://localhost:3000,http://localhost:3001,https://localhost:3001,http://localhost:3002,https://localhost:3002').split(',') if o.strip()]
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r'^https://.*\.onrender\.com$',
     r'^https://.*\.vercel\.app$',
 ]
 CORS_URLS_REGEX = r'^/api/.*$'
 
-CSRF_TRUSTED_ORIGINS = [o.strip() for o in config('CSRF_TRUSTED_ORIGINS', default='https://*.onrender.com,https://*.vercel.app,https://localhost:3000,http://localhost:3000').split(',') if o.strip()]
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in config('CSRF_TRUSTED_ORIGINS', default='https://*.onrender.com,https://*.vercel.app,https://localhost:3000,http://localhost:3000,https://localhost:3001,http://localhost:3001,https://localhost:3002,http://localhost:3002').split(',') if o.strip()]
 if IS_VERCEL:
     vercel_url = os.environ.get('VERCEL_URL')
     if vercel_url:
