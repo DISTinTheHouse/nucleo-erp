@@ -379,14 +379,18 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
         instance.folio = f"{prefijo_respaldo}-{empresa.pk}-{instance.id}"
 
+    @staticmethod
+    def _sucursales_del_usuario(user, empresa):
+        """Sucursales activas de ``empresa`` que el usuario puede usar: todas para
+        superusuario/admin de empresa; si no, las asignadas (#720)."""
+        qs = Sucursal.objects.filter(empresa=empresa, activo=True)
+        if user.is_superuser or getattr(user, "is_admin_empresa", False):
+            return qs
+        return qs.filter(pk__in=user.sucursales_permitidas())
+
     def _get_default_sucursal(self, user, empresa):
-        suc = getattr(user, "sucursal_default", None)
-        if suc and getattr(suc, "empresa_id", None) == getattr(empresa, "pk", None):
-            return suc
-        try:
-            return Sucursal.objects.filter(empresa=empresa, activo=True).order_by("codigo").first()
-        except Exception:
-            return None
+        permitidas = self._sucursales_del_usuario(user, empresa)
+        return permitidas.filter(pk=user.sucursal_default_id).first() or permitidas.order_by("codigo").first()
 
     def _get_default_moneda(self, empresa):
         moneda = getattr(empresa, "moneda_base", None)
@@ -574,7 +578,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         sucursales = []
         if empresa:
             sucursales = list(
-                Sucursal.objects.filter(empresa=empresa, activo=True)
+                self._sucursales_del_usuario(user, empresa)
                 .order_by("codigo")
                 .values("id_sucursal", "codigo", "nombre")
             )
@@ -660,6 +664,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             self._validar_encabezado_empresa(
                 empresa, sucursal_id=sucursal_id, proveedor_id=proveedor_id, moneda_id=moneda_id,
             )
+            # Solo una sucursal asignada al usuario, si la OC estrena o cambia de sucursal (#720).
+            if has_sucursal and str(oc.sucursal_id) != str(sucursal_id) and not (
+                self._sucursales_del_usuario(user, empresa).filter(pk=sucursal_id).exists()
+            ):
+                raise ValidationError({"sucursal": "No tienes asignada esta sucursal."})
             self._validar_renglones_empresa(empresa, detalle)
             pedidos_ids = self._validar_pedidos_empresa(empresa, header)
 
