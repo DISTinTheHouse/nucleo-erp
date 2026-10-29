@@ -50,6 +50,9 @@ def folio_preview(empresa, sucursal, tipo_documento="Picking"):
 # EMBARQUE/REFLEJANTE/CORTE_MANGA no tienen almacén propio: van sin sugerencia.
 ALMACEN_POR_DESTINO = {"APARTADO": "APARTADOS", "BORDADO": "BORDADOS"}
 
+# ``Almacen.estatus`` declara sus choices en línea (sin enum): único lugar del valor en wms.
+ALMACEN_ACTIVO = "ACTIVO"
+
 
 def programaciones_de(pedido, almacenes=None):
     """Parcialidades programadas del pedido. Con ``almacenes`` ({nombre en mayúsculas:
@@ -78,7 +81,7 @@ def almacenes_por_destino_de_sucursales(empresa_id, sucursal_ids):
     almacenes = Almacen.objects.filter(
         empresa_id=empresa_id,
         sucursal_id__in=sucursal_ids,
-        estatus="ACTIVO",
+        estatus=ALMACEN_ACTIVO,
         permite_entrada=True,
         nombre__iregex=r"^(" + "|".join(ALMACEN_POR_DESTINO.values()) + r")$",
     ).order_by("pk")
@@ -292,7 +295,7 @@ def sugerir_almacenes(pedido, almacen_origen_actual, almacen_destino_actual, alm
         candidatos = Almacen.objects.filter(
             empresa_id=pedido.empresa_id,
             sucursal_id=pedido.sucursal_id,
-            estatus="ACTIVO",
+            estatus=ALMACEN_ACTIVO,
             permite_salida=True,
         ).order_by("pk")
         exclude_pks = []
