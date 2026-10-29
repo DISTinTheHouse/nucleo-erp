@@ -1719,6 +1719,10 @@ class PedidoProgramarTests(TestCase):
         PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=self.pedido, cantidad=50).update(variante=variante)
         Existencia.objects.create(producto=self.producto, producto_variante=variante, almacen=alm00, cantidad=20)
         Existencia.objects.create(producto=self.producto, producto_variante=variante, almacen=self.almacen, cantidad=999)
+        otra_sucursal = Sucursal.objects.create(empresa=self.empresa, codigo="GDL", nombre="Guadalajara")
+        alm00_otra = Almacen.objects.create(empresa=self.empresa, sucursal=otra_sucursal, codigo="ALM-00",
+                                            nombre="PT GDL", tipo_almacen=TipoAlmacen.PRODUCTO_TERMINADO)
+        Existencia.objects.create(producto=self.producto, producto_variante=variante, almacen=alm00_otra, cantidad=500)
         client = APIClient()
         client.force_authenticate(user=self.mesa_no_admin)
         resp = client.get(pedido_programar_url(self.pedido.pk))
@@ -1730,6 +1734,15 @@ class PedidoProgramarTests(TestCase):
         self.assertEqual((con_stock["stock_disponible"], con_stock["faltante"]), (20, 30))
         sin_variante = next(r for r in resp.data["renglones"] if r["variante_id"] is None)
         self.assertIsNone(sin_variante["stock_disponible"])
+
+    def test_patch_conserva_sello_de_parcialidades_sin_cambio(self):
+        previa = {"destino": "EMBARQUE", "cantidad": 10}
+        self._patch(self.mesa_no_admin, {"programaciones": [previa]})
+        sello = self._programacion_db()["programaciones"][0]
+        self._patch(self.admin_mesa, {"programaciones": [previa, {"destino": "APARTADO", "cantidad": 5}]})
+        guardadas = self._programacion_db()["programaciones"]
+        self.assertEqual((guardadas[0]["usuario_id"], guardadas[0]["fecha"]), (self.mesa_no_admin.pk, sello["fecha"]))
+        self.assertEqual(guardadas[1]["usuario_id"], self.admin_mesa.pk)
 
     def test_get_contexto_solo_mesa_control_y_su_empresa(self):
         for user, esperado in ((self.vendedor, 400), (self.admin_otra_empresa, 404)):
@@ -2793,6 +2806,13 @@ class RechazarCambiosCotizacionTests(TestCase):
     def _autorizar(self):
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")
         self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_autorizar_sin_sucursal_responde_400(self):
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(sucursal=None)
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("sucursal", resp.json())
+        self.assertFalse(Pedido.objects.filter(cotizacion=self.cotizacion).exists())
 
     def _forzar_cambios_solicitados(self, **cambios):
         # Simula que mesa de control editó la cotización ya autorizada

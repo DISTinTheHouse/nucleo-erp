@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.db import transaction
 from terceros.models import Cliente, Proveedor, Transportista
 
 
@@ -48,6 +49,15 @@ class ProveedorAdmin(admin.ModelAdmin):
     ordering = ("nombre", "id")
     autocomplete_fields = ("empresa", "sat_regimen_fiscal", "sat_forma_pago", "sat_metodo_pago", "moneda")
     list_select_related = ("empresa", "sat_regimen_fiscal", "sat_forma_pago", "sat_metodo_pago", "moneda")
+    # El código lo genera el sistema (PROV00001...), igual que en la API (#715).
+    readonly_fields = ("codigo",)
+
+    def save_model(self, request, obj, form, change):
+        if change or obj.empresa_id is None:
+            return super().save_model(request, obj, form, change)
+        with transaction.atomic():
+            obj.codigo = Proveedor.siguiente_codigo(obj.empresa)
+            super().save_model(request, obj, form, change)
 
 
 @admin.register(Transportista)

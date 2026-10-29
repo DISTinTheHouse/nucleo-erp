@@ -96,7 +96,7 @@ class ProveedorEmpresaTests(TestCase):
 
     def _body(self, **extra):
         body = {
-            "nombre": "Telas SA", "codigo": "P001", "razon_social": "Telas SA de CV",
+            "nombre": "Telas SA", "razon_social": "Telas SA de CV",
             "telefono": "8100000000", "contacto_principal": "Ana", "rfc": "TEL010101AAA",
             "email": "ventas@telas.test", "sat_regimen_fiscal": self.regimen.pk,
             "sat_forma_pago": self.forma.pk, "sat_metodo_pago": self.metodo.pk,
@@ -130,6 +130,27 @@ class ProveedorEmpresaTests(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         proveedor.refresh_from_db()
         self.assertEqual(proveedor.empresa_id, self.empresa.pk)
+
+    def test_codigo_consecutivo_ignora_el_del_cliente(self):
+        primero = self.client_api.post(self.URL, self._body(codigo="MANUAL"), format="json")
+        segundo = self.client_api.post(self.URL, self._body(), format="json")
+        self.assertEqual((primero.data["codigo"], segundo.data["codigo"]), ("PROV00001", "PROV00002"))
+        resp = self.client_api.patch(f"{self.URL}{segundo.data['id']}/", {"codigo": "X"}, format="json")
+        self.assertEqual(resp.data["codigo"], "PROV00002")
+
+    def test_codigo_por_empresa_cuenta_bajas_e_ignora_heredados(self):
+        baja = self._proveedor()
+        Proveedor.objects.filter(pk=baja.pk).update(codigo="prov00007", activo=False)
+        heredado = self._proveedor()
+        Proveedor.objects.filter(pk=heredado.pk).update(codigo="PROV-0001")
+        Proveedor.objects.filter(pk=self._proveedor().pk).update(empresa=self.otra, codigo="PROV00050")
+        self.assertEqual(self._proveedor().codigo, "PROV00008")
+
+    def test_codigo_unico_por_empresa_en_bd(self):
+        from django.db import IntegrityError, transaction
+        p = self._proveedor()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Proveedor.objects.filter(pk=self._proveedor().pk).update(codigo=p.codigo)
 
     def test_moneda_de_otra_empresa_responde_400(self):
         resp = self.client_api.post(self.URL, self._body(moneda=self.moneda_ajena.pk), format="json")
