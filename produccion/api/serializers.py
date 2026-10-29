@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import serializers
 
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
@@ -2379,3 +2380,48 @@ class VarianteProduccionSerializer(serializers.ModelSerializer):
     class Meta:
         model = VarianteProductoProduccion
         fields = ["id", "sku", "nombre", "talla_nombre", "aplica_catalogo", "sku_catalogo", "pedido_detalle"]
+
+
+class _EditarOrdenServicioSerializer(serializers.ModelSerializer):
+    """PATCH del detalle de reflejante/corte de manga: estatus y datos de
+    seguimiento. Lo demás (pedido, renglones, folio) no se edita aquí."""
+
+    estatus_field = None
+    # Ambos enums comparten valores: 5 = Completado, 7 = Cancelado.
+
+    def validate(self, attrs):
+        if getattr(self.instance, self.estatus_field) == 7:
+            raise serializers.ValidationError({self.estatus_field: "La orden está cancelada: ya no se edita."})
+        return attrs
+
+    def update(self, instance, validated_data):
+        # Completado sin fecha de fin capturada: se sella ahora.
+        if (
+            validated_data.get(self.estatus_field) == 5
+            and "fecha_fin" not in validated_data
+            and not instance.fecha_fin
+        ):
+            validated_data["fecha_fin"] = timezone.now()
+        return super().update(instance, validated_data)
+
+
+class OrdenReflejanteEditarSerializer(_EditarOrdenServicioSerializer):
+    estatus_field = "estatus_reflejante"
+    estatus_reflejante_display = serializers.CharField(source="get_estatus_reflejante_display", read_only=True)
+
+    class Meta:
+        model = OrdenesReflejante
+        fields = ["id", "folio_reflejante", "estatus_reflejante", "estatus_reflejante_display",
+                  "prioridad", "fecha_fin", "observaciones"]
+        read_only_fields = ["id", "folio_reflejante"]
+
+
+class OrdenesCorteMangaEditarSerializer(_EditarOrdenServicioSerializer):
+    estatus_field = "estatus_corte"
+    estatus_corte_display = serializers.CharField(source="get_estatus_corte_display", read_only=True)
+
+    class Meta:
+        model = OrdenesCorteManga
+        fields = ["id", "folio_ocm", "estatus_corte", "estatus_corte_display",
+                  "prioridad", "fecha_fin", "observaciones"]
+        read_only_fields = ["id", "folio_ocm"]

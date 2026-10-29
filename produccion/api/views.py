@@ -68,11 +68,13 @@ from produccion.api.serializers import (
     BordadoAvancesSerializer,
     BordadoIncidenciasSerializer,
     OrdenReflejanteSerializer,
+    OrdenReflejanteEditarSerializer,
     OrdenReflejanteListSerializer,
     OrdenReflejanteRetrieveSerializer,
     ReflejanteAvancesSerializer,
     ReflejanteIncidenciasSerializer,
     OrdenesCorteMangaSerializer,
+    OrdenesCorteMangaEditarSerializer,
     OrdenesCorteMangaListSerializer,
     OrdenesCorteMangaRetrieveSerializer,
     PedidoEspecialListSerializer,
@@ -1427,9 +1429,11 @@ class OrdenReflejanteViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.DestroyModelMixin,
+    mixins.UpdateModelMixin,
     mixins.CreateModelMixin, GenericViewSet
     ):
     queryset = OrdenesReflejante.objects.all()
+    http_method_names = ['get', 'post', 'patch', 'delete']
     serializer_class = OrdenReflejanteSerializer
 
     def get_queryset(self):
@@ -1473,6 +1477,8 @@ class OrdenReflejanteViewSet(
             return OrdenReflejanteListSerializer
         if self.action == "retrieve":
             return OrdenReflejanteRetrieveSerializer
+        if self.action == "partial_update":
+            return OrdenReflejanteEditarSerializer
         return OrdenReflejanteSerializer
 
     def _serializar_pagina(self, ordenes):
@@ -1696,9 +1702,11 @@ class OrdenesCorteMangaViewSet(
     mixins.ListModelMixin,
     mixins.CreateModelMixin,
     mixins.DestroyModelMixin,
+    mixins.UpdateModelMixin,
     GenericViewSet
     ):
     queryset = OrdenesCorteManga.objects.all()
+    http_method_names = ['get', 'post', 'patch', 'delete']
     serializer_class = OrdenesCorteMangaSerializer
 
     def get_queryset(self):
@@ -1740,6 +1748,8 @@ class OrdenesCorteMangaViewSet(
             return OrdenesCorteMangaListSerializer
         if self.action == "retrieve":
             return OrdenesCorteMangaRetrieveSerializer
+        if self.action == "partial_update":
+            return OrdenesCorteMangaEditarSerializer
         return OrdenesCorteMangaSerializer
 
     def retrieve(self, request, *args, **kwargs):
