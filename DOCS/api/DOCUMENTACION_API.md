@@ -2064,7 +2064,8 @@ Una sola llamada con lo que hoy se ve en 3 pestañas (detalle con servicios, sto
 
 - `pedido_detalle_id`: id de la partida (`PedidoDetalle`) a la que pertenece la talla; nunca `null`. Sirve para agrupar las tallas por partida (es el mismo `detalles[].id` del detalle del pedido).
 - `stock_disponible`: existencia en el **ALM-00 (PRODUCTO TERMINADO) de la sucursal del pedido** menos reservas `ACTIVA` de otros pedidos en ese mismo almacén. Con variante se mide la variante; sin variante, el producto (filas de existencia sin variante, misma clave que WMS), pero **sólo si el producto no tiene ninguna variante** (activa o no) en la empresa del pedido. Son piezas enteras: una existencia fraccionaria se trunca. `null` si el renglón es muestra, no tiene producto, o no tiene variante y su producto sí tiene variantes (talla sin resolver, ver issue #731).
-- `faltante`: `max(cantidad - stock_disponible, 0)`; `null` igual que arriba.
+  - **Reparto entre renglones que comparten clave (EC-644):** el stock de una clave (misma variante, o mismo producto sin variantes — p. ej. varias tallas de un producto sin variantes, o la misma variante en dos partidas) **se reparte entre sus renglones en el orden de la respuesta** (`pedido_detalle_id`, luego id de talla): cada renglón recibe lo que queda después de los anteriores, así que la suma de piezas cubiertas nunca excede el disponible. Ej.: disponible 15 y CH/M/G de 10 → CH `15`/`0`, M `5`/`5`, G `0`/`10`. Los renglones `null` no consumen el stock de la clave.
+- `faltante`: `max(cantidad - stock_disponible, 0)`, con el `stock_disponible` ya repartido; `null` igual que arriba.
 - `servicios`: `BORDADO`, `REFLEJANTE`, `CORTE_MANGA`, `CAMBIO_TALLA` que lleva esa talla.
 - Front: pinta la tabla de `renglones`, el `<select>` de destino con `destinos_aplicables`, precarga `programacion_conf.programaciones` y guarda con el `PATCH` de abajo.
 

@@ -1873,6 +1873,80 @@ class PedidoProgramarTests(TestCase):
         with self.assertNumQueries(5):
             client.get(url)
 
+    def _pedido_reparto(self, *partidas):
+        """Pedido nuevo con una partida por elemento: ``(producto, [(talla, cantidad,
+        variante), ...], nombre_externo)``. Devuelve el pedido."""
+        pedido = self._pedido(f"P-REP-{Pedido.objects.count()}")
+        for producto, tallas, externo in partidas:
+            det = PedidoDetalle.objects.create(pedido=pedido, producto=producto, producto_nombre_externo=externo)
+            for talla, cantidad, variante in tallas:
+                PedidoDetalleTalla.objects.create(pedido_detalle=det, talla=talla, cantidad=cantidad, variante=variante)
+        return pedido
+
+    @staticmethod
+    def _stock_renglones(data):
+        return [(r["talla"], r["cantidad"], r["stock_disponible"], r["faltante"]) for r in data["renglones"]]
+
+    def test_get_contexto_reparte_stock_de_producto_sin_variantes_entre_tallas(self):
+        alm00, _, _, sin_variantes = self._escenario_stock()
+        Existencia.objects.create(producto=sin_variantes, almacen=alm00, cantidad=15)
+        ch, g = Talla.objects.create(nombre="CH"), Talla.objects.create(nombre="G")
+        pedido = self._pedido_reparto(
+            (sin_variantes, [(ch, 10, None), (self.talla_m, 10, None), (g, 10, None)], None))
+        self.assertEqual(self._stock_renglones(self._get_contexto(pedido)), [
+            ("CH", 10, 15, 0), ("M", 10, 5, 5), ("G", 10, 0, 10),
+        ])
+
+    def test_get_contexto_reparte_stock_de_la_misma_variante_entre_partidas(self):
+        alm00, _, variante, _ = self._escenario_stock()
+        Existencia.objects.create(producto=self.producto, producto_variante=variante, almacen=alm00, cantidad=12)
+        pedido = self._pedido_reparto(
+            (self.producto, [(self.talla_m, 10, variante)], None),
+            (self.producto, [(self.talla_m, 10, variante)], None),
+        )
+        renglones = self._get_contexto(pedido)["renglones"]
+        self.assertEqual(len({r["pedido_detalle_id"] for r in renglones}), 2)
+        self.assertEqual(self._stock_renglones({"renglones": renglones}), [("M", 10, 12, 0), ("M", 10, 2, 8)])
+
+    def test_get_contexto_reparto_ignora_renglones_null(self):
+        # Muestra del mismo producto sin variantes y talla sin resolver de un producto
+        # con variantes (#731): quedan null y no consumen el stock de la clave.
+        alm00, _, _, sin_variantes = self._escenario_stock()
+        Existencia.objects.create(producto=sin_variantes, almacen=alm00, cantidad=15)
+        Existencia.objects.create(producto=self.producto, almacen=alm00, cantidad=100)
+        pedido = self._pedido_reparto(
+            (sin_variantes, [(self.talla_m, 5, None)], "Muestra del mandil"),
+            (sin_variantes, [(self.talla_m, 10, None)], None),
+            (self.producto, [(self.talla_l, 8, None)], None),
+            (sin_variantes, [(self.talla_l, 10, None)], None),
+        )
+        self.assertEqual(self._stock_renglones(self._get_contexto(pedido)), [
+            ("M", 5, None, None), ("M", 10, 15, 0), ("L", 8, None, None), ("L", 10, 5, 5),
+        ])
+
+    def test_get_contexto_reparto_descuenta_reservas_de_otros_pedidos_antes(self):
+        alm00, _, variante, _ = self._escenario_stock()
+        existencia = Existencia.objects.create(producto=self.producto, producto_variante=variante,
+                                               almacen=alm00, cantidad=20)
+        pedido = self._pedido_reparto(
+            (self.producto, [(self.talla_m, 10, variante)], None),
+            (self.producto, [(self.talla_m, 10, variante)], None),
+        )
+        self._reservar(existencia, 8)          # de otro pedido (self.pedido): resta
+        self._reservar(existencia, 6, pedido=pedido)  # del propio pedido: no resta
+        self.assertEqual(self._stock_renglones(self._get_contexto(pedido)), [("M", 10, 12, 0), ("M", 10, 2, 8)])
+
+    def test_get_contexto_reparto_otra_empresa_404(self):
+        alm00, _, variante, _ = self._escenario_stock()
+        Existencia.objects.create(producto=self.producto, producto_variante=variante, almacen=alm00, cantidad=12)
+        pedido = self._pedido_reparto(
+            (self.producto, [(self.talla_m, 10, variante)], None),
+            (self.producto, [(self.talla_m, 10, variante)], None),
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.admin_otra_empresa)
+        self.assertEqual(client.get(pedido_programar_url(pedido.pk)).status_code, 404)
+
     def test_patch_conserva_sello_de_parcialidades_sin_cambio(self):
         previa = {"destino": "EMBARQUE", "cantidad": 10}
         self._patch(self.mesa_no_admin, {"programaciones": [previa]})
