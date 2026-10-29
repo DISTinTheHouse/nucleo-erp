@@ -3039,6 +3039,18 @@ class RechazarCambiosCotizacionTests(TestCase):
         self.assertIn(self.producto.nombre, resp.json()["color"][0])
         self.assertFalse(Pedido.objects.filter(cotizacion=self.cotizacion).exists())
 
+    def test_autorizar_responde_pedido_nuevo_sin_consultar_documentos_vacios(self):
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        pedido = resp.json()["pedido"]
+        self.assertEqual([d["tipo"] for d in pedido["documentos"]], ["cotizacion"])
+        self.assertEqual(pedido["folios_picking"], [])
+        self.assertEqual(pedido["tracker_picking"]["total_asignado"], "0")
+        # Lo mismo que daría el detalle del pedido.
+        detalle = self.client.get(f"/api/v1/ventas/pedidos/{pedido['id']}/").json()
+        for campo in ("documentos", "folios_picking", "tracker_picking", "destinos_aplicables"):
+            self.assertEqual(pedido[campo], detalle[campo], campo)
+
     def test_autorizar_sin_sucursal_responde_400(self):
         Cotizacion.objects.filter(pk=self.cotizacion.pk).update(sucursal=None)
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")

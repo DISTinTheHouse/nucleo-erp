@@ -27,3 +27,11 @@ def destinos_aplicables(pedido):
     ]
     destinos.extend(_DESTINOS_LOGISTICA)
     return destinos
+
+
+def destinos_de_tallas(tallas):
+    """``destinos_aplicables`` sobre tallas ya cargadas en memoria: 0 consultas."""
+    tallas = list(tallas)
+    return [
+        destino for destino, campo in _DESTINOS_POR_SERVICIO if any(getattr(t, campo) for t in tallas)
+    ] + list(_DESTINOS_LOGISTICA)
