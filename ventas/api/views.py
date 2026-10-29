@@ -3514,6 +3514,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 disponible = max(int((stock.get(t.variante_id) or 0) - (reservado.get(t.variante_id) or 0)), 0)
             renglones.append({
                 "pedido_detalle_talla_id": t.pk,
+                "pedido_detalle_id": t.pedido_detalle_id,
                 "producto": det.producto.nombre if det.producto else det.producto_nombre_externo,
                 "color": det.color.nombre if det.color else None,
                 "talla": t.talla.nombre,
