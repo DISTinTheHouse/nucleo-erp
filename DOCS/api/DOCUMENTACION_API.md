@@ -2063,7 +2063,7 @@ Una sola llamada con lo que hoy se ve en 3 pestañas (detalle con servicios, sto
 ```
 
 - `pedido_detalle_id`: id de la partida (`PedidoDetalle`) a la que pertenece la talla; nunca `null`. Sirve para agrupar las tallas por partida (es el mismo `detalles[].id` del detalle del pedido).
-- `stock_disponible`: existencia en el **ALM-00 (PRODUCTO TERMINADO) de la sucursal del pedido** menos reservas `ACTIVA` de otros pedidos en ese mismo almacén. Con variante se mide la variante; sin variante, el producto (filas de existencia sin variante, misma clave que WMS). `null` sólo si el renglón es muestra o no tiene producto.
+- `stock_disponible`: existencia en el **ALM-00 (PRODUCTO TERMINADO) de la sucursal del pedido** menos reservas `ACTIVA` de otros pedidos en ese mismo almacén. Con variante se mide la variante; sin variante, el producto (filas de existencia sin variante, misma clave que WMS), pero **sólo si el producto no tiene ninguna variante** (activa o no). `null` si el renglón es muestra, no tiene producto, o no tiene variante y su producto sí tiene variantes (talla sin resolver, ver issue #731).
 - `faltante`: `max(cantidad - stock_disponible, 0)`; `null` igual que arriba.
 - `servicios`: `BORDADO`, `REFLEJANTE`, `CORTE_MANGA`, `CAMBIO_TALLA` que lleva esa talla.
 - Front: pinta la tabla de `renglones`, el `<select>` de destino con `destinos_aplicables`, precarga `programacion_conf.programaciones` y guarda con el `PATCH` de abajo.

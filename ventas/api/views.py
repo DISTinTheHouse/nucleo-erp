@@ -5,7 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import router, transaction
 from django.db.models.deletion import Collector, ProtectedError, RestrictedError
-from django.db.models import Count, F, OuterRef, Prefetch, Q, Subquery, Sum
+from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, Subquery, Sum
 from django.db.models.functions import Coalesce
 from datetime import timedelta
 from django.utils import timezone
@@ -3475,20 +3475,28 @@ class PedidoViewSet(viewsets.ModelViewSet):
     def _programar_contexto(self, pedido):
         """Renglones del pedido con servicios y stock disponible en el ALM-00 de la
         sucursal del pedido (existencia menos reservas activas de otros pedidos), por
-        variante o, sin ella, por producto. Queries fijas, sin importar renglones."""
+        variante o, si el producto no tiene variantes, por producto. Queries fijas, sin
+        importar renglones."""
+        from catalogo.models import ProductoVariante
         from ventas.services.programacion_service import _DESTINOS_LOGISTICA, _DESTINOS_POR_SERVICIO
 
         tallas = list(
             PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
             .select_related("pedido_detalle__producto", "pedido_detalle__color", "talla", "variante")
+            # Activas o no: el guardado resuelve la variante sin mirar ``activo``.
+            .annotate(producto_con_variantes=Exists(
+                ProductoVariante.objects.filter(producto_id=OuterRef("pedido_detalle__producto_id"))))
             .order_by("pedido_detalle_id", "id")
         )
         # Clave de stock como en ``ExistenciaService``: la variante o, sin ella, el
-        # producto (filas de ``Existencia`` sin variante). Las muestras no se surten de aquí.
+        # producto (filas de ``Existencia`` sin variante). Sólo si el producto no tiene
+        # ninguna variante: si las tiene, la talla quedó sin resolver (#731) y su stock
+        # por producto no dice nada. Las muestras no se surten de aquí.
         def clave(t):
             if t.variante_id:
                 return ("variante", t.variante_id)
-            if t.pedido_detalle.producto_id and not es_muestra(t.pedido_detalle):
+            if (t.pedido_detalle.producto_id and not t.producto_con_variantes
+                    and not es_muestra(t.pedido_detalle)):
                 return ("producto", t.pedido_detalle.producto_id)
             return None
 
