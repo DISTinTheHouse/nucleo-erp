@@ -245,22 +245,25 @@ class FacturaTimbradoService:
         return nota
 
     @staticmethod
-    def _timbrar_nota(nota):
-        def preparar(n):
-            n = NotaCredito.objects.select_related(
-                "factura__empresa", "factura__pedido__cliente_regimen_fiscal",
-                "factura__cliente__sat_regimen_fiscal", "factura__sucursal",
-            ).get(pk=n.pk)
-            _exigir_empresa_duena(n.factura.empresa, "cfdi")
-            if n.cfdi_uuid:
-                raise ErrorDeNegocio({"cfdi": f"La nota ya está timbrada (UUID {n.cfdi_uuid})."})
-            if n.cfdi_pendiente:
-                raise ErrorDeNegocio({"cfdi": PENDIENTE.format("cfdi_pendiente")})
-            if n.estatus != NotaCredito.Estatus.EMITIDA:
-                raise ErrorDeNegocio({"estatus": "Solo se timbra una nota de crédito Emitida."})
-            NotaCreditoService.validar_factura(n.factura)
-            return construir_payload_nota_credito(n)
+    def preparar_nota(n):
+        """Valida y arma el CFDI de egreso; levanta ``ErrorDeNegocio`` si falta algo."""
+        n = NotaCredito.objects.select_related(
+            "factura__empresa", "factura__pedido__cliente_regimen_fiscal",
+            "factura__cliente__sat_regimen_fiscal", "factura__sucursal",
+        ).get(pk=n.pk)
+        _exigir_empresa_duena(n.factura.empresa, "cfdi")
+        if n.cfdi_uuid:
+            raise ErrorDeNegocio({"cfdi": f"La nota ya está timbrada (UUID {n.cfdi_uuid})."})
+        if n.cfdi_pendiente:
+            raise ErrorDeNegocio({"cfdi": PENDIENTE.format("cfdi_pendiente")})
+        if n.estatus != NotaCredito.Estatus.EMITIDA:
+            raise ErrorDeNegocio({"estatus": "Solo se timbra una nota de crédito Emitida."})
+        NotaCreditoService.validar_factura(n.factura)
+        return construir_payload_nota_credito(n)
 
+    @staticmethod
+    def _timbrar_nota(nota):
+        preparar = FacturaTimbradoService.preparar_nota
         obj, error = _timbrar(NotaCredito, nota.pk, preparar, CAMPOS_CFDI, "cfdi", "CFDI")
         _copiar(obj, nota, CAMPOS_CFDI)
         return error
