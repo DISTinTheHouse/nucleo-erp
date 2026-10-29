@@ -2044,7 +2044,7 @@ Una vez que el pedido ya fue aceptado/autorizado, mesa de control reparte sus pi
 
 #### `GET /api/v1/ventas/pedidos/{id}/programar/` — pantalla única
 
-Una sola llamada con lo que hoy se ve en 3 pestañas (detalle con servicios, stock, programar). Mismo permiso que el `PATCH` (mesa de control → si no, `400`); otra empresa → `404`. 4 queries fijas.
+Una sola llamada con lo que hoy se ve en 3 pestañas (detalle con servicios, stock, programar). Mismo permiso que el `PATCH` (mesa de control → si no, `400`); otra empresa → `404`. Queries fijas sin importar el número de renglones: pedido, tallas, existencias y reservas (más la del permiso si el usuario no es superusuario ni admin de empresa).
 
 ```json
 {
@@ -2054,14 +2054,16 @@ Una sola llamada con lo que hoy se ve en 3 pestañas (detalle con servicios, sto
   "destinos_aplicables": ["BORDADO", "EMBARQUE", "APARTADO"],
   "programacion_conf": { "programaciones": [] },
   "renglones": [
-    { "pedido_detalle_talla_id": 1198, "producto": "FILIPINA MEDICA LA DAMA", "color": "MARINO",
+    { "pedido_detalle_talla_id": 1198, "pedido_detalle_id": 689,
+      "producto": "FILIPINA MEDICA LA DAMA", "color": "MARINO",
       "talla": "G", "sku": "1022703G", "variante_id": 1564, "es_muestra": false,
       "cantidad": 2, "servicios": ["BORDADO"], "stock_disponible": 2000, "faltante": 0 }
   ]
 }
 ```
 
-- `stock_disponible`: existencia en **ALM-00 (PRODUCTO TERMINADO)** menos reservas activas de otros pedidos. `null` si el renglón no tiene variante o es muestra.
+- `pedido_detalle_id`: id de la partida (`PedidoDetalle`) a la que pertenece la talla; nunca `null`. Sirve para agrupar las tallas por partida (es el mismo `detalles[].id` del detalle del pedido).
+- `stock_disponible`: existencia en el **ALM-00 (PRODUCTO TERMINADO) de la sucursal del pedido** menos reservas `ACTIVA` de otros pedidos en ese mismo almacén. Con variante se mide la variante; sin variante, el producto (filas de existencia sin variante, misma clave que WMS). `null` sólo si el renglón es muestra o no tiene producto.
 - `faltante`: `max(cantidad - stock_disponible, 0)`; `null` igual que arriba.
 - `servicios`: `BORDADO`, `REFLEJANTE`, `CORTE_MANGA`, `CAMBIO_TALLA` que lleva esa talla.
 - Front: pinta la tabla de `renglones`, el `<select>` de destino con `destinos_aplicables`, precarga `programacion_conf.programaciones` y guarda con el `PATCH` de abajo.
