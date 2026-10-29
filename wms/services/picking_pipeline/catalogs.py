@@ -274,37 +274,22 @@ def serializar_almacen(almacen):
     }
 
 
-def sugerir_almacenes(pedido, almacen_origen_actual, almacen_destino_actual, almacenes_destino=None):
-    """Sugiere almacén origen (menor pk != destino) y destino = APARTADOS.
+def sugerir_origen(pedido, destino):
+    """Sugiere el almacén origen del GET onboarding: el ``ACTIVO`` con
+    ``permite_salida`` de menor pk en la sucursal del pedido.
 
-    Regla del GET onboarding: el ``origen`` sugerido nunca es APARTADOS ni el
-    ``destino``, porque el POST rechaza origen = destino con 400. Solo se
-    sugieren almacenes ``ACTIVO`` con el flag que el POST exige: ``permite_salida``
-    al origen y ``permite_entrada`` al destino. ``almacenes_destino`` es el
-    resultado de ``almacenes_por_destino(pedido)`` si el llamador ya lo tiene.
+    Nunca APARTADOS (con cualquier flag) ni ``destino``, porque el POST rechaza
+    origen = destino con 400: sin otro candidato devuelve ``None``.
     """
-    origen_sugerido = almacen_origen_actual
-    destino_sugerido = almacen_destino_actual
-
-    if destino_sugerido is None:
-        if almacenes_destino is None:
-            almacenes_destino = almacenes_por_destino(pedido)
-        destino_sugerido = almacenes_destino.get(ALMACEN_POR_DESTINO["APARTADO"])
-
-    if origen_sugerido is None:
-        # Nunca APARTADOS (con cualquier flag) ni el destino sugerido: sin otro
-        # candidato, ``None`` antes que un par origen/destino que el POST rechaza.
-        candidatos = Almacen.objects.filter(
-            empresa_id=pedido.empresa_id,
-            sucursal_id=pedido.sucursal_id,
-            estatus=ALMACEN_ACTIVO,
-            permite_salida=True,
-        ).exclude(nombre__iexact=ALMACEN_POR_DESTINO["APARTADO"])
-        if destino_sugerido is not None:
-            candidatos = candidatos.exclude(pk=destino_sugerido.pk)
-        origen_sugerido = candidatos.order_by("pk").first()
-
-    return origen_sugerido, destino_sugerido
+    candidatos = Almacen.objects.filter(
+        empresa_id=pedido.empresa_id,
+        sucursal_id=pedido.sucursal_id,
+        estatus=ALMACEN_ACTIVO,
+        permite_salida=True,
+    ).exclude(nombre__iexact=ALMACEN_POR_DESTINO["APARTADO"])
+    if destino is not None:
+        candidatos = candidatos.exclude(pk=destino.pk)
+    return candidatos.order_by("pk").first()
 
 
 def armar_header_preview(pedido):
