@@ -93,11 +93,12 @@ def almacenes_por_destino(pedido):
 
 
 def resolver_apartados_safe(empresa_id, sucursal_id):
-    """GET onboarding: busca el almacén ``APARTADOS`` (iexact) sin fallar.
+    """Busca el almacén ``APARTADOS`` (iexact) sin fallar, sin filtrar ``estatus``
+    ni flags.
 
-    Devuelve el ``Almacen`` o ``None`` si no está configurado. Usado como
-    sugerencia inicial de ``almacen_destino``. Para el POST ver
-    ``resolver_apartados_obligatorio``.
+    Devuelve el ``Almacen`` o ``None`` si no está configurado. Lo usa el POST
+    (``sugerir_apartados_por_defecto``) cuando no llega ``almacen_destino``; las
+    sugerencias del GET onboarding van por ``almacenes_por_destino``, que sí filtra.
     """
     return (
         Almacen.objects.filter(
@@ -121,7 +122,7 @@ def resolver_apartados_obligatorio(pedido):
 
 
 def sugerir_apartados_por_defecto(pedido):
-    """GET/POST: sugiere el almacén ``APARTADOS`` (iexact) como destino default.
+    """POST: sugiere el almacén ``APARTADOS`` (iexact) como destino default.
 
     A diferencia del nombre anterior NO lanza 400 si falta; devuelve el
     ``Almacen`` o ``None`` si no está configurado. El POST onboarding
@@ -270,40 +271,36 @@ def serializar_almacen(almacen):
     }
 
 
-def sugerir_almacenes(pedido, almacen_origen_actual, almacen_destino_actual):
+def sugerir_almacenes(pedido, almacen_origen_actual, almacen_destino_actual, almacenes_destino=None):
     """Sugiere almacén origen (menor pk != destino) y destino = APARTADOS.
 
     Regla del GET onboarding: no exponer como sugerencia un ``origen`` igual
-    al ``destino`` (APARTADOS), porque el POST rechaza ese caso con 400.
+    al ``destino`` (APARTADOS), porque el POST rechaza ese caso con 400. Solo se
+    sugieren almacenes ``ACTIVO`` con el flag que el POST exige: ``permite_salida``
+    al origen y ``permite_entrada`` al destino. ``almacenes_destino`` es el
+    resultado de ``almacenes_por_destino(pedido)`` si el llamador ya lo tiene.
     """
     origen_sugerido = almacen_origen_actual
     destino_sugerido = almacen_destino_actual
 
     if destino_sugerido is None:
-        destino_sugerido = resolver_apartados_safe(pedido.empresa_id, pedido.sucursal_id)
+        if almacenes_destino is None:
+            almacenes_destino = almacenes_por_destino(pedido)
+        destino_sugerido = almacenes_destino.get(ALMACEN_POR_DESTINO["APARTADO"])
 
     if origen_sugerido is None:
+        candidatos = Almacen.objects.filter(
+            empresa_id=pedido.empresa_id,
+            sucursal_id=pedido.sucursal_id,
+            estatus="ACTIVO",
+            permite_salida=True,
+        ).order_by("pk")
         exclude_pks = []
         if destino_sugerido is not None:
             exclude_pks.append(destino_sugerido.pk)
-        origen_sugerido = (
-            Almacen.objects.filter(
-                empresa_id=pedido.empresa_id,
-                sucursal_id=pedido.sucursal_id,
-            )
-            .exclude(pk__in=exclude_pks)
-            .order_by("pk")
-            .first()
-        )
+        origen_sugerido = candidatos.exclude(pk__in=exclude_pks).first()
         if origen_sugerido is None and destino_sugerido is not None:
-            origen_sugerido = (
-                Almacen.objects.filter(
-                    empresa_id=pedido.empresa_id,
-                    sucursal_id=pedido.sucursal_id,
-                )
-                .order_by("pk")
-                .first()
-            )
+            origen_sugerido = candidatos.first()
 
     return origen_sugerido, destino_sugerido
 
