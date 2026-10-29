@@ -1400,6 +1400,7 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 **Línea de muestra (sin SKU de catálogo)**: en vez de `producto`, se manda `producto_nombre_externo` (texto libre, obligatorio para este caso). Dos campos opcionales que el vendedor puede sugerir en esta misma línea:
 - `color`/`color_id` → `CotizacionDetalle.color`.
 - `categoria_producto`/`categoria_producto_id` → `CotizacionDetalle.categoria_producto` (nuevo). Ninguno de los dos se valida como obligatorio ni exclusivo aquí — es orientación para cuando producción/catálogo den de alta el producto real (ver "Pedidos con Producción Especial" más abajo).
+- **Tallas por categoría**: con `categoria_producto`, las tallas deben ser de esa categoría (p. ej. Chamarra → CH…6XG, no 1/3/5); si no → `400 {"detalle": "La talla 1 no corresponde a la categoría Chamarra."}`. Categoría sin tallas configuradas no restringe. Front: llenar el selector con `GET /api/v1/catalogo/talla/?categoria_producto=<id>` al elegir la categoría.
 
 **Folio de Pedido**
 
