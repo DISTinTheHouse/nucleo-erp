@@ -445,6 +445,19 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
                 )
                 self._assert_rechazo(resp, campo, mensaje, antes)
 
+    def test_onboarding_solo_sucursales_asignadas(self):
+        otra = Sucursal.objects.create(empresa=self.a["empresa"], codigo="ZZZ", nombre="No asignada")
+        get = self._client(self.usuario).get(f"{ORDENES_URL}onboarding/")
+        self.assertEqual([s["id_sucursal"] for s in get.data["catalogos"]["sucursales"]], [self.a["sucursal"].pk])
+        root = self._client(self.superuser).get(f"{ORDENES_URL}onboarding/")
+        self.assertIn(otra.pk, [s["id_sucursal"] for s in root.data["catalogos"]["sucursales"]])
+        base = {"sucursal": otra.pk, "proveedor": self.a["proveedor"].pk, "moneda": self.a["moneda"].pk}
+        resp = self._client(self.usuario).post(
+            f"{ORDENES_URL}onboarding/", {"orden_compra": base, "detalle": [self._linea(self.a["producto"])]}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("sucursal", resp.data)
+
     def test_onboarding_edita_rechaza_fk_de_otra_empresa(self):
         antes = self._huella()
         for user in (self.usuario, self.superuser):
