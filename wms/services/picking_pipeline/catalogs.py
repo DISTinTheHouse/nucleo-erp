@@ -55,7 +55,7 @@ def programaciones_de(pedido, almacenes=None):
     """Parcialidades programadas del pedido. Con ``almacenes`` ({nombre en mayúsculas:
     Almacen}) agrega el almacén sugerido de cada destino."""
     filas = []
-    for p in (pedido.programacion_conf or {}).get("programaciones", []):
+    for p in (pedido.programacion_conf or {}).get("programaciones") or []:
         fila = {"destino": p.get("destino"), "cantidad": p.get("cantidad"), "comentarios": p.get("comentarios") or ""}
         if almacenes is not None:
             almacen = almacenes.get(ALMACEN_POR_DESTINO.get(fila["destino"]))
@@ -64,16 +64,32 @@ def programaciones_de(pedido, almacenes=None):
     return filas
 
 
+def almacenes_por_destino_de_sucursales(empresa_id, sucursal_ids):
+    """{sucursal_id: {nombre en mayúsculas: Almacen}} de los almacenes de
+    ``ALMACEN_POR_DESTINO`` en esas sucursales de la empresa. Una consulta.
+
+    Solo almacenes ``ACTIVO`` con ``permite_entrada`` (lo que el POST acepta como
+    destino). Si una sucursal tiene dos con el mismo nombre, gana el de menor pk.
+    Una sucursal sin ninguno no aparece en el resultado.
+    """
+    if not sucursal_ids:
+        return {}
+    por_sucursal = {}
+    almacenes = Almacen.objects.filter(
+        empresa_id=empresa_id,
+        sucursal_id__in=sucursal_ids,
+        estatus="ACTIVO",
+        permite_entrada=True,
+        nombre__iregex=r"^(" + "|".join(ALMACEN_POR_DESTINO.values()) + r")$",
+    ).order_by("pk")
+    for almacen in almacenes:
+        por_sucursal.setdefault(almacen.sucursal_id, {}).setdefault(almacen.nombre.upper(), almacen)
+    return por_sucursal
+
+
 def almacenes_por_destino(pedido):
-    """{nombre: Almacen} de los almacenes de ``ALMACEN_POR_DESTINO`` en la sucursal del pedido. Una consulta."""
-    return {
-        a.nombre.upper(): a
-        for a in Almacen.objects.filter(
-            empresa_id=pedido.empresa_id, sucursal_id=pedido.sucursal_id,
-        ).filter(
-            nombre__iregex=r"^(" + "|".join(ALMACEN_POR_DESTINO.values()) + r")$",
-        ).order_by("-pk")
-    }
+    """{nombre: Almacen} de ``almacenes_por_destino_de_sucursales`` para la sucursal del pedido."""
+    return almacenes_por_destino_de_sucursales(pedido.empresa_id, {pedido.sucursal_id}).get(pedido.sucursal_id, {})
 
 
 def resolver_apartados_safe(empresa_id, sucursal_id):
@@ -171,6 +187,11 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids):
     if not es_staff:
         pedido_qs = pedido_qs.filter(sucursal_id__in=sucursal_ids)
 
+    pedidos = list(pedido_qs[:50])
+    # Almacén sugerido por destino: una consulta para las sucursales de los 50, no una por pedido.
+    almacenes_por_sucursal = almacenes_por_destino_de_sucursales(
+        empresa.pk, {pedido.sucursal_id for pedido in pedidos}
+    )
     pedidos_payload = [
         {
             "id": pedido.id,
@@ -179,9 +200,9 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids):
             "cliente_nombre": getattr(pedido.cliente, "nombre", None),
             "sucursal": pedido.sucursal_id,
             "sucursal_nombre": getattr(pedido.sucursal, "nombre", None),
-            "programaciones": programaciones_de(pedido),
+            "programaciones": programaciones_de(pedido, almacenes_por_sucursal.get(pedido.sucursal_id, {})),
         }
-        for pedido in pedido_qs[:50]
+        for pedido in pedidos
     ]
 
     operadores_qs = (
