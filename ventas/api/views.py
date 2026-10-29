@@ -3473,8 +3473,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
     ALMACEN_SURTIDO = "ALM-00"
 
     def _programar_contexto(self, pedido):
-        """Renglones del pedido con servicios y stock disponible en ALM-00 (existencia
-        menos reservas activas de otros pedidos). Queries fijas, sin importar renglones."""
+        """Renglones del pedido con servicios y stock disponible en el ALM-00 de la
+        sucursal del pedido (existencia menos reservas activas de otros pedidos), por
+        variante o, sin ella, por producto. Queries fijas, sin importar renglones."""
         from ventas.services.programacion_service import _DESTINOS_LOGISTICA, _DESTINOS_POR_SERVICIO
 
         tallas = list(
@@ -3482,31 +3483,47 @@ class PedidoViewSet(viewsets.ModelViewSet):
             .select_related("pedido_detalle__producto", "pedido_detalle__color", "talla", "variante")
             .order_by("pedido_detalle_id", "id")
         )
-        variantes = {t.variante_id for t in tallas if t.variante_id}
-        almacen = dict(producto_variante_id__in=variantes, almacen__empresa_id=pedido.empresa_id,
-                       almacen__sucursal_id=pedido.sucursal_id, almacen__codigo=self.ALMACEN_SURTIDO)
-        stock = dict(
-            Existencia.objects.filter(**almacen).values("producto_variante_id")
-            .annotate(t=Sum("cantidad")).values_list("producto_variante_id", "t")
-        ) if variantes else {}
-        reservado = dict(
-            inventario_reservas.objects.filter(
-                estado=inventario_reservas.Estado.ACTIVA,
-                existencia__producto_variante_id__in=variantes,
-                almacen__empresa_id=pedido.empresa_id, almacen__sucursal_id=pedido.sucursal_id,
-                almacen__codigo=self.ALMACEN_SURTIDO,
-            ).exclude(pedido_detalle__pedido=pedido)
-            .values("existencia__producto_variante_id").annotate(t=Sum("cantidad"))
-            .values_list("existencia__producto_variante_id", "t")
-        ) if variantes else {}
+        # Clave de stock como en ``ExistenciaService``: la variante o, sin ella, el
+        # producto (filas de ``Existencia`` sin variante). Las muestras no se surten de aquí.
+        def clave(t):
+            if t.variante_id:
+                return ("variante", t.variante_id)
+            if t.pedido_detalle.producto_id and not es_muestra(t.pedido_detalle):
+                return ("producto", t.pedido_detalle.producto_id)
+            return None
+
+        claves = {c for c in map(clave, tallas) if c}
+        variantes = {i for tipo, i in claves if tipo == "variante"}
+        productos = {i for tipo, i in claves if tipo == "producto"}
+        alcance = dict(almacen__empresa_id=pedido.empresa_id, almacen__sucursal_id=pedido.sucursal_id,
+                       almacen__codigo=self.ALMACEN_SURTIDO)
+
+        def por_clave(qs, prefijo=""):
+            """Una query: suma ``cantidad`` por clave. Se acumula porque una fila con
+            variante agrupa también por su ``producto_id``."""
+            producto, variante = f"{prefijo}producto_id", f"{prefijo}producto_variante_id"
+            qs = qs.filter(Q(**{f"{variante}__in": variantes})
+                           | Q(**{f"{producto}__in": productos, f"{variante}__isnull": True}))
+            totales = {}
+            for p, v, total in qs.values(producto, variante).annotate(t=Sum("cantidad")).values_list(producto, variante, "t"):
+                c = ("variante", v) if v else ("producto", p)
+                totales[c] = totales.get(c, 0) + total
+            return totales
+
+        stock = por_clave(Existencia.objects.filter(**alcance)) if claves else {}
+        reservado = por_clave(
+            inventario_reservas.objects.filter(estado=inventario_reservas.Estado.ACTIVA, **alcance)
+            .exclude(pedido_detalle__pedido=pedido), "existencia__"
+        ) if claves else {}
 
         renglones = []
         for t in tallas:
             det = t.pedido_detalle
             muestra = es_muestra(det)
+            c = clave(t)
             disponible = None
-            if t.variante_id and not muestra:
-                disponible = max(int((stock.get(t.variante_id) or 0) - (reservado.get(t.variante_id) or 0)), 0)
+            if c and not muestra:
+                disponible = max(int((stock.get(c) or 0) - (reservado.get(c) or 0)), 0)
             renglones.append({
                 "pedido_detalle_talla_id": t.pk,
                 "pedido_detalle_id": t.pedido_detalle_id,
