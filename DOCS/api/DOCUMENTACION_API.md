@@ -4989,18 +4989,18 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
 
 - **Endpoint**: `GET /api/v1/wms/pickings/onboarding/`
 - **Solo pedidos programados**: `pedidos` trae únicamente los que mesa de control ya programó (`PATCH /ventas/pedidos/{id}/programar/`). Un `POST` con un pedido sin programar → `400 {"pedido": "El pedido no está programado; prográmalo antes de surtirlo."}`.
-- **Hacia dónde surtir**: cada pedido trae `programaciones: [{destino, cantidad, comentarios}]`. Con `?pedido=`, `pedido.programaciones[]` agrega `almacen_sugerido: {id, nombre} | null` (APARTADO → APARTADOS, BORDADO → BORDADOS; el resto sin almacén). Front: mostrarlo como pista junto al selector de almacén destino, p. ej. "Programado: APARTADO · 4 pzs → APARTADOS".
+- **Hacia dónde surtir**: cada pedido trae `programaciones: [{destino, cantidad, comentarios, almacen_sugerido}]`, tanto en el listado `pedidos[]` como en `pedido` (con `?pedido=`); para un mismo pedido ambas respuestas traen lo mismo. `almacen_sugerido` es `{id, nombre}` o `null` (ver _Regla de sugerencia de almacenes_ abajo). Front: mostrarlo como pista junto al selector de almacén destino, p. ej. "Programado: APARTADO · 4 pzs → APARTADOS".
 - **Objetivo (rediseño v2: _Tracker de prendas por pedido_)**: dar al frontend todo lo necesario para preparar un surtido parcial o total mediante un flujo onboarding de 4 pasos. El **picking** es el documento que _rastrea la ruta física_ de las prendas del pedido:
   - `almacen_origen` → de dónde se toman las prendas.
   - `almacen_destino` → hacia qué estación/almacén se envían (seleccionable **libremente**).
   - Las cantidades `cantidad_asignada` / `cantidad_surtida` alimentan los dashboards de `% surtido del pedido` y `% avance de órdenes de trabajo` vinculadas al mismo pedido.
-  - Este endpoint **no crea transferencias, no mueve inventario**.
+  - El **GET** solo lee: no crea transferencias ni mueve inventario. El **POST** sobre la misma URL sí: crea una transferencia (folio TR) que mueve `Existencia` de origen a destino (ver _2) Crear Picking desde Onboarding_).
 
 **Flujo onboarding**
 
 1. Seleccionar el **pedido** (catálogo `pedidos`).
 2. Seleccionar **almacén origen** de la lista filtrada `almacenes_origen` (solo almacenes con `permite_salida=True`).
-3. Seleccionar **almacén destino** de la lista filtrada `almacenes_destino` (solo almacenes con `permite_entrada=True`). Si no se envía query param, se sugiere `APARTADOS` como convención, pero **ya no es obligatorio**: el operador puede cambiarlo en el selector.
+3. Seleccionar **almacén destino** de la lista filtrada `almacenes_destino` (almacenes con `permite_entrada=True`, salvo el _fallback_ descrito abajo). Si no se envía query param, se sugiere `APARTADOS` como convención (solo si está `ACTIVO` y con `permite_entrada`), pero **ya no es obligatorio**: el operador puede cambiarlo en el selector.
 4. Vista previa del encabezado (`header` con fecha sugerida, folio preview y **`tracker` KPIs del pedido**) + líneas con **existencia disponible** para picking parcial y flags de órdenes de trabajo (bordado / reflejante / corte de manga).
 
 **Query params**
@@ -5010,6 +5010,20 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
 | `pedido` / `pedido_id`                   | No        | Activa la precarga del pedido y sus líneas de talla.                                    |
 | `almacen_origen` / `almacen_origen_id`   | No        | Preselecciona el almacén de origen; usado para calcular existencia disponible.          |
 | `almacen_destino` / `almacen_destino_id` | No        | Preselecciona el almacén destino (si no se envía se sugiere `APARTADOS` no bloqueante). |
+
+**Regla de sugerencia de almacenes**
+
+Toda sugerencia del GET (`programaciones[].almacen_sugerido`, `almacen_destino` y `almacen_origen` cuando no llegan por query param) se busca en la empresa y sucursal **del pedido** y solo entre almacenes `estatus = "ACTIVO"` con el flag que el POST exige; si no hay candidato, llega `null`.
+
+| Sugerencia                          | Candidatos                                                                                                  | Empate                        |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `almacen_sugerido` de `APARTADO`    | Nombre `APARTADOS` (sin distinguir mayúsculas), `ACTIVO`, `permite_entrada=True`.                           | Menor `id`.                   |
+| `almacen_sugerido` de `BORDADO`     | Nombre `BORDADOS` (sin distinguir mayúsculas), `ACTIVO`, `permite_entrada=True`.                            | Menor `id`.                   |
+| `almacen_sugerido` de otro destino  | `EMBARQUE`, `REFLEJANTE` y `CORTE_MANGA` no tienen almacén propio: siempre `null`.                          | —                             |
+| `almacen_destino`                   | El mismo de `APARTADO`.                                                                                     | Menor `id`.                   |
+| `almacen_origen`                    | `ACTIVO`, `permite_salida=True`, distinto del destino sugerido. Si no hay otro, el propio destino (el POST lo rechazará: elegir otro). | Menor `id`. |
+
+En el listado, `almacen_sugerido` se resuelve con una sola consulta para todas las sucursales de los pedidos devueltos (hasta 50), no una por pedido. Un `almacen_origen`/`almacen_destino` enviado por query param al que el usuario tiene acceso se devuelve tal cual, sin esta regla; uno sin acceso se ignora y se sugiere.
 
 **Ejemplo**
 
@@ -5026,7 +5040,11 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
       "cliente": 15,
       "cliente_nombre": "Cliente Demo",
       "sucursal": 1,
-      "sucursal_nombre": "Matriz"
+      "sucursal_nombre": "Matriz",
+      "programaciones": [
+        { "destino": "APARTADO", "cantidad": 4, "comentarios": "", "almacen_sugerido": { "id": 10, "nombre": "APARTADOS" } },
+        { "destino": "BORDADO", "cantidad": 2, "comentarios": "Logo pecho", "almacen_sugerido": null }
+      ]
     }
   ],
   "operadores": [{ "id": 8, "nombre": "Juan Perez" }],
@@ -5082,17 +5100,30 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
       "total_surtido":        "10"
     }
   },
-  "pedido": { ... },
+  "pedido": {
+    "id": 125,
+    "folio": "PD-000125",
+    "cliente": 15,
+    "cliente_nombre": "Cliente Demo",
+    "sucursal": 1,
+    "sucursal_nombre": "Matriz",
+    "programaciones": [
+      { "destino": "APARTADO", "cantidad": 4, "comentarios": "", "almacen_sugerido": { "id": 10, "nombre": "APARTADOS" } },
+      { "destino": "BORDADO", "cantidad": 2, "comentarios": "Logo pecho", "almacen_sugerido": null }
+    ]
+  },
   "picking_detalle": [ ... ]
 }
 ```
+
+`pedido` tiene la misma forma que cada elemento de `pedidos` y solo viene con `?pedido=` (sin él, `null`). En el ejemplo `BORDADO` llega en `null` porque el catálogo no tiene un almacén llamado `BORDADOS` (la "Estación de Bordado" no coincide por nombre).
 
 **Nuevos campos — selectores de almacén (v2)**
 
 | Campo               | Shape (cada item)                                                               | Cuándo usarlo en el UI                                                                                                                                                       |
 | ------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `almacenes_origen`  | `{id, codigo, nombre, sucursal, tipo_almacen, permite_salida, permite_entrada}` | Úsalo como **datasource del selector ORIGEN**. Siempre `permite_salida=True` (garantizado).                                                                                  |
-| `almacenes_destino` | `{id, codigo, nombre, sucursal, tipo_almacen, permite_salida, permite_entrada}` | Úsalo como **datasource del selector DESTINO**. Siempre `permite_entrada=True`. El usuario cambia libremente la sugerencia default de APARTADOS por cualquier otra estación. |
+| `almacenes_origen`  | `{id, codigo, nombre, sucursal, tipo_almacen, permite_salida, permite_entrada}` | Úsalo como **datasource del selector ORIGEN**. Trae los de `permite_salida=True`; si ninguno lo tiene, el catálogo completo (ver _Fallback seguro_). No filtra `estatus`.     |
+| `almacenes_destino` | `{id, codigo, nombre, sucursal, tipo_almacen, permite_salida, permite_entrada}` | Úsalo como **datasource del selector DESTINO**. Trae los de `permite_entrada=True`; si ninguno lo tiene, el catálogo completo (ver _Fallback seguro_). No filtra `estatus`. El usuario cambia libremente la sugerencia default de APARTADOS por cualquier otra estación. |
 | `almacenes`         | Catálogo completo (sin filtros). Backward-compat.                               | Úsalo solo si el UI requiere vista completa del catálogo. Para los selectores de origen/destino prefiere los dos de arriba.                                                  |
 
 > **Fallback seguro**: Si el catálogo de almacenes **no tiene bien prendidos los flags** `permite_salida` / `permite_entrada` (ej: data vieja sin configurar), ambos subsets `almacenes_origen` / `almacenes_destino` **degeneran al catálogo completo** para no bloquear al operador. El admin debe prender estos flags en el catálogo `Almacen` para obtener el filtro óptimo.
@@ -5154,9 +5185,9 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
      - `almacen_destino.permite_entrada = True` → 400 `{"almacen_destino": "..."}` si no cumple.
      - `almacen != almacen_destino` → 400 `{"almacen", "almacen_destino"}` (ambos campos) si son el mismo.
      - Cross-tenant: ambos almacenes deben pertenecer a la misma `empresa` y `sucursal` permitidas del usuario.
-3. Crea el documento `Picking` + `PickingDetalle` (bulk_create), genera folio único y responde el picking.
+3. Genera el folio único, crea la transferencia (folio TR) que mueve `Existencia` del almacén origen al destino (con su `MovimientoInventario`), crea el documento `Picking` + `PickingDetalle` (bulk_create) y responde el picking.
 
-> La **operación física** (tomar prendas del almacén origen y depositarlas en el destino) queda **fuera de este endpoint**. Para el movimiento de inventario se usan los endpoints del módulo Transferencias; para órdenes de producción se usa el módulo Producción.
+> El **movimiento de inventario** sí ocurre en este endpoint, vía la transferencia TR del paso 3; no se crean reservas. Las órdenes de producción quedan **fuera**: se generan desde el módulo Producción.
 >
 > Alimentación de dashboards: en cuanto el picking se crea, el `header.tracker` del GET onboarding aumenta `total_asignado` y `pct_asignado_pedido` según las cantidades asignadas en ese documento. Cuando más adelante se marcan líneas como `SURTIDA` (vía actualizaciones de `PickingDetalle`), aumenta `total_surtido` y `pct_surtido_pedido`.
 
