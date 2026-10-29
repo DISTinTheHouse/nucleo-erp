@@ -741,6 +741,8 @@ class PickingGeneraTransferenciaTests(TestCase):
             cliente=cliente,
             moneda=moneda,
             folio="P-1",
+            # AUTORIZADA: el listado del onboarding solo trae ``estatus`` 3/4.
+            estatus=3,
             programacion_conf={"programaciones": [{"destino": "APARTADO", "cantidad": 1}]},
             persona_pagos="Pagos",
             correo_facturas="tr@example.com",
