@@ -829,7 +829,8 @@ class PedidoSerializer(serializers.ModelSerializer):
 
     def get_destinos_aplicables(self, obj):
         from ventas.services.programacion_service import destinos_aplicables, destinos_de_tallas
-        if self.context.get("_pedido_nuevo"):
+        # Con renglones y tallas ya prefetcheados (alta, detalle, PATCH): sin consultar.
+        if self.context.get("_pedido_nuevo") or self.context.get("_tallas_en_memoria"):
             return destinos_de_tallas(t for d in obj.detalles.all() for t in d.tallas.all())
         return destinos_aplicables(obj)
 

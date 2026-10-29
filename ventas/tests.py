@@ -3051,6 +3051,15 @@ class RechazarCambiosCotizacionTests(TestCase):
         for campo in ("documentos", "folios_picking", "tracker_picking", "destinos_aplicables"):
             self.assertEqual(pedido[campo], detalle[campo], campo)
 
+    def test_patch_clasificar_responde_igual_que_el_detalle(self):
+        self._autorizar()
+        pedido = Pedido.objects.get(cotizacion=self.cotizacion)
+        resp = self.client.patch(f"/api/v1/ventas/pedidos/{pedido.pk}/", {"clasificacion": "C"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        detalle = self.client.get(f"/api/v1/ventas/pedidos/{pedido.pk}/").json()
+        for campo in ("documentos", "tracker_picking", "destinos_aplicables", "detalles", "clasificacion"):
+            self.assertEqual(resp.json()[campo], detalle[campo], campo)
+
     def test_autorizar_sin_sucursal_responde_400(self):
         Cotizacion.objects.filter(pk=self.cotizacion.pk).update(sucursal=None)
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")

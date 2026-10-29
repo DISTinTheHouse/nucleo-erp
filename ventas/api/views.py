@@ -2605,7 +2605,6 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # 404 (no 500) para un pedido de otra empresa o inexistente — misma
         # convención multi-tenant del resto de la API.
         from ventas.services.pedido_documentos_service import documentos_related_prefetch_args
-        from wms.services.picking_pipeline.pendientes import historical_maps
 
         # ``select_related("cotizacion")``: ``listar_documentos_pedido`` lee la
         # FK ``pedido.cotizacion`` (el único documento ``is_single``), que sin
@@ -2624,6 +2623,20 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # PedidoDetalleTallaRead) consumen exactamente estos mismos mapas y
         # no repiten queries. Si hay un fallo (ej: módulo WMS no disponible),
         # se cae a mapas vacíos (tracker=0 en toda la UI), sin romper el detalle.
+        serializer_class = self.get_serializer_class()
+        context = dict(self.get_serializer_context() or {})
+        context.update(self._contexto_detalle(instance))
+        serializer = serializer_class(instance, context=context)
+
+        data = filtrar_campos_contabilidad_pedido(serializer.data, request.user)
+        return Response(data)
+
+    @staticmethod
+    def _contexto_detalle(instance):
+        """Lo que el serializer del detalle recalcularía por su cuenta: mapas de surtido,
+        total de piezas y destinos, sobre los renglones ya prefetcheados (detalle y PATCH)."""
+        from wms.services.picking_pipeline.pendientes import historical_maps
+
         try:
             asignado_map, surtido_map = historical_maps(instance)
             tracking_ctx = {
@@ -2646,15 +2659,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
             )
         except Exception:
             total_prendas_pedido = None
-
-        serializer_class = self.get_serializer_class()
-        context = dict(self.get_serializer_context() or {})
-        context["_picking_tracking"] = tracking_ctx
-        context["_total_prendas_pedido"] = total_prendas_pedido
-        serializer = serializer_class(instance, context=context)
-
-        data = filtrar_campos_contabilidad_pedido(serializer.data, request.user)
-        return Response(data)
+        return {
+            "_picking_tracking": tracking_ctx,
+            "_total_prendas_pedido": total_prendas_pedido,
+            "_tallas_en_memoria": True,
+        }
 
     def _snapshot_facturacion(self, pedido):
         try:
@@ -3149,7 +3158,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # después de este método y la respuesta recargaba renglones y tallas uno
         # por uno (N+1, y sin el orden por ``id`` del GET). Se serializa una
         # instancia recargada con el mismo prefetch que el detalle.
-        serializer.instance = self.get_queryset().get(pk=serializer.instance.pk)
+        serializer.instance = self.get_queryset().select_related("cotizacion").get(pk=serializer.instance.pk)
+        serializer.context.update(self._contexto_detalle(serializer.instance))
 
     def _validar_cambio_estatus(self, pedido, nuevo):
         """CANCELADO es terminal y solo se pone con ``POST /pedidos/{id}/cancelar/``."""
