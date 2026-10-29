@@ -939,6 +939,26 @@ class OnboardingAlmacenSugeridoTests(TestCase):
         self.assertEqual(len(data["pedidos"]), 6)
         self.assertEqual(len(despues), len(antes))
 
+    def test_detalle_reusa_los_almacenes_del_listado(self):
+        import wms.services.picking_service as picking_service
+
+        espia = patch.object(
+            picking_service, "almacenes_por_destino", wraps=picking_service.almacenes_por_destino
+        )
+        with espia as llamada:
+            data = self._get(pedido=self.pedido_matriz.pk)
+        llamada.assert_not_called()  # su sucursal ya venía resuelta del listado
+        self.assertEqual(data["pedido"]["programaciones"][0]["almacen_sugerido"]["id"], self.apartados.pk)
+
+        # Fuera de los 50 del listado: se resuelve aparte, con el mismo resultado.
+        for i in range(50):
+            self._pedido(self.norte, f"R-{i}", ["APARTADO"])
+        with espia as llamada:
+            data = self._get(pedido=self.pedido_matriz.pk)
+        llamada.assert_called_once()
+        self.assertEqual(data["pedido"]["programaciones"][0]["almacen_sugerido"]["id"], self.apartados.pk)
+        self.assertEqual(data["almacen_destino"]["id"], self.apartados.pk)
+
     def test_sugerencias_de_origen_y_destino_filtran_activo_y_flags(self):
         data = self._get(pedido=self.pedido_matriz.pk)
         # Destino: APARTADOS activo con entrada de menor pk (salta el INACTIVO).

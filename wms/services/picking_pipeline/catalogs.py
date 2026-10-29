@@ -73,11 +73,11 @@ def almacenes_por_destino_de_sucursales(empresa_id, sucursal_ids):
 
     Solo almacenes ``ACTIVO`` con ``permite_entrada`` (lo que el POST acepta como
     destino). Si una sucursal tiene dos con el mismo nombre, gana el de menor pk.
-    Una sucursal sin ninguno no aparece en el resultado.
+    Toda sucursal pedida aparece, con ``{}`` si no tiene ninguno.
     """
-    if not sucursal_ids:
-        return {}
-    por_sucursal = {}
+    por_sucursal = {sucursal_id: {} for sucursal_id in sucursal_ids}
+    if not por_sucursal:
+        return por_sucursal
     almacenes = Almacen.objects.filter(
         empresa_id=empresa_id,
         sucursal_id__in=sucursal_ids,
@@ -86,7 +86,7 @@ def almacenes_por_destino_de_sucursales(empresa_id, sucursal_ids):
         nombre__iregex=r"^(" + "|".join(ALMACEN_POR_DESTINO.values()) + r")$",
     ).order_by("pk")
     for almacen in almacenes:
-        por_sucursal.setdefault(almacen.sucursal_id, {}).setdefault(almacen.nombre.upper(), almacen)
+        por_sucursal[almacen.sucursal_id].setdefault(almacen.nombre.upper(), almacen)
     return por_sucursal
 
 
@@ -168,7 +168,9 @@ def armar_payload_vacio():
 
 
 def cargar_catalogos(user, empresa, es_staff, sucursal_ids):
-    """Devuelve (pedidos, operadores, almacenes_qs, almacenes_payload).
+    """Devuelve (pedido_qs, pedidos_payload, operadores_payload, almacenes_qs,
+    almacenes_payload, almacenes_origen_payload, almacenes_destino_payload,
+    almacenes_por_sucursal).
 
     Se extrajo como función compartida porque el GET onboarding necesita
     los tres catálogos y además re-filtra ``almacenes_qs`` más adelante
@@ -204,7 +206,7 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids):
             "cliente_nombre": getattr(pedido.cliente, "nombre", None),
             "sucursal": pedido.sucursal_id,
             "sucursal_nombre": getattr(pedido.sucursal, "nombre", None),
-            "programaciones": programaciones_de(pedido, almacenes_por_sucursal.get(pedido.sucursal_id, {})),
+            "programaciones": programaciones_de(pedido, almacenes_por_sucursal[pedido.sucursal_id]),
         }
         for pedido in pedidos
     ]
@@ -259,6 +261,7 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids):
         almacenes_payload,
         almacenes_origen_payload,
         almacenes_destino_payload,
+        almacenes_por_sucursal,
     )
 
 
