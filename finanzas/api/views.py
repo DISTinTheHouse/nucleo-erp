@@ -93,6 +93,7 @@ from finanzas.services.dashboard_service import DashboardFinancieroService
 from finanzas.services.factura_service import FacturaService
 from finanzas.services.movimiento_bancario_service import MovimientoBancarioService
 from finanzas.services.nota_credito_service import NotaCreditoService
+from finanzas.services.nota_credito_poliza_service import NotaCreditoPolizaService
 from finanzas.services.pago_service import PagoService
 from finanzas.services.plan_contable_service import PlanContableService
 from finanzas.services.factura_cancelacion_service import FacturaCancelacionService
@@ -2471,33 +2472,60 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
             factura_detalle = detalle_data.get("factura_detalle")
             if factura_detalle is not None and factura_detalle.factura_id != factura.pk:
                 raise ValidationError({"factura_detalle": "Detalle de factura no corresponde a la factura de la nota."})
+        emite = serializer.validated_data.get("estatus") == NotaCredito.Estatus.EMITIDA
+        timbra = emite and self._exigir_permiso_timbrar(factura, user)
         # Emitida: se guarda y aplica con la CxC bloqueada (valida saldo) y SOLO después se timbra,
         # con la reserva ``cfdi_pendiente`` de ``timbrar/`` (#613).
         with transaction.atomic():
             nota = serializer.save()
             for detalle_data in detalles_data:
                 NotaCreditoDetalle.objects.create(nota_credito=nota, **detalle_data)
-            if nota.estatus == NotaCredito.Estatus.EMITIDA:
-                NotaCreditoService.aplicar_nota_credito(nota, user)
-        if nota.estatus == NotaCredito.Estatus.EMITIDA:
-            self._timbrar_al_emitir(nota, user)
+            if emite:
+                self._aplicar(nota, user, timbra)
+        if timbra:
+            self._timbrar_al_emitir(nota, user, desde_borrador=False)
 
     @staticmethod
-    def _timbrar_al_emitir(nota, user):
-        """Timbra la nota recién emitida. Si Facturama la rechaza (sin CFDI ni reserva) se revierte."""
-        if not empresa_usa_facturama(nota.factura.empresa):
-            return
+    def _exigir_permiso_timbrar(factura, user):
+        """``True`` si emitir esta nota timbra CFDI; exige el mismo permiso que ``timbrar/`` (#725)."""
+        if factura is None or not empresa_usa_facturama(factura.empresa):
+            return False
+        if not user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
+            raise PermissionDenied("No tienes permiso para timbrar la nota de crédito.")
+        return True
+
+    @staticmethod
+    def _aplicar(nota, user, timbra):
+        """Aplica a la CxC. Si se va a timbrar, valida el CFDI aquí, dentro de la transacción:
+        si falta un dato fiscal no se guarda nada (#722). La póliza va después del timbre."""
+        NotaCreditoService.aplicar_nota_credito(nota, user, poliza=not timbra)
+        if timbra:
+            FacturaTimbradoService.preparar_nota(nota)
+
+    @staticmethod
+    def _timbrar_al_emitir(nota, user, desde_borrador):
+        """Timbra la nota recién emitida. Si Facturama la rechaza (sin CFDI ni reserva), un
+        Borrador vuelve a Borrador (#723) y un POST se cancela; el 400 dice cómo quedó (#724)."""
         error = FacturaTimbradoService._timbrar_nota(nota)
-        if error:
-            if not nota.cfdi_pendiente:
+        if error and not nota.cfdi_pendiente:
+            if desde_borrador:
+                NotaCreditoService.regresar_a_borrador(nota)
+            else:
                 NotaCreditoService.cancelar_nota_credito(nota, user)
-            raise error
+            nota.refresh_from_db()
+        else:
+            NotaCreditoPolizaService.generar(nota, user)
+        if error:
+            raise ValidationError({
+                **error.message_dict,
+                "nota_credito": {"id": nota.pk, "estatus": nota.estatus},
+            })
 
     def perform_update(self, serializer):
         with transaction.atomic():
-            emite = self._actualizar(serializer)
-        if emite:
-            self._timbrar_al_emitir(serializer.instance, self.request.user)
+            timbra = self._actualizar(serializer)
+        if timbra:
+            self._timbrar_al_emitir(serializer.instance, self.request.user, desde_borrador=True)
 
     def _actualizar(self, serializer):
         user = self.request.user
@@ -2542,6 +2570,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
                 {"estatus": _mensaje_transicion_invalida(anterior, solicitado)}
             )
         emite = solicitado == NotaCredito.Estatus.EMITIDA and anterior != NotaCredito.Estatus.EMITIDA
+        timbra = emite and self._exigir_permiso_timbrar(serializer.instance.factura, user)
         if anterior == NotaCredito.Estatus.EMITIDA:
             # Ya aplicada a la CxC y (quizá) timbrada: solo se edita lo que no cambia importes ni CFDI (#615).
             cambiados = [
@@ -2552,8 +2581,8 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
                 raise ValidationError({c: "No se edita en una nota Emitida; cancélala y emite otra." for c in cambiados})
         nota = serializer.save()
         if emite:
-            NotaCreditoService.aplicar_nota_credito(nota, user)
-        return emite
+            self._aplicar(nota, user, timbra)
+        return timbra
 
     @transaction.atomic
     def perform_destroy(self, instance):

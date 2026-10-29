@@ -3283,7 +3283,11 @@ No mandes `pago` dentro de `pago_detalles`: mismo caso.
 ```
 
 - `factura_detalle` debe ser de la misma `factura` de la nota, si no → 400.
-- `estatus: "Emitida"` aplica la nota contra la CxC en el mismo POST (reduce saldo). Cancelar la nota NO revierte ese saldo todavía.
+- `estatus: "Emitida"` (POST o PATCH desde Borrador) aplica la nota contra la CxC y, en la empresa de Facturama, timbra el CFDI de egreso:
+  - Exige `E-FIN-FACTURAS`, igual que `timbrar/`; sin él → `403` y no se guarda nada.
+  - Si falta un dato para el CFDI (factura sin timbrar, forma de pago, RFC…) → `400 {"cfdi": [...]}` y **no se guarda nada**.
+  - Si Facturama rechaza → `400` con `cfdi` y `nota_credito: {"id", "estatus"}`. Por POST la nota queda `Cancelada`; por PATCH vuelve a `Borrador` para corregirla. La CxC queda como estaba.
+  - La póliza se genera al timbrar (o si Facturama no confirma), nunca en un rechazo.
 
 #### Factura de proveedor
 

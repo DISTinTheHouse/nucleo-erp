@@ -2191,7 +2191,8 @@ class Defecto9NotaCreditoFechaEmisionYCxCFaltante(FinanzasBase):
 
 
 class NotaCreditoTimbraAntesDeGuardar(Defecto9NotaCreditoFechaEmisionYCxCFaltante):
-    """Emitir una nota (create o PATCH) timbra en Facturama primero; si falla no se guarda nada."""
+    """Emitir una nota (create o PATCH) la aplica y luego timbra. Sin datos para el CFDI no se
+    guarda nada; un rechazo de Facturama cancela la nota (POST) o la regresa a Borrador (PATCH)."""
 
     SVC = "finanzas.services.factura_timbrado_service"
 
@@ -2281,7 +2282,39 @@ class NotaCreditoTimbraAntesDeGuardar(Defecto9NotaCreditoFechaEmisionYCxCFaltant
                 self._timbra(side_effect=err):
             r = client.patch(f"{NOTAS_CREDITO_URL}{resp.data['id']}/", {"estatus": "Emitida"}, format="json")
         self.assertEqual(r.status_code, 400, r.data)
-        self.assertEqual(NotaCredito.objects.get().estatus, "Cancelada")
+        nota = NotaCredito.objects.get()
+        self.assertEqual(nota.estatus, "Borrador")
+        self.assertEqual(r.data["nota_credito"]["estatus"], "Borrador")
+        from finanzas.services.nota_credito_poliza_service import ORIGEN
+        self.assertFalse(Poliza.objects.filter(origen_tipo=ORIGEN, origen_id=nota.pk).exists())
+
+    def test_rechazo_dice_que_nota_quedo(self):
+        err = FacturamaAPIException("rechazo", status_code=400, details={"Message": "x"})
+        with self._con_facturama(), patch(f"{self.SVC}.construir_payload_nota_credito", return_value={}),                 self._timbra(side_effect=err):
+            _, _, resp = self._post()
+        nota = NotaCredito.objects.get()
+        self.assertEqual(resp.data["nota_credito"]["id"], nota.pk)
+        self.assertEqual(resp.data["nota_credito"]["estatus"], "Cancelada")
+
+    def test_sin_datos_para_el_cfdi_no_guarda_nada(self):
+        from finanzas.exceptions import ErrorDeNegocio
+        falta = ErrorDeNegocio({"cfdi": "La factura no está timbrada."})
+        with self._con_facturama(), patch(f"{self.SVC}.construir_payload_nota_credito", side_effect=falta),                 self._timbra() as mock:
+            _, cxc, resp = self._post()
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(NotaCredito.objects.exists())
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+        mock.assert_not_called()
+
+    def test_emitir_sin_permiso_de_timbrar_es_403(self):
+        from seguridad.models import UsuarioPermiso
+        UsuarioPermiso.objects.filter(usuario=self.a["usuario"], permiso__clave="E-FIN-FACTURAS").delete()
+        with self._con_facturama(), self._timbra() as mock:
+            _, _, resp = self._post()
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertFalse(NotaCredito.objects.exists())
+        mock.assert_not_called()
 
 
 class Defecto10NotaCreditoDobleAplicacionConcurrente(FinanzasBase):

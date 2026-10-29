@@ -47,7 +47,9 @@ class NotaCreditoService:
 
     @staticmethod
     @transaction.atomic
-    def aplicar_nota_credito(nota: NotaCredito, usuario=None):
+    def aplicar_nota_credito(nota: NotaCredito, usuario=None, poliza=True):
+        # ``poliza=False``: quien timbra la genera después, solo si Facturama no rechaza
+        # (un rechazo regresa la nota a Borrador sin dejar póliza y contrapóliza, #723).
         # Orden de bloqueo de todo el módulo: primero la nota, después la CxC.
         # El estatus se relee de la fila ya bloqueada porque el objeto que llega
         # pudo cargarse antes de que otra petición emitiera la misma nota.
@@ -70,7 +72,35 @@ class NotaCreditoService:
         else:
             cxc.estatus = CuentaPorCobrar.EstatusCxC.PARCIAL
         cxc.save()
-        NotaCreditoPolizaService.generar(bloqueada, usuario)
+        if poliza:
+            NotaCreditoPolizaService.generar(bloqueada, usuario)
+
+    @staticmethod
+    def _devolver_saldo(nota):
+        """Regresa a la CxC lo que la nota Emitida le acreditó."""
+        cxc = CuentaPorCobrar.objects.select_for_update().filter(factura=nota.factura).first()
+        total_nc = Decimal(str(nota.total or 0))
+        if cxc is None or total_nc <= 0:
+            return
+        cxc.saldo = (Decimal(str(cxc.saldo or 0)) + total_nc).quantize(Decimal("0.01"))
+        if cxc.saldo >= Decimal(str(cxc.total or 0)) - Decimal("0.01"):
+            cxc.estatus = CuentaPorCobrar.EstatusCxC.PENDIENTE
+        else:
+            cxc.estatus = CuentaPorCobrar.EstatusCxC.PARCIAL
+        cxc.save()
+
+    @staticmethod
+    @transaction.atomic
+    def regresar_a_borrador(nota: NotaCredito):
+        """Deshace una emisión que Facturama rechazó: devuelve el saldo y la nota vuelve a
+        Borrador para corregirla. Solo para una emisión aplicada con ``poliza=False``."""
+        NotaCredito.objects.select_for_update().get(pk=nota.pk)
+        nota.refresh_from_db()
+        if nota.estatus != NotaCredito.Estatus.EMITIDA or nota.cfdi_uuid or nota.cfdi_pendiente:
+            return
+        NotaCreditoService._devolver_saldo(nota)
+        nota.estatus = NotaCredito.Estatus.BORRADOR
+        nota.save()
 
     @staticmethod
     @transaction.atomic
@@ -106,21 +136,7 @@ class NotaCreditoService:
         # Sólo se revierte lo que realmente se aplicó: una nota en Borrador
         # nunca tocó la CxC.
         if nota.estatus == NotaCredito.Estatus.EMITIDA:
-            cxc = (
-                CuentaPorCobrar.objects.select_for_update()
-                .filter(factura=nota.factura)
-                .first()
-            )
-            total_nc = Decimal(str(nota.total or 0))
-            if cxc is not None and total_nc > 0:
-                cxc.saldo = (
-                    Decimal(str(cxc.saldo or 0)) + total_nc
-                ).quantize(Decimal("0.01"))
-                if cxc.saldo >= Decimal(str(cxc.total or 0)) - Decimal("0.01"):
-                    cxc.estatus = CuentaPorCobrar.EstatusCxC.PENDIENTE
-                else:
-                    cxc.estatus = CuentaPorCobrar.EstatusCxC.PARCIAL
-                cxc.save()
+            NotaCreditoService._devolver_saldo(nota)
         era_emitida = nota.estatus == NotaCredito.Estatus.EMITIDA
         nota.estatus = NotaCredito.Estatus.CANCELADA
         nota.save()
