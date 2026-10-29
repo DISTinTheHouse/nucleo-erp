@@ -1924,6 +1924,17 @@ class PedidoProgramarTests(TestCase):
             ("M", 5, None, None), ("M", 10, 15, 0), ("L", 8, None, None), ("L", 10, 5, 5),
         ])
 
+    def test_get_contexto_reparto_muestra_con_la_misma_variante_no_consume(self):
+        # La muestra va primero y apunta a la variante de la partida normal: queda
+        # null y la partida recibe el stock completo.
+        alm00, _, variante, _ = self._escenario_stock()
+        Existencia.objects.create(producto=self.producto, producto_variante=variante, almacen=alm00, cantidad=12)
+        pedido = self._pedido_reparto(
+            (self.producto, [(self.talla_m, 10, variante)], "Muestra de la playera"),
+            (self.producto, [(self.talla_m, 10, variante)], None),
+        )
+        self.assertEqual(self._stock_renglones(self._get_contexto(pedido)), [("M", 10, None, None), ("M", 10, 12, 0)])
+
     def test_get_contexto_reparto_descuenta_reservas_de_otros_pedidos_antes(self):
         alm00, _, variante, _ = self._escenario_stock()
         existencia = Existencia.objects.create(producto=self.producto, producto_variante=variante,
