@@ -2276,11 +2276,20 @@ class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
     # ``variante_produccion`` -- evita un query por talla para saber si ya
     # tiene SKU de producción generado.
     sku_produccion = serializers.SerializerMethodField()
+    sku_siguiente = serializers.SerializerMethodField()
 
     def get_sku_produccion(self, obj):
         variante = getattr(obj, "variante_produccion", None)
         # ``sku`` vacío = sin SKU, igual que el ``sku_produccion`` del detalle de ventas.
         return (variante.sku or None) if variante else None
+
+    def get_sku_siguiente(self, obj):
+        """El SKU que generará ``variante-onboarding`` para esta talla (misma fórmula);
+        ``None`` si ya tiene o la línea aún no tiene color (lo arma el front con ``sku_prefijo``)."""
+        color = obj.pedido_detalle.color
+        if getattr(obj, "variante_produccion", None) or color is None or not color.codigo:
+            return None
+        return f"MP{obj.pedido_detalle_id}-{color.codigo}-{obj.talla.nombre}".strip().upper()
 
     class Meta:
         model = PedidoDetalleTalla
@@ -2289,6 +2298,7 @@ class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
             "talla_nombre",
             "cantidad",
             "sku_produccion",
+            "sku_siguiente",
             "lleva_bordado",
             "bordado_config",
             "lleva_reflejante",
@@ -2305,10 +2315,22 @@ class PedidoDetalleEspecialSerializer(serializers.ModelSerializer):
     # Llenado en la vista via Prefetch(..., to_attr="tallas_especiales"): todas
     # las tallas de la linea especial.
     tallas = PedidoDetalleTallaEspecialSerializer(source="tallas_especiales", many=True, read_only=True)
+    categoria_producto = serializers.SerializerMethodField()
+    # SKU = ``{sku_prefijo}-{color.codigo}-{talla}``: con él el front muestra el
+    # siguiente SKU en cuanto se elige el color.
+    sku_prefijo = serializers.SerializerMethodField()
 
     class Meta:
         model = PedidoDetalle
-        fields = ["id", "producto_nombre_externo", "color_nombre", "tallas"]
+        fields = ["id", "producto_nombre_externo", "color_nombre", "categoria_producto", "sku_prefijo", "tallas"]
+
+    def get_categoria_producto(self, obj):
+        # Llenada en la vista desde la línea de la cotización.
+        categoria = getattr(obj, "categoria", None)
+        return {"id": categoria.pk, "nombre": categoria.nombre} if categoria else None
+
+    def get_sku_prefijo(self, obj):
+        return f"MP{obj.pk}"
 
     def get_color_nombre(self, obj):
         return obj.color.nombre if obj.color else None
@@ -2336,6 +2358,9 @@ class VarianteProduccionOnboardingSerializer(serializers.Serializer):
         queryset=Color.objects.all(), required=False, allow_null=True
     )
     materia_prima_detalle = BomDetalleSerializer(many=True)
+    # También da de alta el producto y sus variantes en el catálogo (con la categoría
+    # de la línea), para que tenga existencias y se venda como producto normal.
+    alta_catalogo = serializers.BooleanField(required=False, default=False)
 
     def validate_materia_prima_detalle(self, value):
         if not value:
@@ -2345,7 +2370,12 @@ class VarianteProduccionOnboardingSerializer(serializers.Serializer):
 
 class VarianteProduccionSerializer(serializers.ModelSerializer):
     talla_nombre = serializers.CharField(source="talla.nombre", read_only=True)
+    # SKU de la ``ProductoVariante`` de catálogo creada con ``alta_catalogo``; ``None`` si no.
+    sku_catalogo = serializers.SerializerMethodField()
+
+    def get_sku_catalogo(self, obj):
+        return getattr(obj, "sku_catalogo", None)
 
     class Meta:
         model = VarianteProductoProduccion
-        fields = ["id", "sku", "nombre", "talla_nombre", "aplica_catalogo", "pedido_detalle"]
+        fields = ["id", "sku", "nombre", "talla_nombre", "aplica_catalogo", "sku_catalogo", "pedido_detalle"]

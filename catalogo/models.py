@@ -198,9 +198,9 @@ class VarianteProductoProduccion(StatusLifecycleModel):
 
     Vive en tabla separada a propósito (ver ``DOCS/arquitectura/dbdiagram.io.md``,
     sección CATALOGO): un listado o búsqueda de catálogo NO debe traer muestras que
-    tal vez nunca se vendan de nuevo. ``aplica_catalogo`` es el flag pendiente de
-    "promover a catálogo real", para que mesa de control decida después -- no hay
-    todavía una función que lo consuma.
+    tal vez nunca se vendan de nuevo. ``aplica_catalogo`` = se promovió a catálogo
+    real al generarlo (``variante-onboarding`` con ``alta_catalogo``); su producto
+    queda en ``producto_base``.
     """
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="variantes_produccion")
     # Nullable: se crea desde el detalle del pedido especial, antes de que exista

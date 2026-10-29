@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 
-from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+from ventas.models import CotizacionDetalle, Pedido, PedidoDetalle, PedidoDetalleTalla
 from ventas.services.sku_produccion_service import detalles_de_muestra, nombre_es_muestra, variantes_produccion_activas
 from usuarios.models import Usuario
 from nucleo.models import Sucursal
@@ -80,7 +80,9 @@ from produccion.api.serializers import (
     VarianteProduccionOnboardingSerializer,
     VarianteProduccionSerializer,
 )
-from catalogo.models import VarianteProductoProduccion
+from catalogo.models import Producto, ProductoVariante, VarianteProductoProduccion
+from catalogo.codigos import siguiente_codigo_producto
+from catalogo.api.views import TIPO_PRODUCTO_TERMINADO_ID
 from inventarios.models import Existencia
 
 from produccion.services.orden_bordado_service import OrdenBordadoService
@@ -1892,6 +1894,25 @@ def _detalles_especiales_qs():
     return detalles_de_muestra()
 
 
+def _categorias_de_muestras(pedido):
+    """``{nombre externo: {color_id: CategoriaProducto}}`` de las líneas de muestra de la
+    cotización del pedido: la categoría la captura ventas ahí (el pedido no la tiene). Un query."""
+    categorias = {}
+    if not pedido.cotizacion_id:
+        return categorias
+    for cd in CotizacionDetalle.objects.filter(
+        cotizacion_id=pedido.cotizacion_id, producto__isnull=True, categoria_producto__isnull=False,
+    ).select_related("categoria_producto"):
+        categorias.setdefault(cd.producto_nombre_externo, {})[cd.color_id] = cd.categoria_producto
+    return categorias
+
+
+def _categoria_de_linea(categorias, detalle):
+    """La de la línea con el mismo nombre; con varias, la del mismo color o sin color."""
+    por_color = categorias.get(detalle.producto_nombre_externo, {})
+    return por_color.get(detalle.color_id) or por_color.get(None) or next(iter(por_color.values()), None)
+
+
 def _require_produccion(user):
     """Gate compartido por las acciones de escritura de producción (ruta
     crítica de OP, onboarding de SKU de muestra): superuser/admin_empresa
@@ -1937,7 +1958,7 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             # programacion_conf) -- antes de eso, no hay compromiso de
             # entrega real sobre el que producción pueda planear.
             .filter(clasificacion__isnull=False, fecha_confirmacion__isnull=False)
-            .only("id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "empresa")
+            .only("id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "empresa", "cotizacion")
             .order_by("-fecha_confirmacion", "-id")
         )
 
@@ -1963,7 +1984,9 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             pedido_detalle_id__in=[d.id for d in detalles]
         ).only("id", "sku", "pedido_detalle_id", "talla_id")
         variantes_por_talla = {(v.pedido_detalle_id, v.talla_id): v for v in variantes}
+        categorias = _categorias_de_muestras(pedido)
         for det in detalles:
+            det.categoria = _categoria_de_linea(categorias, det)
             for dt in det.tallas_especiales:
                 dt.variante_produccion = variantes_por_talla.get((det.id, dt.talla_id))
 
@@ -2080,6 +2103,21 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             if not tallas:
                 raise ValidationError({'pedido_detalle_id': 'La línea no tiene tallas con cantidad.'})
 
+            alta_catalogo = serializer.validated_data.get('alta_catalogo', False)
+            if alta_catalogo:
+                categoria = _categoria_de_linea(_categorias_de_muestras(pedido), detalle)
+                if categoria is None:
+                    raise ValidationError({'alta_catalogo': (
+                        'La línea no tiene categoría (se captura en la cotización); '
+                        'no se puede dar de alta en catálogo.'
+                    )})
+                permitidas = set(categoria.tallas.values_list('pk', flat=True))
+                fuera = [dt.talla.nombre for dt in tallas if permitidas and dt.talla_id not in permitidas]
+                if fuera:
+                    raise ValidationError({'alta_catalogo': (
+                        f"Tallas que no son de la categoría {categoria.nombre}: {', '.join(fuera)}."
+                    )})
+
             # ``producto_nombre_externo`` admite más caracteres que ``nombre`` de la
             # variante y Postgres no trunca solo (DataError -> 500): se recorta al
             # ``max_length`` del campo. Sólo al recortar se quitan los espacios y
@@ -2098,6 +2136,17 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                     if asignar_color:
                         detalle.color = color
                         detalle.save(update_fields=['color'])
+                    if alta_catalogo:
+                        # Mismo alta que el catálogo (``ProductoViewSet.onboarding`` +
+                        # ``ProductoVarianteViewSet.onboarding``): código consecutivo de la
+                        # categoría, Producto Terminado, SKU ``codigo-color-talla`` (#muestras).
+                        producto_catalogo = Producto.objects.create(
+                            empresa=pedido.empresa, categoria_producto=categoria,
+                            codigo=siguiente_codigo_producto(categoria), tipo_id=TIPO_PRODUCTO_TERMINADO_ID,
+                            unidad_medida=categoria.unidad_medida,
+                            nombre=nombre[:Producto._meta.get_field('nombre').max_length].rstrip(' -_,;:./|'),
+                            precio_base=detalle.precio_unitario,
+                        )
                     for dt in tallas:
                         # Sin ``producto.codigo`` real que usar (es una muestra sin
                         # catálogo): el prefijo sale del propio ``pedido_detalle_id``,
@@ -2113,6 +2162,8 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                             talla=dt.talla,
                             nombre=nombre,
                             sku=sku,
+                            aplica_catalogo=alta_catalogo,
+                            producto_base=producto_catalogo if alta_catalogo else None,
                         )
                         bom = ListaMaterialBom.objects.create(
                             empresa=pedido.empresa, variante_produccion=variante
@@ -2121,6 +2172,16 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                             BomDetalle(bom=bom, **{**detalle_bom, "variante_produccion": variante})
                             for detalle_bom in detalles_bom
                         ])
+                        if alta_catalogo:
+                            sku_catalogo = f"{producto_catalogo.codigo}-{color.codigo}-{dt.talla.nombre}".strip().upper()
+                            if ProductoVariante.objects.filter(sku=sku_catalogo).exists():
+                                raise ValidationError({'alta_catalogo': f"El SKU '{sku_catalogo}' ya existe en catálogo."})
+                            ProductoVariante.objects.create(
+                                producto=producto_catalogo, empresa=pedido.empresa, color=color,
+                                talla=dt.talla, sku=sku_catalogo,
+                                precio_base=dt.precio_unitario if dt.precio_unitario is not None else detalle.precio_unitario,
+                            )
+                            variante.sku_catalogo = sku_catalogo
                         creadas.append(variante)
             except IntegrityError as exc:
                 # Red de seguridad del candado: si aun así otra alta ganó, el
