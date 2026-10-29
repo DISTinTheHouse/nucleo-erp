@@ -325,6 +325,15 @@ class Factura(StatusLifecycleModel):
     def __str__(self):
         return str(self.id)
 
+    @property
+    def cancelada_o_en_cancelacion(self):
+        """Cancelada o con la cancelación ante el SAT en curso: no admite nota ni REP (#614, #733)."""
+        return (
+            self.estatus == Factura.FacturaStatus.CANCELADA
+            or self.cfdi_cancelado
+            or self.cfdi_cancelacion_solicitada
+        )
+
 class FacturaDetalle(models.Model):
     factura = models.ForeignKey(Factura, on_delete=models.CASCADE, related_name="factura_detalles")
     pedido_detalle = models.ForeignKey('ventas.PedidoDetalle', on_delete=models.PROTECT, related_name="factura_detalles")

@@ -88,6 +88,7 @@ from ventas.utils.helpers import (
     _save_servicios_extras,
     _save_pedido_detalle,
     _save_pedido_servicios_extras,
+    exigir_color_si_hay_variantes,
     exigir_reflejante_inventario_guardado,
     nombre_para_mostrar,
 )
@@ -2118,6 +2119,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         )
         # Reflejante «Del inventario»: máximo 50 piezas por partida (CO-06).
         exigir_reflejante_inventario_guardado(CotizacionDetalle.objects.filter(cotizacion=cotizacion))
+        exigir_color_si_hay_variantes(CotizacionDetalle.objects.filter(cotizacion=cotizacion))
 
         comentario = _texto_comentario(request.data)
         with transaction.atomic():
@@ -2229,6 +2231,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             )
             # Reflejante «Del inventario»: máximo 50 piezas por partida (CO-06).
             exigir_reflejante_inventario_guardado(CotizacionDetalle.objects.filter(cotizacion=cotizacion))
+            exigir_color_si_hay_variantes(CotizacionDetalle.objects.filter(cotizacion=cotizacion))
 
             pedido_existente = (
                 Pedido.objects.select_for_update()
@@ -2364,6 +2367,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             )
             # Reflejante «Del inventario»: máximo 50 piezas por partida (CO-06).
             exigir_reflejante_inventario_guardado(CotizacionDetalle.objects.filter(cotizacion=cotizacion))
+            exigir_color_si_hay_variantes(CotizacionDetalle.objects.filter(cotizacion=cotizacion))
             pedido = (
                 Pedido.objects.select_for_update()
                 .filter(cotizacion=cotizacion, activo=True)
@@ -3328,6 +3332,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             pedido.save(update_fields=list(pedido_data.keys()) + ["updated_at"])
             self._snapshot_facturacion(pedido)
             _save_pedido_detalle(pedido, detalle_data, pedido.empresa, user)
+            exigir_color_si_hay_variantes(PedidoDetalle.objects.filter(pedido=pedido))
             _save_pedido_servicios_extras(pedido, servicios_extras_data)
             self._aplicar_pedido_a_cotizacion(
                 pedido, cotizacion, detalle_data, servicios_extras_data

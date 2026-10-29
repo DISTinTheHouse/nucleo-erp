@@ -73,6 +73,19 @@ def exigir_reflejante_inventario_guardado(detalles):
         _exigir_maximo_reflejante_inventario(numero, total)
 
 
+def exigir_color_si_hay_variantes(detalles):
+    """Una línea de catálogo sin color cuyo producto tiene variantes deja sus tallas sin
+    variante (sin SKU ni stock real). El borrador se guarda igual; esto se exige al
+    enviar a revisión, autorizar y editar en mesa de control (#731). Una consulta."""
+    sin_color = list(
+        detalles.filter(producto__isnull=False, color__isnull=True, producto__variantes__isnull=False)
+        .filter(Q(producto_nombre_externo__isnull=True) | Q(producto_nombre_externo=""))
+        .values_list("producto__nombre", flat=True).distinct()
+    )
+    if sin_color:
+        raise ValidationError({"color": f"Elige el color de: {', '.join(sorted(sin_color))}."})
+
+
 def _merge_detalle(rows):
     agrupado = {}
     for row in rows:

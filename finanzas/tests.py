@@ -6170,6 +6170,14 @@ class FacturaListadoLigeroTests(FinanzasBase):
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]["cantidad"], 2)
 
+    def test_filtro_saldo_pendiente_excluye_cxc_cancelada(self):
+        factura = Factura.objects.get(pk=self._facturar(cantidad=1))
+        CuentaPorCobrar.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"), estatus=CuentaPorCobrar.EstatusCxC.CANCELADA,
+        )
+        self.assertEqual(self._listar(params={"saldo_pendiente": "true"}), [])
+
     def test_onboarding_sin_pedido_usa_el_mismo_listado(self):
         self._facturar(cantidad=1)
         self.assertEqual(self._listar(url=ONBOARDING_URL), self._listar())
@@ -7071,6 +7079,17 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         self.assertEqual(pago["Currency"], "USD")
         self.assertEqual(pago["ExchangeRate"], 17.25)
         self.assertEqual(pago["RelatedDocuments"][0]["Currency"], "USD")
+
+    def test_rep_rechaza_factura_con_cancelacion_en_proceso(self):
+        from types import SimpleNamespace
+        from finanzas.services.facturama import cfdi_payload
+
+        cobro = Cobro.objects.get(pk=self._cobrar_usd(tipo_cambio="17.25").data["id"])
+        Factura.objects.update(cfdi_uuid="UUID-USD", cfdi_cancelacion_solicitada=True)
+        ppd = SimpleNamespace(metodo_pago="PPD", cliente_rfc="XAXX010101000")
+        with patch.object(Factura, "pedido", ppd, create=True), patch.object(cfdi_payload, "_receptor", return_value={}):
+            with self.assertRaisesMessage(ErrorDeNegocio, "cancelación está en proceso"):
+                cfdi_payload.construir_payload_rep(cobro)
 
 
 class F0CuentaPorCobrarSoloLecturaTests(FinanzasBase):

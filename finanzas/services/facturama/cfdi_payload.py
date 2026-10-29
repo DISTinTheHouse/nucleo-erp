@@ -220,8 +220,8 @@ def construir_payload_rep(cobro):
         if not f.cfdi_uuid:
             errores[f"f{f.pk}"] = f"La factura {f.folio} no está timbrada."
             continue
-        if f.estatus == "Cancelada" or f.cfdi_cancelado:  # #596
-            errores[f"f{f.pk}"] = f"La factura {f.folio} está cancelada."
+        if f.cancelada_o_en_cancelacion:  # #596, #733
+            errores[f"f{f.pk}"] = f"La factura {f.folio} está cancelada o su cancelación está en proceso."
             continue
         if _texto(getattr(f.pedido, "metodo_pago", None)).upper() != "PPD":
             errores[f"f{f.pk}"] = f"La factura {f.folio} no es PPD: no lleva complemento de pago."

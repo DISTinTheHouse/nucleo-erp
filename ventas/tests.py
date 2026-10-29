@@ -2807,6 +2807,15 @@ class RechazarCambiosCotizacionTests(TestCase):
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")
         self.assertEqual(resp.status_code, 201, resp.content)
 
+    def test_autorizar_linea_sin_color_con_variantes_responde_400(self):
+        color = Color.objects.create(nombre="Gris", codigo="GRI", codigo_hex="#888")
+        ProductoVariante.objects.create(producto=self.producto, empresa=self.producto.empresa, color=color,
+                                        talla=Talla.objects.create(nombre="XG"), sku="SKU-731", precio_base="1")
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn(self.producto.nombre, resp.json()["color"][0])
+        self.assertFalse(Pedido.objects.filter(cotizacion=self.cotizacion).exists())
+
     def test_autorizar_sin_sucursal_responde_400(self):
         Cotizacion.objects.filter(pk=self.cotizacion.pk).update(sucursal=None)
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")
