@@ -46,6 +46,36 @@ def folio_preview(empresa, sucursal, tipo_documento="Picking"):
         return None
 
 
+# Destino de la programación -> almacén por nombre (mismo criterio que APARTADOS).
+# EMBARQUE/REFLEJANTE/CORTE_MANGA no tienen almacén propio: van sin sugerencia.
+ALMACEN_POR_DESTINO = {"APARTADO": "APARTADOS", "BORDADO": "BORDADOS"}
+
+
+def programaciones_de(pedido, almacenes=None):
+    """Parcialidades programadas del pedido. Con ``almacenes`` ({nombre en mayúsculas:
+    Almacen}) agrega el almacén sugerido de cada destino."""
+    filas = []
+    for p in (pedido.programacion_conf or {}).get("programaciones", []):
+        fila = {"destino": p.get("destino"), "cantidad": p.get("cantidad"), "comentarios": p.get("comentarios") or ""}
+        if almacenes is not None:
+            almacen = almacenes.get(ALMACEN_POR_DESTINO.get(fila["destino"]))
+            fila["almacen_sugerido"] = {"id": almacen.pk, "nombre": almacen.nombre} if almacen else None
+        filas.append(fila)
+    return filas
+
+
+def almacenes_por_destino(pedido):
+    """{nombre: Almacen} de los almacenes de ``ALMACEN_POR_DESTINO`` en la sucursal del pedido. Una consulta."""
+    return {
+        a.nombre.upper(): a
+        for a in Almacen.objects.filter(
+            empresa_id=pedido.empresa_id, sucursal_id=pedido.sucursal_id,
+        ).filter(
+            nombre__iregex=r"^(" + "|".join(ALMACEN_POR_DESTINO.values()) + r")$",
+        ).order_by("-pk")
+    }
+
+
 def resolver_apartados_safe(empresa_id, sucursal_id):
     """GET onboarding: busca el almacén ``APARTADOS`` (iexact) sin fallar.
 
@@ -129,6 +159,8 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids):
             empresa=empresa,
             activo=True,
             estatus__in=[3, 4],
+            # Solo se surte lo que mesa de control ya programó (``PATCH /pedidos/{id}/programar/``).
+            programacion_conf__programaciones__0__isnull=False,
         )
         # ``empresa`` además de cliente/sucursal: ``armar_header_preview`` lee
         # ``pedido.empresa`` para el preview del folio, y sin esto era una
@@ -147,6 +179,7 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids):
             "cliente_nombre": getattr(pedido.cliente, "nombre", None),
             "sucursal": pedido.sucursal_id,
             "sucursal_nombre": getattr(pedido.sucursal, "nombre", None),
+            "programaciones": programaciones_de(pedido),
         }
         for pedido in pedido_qs[:50]
     ]

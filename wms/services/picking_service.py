@@ -10,9 +10,11 @@ from wms.models import Picking, PickingDetalle
 from wms.services.existencia_service import ExistenciaService
 from wms.services.transferencia_service import TransferenciaService
 from wms.services.picking_pipeline.catalogs import (
+    almacenes_por_destino,
     armar_header_preview,
     armar_payload_vacio,
     cargar_catalogos,
+    programaciones_de,
     serializar_almacen,
     sugerir_almacenes,
     sugerir_apartados_por_defecto,
@@ -243,6 +245,7 @@ class PickingService:
             "cliente_nombre": getattr(pedido.cliente, "nombre", None),
             "sucursal": pedido.sucursal_id,
             "sucursal_nombre": getattr(pedido.sucursal, "nombre", None),
+            "programaciones": programaciones_de(pedido, almacenes_por_destino(pedido)),
         }
         payload["picking_detalle"] = detalle_payload
         return payload

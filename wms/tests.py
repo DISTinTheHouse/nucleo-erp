@@ -741,6 +741,7 @@ class PickingGeneraTransferenciaTests(TestCase):
             cliente=cliente,
             moneda=moneda,
             folio="P-1",
+            programacion_conf={"programaciones": [{"destino": "APARTADO", "cantidad": 1}]},
             persona_pagos="Pagos",
             correo_facturas="tr@example.com",
             telefono_pagos="8100000000",
@@ -783,6 +784,27 @@ class PickingGeneraTransferenciaTests(TestCase):
                 (resp.json()["almacen_actual"], resp.json()["almacen_actual_nombre"]),
                 (self.destino.pk, "Apartados"),
             )
+
+    def test_onboarding_solo_pedidos_programados_con_almacen_sugerido(self):
+        from ventas.models import Pedido
+
+        api = APIClient()
+        api.force_authenticate(self.usuario)
+        sin_programar = Pedido.objects.get(pk=self.pedido.pk)
+        sin_programar.pk, sin_programar.folio, sin_programar.programacion_conf = None, "P-2", None
+        sin_programar.save()
+        data = api.get("/api/v1/wms/pickings/onboarding/").json()
+        self.assertEqual([p["id"] for p in data["pedidos"]], [self.pedido.pk])
+        data = api.get(f"/api/v1/wms/pickings/onboarding/?pedido={self.pedido.pk}").json()
+        (prog,) = data["pedido"]["programaciones"]
+        self.assertEqual((prog["destino"], prog["almacen_sugerido"]["id"]), ("APARTADO", self.destino.pk))
+        cuerpo = {
+            "pedido": sin_programar.pk, "operador": self.usuario.pk, "almacen": self.origen.pk,
+            "almacen_destino": self.destino.pk,
+            "picking_detalle": [{"pedido_detalle_talla": self.talla_row.pk, "cantidad_asignada": "1"}],
+        }
+        resp = api.post("/api/v1/wms/pickings/onboarding/", cuerpo, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content)
 
     def test_picking_crea_transferencia_con_folio_tr_y_mueve_stock(self):
         from wms.services.picking_service import PickingService
@@ -1008,6 +1030,7 @@ class PackingDespachoEC574Tests(TestCase):
             moneda=Moneda.objects.create(codigo_iso="MXN", nombre="Peso"), folio="P-574",
             persona_pagos="Pagos", correo_facturas="ec574@example.com", telefono_pagos="8100000000",
             forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            programacion_conf={"programaciones": [{"destino": "APARTADO", "cantidad": 1}]},
         )
         detalle = PedidoDetalle.objects.create(pedido=cls.pedido, producto=producto)
         cls.talla_m = PedidoDetalleTalla.objects.create(

@@ -4986,6 +4986,8 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
 ### 1) Onboarding de Picking
 
 - **Endpoint**: `GET /api/v1/wms/pickings/onboarding/`
+- **Solo pedidos programados**: `pedidos` trae únicamente los que mesa de control ya programó (`PATCH /ventas/pedidos/{id}/programar/`). Un `POST` con un pedido sin programar → `400 {"pedido": "El pedido no está programado; prográmalo antes de surtirlo."}`.
+- **Hacia dónde surtir**: cada pedido trae `programaciones: [{destino, cantidad, comentarios}]`. Con `?pedido=`, `pedido.programaciones[]` agrega `almacen_sugerido: {id, nombre} | null` (APARTADO → APARTADOS, BORDADO → BORDADOS; el resto sin almacén). Front: mostrarlo como pista junto al selector de almacén destino, p. ej. "Programado: APARTADO · 4 pzs → APARTADOS".
 - **Objetivo (rediseño v2: _Tracker de prendas por pedido_)**: dar al frontend todo lo necesario para preparar un surtido parcial o total mediante un flujo onboarding de 4 pasos. El **picking** es el documento que _rastrea la ruta física_ de las prendas del pedido:
   - `almacen_origen` → de dónde se toman las prendas.
   - `almacen_destino` → hacia qué estación/almacén se envían (seleccionable **libremente**).
