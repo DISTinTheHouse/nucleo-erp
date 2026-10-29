@@ -997,6 +997,31 @@ class OnboardingAlmacenSugeridoTests(TestCase):
         self.assertIsNone(data["almacen_destino"])
         self.assertEqual(data["almacen_origen"]["id"], terminado.pk)
 
+    def test_origen_por_query_param_conserva_la_regla_del_destino(self):
+        data = self._get(pedido=self.pedido_matriz.pk, almacen_origen=self.origen.pk)
+        self.assertEqual(data["almacen_origen"]["id"], self.origen.pk)
+        # El destino sale igual que sin query param: APARTADOS activo con entrada.
+        self.assertEqual(data["almacen_destino"]["id"], self.apartados.pk)
+
+        data = self._get(pedido=self.pedido_norte.pk, almacen_origen=self.bordados_norte.pk)
+        self.assertEqual(data["almacen_origen"]["id"], self.bordados_norte.pk)
+        self.assertIsNone(data["almacen_destino"])  # Norte no tiene APARTADOS válido
+
+    def test_usuario_de_una_sucursal_solo_ve_sus_pedidos_y_sugerencias(self):
+        operador = Usuario.objects.create(
+            username="norte645@example.com", email="norte645@example.com",
+            empresa=self.empresa, sucursal_default=self.norte,
+        )
+        self.api.force_authenticate(operador)
+        (pedido,) = self._get()["pedidos"]
+        self.assertEqual(pedido["id"], self.pedido_norte.pk)
+        self.assertEqual(
+            self._sugeridos(pedido["programaciones"]),
+            [("APARTADO", None), ("BORDADO", self.bordados_norte.pk)],
+        )
+        resp = self.api.get(self.URL, {"pedido": self.pedido_matriz.pk})
+        self.assertEqual(resp.status_code, 400, resp.content)
+
     def test_sin_apartados_valido_no_sugiere_destino(self):
         data = self._get(pedido=self.pedido_norte.pk)
         self.assertIsNone(data["almacen_destino"])
