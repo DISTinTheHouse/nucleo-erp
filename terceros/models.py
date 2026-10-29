@@ -140,6 +140,23 @@ class Proveedor(StatusLifecycleModel):
         db_table = "proveedores"
         verbose_name = "Proveedor"
         verbose_name_plural = "Proveedores"
+        constraints = [
+            models.UniqueConstraint(fields=["empresa", "codigo"], name="uq_proveedor_empresa_codigo"),
+        ]
+
+    @staticmethod
+    def siguiente_codigo(empresa):
+        """PROV00001, PROV00002... por empresa. Llamar dentro de una transacción:
+        bloquea la empresa para que dos altas simultáneas no tomen el mismo número.
+        Cuenta también los dados de baja, para no reutilizar su código."""
+        Empresa.objects.select_for_update().filter(pk=empresa.pk).first()
+        ultimo = max(
+            (int(c[4:]) for c in Proveedor.objects.filter(
+                empresa=empresa, codigo__iregex=r"^PROV[0-9]+$"
+            ).values_list("codigo", flat=True)),
+            default=0,
+        )
+        return f"PROV{ultimo + 1:05d}"
     
     def __str__(self):
         return str(self.id)

@@ -1666,7 +1666,14 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             {"permiso": "Acción disponible solo para mesa de control."}
         )
 
+    @staticmethod
+    def _exigir_sucursal(cotizacion):
+        # El pedido exige sucursal; sin ella el alta daba 500 (#719).
+        if not cotizacion.sucursal_id:
+            raise ValidationError({"sucursal": "La cotización no tiene sucursal; asígnala antes de autorizar."})
+
     def _copiar_cotizacion_a_pedido(self, cotizacion, empresa):
+        self._exigir_sucursal(cotizacion)
         # Valores por omisión para campos NOT NULL de Pedido que cotización no
         # siempre define. Elegidos alineados a los TextChoices de Cotizacion y
         # a los defaults razonables usados en producción.
@@ -2003,6 +2010,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 )
 
     def _aplicar_cotizacion_a_pedido(self, cotizacion, pedido):
+        self._exigir_sucursal(cotizacion)
         pedido.empresa = cotizacion.empresa
         pedido.sucursal = cotizacion.sucursal
         pedido.cliente = cotizacion.cliente
@@ -3431,19 +3439,23 @@ class PedidoViewSet(viewsets.ModelViewSet):
             # de inventarios (``usuario_id`` / ``usuario_nombre``).
             fecha = timezone.now().isoformat()
             usuario_nombre = nombre_para_mostrar(user.first_name, user.last_name, user.email)
-            pedido.programacion_conf = {
-                "programaciones": [
-                    {
-                        "destino": p["destino"],
-                        "cantidad": p["cantidad"],
-                        "comentarios": p.get("comentarios") or "",
-                        "fecha": fecha,
-                        "usuario_id": user.pk,
-                        "usuario_nombre": usuario_nombre,
-                    }
-                    for p in serializer.validated_data["programaciones"]
-                ]
-            }
+            # Una parcialidad igual a una ya guardada (destino, cantidad, comentarios)
+            # conserva su sello; solo las nuevas o cambiadas llevan el de este guardado (#728).
+            previas = {}
+            for p in (pedido.programacion_conf or {}).get("programaciones", []):
+                clave = (p.get("destino"), p.get("cantidad"), p.get("comentarios") or "")
+                previas.setdefault(clave, []).append(p)
+            programaciones = []
+            for p in serializer.validated_data["programaciones"]:
+                clave = (p["destino"], p["cantidad"], p.get("comentarios") or "")
+                previa = previas.get(clave, []).pop(0) if previas.get(clave) else None
+                sello = previa or {"fecha": fecha, "usuario_id": user.pk, "usuario_nombre": usuario_nombre}
+                programaciones.append({
+                    "destino": clave[0], "cantidad": clave[1], "comentarios": clave[2],
+                    "fecha": sello.get("fecha"), "usuario_id": sello.get("usuario_id"),
+                    "usuario_nombre": sello.get("usuario_nombre"),
+                })
+            pedido.programacion_conf = {"programaciones": programaciones}
             pedido.save(update_fields=["programacion_conf", "updated_at"])
 
         # Se relee de BD para que la respuesta refleje lo persistido, no lo enviado.
@@ -3472,7 +3484,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         )
         variantes = {t.variante_id for t in tallas if t.variante_id}
         almacen = dict(producto_variante_id__in=variantes, almacen__empresa_id=pedido.empresa_id,
-                       almacen__codigo=self.ALMACEN_SURTIDO)
+                       almacen__sucursal_id=pedido.sucursal_id, almacen__codigo=self.ALMACEN_SURTIDO)
         stock = dict(
             Existencia.objects.filter(**almacen).values("producto_variante_id")
             .annotate(t=Sum("cantidad")).values_list("producto_variante_id", "t")
@@ -3481,7 +3493,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
             inventario_reservas.objects.filter(
                 estado=inventario_reservas.Estado.ACTIVA,
                 existencia__producto_variante_id__in=variantes,
-                almacen__empresa_id=pedido.empresa_id, almacen__codigo=self.ALMACEN_SURTIDO,
+                almacen__empresa_id=pedido.empresa_id, almacen__sucursal_id=pedido.sucursal_id,
+                almacen__codigo=self.ALMACEN_SURTIDO,
             ).exclude(pedido_detalle__pedido=pedido)
             .values("existencia__producto_variante_id").annotate(t=Sum("cantidad"))
             .values_list("existencia__producto_variante_id", "t")
