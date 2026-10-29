@@ -31,11 +31,7 @@ class NotaCreditoService:
     @staticmethod
     def validar_factura(factura):
         """No se emite ni timbra una nota sobre una factura cancelada o con cancelación en curso (#614)."""
-        if (
-            factura.estatus == Factura.FacturaStatus.CANCELADA
-            or factura.cfdi_cancelado
-            or factura.cfdi_cancelacion_solicitada
-        ):
+        if factura.cancelada_o_en_cancelacion:
             raise ErrorDeNegocio({"factura": "La factura está cancelada o su cancelación está en proceso."})
 
     @staticmethod

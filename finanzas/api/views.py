@@ -576,7 +576,9 @@ class FacturaViewSet(FinanzasBaseViewSet):
         if pedido:
             qs = qs.filter(pedido_id=pedido)
         if _bool_param(saldo_pendiente):
-            qs = qs.filter(cuentas_por_cobrar__saldo__gt=0).distinct()
+            # Una CxC cancelada conserva su saldo: no es pendiente (#734, como en CxC #591).
+            vivas = [e for e in CuentaPorCobrar.EstatusCxC.values if e != CuentaPorCobrar.EstatusCxC.CANCELADA]
+            qs = qs.filter(cuentas_por_cobrar__saldo__gt=0, cuentas_por_cobrar__estatus__in=vivas).distinct()
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha_emision")
         qs = _aplicar_ordering(qs, qp, ["-fecha_emision", "-id"])
         return qs
