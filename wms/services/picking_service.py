@@ -104,6 +104,7 @@ class PickingService:
             almacenes_payload,
             almacenes_origen_payload,
             almacenes_destino_payload,
+            almacenes_por_sucursal,
         ) = cargar_catalogos(user, empresa, es_staff, sucursal_ids)
 
         almacen_origen_id = parse_pk(almacen_origen_id)
@@ -153,10 +154,13 @@ class PickingService:
         header_base["tracker"] = cls._armar_tracker(pedido, picking_maps=picking_maps)
         payload["header"] = header_base
 
-        # Una sola resolución por petición: alimenta la sugerencia de destino y
-        # ``pedido.programaciones[].almacen_sugerido`` con la misma regla
-        # (ACTIVO + ``permite_entrada``) que el listado.
-        almacenes_destino = almacenes_por_destino(pedido)
+        # Almacenes por destino de la sucursal del pedido, con la misma regla
+        # (ACTIVO + ``permite_entrada``) que el listado: alimentan la sugerencia
+        # de destino y ``pedido.programaciones[].almacen_sugerido``. Se reusa lo
+        # que el listado ya resolvió; solo consulta si el pedido quedó fuera de los 50.
+        almacenes_destino = almacenes_por_sucursal.get(pedido.sucursal_id)
+        if almacenes_destino is None:
+            almacenes_destino = almacenes_por_destino(pedido)
 
         # Sin query param: destino = APARTADOS válido; origen = ``sugerir_origen``,
         # que nunca repite el destino.
