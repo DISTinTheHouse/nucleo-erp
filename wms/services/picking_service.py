@@ -17,8 +17,8 @@ from wms.services.picking_pipeline.catalogs import (
     cargar_catalogos,
     programaciones_de,
     serializar_almacen,
-    sugerir_almacenes,
     sugerir_apartados_por_defecto,
+    sugerir_origen,
 )
 from wms.services.picking_pipeline.cantidad_validator import resolve_requested_items
 from wms.services.picking_pipeline.context import (
@@ -158,25 +158,14 @@ class PickingService:
         # (ACTIVO + ``permite_entrada``) que el listado.
         almacenes_destino = almacenes_por_destino(pedido)
 
+        # Sin query param: destino = APARTADOS válido; origen = ``sugerir_origen``,
+        # que nunca repite el destino.
+        if almacen_destino is None:
+            almacen_destino = almacenes_destino.get(ALMACEN_POR_DESTINO["APARTADO"])
+            payload["almacen_destino"] = serializar_almacen(almacen_destino)
         if almacen_origen is None:
-            origen_sugerido, destino_sugerido = sugerir_almacenes(
-                pedido,
-                almacen_origen_actual=None,
-                almacen_destino_actual=almacen_destino,
-                almacenes_destino=almacenes_destino,
-            )
-            if payload["almacen_origen"] is None:
-                payload["almacen_origen"] = serializar_almacen(origen_sugerido)
-                almacen_origen = origen_sugerido
-            if destino_sugerido and payload["almacen_destino"] is None:
-                payload["almacen_destino"] = serializar_almacen(destino_sugerido)
-                almacen_destino = destino_sugerido
-
-        if almacen_destino is None and payload["almacen_destino"] is None:
-            almacen_apartados = almacenes_destino.get(ALMACEN_POR_DESTINO["APARTADO"])
-            if almacen_apartados:
-                payload["almacen_destino"] = serializar_almacen(almacen_apartados)
-                almacen_destino = almacen_apartados
+            almacen_origen = sugerir_origen(pedido, almacen_destino)
+            payload["almacen_origen"] = serializar_almacen(almacen_origen)
 
         tallas = list(
             PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
