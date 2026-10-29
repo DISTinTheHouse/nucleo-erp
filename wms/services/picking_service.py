@@ -10,6 +10,7 @@ from wms.models import Picking, PickingDetalle
 from wms.services.existencia_service import ExistenciaService
 from wms.services.transferencia_service import TransferenciaService
 from wms.services.picking_pipeline.catalogs import (
+    ALMACEN_POR_DESTINO,
     almacenes_por_destino,
     armar_header_preview,
     armar_payload_vacio,
@@ -152,11 +153,17 @@ class PickingService:
         header_base["tracker"] = cls._armar_tracker(pedido, picking_maps=picking_maps)
         payload["header"] = header_base
 
+        # Una sola resolución por petición: alimenta la sugerencia de destino y
+        # ``pedido.programaciones[].almacen_sugerido`` con la misma regla
+        # (ACTIVO + ``permite_entrada``) que el listado.
+        almacenes_destino = almacenes_por_destino(pedido)
+
         if almacen_origen is None:
             origen_sugerido, destino_sugerido = sugerir_almacenes(
                 pedido,
                 almacen_origen_actual=None,
                 almacen_destino_actual=almacen_destino,
+                almacenes_destino=almacenes_destino,
             )
             if payload["almacen_origen"] is None:
                 payload["almacen_origen"] = serializar_almacen(origen_sugerido)
@@ -166,7 +173,7 @@ class PickingService:
                 almacen_destino = destino_sugerido
 
         if almacen_destino is None and payload["almacen_destino"] is None:
-            almacen_apartados = sugerir_apartados_por_defecto(pedido)
+            almacen_apartados = almacenes_destino.get(ALMACEN_POR_DESTINO["APARTADO"])
             if almacen_apartados:
                 payload["almacen_destino"] = serializar_almacen(almacen_apartados)
                 almacen_destino = almacen_apartados
@@ -245,7 +252,7 @@ class PickingService:
             "cliente_nombre": getattr(pedido.cliente, "nombre", None),
             "sucursal": pedido.sucursal_id,
             "sucursal_nombre": getattr(pedido.sucursal, "nombre", None),
-            "programaciones": programaciones_de(pedido, almacenes_por_destino(pedido)),
+            "programaciones": programaciones_de(pedido, almacenes_destino),
         }
         payload["picking_detalle"] = detalle_payload
         return payload
