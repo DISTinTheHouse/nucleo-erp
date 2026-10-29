@@ -1,6 +1,6 @@
 from django.db.models import Q
 from catalogo.compatibilidad import exigir_compatibilidad
-from catalogo.models import Talla, Producto, ProductoVariante
+from catalogo.models import CategoriaProductoTalla, Talla, Producto, ProductoVariante
 from ventas.services.sku_produccion_service import nombre_es_muestra
 from ventas.models import (
     CotizacionServicioExtra,
@@ -252,6 +252,13 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user, validar_matriz
         ),
         empresa_id=cotizacion_obj.empresa_id,
     ).in_bulk()
+    # Tallas permitidas por categoría, para las muestras (las de catálogo ya las
+    # valida su variante). Una consulta; categoría sin tallas configuradas no restringe.
+    tallas_por_categoria = {}
+    for cat_id, talla_id in CategoriaProductoTalla.objects.filter(
+        categoria_producto_id__in=categorias
+    ).values_list("categoria_producto_id", "talla_id"):
+        tallas_por_categoria.setdefault(cat_id, set()).add(talla_id)
     direcciones = DirModel.objects.filter(
         pk__in=_ids_validos(r.get("direccion_envio_cliente") for r in rows),
         activo=True,
@@ -358,6 +365,11 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user, validar_matriz
                 talla = None
             if not talla:
                 raise ValidationError({"detalle": f"Talla inválida: {t['talla']}"})
+            permitidas = tallas_por_categoria.get(getattr(categoria_producto_obj, "pk", None))
+            if producto is None and permitidas and talla.pk not in permitidas:
+                raise ValidationError({"detalle": (
+                    f"La talla {talla.nombre} no corresponde a la categoría {categoria_producto_obj.nombre}."
+                )})
             if t.get("lleva_bordado") and t.get("bordado_config") is None:
                 raise ValidationError(
                     {

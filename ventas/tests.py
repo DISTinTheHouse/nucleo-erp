@@ -3249,6 +3249,16 @@ class CategoriaProductoCotizacionTests(TestCase):
             with self.assertRaises(DRFValidationError):
                 _save_cotizacion_detalle(self.cotizacion, [self._fila(self.ajena)], self.empresa, user)
 
+    def test_muestra_solo_acepta_tallas_de_su_categoria(self):
+        from catalogo.models import CategoriaProductoTalla
+        ch, uno = Talla.objects.create(nombre="CH"), Talla.objects.create(nombre="1")
+        CategoriaProductoTalla.objects.create(categoria_producto=self.propia, talla=ch)
+        fila = lambda talla: {**self._fila(self.propia), "tallas": [{"talla": talla.pk, "cantidad": 1}]}
+        with self.assertRaisesMessage(DRFValidationError, "no corresponde a la categoría"):
+            _save_cotizacion_detalle(self.cotizacion, [fila(uno)], self.empresa, self.admin)
+        _save_cotizacion_detalle(self.cotizacion, [fila(ch)], self.empresa, self.admin)
+        self.assertTrue(CotizacionDetalleTalla.objects.filter(talla=ch).exists())
+
     def test_cotizacion_detalle_rechaza_categoria_ajena(self):
         det = CotizacionDetalle.objects.create(
             cotizacion=self.cotizacion, producto_nombre_externo="Muestra",
