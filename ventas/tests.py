@@ -2123,13 +2123,13 @@ class PedidoProgramarTests(TestCase):
         self.assertIn(response.status_code, (401, 403))
         self.assertEqual(self._programacion_db(), {})
 
-    def test_solo_acepta_patch(self):
+    def test_solo_acepta_get_y_patch(self):
         client = APIClient()
         client.force_authenticate(user=self.admin_mesa)
         payload = {"programaciones": [{"destino": "BORDADO", "cantidad": 1}]}
         url = pedido_programar_url(self.pedido.pk)
         self.assertEqual(client.post(url, payload, format="json").status_code, 405)
-        self.assertEqual(client.get(url).status_code, 405)
+        self.assertEqual(client.put(url, payload, format="json").status_code, 405)
 
     def test_no_aplica_bloqueos_de_edicion_estricta(self):
         picking = Picking.objects.create(
