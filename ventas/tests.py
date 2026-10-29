@@ -1818,6 +1818,25 @@ class PedidoProgramarTests(TestCase):
             (None, 40): (35, 5),          # producto sin variantes: 45 - 10
         })
 
+    def test_get_contexto_suma_existencias_de_la_variante_con_y_sin_producto(self):
+        alm00, _, variante, _ = self._escenario_stock()
+        Existencia.objects.create(producto=self.producto, producto_variante=variante, almacen=alm00, cantidad=20)
+        Existencia.objects.create(producto=None, producto_variante=variante, almacen=alm00, cantidad=15)
+        con_variante = next(r for r in self._get_contexto()["renglones"] if r["variante_id"] == variante.pk)
+        self.assertEqual((con_variante["stock_disponible"], con_variante["faltante"]), (35, 15))
+
+    def test_get_contexto_variantes_de_otra_empresa_no_cuentan(self):
+        # El guardado sólo resuelve variantes de la empresa del pedido: con variantes
+        # únicamente en otra empresa, el producto se trata como sin variantes.
+        alm00, _, _, sin_variantes = self._escenario_stock()
+        ProductoVariante.objects.create(
+            producto=sin_variantes, empresa=self.empresa_b, sku="MAND-GLOBEX", precio_base="1",
+            color=Color.objects.create(nombre="Blanco", codigo="BLA", codigo_hex="#fff"), talla=self.talla_m,
+        )
+        Existencia.objects.create(producto=sin_variantes, almacen=alm00, cantidad=12)
+        renglon = next(r for r in self._get_contexto()["renglones"] if r["cantidad"] == 40)
+        self.assertEqual((renglon["stock_disponible"], renglon["faltante"]), (12, 28))
+
     def test_get_contexto_muestra_y_sin_producto_quedan_null(self):
         alm00, _, _, _ = self._escenario_stock()
         Existencia.objects.create(producto=self.producto, almacen=alm00, cantidad=100)

@@ -3483,24 +3483,27 @@ class PedidoViewSet(viewsets.ModelViewSet):
         tallas = list(
             PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
             .select_related("pedido_detalle__producto", "pedido_detalle__color", "talla", "variante")
-            # Activas o no: el guardado resuelve la variante sin mirar ``activo``.
-            .annotate(producto_con_variantes=Exists(
-                ProductoVariante.objects.filter(producto_id=OuterRef("pedido_detalle__producto_id"))))
+            # Mismo criterio que el guardado al resolver la variante: variantes de la
+            # empresa del pedido, activas o no.
+            .annotate(producto_con_variantes=Exists(ProductoVariante.objects.filter(
+                producto_id=OuterRef("pedido_detalle__producto_id"), empresa_id=pedido.empresa_id)))
             .order_by("pedido_detalle_id", "id")
         )
         # Clave de stock como en ``ExistenciaService``: la variante o, sin ella, el
         # producto (filas de ``Existencia`` sin variante). Sólo si el producto no tiene
         # ninguna variante: si las tiene, la talla quedó sin resolver (#731) y su stock
-        # por producto no dice nada. Las muestras no se surten de aquí.
+        # por producto no dice nada. Las muestras no se surten de aquí: sin clave.
         def clave(t):
+            if es_muestra(t.pedido_detalle):
+                return None
             if t.variante_id:
                 return ("variante", t.variante_id)
-            if (t.pedido_detalle.producto_id and not t.producto_con_variantes
-                    and not es_muestra(t.pedido_detalle)):
+            if t.pedido_detalle.producto_id and not t.producto_con_variantes:
                 return ("producto", t.pedido_detalle.producto_id)
             return None
 
-        claves = {c for c in map(clave, tallas) if c}
+        clave_por_talla = {t.pk: clave(t) for t in tallas}
+        claves = {c for c in clave_por_talla.values() if c}
         variantes = {i for tipo, i in claves if tipo == "variante"}
         productos = {i for tipo, i in claves if tipo == "producto"}
         alcance = dict(almacen__empresa_id=pedido.empresa_id, almacen__sucursal_id=pedido.sucursal_id,
@@ -3528,9 +3531,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
         for t in tallas:
             det = t.pedido_detalle
             muestra = es_muestra(det)
-            c = clave(t)
+            c = clave_por_talla[t.pk]
             disponible = None
-            if c and not muestra:
+            if c:
                 disponible = max(int((stock.get(c) or 0) - (reservado.get(c) or 0)), 0)
             renglones.append({
                 "pedido_detalle_talla_id": t.pk,
