@@ -5797,6 +5797,45 @@ class BomDetalleTenantTests(_BomTenantBase, TestCase):
             "materia_prima_detalle": [self._insumo(**insumo)],
         }
 
+    def _con_categoria(self):
+        from catalogo.models import CategoriaProducto
+        from ventas.models import Cotizacion, CotizacionDetalle
+        categoria = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Chamarra", codigo="CHA")
+        cotizacion = Cotizacion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.pedido.cliente, estatus=3,
+        )
+        CotizacionDetalle.objects.create(
+            cotizacion=cotizacion, producto_nombre_externo="Muestra especial", categoria_producto=categoria,
+        )
+        Pedido.objects.filter(pk=self.pedido.pk).update(cotizacion=cotizacion)
+        return categoria
+
+    def test_detalle_trae_categoria_y_prefijo_de_sku(self):
+        self._con_categoria()
+        resp = self._client(self.admin).get(f"/api/v1/produccion/pedidos-especiales/{self.pedido.pk}/")
+        (linea,) = resp.data["detalles"]
+        self.assertEqual(linea["categoria_producto"]["nombre"], "Chamarra")
+        self.assertEqual(linea["sku_prefijo"], f"MP{self.linea_muestra.pk}")
+        self.assertTrue(linea["tallas"][0]["sku_siguiente"].startswith(f"MP{self.linea_muestra.pk}-"))
+
+    def test_variante_onboarding_alta_catalogo_crea_producto_y_variantes(self):
+        categoria = self._con_categoria()
+        body = {**self._body_onboarding(), "alta_catalogo": True}
+        resp = self._client(self.admin).post(self.url_onboarding, body, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        producto = Producto.objects.get(categoria_producto=categoria)
+        self.assertEqual(producto.codigo, "CHA00")
+        variante = ProductoVariante.objects.get(producto=producto)
+        self.assertEqual(resp.data[0]["sku_catalogo"], variante.sku)
+        self.assertTrue(resp.data[0]["aplica_catalogo"])
+
+    def test_variante_onboarding_alta_catalogo_sin_categoria_es_400(self):
+        body = {**self._body_onboarding(), "alta_catalogo": True}
+        resp = self._client(self.admin).post(self.url_onboarding, body, format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("alta_catalogo", resp.data)
+        self.assertFalse(VarianteProductoProduccion.objects.filter(pedido_detalle=self.linea_muestra).exists())
+
     def test_variante_onboarding_rechaza_componente_de_otra_empresa(self):
         resp = self._client(self.admin).post(
             self.url_onboarding, self._body_onboarding(componente=self.componente_ajeno.pk), format="json"
@@ -5823,7 +5862,7 @@ class BomDetalleTenantTests(_BomTenantBase, TestCase):
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertEqual(len(resp.data), 1)
         self.assertEqual(
-            set(resp.data[0]), {"id", "sku", "nombre", "talla_nombre", "aplica_catalogo", "pedido_detalle"}
+            set(resp.data[0]), {"id", "sku", "nombre", "talla_nombre", "aplica_catalogo", "sku_catalogo", "pedido_detalle"}
         )
         variante = VarianteProductoProduccion.objects.get(pk=resp.data[0]["id"])
         self.assertEqual(variante.empresa_id, self.empresa.pk)
@@ -6502,7 +6541,7 @@ class VarianteOnboardingColorTests(_BomTenantBase, TestCase):
 
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertEqual(
-            set(resp.data[0]), {"id", "sku", "nombre", "talla_nombre", "aplica_catalogo", "pedido_detalle"}
+            set(resp.data[0]), {"id", "sku", "nombre", "talla_nombre", "aplica_catalogo", "sku_catalogo", "pedido_detalle"}
         )
         self.assertEqual(resp.data[0]["sku"], f"MP{linea.pk}-ROJ-M")
         linea.refresh_from_db()
