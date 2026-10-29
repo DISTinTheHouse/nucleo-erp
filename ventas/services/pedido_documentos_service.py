@@ -199,12 +199,15 @@ def _visible(doc, cfg, alcance):
     return True
 
 
-def listar_documentos_pedido(pedido, user=None):
+def listar_documentos_pedido(pedido, user=None, tipos=None):
     """Documentos del pedido. Con ``user``: sin bajas, sin facturas si no ve
-    contabilidad y, en los tipos por sucursal, solo los de sus sucursales."""
+    contabilidad y, en los tipos por sucursal, solo los de sus sucursales.
+    ``tipos``: solo esos (un pedido recién creado solo puede tener su cotización)."""
     documentos = []
     alcance = _alcance(user)
     for cfg in DOCUMENTOS_CONFIG:
+        if tipos is not None and cfg["tipo"] not in tipos:
+            continue
         if cfg["is_single"]:
             doc = getattr(pedido, cfg["related_name"], None)
             if doc is None or not _visible(doc, cfg, alcance):

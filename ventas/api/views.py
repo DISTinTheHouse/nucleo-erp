@@ -2220,6 +2220,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 raise ValidationError(
                     {"cotizacion": "La cotización debe estar EN REVISION para ser autorizada."}
                 )
+            # La fila se releyó bajo lock; la empresa es la misma ya cargada (sin otra consulta).
+            cotizacion.empresa = empresa
             # Antes de generar el pedido, que copia estos montos tal cual (EC-571).
             errores_montos = errores_montos_guardados(cotizacion)
             if errores_montos:
@@ -2281,16 +2283,27 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
         pedido = (
             Pedido.objects.filter(pk=pedido.pk)
+            .select_related("cotizacion")
             .prefetch_related(
                 _pedido_detalles_prefetch(),
                 _pedido_servicios_extras_prefetch(),
             )
             .first()
         )
+        # Pedido recién creado bajo el lock de la cotización: aún no tiene picking,
+        # órdenes, facturas ni envíos. Se le pasa al serializer lo ya sabido (como
+        # ``retrieve()``) en vez de consultar ~20 tablas que vienen vacías.
+        contexto = {
+            "_pedido_nuevo": True,
+            "_picking_tracking": {"asignado_map": {}, "surtido_map": {}},
+            "_total_prendas_pedido": sum(
+                (t.cantidad or 0) for d in pedido.detalles.all() for t in d.tallas.all()
+            ),
+        }
         return Response(
             {
                 "cotizacion": CotizacionSerializer(cotizacion).data,
-                "pedido": PedidoSerializer(pedido).data,
+                "pedido": PedidoSerializer(pedido, context=contexto).data,
             },
             status=status.HTTP_201_CREATED,
         )

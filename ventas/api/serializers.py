@@ -828,7 +828,9 @@ class PedidoSerializer(serializers.ModelSerializer):
         return rango_fecha_entrega(obj)[1]
 
     def get_destinos_aplicables(self, obj):
-        from ventas.services.programacion_service import destinos_aplicables
+        from ventas.services.programacion_service import destinos_aplicables, destinos_de_tallas
+        if self.context.get("_pedido_nuevo"):
+            return destinos_de_tallas(t for d in obj.detalles.all() for t in d.tallas.all())
         return destinos_aplicables(obj)
 
     def get_total_parcialidades(self, obj):
@@ -876,7 +878,9 @@ class PedidoSerializer(serializers.ModelSerializer):
         from ventas.services.pedido_documentos_service import listar_documentos_pedido
         try:
             request = self.context.get("request")
-            return listar_documentos_pedido(obj, getattr(request, "user", None))
+            # Recién creado (``autorizar``): nada más que su cotización lo referencia aún.
+            tipos = {"cotizacion"} if self.context.get("_pedido_nuevo") else None
+            return listar_documentos_pedido(obj, getattr(request, "user", None), tipos=tipos)
         except Exception:
             return []
 
@@ -905,6 +909,8 @@ class PedidoSerializer(serializers.ModelSerializer):
 
     def get_folios_picking(self, obj):
         from wms.services.picking_pipeline.pendientes import listar_folios_picking
+        if self.context.get("_pedido_nuevo"):
+            return []
         try:
             return listar_folios_picking(obj)
         except Exception:
