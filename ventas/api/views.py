@@ -3480,7 +3480,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
     def _programar_contexto(self, pedido):
         """Renglones del pedido con servicios y stock disponible en el ALM-00 de la
         sucursal del pedido (existencia menos reservas activas de otros pedidos), por
-        variante o, si el producto no tiene variantes, por producto. Queries fijas, sin
+        variante o, si el producto no tiene variantes, por producto, repartido entre los
+        renglones que comparten clave en el orden de la respuesta. Queries fijas, sin
         importar renglones."""
         from catalogo.models import ProductoVariante
         from ventas.services.programacion_service import _DESTINOS_LOGISTICA, _DESTINOS_POR_SERVICIO
@@ -3532,6 +3533,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
             .exclude(pedido_detalle__pedido=pedido), "existencia__"
         ) if claves else {}
 
+        # El stock de una clave se reparte entre sus renglones en el orden de la
+        # respuesta: cada uno ve lo que dejaron los anteriores, para que la cobertura
+        # no cuente dos veces las mismas piezas (EC-644).
+        restante = {c: max(int((stock.get(c) or 0) - (reservado.get(c) or 0)), 0) for c in claves}
         renglones = []
         for t in tallas:
             det = t.pedido_detalle
@@ -3539,7 +3544,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
             c = clave_por_talla[t.pk]
             disponible = None
             if c:
-                disponible = max(int((stock.get(c) or 0) - (reservado.get(c) or 0)), 0)
+                disponible = restante[c]
+                restante[c] = max(disponible - t.cantidad, 0)
             renglones.append({
                 "pedido_detalle_talla_id": t.pk,
                 "pedido_detalle_id": t.pedido_detalle_id,
