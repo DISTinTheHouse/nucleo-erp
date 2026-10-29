@@ -1923,6 +1923,55 @@ def _categoria_de_linea(categorias, detalle):
     return por_color.get(detalle.color_id) or por_color.get(None) or next(iter(por_color.values()), None)
 
 
+def _categoria_para_alta(pedido, detalle, tallas):
+    """Categoría de la línea para darla de alta en catálogo; exige que exista y
+    que las tallas sean de ella."""
+    categoria = _categoria_de_linea(_categorias_de_muestras(pedido), detalle)
+    if categoria is None:
+        raise ValidationError({'alta_catalogo': (
+            'La línea no tiene categoría (se captura en la cotización); '
+            'no se puede dar de alta en catálogo.'
+        )})
+    permitidas = set(categoria.tallas.values_list('pk', flat=True))
+    fuera = [t.nombre for t in tallas if permitidas and t.pk not in permitidas]
+    if fuera:
+        raise ValidationError({'alta_catalogo': (
+            f"Tallas que no son de la categoría {categoria.nombre}: {', '.join(fuera)}."
+        )})
+    return categoria
+
+
+def _crear_producto_catalogo(pedido, detalle, categoria, nombre):
+    # Mismo alta que el catálogo (``ProductoViewSet.onboarding``): código
+    # consecutivo de la categoría, Producto Terminado.
+    return Producto.objects.create(
+        empresa=pedido.empresa, categoria_producto=categoria,
+        codigo=siguiente_codigo_producto(categoria), tipo_id=TIPO_PRODUCTO_TERMINADO_ID,
+        unidad_medida=categoria.unidad_medida,
+        nombre=nombre[:Producto._meta.get_field('nombre').max_length].rstrip(' -_,;:./|'),
+        precio_base=detalle.precio_unitario,
+    )
+
+
+def _alta_variante_catalogo(variante, producto, precio):
+    """``ProductoVariante`` (SKU ``codigo-color-talla``) para una variante de
+    producción; su BOM queda ligado también al SKU de catálogo, que es por el
+    que la OP lo busca (``con_bom``)."""
+    sku = f"{producto.codigo}-{variante.color.codigo}-{variante.talla.nombre}".strip().upper()
+    if ProductoVariante.objects.filter(sku=sku).exists():
+        raise ValidationError({'alta_catalogo': f"El SKU '{sku}' ya existe en catálogo."})
+    pv = ProductoVariante.objects.create(
+        producto=producto, empresa=producto.empresa, color=variante.color,
+        talla=variante.talla, sku=sku, precio_base=precio,
+    )
+    variante.aplica_catalogo = True
+    variante.producto_base = producto
+    variante.save(update_fields=['aplica_catalogo', 'producto_base'])
+    ListaMaterialBom.objects.filter(variante_produccion=variante).update(producto_variante=pv)
+    variante.sku_catalogo = sku
+    return pv
+
+
 def _require_produccion(user):
     """Gate compartido por las acciones de escritura de producción (ruta
     crítica de OP, onboarding de SKU de muestra): superuser/admin_empresa
@@ -2115,18 +2164,7 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
 
             alta_catalogo = serializer.validated_data.get('alta_catalogo', False)
             if alta_catalogo:
-                categoria = _categoria_de_linea(_categorias_de_muestras(pedido), detalle)
-                if categoria is None:
-                    raise ValidationError({'alta_catalogo': (
-                        'La línea no tiene categoría (se captura en la cotización); '
-                        'no se puede dar de alta en catálogo.'
-                    )})
-                permitidas = set(categoria.tallas.values_list('pk', flat=True))
-                fuera = [dt.talla.nombre for dt in tallas if permitidas and dt.talla_id not in permitidas]
-                if fuera:
-                    raise ValidationError({'alta_catalogo': (
-                        f"Tallas que no son de la categoría {categoria.nombre}: {', '.join(fuera)}."
-                    )})
+                categoria = _categoria_para_alta(pedido, detalle, [dt.talla for dt in tallas])
 
             # ``producto_nombre_externo`` admite más caracteres que ``nombre`` de la
             # variante y Postgres no trunca solo (DataError -> 500): se recorta al
@@ -2147,16 +2185,7 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                         detalle.color = color
                         detalle.save(update_fields=['color'])
                     if alta_catalogo:
-                        # Mismo alta que el catálogo (``ProductoViewSet.onboarding`` +
-                        # ``ProductoVarianteViewSet.onboarding``): código consecutivo de la
-                        # categoría, Producto Terminado, SKU ``codigo-color-talla`` (#muestras).
-                        producto_catalogo = Producto.objects.create(
-                            empresa=pedido.empresa, categoria_producto=categoria,
-                            codigo=siguiente_codigo_producto(categoria), tipo_id=TIPO_PRODUCTO_TERMINADO_ID,
-                            unidad_medida=categoria.unidad_medida,
-                            nombre=nombre[:Producto._meta.get_field('nombre').max_length].rstrip(' -_,;:./|'),
-                            precio_base=detalle.precio_unitario,
-                        )
+                        producto_catalogo = _crear_producto_catalogo(pedido, detalle, categoria, nombre)
                     for dt in tallas:
                         # Sin ``producto.codigo`` real que usar (es una muestra sin
                         # catálogo): el prefijo sale del propio ``pedido_detalle_id``,
@@ -2183,15 +2212,10 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                             for detalle_bom in detalles_bom
                         ])
                         if alta_catalogo:
-                            sku_catalogo = f"{producto_catalogo.codigo}-{color.codigo}-{dt.talla.nombre}".strip().upper()
-                            if ProductoVariante.objects.filter(sku=sku_catalogo).exists():
-                                raise ValidationError({'alta_catalogo': f"El SKU '{sku_catalogo}' ya existe en catálogo."})
-                            ProductoVariante.objects.create(
-                                producto=producto_catalogo, empresa=pedido.empresa, color=color,
-                                talla=dt.talla, sku=sku_catalogo,
-                                precio_base=dt.precio_unitario if dt.precio_unitario is not None else detalle.precio_unitario,
+                            _alta_variante_catalogo(
+                                variante, producto_catalogo,
+                                dt.precio_unitario if dt.precio_unitario is not None else detalle.precio_unitario,
                             )
-                            variante.sku_catalogo = sku_catalogo
                         creadas.append(variante)
             except IntegrityError as exc:
                 # Red de seguridad del candado: si aun así otra alta ganó, el
@@ -2206,3 +2230,42 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             VarianteProduccionSerializer(creadas, many=True).data,
             status=status.HTTP_201_CREATED,
         )
+
+    @action(detail=True, methods=['post'], url_path='alta-catalogo')
+    def alta_catalogo(self, request, pk=None):
+        """Alta en catálogo de los SKU de producción que una línea ya tiene
+        (generados sin ``alta_catalogo``): un Producto y una variante por
+        talla, con el BOM ligado para que salgan en la OP y en inventarios."""
+        pedido = self.get_object()
+        _require_produccion(request.user)
+        try:
+            pedido_detalle_id = int(request.data.get('pedido_detalle_id'))
+        except (TypeError, ValueError):
+            raise ValidationError({'pedido_detalle_id': 'Requerido.'})
+        with transaction.atomic():
+            detalle = (
+                _detalles_especiales_qs().select_for_update()
+                .filter(pedido=pedido, pk=pedido_detalle_id).first()
+            )
+            if detalle is None:
+                raise ValidationError({
+                    'pedido_detalle_id': 'No es una línea de producción especial de este pedido.'
+                })
+            variantes = list(
+                VarianteProductoProduccion.objects.filter(pedido_detalle=detalle, aplica_catalogo=False)
+                .select_related('color', 'talla').order_by('pk')
+            )
+            if not variantes:
+                raise ValidationError({
+                    'pedido_detalle_id': 'La línea no tiene SKU de producción pendientes de alta en catálogo.'
+                })
+            categoria = _categoria_para_alta(pedido, detalle, [v.talla for v in variantes])
+            producto = _crear_producto_catalogo(pedido, detalle, categoria, variantes[0].nombre)
+            precios = dict(
+                PedidoDetalleTalla.objects.filter(pedido_detalle=detalle)
+                .values_list('talla_id', 'precio_unitario')
+            )
+            for v in variantes:
+                precio = precios.get(v.talla_id)
+                _alta_variante_catalogo(v, producto, precio if precio is not None else detalle.precio_unitario)
+        return Response(VarianteProduccionSerializer(variantes, many=True).data, status=status.HTTP_201_CREATED)
