@@ -946,6 +946,37 @@ class OnboardingAlmacenSugeridoTests(TestCase):
         # Origen: activo con ``permite_salida`` (salta el INACTIVO y el sin salida).
         self.assertEqual(data["almacen_origen"]["id"], self.origen.pk)
 
+    def _sucursal_con(self, codigo, *almacenes):
+        """Sucursal nueva con sus almacenes ``(codigo, nombre, flags)`` y un pedido programado."""
+        from inventarios.models import Almacen
+
+        sucursal = Sucursal.objects.create(empresa=self.empresa, codigo=codigo, nombre=codigo)
+        creados = [
+            Almacen.objects.create(empresa=self.empresa, sucursal=sucursal, codigo=c, nombre=n, **flags)
+            for c, n, flags in almacenes
+        ]
+        return self._pedido(sucursal, f"{codigo}-1", ["APARTADO"]), creados
+
+    def test_origen_nunca_es_el_destino(self):
+        # Solo hay un APARTADOS válido como destino que además permite salida.
+        pedido, (apartados,) = self._sucursal_con(
+            "SUR", ("APA", "APARTADOS", {"permite_entrada": True, "permite_salida": True})
+        )
+        data = self._get(pedido=pedido.pk)
+        self.assertEqual(data["almacen_destino"]["id"], apartados.pk)
+        self.assertIsNone(data["almacen_origen"])
+
+    def test_origen_nunca_es_apartados_aunque_no_sea_destino(self):
+        # APARTADOS sin entrada (no es destino) pero con salida y el menor pk.
+        pedido, (_, terminado) = self._sucursal_con(
+            "OTE",
+            ("APA", "APARTADOS", {"permite_salida": True}),
+            ("PT", "Terminado", {"permite_salida": True}),
+        )
+        data = self._get(pedido=pedido.pk)
+        self.assertIsNone(data["almacen_destino"])
+        self.assertEqual(data["almacen_origen"]["id"], terminado.pk)
+
     def test_sin_apartados_valido_no_sugiere_destino(self):
         data = self._get(pedido=self.pedido_norte.pk)
         self.assertIsNone(data["almacen_destino"])

@@ -5021,7 +5021,7 @@ Toda sugerencia del GET (`programaciones[].almacen_sugerido`, `almacen_destino` 
 | `almacen_sugerido` de `BORDADO`     | Nombre `BORDADOS` (sin distinguir mayúsculas), `ACTIVO`, `permite_entrada=True`.                            | Menor `id`.                   |
 | `almacen_sugerido` de otro destino  | `EMBARQUE`, `REFLEJANTE` y `CORTE_MANGA` no tienen almacén propio: siempre `null`.                          | —                             |
 | `almacen_destino`                   | El mismo de `APARTADO`.                                                                                     | Menor `id`.                   |
-| `almacen_origen`                    | `ACTIVO`, `permite_salida=True`, distinto del destino sugerido. Si no hay otro, el propio destino (el POST lo rechazará: elegir otro). | Menor `id`. |
+| `almacen_origen`                    | `ACTIVO`, `permite_salida=True`, nunca un almacén llamado `APARTADOS` ni el destino. Sin candidato: `null`. | Menor `id`. |
 
 En el listado, `almacen_sugerido` se resuelve con una sola consulta para todas las sucursales de los pedidos devueltos (hasta 50), no una por pedido. Un `almacen_origen`/`almacen_destino` enviado por query param al que el usuario tiene acceso se devuelve tal cual, sin esta regla; uno sin acceso se ignora y se sugiere.
 
