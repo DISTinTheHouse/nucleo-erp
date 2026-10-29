@@ -829,6 +829,135 @@ class PickingGeneraTransferenciaTests(TestCase):
             ).exists()
         )
 
+class OnboardingAlmacenSugeridoTests(TestCase):
+    """EC-645: ``almacen_sugerido`` en ambas respuestas del GET onboarding y
+    sugerencias de origen/destino solo entre almacenes que el POST aceptaría."""
+
+    URL = "/api/v1/wms/pickings/onboarding/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from inventarios.models import Almacen
+        from nucleo.models import Moneda
+        from terceros.models import Cliente
+
+        cls.empresa = Empresa.objects.create(codigo="ec645", razon_social="EC645 SA")
+        cls.matriz = Sucursal.objects.create(empresa=cls.empresa, codigo="MTZ", nombre="Matriz")
+        cls.norte = Sucursal.objects.create(empresa=cls.empresa, codigo="NTE", nombre="Norte")
+        # Admin de empresa: el listado le trae pedidos de las dos sucursales.
+        cls.usuario = Usuario.objects.create(
+            username="ec645@example.com", email="ec645@example.com", empresa=cls.empresa,
+            sucursal_default=cls.matriz, is_admin_empresa=True,
+        )
+
+        def almacen(sucursal, codigo, nombre, empresa=None, **flags):
+            return Almacen.objects.create(
+                empresa=empresa or cls.empresa, sucursal=sucursal, codigo=codigo, nombre=nombre, **flags
+            )
+
+        # Matriz. El orden de alta fija los pk: lo inválido va primero, que es lo
+        # que una regla de "menor pk" sin filtro elegiría.
+        cls.origen_inactivo = almacen(cls.matriz, "PT-OFF", "PT viejo", estatus="INACTIVO", permite_salida=True)
+        cls.sin_salida = almacen(cls.matriz, "PT-NS", "Sin salida")
+        cls.apartados_inactivo = almacen(cls.matriz, "APA-OFF", "APARTADOS", estatus="INACTIVO", permite_entrada=True)
+        cls.apartados = almacen(cls.matriz, "APA", "Apartados", permite_entrada=True)
+        cls.apartados_dup = almacen(cls.matriz, "APA2", "APARTADOS", permite_entrada=True)
+        cls.origen = almacen(cls.matriz, "PT", "Terminado", permite_salida=True)
+        almacen(cls.matriz, "BOR", "BORDADOS", estatus="INACTIVO", permite_entrada=True)
+        # Norte: sin APARTADOS propio; un BORDADOS sin entrada y otro válido.
+        almacen(cls.norte, "BOR-NE", "Bordados")
+        cls.bordados_norte = almacen(cls.norte, "BOR-OK", "BORDADOS", permite_entrada=True)
+        # Otra empresa con un APARTADOS válido colgado de la sucursal Norte: no
+        # debe sugerirse nunca (el candidato se acota a la empresa del pedido).
+        otra = Empresa.objects.create(codigo="ec645-b", razon_social="Otra SA")
+        almacen(cls.norte, "APA-X", "APARTADOS", empresa=otra, permite_entrada=True)
+
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.pedido_matriz = cls._pedido(cls.matriz, "M-1", ["APARTADO", "BORDADO", "EMBARQUE"])
+        cls.pedido_norte = cls._pedido(cls.norte, "N-1", ["APARTADO", "BORDADO"])
+
+    @classmethod
+    def _pedido(cls, sucursal, folio, destinos):
+        from ventas.models import Pedido
+
+        return Pedido.objects.create(
+            empresa=cls.empresa, sucursal=sucursal, cliente=cls.cliente, moneda=cls.moneda, folio=folio,
+            estatus=3, programacion_conf={"programaciones": [{"destino": d, "cantidad": 1} for d in destinos]},
+            persona_pagos="Pagos", correo_facturas="ec645@example.com", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+
+    def setUp(self):
+        self.api = APIClient()
+        self.api.force_authenticate(self.usuario)
+
+    def _get(self, **params):
+        resp = self.api.get(self.URL, params)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    @staticmethod
+    def _sugeridos(programaciones):
+        return [(p["destino"], (p["almacen_sugerido"] or {}).get("id")) for p in programaciones]
+
+    def test_listado_trae_almacen_sugerido_por_sucursal(self):
+        pedidos = {p["id"]: p for p in self._get()["pedidos"]}
+        # Matriz: APARTADOS activo de menor pk (no el INACTIVO, no el duplicado);
+        # BORDADOS inactivo -> null; EMBARQUE no tiene almacén -> null.
+        self.assertEqual(
+            self._sugeridos(pedidos[self.pedido_matriz.pk]["programaciones"]),
+            [("APARTADO", self.apartados.pk), ("BORDADO", None), ("EMBARQUE", None)],
+        )
+        # Norte: sin APARTADOS propio (el de otra empresa no cuenta) -> null; el
+        # BORDADOS sin ``permite_entrada`` se salta aunque tenga menor pk.
+        self.assertEqual(
+            self._sugeridos(pedidos[self.pedido_norte.pk]["programaciones"]),
+            [("APARTADO", None), ("BORDADO", self.bordados_norte.pk)],
+        )
+        self.assertEqual(
+            pedidos[self.pedido_matriz.pk]["programaciones"][0]["almacen_sugerido"],
+            {"id": self.apartados.pk, "nombre": "Apartados"},
+        )
+
+    def test_listado_y_detalle_coinciden(self):
+        listado = {p["id"]: p["programaciones"] for p in self._get()["pedidos"]}
+        for pedido in (self.pedido_matriz, self.pedido_norte):
+            detalle = self._get(pedido=pedido.pk)["pedido"]["programaciones"]
+            self.assertEqual(detalle, listado[pedido.pk])
+
+    def test_listado_no_crece_en_consultas_con_mas_pedidos(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as antes:
+            self._get()
+        for i in range(4):
+            self._pedido(self.matriz if i % 2 else self.norte, f"X-{i}", ["APARTADO", "BORDADO"])
+        with CaptureQueriesContext(connection) as despues:
+            data = self._get()
+        self.assertEqual(len(data["pedidos"]), 6)
+        self.assertEqual(len(despues), len(antes))
+
+    def test_sugerencias_de_origen_y_destino_filtran_activo_y_flags(self):
+        data = self._get(pedido=self.pedido_matriz.pk)
+        # Destino: APARTADOS activo con entrada de menor pk (salta el INACTIVO).
+        self.assertEqual(data["almacen_destino"]["id"], self.apartados.pk)
+        # Origen: activo con ``permite_salida`` (salta el INACTIVO y el sin salida).
+        self.assertEqual(data["almacen_origen"]["id"], self.origen.pk)
+
+    def test_sin_apartados_valido_no_sugiere_destino(self):
+        data = self._get(pedido=self.pedido_norte.pk)
+        self.assertIsNone(data["almacen_destino"])
+
+    def test_programaciones_null_no_revienta(self):
+        from types import SimpleNamespace
+
+        from wms.services.picking_pipeline.catalogs import programaciones_de
+
+        self.assertEqual(programaciones_de(SimpleNamespace(programacion_conf={"programaciones": None}), {}), [])
+
+
 class PickingTrasladoTests(TestCase):
     """``POST /pickings/{id}/trasladar/``: mover un picking a otro almacén."""
 
