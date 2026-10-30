@@ -24,6 +24,7 @@ from rest_framework.test import APIClient, APIRequestFactory
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Color, Producto, ProductoVariante, Talla
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+from inventarios.api import auxiliar as auxiliar_mod
 from inventarios.api.serializers import ExistenciaSerializer
 from inventarios.models import (
     AjusteInventario,
@@ -46,6 +47,7 @@ from nucleo.models import (
 from produccion.models import ListaMaterialBom, OrdenProduccion, OrdenProduccionDetalle
 from terceros.models import Proveedor
 from usuarios.models import Usuario
+from wms.models import Transferencia
 
 MOVIMIENTOS_URL = "/api/v1/inventarios/movimientos/"
 
@@ -988,16 +990,19 @@ class AuxiliarMovimientosTests(TestCase):
         )
         cls.user = Usuario.objects.create(
             username="u@aux.test", email="u@aux.test", empresa=cls.empresa, is_admin_empresa=True,
+            sucursal_default=sucursal,
         )
+        cls.otra_sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="AUX2", nombre="aux 2")
+        cls.alm3 = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.otra_sucursal, codigo="A3", nombre="Tres")
         otra = Empresa.objects.create(codigo="globex-aux", razon_social="globex SA")
         cls.ajena = ProductoVariante.objects.create(
             producto=Producto.objects.create(empresa=otra, nombre="Camisa ajena"),
             empresa=otra, color=color, sku="CAM-99", precio_base="1",
         )
 
-        def mov(tipo, origen=None, destino=None, cantidad="0", costo="0"):
+        def mov(tipo, origen=None, destino=None, cantidad="0", costo="0", **extra):
             m = MovimientoInventario.objects.create(
-                empresa=cls.empresa, sucursal=sucursal, tipo_movimiento=tipo, usuario=cls.user,
+                empresa=cls.empresa, sucursal=sucursal, tipo_movimiento=tipo, usuario=cls.user, **extra,
             )
             MovimientoInventarioDetalle.objects.create(
                 movimiento_inventario=m, producto=producto, producto_variante=cls.variante,
@@ -1008,12 +1013,20 @@ class AuxiliarMovimientosTests(TestCase):
         mov("SALIDA", origen=cls.ub1, cantidad="3")
         mov("TRANSFERENCIA", origen=cls.ub1, destino=cls.ub2, cantidad="2")
         mov("AJUSTE", origen=cls.ub2, destino=cls.ub2, cantidad="5")  # cantidad final, no diferencia
-        Existencia.objects.create(producto=producto, producto_variante=cls.variante, almacen=cls.alm1, ubicacion=cls.ub1, cantidad="5")
+        # Transferencia sin ubicaciones (picking) hacia un almacén de otra
+        # sucursal: los almacenes salen de la transferencia (#801).
+        transferencia = Transferencia.objects.create(
+            empresa=cls.empresa, sucursal=sucursal, almacen_origen=cls.alm1, almacen_destino=cls.alm3,
+            folio="TR-AUX", usuario=cls.user,
+        )
+        mov("TRANSFERENCIA", cantidad="1", transferencia=transferencia)
+        Existencia.objects.create(producto=producto, producto_variante=cls.variante, almacen=cls.alm1, ubicacion=cls.ub1, cantidad="4")
         Existencia.objects.create(producto=producto, producto_variante=cls.variante, almacen=cls.alm2, ubicacion=cls.ub2, cantidad="5")
+        Existencia.objects.create(producto=producto, producto_variante=cls.variante, almacen=cls.alm3, cantidad="1")
 
-    def _get(self, **params):
+    def _get(self, user=None, **params):
         client = APIClient()
-        client.force_authenticate(user=self.user)
+        client.force_authenticate(user=user or self.user)
         return client.get(self.URL, params)
 
     def test_busqueda_con_varias_coincidencias_regresa_opciones(self):
@@ -1033,6 +1046,8 @@ class AuxiliarMovimientosTests(TestCase):
                 ("TRANSFERENCIA", "A1", "0.0000", "2.0000", "5.0000"),
                 ("TRANSFERENCIA", "A2", "2.0000", "0.0000", "7.0000"),
                 ("AJUSTE", "A2", "3.0000", "0.0000", "10.0000"),
+                # La entrada a A3 es de otra sucursal: no se ve (#800).
+                ("TRANSFERENCIA", "A1", "0.0000", "1.0000", "9.0000"),
             ],
         )
         self.assertEqual(filas[0]["costo_promedio"], "5.00")
@@ -1045,3 +1060,49 @@ class AuxiliarMovimientosTests(TestCase):
     def test_variante_de_otra_empresa(self):
         self.assertEqual(self._get(producto_variante=self.ajena.pk).status_code, 404)
         self.assertEqual(self._get(q="CAM-99").json()["opciones"], [])
+
+    def test_transferencia_sin_ubicaciones_usa_almacenes_de_la_transferencia(self):
+        superuser = Usuario.objects.create(username="su@aux.test", email="su@aux.test", is_superuser=True)
+        filas = self._get(user=superuser, producto_variante=self.variante.pk).json()["results"]
+        self.assertEqual(
+            [(f["almacen_codigo"], f["efecto"]) for f in filas if f["folio_referencia"] == "TR-AUX"],
+            [("A1", "SALIDA"), ("A3", "ENTRADA")],
+        )
+
+    def test_almacen_de_otra_sucursal_no_regresa_datos(self):
+        data = self._get(producto_variante=self.variante.pk, almacen=self.alm3.pk).json()
+        self.assertEqual(data["results"], [])
+        self.assertEqual(data["resumen"]["existencia_actual"], "0.0000")
+
+    def test_id_no_numerico_es_400(self):
+        self.assertIn("almacen", self._get(producto_variante=self.variante.pk, almacen="A1").json())
+        self.assertIn("producto_variante", self._get(producto_variante="CAM-01").json())
+
+    def test_opciones_recortadas_avisan_hay_mas(self):
+        with mock.patch.object(auxiliar_mod, "LIMITE_OPCIONES", 1):
+            data = self._get(q="camisa").json()
+        self.assertEqual((len(data["opciones"]), data["hay_mas"]), (1, True))
+
+    def test_ajuste_usa_la_diferencia_de_la_auditoria(self):
+        # El saldo corrido de ub1 es 5, pero la existencia era 4 (stock sin
+        # movimiento): la auditoría manda (#802).
+        ajuste = AjusteInventario.objects.create(
+            empresa=self.empresa, sucursal=self.alm1.sucursal, almacen=self.alm1, usuario=self.user, motivo="Conteo",
+        )
+        m = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.alm1.sucursal, tipo_movimiento="AJUSTE",
+            usuario=self.user, ajuste_inventario=ajuste,
+        )
+        MovimientoInventarioDetalle.objects.create(
+            movimiento_inventario=m, producto_variante=self.variante,
+            ubicacion_origen=self.ub1, ubicacion_destino=self.ub1, cantidad="0",
+        )
+        AuditoriaEvento.objects.create(
+            empresa=self.empresa, usuario=self.user, modulo="inventarios", accion="AJUSTE",
+            tabla="existencias", id_registro=str(self.alm1.pk),
+            despues_json={"ajuste_id": ajuste.pk, "items": [
+                {"producto_variante_id": self.variante.pk, "ubicacion_id": self.ub1.pk, "delta": "-4.0000"},
+            ]},
+        )
+        fila = self._get(producto_variante=self.variante.pk).json()["results"][-1]
+        self.assertEqual((fila["tm"], fila["salidas"]), ("AJUSTE", "4.0000"))

@@ -7,14 +7,21 @@ para elegir una.
 
 Cada detalle de ``MovimientoInventarioDetalle`` se convierte en filas por
 almacén afectado: la transferencia da una salida (origen) y una entrada
-(destino). El AJUSTE guarda la cantidad final de la ubicación, no la
-diferencia: aquí se convierte en entrada/salida contra el saldo corrido.
+(destino); sin ubicaciones, los almacenes salen de la transferencia. El
+AJUSTE guarda la cantidad final de la ubicación, no la diferencia: la
+diferencia sale de su evento de auditoría (antes/después de la existencia) y,
+si no hay evento, del saldo corrido.
+
+Alcance: el de los reportes hermanos (empresa + sucursales permitidas, por
+almacén). Un renglón sin almacén se ve si el movimiento es de una sucursal
+permitida.
 """
 from collections import defaultdict
 from decimal import Decimal
 
 from django.db.models import OuterRef, Q, Subquery, Sum
 
+from auditoria.models import AuditoriaEvento
 from catalogo.models import ProductoVariante, VarianteProductoProduccion
 from inventarios.models import Existencia, MovimientoInventarioDetalle
 
@@ -48,6 +55,8 @@ def sku_produccion_subquery():
 
 
 def buscar_variantes(user, q):
+    """Coincidencias de ``q``; trae una de más que ``LIMITE_OPCIONES`` para
+    saber si hay más (``hay_mas``)."""
     qs = (
         variantes_scope(user)
         .annotate(sku_produccion=sku_produccion_subquery())
@@ -64,7 +73,7 @@ def buscar_variantes(user, q):
             | Q(nombre__icontains=palabra)
             | Q(producto__nombre__icontains=palabra)
         )
-    return list(qs.filter(filtro).order_by("-activo", "sku")[:LIMITE_OPCIONES])
+    return list(qs.filter(filtro).order_by("-activo", "sku")[:LIMITE_OPCIONES + 1])
 
 
 def opcion(v):
@@ -93,8 +102,34 @@ def _documento(m):
     return "MOVIMIENTO_MANUAL", None
 
 
-def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None):
-    """Filas del auxiliar en orden cronológico con saldo y costo promedio."""
+def _deltas_ajuste(user, ajuste_ids):
+    """(ajuste, variante, ubicación) -> diferencias en el orden del ajuste.
+
+    ``cantidad_before`` de la auditoría ya incluye el stock cargado sin
+    movimiento, que el saldo corrido no conoce (#802).
+    """
+    deltas = defaultdict(list)
+    if not ajuste_ids:
+        return deltas
+    eventos = AuditoriaEvento.objects.filter(
+        modulo="inventarios", tabla="existencias", accion="AJUSTE",
+        despues_json__ajuste_id__in=sorted(ajuste_ids),
+    ).order_by("id_evento")
+    if not user.is_superuser:
+        eventos = eventos.filter(empresa_id=user.empresa_id)
+    for despues in eventos.values_list("despues_json", flat=True):
+        for item in (despues or {}).get("items") or []:
+            clave = (despues.get("ajuste_id"), item.get("producto_variante_id"), item.get("ubicacion_id"))
+            deltas[clave].append(_d(item.get("delta")))
+    return deltas
+
+
+def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None, alcance=None):
+    """Filas del auxiliar en orden cronológico con saldo y costo promedio.
+
+    ``alcance``: ``None`` sin restricción (superuser) o ``(almacen_ids,
+    sucursal_ids)`` permitidos.
+    """
     detalles = (
         MovimientoInventarioDetalle.objects.filter(
             producto_variante_id=variante_id, movimiento_inventario__activo=True
@@ -113,6 +148,7 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None):
             "ubicacion_destino__almacen__codigo",
             "ubicacion_destino__almacen__nombre",
             "movimiento_inventario_id",
+            "movimiento_inventario__sucursal_id",
             "movimiento_inventario__tipo_movimiento",
             "movimiento_inventario__fecha_movimiento",
             "movimiento_inventario__observaciones",
@@ -126,6 +162,12 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None):
             "movimiento_inventario__recepcion__almacen__nombre",
             "movimiento_inventario__transferencia_id",
             "movimiento_inventario__transferencia__folio",
+            "movimiento_inventario__transferencia__almacen_origen_id",
+            "movimiento_inventario__transferencia__almacen_origen__codigo",
+            "movimiento_inventario__transferencia__almacen_origen__nombre",
+            "movimiento_inventario__transferencia__almacen_destino_id",
+            "movimiento_inventario__transferencia__almacen_destino__codigo",
+            "movimiento_inventario__transferencia__almacen_destino__nombre",
             "movimiento_inventario__op_id",
             "movimiento_inventario__op__folio_op",
             "movimiento_inventario__ajuste_inventario_id",
@@ -138,6 +180,17 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None):
     )
     if not user.is_superuser:
         detalles = detalles.filter(movimiento_inventario__empresa_id=user.empresa_id)
+    detalles = list(detalles)
+    deltas_ajuste = _deltas_ajuste(user, {
+        m["movimiento_inventario__ajuste_inventario_id"] for m in detalles
+        if m["movimiento_inventario__tipo_movimiento"] == "AJUSTE" and m["movimiento_inventario__ajuste_inventario_id"]
+    })
+
+    def visible(alm_id, sucursal_id):
+        if alcance is None:
+            return True
+        almacenes, sucursales = alcance
+        return alm_id in almacenes if alm_id else sucursal_id in sucursales
 
     saldo_ubicacion = defaultdict(lambda: CERO)  # (almacen, ubicacion) -> cantidad
     saldo_almacen = defaultdict(lambda: CERO)
@@ -164,17 +217,34 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None):
                     m["movimiento_inventario__ajuste_inventario__almacen__codigo"],
                     m["movimiento_inventario__ajuste_inventario__almacen__nombre"],
                 )
-            afectaciones.append((*alm, ub, cantidad - saldo_ubicacion[(alm[0], ub)]))
+            pendientes = deltas_ajuste.get((m["movimiento_inventario__ajuste_inventario_id"], variante_id, ub))
+            delta = pendientes.pop(0) if pendientes else cantidad - saldo_ubicacion[(alm[0], ub)]
+            afectaciones.append((*alm, ub, delta))
         else:
+            transferencia = tipo == "TRANSFERENCIA"
             if m["ubicacion_origen_id"]:
                 afectaciones.append((
                     m["ubicacion_origen__almacen_id"], m["ubicacion_origen__almacen__codigo"],
                     m["ubicacion_origen__almacen__nombre"], m["ubicacion_origen_id"], -cantidad,
                 ))
+            elif transferencia and m["movimiento_inventario__transferencia__almacen_origen_id"]:
+                # Sin ubicaciones (picking, almacenes sin ubicaciones) el
+                # almacén sale de la transferencia (#801).
+                afectaciones.append((
+                    m["movimiento_inventario__transferencia__almacen_origen_id"],
+                    m["movimiento_inventario__transferencia__almacen_origen__codigo"],
+                    m["movimiento_inventario__transferencia__almacen_origen__nombre"], None, -cantidad,
+                ))
             if m["ubicacion_destino_id"]:
                 afectaciones.append((
                     m["ubicacion_destino__almacen_id"], m["ubicacion_destino__almacen__codigo"],
                     m["ubicacion_destino__almacen__nombre"], m["ubicacion_destino_id"], cantidad,
+                ))
+            elif transferencia and m["movimiento_inventario__transferencia__almacen_destino_id"]:
+                afectaciones.append((
+                    m["movimiento_inventario__transferencia__almacen_destino_id"],
+                    m["movimiento_inventario__transferencia__almacen_destino__codigo"],
+                    m["movimiento_inventario__transferencia__almacen_destino__nombre"], None, cantidad,
                 ))
             if not afectaciones:
                 if tipo == "ENTRADA" and m["movimiento_inventario__recepcion__almacen_id"]:
@@ -194,6 +264,8 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None):
         fecha = m["movimiento_inventario__fecha_movimiento"]
 
         for alm_id, alm_codigo, alm_nombre, ub, delta in afectaciones:
+            if not visible(alm_id, m["movimiento_inventario__sucursal_id"]):
+                continue
             # Costo promedio ponderado: solo una entrada con costo lo revalúa.
             if delta > 0 and costo > 0 and saldo_total + delta > 0:
                 costo_promedio = (max(saldo_total, CERO) * costo_promedio + delta * costo) / (max(saldo_total, CERO) + delta)
@@ -236,6 +308,8 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None):
     existencias = Existencia.objects.filter(producto_variante_id=variante_id)
     if not user.is_superuser:
         existencias = existencias.filter(almacen__empresa_id=user.empresa_id)
+    if alcance is not None:
+        existencias = existencias.filter(almacen_id__in=alcance[0])
     real = {e["almacen_id"]: _d(e["t"]) for e in existencias.values("almacen_id").annotate(t=Sum("cantidad"))}
     sin_mov = {a: real.get(a, CERO) - saldo_almacen.get(a, CERO) for a in set(real) | set(saldo_almacen)}
     if almacen_id:
