@@ -5889,6 +5889,14 @@ class BomDetalleTenantTests(_BomTenantBase, TestCase):
         self.assertEqual(resp.status_code, 400, resp.data)
         self.assertIn("pedido_detalle_id", resp.data)
 
+    def test_detalle_no_ofrece_talla_con_variante_inactiva(self):
+        # ``variante-onboarding`` no la regenera (#788): el detalle no la marca pendiente.
+        self._client(self.admin).post(self.url_onboarding, self._body_onboarding(), format="json")
+        VarianteProductoProduccion.objects.filter(pedido_detalle=self.linea_muestra).update(activo=False)
+        resp = self._client(self.admin).get(f"/api/v1/produccion/pedidos-especiales/{self.pedido.pk}/")
+        tallas = resp.data["detalles"][0]["tallas"]
+        self.assertTrue(all(t["sku_siguiente"] is None for t in tallas if t["cantidad"]))
+
     def test_alta_catalogo_categoria_inactiva_es_400(self):
         categoria = self._con_categoria()
         categoria.activo = False
