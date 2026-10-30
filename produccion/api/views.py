@@ -1918,7 +1918,10 @@ def _categorias_de_muestras(pedido):
 
 
 def _categoria_de_linea(categorias, detalle):
-    """La de la línea con el mismo nombre; con varias, la del mismo color o sin color."""
+    """La guardada en la línea; si no tiene (pedido anterior a #768), la de la
+    línea de cotización con el mismo nombre: la del mismo color o sin color."""
+    if detalle.categoria_producto_id:
+        return detalle.categoria_producto
     por_color = categorias.get(detalle.producto_nombre_externo, {})
     return por_color.get(detalle.color_id) or por_color.get(None) or next(iter(por_color.values()), None)
 
@@ -1966,7 +1969,7 @@ def _alta_variante_catalogo(variante, producto, precio):
     producción; su BOM queda ligado también al SKU de catálogo, que es por el
     que la OP lo busca (``con_bom``)."""
     sku = f"{producto.codigo}-{variante.color.codigo}-{variante.talla.nombre}".strip().upper()
-    if ProductoVariante.objects.filter(sku=sku).exists():
+    if ProductoVariante.objects.filter(empresa=producto.empresa, sku=sku).exists():
         raise ValidationError({'alta_catalogo': f"El SKU '{sku}' ya existe en catálogo."})
     pv = ProductoVariante.objects.create(
         producto=producto, empresa=producto.empresa, color=variante.color,
@@ -2034,7 +2037,7 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         detalles = list(
             _detalles_especiales_qs()
             .filter(pedido=pedido)
-            .select_related("color")
+            .select_related("color", "categoria_producto")
             .prefetch_related(
                 Prefetch(
                     "tallas",

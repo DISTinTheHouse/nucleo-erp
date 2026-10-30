@@ -146,7 +146,9 @@ class ProductoVariante(models.Model):
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="variantes")
     color = models.ForeignKey(Color, on_delete=models.CASCADE, related_name="variantes")
     talla = models.ForeignKey(Talla, on_delete=models.CASCADE, related_name="variantes", null=True, blank=True)
-    sku = models.CharField(max_length=50, unique=True)
+    # Único por empresa, no global: el SKU se arma con datos que se repiten
+    # entre empresas (código de categoría, color, talla) (#765).
+    sku = models.CharField(max_length=50, db_index=True)
     cod_proscai = models.CharField(max_length=50, blank=True, default="")
     precio_base = models.DecimalField(max_digits=10, decimal_places=2)
     activo = models.BooleanField(default=True)
@@ -155,6 +157,9 @@ class ProductoVariante(models.Model):
 
     class Meta:
         db_table = "variantes_producto"
+        constraints = [
+            models.UniqueConstraint(fields=["empresa", "sku"], name="uq_variante_empresa_sku"),
+        ]
         verbose_name = "Variante Producto"
         verbose_name_plural = "Variantes Producto"
         indexes = [
