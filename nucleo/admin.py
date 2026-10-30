@@ -133,3 +133,5 @@ class EmpresaSatConfigAdmin(admin.ModelAdmin):
     ordering = ("empresa", "id_empresa_sat_config")
     autocomplete_fields = ("empresa", "regimen_fiscal")
     list_select_related = ("empresa", "regimen_fiscal")
+    # Secretos del CSD: nunca se muestran ni se editan desde el admin (EC-679).
+    exclude = ("password_llave", "certificado_pem", "llave_privada_pem")
