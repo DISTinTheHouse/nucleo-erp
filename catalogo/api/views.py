@@ -1,5 +1,5 @@
 from django.db import IntegrityError, transaction
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Exists, OuterRef, Q, Subquery
 from django.db.models.functions import Lower
 from rest_framework import viewsets
 from rest_framework.decorators import action
@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from catalogo.codigos import siguiente_codigo_producto
 from catalogo.tallas import talla_sort_key
 from catalogo.validaciones import talla_permitida_para_producto
-from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso
+from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso, VarianteProductoProduccion
 from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
 from produccion.models import ListaMaterialBom
 
@@ -256,6 +256,14 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
         # ``ProductoVariante.empresa`` es FK propia (el onboarding la copia de
         # ``producto.empresa``); se acota por ella, no por ``producto__empresa``.
         qs = _alcance_empresa(super().get_queryset(), self.request.user)
+        # Una muestra dada de alta en catálogo se sigue buscando por su SKU de
+        # producción (``MP{linea}-{color}-{talla}``): se anota y entra en ``q``.
+        qs = qs.annotate(sku_produccion=Subquery(
+            VarianteProductoProduccion.objects.filter(
+                activo=True, aplica_catalogo=True, producto_base=OuterRef('producto'),
+                color=OuterRef('color'), talla=OuterRef('talla'),
+            ).values('sku')[:1]
+        ))
         if self.request.query_params.get('con_bom', '').lower() == 'true':
             bom_qs = ListaMaterialBom.objects.filter(
                 producto_variante=OuterRef('pk'),
@@ -273,6 +281,7 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
                 | Q(producto__cod_proscai__icontains=q)
                 | Q(nombre__icontains=q)
                 | Q(producto__nombre__icontains=q)
+                | Q(sku_produccion__icontains=q)
             )
         return qs
 
