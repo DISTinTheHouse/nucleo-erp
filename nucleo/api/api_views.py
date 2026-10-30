@@ -4,14 +4,12 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status, viewsets, permissions
-from django.shortcuts import get_object_or_404
 from django.db import connections, models
 from ..choices import StatusChoices
 from ..models import (
     Empresa, Sucursal, Departamento, Moneda, SerieFolio,
     SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, 
     SatClaveProdServ, SatClaveUnidad,
-    EmpresaSatConfig,
     UnidadMedida, Impuesto
 )
 from .serializers import (
@@ -19,7 +17,6 @@ from .serializers import (
     SatUsoCfdiSerializer, SatMetodoPagoSerializer, SatFormaPagoSerializer,
     SatClaveProdServSerializer, SatClaveUnidadSerializer,
     UnidadMedidaSerializer, ImpuestoSerializer,
-    EmpresaSatConfigSerializer,
     EmpresaSerializer, SucursalSerializer, DepartamentoSerializer, MonedaSerializer, SerieFolioSerializer
 )
 from seguridad.api.api_views import IsSuperUserOrReadOnly
@@ -269,31 +266,6 @@ class ReadyzAPIView(APIView):
             {"ok": healthy, "checks": checks},
             status=200 if healthy else 503,
         )
-
-class EmpresaSatConfigUpdateView(APIView):
-    permission_classes = [IsAuthenticated]
-    
-    def get_object(self, empresa_id):
-        # Verificar permisos: usuario debe pertenecer a la empresa o ser superuser
-        # Por ahora simple check de existencia
-        empresa = get_object_or_404(Empresa, pk=empresa_id)
-        # Crear config si no existe
-        config, created = EmpresaSatConfig.objects.get_or_create(empresa=empresa)
-        return config
-
-    def get(self, request, empresa_id):
-        config = self.get_object(empresa_id)
-        serializer = EmpresaSatConfigSerializer(config)
-        return Response(serializer.data)
-
-    def patch(self, request, empresa_id):
-        config = self.get_object(empresa_id)
-        # Usamos partial=True para permitir subir solo archivos o solo password
-        serializer = EmpresaSatConfigSerializer(config, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class SatCatalogosAPIView(APIView):
     permission_classes = [IsAuthenticated]

@@ -17,12 +17,13 @@ from django.contrib.auth.models import AnonymousUser
 from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
+from django.urls import NoReverseMatch, reverse
 from rest_framework.test import APIClient
 
 from catalogo.models import Color, Producto, ProductoVariante, Talla
 from finanzas.models import Factura
 from nucleo.api.search import REGISTRO
-from nucleo.models import Empresa, Moneda, Sucursal
+from nucleo.models import Empresa, EmpresaSatConfig, Moneda, Sucursal
 from nucleo.permisos import permisos_efectivos
 from produccion.models import OrdenesBordado, OrdenesCorteManga, OrdenesReflejante
 from seguridad.models import Permiso, Rol, RolPermiso, UsuarioPermiso, UsuarioRol
@@ -1798,3 +1799,81 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
         self.assertNotIn("Textil De Otra Empresa", muchas[self.a["admin"].username][1])
         self.assertEqual(len(muchas[self.a["admin"].username][1]), 22)
 
+
+class ConfigSatDesmontadaTests(TestCase):
+    """EC-679: ``config-sat`` no acotaba por empresa y devolvía ``password_llave``
+    en claro. Se desmontó; el modelo sigue, pero sus secretos no salen ni por la
+    API ni por el admin."""
+
+    VALOR_PASS = "marcador-uno-ec679"
+    VALOR_CERT = "marcador-dos-ec679"
+    VALOR_LLAVE = "marcador-tres-ec679"
+    RUTA_KEY = "sat/csd/sat-ec679/key_prueba.key"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="sat-ec679", razon_social="SAT EC679 SA")
+        cls.config = EmpresaSatConfig.objects.create(
+            empresa=cls.empresa,
+            password_llave=cls.VALOR_PASS,
+            certificado_pem=cls.VALOR_CERT,
+            llave_privada_pem=cls.VALOR_LLAVE,
+            archivo_cer="sat/csd/sat-ec679/cer_prueba.cer",
+            archivo_key=cls.RUTA_KEY,
+            no_certificado="30001000000400002434",
+        )
+        cls.otra = Empresa.objects.create(codigo="otra-ec679", razon_social="OTRA EC679 SA")
+        cls.user = Usuario.objects.create(
+            username="user-ec679", email="user@ec679.test", empresa=cls.otra
+        )
+        cls.staff = Usuario.objects.create(
+            username="root-ec679", email="root@ec679.test", is_staff=True, is_superuser=True
+        )
+
+    def test_la_ruta_ya_no_existe(self):
+        with self.assertRaises(NoReverseMatch):
+            reverse("nucleo:api_empresa_sat_config", kwargs={"empresa_id": self.empresa.pk})
+
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        url = f"/api/v1/nucleo/empresas/{self.empresa.pk}/config-sat/"
+        self.assertEqual(client.get(url).status_code, 404)
+        self.assertEqual(client.patch(url, {"password_llave": "x"}).status_code, 404)
+
+    def _login_admin(self):
+        self.client.force_login(self.staff, backend="django.contrib.auth.backends.ModelBackend")
+
+    def test_admin_no_muestra_los_secretos(self):
+        self._login_admin()
+        for url in (
+            reverse("admin:nucleo_empresasatconfig_changelist"),
+            reverse("admin:nucleo_empresasatconfig_change", args=[self.config.pk]),
+        ):
+            with self.subTest(url=url):
+                resp = self.client.get(url)
+                self.assertEqual(resp.status_code, 200)
+                for secreto in (self.VALOR_PASS, self.VALOR_CERT, self.VALOR_LLAVE, self.RUTA_KEY):
+                    self.assertNotContains(resp, secreto)
+
+        # Detalle de solo lectura: sin inputs editables, pero con los datos no secretos.
+        resp = self.client.get(reverse("admin:nucleo_empresasatconfig_change", args=[self.config.pk]))
+        for campo in ("password_llave", "certificado_pem", "llave_privada_pem", "archivo_key", "archivo_cer"):
+            self.assertNotContains(resp, f'name="{campo}"')
+        self.assertContains(resp, "30001000000400002434")
+        self.assertContains(resp, "cer_prueba.cer")
+
+    def test_admin_es_de_solo_lectura(self):
+        self._login_admin()
+        change_url = reverse("admin:nucleo_empresasatconfig_change", args=[self.config.pk])
+
+        self.assertEqual(self.client.get(reverse("admin:nucleo_empresasatconfig_add")).status_code, 403)
+        self.assertEqual(self.client.post(change_url, {"no_certificado": "otro"}).status_code, 403)
+        self.assertEqual(
+            self.client.post(
+                reverse("admin:nucleo_empresasatconfig_delete", args=[self.config.pk]), {"post": "yes"}
+            ).status_code,
+            403,
+        )
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.no_certificado, "30001000000400002434")
+        self.assertTrue(EmpresaSatConfig.objects.filter(pk=self.config.pk).exists())

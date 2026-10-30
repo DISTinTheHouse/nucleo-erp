@@ -249,7 +249,6 @@ Para administradores y responsables del sistema.
 ## 🆘 Solución de Problemas Comunes
 
 - **"RFC inválido al crear empresa"**: Verifica formato y dígito verificador del RFC.
-- **"Error al cargar CSD"**: Asegúrate de usar la contraseña correcta de la llave privada `.key`.
 - **"No veo ninguna sucursal"**: Revisa que el usuario tenga sucursal default y sucursales permitidas asignadas.
 - **"No hay serie activa para recepción"**: Configura una serie como `RC`, `RT` o `RZ` para la empresa y sucursal.
 - **"No puedo hacer salida de inventario"**: Revisa que exista cantidad suficiente; la salida nunca puede dejar stock negativo.

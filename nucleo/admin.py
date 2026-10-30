@@ -133,3 +133,16 @@ class EmpresaSatConfigAdmin(admin.ModelAdmin):
     ordering = ("empresa", "id_empresa_sat_config")
     autocomplete_fields = ("empresa", "regimen_fiscal")
     list_select_related = ("empresa", "regimen_fiscal")
+    # Secretos del CSD: nunca se muestran desde el admin (EC-679).
+    exclude = ("password_llave", "certificado_pem", "llave_privada_pem", "archivo_key")
+
+    # Solo lectura: sin el endpoint ``config-sat`` no queda flujo que valide el
+    # CSD, y una subida desde aquí dejaría ``validado`` desalineado (EC-679).
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

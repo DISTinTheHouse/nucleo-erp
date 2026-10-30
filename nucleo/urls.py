@@ -5,7 +5,7 @@ from .api.api_views import (
     SatClaveProdServViewSet, SatClaveUnidadViewSet,
     UnidadMedidaViewSet, ImpuestoViewSet,
     UserEmpresasAPIView, UserSucursalesAPIView, SatCatalogosAPIView,
-    EmpresaSatConfigUpdateView, HealthzAPIView, ReadyzAPIView
+    HealthzAPIView, ReadyzAPIView
 )
 from .api.search import BusquedaGlobalAPIView
 from .views import (
@@ -43,7 +43,6 @@ urlpatterns = [
     path('api/v1/nucleo/mis-empresas/', UserEmpresasAPIView.as_view(), name='api_mis_empresas'),
     path('api/v1/nucleo/mis-sucursales/', UserSucursalesAPIView.as_view(), name='api_mis_sucursales'),
     path('api/v1/nucleo/sat/catalogos/', SatCatalogosAPIView.as_view(), name='api_sat_catalogos'),
-    path('api/v1/nucleo/empresas/<int:empresa_id>/config-sat/', EmpresaSatConfigUpdateView.as_view(), name='api_empresa_sat_config'),
     # Buscador global del header. Se declara aquí, con el resto de APIView de
     # nucleo, aunque su ruta NO lleve el segmento de app: es transversal (cruza
     # ventas y terceros) y el path de primer nivel es requisito de producto.
