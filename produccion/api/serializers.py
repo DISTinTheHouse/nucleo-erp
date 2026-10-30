@@ -2353,7 +2353,7 @@ class PedidoEspecialDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Pedido
-        fields = ["id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "detalles"]
+        fields = ["id", "folio", "estatus", "cliente_nombre", "clasificacion", "fecha_confirmacion", "detalles"]
 
 
 class VarianteProduccionOnboardingSerializer(serializers.Serializer):
@@ -2377,6 +2377,11 @@ class VarianteProduccionOnboardingSerializer(serializers.Serializer):
         if not value:
             raise serializers.ValidationError("Se requiere al menos un insumo.")
         return value
+
+
+class AltaCatalogoInputSerializer(serializers.Serializer):
+    """Body de ``PedidoEspecialViewSet.alta_catalogo`` (solo para el esquema OpenAPI)."""
+    pedido_detalle_id = serializers.IntegerField()
 
 
 class VarianteProduccionSerializer(serializers.ModelSerializer):
