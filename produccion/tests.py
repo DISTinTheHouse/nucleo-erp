@@ -5829,6 +5829,44 @@ class BomDetalleTenantTests(_BomTenantBase, TestCase):
         self.assertEqual(resp.data[0]["sku_catalogo"], variante.sku)
         self.assertTrue(resp.data[0]["aplica_catalogo"])
 
+    def test_variante_onboarding_alta_catalogo_liga_el_bom_al_sku_de_catalogo(self):
+        self._con_categoria()
+        body = {**self._body_onboarding(), "alta_catalogo": True}
+        resp = self._client(self.admin).post(self.url_onboarding, body, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        for vpp in VarianteProductoProduccion.objects.filter(pedido_detalle=self.linea_muestra):
+            bom = ListaMaterialBom.objects.get(variante_produccion=vpp)
+            self.assertEqual(bom.producto_variante.sku, f"CHA00-{vpp.color.codigo}-{vpp.talla.nombre}".upper())
+
+    def test_alta_catalogo_de_sku_ya_generados(self):
+        categoria = self._con_categoria()
+        resp = self._client(self.admin).post(self.url_onboarding, self._body_onboarding(), format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        url = f"/api/v1/produccion/pedidos-especiales/{self.pedido.pk}/alta-catalogo/"
+        resp = self._client(self.admin).post(url, {"pedido_detalle_id": self.linea_muestra.pk}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertTrue(all(v["aplica_catalogo"] and v["sku_catalogo"] for v in resp.data))
+        self.assertEqual(Producto.objects.filter(categoria_producto=categoria).count(), 1)
+        self.assertFalse(ListaMaterialBom.objects.filter(
+            variante_produccion__pedido_detalle=self.linea_muestra, producto_variante__isnull=True
+        ).exists())
+        # El detalle ya lo dice por talla (#767).
+        detalle = self._client(self.admin).get(f"/api/v1/produccion/pedidos-especiales/{self.pedido.pk}/")
+        talla = detalle.data["detalles"][0]["tallas"][0]
+        self.assertTrue(talla["aplica_catalogo"])
+        self.assertEqual(talla["sku_catalogo"], resp.data[0]["sku_catalogo"])
+        # Sin pendientes: 400.
+        resp = self._client(self.admin).post(url, {"pedido_detalle_id": self.linea_muestra.pk}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_alta_catalogo_sin_categoria_es_400(self):
+        self._client(self.admin).post(self.url_onboarding, self._body_onboarding(), format="json")
+        url = f"/api/v1/produccion/pedidos-especiales/{self.pedido.pk}/alta-catalogo/"
+        resp = self._client(self.admin).post(url, {"pedido_detalle_id": self.linea_muestra.pk}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("alta_catalogo", resp.data)
+        self.assertFalse(Producto.objects.filter(variantes__isnull=False, categoria_producto__isnull=False).exists())
+
     def test_variante_onboarding_alta_catalogo_sin_categoria_es_400(self):
         body = {**self._body_onboarding(), "alta_catalogo": True}
         resp = self._client(self.admin).post(self.url_onboarding, body, format="json")
