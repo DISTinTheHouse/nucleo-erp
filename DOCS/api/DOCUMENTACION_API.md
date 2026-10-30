@@ -1079,42 +1079,6 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
 
 ---
 
-## ⚙️ 10. Configuración Fiscal (CSD)
-
-Sube y valida los archivos de Certificado de Sello Digital (CSD) para una empresa.
-
-### Obtener Configuración Actual
-
-- **Endpoint**: `GET /api/v1/nucleo/empresas/{id_empresa}/config-sat/`
-- **Respuesta**:
-  ```json
-  {
-    "id_empresa_sat_config": 2,
-    "validado": true,
-    "no_certificado": "30001000000400002434",
-    "fecha_expiracion": "2027-05-20T12:00:00Z",
-    "mensaje_error": null,
-    "regimen_fiscal": 1
-  }
-  ```
-
-### Subir/Actualizar CSD (Archivos)
-
-Este endpoint valida criptográficamente que el `.cer` y `.key` correspondan y que la contraseña sea correcta. También valida que el RFC del certificado coincida con el de la empresa.
-
-- **Endpoint**: `PATCH /api/v1/nucleo/empresas/{id_empresa}/config-sat/`
-- **Header**: `Content-Type: multipart/form-data`
-- **Body (FormData)**:
-  - `archivo_cer`: (File) Archivo .cer
-  - `archivo_key`: (File) Archivo .key
-  - `password_llave`: (Text) Contraseña de la llave privada
-  - `regimen_fiscal`: (Int, Opcional) ID del régimen fiscal
-- **Respuestas**:
-  - `200 OK`: Archivos validados y guardados. `validado: true`.
-  - `400 Bad Request`: Error de validación (ej. "Contraseña incorrecta", "RFC no coincide"). El campo `mensaje_error` contendrá el detalle.
-
----
-
 ## 👤 Terceros
 
 ### Detalle de Cliente (con resumen comercial)
