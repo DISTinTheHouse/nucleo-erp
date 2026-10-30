@@ -2429,6 +2429,17 @@ Respuesta (`GET` lista/detalle, y `orden_compra` de onboarding/PUT/aceptar) aña
 - **Folios**: `aceptar` toma la serie activa de la sucursal por `tipo_compra`: `MP` → `SerieFolio.tipo_documento` `ORDEN_COMPRA` u `Orden de Compra` (serie `OC`), `PT` → `ORDEN_COMPRA_PT` u `Orden de Compra PT` (serie `O`). Si no hay serie configurada se usa el folio de respaldo `OC-{empresa}-{id}` / `O-{empresa}-{id}`.
 - Rendimiento: crear/editar/aceptar una OC ya no hace consultas por renglón (alta de 10 renglones: 47 → 15 consultas; edición: 62 → 30; aceptar: 16 → 11). Los renglones se insertan en lote conservando su historial.
 
+### Renglones por SKU (OC de PT)
+
+- **Búsqueda**: `GET /api/v1/compras/ordenes/onboarding/?tipo_compra=PT` agrega `busqueda.variantes[]` (`id`, `sku`, `producto_id`, `producto_nombre`, `color`, `talla`, `precio_base`): variantes activas de productos activos de tipo Producto Terminado.
+  - `limit` y `producto_q` aplican a todas las listas (como antes). Por lista: `proveedor_limit`, `producto_limit`, `variante_limit` (1–1000; `all`/`0`/`-1` = sin tope) y `variante_q` (SKU o nombre, solo variantes; si viene, `producto_q` ya no filtra variantes).
+  - Ej. buscar solo SKU: `?tipo_compra=PT&variante_q=10500&variante_limit=20&proveedor_limit=1&producto_limit=1`.
+- **Escritura** (`POST .../onboarding/` y `PUT`): renglón con `producto_variante` (el producto sale de la variante). Se valida contra el `tipo_compra` efectivo (body, si no el de la OC):
+  - OC de `MP` con `producto_variante` → `400 {"detalle": ...}`; cambiar a `MP` una OC con renglones por SKU sin mandar `detalle` → `400 {"tipo_compra": ...}`.
+  - La variante debe ser de las que ofrece la búsqueda (activa, producto activo y de PT) o ya estar en la OC; si no → `400 {"detalle": ...}`.
+  - Una OC de `PT` todavía acepta renglones solo con `producto` (pendiente de decisión, #792).
+- **Lectura**: cada renglón (`detalles[]` del `GET`, `detalle[]` de onboarding/`PUT`) trae `producto_variante_id`, `producto_variante_sku`, `producto_variante_color`, `producto_variante_talla` (`null` en renglones sin variante). Mismos campos en `busqueda.ordenes_compra[].detalle[]` de `recepciones/onboarding/` y `producto_variante_id`/`producto_variante_sku`/`producto_variante_talla` en `resumen.detalle[]` del encuadre RFID.
+
 ### Cancelar una orden de compra
 
 Cancelar = la orden al proveedor queda anulada **pero se conserva y sigue visible**. Para borrar una OC capturada por error, ver "Eliminar" abajo.
@@ -2752,7 +2763,7 @@ Manda `orden_compra` **u** `op` (nunca ambos). `empresa`/`sucursal`/`proveedor`/
 ```json
 { "codigo_tag": "9999-NEG" }
 ```
-Resuelve por `sku` de variante, o `codigo`/`cod_proscai` de producto. Un tag repetido en el mismo encuadre regresa `400`. Solo funciona si el encuadre sigue `PENDIENTE`.
+Resuelve por `sku` de variante, o `codigo`/`cod_proscai` de producto. Con SKU, la lectura va al renglón de esa variante (si la orden no la tiene, a un renglón del producto sin variante; si tampoco, queda sin asignar). Un tag repetido en el mismo encuadre regresa `400`. Solo funciona si el encuadre sigue `PENDIENTE`.
 
 **3) Ver detalle + resumen** — `GET /api/v1/compras/recepcion-rfid-encuadres/{id}/`
 

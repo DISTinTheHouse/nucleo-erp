@@ -115,6 +115,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         OrdenCompra.EstatusOrdenCompra.BORRADOR,
         OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
     }
+    # Variantes que se compran en una OC de PT: las que ofrece el GET de
+    # onboarding y las que acepta la escritura de renglones (#792).
+    VARIANTE_COMPRABLE = Q(activo=True, producto__activo=True, producto__tipo_id=TIPO_PRODUCTO_TERMINADO_ID)
 
     def get_queryset(self):
         user = self.request.user
@@ -191,7 +194,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             # pueden devolverlos en distinto orden.
             Prefetch(
                 'ordencompradetalle_set',
-                queryset=OrdenCompraDetalle.objects.select_related('producto', 'producto_variante').order_by('id'),
+                queryset=OrdenCompraDetalle.objects.select_related(
+                    'producto', 'producto_variante__color', 'producto_variante__talla'
+                ).order_by('id'),
             ),
             Prefetch("recepcion_set", queryset=recepciones_qs),
             "facturas_proveedores",
@@ -424,19 +429,42 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         ).exists():
             raise ValidationError({"moneda": "La moneda no está disponible para la empresa de la orden."})
 
-    def _validar_renglones_empresa(self, empresa, detalle):
+    def _validar_renglones_empresa(self, empresa, detalle, tipo_compra=None, oc=None):
         # Mismo invariante para el producto de cada renglón. Se valida el lote
         # completo antes de escribir: el reemplazo de renglones borra los
         # existentes, así que un renglón ajeno no puede llegar a esa escritura.
+        # ``tipo_compra`` es el efectivo (body o instancia).
+        materia_prima = tipo_compra == OrdenCompra.TipoCompra.MATERIA_PRIMA
+        actuales = OrdenCompraDetalle.objects.filter(orden_compra_id=getattr(oc, "pk", None))
+        if detalle is None:
+            # Cambio de tipo sin renglones en el body: valen los actuales.
+            if materia_prima and oc is not None and oc.pk and oc.tipo_compra != tipo_compra and (
+                actuales.filter(producto_variante__isnull=False).exists()
+            ):
+                raise ValidationError(
+                    {"tipo_compra": "La orden tiene renglones por SKU; no puede ser de materia prima."}
+                )
+            return
         if not detalle:
             return
+        if materia_prima:
+            for idx, it in enumerate(detalle):
+                if it.get("producto_variante"):
+                    raise ValidationError(
+                        {"detalle": f"El renglón #{idx + 1} trae SKU: en una OC de materia prima los renglones van por producto."}
+                    )
         empresa_id = getattr(empresa, "pk", None)
         # Un renglón por SKU (``producto_variante``) toma su producto de la
-        # variante; si además manda ``producto``, debe ser el mismo.
+        # variante; si además manda ``producto``, debe ser el mismo. Solo
+        # variantes comprables, o las que la orden ya tenía (una baja posterior
+        # no impide editarla).
         variantes = dict(
             ProductoVariante.objects.filter(
                 pk__in=[it.get("producto_variante") for it in detalle if it.get("producto_variante")],
                 empresa_id=empresa_id,
+            ).filter(
+                self.VARIANTE_COMPRABLE
+                | Q(pk__in=actuales.filter(producto_variante__isnull=False).values("producto_variante_id"))
             ).values_list("pk", "producto_id")
         )
         for idx, it in enumerate(detalle):
@@ -535,7 +563,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def _respuesta_oc(self, oc):
-        detalles_qs = OrdenCompraDetalle.objects.filter(orden_compra=oc).order_by("id")
+        detalles_qs = (
+            OrdenCompraDetalle.objects.filter(orden_compra=oc)
+            .select_related("producto_variante__color", "producto_variante__talla")
+            .order_by("id")
+        )
         return Response(
             {
                 "orden_compra": OrdenCompraSerializer(self._oc_para_respuesta(oc.pk)).data,
@@ -550,18 +582,28 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         if not empresa and not getattr(user, "is_superuser", False):
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
-        limit_raw = request.query_params.get("limit")
-        limit = None
-
-        if limit_raw not in (None, "", "all", "ALL", "0", "-1"):
+        def _limite(raw, default=None):
+            if raw in (None, ""):
+                return default
+            if raw in ("all", "ALL", "0", "-1"):
+                return None
             try:
-                limit = int(limit_raw)
+                valor = int(raw)
             except Exception:
-                limit = 20
-            limit = max(1, min(limit, 1000))
+                valor = 20
+            return max(1, min(valor, 1000))
 
-        proveedor_q = (request.query_params.get("proveedor_q") or "").strip()
-        producto_q = (request.query_params.get("producto_q") or "").strip()
+        # ``limit``/``producto_q`` aplican a todas las listas, como antes; los
+        # parámetros por lista los sustituyen solo en la suya (#795).
+        qp = request.query_params
+        limit = _limite(qp.get("limit"))
+        proveedor_limit = _limite(qp.get("proveedor_limit"), limit)
+        producto_limit = _limite(qp.get("producto_limit"), limit)
+        variante_limit = _limite(qp.get("variante_limit"), limit)
+
+        proveedor_q = (qp.get("proveedor_q") or "").strip()
+        producto_q = (qp.get("producto_q") or "").strip()
+        variante_q = (qp.get("variante_q") or "").strip() if "variante_q" in qp else producto_q
 
         proveedores_qs = Proveedor.objects.filter(activo=True)
         productos_qs = Producto.objects.filter(activo=True)
@@ -588,9 +630,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             "id", "codigo", "cod_proscai", "nombre", "descripcion", "precio_base"
         )
 
-        if limit is not None:
-            proveedores_qs = proveedores_qs[:limit]
-            productos_qs = productos_qs[:limit]
+        if proveedor_limit is not None:
+            proveedores_qs = proveedores_qs[:proveedor_limit]
+        if producto_limit is not None:
+            productos_qs = productos_qs[:producto_limit]
 
         proveedores = list(proveedores_qs)
         productos = list(productos_qs)
@@ -598,21 +641,19 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         # que también viajan las variantes, buscables por SKU o nombre.
         variantes = []
         if (request.query_params.get("tipo_compra") or "").strip().upper() == OrdenCompra.TipoCompra.PRODUCTO_TERMINADO:
-            variantes_qs = ProductoVariante.objects.filter(
-                activo=True, producto__activo=True, producto__tipo_id=TIPO_PRODUCTO_TERMINADO_ID,
-            )
+            variantes_qs = ProductoVariante.objects.filter(self.VARIANTE_COMPRABLE)
             if empresa:
                 variantes_qs = variantes_qs.filter(empresa=empresa)
-            if producto_q:
+            if variante_q:
                 variantes_qs = variantes_qs.filter(
-                    Q(sku__icontains=producto_q) | Q(nombre__icontains=producto_q)
-                    | Q(producto__nombre__icontains=producto_q)
+                    Q(sku__icontains=variante_q) | Q(nombre__icontains=variante_q)
+                    | Q(producto__nombre__icontains=variante_q)
                 )
             variantes_qs = variantes_qs.order_by("sku").values(
                 "id", "sku", "producto_id", "producto__nombre", "color__nombre", "talla__nombre", "precio_base",
             )
-            if limit is not None:
-                variantes_qs = variantes_qs[:limit]
+            if variante_limit is not None:
+                variantes_qs = variantes_qs[:variante_limit]
             variantes = [
                 {
                     "id": v["id"], "sku": v["sku"], "producto_id": v["producto_id"],
@@ -716,7 +757,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 self._sucursales_del_usuario(user, empresa).filter(pk=sucursal_id).exists()
             ):
                 raise ValidationError({"sucursal": "No tienes asignada esta sucursal."})
-            self._validar_renglones_empresa(empresa, detalle)
+            self._validar_renglones_empresa(empresa, detalle, header.get("tipo_compra") or oc.tipo_compra, oc)
             pedidos_ids = self._validar_pedidos_empresa(empresa, header)
 
             oc.empresa = empresa
@@ -886,7 +927,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 proveedor_id=proveedor_id if has_proveedor else None,
                 moneda_id=moneda_id if has_moneda else None,
             )
-            self._validar_renglones_empresa(oc.empresa, detalle)
+            self._validar_renglones_empresa(oc.empresa, detalle, header.get("tipo_compra") or oc.tipo_compra, oc)
             pedidos_ids = self._validar_pedidos_empresa(oc.empresa, header)
             # El folio sale de la serie del tipo de compra: con folio ya asignado
             # el tipo no puede cambiar (quedaría un OC-... en una compra de PT).
@@ -1425,7 +1466,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             detalles_qs = (
                 OrdenCompraDetalle.objects
                 .filter(orden_compra_id__in=oc_ids)
-                .select_related("producto")
+                .select_related("producto", "producto_variante__color", "producto_variante__talla")
                 .order_by("orden_compra_id", "id")
             )
             detalles_list = list(detalles_qs)
@@ -1454,10 +1495,16 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 recibido = recibido_map.get(detalle.pk, Decimal("0"))
                 ordered = Decimal(str(detalle.cantidad or 0))
                 pendiente = ordered - recibido
+                variante = detalle.producto_variante
                 item = {
                     "id": detalle.pk,
                     "producto_id": detalle.producto_id,
                     "producto_nombre": detalle.producto.nombre,
+                    # Mismos nombres que ``OrdenCompraDetalleReadSerializer``.
+                    "producto_variante_id": detalle.producto_variante_id,
+                    "producto_variante_sku": getattr(variante, "sku", None),
+                    "producto_variante_color": getattr(getattr(variante, "color", None), "nombre", None),
+                    "producto_variante_talla": getattr(getattr(variante, "talla", None), "nombre", None),
                     "cantidad_ordenada": str(ordered),
                     "cantidad_recibida": str(recibido),
                     "cantidad_pendiente": str(max(pendiente, Decimal("0"))),
@@ -2493,18 +2540,28 @@ def _resolver_tag_rfid(encuadre, codigo_tag):
     orden_compra_detalle = None
     orden_produccion_detalle = None
     if producto:
+        # Con variante resuelta, el renglón de esa variante; por producto solo
+        # los renglones sin variante (MP u OC legadas), para no cargar una
+        # talla en el renglón de otra (#794). Tag por código de producto (sin
+        # variante): el primer renglón del producto, como antes.
         if encuadre.orden_compra_id:
-            orden_compra_detalle = (
-                OrdenCompraDetalle.objects.filter(
-                    orden_compra_id=encuadre.orden_compra_id, producto_id=producto.pk
-                ).order_by("id").first()
-            )
+            renglones = OrdenCompraDetalle.objects.filter(
+                orden_compra_id=encuadre.orden_compra_id, producto_id=producto.pk
+            ).order_by("id")
+            if producto_variante:
+                orden_compra_detalle = (
+                    renglones.filter(producto_variante=producto_variante).first()
+                    or renglones.filter(producto_variante__isnull=True).first()
+                )
+            else:
+                orden_compra_detalle = renglones.first()
         elif encuadre.op_id:
-            orden_produccion_detalle = (
-                OrdenProduccionDetalle.objects.filter(
-                    op_id=encuadre.op_id, producto_variante__producto_id=producto.pk
-                ).order_by("op_detalle_id").first()
-            )
+            renglones = OrdenProduccionDetalle.objects.filter(
+                op_id=encuadre.op_id, producto_variante__producto_id=producto.pk
+            ).order_by("op_detalle_id")
+            if producto_variante:
+                renglones = renglones.filter(producto_variante=producto_variante)
+            orden_produccion_detalle = renglones.first()
 
     return {
         "producto": producto,
@@ -2527,13 +2584,13 @@ def resumen_encuadre_rfid(encuadre):
     if encuadre.orden_compra_id:
         detalle_qs = (
             OrdenCompraDetalle.objects.filter(orden_compra_id=encuadre.orden_compra_id)
-            .select_related("producto").order_by("id")
+            .select_related("producto", "producto_variante__talla").order_by("id")
         )
         recibido_fn = recepcion_vs._cantidad_recibida_oc
     elif encuadre.op_id:
         detalle_qs = (
             OrdenProduccionDetalle.objects.filter(op_id=encuadre.op_id)
-            .select_related("producto_variante__producto").order_by("op_detalle_id")
+            .select_related("producto_variante__producto", "producto_variante__talla").order_by("op_detalle_id")
         )
         recibido_fn = recepcion_vs._cantidad_recibida_op
     else:
@@ -2560,10 +2617,14 @@ def resumen_encuadre_rfid(encuadre):
             producto = getattr(detalle.producto_variante, "producto", None)
 
         total_esperado += esperado
+        variante = detalle.producto_variante
         detalles.append({
             "detalle_id": detalle.pk,
             "producto_id": getattr(producto, "pk", None),
             "producto_nombre": getattr(producto, "nombre", None),
+            "producto_variante_id": getattr(variante, "pk", None),
+            "producto_variante_sku": getattr(variante, "sku", None),
+            "producto_variante_talla": getattr(getattr(variante, "talla", None), "nombre", None),
             "ordenado": str(ordenado),
             "ya_recibido": str(ya_recibido),
             "esperado": str(esperado),
