@@ -78,7 +78,7 @@ def exigir_color_si_hay_variantes(detalles):
     variante (sin SKU ni stock real). El borrador se guarda igual; esto se exige al
     enviar a revisión, autorizar y editar en mesa de control (#731). Una consulta."""
     sin_color = list(
-        detalles.filter(producto__isnull=False, color__isnull=True, producto__variantes__isnull=False)
+        detalles.filter(producto__isnull=False, color__isnull=True, producto__variantes__activo=True)
         .filter(Q(producto_nombre_externo__isnull=True) | Q(producto_nombre_externo=""))
         .values_list("producto__nombre", flat=True).distinct()
     )
@@ -366,9 +366,12 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user, validar_matriz
             if not talla:
                 raise ValidationError({"detalle": f"Talla inválida: {t['talla']}"})
             permitidas = tallas_por_categoria.get(getattr(categoria_producto_obj, "pk", None))
-            if producto is None and permitidas and talla.pk not in permitidas:
+            # La copia del servidor desde mesa de control (``validar_matriz=False``)
+            # no revalida: el pedido ya aceptó la talla y no se puede corregir ahí (#761).
+            if validar_matriz and producto is None and permitidas and talla.pk not in permitidas:
                 raise ValidationError({"detalle": (
-                    f"La talla {talla.nombre} no corresponde a la categoría {categoria_producto_obj.nombre}."
+                    f"Partida {numero}: la talla {talla.nombre} no corresponde a la categoría "
+                    f"{categoria_producto_obj.nombre}."
                 )})
             if t.get("lleva_bordado") and t.get("bordado_config") is None:
                 raise ValidationError(
