@@ -126,7 +126,10 @@ class TallaViewSet(viewsets.ModelViewSet):
                 categoria_id = int(categoria_id)
             except (TypeError, ValueError):
                 raise ValidationError({"categoria_producto": "Debe ser un entero."})
-            qs = qs.filter(categorias_producto__id=categoria_id).distinct()
+            # La categoría se acota a la empresa del usuario y activa: una ajena o
+            # inexistente responde igual, lista vacía (#760).
+            categorias = _alcance_empresa(CategoriaProducto.objects.filter(activo=True), self.request.user)
+            qs = qs.filter(categorias_producto__in=categorias.filter(pk=categoria_id)).distinct()
         return qs
 
     def list(self, request, *args, **kwargs):
