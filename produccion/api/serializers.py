@@ -2278,6 +2278,14 @@ class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
     # tiene SKU de producción generado.
     sku_produccion = serializers.SerializerMethodField()
     sku_siguiente = serializers.SerializerMethodField()
+    aplica_catalogo = serializers.SerializerMethodField()
+    sku_catalogo = serializers.SerializerMethodField()
+
+    def get_aplica_catalogo(self, obj):
+        return bool(getattr(getattr(obj, "variante_produccion", None), "aplica_catalogo", False))
+
+    def get_sku_catalogo(self, obj):
+        return getattr(getattr(obj, "variante_produccion", None), "sku_catalogo", None)
 
     def get_sku_produccion(self, obj):
         variante = getattr(obj, "variante_produccion", None)
@@ -2300,6 +2308,8 @@ class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
             "cantidad",
             "sku_produccion",
             "sku_siguiente",
+            "aplica_catalogo",
+            "sku_catalogo",
             "lleva_bordado",
             "bordado_config",
             "lleva_reflejante",
