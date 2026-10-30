@@ -2584,6 +2584,15 @@ class CotizacionDetalleViewSet(viewsets.ModelViewSet):
         return qs.none()
 
 
+def _nombre_corto(nombre, largo=40):
+    """Nombre del producto recortado a ``largo`` caracteres sin partir palabras
+    (el catálogo no guarda un nombre corto)."""
+    nombre = " ".join((nombre or "").split())
+    if len(nombre) <= largo:
+        return nombre or None
+    return nombre[:largo].rsplit(" ", 1)[0].rstrip(" -_,;:./|") + "…"
+
+
 class PedidoViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "put", "patch", "head", "options"]
     queryset = pedidos_base()
@@ -3512,7 +3521,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
 
         tallas = list(
             PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
-            .select_related("pedido_detalle__producto", "pedido_detalle__color", "talla", "variante")
+            .select_related(
+                "pedido_detalle__producto__categoria_producto", "pedido_detalle__categoria_producto",
+                "pedido_detalle__color", "talla", "variante",
+            )
             # Mismo criterio que el guardado al resolver la variante: variantes de la
             # empresa del pedido, activas o no.
             .annotate(producto_con_variantes=Exists(ProductoVariante.objects.filter(
@@ -3570,10 +3582,17 @@ class PedidoViewSet(viewsets.ModelViewSet):
             if c:
                 disponible = restante[c]
                 restante[c] = max(disponible - t.cantidad, 0)
+            # Solo lectura, para que el operario ubique la prenda sin leer la
+            # descripción: la categoría del producto o, en una muestra, la de la línea.
+            categoria = det.producto.categoria_producto if det.producto else det.categoria_producto
+            nombre = det.producto.nombre if det.producto else det.producto_nombre_externo
             renglones.append({
                 "pedido_detalle_talla_id": t.pk,
                 "pedido_detalle_id": t.pedido_detalle_id,
-                "producto": det.producto.nombre if det.producto else det.producto_nombre_externo,
+                "producto": nombre,
+                "producto_nombre_corto": _nombre_corto(nombre),
+                "categoria_id": categoria.pk if categoria else None,
+                "categoria_nombre": categoria.nombre if categoria else None,
                 "color": det.color.nombre if det.color else None,
                 "talla": t.talla.nombre,
                 "sku": t.variante.sku if t.variante else t.sku_muestra,
