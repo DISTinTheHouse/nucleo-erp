@@ -2294,9 +2294,11 @@ class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
 
     def get_sku_siguiente(self, obj):
         """El SKU que generará ``variante-onboarding`` para esta talla (misma fórmula);
-        ``None`` si ya tiene o la línea aún no tiene color (lo arma el front con ``sku_prefijo``)."""
+        ``None`` si ya tiene (aunque su variante esté inactiva, #788) o la línea aún no
+        tiene color con código (lo arma el front con ``sku_prefijo``)."""
         color = obj.pedido_detalle.color
-        if getattr(obj, "variante_produccion", None) or color is None or not color.codigo:
+        ya_tiene = getattr(obj, "tiene_variante", False) or getattr(obj, "variante_produccion", None)
+        if ya_tiene or color is None or not color.codigo:
             return None
         return f"MP{obj.pedido_detalle_id}-{color.codigo}-{obj.talla.nombre}".strip().upper()
 

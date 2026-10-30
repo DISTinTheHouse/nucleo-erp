@@ -2084,6 +2084,12 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             pedido_detalle_id__in=[d.id for d in detalles]
         ).only("id", "sku", "pedido_detalle_id", "talla_id", "color_id", "aplica_catalogo", "producto_base_id")
         variantes_por_talla = {(v.pedido_detalle_id, v.talla_id): v for v in variantes}
+        # Tallas con variante aunque esté inactiva: ``variante-onboarding`` (y su
+        # índice único) no la vuelve a generar, así que no se ofrece como pendiente (#788).
+        con_variante = set(
+            VarianteProductoProduccion.objects.filter(pedido_detalle_id__in=[d.id for d in detalles])
+            .values_list("pedido_detalle_id", "talla_id")
+        )
         # SKU de catálogo de las que ya se dieron de alta: una consulta (#767).
         sku_catalogo = {
             (pv.producto_id, pv.color_id, pv.talla_id): pv.sku
@@ -2098,6 +2104,7 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             det.categoria = _categoria_de_linea(categorias, det)
             for dt in det.tallas_especiales:
                 dt.variante_produccion = variantes_por_talla.get((det.id, dt.talla_id))
+                dt.tiene_variante = (det.id, dt.talla_id) in con_variante
 
         pedido.detalles_especiales = detalles
         serializer = self.get_serializer(pedido)
