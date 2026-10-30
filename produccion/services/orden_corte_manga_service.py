@@ -108,7 +108,7 @@ class OrdenCorteMangaService:
     @staticmethod
     def cantidades_asignadas_por_pedidos(pedido_ids):
         """``common.cantidades_asignadas`` para OCMs; ver allí el contrato."""
-        return cantidades_asignadas(OrdenCorteMangaDetalle, "ocm", pedido_ids)
+        return cantidades_asignadas(OrdenCorteMangaDetalle, "ocm", pedido_ids, "estatus_corte")
 
     @staticmethod
     def _cantidades_asignadas_por_linea(pedido):

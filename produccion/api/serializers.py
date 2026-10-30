@@ -2399,19 +2399,26 @@ class _EditarOrdenServicioSerializer(serializers.ModelSerializer):
     estatus_field = None
     # Ambos enums comparten valores: 5 = Completado, 7 = Cancelado.
 
+    def validate_prioridad(self, value):
+        # 1 Alta, 2 Media, 3 Baja (#776).
+        if value not in (1, 2, 3):
+            raise serializers.ValidationError("Prioridad inválida: 1 (Alta), 2 (Media) o 3 (Baja).")
+        return value
+
     def validate(self, attrs):
         if getattr(self.instance, self.estatus_field) == 7:
             raise serializers.ValidationError({self.estatus_field: "La orden está cancelada: ya no se edita."})
         return attrs
 
     def update(self, instance, validated_data):
-        # Completado sin fecha de fin capturada: se sella ahora.
-        if (
-            validated_data.get(self.estatus_field) == 5
-            and "fecha_fin" not in validated_data
-            and not instance.fecha_fin
-        ):
-            validated_data["fecha_fin"] = timezone.now()
+        nuevo = validated_data.get(self.estatus_field)
+        if "fecha_fin" not in validated_data:
+            if nuevo == 5 and not instance.fecha_fin:
+                # Completado sin fecha de fin capturada: se sella ahora.
+                validated_data["fecha_fin"] = timezone.now()
+            elif nuevo is not None and nuevo not in (5, 7) and getattr(instance, self.estatus_field) == 5:
+                # Reabierta: deja de tener fecha de fin (#777). Cancelar la conserva.
+                validated_data["fecha_fin"] = None
         return super().update(instance, validated_data)
 
 

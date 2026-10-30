@@ -1425,7 +1425,23 @@ class BordadoIncidenciasViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelView
     def perform_destroy(self, instance):
         instance.soft_delete()
 
+class _OrdenServicioEditableMixin:
+    """PATCH/DELETE de reflejante y corte de manga: solo producción (#774), y el
+    PATCH con la orden bloqueada para que no pise una cancelación concurrente (#778)."""
+
+    def partial_update(self, request, *args, **kwargs):
+        _require_produccion(request.user)
+        with transaction.atomic():
+            list(self.get_queryset().model.objects.select_for_update().filter(pk=kwargs["pk"]).values_list("pk"))
+            return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        _require_produccion(request.user)
+        return super().destroy(request, *args, **kwargs)
+
+
 class OrdenReflejanteViewSet(
+    _OrdenServicioEditableMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.DestroyModelMixin,
@@ -1698,6 +1714,7 @@ class ReflejanteIncidenciasViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelV
         instance.soft_delete()
 
 class OrdenesCorteMangaViewSet(
+    _OrdenServicioEditableMixin,
     mixins.RetrieveModelMixin,
     mixins.ListModelMixin,
     mixins.CreateModelMixin,
