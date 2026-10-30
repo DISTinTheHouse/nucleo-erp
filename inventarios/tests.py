@@ -830,6 +830,24 @@ class ReporteExistenciasProduccionComprasTests(TestCase):
         self.assertEqual(entry["fecha_entrega_estimada"], "2026-11-15")
         self.assertEqual(entry["comentarios"], "Insumo PARCIAL")
 
+    def test_compras_por_talla_solo_de_renglones_con_variante(self):
+        oc = OrdenCompra.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.proveedor, moneda=self.moneda,
+            usuario=self.a["regular"], folio="O-acme-rs-PT", fecha_oc="2026-09-01",
+            estatus=OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+        )
+        OrdenCompraDetalle.objects.create(
+            orden_compra=oc, producto=self.a["producto"], producto_variante=self.a["var_m"],
+            sucursal=self.a["sucursal"], cantidad=7, piezas=7,
+        )
+        r = self._resultado(self.a["regular"], self.a["producto"])
+        # 25 del renglón legado sin variante + 7 de la talla M.
+        self.assertEqual(r["compras_pendiente_cantidad"], "32.0000")
+        self.assertEqual(r["compras_por_talla"], {"M-RS": "7.0000"})
+        # El SKU de la variante también encuentra lo que viene en la O.
+        r = self._resultado(self.a["regular"], self.a["producto"], {"sku": "acme-rs-M"})
+        self.assertEqual(r["compras_por_talla"], {"M-RS": "7.0000"})
+
     # --- alcance / filtros ------------------------------------------------
 
     def test_sin_almacenes_en_alcance_devuelve_vacio(self):
