@@ -2213,3 +2213,97 @@ class OrdenCompraRutaCriticaTests(TestCase):
         oc = self._oc()
         with self.assertNumQueries(2):
             self.api.get(self._url(oc))
+
+
+class OrdenCompraVariantesPTTests(TestCase):
+    """OC de PT por SKU: validación contra ``tipo_compra`` (#792), variante en
+    las lecturas (#793), encuadre RFID por variante (#794) y límites por lista
+    del onboarding (#795)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from catalogo.models import Talla, TipoProducto
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Una exhibición")
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="acme-pt", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="PT", nombre="PT")
+        cls.almacen = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="A", nombre="A")
+        cls.proveedor = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="P1", moneda=moneda, sat_regimen_fiscal=regimen,
+            sat_forma_pago=forma, sat_metodo_pago=metodo, codigo="P1", razon_social="P1",
+            telefono="8100000000", contacto_principal="Ana", rfc="XAXX010101000", email="p1@p.test",
+        )
+        pt = TipoProducto.objects.create(pk=3, codigo="PT")
+        color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Camisa", tipo=pt)
+        cls.ch, cls.g = [
+            ProductoVariante.objects.create(
+                producto=cls.producto, empresa=cls.empresa, color=color, talla=Talla.objects.create(nombre=t),
+                sku=f"CAM-{t}", precio_base="1",
+            )
+            for t in ("CH", "G")
+        ]
+        cls.baja = ProductoVariante.objects.create(
+            producto=cls.producto, empresa=cls.empresa, color=color, sku="CAM-X", precio_base="1", activo=False,
+        )
+        cls.usuario = Usuario.objects.create(
+            username="pt", email="pt@acme.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+
+    def setUp(self):
+        self.api = APIClient()
+        self.api.force_authenticate(user=self.usuario)
+
+    def _crear(self, tipo, detalle):
+        body = {"orden_compra": {"proveedor": self.proveedor.pk, "tipo_compra": tipo}, "detalle": detalle}
+        return self.api.post(f"{ORDENES_URL}onboarding/", body, format="json")
+
+    def _oc_pt(self):
+        resp = self._crear("PT", [
+            {"producto_variante": self.ch.pk, "cantidad": 10},
+            {"producto_variante": self.g.pk, "cantidad": 10},
+        ])
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def test_mp_con_sku_es_400(self):
+        resp = self._crear("MP", [{"producto_variante": self.ch.pk, "cantidad": 1}])
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("detalle", resp.json())
+
+    def test_variante_inactiva_es_400(self):
+        resp = self._crear("PT", [{"producto_variante": self.baja.pk, "cantidad": 1}])
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_pasar_a_mp_con_renglones_por_sku_es_400(self):
+        oc = self._oc_pt()["orden_compra"]
+        resp = self.api.put(f"{ORDENES_URL}{oc['id']}/", {"tipo_compra": "MP"}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("tipo_compra", resp.json())
+
+    def test_lecturas_traen_sku_y_talla(self):
+        data = self._oc_pt()
+        self.assertEqual([(d["producto_variante_sku"], d["producto_variante_talla"]) for d in data["detalle"]],
+                         [("CAM-CH", "CH"), ("CAM-G", "G")])
+        detalles = self.api.get(f"{ORDENES_URL}{data['orden_compra']['id']}/").json()["detalles"]
+        self.assertEqual([d["producto_variante_color"] for d in detalles], ["Negro", "Negro"])
+
+    def test_rfid_asigna_el_tag_al_renglon_de_su_talla(self):
+        oc_id = self._oc_pt()["orden_compra"]["id"]
+        url = "/api/v1/compras/recepcion-rfid-encuadres/"
+        enc = self.api.post(url, {"tipo_origen": "OC", "orden_compra": oc_id, "almacen": self.almacen.pk}, format="json").json()
+        for i in range(3):
+            self.api.post(f"{url}{enc['id']}/lecturas/", {"codigo_tag": f"CAM-G EPC{i}"}, format="json")
+        resumen = self.api.get(f"{url}{enc['id']}/").json()["resumen"]
+        self.assertEqual([(d["producto_variante_talla"], d["leido"]) for d in resumen["detalle"]],
+                         [("CH", "0"), ("G", "3.0000")])
+
+    def test_onboarding_limita_y_busca_por_lista(self):
+        busqueda = self.api.get(f"{ORDENES_URL}onboarding/", {
+            "tipo_compra": "PT", "variante_q": "CAM-G", "producto_limit": 1, "proveedor_limit": 1,
+        }).json()["busqueda"]
+        self.assertEqual([v["sku"] for v in busqueda["variantes"]], ["CAM-G"])
+        self.assertEqual((len(busqueda["proveedores"]), len(busqueda["productos"])), (1, 1))

@@ -23,6 +23,14 @@ class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
     producto_variante_sku = serializers.CharField(
         source='producto_variante.sku', read_only=True, default=None
     )
+    # Mismos nombres que el onboarding de recepciones; ``None`` en renglones
+    # de MP o legados sin variante.
+    producto_variante_color = serializers.CharField(
+        source='producto_variante.color.nombre', read_only=True, default=None
+    )
+    producto_variante_talla = serializers.CharField(
+        source='producto_variante.talla.nombre', read_only=True, default=None
+    )
 
     class Meta:
         model = OrdenCompraDetalle
@@ -32,6 +40,8 @@ class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
             'producto_nombre',
             'producto_variante_id',
             'producto_variante_sku',
+            'producto_variante_color',
+            'producto_variante_talla',
             'descripcion',
             'cantidad',
             'descuento',
@@ -162,6 +172,16 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
 
 
 class OrdenCompraDetalleSerializer(serializers.ModelSerializer):
+    producto_variante_sku = serializers.CharField(
+        source='producto_variante.sku', read_only=True, default=None
+    )
+    producto_variante_color = serializers.CharField(
+        source='producto_variante.color.nombre', read_only=True, default=None
+    )
+    producto_variante_talla = serializers.CharField(
+        source='producto_variante.talla.nombre', read_only=True, default=None
+    )
+
     class Meta:
         model = OrdenCompraDetalle
         fields = "__all__"
