@@ -53,7 +53,10 @@ from produccion.models import (
     OrdenCorteMangaDetalle
 )
 
+from drf_spectacular.utils import OpenApiResponse, extend_schema
+
 from produccion.api.serializers import (
+    AltaCatalogoInputSerializer,
     ListaMaterialBomSerializer,
     BomDetalleSerializer,
     BomBulkItemSerializer,
@@ -1952,6 +1955,10 @@ def _categoria_para_alta(pedido, detalle, tallas):
             'La línea no tiene categoría (se captura en la cotización); '
             'no se puede dar de alta en catálogo.'
         )})
+    if not categoria.activo:
+        raise ValidationError({'alta_catalogo': (
+            f"La categoría {categoria.nombre} está inactiva; no se puede dar de alta en catálogo."
+        )})
     permitidas = set(categoria.tallas.values_list('pk', flat=True))
     fuera = [t.nombre for t in tallas if permitidas and t.pk not in permitidas]
     if fuera:
@@ -1965,7 +1972,7 @@ def _crear_producto_catalogo(pedido, detalle, categoria, nombre):
     # Una línea = un Producto: si ya dio de alta tallas antes (alta incremental),
     # las nuevas cuelgan del mismo (#764).
     existente = (
-        VarianteProductoProduccion.objects.filter(pedido_detalle=detalle, producto_base__isnull=False)
+        variantes_produccion_activas().filter(pedido_detalle=detalle, producto_base__isnull=False)
         .values_list('producto_base', flat=True).first()
     )
     if existente:
@@ -1988,10 +1995,16 @@ def _alta_variante_catalogo(variante, producto, precio):
     sku = f"{producto.codigo}-{variante.color.codigo}-{variante.talla.nombre}".strip().upper()
     if ProductoVariante.objects.filter(empresa=producto.empresa, sku=sku).exists():
         raise ValidationError({'alta_catalogo': f"El SKU '{sku}' ya existe en catálogo."})
-    pv = ProductoVariante.objects.create(
-        producto=producto, empresa=producto.empresa, color=variante.color,
-        talla=variante.talla, sku=sku, precio_base=precio,
-    )
+    try:
+        # Savepoint: si otra alta ganó el mismo SKU entre el ``exists`` y el
+        # INSERT, se responde el mismo 400 en vez de un 500 (#782).
+        with transaction.atomic():
+            pv = ProductoVariante.objects.create(
+                producto=producto, empresa=producto.empresa, color=variante.color,
+                talla=variante.talla, sku=sku, precio_base=precio,
+            )
+    except IntegrityError:
+        raise ValidationError({'alta_catalogo': f"El SKU '{sku}' ya existe en catálogo."})
     variante.aplica_catalogo = True
     variante.producto_base = producto
     variante.save(update_fields=['aplica_catalogo', 'producto_base'])
@@ -2090,6 +2103,10 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         serializer = self.get_serializer(pedido)
         return Response(serializer.data)
 
+    @extend_schema(
+        request=VarianteProduccionOnboardingSerializer,
+        responses={201: VarianteProduccionSerializer(many=True), 400: OpenApiResponse(description="Validación")},
+    )
     @action(detail=True, methods=['post'], url_path='variante-onboarding')
     def variante_onboarding(self, request, pk=None):
         """Alta rápida: una ``VarianteProductoProduccion`` (SKU) por cada
@@ -2268,6 +2285,10 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             status=status.HTTP_201_CREATED,
         )
 
+    @extend_schema(
+        request=AltaCatalogoInputSerializer,
+        responses={201: VarianteProduccionSerializer(many=True), 400: OpenApiResponse(description="Validación")},
+    )
     @action(detail=True, methods=['post'], url_path='alta-catalogo')
     def alta_catalogo(self, request, pk=None):
         """Alta en catálogo de los SKU de producción que una línea ya tiene
@@ -2275,6 +2296,8 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         talla, con el BOM ligado para que salgan en la OP y en inventarios."""
         pedido = self.get_object()
         _require_produccion(request.user)
+        if pedido.estatus == Pedido.ESTATUS_CANCELADO:
+            raise ValidationError({'pedido': 'El pedido está CANCELADO; no se puede dar de alta en catálogo.'})
         try:
             pedido_detalle_id = int(request.data.get('pedido_detalle_id'))
         except (TypeError, ValueError):
@@ -2289,7 +2312,7 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                     'pedido_detalle_id': 'No es una línea de producción especial de este pedido.'
                 })
             variantes = list(
-                VarianteProductoProduccion.objects.filter(pedido_detalle=detalle, aplica_catalogo=False)
+                variantes_produccion_activas().filter(pedido_detalle=detalle, aplica_catalogo=False)
                 .select_related('color', 'talla').order_by('pk')
             )
             if not variantes:

@@ -5867,6 +5867,52 @@ class BomDetalleTenantTests(_BomTenantBase, TestCase):
         self.assertIn("alta_catalogo", resp.data)
         self.assertFalse(Producto.objects.filter(variantes__isnull=False, categoria_producto__isnull=False).exists())
 
+    def _alta_catalogo(self):
+        url = f"/api/v1/produccion/pedidos-especiales/{self.pedido.pk}/alta-catalogo/"
+        return self._client(self.admin).post(url, {"pedido_detalle_id": self.linea_muestra.pk}, format="json")
+
+    def test_alta_catalogo_pedido_cancelado_es_400(self):
+        self._con_categoria()
+        self._client(self.admin).post(self.url_onboarding, self._body_onboarding(), format="json")
+        Pedido.objects.filter(pk=self.pedido.pk).update(estatus=Pedido.ESTATUS_CANCELADO)
+        resp = self._alta_catalogo()
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pedido", resp.data)
+        detalle = self._client(self.admin).get(f"/api/v1/produccion/pedidos-especiales/{self.pedido.pk}/")
+        self.assertEqual(detalle.data["estatus"], Pedido.ESTATUS_CANCELADO)
+
+    def test_alta_catalogo_ignora_variantes_inactivas(self):
+        self._con_categoria()
+        self._client(self.admin).post(self.url_onboarding, self._body_onboarding(), format="json")
+        VarianteProductoProduccion.objects.filter(pedido_detalle=self.linea_muestra).update(activo=False)
+        resp = self._alta_catalogo()
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pedido_detalle_id", resp.data)
+
+    def test_alta_catalogo_categoria_inactiva_es_400(self):
+        categoria = self._con_categoria()
+        categoria.activo = False
+        categoria.save(update_fields=["activo"])
+        self._client(self.admin).post(self.url_onboarding, self._body_onboarding(), format="json")
+        resp = self._alta_catalogo()
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("inactiva", str(resp.data["alta_catalogo"]))
+
+    def test_alta_catalogo_sku_ganado_por_otra_alta_es_400(self):
+        self._con_categoria()
+        self._client(self.admin).post(self.url_onboarding, self._body_onboarding(), format="json")
+        vpp = VarianteProductoProduccion.objects.filter(pedido_detalle=self.linea_muestra).first()
+        ProductoVariante.objects.create(
+            producto=self.producto, empresa=self.empresa, color=vpp.color, talla=vpp.talla,
+            sku=f"CHA00-{vpp.color.codigo}-{vpp.talla.nombre}".upper(), precio_base="1",
+        )
+        # El ``exists`` previo no la ve (la otra alta todavía no confirmaba): manda el INSERT.
+        sin_choque = mock.Mock(exists=mock.Mock(return_value=False))
+        with mock.patch.object(ProductoVariante.objects, "filter", return_value=sin_choque):
+            resp = self._alta_catalogo()
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("ya existe", str(resp.data["alta_catalogo"]))
+
     def test_variante_onboarding_alta_catalogo_sin_categoria_es_400(self):
         body = {**self._body_onboarding(), "alta_catalogo": True}
         resp = self._client(self.admin).post(self.url_onboarding, body, format="json")
