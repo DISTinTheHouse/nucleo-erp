@@ -3,83 +3,10 @@ from ..models import (
     Empresa, Moneda, Sucursal, Departamento, 
     SatRegimenFiscal, SatUsoCfdi, SatMetodoPago, SatFormaPago, 
     SatClaveProdServ, SatClaveUnidad,
-    EmpresaSatConfig, SerieFolio,
+    SerieFolio,
     Impuesto, UnidadMedida
 )
-from ..utils import validate_csd, validate_rfc
-
-class EmpresaSatConfigSerializer(serializers.ModelSerializer):
-    archivo_cer = serializers.FileField(write_only=True, required=False)
-    archivo_key = serializers.FileField(write_only=True, required=False)
-    
-    class Meta:
-        model = EmpresaSatConfig
-        fields = [
-            'id_empresa_sat_config', 'empresa', 'regimen_fiscal',
-            'archivo_cer', 'archivo_key', 'password_llave',
-            'no_certificado', 'fecha_expiracion', 'validado', 'mensaje_error'
-        ]
-        read_only_fields = ['validado', 'mensaje_error', 'no_certificado', 'fecha_expiracion']
-
-    def update(self, instance, validated_data):
-        cer_file = validated_data.get('archivo_cer')
-        key_file = validated_data.get('archivo_key')
-        password = validated_data.get('password_llave', instance.password_llave)
-
-        # Actualizar campos normales
-        for attr, value in validated_data.items():
-            if attr not in ['archivo_cer', 'archivo_key']:
-                setattr(instance, attr, value)
-
-        # Si se suben archivos, validar
-        if cer_file and key_file:
-            try:
-                cer_content = cer_file.read()
-                key_content = key_file.read()
-                
-                # Reiniciar punteros para guardar
-                cer_file.seek(0)
-                key_file.seek(0)
-                
-                is_valid, result = validate_csd(cer_content, key_content, password)
-                
-                if is_valid:
-                    instance.validado = True
-                    instance.mensaje_error = None
-                    instance.no_certificado = result['no_certificado']
-                    instance.fecha_expiracion = result['fecha_expiracion']
-                    
-                    # Validar RFC vs Empresa si es posible
-                    if instance.empresa.rfc and result['rfc']:
-                         # Limpieza básica para comparar
-                         rfc_cert = result['rfc'].strip().upper()
-                         rfc_empresa = instance.empresa.rfc.strip().upper()
-                         if rfc_cert != rfc_empresa:
-                             instance.validado = False
-                             instance.mensaje_error = f"RFC incorrecto. Certificado: {rfc_cert}, Empresa: {rfc_empresa}"
-                    
-                    instance.archivo_cer = cer_file
-                    instance.archivo_key = key_file
-                else:
-                    instance.validado = False
-                    instance.mensaje_error = result
-                    # Guardamos archivos aunque sean inválidos para revisión, o rechazamos?
-                    # Mejor guardamos para que el usuario vea que se subieron pero fallaron
-                    instance.archivo_cer = cer_file
-                    instance.archivo_key = key_file
-            except Exception as e:
-                instance.validado = False
-                instance.mensaje_error = f"Error procesando archivos: {str(e)}"
-        
-        elif cer_file or key_file:
-             # Si sube solo uno, invalidamos porque falta el par
-             instance.validado = False
-             instance.mensaje_error = "Debe subir ambos archivos (.cer y .key) y la contraseña para validar."
-             if cer_file: instance.archivo_cer = cer_file
-             if key_file: instance.archivo_key = key_file
-
-        instance.save()
-        return instance
+from ..utils import validate_rfc
 
 class SatRegimenFiscalSerializer(serializers.ModelSerializer):
     class Meta:
