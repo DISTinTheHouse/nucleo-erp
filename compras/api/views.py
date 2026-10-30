@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 from simple_history.utils import bulk_create_with_history
 
 from auditoria.models import AuditoriaEvento
+from catalogo.api.views import TIPO_PRODUCTO_TERMINADO_ID
 from catalogo.models import Producto, ProductoVariante
 from compras.models import (
     CalidadInspeccion,
@@ -190,7 +191,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             # pueden devolverlos en distinto orden.
             Prefetch(
                 'ordencompradetalle_set',
-                queryset=OrdenCompraDetalle.objects.select_related('producto').order_by('id'),
+                queryset=OrdenCompraDetalle.objects.select_related('producto', 'producto_variante').order_by('id'),
             ),
             Prefetch("recepcion_set", queryset=recepciones_qs),
             "facturas_proveedores",
@@ -430,6 +431,23 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         if not detalle:
             return
         empresa_id = getattr(empresa, "pk", None)
+        # Un renglón por SKU (``producto_variante``) toma su producto de la
+        # variante; si además manda ``producto``, debe ser el mismo.
+        variantes = dict(
+            ProductoVariante.objects.filter(
+                pk__in=[it.get("producto_variante") for it in detalle if it.get("producto_variante")],
+                empresa_id=empresa_id,
+            ).values_list("pk", "producto_id")
+        )
+        for idx, it in enumerate(detalle):
+            if not it.get("producto_variante"):
+                continue
+            producto_id = variantes.get(it["producto_variante"])
+            if producto_id is None or it.get("producto") not in (None, "", producto_id):
+                raise ValidationError(
+                    {"detalle": f"La variante del renglón #{idx + 1} no es válida para la orden."}
+                )
+            it["producto"] = producto_id
         propios = set(
             Producto.objects.filter(
                 pk__in=[it.get("producto") for it in detalle], empresa_id=empresa_id,
@@ -453,6 +471,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 OrdenCompraDetalle(
                     orden_compra=oc,
                     producto_id=it.get("producto"),
+                    producto_variante_id=it.get("producto_variante") or None,
                     solicitud_compra_detalle=None,
                     requisicion_detalle=None,
                     descripcion=(it.get("descripcion") or None),
@@ -575,6 +594,33 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
         proveedores = list(proveedores_qs)
         productos = list(productos_qs)
+        # OC de Producto Terminado (``?tipo_compra=PT``): se compra por SKU, así
+        # que también viajan las variantes, buscables por SKU o nombre.
+        variantes = []
+        if (request.query_params.get("tipo_compra") or "").strip().upper() == OrdenCompra.TipoCompra.PRODUCTO_TERMINADO:
+            variantes_qs = ProductoVariante.objects.filter(
+                activo=True, producto__activo=True, producto__tipo_id=TIPO_PRODUCTO_TERMINADO_ID,
+            )
+            if empresa:
+                variantes_qs = variantes_qs.filter(empresa=empresa)
+            if producto_q:
+                variantes_qs = variantes_qs.filter(
+                    Q(sku__icontains=producto_q) | Q(nombre__icontains=producto_q)
+                    | Q(producto__nombre__icontains=producto_q)
+                )
+            variantes_qs = variantes_qs.order_by("sku").values(
+                "id", "sku", "producto_id", "producto__nombre", "color__nombre", "talla__nombre", "precio_base",
+            )
+            if limit is not None:
+                variantes_qs = variantes_qs[:limit]
+            variantes = [
+                {
+                    "id": v["id"], "sku": v["sku"], "producto_id": v["producto_id"],
+                    "producto_nombre": v["producto__nombre"], "color": v["color__nombre"],
+                    "talla": v["talla__nombre"], "precio_base": v["precio_base"],
+                }
+                for v in variantes_qs
+            ]
         sucursales = []
         if empresa:
             sucursales = list(
@@ -597,6 +643,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             "busqueda": {
                 "proveedores": proveedores,
                 "productos": productos,
+                "variantes": variantes,
             },
         }
 
@@ -1735,7 +1782,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                                 "orden_compra_detalle": oc_detalle,
                                 "orden_produccion_detalle": None,
                                 "producto": oc_detalle.producto,
-                                "producto_variante": None,
+                                "producto_variante": oc_detalle.producto_variante,
                                 "cantidad_recibida": cantidad,
                                 "ubicacion": item.get("ubicacion"),
                                 "lote": item.get("lote"),

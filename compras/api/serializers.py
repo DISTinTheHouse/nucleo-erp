@@ -20,6 +20,9 @@ class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
     # ``producto`` es NOT NULL en el modelo, así que ``source=`` basta (mismo
     # patrón que ``RecepcionDetalleResumenSerializer.producto_nombre``).
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    producto_variante_sku = serializers.CharField(
+        source='producto_variante.sku', read_only=True, default=None
+    )
 
     class Meta:
         model = OrdenCompraDetalle
@@ -27,6 +30,8 @@ class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
             'id',
             'producto_id',
             'producto_nombre',
+            'producto_variante_id',
+            'producto_variante_sku',
             'descripcion',
             'cantidad',
             'descuento',
@@ -276,10 +281,18 @@ class OrdenCompraOnboardingHeaderSerializer(serializers.Serializer):
 
 
 class OrdenCompraOnboardingDetalleInputSerializer(serializers.Serializer):
-    producto = serializers.IntegerField()
+    # Uno de los dos: con ``producto_variante`` (OC de PT, por SKU) el producto
+    # sale de la variante.
+    producto = serializers.IntegerField(required=False, allow_null=True)
+    producto_variante = serializers.IntegerField(required=False, allow_null=True)
     cantidad = serializers.IntegerField(min_value=1)
     precio = serializers.DecimalField(max_digits=14, decimal_places=2, required=False, allow_null=True)
     descripcion = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+
+    def validate(self, attrs):
+        if not attrs.get("producto") and not attrs.get("producto_variante"):
+            raise serializers.ValidationError({"producto": "Envía `producto` o `producto_variante`."})
+        return attrs
 
 
 class OrdenCompraOnboardingSerializer(serializers.Serializer):

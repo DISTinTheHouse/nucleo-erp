@@ -196,6 +196,10 @@ class OrdenCompraRutaCritica(models.Model):
 class OrdenCompraDetalle(models.Model):
     orden_compra = models.ForeignKey(OrdenCompra, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
+    # SKU comprado (OC de Producto Terminado); pasa tal cual a la recepción.
+    producto_variante = models.ForeignKey(
+        'catalogo.ProductoVariante', on_delete=models.PROTECT, null=True, blank=True
+    )
     solicitud_compra_detalle = models.ForeignKey(SolicitudCompraDetalle, on_delete=models.CASCADE, null=True, blank=True)
     requisicion_detalle = models.ForeignKey(RequisicionDetalle, on_delete=models.CASCADE, null=True, blank=True)
     descripcion = models.CharField(max_length=200, null=True, blank=True)
