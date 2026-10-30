@@ -1805,9 +1805,9 @@ class ConfigSatDesmontadaTests(TestCase):
     en claro. Se desmontó; el modelo sigue, pero sus secretos no salen ni por la
     API ni por el admin."""
 
-    PASSWORD = "secreto-de-prueba-ec679"
-    CERT_PEM = "-----CERT DE PRUEBA EC679-----"
-    LLAVE_PEM = "-----LLAVE DE PRUEBA EC679-----"
+    VALOR_PASS = "marcador-uno-ec679"
+    VALOR_CERT = "marcador-dos-ec679"
+    VALOR_LLAVE = "marcador-tres-ec679"
     RUTA_KEY = "sat/csd/sat-ec679/key_prueba.key"
 
     @classmethod
@@ -1815,9 +1815,9 @@ class ConfigSatDesmontadaTests(TestCase):
         cls.empresa = Empresa.objects.create(codigo="sat-ec679", razon_social="SAT EC679 SA")
         cls.config = EmpresaSatConfig.objects.create(
             empresa=cls.empresa,
-            password_llave=cls.PASSWORD,
-            certificado_pem=cls.CERT_PEM,
-            llave_privada_pem=cls.LLAVE_PEM,
+            password_llave=cls.VALOR_PASS,
+            certificado_pem=cls.VALOR_CERT,
+            llave_privada_pem=cls.VALOR_LLAVE,
             archivo_cer="sat/csd/sat-ec679/cer_prueba.cer",
             archivo_key=cls.RUTA_KEY,
             no_certificado="30001000000400002434",
@@ -1852,7 +1852,7 @@ class ConfigSatDesmontadaTests(TestCase):
             with self.subTest(url=url):
                 resp = self.client.get(url)
                 self.assertEqual(resp.status_code, 200)
-                for secreto in (self.PASSWORD, self.CERT_PEM, self.LLAVE_PEM, self.RUTA_KEY):
+                for secreto in (self.VALOR_PASS, self.VALOR_CERT, self.VALOR_LLAVE, self.RUTA_KEY):
                     self.assertNotContains(resp, secreto)
 
         # Detalle de solo lectura: sin inputs editables, pero con los datos no secretos.
