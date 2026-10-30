@@ -7315,3 +7315,72 @@ class MatrizPrendaProcesoOrdenesTests(TestCase):
             {"compatibilidad_proceso": ["La categoría «Playera» no admite Reflejante en «ESPALDA»."]},
         )
         self.assertFalse(OrdenesReflejante.objects.filter(pedido=pedido).exists())
+
+
+class EditarOrdenServicioTests(TestCase):
+    """PATCH/DELETE del detalle de reflejante y corte de manga (#755, #774-#778)."""
+
+    FLAG = "lleva_reflejante"
+    SERVICE = OrdenReflejanteService
+    _crear_pedido = BaseOrdenTrabajoTests._crear_pedido
+    _talla = BaseOrdenTrabajoTests._talla
+    _save = BaseOrdenTrabajoTests._save
+
+    @classmethod
+    def setUpTestData(cls):
+        BaseOrdenTrabajoTests.setUpTestData.__func__(cls)
+        cls.admin = Usuario.objects.create(
+            username="admin", email="admin@acme.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+
+    def setUp(self):
+        self.pedido, detalle = self._crear_pedido()
+        self._talla(detalle, self.talla_ch, 10)
+        self.orden = self._save(self.pedido)
+        self.url = f"/api/v1/produccion/orden-reflejante/{self.orden.pk}/"
+
+    def _patch(self, body, user=None):
+        client = APIClient()
+        client.force_authenticate(user=user or self.admin)
+        return client.patch(self.url, body, format="json")
+
+    def test_completar_sella_fecha_fin_y_reabrir_la_limpia(self):
+        resp = self._patch({"estatus_reflejante": 5})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIsNotNone(resp.data["fecha_fin"])
+        resp = self._patch({"estatus_reflejante": 3})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIsNone(resp.data["fecha_fin"])
+
+    def test_cancelada_no_se_edita_y_libera_cupo(self):
+        self.assertTrue(OrdenReflejanteService.cantidades_asignadas_por_pedidos([self.pedido.pk])[0])
+        self.assertEqual(self._patch({"estatus_reflejante": 7}).status_code, 200)
+        por_linea, sin_talla = OrdenReflejanteService.cantidades_asignadas_por_pedidos([self.pedido.pk])
+        self.assertEqual((por_linea, sin_talla), ({}, {}))
+        resp = self._patch({"estatus_reflejante": 3})
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_prioridad_solo_1_2_o_3(self):
+        self.assertEqual(self._patch({"prioridad": 2}).status_code, 200)
+        self.assertEqual(self._patch({"prioridad": 999}).status_code, 400)
+
+    def test_campos_no_editables_se_ignoran_y_put_es_405(self):
+        folio = self.orden.folio_reflejante
+        resp = self._patch({"folio_reflejante": "OTRO", "pedido": 0, "observaciones": "x"})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.orden.refresh_from_db()
+        self.assertEqual((self.orden.folio_reflejante, self.orden.pedido_id), (folio, self.pedido.pk))
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        self.assertEqual(client.put(self.url, {}, format="json").status_code, 405)
+
+    def test_sin_departamento_produccion_no_edita_ni_borra(self):
+        resp = self._patch({"estatus_reflejante": 3}, user=self.usuario)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("permiso", resp.data)
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        self.assertEqual(client.delete(self.url).status_code, 400)
+        self.orden.refresh_from_db()
+        self.assertTrue(self.orden.activo)

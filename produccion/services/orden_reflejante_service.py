@@ -115,7 +115,7 @@ class OrdenReflejanteService:
         ``FieldError: Cannot resolve keyword 'or_r'`` en cuanto se consultaba
         el cupo.
         """
-        return cantidades_asignadas(OrdenReflejanteDetalle, "orden_r", pedido_ids)
+        return cantidades_asignadas(OrdenReflejanteDetalle, "orden_r", pedido_ids, "estatus_reflejante")
 
     @staticmethod
     def contratado_por_pedido(pedido_ids):
