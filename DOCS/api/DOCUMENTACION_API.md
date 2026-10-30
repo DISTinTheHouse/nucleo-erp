@@ -699,7 +699,7 @@ Permite consultar el inventario actual.
   - `fecha_inicio`, `fecha_final`, `filtros`, `resumen` y `resumen_por_almacen` se mantienen igual que antes de paginar: reflejan todo el resultado filtrado, no cambian entre páginas.
 
 - **Reporte de existencias + producción + compras (mesa de control)**: `GET /api/v1/inventarios/existencias/reporte-existencias-produccion-compras/`
-- **Para qué sirve**: reemplaza el Excel manual que mesa de control usaba para dar seguimiento a cuándo van a llegar las órdenes de producción y las compras pendientes de un SKU. Por producto muestra, con desglose por talla, lo disponible en almacenes de Producto Terminado y lo que ya está en producción; y a nivel producto (sin talla, ver nota) lo que viene pendiente de compra — cada uno con su folio, fecha de entrega estimada y comentarios, para saber cuándo llega sin cruzar pantallas de producción y compras.
+- **Para qué sirve**: reemplaza el Excel manual que mesa de control usaba para dar seguimiento a cuándo van a llegar las órdenes de producción y las compras pendientes de un SKU. Por producto muestra, con desglose por talla, lo disponible en almacenes de Producto Terminado y lo que ya está en producción; y lo que viene pendiente de compra (total y, en renglones por SKU, por talla) — cada uno con su folio, fecha de entrega estimada y comentarios, para saber cuándo llega sin cruzar pantallas de producción y compras.
 - **No confundir con `reporte-existencias-periodo`** (arriba): ese es el cierre contable entradas/salidas de un rango de fechas; este es una foto del momento (disponible + lo que viene en camino), pensado para decidir resurtido.
 - **Query params** (todos opcionales):
   - `producto` / `producto_id`: filtra a un producto específico.
@@ -709,7 +709,7 @@ Permite consultar el inventario actual.
 - **Sin paginar**: `resultados` es la lista completa (agrupada por producto, no por variante), ordenada por `codigo`.
 - **Qué cuenta como "en producción"**: detalle de `OrdenProduccion` con `activo=True` y `estatus_op` distinto de `COMPLETADO`/`CANCELADO`. Una OP completada o cancelada no debe seguir "reservando" resurtido, así que se excluye aunque siga activa en el sistema.
 - **Qué cuenta como "pendiente de compra"**: detalle de `OrdenCompra` con `activo=True` y `estatus` distinto de `RECIBIDA`/`CANCELADA`/`BORRADOR`, y solo la parte aún no recibida (`cantidad - Σ RecepcionDetalle.cantidad_recibida`); si ya no queda pendiente, la línea no aparece aunque la OC siga "abierta".
-- **Nota de diseño — compras sin desglose por talla**: `compras.OrdenCompraDetalle` no captura `producto_variante` (no todo lo que se compra lleva talla), así que `compras_pendiente_cantidad` y `ordenes_compra` van a nivel producto, no por talla — a diferencia de producción, que sí resuelve por variante porque `OrdenProduccionDetalle` sí tiene `producto_variante`.
+- **Compras por talla**: `compras_pendiente_cantidad` es el total del producto. `compras_por_talla` desglosa solo los renglones de OC con `producto_variante` (O de PT); los de MP o legados sin variante quedan solo en el total. `producto` y `sku` también buscan por la variante del renglón de OC.
 - **`fecha_entrega_estimada` en `OrdenProduccion`**: campo nuevo (antes no existía), mismo criterio que `OrdenCompra.fecha_entrega_estimada` — capturado por producción, nullable.
 - **`comentarios`**: en `ordenes_produccion` es `OrdenProduccion.observaciones`; en `ordenes_compra` es `OrdenCompra.observaciones`.
 - **Ejemplo**: `GET /api/v1/inventarios/existencias/reporte-existencias-produccion-compras/?sku=2125CIE`
@@ -728,6 +728,7 @@ Permite consultar el inventario actual.
         "disponible_total": "1248.0000",
         "produccion_total": "475.0000",
         "compras_pendiente_cantidad": "70.0000",
+        "compras_por_talla": { "CH": "40.0000" },
         "ordenes_produccion": [
           {
             "folio": "OP-000123",

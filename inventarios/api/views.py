@@ -665,11 +665,10 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         van a llegar las órdenes de producción y las compras pendientes de un
         SKU, sin cruzar pantallas de producción y compras.
 
-        Compras se muestra a nivel producto, sin desglose por talla:
-        ``compras.OrdenCompraDetalle`` no captura ``producto_variante`` (no
-        todo lo que se compra lleva talla), así que no hay de dónde sacar el
-        reparto por talla de lo que viene de una OC — a diferencia de
-        producción, que sí resuelve por variante.
+        Compras: ``compras_pendiente_cantidad`` es el total del producto;
+        ``compras_por_talla`` desglosa solo los renglones de OC con
+        ``producto_variante`` (O de PT, #763). Los de MP o legados sin variante
+        quedan solo en el total.
         """
         from produccion.models import OrdenProduccion, OrdenProduccionDetalle
         from compras.models import OrdenCompra, OrdenCompraDetalle, RecepcionDetalle
@@ -714,6 +713,7 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                     "produccion_por_talla": defaultdict(lambda: Decimal("0")),
                     "ordenes_produccion": {},
                     "compras_pendiente_cantidad": Decimal("0"),
+                    "compras_por_talla": defaultdict(lambda: Decimal("0")),
                     "ordenes_compra": {},
                 }
             return productos[producto.pk]
@@ -764,7 +764,7 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 "comentarios": op.observaciones,
             }
 
-        # --- 3) Por llegar de compras: OC no recibidas del todo, a nivel producto ---
+        # --- 3) Por llegar de compras: OC no recibidas del todo, por producto (y talla si hay variante) ---
         empresa_ids = {a["empresa_id"] for a in almacenes_pt.values("empresa_id")}
         oc_detalles = (
             OrdenCompraDetalle.objects.filter(
@@ -776,13 +776,17 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 OrdenCompra.EstatusOrdenCompra.CANCELADA,
                 OrdenCompra.EstatusOrdenCompra.BORRADOR,
             ])
-            .select_related("producto", "orden_compra")
+            .select_related("producto", "producto_variante__talla", "orden_compra")
         )
         if producto_id:
-            oc_detalles = oc_detalles.filter(producto_id=producto_id)
+            oc_detalles = oc_detalles.filter(
+                models.Q(producto_id=producto_id) | models.Q(producto_variante__producto_id=producto_id)
+            )
         if sku_q:
             oc_detalles = oc_detalles.filter(
-                models.Q(producto__nombre__icontains=sku_q) | models.Q(producto__codigo__icontains=sku_q)
+                models.Q(producto_variante__sku__icontains=sku_q)
+                | models.Q(producto__nombre__icontains=sku_q)
+                | models.Q(producto__codigo__icontains=sku_q)
             )
 
         recibido_por_detalle = defaultdict(lambda: Decimal("0"))
@@ -802,6 +806,9 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 continue
             bucket = _producto_bucket(det.producto)
             bucket["compras_pendiente_cantidad"] += pendiente
+            if det.producto_variante_id:
+                talla = det.producto_variante.talla
+                bucket["compras_por_talla"][talla.nombre if talla else "N/A"] += pendiente
             oc = det.orden_compra
             bucket["ordenes_compra"][oc.pk] = {
                 "folio": oc.folio,
@@ -834,6 +841,9 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 "disponible_total": str(self._quantize_qty(sum(disponible.values(), Decimal("0")))),
                 "produccion_total": str(self._quantize_qty(sum(produccion.values(), Decimal("0")))),
                 "compras_pendiente_cantidad": str(self._quantize_qty(bucket["compras_pendiente_cantidad"])),
+                "compras_por_talla": {
+                    t: str(self._quantize_qty(c)) for t, c in sorted(bucket["compras_por_talla"].items())
+                },
                 "ordenes_produccion": list(bucket["ordenes_produccion"].values()),
                 "ordenes_compra": list(bucket["ordenes_compra"].values()),
             })
