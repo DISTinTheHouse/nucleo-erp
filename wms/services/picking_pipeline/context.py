@@ -37,6 +37,8 @@ def validar_contexto_picking(pedido, almacen, almacen_destino, operador, user):
         raise ValidationError({"almacen": "El almacén origen no pertenece a la empresa del pedido."})
     if almacen.sucursal_id and almacen.sucursal_id != pedido.sucursal_id:
         raise ValidationError({"almacen": "El almacén origen no pertenece a la sucursal del pedido."})
+    if almacen.estatus != "ACTIVO":
+        raise ValidationError({"almacen": "El almacén origen está inactivo."})
     if not bool(getattr(almacen, "permite_salida", False)):
         raise ValidationError({
             "almacen": "Este almacén no permite salidas (configura `permite_salida=True` en el catálogo)."
@@ -47,6 +49,8 @@ def validar_contexto_picking(pedido, almacen, almacen_destino, operador, user):
         raise ValidationError({"almacen_destino": "El almacén destino no pertenece a la empresa del pedido."})
     if almacen_destino.sucursal_id and almacen_destino.sucursal_id != pedido.sucursal_id:
         raise ValidationError({"almacen_destino": "El almacén destino no pertenece a la sucursal del pedido."})
+    if almacen_destino.estatus != "ACTIVO":
+        raise ValidationError({"almacen_destino": "El almacén destino está inactivo."})
     if almacen.pk == almacen_destino.pk:
         raise ValidationError({
             "almacen_destino": "El almacén destino debe ser distinto al origen.",

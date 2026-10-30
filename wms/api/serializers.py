@@ -394,6 +394,17 @@ class PickingCreateSerializer(serializers.ModelSerializer):
 
     picking_detalle = PickingCreateDetalleInputSerializer(many=True)
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Mismo criterio que ``PickingTrasladoSerializer``: un id de otra empresa
+        # responde igual que uno inexistente (#740).
+        user = getattr(self.context.get("request"), "user", None)
+        if user is not None and not getattr(user, "is_superuser", False):
+            empresa_id = getattr(user, "empresa_id", None)
+            for campo in ("pedido", "operador", "almacen", "almacen_destino"):
+                qs = self.fields[campo].queryset
+                self.fields[campo].queryset = qs.filter(empresa_id=empresa_id)
+
     class Meta:
         model = Picking
         fields = [

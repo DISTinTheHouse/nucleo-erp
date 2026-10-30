@@ -53,6 +53,7 @@ def _cargar_tallas_del_pedido(pedido, talla_ids):
     tallas = list(
         PedidoDetalleTalla.objects.filter(
             pedido_detalle__pedido=pedido,
+            pedido_detalle__producto__isnull=False,
             pk__in=list(talla_ids),
         )
         .select_related(
@@ -65,7 +66,7 @@ def _cargar_tallas_del_pedido(pedido, talla_ids):
     )
     if len(tallas) != len(talla_ids):
         raise ValidationError(
-            {"picking_detalle": "Una o más líneas no pertenecen al pedido indicado."}
+            {"picking_detalle": "Una o más líneas no pertenecen al pedido indicado o son muestras (no se surten por picking)."}
         )
     return tallas
 
