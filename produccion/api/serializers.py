@@ -2384,6 +2384,8 @@ class VarianteProduccionOnboardingSerializer(serializers.Serializer):
 class AltaCatalogoInputSerializer(serializers.Serializer):
     """Body de ``PedidoEspecialViewSet.alta_catalogo`` (solo para el esquema OpenAPI)."""
     pedido_detalle_id = serializers.IntegerField()
+    # Solo si la línea no tiene categoría; queda guardada en la línea.
+    categoria_producto = serializers.IntegerField(required=False)
 
 
 class VarianteProduccionSerializer(serializers.ModelSerializer):

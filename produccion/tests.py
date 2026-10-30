@@ -5897,6 +5897,18 @@ class BomDetalleTenantTests(_BomTenantBase, TestCase):
         tallas = resp.data["detalles"][0]["tallas"]
         self.assertTrue(all(t["sku_siguiente"] is None for t in tallas if t["cantidad"]))
 
+    def test_alta_catalogo_linea_sin_categoria_la_toma_del_body(self):
+        from catalogo.models import CategoriaProducto
+        categoria = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Camisola", codigo="CMS")
+        self._client(self.admin).post(self.url_onboarding, self._body_onboarding(), format="json")
+        url = f"/api/v1/produccion/pedidos-especiales/{self.pedido.pk}/alta-catalogo/"
+        body = {"pedido_detalle_id": self.linea_muestra.pk, "categoria_producto": categoria.pk}
+        resp = self._client(self.admin).post(url, body, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.linea_muestra.refresh_from_db()
+        self.assertEqual(self.linea_muestra.categoria_producto_id, categoria.pk)
+        self.assertTrue(Producto.objects.filter(categoria_producto=categoria).exists())
+
     def test_alta_catalogo_categoria_inactiva_es_400(self):
         categoria = self._con_categoria()
         categoria.activo = False
