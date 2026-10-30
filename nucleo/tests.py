@@ -17,12 +17,13 @@ from django.contrib.auth.models import AnonymousUser
 from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
+from django.urls import NoReverseMatch, reverse
 from rest_framework.test import APIClient
 
 from catalogo.models import Color, Producto, ProductoVariante, Talla
 from finanzas.models import Factura
 from nucleo.api.search import REGISTRO
-from nucleo.models import Empresa, Moneda, Sucursal
+from nucleo.models import Empresa, EmpresaSatConfig, Moneda, Sucursal
 from nucleo.permisos import permisos_efectivos
 from produccion.models import OrdenesBordado, OrdenesCorteManga, OrdenesReflejante
 from seguridad.models import Permiso, Rol, RolPermiso, UsuarioPermiso, UsuarioRol
@@ -1798,3 +1799,64 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
         self.assertNotIn("Textil De Otra Empresa", muchas[self.a["admin"].username][1])
         self.assertEqual(len(muchas[self.a["admin"].username][1]), 22)
 
+
+class ConfigSatDesmontadaTests(TestCase):
+    """EC-679: ``config-sat`` no acotaba por empresa y devolvía ``password_llave``
+    en claro. Se desmontó; el modelo sigue, pero sus secretos no salen ni por la
+    API ni por el admin."""
+
+    PASSWORD = "secreto-de-prueba-ec679"
+    CERT_PEM = "-----CERT DE PRUEBA EC679-----"
+    LLAVE_PEM = "-----LLAVE DE PRUEBA EC679-----"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="sat-ec679", razon_social="SAT EC679 SA")
+        cls.config = EmpresaSatConfig.objects.create(
+            empresa=cls.empresa,
+            password_llave=cls.PASSWORD,
+            certificado_pem=cls.CERT_PEM,
+            llave_privada_pem=cls.LLAVE_PEM,
+            no_certificado="30001000000400002434",
+        )
+        cls.otra = Empresa.objects.create(codigo="otra-ec679", razon_social="OTRA EC679 SA")
+        cls.user = Usuario.objects.create(
+            username="user-ec679", email="user@ec679.test", empresa=cls.otra
+        )
+        cls.staff = Usuario.objects.create(
+            username="root-ec679", email="root@ec679.test", is_staff=True, is_superuser=True
+        )
+
+    def test_la_ruta_ya_no_existe(self):
+        with self.assertRaises(NoReverseMatch):
+            reverse("nucleo:api_empresa_sat_config", kwargs={"empresa_id": self.empresa.pk})
+
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        url = f"/api/v1/nucleo/empresas/{self.empresa.pk}/config-sat/"
+        self.assertEqual(client.get(url).status_code, 404)
+        self.assertEqual(client.patch(url, {"password_llave": "x"}).status_code, 404)
+        # El GET creaba la config de cualquier empresa (``get_or_create``).
+        client.get(f"/api/v1/nucleo/empresas/{self.otra.pk}/config-sat/")
+        self.assertFalse(EmpresaSatConfig.objects.filter(empresa=self.otra).exists())
+
+    def test_admin_no_muestra_los_secretos(self):
+        self.client.force_login(self.staff, backend="django.contrib.auth.backends.ModelBackend")
+        urls = (
+            reverse("admin:nucleo_empresasatconfig_changelist"),
+            reverse("admin:nucleo_empresasatconfig_change", args=[self.config.pk]),
+            reverse("admin:nucleo_empresasatconfig_add"),
+        )
+        for url in urls:
+            with self.subTest(url=url):
+                resp = self.client.get(url)
+                self.assertEqual(resp.status_code, 200)
+                for campo in ("password_llave", "certificado_pem", "llave_privada_pem"):
+                    self.assertNotContains(resp, f'name="{campo}"')
+                for secreto in (self.PASSWORD, self.CERT_PEM, self.LLAVE_PEM):
+                    self.assertNotContains(resp, secreto)
+
+        # El resto del formulario sigue disponible.
+        resp = self.client.get(urls[1])
+        for campo in ("empresa", "regimen_fiscal", "archivo_cer", "archivo_key", "no_certificado"):
+            self.assertContains(resp, f'name="{campo}"')
