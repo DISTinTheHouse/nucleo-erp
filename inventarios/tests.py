@@ -963,3 +963,85 @@ class AlmacenPermiteEntradaTests(TestCase):
         )
         self.assertEqual(resp.status_code, 201, resp.content)
         self.assertIs(Almacen.objects.get(pk=resp.json()["id_almacen"]).permite_entrada, False)
+
+
+class AuxiliarMovimientosTests(TestCase):
+    """``GET movimientos/auxiliar/``: kardex de una variante."""
+
+    URL = f"{MOVIMIENTOS_URL}auxiliar/"
+
+    @classmethod
+    def setUpTestData(cls):
+        color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        cls.empresa = Empresa.objects.create(codigo="acme-aux", razon_social="acme SA")
+        sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="AUX", nombre="aux")
+        cls.alm1 = Almacen.objects.create(empresa=cls.empresa, sucursal=sucursal, codigo="A1", nombre="Uno")
+        cls.alm2 = Almacen.objects.create(empresa=cls.empresa, sucursal=sucursal, codigo="A2", nombre="Dos")
+        cls.ub1 = Ubicacion.objects.create(almacen=cls.alm1, pasillo="1")
+        cls.ub2 = Ubicacion.objects.create(almacen=cls.alm2, pasillo="1")
+        producto = Producto.objects.create(empresa=cls.empresa, nombre="Camisa azul")
+        cls.variante = ProductoVariante.objects.create(
+            producto=producto, empresa=cls.empresa, color=color, sku="CAM-01", precio_base="1",
+        )
+        ProductoVariante.objects.create(
+            producto=producto, empresa=cls.empresa, color=color, sku="CAM-02", precio_base="1",
+        )
+        cls.user = Usuario.objects.create(
+            username="u@aux.test", email="u@aux.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        otra = Empresa.objects.create(codigo="globex-aux", razon_social="globex SA")
+        cls.ajena = ProductoVariante.objects.create(
+            producto=Producto.objects.create(empresa=otra, nombre="Camisa ajena"),
+            empresa=otra, color=color, sku="CAM-99", precio_base="1",
+        )
+
+        def mov(tipo, origen=None, destino=None, cantidad="0", costo="0"):
+            m = MovimientoInventario.objects.create(
+                empresa=cls.empresa, sucursal=sucursal, tipo_movimiento=tipo, usuario=cls.user,
+            )
+            MovimientoInventarioDetalle.objects.create(
+                movimiento_inventario=m, producto=producto, producto_variante=cls.variante,
+                ubicacion_origen=origen, ubicacion_destino=destino, cantidad=cantidad, costo_unitario=costo,
+            )
+
+        mov("ENTRADA", destino=cls.ub1, cantidad="10", costo="5")
+        mov("SALIDA", origen=cls.ub1, cantidad="3")
+        mov("TRANSFERENCIA", origen=cls.ub1, destino=cls.ub2, cantidad="2")
+        mov("AJUSTE", origen=cls.ub2, destino=cls.ub2, cantidad="5")  # cantidad final, no diferencia
+        Existencia.objects.create(producto=producto, producto_variante=cls.variante, almacen=cls.alm1, ubicacion=cls.ub1, cantidad="5")
+        Existencia.objects.create(producto=producto, producto_variante=cls.variante, almacen=cls.alm2, ubicacion=cls.ub2, cantidad="5")
+
+    def _get(self, **params):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        return client.get(self.URL, params)
+
+    def test_busqueda_con_varias_coincidencias_regresa_opciones(self):
+        data = self._get(q="camisa").json()
+        self.assertIsNone(data["variante"])
+        self.assertEqual({o["sku"] for o in data["opciones"]}, {"CAM-01", "CAM-02"})
+
+    def test_sku_exacto_regresa_kardex(self):
+        data = self._get(q="cam-01").json()
+        self.assertEqual(data["variante"]["sku"], "CAM-01")
+        filas = data["results"]
+        self.assertEqual(
+            [(f["tm"], f["almacen_codigo"], f["entradas"], f["salidas"], f["saldo"]) for f in filas],
+            [
+                ("ENTRADA", "A1", "10.0000", "0.0000", "10.0000"),
+                ("SALIDA", "A1", "0.0000", "3.0000", "7.0000"),
+                ("TRANSFERENCIA", "A1", "0.0000", "2.0000", "5.0000"),
+                ("TRANSFERENCIA", "A2", "2.0000", "0.0000", "7.0000"),
+                ("AJUSTE", "A2", "3.0000", "0.0000", "10.0000"),
+            ],
+        )
+        self.assertEqual(filas[0]["costo_promedio"], "5.00")
+        self.assertEqual(data["resumen"]["saldo_final"], data["resumen"]["existencia_actual"])
+
+    def test_filtro_por_almacen(self):
+        filas = self._get(producto_variante=self.variante.pk, almacen=self.alm2.pk).json()["results"]
+        self.assertEqual([f["saldo"] for f in filas], ["2.0000", "5.0000"])
+
+    def test_variante_de_otra_empresa(self):
+        self.assertEqual(self._get(producto_variante=self.ajena.pk).status_code, 404)
+        self.assertEqual(self._get(q="CAM-99").json()["opciones"], [])

@@ -817,6 +817,54 @@ Historial operativo de entradas, salidas y ajustes.
   }
   ```
 
+- **Auxiliar de movimientos (kardex de un SKU)**: `GET /api/v1/inventarios/movimientos/auxiliar/`
+  - **Una sola llamada.** El front manda lo que escribe el usuario en `q`:
+    - si hay **una** coincidencia (o un SKU exacto, de catálogo o de producción `MP...`) → regresa `variante` + el kardex;
+    - si hay **varias** → `variante: null` y `opciones` (máx. 20) para elegir una; al elegir, se vuelve a llamar con `producto_variante=<id>`;
+    - si no hay ninguna → `variante: null`, `opciones: []`.
+  - **Query params**:
+    - `q`: SKU, SKU de producción o descripción (busca por palabras, acepta texto incompleto).
+    - `producto_variante`: id de la variante (salta la búsqueda). Se manda `q` o `producto_variante`.
+    - `almacen`: opcional, solo ese almacén (el saldo pasa a ser el del almacén).
+    - `fecha_inicio`, `fecha_final`: opcionales, `YYYY-MM-DD` (si se manda una, van las dos). Lo anterior a `fecha_inicio` queda en `resumen.saldo_inicial`.
+  - **Columnas del reporte → campo**:
+
+    | Columna | Campo |
+    |---|---|
+    | Fecha | `fecha` |
+    | Documento | `documento` (`RECEPCION`, `ORDEN_PRODUCCION`, `TRANSFERENCIA`, `AJUSTE`, `PEDIDO`, `MOVIMIENTO_MANUAL`) |
+    | TM | `tm` (`ENTRADA`, `SALIDA`, `AJUSTE`, `TRANSFERENCIA`) |
+    | Costo | `costo_unitario` |
+    | Entradas | `entradas` |
+    | Salidas | `salidas` |
+    | Cómo afectó al almacén | `efecto` (`ENTRADA` / `SALIDA` / `SIN_CAMBIO`) + `saldo_almacen` (saldo del almacén después del movimiento) + `saldo` (saldo corrido del reporte) |
+    | Almacén afectado | `almacen_codigo`, `almacen_nombre` |
+    | Usuario | `usuario` |
+    | Revalidación del costo | `costo_promedio` (promedio ponderado después del movimiento) |
+    | Folio de referencia | `folio_referencia` |
+
+  - **Notas**:
+    - Una transferencia sale en **dos renglones**: salida del almacén origen y entrada al destino.
+    - El AJUSTE se muestra como entrada o salida por la diferencia contra el saldo anterior.
+    - `resumen.existencia_sin_movimiento`: stock que se cargó sin movimiento (carga inicial). Se suma al `saldo_inicial` para que `saldo_final` = `existencia_actual`.
+    - Hoy ningún flujo guarda costo en los movimientos (`costo_unitario` = 0), así que `costo_promedio` sale en 0 hasta que se capture costo.
+    - Ordenado del más antiguo al más reciente, sin paginación (es un solo SKU). 2–3 consultas a BD.
+  - **Ejemplos**:
+    - `GET /api/v1/inventarios/movimientos/auxiliar/?q=camisa` → `opciones`
+    - `GET /api/v1/inventarios/movimientos/auxiliar/?q=10500-100-M` → kardex
+    - `GET /api/v1/inventarios/movimientos/auxiliar/?producto_variante=2282&almacen=1&fecha_inicio=2026-10-01&fecha_final=2026-10-31`
+  - **Respuesta**:
+    ```json
+    {
+      "variante": {"producto_variante_id": 2282, "sku": "5000201UNI", "sku_produccion": null, "descripcion": "GORRA LEGIONARIO CAQUI", "color": "CAQUI", "talla": "UNI", "activo": true},
+      "opciones": [],
+      "resumen": {"saldo_inicial": "11800.0000", "total_entradas": "219.0000", "total_salidas": "27.0000", "saldo_final": "11992.0000", "existencia_actual": "11992.0000", "existencia_sin_movimiento": "11800.0000", "costo_promedio": "0.00", "total_registros": 29},
+      "results": [
+        {"movimiento_inventario_id": 315, "movimiento_detalle_id": 918, "fecha": "2026-10-26T18:47:43Z", "documento": "PEDIDO", "folio_referencia": "P-00102-2026", "tm": "SALIDA", "costo_unitario": "0.00", "entradas": "0.0000", "salidas": "1.0000", "efecto": "SALIDA", "saldo_almacen": "4000.0000", "saldo": "11991.0000", "almacen_id": 3, "almacen_codigo": "ALM-03", "almacen_nombre": "CORTE", "usuario": "Luis Alberto Ceja Chavez", "costo_promedio": "0.00", "observaciones": "Descuento automático por autorización de pedido P-00102-2026"}
+      ]
+    }
+    ```
+
 - **Reporte por tipo y rango**: `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/`
 - **Uso esperado en frontend**:
   - Seleccionar `tipo_movimiento`
