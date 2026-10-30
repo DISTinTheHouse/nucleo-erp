@@ -10,7 +10,7 @@ misma categoria.
 
 from rest_framework.exceptions import ValidationError
 
-from catalogo.models import Producto
+from catalogo.models import CategoriaProducto, Producto
 
 CODIGO_PRODUCTO_MAX_LENGTH = 5
 
@@ -26,7 +26,10 @@ def siguiente_codigo_producto(categoria, lock=True):
 
     qs = Producto.objects.filter(categoria_producto=categoria, codigo__startswith=prefijo)
     if lock:
-        qs = qs.select_for_update()
+        # Se bloquea la fila de la categoría, no los productos: FOR UPDATE sobre
+        # los productos no frena un INSERT concurrente (ni existe si la categoría
+        # está vacía), así que dos altas sacaban el mismo código (#766).
+        list(CategoriaProducto.objects.select_for_update().filter(pk=categoria.pk).values_list("pk", flat=True))
     existentes = qs.values_list("codigo", flat=True)
     maximo = -1
     for codigo in existentes:
