@@ -85,7 +85,7 @@ from produccion.api.serializers import (
     VarianteProduccionOnboardingSerializer,
     VarianteProduccionSerializer,
 )
-from catalogo.models import Producto, ProductoVariante, VarianteProductoProduccion
+from catalogo.models import CategoriaProducto, Producto, ProductoVariante, VarianteProductoProduccion
 from catalogo.codigos import siguiente_codigo_producto
 from catalogo.api.views import TIPO_PRODUCTO_TERMINADO_ID
 from inventarios.models import Existencia
@@ -2326,6 +2326,17 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                 raise ValidationError({
                     'pedido_detalle_id': 'La línea no tiene SKU de producción pendientes de alta en catálogo.'
                 })
+            # Línea sin categoría (cotización anterior al campo): la manda el body
+            # y queda guardada en la línea.
+            categoria_body = request.data.get('categoria_producto')
+            if categoria_body not in (None, '') and not _categoria_de_linea(_categorias_de_muestras(pedido), detalle):
+                try:
+                    detalle.categoria_producto = CategoriaProducto.objects.get(
+                        pk=int(categoria_body), empresa_id=pedido.empresa_id
+                    )
+                except (TypeError, ValueError, CategoriaProducto.DoesNotExist):
+                    raise ValidationError({'categoria_producto': 'Categoría no válida.'})
+                detalle.save(update_fields=['categoria_producto'])
             categoria = _categoria_para_alta(pedido, detalle, [v.talla for v in variantes])
             producto = _crear_producto_catalogo(pedido, detalle, categoria, variantes[0].nombre)
             precios = dict(
