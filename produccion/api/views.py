@@ -1942,6 +1942,14 @@ def _categoria_para_alta(pedido, detalle, tallas):
 
 
 def _crear_producto_catalogo(pedido, detalle, categoria, nombre):
+    # Una línea = un Producto: si ya dio de alta tallas antes (alta incremental),
+    # las nuevas cuelgan del mismo (#764).
+    existente = (
+        VarianteProductoProduccion.objects.filter(pedido_detalle=detalle, producto_base__isnull=False)
+        .values_list('producto_base', flat=True).first()
+    )
+    if existente:
+        return Producto.objects.get(pk=existente)
     # Mismo alta que el catálogo (``ProductoViewSet.onboarding``): código
     # consecutivo de la categoría, Producto Terminado.
     return Producto.objects.create(
@@ -2041,8 +2049,17 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         # que lee ``PedidoDetalleTallaEspecialSerializer.get_sku_produccion``.
         variantes = variantes_produccion_activas().filter(
             pedido_detalle_id__in=[d.id for d in detalles]
-        ).only("id", "sku", "pedido_detalle_id", "talla_id")
+        ).only("id", "sku", "pedido_detalle_id", "talla_id", "color_id", "aplica_catalogo", "producto_base_id")
         variantes_por_talla = {(v.pedido_detalle_id, v.talla_id): v for v in variantes}
+        # SKU de catálogo de las que ya se dieron de alta: una consulta (#767).
+        sku_catalogo = {
+            (pv.producto_id, pv.color_id, pv.talla_id): pv.sku
+            for pv in ProductoVariante.objects.filter(
+                producto_id__in={v.producto_base_id for v in variantes if v.producto_base_id}
+            ).only("sku", "producto_id", "color_id", "talla_id")
+        }
+        for v in variantes:
+            v.sku_catalogo = sku_catalogo.get((v.producto_base_id, v.color_id, v.talla_id))
         categorias = _categorias_de_muestras(pedido)
         for det in detalles:
             det.categoria = _categoria_de_linea(categorias, det)
