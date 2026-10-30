@@ -172,7 +172,11 @@ class PickingService:
             payload["almacen_origen"] = serializar_almacen(almacen_origen)
 
         tallas = list(
-            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
+            # Las muestras (línea sin ``producto``) no se surten por picking: van
+            # por su flujo de pedido especial (#745).
+            PedidoDetalleTalla.objects.filter(
+                pedido_detalle__pedido=pedido, pedido_detalle__producto__isnull=False
+            )
             .select_related(
                 "pedido_detalle__producto",
                 "variante",
