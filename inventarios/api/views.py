@@ -6,6 +6,9 @@ from decimal import Decimal
 from django.db import models, transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_date
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
+from rest_framework import serializers as drf_serializers
 from rest_framework import status, viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -1546,18 +1549,66 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
         }
         return response
 
+    def _auxiliar_id(self, qp, *nombres):
+        # A diferencia de ``_report_to_int``, un id no numérico es 400: ignorarlo
+        # regresaba el kardex de todos los almacenes (#805).
+        for nombre in nombres:
+            raw = (qp.get(nombre) or "").strip()
+            if raw:
+                try:
+                    return int(raw)
+                except ValueError:
+                    raise ValidationError({nombre: "Debe ser un id numérico."})
+        return None
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("q", str, description="SKU, SKU de producción o descripción."),
+            OpenApiParameter("producto_variante", int, description="Id de la variante (salta la búsqueda)."),
+            OpenApiParameter("almacen", int, description="Solo ese almacén."),
+            OpenApiParameter("fecha_inicio", OpenApiTypes.DATE, description="YYYY-MM-DD; va con fecha_final."),
+            OpenApiParameter("fecha_final", OpenApiTypes.DATE, description="YYYY-MM-DD; va con fecha_inicio."),
+        ],
+        responses={
+            200: inline_serializer(
+                "AuxiliarMovimientos",
+                {
+                    "variante": inline_serializer("AuxiliarOpcion", {
+                        "producto_variante_id": drf_serializers.IntegerField(),
+                        "sku": drf_serializers.CharField(),
+                        "sku_produccion": drf_serializers.CharField(allow_null=True),
+                        "descripcion": drf_serializers.CharField(allow_null=True),
+                        "color": drf_serializers.CharField(allow_null=True),
+                        "talla": drf_serializers.CharField(allow_null=True),
+                        "activo": drf_serializers.BooleanField(),
+                    }, allow_null=True),
+                    "opciones": drf_serializers.ListField(child=drf_serializers.DictField()),
+                    "hay_mas": drf_serializers.BooleanField(),
+                    "resumen": drf_serializers.DictField(required=False),
+                    "results": drf_serializers.ListField(child=drf_serializers.DictField(), required=False),
+                },
+            ),
+            400: OpenApiResponse(description="Validación"),
+            404: OpenApiResponse(description="Variante fuera de alcance"),
+        },
+    )
     @action(detail=False, methods=["get"], url_path="auxiliar")
     def auxiliar(self, request):
         """Auxiliar de movimientos (kardex) de una variante. Ver ``auxiliar.py``."""
         qp = request.query_params
-        variante_id = self._report_to_int(qp.get("producto_variante") or qp.get("producto_variante_id"))
+        variante_id = self._auxiliar_id(qp, "producto_variante", "producto_variante_id")
+        almacen_id = self._auxiliar_id(qp, "almacen", "almacen_id")
         q = (qp.get("q") or "").strip()
         if not variante_id:
             if not q:
                 raise ValidationError({"q": "Manda q (SKU o descripción) o producto_variante."})
             encontradas = auxiliar_mod.buscar_variantes(request.user, q)
             if len(encontradas) != 1:
-                return Response({"variante": None, "opciones": [auxiliar_mod.opcion(v) for v in encontradas]})
+                return Response({
+                    "variante": None,
+                    "opciones": [auxiliar_mod.opcion(v) for v in encontradas[:auxiliar_mod.LIMITE_OPCIONES]],
+                    "hay_mas": len(encontradas) > auxiliar_mod.LIMITE_OPCIONES,
+                })
             variante = encontradas[0]
         else:
             variante = (
@@ -1573,9 +1624,14 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
         inicio_dt = final_dt = None
         if qp.get("fecha_inicio") or qp.get("fecha_final"):
             _fi, _ff, inicio_dt, final_dt = self._movement_report_parse_dates(request)
-        almacen_id = self._report_to_int(qp.get("almacen") or qp.get("almacen_id"))
-        data = auxiliar_mod.kardex(request.user, variante["id"], almacen_id, inicio_dt, final_dt)
-        return Response({"variante": auxiliar_mod.opcion(variante), "opciones": [], **data})
+        # Mismo alcance que los reportes hermanos: empresa + sucursales (#800).
+        # Con ``almacen`` fuera de alcance el conjunto queda vacío: sin datos.
+        alcance = None
+        if not request.user.is_superuser:
+            almacenes, _almacen = self._movement_report_allowed_almacen_ids(request)
+            alcance = (almacenes, request.user.sucursales_permitidas())
+        data = auxiliar_mod.kardex(request.user, variante["id"], almacen_id, inicio_dt, final_dt, alcance)
+        return Response({"variante": auxiliar_mod.opcion(variante), "opciones": [], "hay_mas": False, **data})
 
     def _empresa_ids_permitidas(self, user):
         """Empresas visibles para el usuario: solo la activa (#538).
