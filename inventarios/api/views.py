@@ -25,6 +25,7 @@ from catalogo.models import Producto, ProductoVariante
 from auditoria.models import AuditoriaEvento
 from nucleo.models import Sucursal
 from ventas.models import Pedido
+from . import auxiliar as auxiliar_mod
 from .serializers import (
     AlmacenSerializer,
     UbicacionSerializer,
@@ -1544,6 +1545,37 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
             "total_cantidad": str(total_cantidad.quantize(Decimal("0.0001"))),
         }
         return response
+
+    @action(detail=False, methods=["get"], url_path="auxiliar")
+    def auxiliar(self, request):
+        """Auxiliar de movimientos (kardex) de una variante. Ver ``auxiliar.py``."""
+        qp = request.query_params
+        variante_id = self._report_to_int(qp.get("producto_variante") or qp.get("producto_variante_id"))
+        q = (qp.get("q") or "").strip()
+        if not variante_id:
+            if not q:
+                raise ValidationError({"q": "Manda q (SKU o descripción) o producto_variante."})
+            encontradas = auxiliar_mod.buscar_variantes(request.user, q)
+            if len(encontradas) != 1:
+                return Response({"variante": None, "opciones": [auxiliar_mod.opcion(v) for v in encontradas]})
+            variante = encontradas[0]
+        else:
+            variante = (
+                auxiliar_mod.variantes_scope(request.user)
+                .annotate(sku_produccion=auxiliar_mod.sku_produccion_subquery())
+                .filter(pk=variante_id)
+                .values("id", "sku", "nombre", "producto__nombre", "color__nombre", "talla__nombre", "activo", "sku_produccion")
+                .first()
+            )
+            if not variante:
+                return Response({"detail": "No encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        inicio_dt = final_dt = None
+        if qp.get("fecha_inicio") or qp.get("fecha_final"):
+            _fi, _ff, inicio_dt, final_dt = self._movement_report_parse_dates(request)
+        almacen_id = self._report_to_int(qp.get("almacen") or qp.get("almacen_id"))
+        data = auxiliar_mod.kardex(request.user, variante["id"], almacen_id, inicio_dt, final_dt)
+        return Response({"variante": auxiliar_mod.opcion(variante), "opciones": [], **data})
 
     def _empresa_ids_permitidas(self, user):
         """Empresas visibles para el usuario: solo la activa (#538).
