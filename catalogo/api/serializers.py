@@ -130,6 +130,9 @@ class ProductoVarianteSerializer(EmpresaValidadaEnCreateMixin, serializers.Model
     color_nombre = serializers.CharField(source='color.nombre', read_only=True)
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
     cod_proscai = serializers.CharField(source='producto.cod_proscai', read_only=True)
+    # SKU de producción (``MP...``) de una muestra dada de alta en catálogo;
+    # lo anota ``ProductoVarianteViewSet.get_queryset``.
+    sku_produccion = serializers.CharField(read_only=True, default=None)
 
     class Meta:
         model = ProductoVariante
