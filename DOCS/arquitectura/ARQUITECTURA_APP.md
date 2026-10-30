@@ -93,7 +93,6 @@ El módulo `/api/v1/finanzas/*` unifica el blindaje multi-tenant a través de 5 
 No permitimos basura en la BD.
 
 - **RFCs**: Validación estricta de formato y checksum (algoritmo oficial SAT).
-- **Archivos CSD**: Al subir sellos digitales (`.cer`, `.key`), se validan criptográficamente en memoria antes de guardarse. Si la contraseña no abre la llave o el RFC no coincide, se rechaza.
 
 ### C. Protección de Red y Transporte
 
