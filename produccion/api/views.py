@@ -2081,8 +2081,8 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         sola vez, reutilizado para todas las tallas. Un solo POST, un solo
         formulario de materiales; nada que capturar por talla.
 
-        Falla completa si la línea ya tiene algún SKU generado (idempotencia
-        simple: no hay merge, se reintenta desde cero o no se reintenta).
+        Incremental: un reintento solo genera SKU para las tallas con cantidad
+        que aún no tienen; si no falta ninguna, responde 400.
 
         El color del SKU es el de la línea. Las muestras suelen llegar sin
         color, así que el body puede traer ``color``: obligatorio si la línea
