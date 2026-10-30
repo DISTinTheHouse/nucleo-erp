@@ -311,7 +311,7 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
         sku = "-".join(partes_sku).strip().upper()
         if len(sku) > 50:
             raise ValidationError({"sku": "El SKU generado excede el largo maximo permitido."})
-        if ProductoVariante.objects.filter(sku=sku).exists():
+        if ProductoVariante.objects.filter(empresa=producto.empresa, sku=sku).exists():
             raise ValidationError({"sku": f"El SKU '{sku}' ya existe."})
 
         variante = serializer.save(sku=sku, empresa=producto.empresa, talla=talla)

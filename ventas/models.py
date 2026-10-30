@@ -551,6 +551,11 @@ class PedidoDetalle(models.Model):
     producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name="detalles", null=True, blank=True)
     producto_nombre_externo = models.CharField(max_length=350, null=True, blank=True)
     color = models.ForeignKey(Color, on_delete=models.PROTECT, related_name="pedido_detalles", null=True, blank=True)
+    # Categoría de la muestra, copiada de la cotización al autorizar: ya no se
+    # deduce por el nombre de la línea, que mesa de control puede cambiar (#768).
+    categoria_producto = models.ForeignKey(
+        CategoriaProducto, on_delete=models.PROTECT, related_name="pedido_detalles", null=True, blank=True
+    )
     direccion_envio_cliente = models.ForeignKey(
         DireccionCliente, on_delete=models.PROTECT, related_name="pedido_detalles", null=True, blank=True
     )

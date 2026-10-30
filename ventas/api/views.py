@@ -238,6 +238,7 @@ def _copiar_renglones_cotizacion_a_pedido(cotizacion, pedido):
                 producto_id=det.producto_id,
                 producto_nombre_externo=getattr(det, "producto_nombre_externo", None),
                 color_id=getattr(det, "color_id", None),
+                categoria_producto_id=getattr(det, "categoria_producto_id", None),
                 direccion_envio_cliente_id=getattr(
                     det, "direccion_envio_cliente_id", None
                 ),
