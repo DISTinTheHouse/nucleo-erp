@@ -30,9 +30,22 @@ def _alcance_empresa(qs, user):
     return qs.none()
 
 
+class SoloSuperusuarioEscribe(BasePermission):
+    """Catálogo global (sin empresa): todos leen, solo el superusuario escribe (#535)."""
+
+    def has_permission(self, request, view):
+        return request.method in SAFE_METHODS or request.user.is_superuser
+
+
 class TipoProductoViewSet(viewsets.ModelViewSet):
-    queryset = TipoProducto.objects.all()
+    """Tipos activos (MP, PT, ...). Global; ``DELETE`` = baja lógica (``activo=False``)."""
+    queryset = TipoProducto.objects.filter(activo=True).order_by("codigo")
     serializer_class = TipoProductoSerializer
+    permission_classes = [IsAuthenticated, SoloSuperusuarioEscribe]
+
+    def perform_destroy(self, instance):
+        instance.activo = False
+        instance.save(update_fields=["activo"])
 
 class CategoriaProductoViewSet(viewsets.ModelViewSet):
     serializer_class = CategoriaProductoSerializer
@@ -101,13 +114,6 @@ class ColorViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return Color.objects.filter(activo=True).order_by(Lower("nombre"), "id")
-
-class SoloSuperusuarioEscribe(BasePermission):
-    """Catálogo global (sin empresa): todos leen, solo el superusuario escribe (#535)."""
-
-    def has_permission(self, request, view):
-        return request.method in SAFE_METHODS or request.user.is_superuser
-
 
 class TallaViewSet(viewsets.ModelViewSet):
     serializer_class = TallaSerializer

@@ -41,6 +41,7 @@ from compras.services.kpi_criterios import (
     rechazos_oc,
 )
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
+from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, filtrar_listado_compras
 from compras.api.serializers import (
     CalidadInspeccionInputSerializer,
     CalidadInspeccionSerializer,
@@ -89,7 +90,7 @@ PERMISO_EDITAR_RUTA_CRITICA_OC = "E-COMPRAS-OC"
 _ip_auditoria = ip_auditoria
 
 
-class OrdenamientoSinMontosFilter(OrderingFilter):
+class OrdenamientoSinMontosFilter(OrdenamientoEstableFilter):
     """``?ordering=`` sin los importes que el usuario no puede ver (#837).
 
     Ordenar por ``gran_total`` aunque la respuesta lo oculte deja deducir qué
@@ -113,6 +114,15 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     ]
     # ``?search=`` se publicaba en el schema y se ignoraba sin esto (#839).
     search_fields = ["folio", "referencia", "proveedor__nombre", "proveedor__razon_social"]
+    pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= regresa la lista completa
+    # Lista blanca de ``?ordering=`` (#863); los importes los quita
+    # ``OrdenamientoSinMontosFilter`` a quien no puede verlos.
+    ordering_fields = [
+        "id", "folio", "referencia", "tipo_compra", "tipo", "fecha_oc", "fecha_entrega_estimada",
+        "fecha_autorizacion", "fecha_vencimiento", "estatus", "proveedor__nombre", "sucursal__nombre",
+        "moneda__codigo_iso", "pedido__folio", "total_piezas", *CAMPOS_CONTABILIDAD_OC,
+        "created_at", "updated_at",
+    ]
 
     # Máquina de estados de la OC, en un solo lugar (mismo estilo que
     # ``ComprasDashboardView.ESTATUS_*_OC``). La recepción usa
@@ -168,6 +178,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         elif self.action not in ('cancelar', 'aceptar'):
             # list y las acciones de listado (historial, etc.) serializan ``pedidos``.
             qs = qs.prefetch_related('pedidos')
+        if self.action == "list":
+            # Filtros de servidor (#863), después del alcance por empresa.
+            qs = filtrar_listado_compras(
+                self.request, qs, OrdenCompra.EstatusOrdenCompra.values, "fecha_oc",
+            )
         # Listado más reciente primero; ``-id`` como desempate estable. Es el
         # orden de las órdenes de compra en sí: el ``order_by`` de arriba es del
         # Prefetch de recepciones anidadas y solo aplica en ``retrieve``.
@@ -613,7 +628,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     def handle_get_onboarding(self, request):
         user = self.request.user
         empresa = getattr(user, "empresa", None)
-        if not empresa and not getattr(user, "is_superuser", False):
+        # Superusuario incluido: mismo alcance que el listado de OC (#834, #862).
+        if not empresa:
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         def _limite(raw, default=None):
@@ -641,11 +657,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         producto_q = (qp.get("producto_q") or "").strip()
         variante_q = (qp.get("variante_q") or "").strip() if "variante_q" in qp else producto_q
 
-        proveedores_qs = Proveedor.objects.filter(activo=True)
-        productos_qs = Producto.objects.filter(activo=True)
-        if empresa:
-            proveedores_qs = proveedores_qs.filter(empresa=empresa)
-            productos_qs = productos_qs.filter(empresa=empresa)
+        proveedores_qs = Proveedor.objects.filter(activo=True, empresa=empresa)
+        productos_qs = Producto.objects.filter(activo=True, empresa=empresa)
 
         if proveedor_q:
             proveedores_qs = proveedores_qs.filter(
@@ -692,9 +705,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         variantes = []
         variantes_truncado = False
         if (request.query_params.get("tipo_compra") or "").strip().upper() == OrdenCompra.TipoCompra.PRODUCTO_TERMINADO:
-            variantes_qs = ProductoVariante.objects.filter(self.VARIANTE_COMPRABLE)
-            if empresa:
-                variantes_qs = variantes_qs.filter(empresa=empresa)
+            variantes_qs = ProductoVariante.objects.filter(self.VARIANTE_COMPRABLE, empresa=empresa)
             if variante_q:
                 variantes_qs = variantes_qs.filter(
                     Q(sku__icontains=variante_q) | Q(nombre__icontains=variante_q)
@@ -1100,7 +1111,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     def kpis(self, request):
         user = request.user
         empresa = getattr(user, "empresa", None)
-        if empresa is None and not getattr(user, "is_superuser", False):
+        # Superusuario incluido, como recepciones y proveedores (#834, #861).
+        if empresa is None:
             return Response(self._kpis_vacio())
 
         base = OrdenCompra.objects.filter(empresa=empresa, activo=True)
@@ -1130,6 +1142,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             "ocs_vencidas_sin_recibir": motivo,
             "ciclo_compra": motivo,
             "gasto_por_categoria": motivo,
+            # Clave fija del contrato; sin datos no hay importes (#860).
+            "puede_ver_importes": False,
         }
 
     def _kpi_ocs_abiertas(self, base):
@@ -1224,6 +1238,17 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     http_method_names = ["get", "post"]
     # ``?search=`` se publicaba en el schema y se ignoraba sin esto (#839).
     search_fields = ["folio", "orden_compra__folio", "op__folio_op", "proveedor__nombre"]
+    pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= regresa la lista completa
+    filter_backends = [
+        *[b for b in viewsets.ReadOnlyModelViewSet.filter_backends if b is not OrderingFilter],
+        OrdenamientoEstableFilter,
+    ]
+    # Lista blanca de ``?ordering=`` (#863).
+    ordering_fields = [
+        "id", "folio", "tipo_origen", "fecha_recepcion", "estatus", "remision", "factura_referencia",
+        "proveedor__nombre", "almacen__nombre", "orden_compra__folio", "orden_compra__tipo_compra",
+        "created_at", "updated_at",
+    ]
 
     # Estatus de OC contra los que se puede recibir (onboarding GET y POST).
     ESTATUS_OC_RECIBIBLES = {
@@ -1283,6 +1308,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 if tipo_compra not in OrdenCompra.TipoCompra.values:
                     raise ValidationError({"tipo_compra": "Valor inválido. Usa MP (OC) o PT (O)."})
                 qs = qs.filter(orden_compra__tipo_compra=tipo_compra)
+            # Filtros de servidor (#863); la fecha es el día local de la recepción.
+            qs = filtrar_listado_compras(
+                self.request, qs, Recepcion.EstatusRecepcion.values, "fecha_recepcion__date",
+            )
         return qs
 
     def get_serializer_class(self):
@@ -1484,7 +1513,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     def handle_get_onboarding(self, request):
         user = request.user
         empresa = getattr(user, "empresa", None)
-        if not empresa and not getattr(user, "is_superuser", False):
+        # Superusuario incluido: mismo alcance que el listado de recepciones (#834, #862).
+        if not empresa:
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         oc_q = (request.query_params.get("q") or "").strip()
@@ -1493,13 +1523,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         ordenes_qs = (
             OrdenCompra.objects.filter(
                 activo=True,
+                empresa=empresa,
                 estatus__in=self.ESTATUS_OC_RECIBIBLES,
             )
             .select_related("proveedor", "sucursal")
             .order_by("-updated_at", "-id")
         )
-        if empresa:
-            ordenes_qs = ordenes_qs.filter(empresa=empresa)
         # Filtro opcional MP (serie OC) / PT (serie O). Omitirlo devuelve ambas.
         tipo_compra = (request.query_params.get("tipo_compra") or "").strip().upper()
         if tipo_compra:
@@ -2093,6 +2122,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             "recepciones_parciales": motivo,
             "diferencia_precio": motivo,
             "material_rechazado": motivo,
+            "puede_ver_importes": False,
         }
 
     def _kpi_cumplimiento_cantidad(self, alcance):

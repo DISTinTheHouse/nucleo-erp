@@ -7,6 +7,7 @@ from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
+from rest_framework.filters import OrderingFilter
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
@@ -24,6 +25,7 @@ from terceros.api.serializers import (
     verificar_rfc_cliente,
 )
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
+from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, booleano_param
 from terceros.cartera import cartera_de_cliente
 from terceros import csf, facturama
 from finanzas.services.facturama.acceso import puede_consultar_cfdis
@@ -435,10 +437,21 @@ def _fecha_param(request, nombre):
 
 
 class ProveedorViewSet(viewsets.ModelViewSet):
-    queryset = Proveedor.objects.filter(activo=True)
+    queryset = Proveedor.objects.all()
     serializer_class = ProveedorSerializer
     # ``?search=`` se publicaba en el schema y se ignoraba sin esto (#839).
     search_fields = ["codigo", "nombre", "razon_social", "rfc"]
+    pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= regresa la lista completa
+    filter_backends = [
+        *[b for b in viewsets.ModelViewSet.filter_backends if b is not OrderingFilter],
+        OrdenamientoEstableFilter,
+    ]
+    # Lista blanca de ``?ordering=`` (#863).
+    ordering_fields = [
+        "id", "codigo", "nombre", "razon_social", "rfc", "tipo", "ciudad", "estado", "contacto_principal",
+        "email", "telefono", "fecha_alta", "fecha_baja", "fecha_ultima_compra", "plazo_dias", "dias_credito",
+        "activo", "created_at", "updated_at",
+    ]
 
     def get_queryset(self):
         user = self.request.user
@@ -447,9 +460,12 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         # superusuario incluido: mismo alcance que el listado de OC (#834).
         qs = super().get_queryset().order_by("-fecha_alta", "-id")
         empresa = getattr(user, "empresa", None)
-        if empresa:
-            return qs.filter(empresa=empresa)
-        return qs.none()
+        if not empresa:
+            return qs.none()
+        # Solo el listado puede pedir las bajas (``?activo=false``, #863); el
+        # detalle y las acciones siguen viendo solo activos.
+        activo = booleano_param(self.request, "activo", True) if self.action == "list" else True
+        return qs.filter(empresa=empresa, activo=activo)
 
     def perform_create(self, serializer):
         empresa = getattr(self.request.user, "empresa", None)
@@ -507,8 +523,9 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         paginator = HistorialOrdenesCompraPagination()
         page = paginator.paginate_queryset(qs, request, view=self)
         # Permiso evaluado una vez; las filas se limpian en sitio (#836).
+        ver_montos = puede_ver_contabilidad(request.user)
         data = OrdenCompraSerializer(page, many=True).data
-        if not puede_ver_contabilidad(request.user):
+        if not ver_montos:
             for item in data:
                 quitar_montos_orden_compra(item)
         response = paginator.get_paginated_response(data)
@@ -585,20 +602,27 @@ class ProveedorViewSet(viewsets.ModelViewSet):
                 "generado_en": timezone.now(),
                 "disponible": False,
                 "motivo": "Usuario sin empresa asignada.",
+                # Clave fija del contrato; sin datos no hay importes (#860).
+                "puede_ver_importes": False,
                 "filtros": None,
                 "proveedores": [],
                 "total_proveedores": 0,
                 "truncado": False,
             })
 
-        from compras.services.orden_compra_view_service import puede_ver_contabilidad
+        from compras.services.orden_compra_view_service import puede_ver_contabilidad, quitar_montos
 
+        puede_ver_importes = puede_ver_contabilidad(request.user)
         proveedores = calcular_scorecards(alcance, meta)
+        if not puede_ver_importes:
+            # ``pct`` se queda: es porcentaje, no importe (#859).
+            for proveedor in proveedores:
+                quitar_montos(proveedor["diferencia_precio"], ["costo_facturado", "costo_pactado_oc"])
         return Response({
             "generado_en": timezone.now(),
             "disponible": True,
             # Señal explícita para el front (#841), mismo criterio que OC.
-            "puede_ver_importes": puede_ver_contabilidad(request.user),
+            "puede_ver_importes": puede_ver_importes,
             "filtros": {**alcance.como_dict(), "meta_scorecard": meta, "limite": limite},
             "proveedores": proveedores[:limite],
             "total_proveedores": len(proveedores),
@@ -612,6 +636,7 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         filtros de ``kpis``). Acotado a ``TOPE_DETALLE`` con ``total``."""
         from compras.services.kpi_criterios import AlcanceCompras
         from compras.services.kpi_proveedores import FACTORES_DETALLE, TOPE_DETALLE, detalle_proveedor
+        from compras.services.orden_compra_view_service import puede_ver_contabilidad, quitar_montos
 
         validar_parametros(request, {"factor", "sucursal", "fecha_desde", "fecha_hasta"})
         factor = (request.query_params.get("factor") or "").strip()
@@ -627,14 +652,19 @@ class ProveedorViewSet(viewsets.ModelViewSet):
             fecha_hasta=fecha_hasta,
         )
         filas, total = detalle_proveedor(alcance, factor)
-        return Response({
+        data = {
             "proveedor_id": proveedor.pk,
             "factor": factor,
+            "puede_ver_importes": puede_ver_contabilidad(request.user),
             "total": total,
             "truncado": total > len(filas),
             "tope": TOPE_DETALLE,
             "registros": filas,
-        })
+        }
+        if not data["puede_ver_importes"]:
+            # Precios unitarios de ``factor=precio``, como en ``kpis/`` (#859).
+            quitar_montos(data, ["precio_facturado", "precio_pactado"])
+        return Response(data)
 
     @staticmethod
     def _numero_param(request, nombre, default, minimo, maximo):

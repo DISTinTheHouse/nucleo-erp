@@ -1299,6 +1299,22 @@ class HistorialOCProveedorTests(TestCase):
         filas = data["results"] if isinstance(data, dict) else data
         self.assertEqual([f["id"] for f in filas], [self.proveedor_vacio.pk])
 
+    def test_paginacion_opcional_filtros_y_desempate(self):
+        """#863: ``?limit=`` pagina con ``count``; sin él, lista completa."""
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        pagina = client.get("/api/v1/compras/ordenes/?limit=1&ordering=fecha_oc").json()
+
+        self.assertEqual(pagina["count"], 2)
+        self.assertEqual([r["id"] for r in pagina["results"]], [self.oc_autorizada.pk])
+        self.assertIsNotNone(pagina["next"])
+        self.assertIsInstance(client.get("/api/v1/compras/ordenes/").json(), list)
+        self.assertEqual(
+            self._ids_listado(self.admin, f"?estatus={self.oc_cancelada.estatus}"), [self.oc_cancelada.pk],
+        )
+        self.assertEqual(client.get("/api/v1/compras/ordenes/?estatus=99").status_code, 400)
+        self.assertEqual(client.get("/api/v1/compras/ordenes/?proveedor=x").status_code, 400)
+
     def test_onboarding_avisa_si_la_lista_se_recorto(self):
         """#838: ``*_truncado`` indica si faltan elementos por el tope."""
         client = APIClient()
@@ -1675,6 +1691,7 @@ class RecepcionKpisTests(TestCase):
         data = self._get(root).data
 
         self.assertFalse(data["cumplimiento_cantidad"]["disponible"])
+        self.assertFalse(data["puede_ver_importes"])  # #860
 
     # --- #357/#384/#390: parámetros -------------------------------------------
 
@@ -1982,6 +1999,17 @@ class OrdenCompraKpisTests(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data["ocs_abiertas"]["disponible"])
+        self.assertFalse(resp.data["puede_ver_importes"])
+
+    def test_superusuario_sin_empresa_no_recibe_ceros_como_disponibles(self):
+        # #861: mismo criterio que recepciones y proveedores (#834).
+        root = Usuario.objects.create(username="root", email="root@nowhere.test", is_superuser=True, is_staff=True)
+
+        data = self._get(root).data
+
+        self.assertFalse(data["ocs_abiertas"]["disponible"])
+        self.assertEqual(data["ocs_abiertas"]["motivo"], "Usuario sin empresa asignada.")
+        self.assertFalse(data["puede_ver_importes"])
 
 
 
