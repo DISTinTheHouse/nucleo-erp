@@ -26,7 +26,7 @@ from drf_spectacular.generators import SchemaGenerator
 from rest_framework.test import APIClient
 from rest_framework.viewsets import ViewSetMixin
 
-from catalogo.models import Producto, Talla
+from catalogo.models import Producto, Talla, TipoProducto
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 from finanzas.api import views as finanzas_views
 from finanzas.api.serializers import CuentaPorPagarSerializer, PolizaDetalleRelacionadoSerializer
@@ -131,7 +131,7 @@ class FinanzasBase(TestCase):
             metodo_pago="PUE",
             uso_cfdi="G03",
         )
-        producto = Producto.objects.create(empresa=empresa, nombre=f"Prod {codigo}")
+        producto = Producto.objects.create(empresa=empresa, nombre=f"Prod {codigo}", tipo=cls.tipo_producto)
         detalle = PedidoDetalle.objects.create(
             pedido=pedido, producto=producto, precio_unitario=Decimal("100.00")
         )
@@ -164,6 +164,7 @@ class FinanzasBase(TestCase):
     def setUpTestData(cls):
         cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
         cls.talla = Talla.objects.create(nombre="M")
+        cls.tipo_producto = TipoProducto.objects.create(codigo="PT")
         cls.sat_regimen_fiscal = SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley")
         cls.sat_forma_pago = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
         cls.sat_metodo_pago = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
@@ -209,7 +210,7 @@ class FinanzasBase(TestCase):
             telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000",
             email="proveedor@test.mx",
         )
-        producto = Producto.objects.create(empresa=empresa, nombre="Insumo Test")
+        producto = Producto.objects.create(empresa=empresa, nombre="Insumo Test", tipo=self.tipo_producto)
         oc = OrdenCompra.objects.create(
             empresa=empresa, sucursal=sucursal, proveedor=proveedor, moneda=self.moneda,
             usuario=usuario, fecha_oc=date.today(),
