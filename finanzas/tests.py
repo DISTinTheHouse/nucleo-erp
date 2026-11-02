@@ -334,7 +334,7 @@ class Defecto1OnboardingAislamiento(FinanzasBase):
     def test_rechaza_serie_folio_de_otra_empresa(self):
         """``serie_folio`` es el tercer FK escribible del serializer y también
         se resolvía contra el manager por defecto."""
-        serie_ajena = SerieFolio.objects.get(sucursal=self.b["sucursal"])
+        serie_ajena = SerieFolio.objects.get(sucursal=self.b["sucursal"], tipo_documento="Factura")
         payload = self._payload(self.a["pedido"], self.a["talla_pedido"])
         payload["serie_folio"] = serie_ajena.pk
 
@@ -383,7 +383,7 @@ class Defecto1OnboardingAislamiento(FinanzasBase):
     def test_rechaza_factura_sin_lineas(self):
         """Una factura vacía se colaba con total 0.00 y, por el guard de doble
         facturación, dejaba el pedido inhabilitado para siempre."""
-        serie = SerieFolio.objects.get(sucursal=self.a["sucursal"])
+        serie = SerieFolio.objects.get(sucursal=self.a["sucursal"], tipo_documento="Factura")
         client = self._client(self.a["usuario"])
 
         resp = client.post(
@@ -507,7 +507,7 @@ class FacturacionParcialPorTalla(FinanzasBase):
         self.assertIn("pedido", resp.data)
 
     def test_rechaza_cantidades_invalidas_sin_consumir_folio(self):
-        serie = SerieFolio.objects.get(sucursal=self.a["sucursal"])
+        serie = SerieFolio.objects.get(sucursal=self.a["sucursal"], tipo_documento="Factura")
         for cantidad in ("0", "1.5", "-1"):
             with self.subTest(cantidad=cantidad):
                 resp = self._facturar(cantidad)
@@ -5870,7 +5870,7 @@ class FacturasAislamientoY500Tests(FinanzasBase):
 
     def test_patch_con_pedido_o_serie_de_otra_empresa_no_persiste(self):
         factura = self._factura_a()
-        serie_b = SerieFolio.objects.get(empresa=self.b["empresa"])
+        serie_b = SerieFolio.objects.get(empresa=self.b["empresa"], tipo_documento="Factura")
         client = self._client(self.a["usuario"])
 
         for body in ({"pedido": self.b["pedido"].pk}, {"serie_folio": serie_b.pk}):
