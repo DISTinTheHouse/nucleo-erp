@@ -1,9 +1,7 @@
 """Tests del scope multi-tenant de ``RecepcionViewSet``.
 
-El branch de interés: el chequeo de ``empresa`` corría ANTES del de
-``is_superuser``, así que un superusuario CON empresa asignada quedaba acotado a
-esa empresa en vez de ver todas — al revés que ``PedidoViewSet``/
-``EmpleadoViewSet``, donde el superusuario se evalúa primero.
+Decisión vigente (#834): el superusuario queda acotado a ``user.empresa``,
+igual que el listado de OC; sin empresa no ve recepciones.
 
 Ejecutar SIEMPRE con una BD desechable; el ``.env`` del repo apunta a Supabase
 de producción. Ejemplo con un settings de override a SQLite en memoria:
@@ -90,28 +88,21 @@ class RecepcionViewSetScopeTenantTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         return [row["id"] for row in resp.json()]
 
-    # --- el branch roto -------------------------------------------------------
+    # --- superusuario acotado a su empresa (#834) ------------------------------
 
-    def test_superuser_con_empresa_asignada_ve_todas_las_recepciones(self):
-        """Antes quedaba acotado a su propia empresa por el orden del chequeo."""
-        self.assertEqual(
-            sorted(self._ids(self.superuser_con_empresa)),
-            sorted([self.a["recepcion"].pk, self.b["recepcion"].pk]),
-        )
+    def test_superuser_con_empresa_asignada_solo_ve_las_de_su_empresa(self):
+        self.assertEqual(self._ids(self.superuser_con_empresa), [self.a["recepcion"].pk])
 
-    def test_superuser_con_empresa_puede_hacer_retrieve_de_otra_empresa(self):
+    def test_superuser_con_empresa_no_hace_retrieve_de_otra_empresa(self):
         client = APIClient()
         client.force_authenticate(user=self.superuser_con_empresa)
         resp = client.get(f"{RECEPCIONES_URL}{self.b['recepcion'].pk}/")
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_superuser_sin_empresa_no_ve_recepciones(self):
+        self.assertEqual(self._ids(self.superuser), [])
 
     # --- no regresión en las ramas que ya eran correctas ----------------------
-
-    def test_superuser_sin_empresa_sigue_viendo_todo(self):
-        self.assertEqual(
-            sorted(self._ids(self.superuser)),
-            sorted([self.a["recepcion"].pk, self.b["recepcion"].pk]),
-        )
 
     def test_usuario_normal_sigue_acotado_a_su_empresa(self):
         self.assertEqual(self._ids(self.a["usuario"]), [self.a["recepcion"].pk])
@@ -1255,6 +1246,72 @@ class HistorialOCProveedorTests(TestCase):
 
         self.assertEqual(queries(), antes)
 
+    def _ids_listado(self, user, query=""):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        data = client.get(f"/api/v1/compras/ordenes/{query}").json()
+        return [r["id"] for r in (data["results"] if isinstance(data, dict) else data)]
+
+    def test_sin_contabilidad_las_queries_no_crecen_con_las_filas(self):
+        """#836: el permiso se evalúa una vez por petición, no por fila."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        def queries():
+            with CaptureQueriesContext(connection) as listado:
+                self._ids_listado(self.almacenista)
+            with CaptureQueriesContext(connection) as historial:
+                self._get(self.almacenista)
+            return len(listado), len(historial)
+
+        antes = queries()
+        for dia in range(1, 6):
+            self._oc(self.empresa, self.sucursal, self.oc_autorizada.estatus, "1.00", f"2026-04-0{dia}")
+
+        self.assertEqual(queries(), antes)
+
+    def test_ordenar_por_importe_sin_contabilidad_se_ignora(self):
+        """#837: ordenar por un importe oculto deja el orden por defecto."""
+        por_defecto = self._ids_listado(self.almacenista)
+        for query in ("?ordering=gran_total", "?ordering=-gran_total", "?ordering=subtotal"):
+            with self.subTest(query=query):
+                self.assertEqual(self._ids_listado(self.almacenista, query), por_defecto)
+        # Quien sí ve importes conserva el ordenamiento.
+        self.assertEqual(
+            self._ids_listado(self.admin, "?ordering=gran_total"),
+            [self.oc_cancelada.pk, self.oc_autorizada.pk],
+        )
+        self.assertEqual(
+            self._ids_listado(self.almacenista, "?ordering=fecha_oc"),
+            [self.oc_autorizada.pk, self.oc_cancelada.pk],
+        )
+
+    def test_search_filtra_el_listado(self):
+        """#839: ``?search=`` ya no se ignora en OC ni en proveedores."""
+        self.assertEqual(self._ids_listado(self.admin, "?search=zzz-no-existe"), [])
+        self.assertEqual(
+            sorted(self._ids_listado(self.admin, "?search=P1")),
+            sorted([self.oc_autorizada.pk, self.oc_cancelada.pk]),
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        data = client.get("/api/v1/terceros/proveedores/?search=P2").json()
+        filas = data["results"] if isinstance(data, dict) else data
+        self.assertEqual([f["id"] for f in filas], [self.proveedor_vacio.pk])
+
+    def test_onboarding_avisa_si_la_lista_se_recorto(self):
+        """#838: ``*_truncado`` indica si faltan elementos por el tope."""
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        recortada = client.get("/api/v1/compras/ordenes/onboarding/?proveedor_limit=1").json()["busqueda"]
+        completa = client.get("/api/v1/compras/ordenes/onboarding/?proveedor_limit=2").json()["busqueda"]
+
+        self.assertEqual(len(recortada["proveedores"]), 1)
+        self.assertTrue(recortada["proveedores_truncado"])
+        self.assertEqual(len(completa["proveedores"]), 2)
+        self.assertFalse(completa["proveedores_truncado"])
+        self.assertFalse(completa["variantes_truncado"])
+
 
 class OrdenCompraPutPlanoYFechaLocalTests(TestCase):
     """#329: PUT con encabezado plano valida igual que el anidado (400, no 500).
@@ -1599,7 +1656,7 @@ class RecepcionKpisTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data["cumplimiento_cantidad"]["disponible"])
 
-    def test_superusuario_con_empresa_ve_todas_las_empresas_como_el_listado(self):
+    def test_superusuario_con_empresa_solo_ve_su_empresa_como_el_listado(self):
         self._documentos_de_otra_empresa()
         root = Usuario.objects.create(
             username="root", email="root@acme.test", empresa=self.empresa, is_superuser=True, is_staff=True,
@@ -1607,8 +1664,9 @@ class RecepcionKpisTests(TestCase):
 
         data = self._get(root).data
 
-        self.assertEqual(data["cumplimiento_cantidad"]["cantidad_ordenada"], Decimal("115"))  # 15 + 100
-        self.assertEqual(data["material_rechazado"]["cantidad_rechazada"], Decimal("42"))  # 2 + 40
+        self.assertEqual(data["cumplimiento_cantidad"]["cantidad_ordenada"], Decimal("15"))
+        self.assertEqual(data["material_rechazado"]["cantidad_rechazada"], Decimal("2"))
+        self.assertTrue(data["puede_ver_importes"])
 
     def test_superusuario_sin_empresa_no_recibe_ceros_como_disponibles(self):
         self._documentos_de_otra_empresa()
@@ -1616,8 +1674,7 @@ class RecepcionKpisTests(TestCase):
 
         data = self._get(root).data
 
-        self.assertTrue(data["cumplimiento_cantidad"]["disponible"])
-        self.assertEqual(data["cumplimiento_cantidad"]["cantidad_ordenada"], Decimal("115"))
+        self.assertFalse(data["cumplimiento_cantidad"]["disponible"])
 
     # --- #357/#384/#390: parámetros -------------------------------------------
 

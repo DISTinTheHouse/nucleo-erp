@@ -583,15 +583,17 @@ class ProveedorKpisTests(TestCase):
         self.assertNotIn(prov.pk, ids)
         self.assertEqual(self.client_api_get_detalle(self.usuario, prov.pk, "puntualidad").status_code, 404)
 
-    def test_superusuario_ve_todas_las_empresas_con_o_sin_empresa(self):
+    def test_superusuario_queda_acotado_a_su_empresa(self):
+        """#834: mismo alcance que el listado de OC; sin empresa, no disponible."""
         sin_empresa = self._get(self.superusuario)
         con_empresa = Usuario.objects.create(
             username="root2", email="root2@acme.test", is_superuser=True, is_staff=True, empresa=self.empresa,
         )
 
-        self.assertTrue(sin_empresa.data["disponible"])
-        self.assertEqual(len(sin_empresa.data["proveedores"]), 3)
-        self.assertEqual(len(self._get(con_empresa).data["proveedores"]), 3)
+        self.assertFalse(sin_empresa.data["disponible"])
+        data = self._get(con_empresa).data
+        self.assertEqual(len(data["proveedores"]), 3)
+        self.assertTrue(data["puede_ver_importes"])
 
     # --- drill-down por proveedor ---------------------------------------------
 
