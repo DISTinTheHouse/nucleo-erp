@@ -1096,6 +1096,27 @@ class AuxiliarMovimientosTests(TestCase):
         self.assertIn("almacen", self._get(producto_variante=self.variante.pk, almacen="A1").json())
         self.assertIn("producto_variante", self._get(producto_variante="CAM-01").json())
 
+    def test_id_cero_es_400(self):
+        # #815: ``almacen=0`` quitaba el filtro y ``producto_variante=0`` caía a ``q``.
+        resp = self._get(producto_variante=self.variante.pk, almacen=0)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("almacen", resp.json())
+        resp = self._get(producto_variante=0, q="camisa")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("producto_variante", resp.json())
+
+    def test_renglon_sin_ubicacion_usa_el_almacen_del_detalle(self):
+        # #803: movimiento por pedido sobre una existencia sin ubicación.
+        m = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.alm2.sucursal, tipo_movimiento="SALIDA", usuario=self.user,
+        )
+        MovimientoInventarioDetalle.objects.create(
+            movimiento_inventario=m, producto=self.variante.producto, producto_variante=self.variante,
+            almacen=self.alm2, cantidad="1",
+        )
+        filas = self._get(producto_variante=self.variante.pk, almacen=self.alm2.pk).json()["results"]
+        self.assertEqual((filas[-1]["almacen_id"], filas[-1]["salidas"]), (self.alm2.pk, "1.0000"))
+
     def test_opciones_recortadas_avisan_hay_mas(self):
         with mock.patch.object(auxiliar_mod, "LIMITE_OPCIONES", 1):
             data = self._get(q="camisa").json()

@@ -1005,7 +1005,9 @@ class OnboardingAlmacenSugeridoTests(TestCase):
 
         data = self._get(pedido=self.pedido_norte.pk, almacen_origen=self.bordados_norte.pk)
         self.assertEqual(data["almacen_origen"]["id"], self.bordados_norte.pk)
-        self.assertIsNone(data["almacen_destino"])  # Norte no tiene APARTADOS válido
+        # Su única programación con almacén es el origen pedido, y Norte no
+        # tiene APARTADOS válido: sin destino.
+        self.assertIsNone(data["almacen_destino"])
 
     def test_usuario_de_una_sucursal_solo_ve_sus_pedidos_y_sugerencias(self):
         operador = Usuario.objects.create(
@@ -1022,9 +1024,28 @@ class OnboardingAlmacenSugeridoTests(TestCase):
         resp = self.api.get(self.URL, {"pedido": self.pedido_matriz.pk})
         self.assertEqual(resp.status_code, 400, resp.content)
 
-    def test_sin_apartados_valido_no_sugiere_destino(self):
+    def test_destino_sale_de_las_programaciones_si_apuntan_a_uno_solo(self):
+        # #816: Norte programa APARTADO (sin almacén) y BORDADO -> BORDADOS.
         data = self._get(pedido=self.pedido_norte.pk)
-        self.assertIsNone(data["almacen_destino"])
+        self.assertEqual(data["almacen_destino"]["id"], self.bordados_norte.pk)
+
+    def test_sin_programacion_con_almacen_ni_apartados_no_sugiere_destino(self):
+        pedido, _ = self._sucursal_con("PTE", ("PT", "Terminado", {"permite_salida": True}))
+        self.assertIsNone(self._get(pedido=pedido.pk)["almacen_destino"])
+
+    def test_ids_invalidos_son_400(self):
+        # #817: antes ``?pedido=abc`` daba el listado y los almacenes se sustituían.
+        for params, campo in (
+            ({"pedido": "abc"}, "pedido"),
+            ({"pedido": "0"}, "pedido"),
+            ({"pedido": self.pedido_matriz.pk, "almacen_destino": "abc"}, "almacen_destino"),
+            ({"pedido": self.pedido_matriz.pk, "almacen_destino": 999999}, "almacen_destino"),
+            ({"pedido": self.pedido_matriz.pk, "almacen_origen": 999999}, "almacen_origen"),
+            ({"almacen_origen": "abc"}, "almacen_origen"),
+        ):
+            resp = self.api.get(self.URL, params)
+            self.assertEqual(resp.status_code, 400, (params, resp.content))
+            self.assertIn(campo, resp.json())
 
     def test_programaciones_null_no_revienta(self):
         from types import SimpleNamespace

@@ -147,6 +147,9 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None, al
             "ubicacion_destino__almacen_id",
             "ubicacion_destino__almacen__codigo",
             "ubicacion_destino__almacen__nombre",
+            "almacen_id",
+            "almacen__codigo",
+            "almacen__nombre",
             "movimiento_inventario_id",
             "movimiento_inventario__sucursal_id",
             "movimiento_inventario__tipo_movimiento",
@@ -247,14 +250,18 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None, al
                     m["movimiento_inventario__transferencia__almacen_destino__nombre"], None, cantidad,
                 ))
             if not afectaciones:
-                if tipo == "ENTRADA" and m["movimiento_inventario__recepcion__almacen_id"]:
+                signo = -cantidad if tipo == "SALIDA" else cantidad
+                if m["almacen_id"]:
+                    # Existencia sin ubicación (pedido, factura): el almacén va en el detalle (#803).
+                    afectaciones.append((m["almacen_id"], m["almacen__codigo"], m["almacen__nombre"], None, signo))
+                elif tipo == "ENTRADA" and m["movimiento_inventario__recepcion__almacen_id"]:
                     afectaciones.append((
                         m["movimiento_inventario__recepcion__almacen_id"],
                         m["movimiento_inventario__recepcion__almacen__codigo"],
                         m["movimiento_inventario__recepcion__almacen__nombre"], None, cantidad,
                     ))
                 else:
-                    afectaciones.append((None, None, None, None, -cantidad if tipo == "SALIDA" else cantidad))
+                    afectaciones.append((None, None, None, None, signo))
 
         documento, folio = _documento(m)
         usuario = (

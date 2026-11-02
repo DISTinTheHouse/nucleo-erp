@@ -826,7 +826,7 @@ Historial operativo de entradas, salidas y ajustes.
   - **Alcance**: el de los reportes hermanos: empresa + sucursales permitidas del usuario (por almacén). Movimientos, existencias y almacenes de otras sucursales no salen; un `almacen` fuera de alcance regresa el kardex vacío.
   - **Query params**:
     - `q`: SKU, SKU de producción o descripción (busca por palabras, acepta texto incompleto).
-    - `producto_variante`: id de la variante (salta la búsqueda). Se manda `q` o `producto_variante`. No numérico → 400.
+    - `producto_variante`: id de la variante (salta la búsqueda). Se manda `q` o `producto_variante`. No numérico o `<= 0` → 400 (también `almacen`).
     - `almacen`: opcional, solo ese almacén (el saldo pasa a ser el del almacén). No numérico → 400.
     - `fecha_inicio`, `fecha_final`: opcionales, `YYYY-MM-DD` (si se manda una, van las dos). Lo anterior a `fecha_inicio` queda en `resumen.saldo_inicial`.
   - **Columnas del reporte → campo**:
@@ -5045,7 +5045,9 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
 | ---------------------------------------- | --------- | --------------------------------------------------------------------------------------- |
 | `pedido` / `pedido_id`                   | No        | Activa la precarga del pedido y sus líneas de talla.                                    |
 | `almacen_origen` / `almacen_origen_id`   | No        | Preselecciona el almacén de origen; usado para calcular existencia disponible.          |
-| `almacen_destino` / `almacen_destino_id` | No        | Preselecciona el almacén destino (si no se envía se sugiere `APARTADOS` no bloqueante). |
+| `almacen_destino` / `almacen_destino_id` | No        | Preselecciona el almacén destino. Si no se envía: el almacén al que apuntan las programaciones del pedido cuando es uno solo (y no es el origen pedido); si no, `APARTADOS`. |
+
+Un id no numérico o `<= 0` en cualquiera de los tres es `400` con la clave del parámetro; un `almacen_origen`/`almacen_destino` inexistente o fuera de alcance también es `400` (`"Almacén no encontrado o sin acceso."`), igual que `pedido`.
 
 **Regla de sugerencia de almacenes**
 

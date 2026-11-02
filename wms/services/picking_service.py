@@ -22,7 +22,7 @@ from wms.services.picking_pipeline.catalogs import (
 )
 from wms.services.picking_pipeline.cantidad_validator import resolve_requested_items
 from wms.services.picking_pipeline.context import (
-    parse_pk,
+    parse_pk_estricto,
     validar_contexto_picking,
 )
 from wms.services.picking_pipeline.pendientes import (
@@ -86,7 +86,9 @@ class PickingService:
         almacen_origen_id=None,
         almacen_destino_id=None,
     ):
-        pedido_id = parse_pk(pedido_id)
+        pedido_id = parse_pk_estricto(pedido_id, "pedido")
+        almacen_origen_id = parse_pk_estricto(almacen_origen_id, "almacen_origen")
+        almacen_destino_id = parse_pk_estricto(almacen_destino_id, "almacen_destino")
         empresa = getattr(user, "empresa", None)
         if empresa is None:
             return armar_payload_vacio()
@@ -107,15 +109,18 @@ class PickingService:
             almacenes_por_sucursal,
         ) = cargar_catalogos(user, empresa, es_staff, sucursal_ids)
 
-        almacen_origen_id = parse_pk(almacen_origen_id)
-        almacen_destino_id = parse_pk(almacen_destino_id)
-
         almacen_origen = (
             almacenes_qs.filter(pk=almacen_origen_id).first() if almacen_origen_id else None
         )
         almacen_destino = (
             almacenes_qs.filter(pk=almacen_destino_id).first() if almacen_destino_id else None
         )
+        # Un id que no existe o está fuera de alcance es 400, igual que ``pedido``:
+        # antes se reemplazaba en silencio por la sugerencia (#817).
+        if almacen_origen_id and almacen_origen is None:
+            raise ValidationError({"almacen_origen": "Almacén no encontrado o sin acceso."})
+        if almacen_destino_id and almacen_destino is None:
+            raise ValidationError({"almacen_destino": "Almacén no encontrado o sin acceso."})
 
         payload = {
             "pedidos": pedidos_payload,
@@ -162,10 +167,21 @@ class PickingService:
         if almacenes_destino is None:
             almacenes_destino = almacenes_por_destino(pedido)
 
-        # Sin query param: destino = APARTADOS válido; origen = ``sugerir_origen``,
-        # que nunca repite el destino.
+        # Sin query param: destino = el almacén al que apuntan las programaciones
+        # del pedido si es uno solo (#816), si no APARTADOS; origen =
+        # ``sugerir_origen``, que nunca repite el destino.
         if almacen_destino is None:
-            almacen_destino = almacenes_destino.get(ALMACEN_POR_DESTINO["APARTADO"])
+            programados = {
+                almacenes_destino[nombre].pk: almacenes_destino[nombre]
+                for p in (pedido.programacion_conf or {}).get("programaciones") or []
+                if (nombre := ALMACEN_POR_DESTINO.get(p.get("destino"))) in almacenes_destino
+                # Nunca el origen pedido: el POST rechaza origen = destino.
+                and almacenes_destino[nombre] != almacen_origen
+            }
+            almacen_destino = (
+                next(iter(programados.values())) if len(programados) == 1
+                else almacenes_destino.get(ALMACEN_POR_DESTINO["APARTADO"])
+            )
             payload["almacen_destino"] = serializar_almacen(almacen_destino)
         if almacen_origen is None:
             almacen_origen = sugerir_origen(pedido, almacen_destino)

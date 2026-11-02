@@ -1124,6 +1124,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     # La ubicación sale (SALIDA) o recibe (ENTRADA), como el resto de las entradas (#665).
                     ubicacion_origen_id=item["ubicacion_id"] if tipo_movimiento == TipoMovimiento.SALIDA else None,
                     ubicacion_destino_id=item["ubicacion_id"] if tipo_movimiento == TipoMovimiento.ENTRADA else None,
+                    almacen_id=item.get("almacen_id"),
                     lote_id=None,
                     serie_id=None,
                     cantidad=item["cantidad_movimiento"],
