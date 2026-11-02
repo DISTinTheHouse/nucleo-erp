@@ -844,8 +844,27 @@ class FacturaProveedorSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnSe
             recepcion = attrs.get("recepcion")
             if recepcion and oc and getattr(recepcion, "orden_compra_id", None) and recepcion.orden_compra_id != getattr(oc, "pk", oc):
                 raise ValidationError({"recepcion": "Recepción no corresponde a la OC."})
+        self._validar_sucursal_del_documento(attrs)
         self._validar_montos_contra_lineas(attrs)
         return attrs
+
+    def _validar_sucursal_del_documento(self, attrs):
+        """La factura va en la sucursal de su OC y de su recepción (#813). Al editar se
+        compara con lo guardado, solo si el cuerpo toca alguno de los tres campos."""
+        if not {"sucursal", "oc", "recepcion"} & attrs.keys():
+            return
+        inst = self.instance
+
+        def efectivo(campo):
+            return attrs[campo] if campo in attrs else getattr(inst, campo, None)
+
+        sucursal = efectivo("sucursal")
+        if sucursal is None:
+            return
+        for campo, nombre in (("oc", "orden de compra"), ("recepcion", "recepción")):
+            doc = efectivo(campo)
+            if doc is not None and doc.sucursal_id and doc.sucursal_id != sucursal.pk:
+                raise ValidationError({"sucursal": f"Debe ser la sucursal de la {nombre}."})
 
     CAMPOS_MONTO = ("subtotal", "descuento", "impuestos", "total")
 

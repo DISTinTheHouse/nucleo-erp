@@ -3362,6 +3362,17 @@ No mandes `pago` dentro de `pago_detalles`: mismo caso.
 
 - `oc_detalle` debe ser de la `oc` del encabezado y `recepcion_detalle` de la `recepcion`; si no coinciden → 400.
 - No genera CxP automática. Crea `cuenta-por-pagar` aparte con `factura_proveedor` = id devuelto.
+- `sucursal` debe ser la de la `oc` y la de la `recepcion`; si no → `400` con `sucursal`. Sólo se valida cuando el body trae `sucursal`, `oc` o `recepcion`.
+
+#### Pólizas y conciliaciones bancarias
+
+- **Permiso:** toda escritura en `polizas/` y `conciliaciones-bancarias/` (`POST`, `PATCH`, `PUT`, `DELETE`, `cerrar/`, `cancelar/`, `preparar/`) exige `E-FIN-FACTURAS`; sin él → `403`. Excepción: `POST polizas/validar-cuadre/` sólo calcula y no lo exige.
+- **Cancelar una conciliación `Cerrada`:** sus movimientos bancarios regresan a `Pendiente` (salvo los que estén en otra conciliación cerrada) y la conciliación queda `Cancelada`. Refresca la lista de movimientos después.
+
+#### Clientes contabilidad
+
+- `GET clientes-contabilidad/` devuelve sólo activos. `?activo=false` lista los dados de baja; `?activo=true` es lo mismo que no mandarlo.
+
 
 #### Preparar conciliación
 
