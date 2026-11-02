@@ -26,6 +26,12 @@ _TABLE_STYLE = TableStyle([
 ])
 
 
+def _con_sku(detalle, nombre):
+    """Renglón por variante (OC de PT): el SKU distingue las tallas del mismo producto (#796)."""
+    variante = detalle.producto_variante
+    return f"{variante.sku} · {nombre}" if variante else nombre
+
+
 def _render_oc_pdf(oc):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
@@ -42,9 +48,9 @@ def _render_oc_pdf(oc):
     ]
 
     data = [["Producto", "Cantidad", "Precio", "Importe"]]
-    detalles = OrdenCompraDetalle.objects.filter(orden_compra=oc).select_related("producto").order_by("id")
+    detalles = OrdenCompraDetalle.objects.filter(orden_compra=oc).select_related("producto", "producto_variante").order_by("id")
     for d in detalles:
-        nombre = getattr(d.producto, "nombre", None) or d.descripcion or "-"
+        nombre = _con_sku(d, getattr(d.producto, "nombre", None) or d.descripcion or "-")
         data.append([nombre, str(d.cantidad), f"${d.precio:.2f}", f"${d.importe:.2f}"])
 
     tabla = Table(data, colWidths=[8 * cm, 2.5 * cm, 3 * cm, 3 * cm])
@@ -74,9 +80,9 @@ def _render_recepcion_pdf(recepcion):
     ]
 
     data = [["Producto", "Cantidad recibida"]]
-    detalles = RecepcionDetalle.objects.filter(recepcion=recepcion).select_related("producto").order_by("id")
+    detalles = RecepcionDetalle.objects.filter(recepcion=recepcion).select_related("producto", "producto_variante").order_by("id")
     for d in detalles:
-        data.append([getattr(d.producto, "nombre", None) or "-", str(d.cantidad_recibida)])
+        data.append([_con_sku(d, getattr(d.producto, "nombre", None) or "-"), str(d.cantidad_recibida)])
 
     tabla = Table(data, colWidths=[10 * cm, 4 * cm])
     tabla.setStyle(_TABLE_STYLE)

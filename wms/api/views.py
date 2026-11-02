@@ -212,6 +212,7 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
                 pedido_id=pedido_id,
                 almacen_origen_id=almacen_origen_id,
                 almacen_destino_id=almacen_destino_id,
+                limite_pedidos=request.query_params.get("pedidos_limit"),
             )
             return Response(payload)
 

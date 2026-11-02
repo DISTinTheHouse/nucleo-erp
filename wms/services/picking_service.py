@@ -19,6 +19,8 @@ from wms.services.picking_pipeline.catalogs import (
     serializar_almacen,
     sugerir_apartados_por_defecto,
     sugerir_origen,
+    LIMITE_PEDIDOS,
+    LIMITE_PEDIDOS_MAX,
 )
 from wms.services.picking_pipeline.cantidad_validator import resolve_requested_items
 from wms.services.picking_pipeline.context import (
@@ -85,8 +87,12 @@ class PickingService:
         pedido_id=None,
         almacen_origen_id=None,
         almacen_destino_id=None,
+        limite_pedidos=None,
     ):
         pedido_id = parse_pk_estricto(pedido_id, "pedido")
+        limite_pedidos = min(
+            parse_pk_estricto(limite_pedidos, "pedidos_limit") or LIMITE_PEDIDOS, LIMITE_PEDIDOS_MAX
+        )
         almacen_origen_id = parse_pk_estricto(almacen_origen_id, "almacen_origen")
         almacen_destino_id = parse_pk_estricto(almacen_destino_id, "almacen_destino")
         empresa = getattr(user, "empresa", None)
@@ -101,13 +107,14 @@ class PickingService:
         (
             pedido_qs,
             pedidos_payload,
+            pedidos_truncado,
             operadores_payload,
             almacenes_qs,
             almacenes_payload,
             almacenes_origen_payload,
             almacenes_destino_payload,
             almacenes_por_sucursal,
-        ) = cargar_catalogos(user, empresa, es_staff, sucursal_ids)
+        ) = cargar_catalogos(user, empresa, es_staff, sucursal_ids, limite_pedidos)
 
         almacen_origen = (
             almacenes_qs.filter(pk=almacen_origen_id).first() if almacen_origen_id else None
@@ -124,6 +131,7 @@ class PickingService:
 
         payload = {
             "pedidos": pedidos_payload,
+            "pedidos_truncado": pedidos_truncado,
             "operadores": operadores_payload,
             "almacenes": almacenes_payload,
             "almacenes_origen": almacenes_origen_payload,
