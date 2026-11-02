@@ -6,7 +6,12 @@ from nucleo.models import Empresa, UnidadMedida, Impuesto, SatClaveProdServ, Sat
 from simple_history.models import HistoricalRecords
 
 class TipoProducto(models.Model):
-    codigo = models.CharField(max_length=50)
+    """Qué es el producto: MP, PT, SERVICIO, COMPRAS. Global (igual para toda empresa);
+    lo administra el superusuario. Vive en ``Producto``, no en la variante: color y
+    talla no cambian el tipo."""
+    codigo = models.CharField(max_length=50, unique=True)
+    nombre = models.CharField(max_length=100, blank=True, default="")
+    activo = models.BooleanField(default=True)
 
     history = HistoricalRecords()
 
@@ -103,7 +108,8 @@ class Producto(models.Model):
     nombre = models.CharField(max_length=100)
     descripcion = models.CharField(max_length=150, blank=True, default="")
     activo = models.BooleanField(default=True)
-    tipo = models.ForeignKey(TipoProducto, on_delete=models.CASCADE, related_name="productos", null=True, blank=True)
+    # Obligatorio; PROTECT: borrar un tipo en uso ya no borra sus productos.
+    tipo = models.ForeignKey(TipoProducto, on_delete=models.PROTECT, related_name="productos", limit_choices_to={"activo": True})
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     # campos para costo

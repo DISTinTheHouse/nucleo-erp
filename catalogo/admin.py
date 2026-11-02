@@ -56,8 +56,9 @@ class CategoriaProductoProcesoAdmin(admin.ModelAdmin):
 
 @admin.register(TipoProducto)
 class TipoProductoAdmin(admin.ModelAdmin):
-    list_display = ("id", "codigo")
-    search_fields = ("codigo",)
+    list_display = ("id", "codigo", "nombre", "activo")
+    list_filter = ("activo",)
+    search_fields = ("codigo", "nombre")
     ordering = ("codigo", "id")
 
 
@@ -109,6 +110,7 @@ class ProductoAdmin(admin.ModelAdmin):
     list_display = (
         "nombre",
         "empresa",
+        "tipo",
         "categoria_producto",
         "precio_base",
         "activo",
@@ -117,6 +119,7 @@ class ProductoAdmin(admin.ModelAdmin):
     list_filter = (
         "empresa",
         "activo",
+        "tipo",
         "categoria_producto",
         "unidad_medida",
         "impuesto",
@@ -149,6 +152,7 @@ class ProductoAdmin(admin.ModelAdmin):
     )
     list_select_related = (
         "empresa",
+        "tipo",
         "categoria_producto",
         "unidad_medida",
         "impuesto",

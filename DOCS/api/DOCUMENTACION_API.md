@@ -990,6 +990,7 @@ Entidad principal que agrupa las variantes. Contiene la información general (no
 - **Listar**: `GET /api/v1/catalogo/producto/`
   - `q` (opcional): busca por coincidencia parcial en `nombre`, `codigo` o `cod_proscai`.
   - `tipo_id` (opcional): filtra por `TipoProducto`.
+- **`tipo` es obligatorio** al crear (`400` si falta o si el tipo está inactivo). El tipo es del producto, no de la variante.
 - **Respuesta**:
   ```json
   [
@@ -1066,7 +1067,7 @@ Flujo guiado para que producción dé de alta un Producto y su(s) variante(s) (S
 
 Todos soportan CRUD estándar (`GET`, `POST`, `PATCH`, `DELETE`).
 
-- **Tipos de Producto**: `/api/v1/catalogo/tipo-producto/`
+- **Tipos de Producto**: `/api/v1/catalogo/tipo-producto/` — `{id, codigo, nombre, activo}` (MP, PT, SERVICIO, COMPRAS). Global; lista sólo activos. Sólo el superusuario escribe (`403` el resto); `DELETE` = baja lógica.
 - **Categorías**: `/api/v1/catalogo/categoria-producto/` — incluye `unidad_medida` (FK opcional, la que hereda `Producto` en el onboarding) y `tallas` (M2M vía `CategoriaProductoTalla`: qué tallas son válidas para productos de esta categoría; se administra desde el admin de Django, inline en cada categoría).
 - **Colores**: `/api/v1/catalogo/color/` — incluye `pantone` (opcional).
 - **Tallas**: `/api/v1/catalogo/talla/` — `?categoria_producto={id}` (opcional) filtra solo las tallas permitidas para esa categoría (via `CategoriaProductoTalla`); sin el parámetro regresa todas.
