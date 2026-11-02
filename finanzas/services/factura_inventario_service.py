@@ -93,6 +93,7 @@ class FacturaInventarioService:
                 empresa=pedido.empresa,
                 sucursal=pedido.sucursal,
                 pedido=pedido,
+                factura=factura,
                 tipo_movimiento=TipoMovimiento.ENTRADA if entrada else TipoMovimiento.SALIDA,
                 usuario=usuario,
                 observaciones=f"{observaciones} {referencia}"[:150],

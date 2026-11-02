@@ -827,6 +827,7 @@ Historial operativo de entradas, salidas y ajustes.
   - **Query params**:
     - `q`: SKU, SKU de producción o descripción (busca por palabras, acepta texto incompleto).
     - `producto_variante`: id de la variante (salta la búsqueda). Se manda `q` o `producto_variante`. No numérico o `<= 0` → 400 (también `almacen`).
+    - `limite`: opcional, máximo de renglones en `results` (default 500, máx. 5000). Llegan los más recientes del rango y `results_truncado: true` si hubo más; el saldo y el resumen siempre consideran toda la historia.
     - `almacen`: opcional, solo ese almacén (el saldo pasa a ser el del almacén). No numérico → 400.
     - `fecha_inicio`, `fecha_final`: opcionales, `YYYY-MM-DD` (si se manda una, van las dos). Lo anterior a `fecha_inicio` queda en `resumen.saldo_inicial`.
   - **Columnas del reporte → campo**:
@@ -834,7 +835,7 @@ Historial operativo de entradas, salidas y ajustes.
     | Columna | Campo |
     |---|---|
     | Fecha | `fecha` |
-    | Documento | `documento` (`RECEPCION`, `ORDEN_PRODUCCION`, `TRANSFERENCIA`, `AJUSTE`, `PEDIDO`, `MOVIMIENTO_MANUAL`) |
+    | Documento | `documento` (`RECEPCION`, `ORDEN_PRODUCCION`, `TRANSFERENCIA`, `AJUSTE`, `FACTURA`, `PEDIDO`, `MOVIMIENTO_MANUAL`) |
     | TM | `tm` (`ENTRADA`, `SALIDA`, `AJUSTE`, `TRANSFERENCIA`) |
     | Costo | `costo_unitario` |
     | Entradas | `entradas` |

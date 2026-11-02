@@ -1096,6 +1096,26 @@ class AuxiliarMovimientosTests(TestCase):
         self.assertIn("almacen", self._get(producto_variante=self.variante.pk, almacen="A1").json())
         self.assertIn("producto_variante", self._get(producto_variante="CAM-01").json())
 
+    def test_limite_recorta_a_los_mas_recientes(self):
+        # #807: el saldo sale de toda la historia; la respuesta, solo los últimos N.
+        completo = self._get(producto_variante=self.variante.pk).json()
+        data = self._get(producto_variante=self.variante.pk, limite=2).json()
+        self.assertTrue(data["results_truncado"])
+        self.assertEqual(data["results"], completo["results"][-2:])
+        self.assertFalse(completo["results_truncado"])
+
+    def test_documento_factura_antes_que_pedido(self):
+        # #804: el movimiento de una factura lleva su folio, no el del pedido.
+        m = {k: None for k in (
+            "movimiento_inventario__recepcion_id", "movimiento_inventario__transferencia_id",
+            "movimiento_inventario__op_id", "movimiento_inventario__ajuste_inventario_id",
+        )}
+        m.update({
+            "movimiento_inventario__factura_id": 1, "movimiento_inventario__factura__folio": "F-1",
+            "movimiento_inventario__pedido_id": 2, "movimiento_inventario__pedido__folio": "P-2",
+        })
+        self.assertEqual(auxiliar_mod._documento(m), ("FACTURA", "F-1"))
+
     def test_id_cero_es_400(self):
         # #815: ``almacen=0`` quitaba el filtro y ``producto_variante=0`` caía a ``q``.
         resp = self._get(producto_variante=self.variante.pk, almacen=0)

@@ -1644,7 +1644,10 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
         if not request.user.is_superuser:
             almacenes, _almacen = self._movement_report_allowed_almacen_ids(request)
             alcance = (almacenes, request.user.sucursales_permitidas())
-        data = auxiliar_mod.kardex(request.user, variante["id"], almacen_id, inicio_dt, final_dt, alcance)
+        limite = min(
+            self._auxiliar_id(qp, "limite") or auxiliar_mod.LIMITE_RENGLONES, auxiliar_mod.LIMITE_RENGLONES_MAX
+        )
+        data = auxiliar_mod.kardex(request.user, variante["id"], almacen_id, inicio_dt, final_dt, alcance, limite)
         return Response({"variante": auxiliar_mod.opcion(variante), "opciones": [], "hay_mas": False, **data})
 
     def _empresa_ids_permitidas(self, user):
