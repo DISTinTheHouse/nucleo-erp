@@ -52,6 +52,9 @@ class CategoriaProductoViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = CategoriaProducto.objects.filter(activo=True).order_by("-created_at", "-id")
+        linea = self.request.query_params.get("linea")
+        if linea:
+            qs = qs.filter(linea=linea)
         return _alcance_empresa(qs, self.request.user)
 
 # Nombre del ``UniqueConstraint`` parcial de ``CategoriaProductoProceso`` (models.py).
@@ -164,6 +167,9 @@ class ProductoViewSet(viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 raise ValidationError({"tipo_id": "Must be an integer."})
             qs = qs.filter(tipo_id__in=tipo_ids)
+        linea = self.request.query_params.get('linea')
+        if linea:
+            qs = qs.filter(categoria_producto__linea=linea)
         q = (self.request.query_params.get('q') or '').strip()
         if q:
             qs = qs.filter(

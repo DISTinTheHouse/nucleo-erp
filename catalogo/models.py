@@ -24,8 +24,20 @@ class TipoProducto(models.Model):
         return self.codigo
 
 class CategoriaProducto(models.Model):
+    class Linea(models.TextChoices):
+        """Línea comercial. Agrupa categorías; no cambia SKU, tallas ni procesos."""
+        INDUSTRIAL = "INDUSTRIAL", "Industrial"
+        EMPRESARIAL = "EMPRESARIAL", "Empresarial"
+        ROPA_FRIO = "ROPA_FRIO", "Ropa de frío"
+        EJECUTIVO = "EJECUTIVO", "Ejecutivo"
+        SERVICIOS = "SERVICIOS", "Servicios"
+        EPP = "EPP", "EPP"
+        OTROS = "OTROS", "Otros"
+
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name="categorias_producto")
     nombre = models.CharField(max_length=100)
+    # Vacía = materia prima (TELAS, AVIOS).
+    linea = models.CharField(max_length=20, choices=Linea.choices, blank=True, default="")
     codigo = models.CharField(max_length=3)
     descripcion = models.CharField(max_length=150)
     unidad_medida = models.ForeignKey(
