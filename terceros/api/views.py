@@ -7,6 +7,7 @@ from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
+from rest_framework.filters import OrderingFilter
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
@@ -24,6 +25,7 @@ from terceros.api.serializers import (
     verificar_rfc_cliente,
 )
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
+from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, booleano_param
 from terceros.cartera import cartera_de_cliente
 from terceros import csf, facturama
 from finanzas.services.facturama.acceso import puede_consultar_cfdis
@@ -435,10 +437,21 @@ def _fecha_param(request, nombre):
 
 
 class ProveedorViewSet(viewsets.ModelViewSet):
-    queryset = Proveedor.objects.filter(activo=True)
+    queryset = Proveedor.objects.all()
     serializer_class = ProveedorSerializer
     # ``?search=`` se publicaba en el schema y se ignoraba sin esto (#839).
     search_fields = ["codigo", "nombre", "razon_social", "rfc"]
+    pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= regresa la lista completa
+    filter_backends = [
+        *[b for b in viewsets.ModelViewSet.filter_backends if b is not OrderingFilter],
+        OrdenamientoEstableFilter,
+    ]
+    # Lista blanca de ``?ordering=`` (#863).
+    ordering_fields = [
+        "id", "codigo", "nombre", "razon_social", "rfc", "tipo", "ciudad", "estado", "contacto_principal",
+        "email", "telefono", "fecha_alta", "fecha_baja", "fecha_ultima_compra", "plazo_dias", "dias_credito",
+        "activo", "created_at", "updated_at",
+    ]
 
     def get_queryset(self):
         user = self.request.user
@@ -447,9 +460,12 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         # superusuario incluido: mismo alcance que el listado de OC (#834).
         qs = super().get_queryset().order_by("-fecha_alta", "-id")
         empresa = getattr(user, "empresa", None)
-        if empresa:
-            return qs.filter(empresa=empresa)
-        return qs.none()
+        if not empresa:
+            return qs.none()
+        # Solo el listado puede pedir las bajas (``?activo=false``, #863); el
+        # detalle y las acciones siguen viendo solo activos.
+        activo = booleano_param(self.request, "activo", True) if self.action == "list" else True
+        return qs.filter(empresa=empresa, activo=activo)
 
     def perform_create(self, serializer):
         empresa = getattr(self.request.user, "empresa", None)

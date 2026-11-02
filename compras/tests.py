@@ -1299,6 +1299,22 @@ class HistorialOCProveedorTests(TestCase):
         filas = data["results"] if isinstance(data, dict) else data
         self.assertEqual([f["id"] for f in filas], [self.proveedor_vacio.pk])
 
+    def test_paginacion_opcional_filtros_y_desempate(self):
+        """#863: ``?limit=`` pagina con ``count``; sin él, lista completa."""
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        pagina = client.get("/api/v1/compras/ordenes/?limit=1&ordering=fecha_oc").json()
+
+        self.assertEqual(pagina["count"], 2)
+        self.assertEqual([r["id"] for r in pagina["results"]], [self.oc_autorizada.pk])
+        self.assertIsNotNone(pagina["next"])
+        self.assertIsInstance(client.get("/api/v1/compras/ordenes/").json(), list)
+        self.assertEqual(
+            self._ids_listado(self.admin, f"?estatus={self.oc_cancelada.estatus}"), [self.oc_cancelada.pk],
+        )
+        self.assertEqual(client.get("/api/v1/compras/ordenes/?estatus=99").status_code, 400)
+        self.assertEqual(client.get("/api/v1/compras/ordenes/?proveedor=x").status_code, 400)
+
     def test_onboarding_avisa_si_la_lista_se_recorto(self):
         """#838: ``*_truncado`` indica si faltan elementos por el tope."""
         client = APIClient()
