@@ -1,0 +1,176 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Flujo de CRM",
+    "output": "flujo-crm.html",
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "frontend": {
+          "label": "Vendedor"
+        },
+        "security": {
+          "label": "Mesa de control"
+        },
+        "database": {
+          "label": "Pedido"
+        },
+        "external": {
+          "label": "Excepción"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "vendedor",
+      "label": "Vendedor"
+    },
+    {
+      "id": "excepcion",
+      "label": "Excepciones",
+      "variant": "exception"
+    },
+    {
+      "id": "mesa",
+      "label": "Mesa de control"
+    }
+  ],
+  "mainPath": [
+    "oportunidad",
+    "cotizacion",
+    "revision",
+    "pedido"
+  ],
+  "nodes": [
+    {
+      "id": "oportunidad",
+      "lane": "vendedor",
+      "col": 0,
+      "type": "frontend",
+      "label": "Oportunidad",
+      "sublabel": "Nueva · Contactada"
+    },
+    {
+      "id": "cotizacion",
+      "lane": "vendedor",
+      "col": 1,
+      "type": "frontend",
+      "label": "Cotización",
+      "sublabel": "Borrador"
+    },
+    {
+      "id": "revision",
+      "lane": "mesa",
+      "col": 2,
+      "type": "security",
+      "label": "En revisión",
+      "sublabel": "Mesa decide"
+    },
+    {
+      "id": "pedido",
+      "lane": "mesa",
+      "col": 3,
+      "type": "database",
+      "label": "Pedido",
+      "sublabel": "autorizada"
+    },
+    {
+      "id": "perdida",
+      "lane": "excepcion",
+      "col": 1,
+      "type": "external",
+      "label": "Perdida",
+      "sublabel": "con motivo"
+    },
+    {
+      "id": "rechazada",
+      "lane": "excepcion",
+      "col": 2,
+      "type": "external",
+      "label": "Rechazada",
+      "sublabel": "con motivo"
+    },
+    {
+      "id": "cambios",
+      "lane": "excepcion",
+      "col": 3,
+      "type": "external",
+      "label": "Cambios solicitados",
+      "sublabel": "editada ≤ 30 min",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "from": "oportunidad",
+      "to": "cotizacion",
+      "label": "cotizar",
+      "role": "main"
+    },
+    {
+      "from": "cotizacion",
+      "to": "revision",
+      "label": "enviar a revisión",
+      "role": "main"
+    },
+    {
+      "from": "revision",
+      "to": "pedido",
+      "label": "autoriza",
+      "role": "main"
+    },
+    {
+      "from": "oportunidad",
+      "to": "perdida",
+      "label": "no avanza",
+      "role": "error"
+    },
+    {
+      "from": "revision",
+      "to": "rechazada",
+      "label": "rechaza",
+      "role": "error"
+    },
+    {
+      "from": "rechazada",
+      "to": "cotizacion",
+      "label": "corrige y reenvía",
+      "role": "return"
+    },
+    {
+      "from": "pedido",
+      "to": "cambios",
+      "label": "vendedor edita",
+      "role": "branch"
+    },
+    {
+      "from": "cambios",
+      "to": "pedido",
+      "label": "acepta o rechaza",
+      "role": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Cómo vende hoy el sistema",
+      "items": [
+        "Vendedor: sus clientes y oportunidades; admin y Mesa ven la empresa",
+        "Cotizada y Ganada se calculan de las cotizaciones ligadas",
+        "Autorizar crea el pedido; no saca inventario",
+        "Recompra clona un pedido en una cotización Borrador"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Lo que aún no existe",
+      "items": [
+        "Prospectos: el modelo existe pero sin campos ni API",
+        "Recordatorios automáticos: el frontend consulta los pendientes",
+        "Pasados 30 min de autorizada, solo el admin edita"
+      ]
+    }
+  ]
+}
