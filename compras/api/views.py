@@ -607,7 +607,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         # ``limit``/``producto_q`` aplican a todas las listas, como antes; los
         # parámetros por lista los sustituyen solo en la suya (#795).
         qp = request.query_params
-        limit = _limite(qp.get("limit"))
+        # Sin ``limit`` se topa a 1000 para no volcar el catálogo entero;
+        # ``limit=all`` sigue pidiendo todo de forma explícita (#795).
+        limit = _limite(qp.get("limit"), 1000)
         proveedor_limit = _limite(qp.get("proveedor_limit"), limit)
         producto_limit = _limite(qp.get("producto_limit"), limit)
         variante_limit = _limite(qp.get("variante_limit"), limit)
