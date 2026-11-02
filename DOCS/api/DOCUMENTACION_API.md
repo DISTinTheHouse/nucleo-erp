@@ -2409,7 +2409,7 @@ Respuesta (`GET` lista/detalle, y `orden_compra` de onboarding/PUT/aceptar) aña
 
 - **OC de PT por SKU**: en una OC de `tipo_compra=PT` cada renglón debe traer `producto_variante`; sin variante es `400` (`detalle`), salvo al editar una OC legada que ya tenía ese mismo producto sin variante (se conserva).
 - **Moneda por defecto del proveedor**: `GET /api/v1/compras/ordenes/onboarding/` trae en cada `busqueda.proveedores[]` `moneda_id` y `moneda__codigo_iso` (la moneda dada de alta en el proveedor); el front la preselecciona al elegir proveedor. En el `POST`, si `orden_compra.moneda` no viene, la OC toma la moneda del proveedor y, si no hay proveedor, la moneda base de la empresa. La moneda enviada en el body siempre gana. Al editar (`orden_compra_id`), `moneda: null` conserva la moneda guardada. Si la moneda del proveedor es privada de otra empresa, llega `moneda_id: null` y no se usa como default.
-- **Sin empresa** (superusuario incluido): `GET /api/v1/compras/ordenes/onboarding/` responde `400 {"empresa": "El usuario no tiene empresa asignada."}`; proveedores, productos y variantes siempre son de la empresa del usuario (#862).
+- **Sin empresa** (superusuario incluido): `GET` y `POST /api/v1/compras/ordenes/onboarding/` responden `400 {"empresa": "El usuario no tiene empresa asignada."}` (el `POST`, desde #875); proveedores, productos y variantes siempre son de la empresa del usuario (#862).
 - **Búsqueda**: `GET /api/v1/compras/ordenes/onboarding/?tipo_compra=PT` agrega `busqueda.variantes[]` (`id`, `sku`, `producto_id`, `producto_nombre`, `color`, `talla`, `precio_base`): variantes activas de productos activos de tipo Producto Terminado.
   - `limit` y `producto_q` aplican a todas las listas (como antes). Por lista: `proveedor_limit`, `producto_limit`, `variante_limit` (1–1000; `all`/`0`/`-1` = sin tope) y `variante_q` (SKU o nombre, solo variantes; si viene, `producto_q` ya no filtra variantes).
   - Ej. buscar solo SKU: `?tipo_compra=PT&variante_q=10500&variante_limit=20&proveedor_limit=1&producto_limit=1`.
@@ -2471,7 +2471,7 @@ Seguimiento **informativo** de la OC: la fecha en que compras supo que llegó la
 ### 1) Obtener datos para el formulario
 
 - **Endpoint**: `GET /api/v1/compras/recepciones/onboarding/`
-- **Sin empresa** (superusuario incluido): `400 {"empresa": "El usuario no tiene empresa asignada."}`, igual que `ordenes/onboarding/` (#862).
+- **Sin empresa** (superusuario incluido): `400 {"empresa": "El usuario no tiene empresa asignada."}` en `GET` y `POST`, igual que `ordenes/onboarding/` (#862, #875).
 - **Query Params (opcionales)**:
   - `orden_compra_id`: si se envía, `busqueda.ordenes_compra[]` trae solo esa orden (si es recibible); no es entero → `400`.
   - `tipo_compra`: `MP` (folio OC) o `PT` (folio O, producto terminado). Omitirlo devuelve ambas; otro valor es `400`. En `GET /recepciones/{id}/` no aplica.
@@ -2631,6 +2631,7 @@ Ya NO trae `movimiento_id`/`movimiento_inventario_id` — no hubo movimiento de 
 ### 1) Obtener recepciones pendientes de inspección
 
 - **Endpoint**: `GET /api/v1/compras/calidad-inspecciones/onboarding/`
+- **Sin empresa** (superusuario incluido): `400 {"empresa": "El usuario no tiene empresa asignada."}` en `GET` y `POST` (#875).
 - **Respuesta (resumen)**:
   ```json
   {
@@ -2737,7 +2738,7 @@ Mismo payload que `recepciones/onboarding/` (reusa la lógica, no la duplica): `
   "remision": "REM-001"
 }
 ```
-Manda `orden_compra` **u** `op` (nunca ambos). `empresa`/`sucursal`/`proveedor`/`usuario` los pone el backend.
+Manda `orden_compra` **u** `op` (nunca ambos). `empresa`/`sucursal`/`proveedor`/`usuario` los pone el backend. Sin empresa (superusuario incluido) → `400 {"empresa"}`; `almacen` de otra empresa → `400 {"almacen"}` (#875).
 
 **2) Escanear un tag** — `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/lecturas/`
 

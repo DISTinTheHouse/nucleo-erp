@@ -723,13 +723,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 }
                 for v in filas_variantes
             ]
-        sucursales = []
-        if empresa:
-            sucursales = list(
-                self._sucursales_del_usuario(user, empresa)
-                .order_by("codigo")
-                .values("id_sucursal", "codigo", "nombre")
-            )
+        sucursales = list(
+            self._sucursales_del_usuario(user, empresa)
+            .order_by("codigo")
+            .values("id_sucursal", "codigo", "nombre")
+        )
         monedas = list(
             Moneda.objects.filter(Q(empresa__isnull=True) | Q(empresa=empresa), activo=True)
             .order_by("codigo_iso")
@@ -769,7 +767,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         header = data.get("orden_compra") or {}
         detalle = data.get("detalle")
 
-        if not empresa and not getattr(user, "is_superuser", False):
+        # Superusuario incluido, igual que el GET (#875): sin empresa se saltaba
+        # la pertenencia de la OC editada.
+        if not empresa:
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         with transaction.atomic():
@@ -781,7 +781,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 )
                 if not oc:
                     raise ValidationError({"orden_compra_id": "Orden de compra no encontrada."})
-                if empresa and oc.empresa_id != empresa.pk:
+                if oc.empresa_id != empresa.pk:
                     raise ValidationError({"orden_compra_id": "No tienes acceso a esta orden de compra."})
                 if oc.estatus not in self.ESTATUS_EDITABLES_ONBOARDING:
                     raise ValidationError({"estatus": "La orden ya no puede editarse."})
@@ -1399,6 +1399,24 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return {fila[campo]: Decimal(str(fila["total"] or 0)) for fila in filas}
 
+    def _recibido_por_detalle(self, campo, ids):
+        """``_cantidad_recibida_oc``/``_op`` para varios renglones en dos consultas.
+
+        ``campo`` es ``orden_compra_detalle_id`` u ``orden_produccion_detalle_id``.
+        """
+        if not ids:
+            return {}
+        filas = (
+            RecepcionDetalle.objects.filter(recepcion__activo=True, **{f"{campo}__in": ids})
+            .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            .values(campo)
+            .annotate(total=Sum("cantidad_recibida"))
+        )
+        recibido = {fila[campo]: Decimal(str(fila["total"] or 0)) for fila in filas}
+        for clave, total in self._rechazado_por_detalle(f"recepcion_detalle__{campo}", ids).items():
+            recibido[clave] = recibido.get(clave, Decimal("0")) - total
+        return recibido
+
     def _cantidad_recibida_oc(self, orden_compra_detalle_id):
         total = (
             RecepcionDetalle.objects.filter(
@@ -1623,6 +1641,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         op_qs = (
             OrdenProduccion.objects.filter(
                 activo=True,
+                empresa=empresa,
                 estatus_op__in=[
                     OrdenProduccion.EstatusOrdenProduccion.PENDIENTE,
                     OrdenProduccion.EstatusOrdenProduccion.PREPARACION,
@@ -1633,8 +1652,6 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             .select_related("pedido", "sucursal")
             .order_by("-fecha_inicio", "-op_id")
         )
-        if empresa:
-            op_qs = op_qs.filter(empresa=empresa)
         if oc_q:
             op_qs = op_qs.filter(
                 Q(folio_op__icontains=oc_q)
@@ -1716,9 +1733,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 }
             )
 
-        almacenes_qs = Almacen.objects.filter(estatus="ACTIVO")
-        if empresa:
-            almacenes_qs = almacenes_qs.filter(empresa=empresa)
+        almacenes_qs = Almacen.objects.filter(estatus="ACTIVO", empresa=empresa)
         almacenes = list(
             almacenes_qs.order_by("codigo").values(
                 "id_almacen",
@@ -1731,9 +1746,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
 
         ubicaciones_qs = Ubicacion.objects.filter(estatus="ACTIVO")
         if almacen_id:
-            ubicaciones_qs = ubicaciones_qs.filter(almacen_id=almacen_id)
-            if empresa:
-                ubicaciones_qs = ubicaciones_qs.filter(almacen__empresa=empresa)
+            ubicaciones_qs = ubicaciones_qs.filter(almacen_id=almacen_id, almacen__empresa=empresa)
         else:
             ubicaciones_qs = ubicaciones_qs.none()
         ubicaciones = list(
@@ -1747,9 +1760,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             )
         )
 
-        series_qs = SerieFolio.objects.filter(activo=True)
-        if empresa:
-            series_qs = series_qs.filter(empresa=empresa)
+        series_qs = SerieFolio.objects.filter(activo=True, empresa=empresa)
         series_qs = series_qs.filter(
             Q(tipo_documento__iexact="RECEPCION", serie__in=["RC", "RT", "RZ"])
             | Q(tipo_documento__in=["RC", "RT", "RZ"])
@@ -1789,7 +1800,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             detalle_raw = data["detalle"]
             serie_codigo = (header.get("serie_codigo") or "RC").strip().upper()
 
-            if not empresa and not getattr(user, "is_superuser", False):
+            # Superusuario incluido, igual que el GET (#875).
+            if not empresa:
                 raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
             if serie_codigo not in {"RC", "RT", "RZ"}:
                 raise ValidationError({"serie_codigo": "serie_codigo debe ser RC, RT o RZ."})
@@ -1817,7 +1829,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     )
                     if not oc:
                         raise ValidationError({"orden_compra": "Orden de compra no encontrada."})
-                    if empresa and oc.empresa_id != empresa.pk:
+                    if oc.empresa_id != empresa.pk:
                         raise ValidationError({"orden_compra": "No tienes acceso a esta orden de compra."})
                     if oc.estatus not in self.ESTATUS_OC_RECIBIBLES:
                         raise ValidationError({"estatus": "La orden de compra no está disponible para recepción."})
@@ -1832,7 +1844,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     )
                     if not op:
                         raise ValidationError({"orden_produccion": "Orden de producción no encontrada."})
-                    if empresa and op.empresa_id != empresa.pk:
+                    if op.empresa_id != empresa.pk:
                         raise ValidationError({"orden_produccion": "No tienes acceso a esta orden de producción."})
                     if op.estatus_op not in {
                         OrdenProduccion.EstatusOrdenProduccion.PENDIENTE,
@@ -2416,24 +2428,28 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
     def handle_get_onboarding(self, request):
         user = request.user
         empresa = getattr(user, "empresa", None)
-        if not empresa and not getattr(user, "is_superuser", False):
+        # Superusuario incluido, igual que recepciones/onboarding (#875).
+        if not empresa:
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
+        # Renglones en un solo prefetch: antes era una consulta por recepción.
         recepciones_qs = (
-            Recepcion.objects.filter(activo=True, estatus=Recepcion.EstatusRecepcion.EN_CALIDAD)
-            .select_related("proveedor", "almacen", "orden_compra", "op")
+            Recepcion.objects.filter(
+                activo=True, estatus=Recepcion.EstatusRecepcion.EN_CALIDAD, empresa=empresa,
+            )
+            .select_related("proveedor")
+            .prefetch_related(
+                Prefetch(
+                    "recepciondetalle_set",
+                    queryset=RecepcionDetalle.objects.select_related("producto").order_by("id"),
+                )
+            )
             .order_by("-fecha_recepcion", "-id")
         )
-        if empresa:
-            recepciones_qs = recepciones_qs.filter(empresa=empresa)
 
         recepciones = []
         for r in recepciones_qs[:50]:
-            detalles = (
-                RecepcionDetalle.objects.filter(recepcion=r)
-                .select_related("producto")
-                .order_by("id")
-            )
+            detalles = r.recepciondetalle_set.all()
             recepciones.append(
                 {
                     "id": r.pk,
@@ -2454,9 +2470,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
                 }
             )
 
-        empleados_qs = Empleado.objects.filter(activo=True)
-        if empresa:
-            empleados_qs = empleados_qs.filter(empresa=empresa)
+        empleados_qs = Empleado.objects.filter(activo=True, empresa=empresa)
         inspectores = list(
             empleados_qs.order_by("nombre").values(
                 "id", "numero_empleado", "nombre", "apellido_paterno"
@@ -2476,7 +2490,8 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
 
         user = request.user
         empresa = getattr(user, "empresa", None)
-        if not empresa and not getattr(user, "is_superuser", False):
+        # Sin empresa se saltaban la pertenencia de la recepción y del inspector (#875).
+        if not empresa:
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         serializer = CalidadInspeccionInputSerializer(data=request.data or {})
@@ -2492,7 +2507,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             )
             if not recepcion:
                 raise ValidationError({"recepcion": "Recepción no encontrada."})
-            if empresa and recepcion.empresa_id != empresa.pk:
+            if recepcion.empresa_id != empresa.pk:
                 raise ValidationError({"recepcion": "No tienes acceso a esta recepción."})
             if recepcion.estatus != Recepcion.EstatusRecepcion.EN_CALIDAD:
                 raise ValidationError({"estatus": "La recepción no está en espera de calidad."})
@@ -2500,7 +2515,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             inspector = Empleado.objects.filter(pk=data["inspector"], activo=True).first()
             if not inspector:
                 raise ValidationError({"inspector": "Empleado no encontrado."})
-            if empresa and inspector.empresa_id != empresa.pk:
+            if inspector.empresa_id != empresa.pk:
                 raise ValidationError({"inspector": "El inspector no pertenece a esta empresa."})
 
             renglones = {
@@ -2673,33 +2688,38 @@ def _resolver_tag_rfid(encuadre, codigo_tag):
 def resumen_encuadre_rfid(encuadre):
     """Esperado = ordenado - ya recibido (no solo lo contratado, ver B1 del audit).
 
-    Reutiliza ``RecepcionViewSet._cantidad_recibida_oc``/``_op`` -- ya restan lo
-    que Calidad rechaza, una sola fuente de verdad para "cuánto falta".
+    Reutiliza ``RecepcionViewSet._recibido_por_detalle`` -- ya resta lo que
+    Calidad rechaza, una sola fuente de verdad para "cuánto falta". Va en
+    bloque: antes eran dos consultas por renglón de la orden.
     """
     recepcion_vs = RecepcionViewSet()
     lecturas = list(encuadre.lecturas.all())
 
     if encuadre.orden_compra_id:
-        detalle_qs = (
+        detalle_qs = list(
             OrdenCompraDetalle.objects.filter(orden_compra_id=encuadre.orden_compra_id)
             .select_related("producto", "producto_variante__talla").order_by("id")
         )
-        recibido_fn = recepcion_vs._cantidad_recibida_oc
+        campo_recibido = "orden_compra_detalle_id"
     elif encuadre.op_id:
-        detalle_qs = (
+        detalle_qs = list(
             OrdenProduccionDetalle.objects.filter(op_id=encuadre.op_id)
             .select_related("producto_variante__producto", "producto_variante__talla").order_by("op_detalle_id")
         )
-        recibido_fn = recepcion_vs._cantidad_recibida_op
+        campo_recibido = "orden_produccion_detalle_id"
     else:
         detalle_qs = []
-        recibido_fn = None
+        campo_recibido = None
+    recibido_map = (
+        recepcion_vs._recibido_por_detalle(campo_recibido, [d.pk for d in detalle_qs])
+        if campo_recibido else {}
+    )
 
     detalles = []
     total_esperado = Decimal("0")
     for detalle in detalle_qs:
         ordenado = Decimal(str(detalle.cantidad or 0))
-        ya_recibido = recibido_fn(detalle.pk) if recibido_fn else Decimal("0")
+        ya_recibido = recibido_map.get(detalle.pk, Decimal("0"))
         esperado = max(ordenado - ya_recibido, Decimal("0"))
         if encuadre.orden_compra_id:
             leido = sum(
@@ -2788,7 +2808,8 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         user = request.user
         empresa = getattr(user, "empresa", None)
-        if not empresa and not getattr(user, "is_superuser", False):
+        # Superusuario incluido, igual que recepciones/onboarding (#875).
+        if not empresa:
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         serializer = self.get_serializer(data=request.data)
@@ -2801,10 +2822,14 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             raise ValidationError({"tipo_origen": "Debes enviar exactamente una de orden_compra u op."})
 
         origen = oc or op
-        if empresa and origen.empresa_id != empresa.pk:
+        if origen.empresa_id != empresa.pk:
             raise ValidationError({"tipo_origen": "No pertenece a tu empresa."})
 
         almacen = data["almacen"]
+        # El serializer acepta cualquier almacén: sin sucursal, uno de otra
+        # empresa pasaba la guarda de abajo.
+        if almacen.empresa_id != empresa.pk:
+            raise ValidationError({"almacen": "El almacén no pertenece a tu empresa."})
         if almacen.sucursal_id and origen.sucursal_id != almacen.sucursal_id:
             raise ValidationError({"almacen": "Debe pertenecer a la misma sucursal de la orden."})
 
