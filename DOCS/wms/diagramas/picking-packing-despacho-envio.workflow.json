@@ -7,26 +7,151 @@
     "quality_profile": "showcase"
   },
   "lanes": [
-    { "id": "logistica", "label": "Logística (independiente)" },
-    { "id": "almacen", "label": "Almacén (WMS)" },
-    { "id": "despacho", "label": "Despacho" }
+    {
+      "id": "ventas",
+      "label": "Mesa de control"
+    },
+    {
+      "id": "almacen",
+      "label": "Almacén (WMS)"
+    },
+    {
+      "id": "procesos",
+      "label": "Procesos y traslados"
+    },
+    {
+      "id": "despacho",
+      "label": "Despacho y envío"
+    }
   ],
   "phases": [
-    { "id": "fase_surtido", "label": "Surtido y embarque", "fromCol": 0, "toCol": 2 },
-    { "id": "fase_salida", "label": "Salida", "fromCol": 3, "toCol": 3, "variant": "emphasis" }
+    {
+      "id": "fase_programar",
+      "label": "Programación",
+      "fromCol": 0,
+      "toCol": 0
+    },
+    {
+      "id": "fase_surtido",
+      "label": "Surtido y empaque",
+      "fromCol": 1,
+      "toCol": 2
+    },
+    {
+      "id": "fase_salida",
+      "label": "Salida",
+      "fromCol": 3,
+      "toCol": 3,
+      "variant": "emphasis"
+    }
   ],
-  "mainPath": ["crear_picking", "crear_packing", "crear_despacho"],
+  "mainPath": [
+    "programar",
+    "crear_picking",
+    "crear_packing",
+    "crear_despacho"
+  ],
   "nodes": [
-    { "id": "crear_envio", "lane": "logistica", "col": 0, "width": 104, "type": "external", "label": "Crear Envío", "sublabel": "pedido + transportista" },
-    { "id": "crear_picking", "lane": "almacen", "col": 0, "width": 104, "type": "frontend", "label": "Crear Picking", "sublabel": "pedido + almacén" },
-    { "id": "ordenes_trabajo", "lane": "almacen", "col": 1, "width": 118, "type": "messagebus", "label": "Órdenes de Trabajo", "sublabel": "bordado / reflejante / corte" },
-    { "id": "crear_packing", "lane": "almacen", "col": 2, "width": 104, "type": "frontend", "label": "Crear Packing", "sublabel": "cajas + peso" },
-    { "id": "crear_despacho", "lane": "despacho", "col": 3, "width": 112, "type": "backend", "label": "Crear Despacho", "sublabel": "+ guía" }
+    {
+      "id": "programar",
+      "lane": "ventas",
+      "col": 0,
+      "width": 120,
+      "type": "frontend",
+      "label": "Programar Pedido",
+      "sublabel": "destino + cantidad"
+    },
+    {
+      "id": "crear_picking",
+      "lane": "almacen",
+      "col": 1,
+      "width": 130,
+      "type": "frontend",
+      "label": "Nuevo Surtido",
+      "sublabel": "almacén sugerido · sin muestras"
+    },
+    {
+      "id": "ordenes_trabajo",
+      "lane": "procesos",
+      "col": 0,
+      "width": 130,
+      "type": "messagebus",
+      "label": "Órdenes de Trabajo",
+      "sublabel": "bordado / reflejante / corte"
+    },
+    {
+      "id": "trasladar",
+      "lane": "procesos",
+      "col": 1,
+      "width": 120,
+      "type": "backend",
+      "label": "Trasladar Picking",
+      "sublabel": "genera Transferencia"
+    },
+    {
+      "id": "crear_packing",
+      "lane": "almacen",
+      "col": 2,
+      "width": 110,
+      "type": "frontend",
+      "label": "Crear Packing",
+      "sublabel": "cajas + peso"
+    },
+    {
+      "id": "crear_envio",
+      "lane": "despacho",
+      "col": 2,
+      "width": 110,
+      "type": "external",
+      "label": "Crear Envío",
+      "sublabel": "pedido + transportista"
+    },
+    {
+      "id": "crear_despacho",
+      "lane": "despacho",
+      "col": 3,
+      "width": 116,
+      "type": "backend",
+      "label": "Crear Despacho",
+      "sublabel": "+ guía"
+    }
   ],
   "edges": [
-    { "from": "crear_picking", "to": "ordenes_trabajo", "label": "genera, si aplica", "variant": "dashed" },
-    { "from": "crear_picking", "to": "crear_packing", "label": "GET candidatos — ya empacado no sale", "variant": "emphasis" },
-    { "from": "crear_packing", "to": "crear_despacho", "label": "GET candidatos — ya despachado no sale", "variant": "emphasis" },
-    { "from": "crear_envio", "to": "crear_despacho", "label": "opcional, ya existente", "variant": "dashed" }
+    {
+      "from": "programar",
+      "to": "crear_picking",
+      "label": "solo pedidos programados",
+      "variant": "emphasis"
+    },
+    {
+      "from": "crear_picking",
+      "to": "ordenes_trabajo",
+      "label": "si aplica",
+      "variant": "dashed"
+    },
+    {
+      "from": "crear_picking",
+      "to": "trasladar",
+      "label": "a APARTADOS / BORDADOS",
+      "variant": "dashed"
+    },
+    {
+      "from": "crear_picking",
+      "to": "crear_packing",
+      "label": "ya empacado no sale",
+      "variant": "emphasis"
+    },
+    {
+      "from": "crear_packing",
+      "to": "crear_despacho",
+      "label": "ya despachado no sale",
+      "variant": "emphasis"
+    },
+    {
+      "from": "crear_envio",
+      "to": "crear_despacho",
+      "label": "opcional",
+      "variant": "dashed"
+    }
   ]
 }
