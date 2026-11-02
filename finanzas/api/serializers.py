@@ -37,6 +37,7 @@ from finanzas.services.factura_proveedor_montos import (
     encabezado_cuadra,
     totales_desde_lineas,
 )
+from finanzas.scope import por_sucursal
 from finanzas.services.poliza_service import PolizaService
 from finanzas.services.cuenta_por_pagar_service import (
     CuentaPorPagarService,
@@ -1068,9 +1069,11 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
         fields["cliente"].queryset = Cliente.objects.filter(empresa_id=empresa_id, activo=True)
         fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id, activo=True).select_related("moneda")
-        fields["cobro_detalles"].child.fields["cxc"].queryset = CuentaPorCobrar.objects.filter(
+        cxcs = CuentaPorCobrar.objects.filter(
             Q(empresa_id=empresa_id) | Q(empresa__isnull=True, factura__empresa_id=empresa_id)
         )
+        user = getattr(self.context.get("request"), "user", None)
+        fields["cobro_detalles"].child.fields["cxc"].queryset = por_sucursal(cxcs, user, "factura__sucursal") if user else cxcs
         return fields
 
     def validate(self, attrs):

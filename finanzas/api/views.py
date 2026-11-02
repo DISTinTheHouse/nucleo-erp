@@ -103,6 +103,7 @@ from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
 from finanzas.services.reporte_contable_service import LIMITE_OMISION, ReporteContableService
+from finanzas.scope import cobros_por_sucursal, exigir_factura_visible, por_sucursal, sucursales_visibles
 from finanzas.utils.folios import generate_factura_folio
 from nucleo.models import Empresa, Moneda, Sucursal
 
@@ -454,6 +455,7 @@ class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
             qs = qs.filter(
                 Q(empresa=empresa) | Q(empresa__isnull=True, factura__empresa=empresa)
             ).distinct()
+        qs = por_sucursal(qs, user, 'factura__sucursal')
 
         qp = self.request.query_params
         cliente_id = qp.get('cliente') or qp.get('cliente_id')
@@ -557,7 +559,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
                 precio_minimo=_por_factura(Min('precio_unitario')),
                 precio_maximo=_por_factura(Max('precio_unitario')),
             )
-        qs = _aplicar_scope_empresa(qs, user, lookup="empresa")
+        qs = por_sucursal(_aplicar_scope_empresa(qs, user, lookup="empresa"), user, "sucursal")
         qp = self.request.query_params
         cliente_id = qp.get('cliente') or qp.get('cliente_id')
         estatus = (qp.get('estatus') or '').strip()
@@ -612,7 +614,8 @@ class FacturaViewSet(FinanzasBaseViewSet):
         sucursal = getattr(user, "sucursal_default", None)
         if sucursal and getattr(sucursal, "empresa_id", None) == getattr(empresa, "pk", None):
             return sucursal
-        return Sucursal.objects.filter(empresa=empresa, activo=True).order_by("codigo").first()
+        # Nunca una sucursal que el usuario no vería después (#753).
+        return por_sucursal(Sucursal.objects.filter(empresa=empresa, activo=True), user, "pk").order_by("codigo").first()
 
     @action(detail=False, methods=['post'], url_path='registrar-pendiente-cobro')
     def registrar_pendiente_cobro(self, request):
@@ -1907,6 +1910,7 @@ class CobroViewSet(FinanzasBaseViewSet):
             if not empresa:
                 return qs.none()
             qs = qs.filter(empresa=empresa)
+        qs = cobros_por_sucursal(qs, user)
         qp = self.request.query_params
         cliente = qp.get("cliente") or qp.get("cliente_id")
         metodo_pago = (qp.get("metodo_pago") or "").strip()
@@ -2474,6 +2478,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
             if empresa is None:
                 return NotaCredito.objects.none()
             qs = NotaCredito.objects.filter(factura__empresa=empresa)
+        qs = por_sucursal(qs, user, "factura__sucursal")
         qp = self.request.query_params
         cliente = qp.get("cliente") or qp.get("cliente_id")
         estatus = (qp.get("estatus") or "").strip()
@@ -2510,6 +2515,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
                 cli_emp = getattr(cliente, "empresa_id", None)
                 if cli_emp and cli_emp != user_emp.pk:
                     raise ValidationError({"cliente": "Cliente no pertenece a la empresa."})
+        exigir_factura_visible(user, factura)
         detalles_data = serializer.validated_data.pop("nota_credito_detalles", [])
         for detalle_data in detalles_data:
             factura_detalle = detalle_data.get("factura_detalle")
@@ -2592,6 +2598,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
                 fact = getattr(serializer.instance, "factura", None)
                 if fact and getattr(fact, "empresa_id", None) and fact.empresa_id != empresa.pk:
                     raise PermissionDenied()
+        exigir_factura_visible(user, serializer.validated_data.get("factura"))
         # La decisión "esta petición es la que emite" se toma con la fila de la
         # nota bloqueada. Leyendo el estatus previo del objeto cargado antes del
         # lock, dos emisiones concurrentes veían ambas "Borrador" y aplicaban el
@@ -2706,6 +2713,9 @@ class AlertaMoraViewSet(FinanzasBaseReadOnlyViewSet):
             if not empresa:
                 return qs.none()
             qs = qs.filter(empresa=empresa)
+        ids = sucursales_visibles(user)
+        if ids is not None:  # las de CxP siguen por empresa (#753)
+            qs = qs.filter(Q(cuenta_por_cobrar__isnull=True) | Q(cuenta_por_cobrar__factura__sucursal__in=ids))
         qp = self.request.query_params
         tipo_cuenta = (qp.get("tipo_cuenta") or "").strip()
         nivel = (qp.get("nivel") or "").strip()

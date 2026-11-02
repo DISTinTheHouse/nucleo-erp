@@ -2933,6 +2933,7 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 6. **Conciliación preparar** solo recibe `cuenta_bancaria`, `fecha_inicio`, `fecha_final`, `saldo_estado_cuenta`.
 7. **Movimientos bancarios generados por cobros/pagos no se editan**. Se cancelan desde el origen o con su acción de cancelar.
 8. **Líneas hijas solo en `POST`.** `poliza_detalles`, `cobro_detalles`, `pago_detalles`, `nota_credito_detalles`, `factura_proveedor_detalles`: van anidadas al crear el padre. En `PATCH`/`PUT` se ignoran (sin edición de renglones todavía). Para corregir, cancela y crea de nuevo.
+9. **Alcance por sucursal (#753).** Facturas, notas de crédito, CxC, cobros y alertas de mora de CxC se filtran por las sucursales del usuario (`sucursales` + `sucursal_default`). Admin de empresa y superusuario ven toda la empresa. Lo de otra sucursal no aparece en listas ni en la búsqueda, el detalle da `404` y usarlo al crear da `400`. Un cobro con líneas de otra sucursal no aparece. Pólizas, bancos, CxP, conciliaciones y reportes siguen por empresa. Regla en `finanzas/scope.py`.
 
 ### Mapa de trazabilidad por id
 
