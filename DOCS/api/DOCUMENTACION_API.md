@@ -2397,7 +2397,7 @@ Respuesta (`GET` lista/detalle, y `orden_compra` de onboarding/PUT/aceptar) aña
 ### Renglones por SKU (OC de PT)
 
 - **OC de PT por SKU**: en una OC de `tipo_compra=PT` cada renglón debe traer `producto_variante`; sin variante es `400` (`detalle`), salvo al editar una OC legada que ya tenía ese mismo producto sin variante (se conserva).
-- **Moneda por defecto del proveedor**: `GET /api/v1/compras/ordenes/onboarding/` trae en cada `busqueda.proveedores[]` `moneda_id` y `moneda__codigo_iso` (la moneda dada de alta en el proveedor); el front la preselecciona al elegir proveedor. En el `POST`, si `orden_compra.moneda` no viene, la OC toma la moneda del proveedor y, si no hay proveedor, la moneda base de la empresa. La moneda enviada en el body siempre gana.
+- **Moneda por defecto del proveedor**: `GET /api/v1/compras/ordenes/onboarding/` trae en cada `busqueda.proveedores[]` `moneda_id` y `moneda__codigo_iso` (la moneda dada de alta en el proveedor); el front la preselecciona al elegir proveedor. En el `POST`, si `orden_compra.moneda` no viene, la OC toma la moneda del proveedor y, si no hay proveedor, la moneda base de la empresa. La moneda enviada en el body siempre gana. Al editar (`orden_compra_id`), `moneda: null` conserva la moneda guardada. Si la moneda del proveedor es privada de otra empresa, llega `moneda_id: null` y no se usa como default.
 - **Búsqueda**: `GET /api/v1/compras/ordenes/onboarding/?tipo_compra=PT` agrega `busqueda.variantes[]` (`id`, `sku`, `producto_id`, `producto_nombre`, `color`, `talla`, `precio_base`): variantes activas de productos activos de tipo Producto Terminado.
   - `limit` y `producto_q` aplican a todas las listas (como antes). Por lista: `proveedor_limit`, `producto_limit`, `variante_limit` (1–1000; `all`/`0`/`-1` = sin tope) y `variante_q` (SKU o nombre, solo variantes; si viene, `producto_q` ya no filtra variantes).
   - Ej. buscar solo SKU: `?tipo_compra=PT&variante_q=10500&variante_limit=20&proveedor_limit=1&producto_limit=1`.
@@ -5047,6 +5047,7 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
 | ---------------------------------------- | --------- | --------------------------------------------------------------------------------------- |
 | `pedido` / `pedido_id`                   | No        | Activa la precarga del pedido y sus líneas de talla.                                    |
 | `almacen_origen` / `almacen_origen_id`   | No        | Preselecciona el almacén de origen; usado para calcular existencia disponible.          |
+| (listado)                               | —         | Solo pedidos activos, estatus 3/4, programados y **con algo pendiente por surtir** (talla con producto y cantidad > asignada). El alta (POST) rechaza con 400 un pedido inactivo o fuera de estatus 3/4. |
 | `pedidos_limit`                         | No        | Tope del listado `pedidos` (default 50, máx. 500). La respuesta trae `pedidos_truncado: true` si quedaron pedidos fuera. |
 | `almacen_destino` / `almacen_destino_id` | No        | Preselecciona el almacén destino. Si no se envía: el almacén al que apuntan las programaciones del pedido cuando es uno solo (y no es el origen pedido); si no, `APARTADOS`. |
 

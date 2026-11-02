@@ -4,6 +4,7 @@ from rest_framework.exceptions import ValidationError
 from inventarios.models import Almacen
 from nucleo.models import SerieFolio
 from ventas.models import Pedido
+from wms.services.picking_pipeline.pendientes import tiene_pendiente_surtible
 
 
 def folio_preview(empresa, sucursal, tipo_documento="Picking"):
@@ -189,6 +190,9 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids, limite_pedidos=LIMIT
             # Solo se surte lo que mesa de control ya programó (``PATCH /pedidos/{id}/programar/``).
             programacion_conf__programaciones__0__isnull=False,
         )
+        # Sin nada pendiente por surtir no se ofrece: el alta lo rechazaría (#823).
+        # Va antes del tope, para que el corte cuente solo pedidos surtibles.
+        .filter(tiene_pendiente_surtible())
         # ``empresa`` además de cliente/sucursal: ``armar_header_preview`` lee
         # ``pedido.empresa`` para el preview del folio, y sin esto era una
         # consulta suelta por petición.

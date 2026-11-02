@@ -649,6 +649,15 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             productos_qs = productos_qs[:producto_limit]
 
         proveedores = list(proveedores_qs)
+        # Moneda privada de otra empresa: no se ofrece como default (#825).
+        disponibles = set(
+            Moneda.objects.filter(Q(empresa__isnull=True) | Q(empresa=empresa))
+            .filter(pk__in={p["moneda_id"] for p in proveedores})
+            .values_list("pk", flat=True)
+        )
+        for p in proveedores:
+            if p["moneda_id"] not in disponibles:
+                p["moneda_id"] = p["moneda__codigo_iso"] = None
         productos = list(productos_qs)
         # OC de Producto Terminado (``?tipo_compra=PT``): se compra por SKU, así
         # que también viajan las variantes, buscables por SKU o nombre.
@@ -757,8 +766,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
             if not moneda_id and proveedor_id:
                 # Sin moneda en el body: la del proveedor, luego la base de la empresa.
+                # Solo si la moneda está disponible para la empresa (#825).
                 moneda_id = (
                     Proveedor.objects.filter(pk=proveedor_id, empresa=empresa)
+                    .filter(Q(moneda__empresa__isnull=True) | Q(moneda__empresa=empresa))
                     .values_list("moneda_id", flat=True).first()
                 )
             if not moneda_id:
@@ -785,7 +796,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 oc.sucursal_id = sucursal_id
             if not oc.pk or has_proveedor:
                 oc.proveedor_id = proveedor_id
-            if not oc.pk or has_moneda:
+            # Al editar, ``moneda: null`` conserva la guardada, igual que el PUT (#824).
+            if not oc.pk or (has_moneda and header.get("moneda")):
                 oc.moneda_id = moneda_id
             if not oc.pk:
                 # Fecha de generación (EC-395): la fija el servidor al crear y
