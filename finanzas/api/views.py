@@ -2420,9 +2420,33 @@ def _mensaje_transicion_invalida(anterior, solicitado):
 CAMPOS_EDITABLES_NOTA_EMITIDA = {"observaciones", "estatus"}
 
 
+class _EmisionConEstado(Exception):
+    """400 de una emisión que dejó la nota guardada: el cuerpo dice cómo quedó.
+
+    Se responde directo, no con la ``ValidationError`` de DRF, porque ésta
+    convierte cada hoja en texto y ``nota_credito.id`` llegaba como ``"15"`` (#750).
+    """
+
+    def __init__(self, error, nota):
+        super().__init__(error)
+        self.data = {**error.message_dict, "nota_credito": {"id": nota.pk, "estatus": nota.estatus}}
+
+
 class NotaCreditoViewSet(FinanzasBaseViewSet):
     queryset = NotaCredito.objects.all()
     serializer_class = NotaCreditoSerializer
+
+    def check_permissions(self, request):
+        # Crear, editar, borrar, emitir y cancelar mueven la CxC y la póliza: mismo
+        # permiso que cobros y facturas, revisado antes de tocar nada (#752).
+        super().check_permissions(request)
+        if request.method not in SAFE_METHODS and not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
+            raise PermissionDenied("No tienes permiso para registrar o cancelar notas de crédito.")
+
+    def handle_exception(self, exc):
+        if isinstance(exc, _EmisionConEstado):
+            return Response(exc.data, status=status.HTTP_400_BAD_REQUEST)
+        return super().handle_exception(exc)
 
     def get_queryset(self):
         user = self.request.user
@@ -2498,30 +2522,44 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
 
     @staticmethod
     def _aplicar(nota, user, timbra):
-        """Aplica a la CxC. Si se va a timbrar, valida el CFDI aquí, dentro de la transacción:
-        si falta un dato fiscal no se guarda nada (#722). La póliza va después del timbre."""
+        """Aplica a la CxC. Si se va a timbrar, valida el CFDI y la póliza aquí, dentro de la
+        transacción: si falta un dato fiscal o contable no se guarda nada (#722, #749). La
+        póliza se genera después del timbre."""
         NotaCreditoService.aplicar_nota_credito(nota, user, poliza=not timbra)
         if timbra:
             FacturaTimbradoService.preparar_nota(nota)
+            NotaCreditoPolizaService.validar(nota)
 
     @staticmethod
     def _timbrar_al_emitir(nota, user, desde_borrador):
-        """Timbra la nota recién emitida. Si Facturama la rechaza (sin CFDI ni reserva), un
-        Borrador vuelve a Borrador (#723) y un POST se cancela; el 400 dice cómo quedó (#724)."""
-        error = FacturaTimbradoService._timbrar_nota(nota)
-        if error and not nota.cfdi_pendiente:
+        """Timbra la nota recién emitida y responde siempre con cómo quedó (#724).
+
+        - Facturama la rechaza (sin CFDI ni reserva): un Borrador vuelve a Borrador (#723)
+          y un POST se cancela.
+        - Otra petición cambió la nota entre la emisión y el timbre y el segundo
+          ``preparar`` falla (#751): se decide con la nota releída, igual que un rechazo.
+        - Con CFDI o con timbrado sin confirmar, se genera la póliza; si aun así falla,
+          el 400 lo dice junto con la nota (#749).
+        """
+        try:
+            error = FacturaTimbradoService._timbrar_nota(nota)
+        except ErrorDeNegocio as exc:
+            error = exc
+        nota.refresh_from_db()
+        con_cfdi = bool(nota.cfdi_uuid or nota.cfdi_pendiente)
+        if error and not con_cfdi and nota.estatus == NotaCredito.Estatus.EMITIDA:
             if desde_borrador:
                 NotaCreditoService.regresar_a_borrador(nota)
             else:
                 NotaCreditoService.cancelar_nota_credito(nota, user)
             nota.refresh_from_db()
-        else:
-            NotaCreditoPolizaService.generar(nota, user)
+        elif con_cfdi:
+            try:
+                NotaCreditoPolizaService.generar(nota, user)
+            except ErrorDeNegocio as exc:
+                error = error or exc
         if error:
-            raise ValidationError({
-                **error.message_dict,
-                "nota_credito": {"id": nota.pk, "estatus": nota.estatus},
-            })
+            raise _EmisionConEstado(error, nota)
 
     def perform_update(self, serializer):
         with transaction.atomic():

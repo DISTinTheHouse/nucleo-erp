@@ -3319,11 +3319,23 @@ No mandes `pago` dentro de `pago_detalles`: mismo caso.
 ```
 
 - `factura_detalle` debe ser de la misma `factura` de la nota, si no → 400.
-- `estatus: "Emitida"` (POST o PATCH desde Borrador) aplica la nota contra la CxC y, en la empresa de Facturama, timbra el CFDI de egreso:
-  - Exige `E-FIN-FACTURAS`, igual que `timbrar/`; sin él → `403` y no se guarda nada.
-  - Si falta un dato para el CFDI (factura sin timbrar, forma de pago, RFC…) → `400 {"cfdi": [...]}` y **no se guarda nada**.
-  - Si Facturama rechaza → `400` con `cfdi` y `nota_credito: {"id", "estatus"}`. Por POST la nota queda `Cancelada`; por PATCH vuelve a `Borrador` para corregirla. La CxC queda como estaba.
-  - La póliza se genera al timbrar (o si Facturama no confirma), nunca en un rechazo.
+- **Permiso:** toda escritura (`POST`, `PATCH`, `PUT`, `DELETE`, `cancelar/`, `timbrar/`) exige `E-FIN-FACTURAS`; sin él → `403` y no se toca nada. Leer exige `R-CONTABILIDAD`.
+- **Factura válida:** activa (`activo: true`), no cancelada ni en cancelación, con CxC no cancelada y saldo suficiente. Si no → `400` con `factura` o `total`.
+
+**Emitir** (`POST` con `estatus: "Emitida"`, o `PATCH {"estatus": "Emitida"}` sobre un Borrador). En la empresa de Facturama además timbra el CFDI de egreso. Cómo manejar la respuesta en Next.js:
+
+| Respuesta | ¿Trae `nota_credito`? | Cómo quedó | Qué hacer |
+|---|---|---|---|
+| `201`/`200` | — (el cuerpo es la nota) | `Emitida`, CxC rebajada, con `cfdi_uuid` y póliza | Éxito |
+| `400` sin `nota_credito` (claves `cfdi`, `factura`, `total`, `estatus`, `configuracion_contable`, `cuenta_contable`, `poliza`) | No | **No se guardó nada** | Mostrar el error del campo, corregir y reintentar |
+| `400` + `nota_credito.estatus` `Cancelada` (POST) o `Borrador` (PATCH) | Sí | Facturama rechazó; CxC sin cambios | Corregir; por PATCH se reintenta sobre la misma nota |
+| `400` + `nota_credito.estatus` `Emitida` | Sí | CxC rebajada; `cfdi_pendiente: true` (Facturama no confirmó) | **No reintentar**: revisar en Facturama |
+| `403` | No | Nada | Sin `E-FIN-FACTURAS` |
+
+- Regla simple: **si el 400 trae `nota_credito`, la nota existe** con `id` (número) y `estatus`; refresca esa nota en lugar de crear otra. Si no lo trae, no se guardó nada.
+- La configuración contable se valida antes de timbrar, así que un error de cuentas nunca deja una nota timbrada sin póliza.
+- Volver a mandar `{"estatus": "Emitida"}` sobre una nota que ya está `Emitida` responde `200` sin hacer nada (no aplica dos veces). Para saber si el CFDI quedó, lee `cfdi_uuid` y `cfdi_pendiente` de la respuesta, no el código HTTP.
+- **Cancelar:** `POST /notas-credito/{id}/cancelar/` devuelve el importe a la CxC y genera la contrapóliza. Se rechaza si la nota está timbrada o con `cfdi_pendiente`.
 
 #### Factura de proveedor
 
