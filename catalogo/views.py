@@ -2,9 +2,10 @@ from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseForbidden
 from django.middleware.csrf import get_token
+from django.utils.html import escape
 from django.views.decorators.csrf import csrf_protect
 
-from .models import Producto
+from .models import Producto, TipoProducto
 
 
 @login_required
@@ -12,6 +13,10 @@ from .models import Producto
 def importar_productos_excel(request):
     if request.method == "GET":
         csrf_token = get_token(request)
+        tipos = "".join(
+            f'<option value="{t.pk}">{escape(t.codigo)} {escape(t.nombre)}</option>'
+            for t in TipoProducto.objects.filter(activo=True).order_by("codigo")
+        )
         return HttpResponse(
             f"""
             <html>
@@ -20,6 +25,7 @@ def importar_productos_excel(request):
                 <p>Sube un archivo .xlsx con una columna llamada <b>nombre</b> o con el nombre en la primera columna.</p>
                 <form method="post" enctype="multipart/form-data">
                   <input type="hidden" name="csrfmiddlewaretoken" value="{csrf_token}">
+                  <select name="tipo" required>{tipos}</select>
                   <input type="file" name="archivo" accept=".xlsx,.xlsm,.xltx,.xltm" required />
                   <button type="submit">Importar</button>
                 </form>
@@ -34,6 +40,11 @@ def importar_productos_excel(request):
     archivo = request.FILES.get("archivo")
     if not archivo:
         return HttpResponseBadRequest("Falta el archivo.")
+    # Todo producto lleva tipo (MP, PT, ...); el archivo trae sólo nombres.
+    tipo_id = request.POST.get("tipo", "")
+    tipo = TipoProducto.objects.filter(activo=True, pk=tipo_id).first() if tipo_id.isdigit() else None
+    if tipo is None:
+        return HttpResponseBadRequest("Falta el tipo de producto.")
 
     user = request.user
     empresa = getattr(user, "empresa", None)
@@ -98,7 +109,7 @@ def importar_productos_excel(request):
             Producto.objects.filter(empresa=empresa, nombre__in=nombres).values_list("nombre", flat=True)
         )
         nuevos = [
-            Producto(empresa=empresa, nombre=n)
+            Producto(empresa=empresa, nombre=n, tipo=tipo)
             for n in nombres
             if n not in existentes
         ]

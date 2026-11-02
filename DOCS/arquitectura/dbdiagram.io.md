@@ -173,8 +173,7 @@ Table productos {
   id_impuesto int
   id_sat_prodserv int
   id_sat_unidad int
-  // opcional si decides normalizar el "tipo" (hoy en Django es CharField)
-  id_tipo_producto int
+  id_tipo_producto int   // obligatorio: MP, PT, SERVICIO, COMPRAS
 }
 
 Table variantes_producto {

@@ -104,7 +104,7 @@ class ProductoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerial
 
 class ProductoOnboardingSerializer(serializers.ModelSerializer):
     """Alta simplificada de Producto para producción: nombre + tipo + categoria + precio, sin descripcion."""
-    tipo = serializers.PrimaryKeyRelatedField(queryset=TipoProducto.objects.all())
+    tipo = serializers.PrimaryKeyRelatedField(queryset=TipoProducto.objects.filter(activo=True))
     categoria_producto = serializers.PrimaryKeyRelatedField(queryset=CategoriaProducto.objects.all())
     precio_base = serializers.DecimalField(max_digits=10, decimal_places=2)
 
