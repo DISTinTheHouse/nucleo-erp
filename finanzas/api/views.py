@@ -2420,6 +2420,16 @@ def _mensaje_transicion_invalida(anterior, solicitado):
 CAMPOS_EDITABLES_NOTA_EMITIDA = {"observaciones", "estatus"}
 
 
+class TimbradoNotaCreditoFallido(ValidationError):
+    """400 del timbrado fallido al emitir: el error y ``nota_credito`` con cómo quedó (#724).
+    ``ValidationError`` convierte a texto todo valor anidado; ``nota_credito`` se agrega
+    después para que ``id`` llegue como entero."""
+
+    def __init__(self, error, nota):
+        super().__init__(error.message_dict)
+        self.detail["nota_credito"] = {"id": nota.pk, "estatus": nota.estatus}
+
+
 class NotaCreditoViewSet(FinanzasBaseViewSet):
     queryset = NotaCredito.objects.all()
     serializer_class = NotaCreditoSerializer
@@ -2518,10 +2528,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
         else:
             NotaCreditoPolizaService.generar(nota, user)
         if error:
-            raise ValidationError({
-                **error.message_dict,
-                "nota_credito": {"id": nota.pk, "estatus": nota.estatus},
-            })
+            raise TimbradoNotaCreditoFallido(error, nota)
 
     def perform_update(self, serializer):
         with transaction.atomic():
