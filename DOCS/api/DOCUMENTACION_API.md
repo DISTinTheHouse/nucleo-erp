@@ -2396,6 +2396,7 @@ Respuesta (`GET` lista/detalle, y `orden_compra` de onboarding/PUT/aceptar) aña
 
 ### Renglones por SKU (OC de PT)
 
+- **Moneda por defecto del proveedor**: `GET /api/v1/compras/ordenes/onboarding/` trae en cada `busqueda.proveedores[]` `moneda_id` y `moneda__codigo_iso` (la moneda dada de alta en el proveedor); el front la preselecciona al elegir proveedor. En el `POST`, si `orden_compra.moneda` no viene, la OC toma la moneda del proveedor y, si no hay proveedor, la moneda base de la empresa. La moneda enviada en el body siempre gana.
 - **Búsqueda**: `GET /api/v1/compras/ordenes/onboarding/?tipo_compra=PT` agrega `busqueda.variantes[]` (`id`, `sku`, `producto_id`, `producto_nombre`, `color`, `talla`, `precio_base`): variantes activas de productos activos de tipo Producto Terminado.
   - `limit` y `producto_q` aplican a todas las listas (como antes). Por lista: `proveedor_limit`, `producto_limit`, `variante_limit` (1–1000; `all`/`0`/`-1` = sin tope) y `variante_q` (SKU o nombre, solo variantes; si viene, `producto_q` ya no filtra variantes).
   - Ej. buscar solo SKU: `?tipo_compra=PT&variante_q=10500&variante_limit=20&proveedor_limit=1&producto_limit=1`.

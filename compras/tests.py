@@ -433,6 +433,24 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
 
     # --- encabezado: create / edit / PUT ------------------------------------------
 
+    def test_sin_moneda_la_oc_toma_la_del_proveedor(self):
+        Proveedor.objects.filter(pk=self.a["proveedor"].pk).update(moneda=self.moneda_global)
+        api = self._client(self.usuario)
+        prov = next(
+            p for p in api.get(f"{ORDENES_URL}onboarding/").json()["busqueda"]["proveedores"]
+            if p["id"] == self.a["proveedor"].pk
+        )
+        self.assertEqual((prov["moneda_id"], prov["moneda__codigo_iso"]), (self.moneda_global.pk, "USD"))
+        cuerpo = {"orden_compra": {"proveedor": self.a["proveedor"].pk}, "detalle": [self._linea(self.a["producto"])]}
+        resp = api.post(f"{ORDENES_URL}onboarding/", cuerpo, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(OrdenCompra.objects.latest("pk").moneda_id, self.moneda_global.pk)
+        # La moneda elegida en el body manda sobre la del proveedor.
+        cuerpo["orden_compra"]["moneda"] = self.a["moneda"].pk
+        api.post(f"{ORDENES_URL}onboarding/", cuerpo, format="json")
+        self.assertEqual(OrdenCompra.objects.latest("pk").moneda_id, self.a["moneda"].pk)
+
+
     def test_onboarding_crea_rechaza_fk_de_otra_empresa_incluso_al_superusuario(self):
         antes = self._huella()
         base = {"sucursal": self.a["sucursal"].pk, "proveedor": self.a["proveedor"].pk, "moneda": self.a["moneda"].pk}

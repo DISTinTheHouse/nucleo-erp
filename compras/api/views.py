@@ -624,7 +624,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         proveedores_qs = proveedores_qs.order_by("nombre").values(
-            "id", "codigo", "nombre", "razon_social", "rfc"
+            "id", "codigo", "nombre", "razon_social", "rfc",
+            # Moneda dada de alta en el proveedor: el front la preselecciona en la OC.
+            "moneda_id", "moneda__codigo_iso",
         )
         productos_qs = productos_qs.order_by("nombre").values(
             "id", "codigo", "cod_proscai", "nombre", "descripcion", "precio_base"
@@ -742,6 +744,12 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                     raise ValidationError({"sucursal": "Sucursal es requerida."})
                 sucursal_id = suc.pk
 
+            if not moneda_id and proveedor_id:
+                # Sin moneda en el body: la del proveedor, luego la base de la empresa.
+                moneda_id = (
+                    Proveedor.objects.filter(pk=proveedor_id, empresa=empresa)
+                    .values_list("moneda_id", flat=True).first()
+                )
             if not moneda_id:
                 m = self._get_default_moneda(empresa)
                 if not m:
