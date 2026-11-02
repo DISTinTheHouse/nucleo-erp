@@ -922,7 +922,12 @@ class CuentaBancariaSerializer(
 
     class Meta:
         model = CuentaBancaria
-        fields = "__all__"
+        # Credenciales de Open Banking: ni se devuelven ni se aceptan, igual que
+        # en el admin (EC-710). Su cifrado en reposo va en el issue #850.
+        exclude = ("token", "refresh_token")
+        # ``saldo_actual`` lo mueven cobros, pagos y movimientos bancarios; la
+        # sincronización, el día que exista Open Banking (EC-710).
+        read_only_fields = ("saldo_actual", "api_provider", "ultima_sincronizacion")
 
     def validate(self, attrs):
         req = self.context.get("request")
