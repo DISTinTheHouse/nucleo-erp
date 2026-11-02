@@ -12,7 +12,6 @@ semántica del lock.
 
 import importlib
 import inspect
-import itertools
 import time
 from datetime import date, timedelta
 from decimal import Decimal
@@ -104,8 +103,6 @@ POLIZAS_URL = "/api/v1/finanzas/polizas/"
 COBROS_URL = "/api/v1/finanzas/cobros/"
 PAGOS_URL = "/api/v1/finanzas/pagos/"
 NOTAS_CREDITO_URL = "/api/v1/finanzas/notas-credito/"
-# El código de proveedor es único por empresa (#715): cada alta del helper toma uno nuevo.
-CODIGOS_PROVEEDOR = itertools.count(1)
 FACTURAS_PROVEEDOR_URL = "/api/v1/finanzas/facturas-proveedor/"
 
 
@@ -212,7 +209,7 @@ class FinanzasBase(TestCase):
         proveedor = Proveedor.objects.create(
             empresa=empresa, nombre="Proveedor Test", moneda=self.moneda,
             sat_regimen_fiscal=self.sat_regimen_fiscal, sat_forma_pago=self.sat_forma_pago,
-            sat_metodo_pago=self.sat_metodo_pago, codigo=f"PROV-{empresa.pk}-{next(CODIGOS_PROVEEDOR)}", razon_social="Proveedor Test SA",
+            sat_metodo_pago=self.sat_metodo_pago, codigo=Proveedor.siguiente_codigo(empresa), razon_social="Proveedor Test SA",
             telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000",
             email="proveedor@test.mx",
         )
@@ -2287,7 +2284,11 @@ class NotaCreditoTimbraAntesDeGuardar(Defecto9NotaCreditoFechaEmisionYCxCFaltant
         self.assertEqual(r.status_code, 400, r.data)
         nota = NotaCredito.objects.get()
         self.assertEqual(nota.estatus, "Borrador")
-        self.assertEqual(r.data["nota_credito"]["estatus"], "Borrador")
+        # El cuerpo tal como llega al frontend: el motivo en ``cfdi`` e ``id`` entero (#724).
+        self.assertEqual(r.json(), {
+            "cfdi": ["Facturama rechazó el CFDI: x"],
+            "nota_credito": {"id": nota.pk, "estatus": "Borrador"},
+        })
         from finanzas.services.nota_credito_poliza_service import ORIGEN
         self.assertFalse(Poliza.objects.filter(origen_tipo=ORIGEN, origen_id=nota.pk).exists())
 
@@ -5823,7 +5824,7 @@ class FacturamaAccesoTests(TestCase):
             )
             self.assertEqual(r.status_code, 201, r.content)
             self.assertEqual(facturama.faltantes(Cliente.objects.get(pk=r.data["id"])), [])
-            self.assertFalse(r.data["facturama_sincronizado"])
+            self.assertIs(r.data["facturama_sincronizado"], False)
             alta_facturama.assert_not_called()
 
             self.client.force_authenticate(user=self.admin_duena)

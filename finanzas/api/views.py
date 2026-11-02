@@ -2426,7 +2426,7 @@ class TimbradoNotaCreditoFallido(ValidationError):
     después para que ``id`` llegue como entero."""
 
     def __init__(self, error, nota):
-        super().__init__(error.message_dict)
+        super().__init__(get_error_detail(error))
         self.detail["nota_credito"] = {"id": nota.pk, "estatus": nota.estatus}
 
 
