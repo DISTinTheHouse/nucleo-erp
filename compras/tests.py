@@ -1675,6 +1675,7 @@ class RecepcionKpisTests(TestCase):
         data = self._get(root).data
 
         self.assertFalse(data["cumplimiento_cantidad"]["disponible"])
+        self.assertFalse(data["puede_ver_importes"])  # #860
 
     # --- #357/#384/#390: parámetros -------------------------------------------
 
@@ -1982,6 +1983,17 @@ class OrdenCompraKpisTests(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data["ocs_abiertas"]["disponible"])
+        self.assertFalse(resp.data["puede_ver_importes"])
+
+    def test_superusuario_sin_empresa_no_recibe_ceros_como_disponibles(self):
+        # #861: mismo criterio que recepciones y proveedores (#834).
+        root = Usuario.objects.create(username="root", email="root@nowhere.test", is_superuser=True, is_staff=True)
+
+        data = self._get(root).data
+
+        self.assertFalse(data["ocs_abiertas"]["disponible"])
+        self.assertEqual(data["ocs_abiertas"]["motivo"], "Usuario sin empresa asignada.")
+        self.assertFalse(data["puede_ver_importes"])
 
 
 
