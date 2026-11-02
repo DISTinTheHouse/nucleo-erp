@@ -205,7 +205,7 @@ class FinanzasBase(TestCase):
         proveedor = Proveedor.objects.create(
             empresa=empresa, nombre="Proveedor Test", moneda=self.moneda,
             sat_regimen_fiscal=self.sat_regimen_fiscal, sat_forma_pago=self.sat_forma_pago,
-            sat_metodo_pago=self.sat_metodo_pago, codigo=f"PROV-{empresa.pk}", razon_social="Proveedor Test SA",
+            sat_metodo_pago=self.sat_metodo_pago, codigo=Proveedor.siguiente_codigo(empresa), razon_social="Proveedor Test SA",
             telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000",
             email="proveedor@test.mx",
         )
@@ -327,7 +327,7 @@ class Defecto1OnboardingAislamiento(FinanzasBase):
     def test_rechaza_serie_folio_de_otra_empresa(self):
         """``serie_folio`` es el tercer FK escribible del serializer y también
         se resolvía contra el manager por defecto."""
-        serie_ajena = SerieFolio.objects.get(sucursal=self.b["sucursal"])
+        serie_ajena = SerieFolio.objects.get(sucursal=self.b["sucursal"], tipo_documento="Factura")
         payload = self._payload(self.a["pedido"], self.a["talla_pedido"])
         payload["serie_folio"] = serie_ajena.pk
 
@@ -376,7 +376,7 @@ class Defecto1OnboardingAislamiento(FinanzasBase):
     def test_rechaza_factura_sin_lineas(self):
         """Una factura vacía se colaba con total 0.00 y, por el guard de doble
         facturación, dejaba el pedido inhabilitado para siempre."""
-        serie = SerieFolio.objects.get(sucursal=self.a["sucursal"])
+        serie = SerieFolio.objects.get(sucursal=self.a["sucursal"], tipo_documento="Factura")
         client = self._client(self.a["usuario"])
 
         resp = client.post(
@@ -500,7 +500,7 @@ class FacturacionParcialPorTalla(FinanzasBase):
         self.assertIn("pedido", resp.data)
 
     def test_rechaza_cantidades_invalidas_sin_consumir_folio(self):
-        serie = SerieFolio.objects.get(sucursal=self.a["sucursal"])
+        serie = SerieFolio.objects.get(sucursal=self.a["sucursal"], tipo_documento="Factura")
         for cantidad in ("0", "1.5", "-1"):
             with self.subTest(cantidad=cantidad):
                 resp = self._facturar(cantidad)
@@ -2280,7 +2280,11 @@ class NotaCreditoTimbraAntesDeGuardar(Defecto9NotaCreditoFechaEmisionYCxCFaltant
         self.assertEqual(r.status_code, 400, r.data)
         nota = NotaCredito.objects.get()
         self.assertEqual(nota.estatus, "Borrador")
-        self.assertEqual(r.data["nota_credito"]["estatus"], "Borrador")
+        # El cuerpo tal como llega al frontend: el motivo en ``cfdi`` e ``id`` entero (#724).
+        self.assertEqual(r.json(), {
+            "cfdi": ["Facturama rechazó el CFDI: x"],
+            "nota_credito": {"id": nota.pk, "estatus": "Borrador"},
+        })
         from finanzas.services.nota_credito_poliza_service import ORIGEN
         self.assertFalse(Poliza.objects.filter(origen_tipo=ORIGEN, origen_id=nota.pk).exists())
 
@@ -5794,19 +5798,37 @@ class FacturamaAccesoTests(TestCase):
             self.assertEqual(self._get(self.admin_otra, self.CFDI).status_code, 403)
 
     def test_alta_de_cliente_solo_se_sube_a_facturama_desde_la_duena(self):
+        from nucleo.models import SatUsoCfdi
+        from terceros import facturama
+
+        # Completo para Facturama (#659): si la otra empresa no lo sube es por el
+        # candado de la cuenta, no porque le falte algún dato.
+        completo = {
+            "razon_social": "CLI SA DE CV", "rfc": "URE180429TM6", "correo": "pagos@cli.test",
+            "codigo_postal": "64000",
+            "sat_regimen_fiscal": SatRegimenFiscal.objects.create(codigo="601", descripcion="General").pk,
+            "sat_uso_cfdi": SatUsoCfdi.objects.create(codigo="G03", descripcion="Gastos").pk,
+        }
         with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"), patch(
             "terceros.facturama.FacturamaService"
         ) as servicio:
             servicio.return_value.client.post.return_value = {"Id": "x"}
             alta_facturama = servicio.return_value.client.post
             self.client.force_authenticate(user=self.admin_otra)
-            r = self.client.post("/api/v1/terceros/clientes/", {"nombre": "Cliente otra"}, format="json")
+            r = self.client.post(
+                "/api/v1/terceros/clientes/", {**completo, "nombre": "Cliente otra"}, format="json",
+            )
             self.assertEqual(r.status_code, 201, r.content)
+            self.assertEqual(facturama.faltantes(Cliente.objects.get(pk=r.data["id"])), [])
+            self.assertIs(r.data["facturama_sincronizado"], False)
             alta_facturama.assert_not_called()
 
             self.client.force_authenticate(user=self.admin_duena)
-            r = self.client.post("/api/v1/terceros/clientes/", {"nombre": "Cliente dueña"}, format="json")
+            r = self.client.post(
+                "/api/v1/terceros/clientes/", {**completo, "nombre": "Cliente dueña"}, format="json",
+            )
             self.assertEqual(r.status_code, 201, r.content)
+            self.assertTrue(r.data["facturama_sincronizado"])
             alta_facturama.assert_called_once()
 
     def test_paginas_core_de_facturama_solo_superusuario(self):
@@ -5863,7 +5885,7 @@ class FacturasAislamientoY500Tests(FinanzasBase):
 
     def test_patch_con_pedido_o_serie_de_otra_empresa_no_persiste(self):
         factura = self._factura_a()
-        serie_b = SerieFolio.objects.get(empresa=self.b["empresa"])
+        serie_b = SerieFolio.objects.get(empresa=self.b["empresa"], tipo_documento="Factura")
         client = self._client(self.a["usuario"])
 
         for body in ({"pedido": self.b["pedido"].pk}, {"serie_folio": serie_b.pk}):
