@@ -34,7 +34,7 @@
 </head>
 <body>
 <h1>Flujo del CRM</h1>
-<svg viewBox="0 0 1000 440" role="img" aria-label="Flujo: oportunidad, cotización, mesa de control, pedido">
+<svg viewBox="0 0 1000 470" role="img" aria-label="Flujo: oportunidad, seguimientos, cotización, mesa de control, ganada o perdida">
   <defs>
     <marker id="p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--gris)"/></marker>
     <marker id="pv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--verde)"/></marker>
@@ -42,42 +42,49 @@
     <marker id="pm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--morado)"/></marker>
   </defs>
 
-  <!-- Carril 1 -->
-  <rect class="lane" x="20" y="20" width="960" height="170" rx="14"/>
-  <text class="lane-t" x="40" y="46">01 / Vendedor · CRM (nuevo)</text>
+  <!-- Carril 1: lo que guarda la oportunidad (etapa) -->
+  <rect class="lane" x="20" y="20" width="960" height="190" rx="14"/>
+  <text class="lane-t" x="40" y="46">01 / Vendedor · oportunidad (etapa guardada)</text>
 
   <rect class="az" x="50" y="80" width="170" height="64" rx="10"/>
-  <text class="n-t" x="135" y="108">Oportunidad</text><text class="n-s" x="135" y="126">Nueva</text>
+  <text class="n-t" x="135" y="108">Nueva</text><text class="n-s" x="135" y="126">contacto, monto estimado</text>
 
   <rect class="az" x="290" y="80" width="170" height="64" rx="10"/>
-  <text class="n-t" x="375" y="108">Oportunidad</text><text class="n-s" x="375" y="126">Contactada · próximo contacto</text>
+  <text class="n-t" x="375" y="108">Contactada</text><text class="n-s" x="375" y="126">próximo contacto</text>
 
-  <rect class="ro" x="560" y="80" width="170" height="64" rx="10"/>
-  <text class="n-t" x="645" y="108">Perdida</text><text class="n-s" x="645" y="126">motivo obligatorio</text>
+  <rect class="gr" x="530" y="80" width="190" height="64" rx="10"/>
+  <text class="n-t" x="625" y="108">Seguimientos</text><text class="n-s" x="625" y="126">nota · llamada · visita · tarea</text>
+
+  <rect class="ro" x="790" y="80" width="170" height="64" rx="10"/>
+  <text class="n-t" x="875" y="108">Perdida</text><text class="n-s" x="875" y="126">motivo obligatorio</text>
 
   <path class="arr" d="M220 112H288"/><text class="lbl" x="254" y="102">contacta</text>
-  <path class="arr-ro" d="M460 112H558"/><text class="lbl" x="509" y="102">no avanza</text>
+  <path class="arr" d="M460 112H528"/><text class="lbl" x="494" y="102">registra</text>
+  <path class="arr-ro" d="M375 80V62H875V78"/><text class="lbl" x="700" y="56">no avanza (antes de Ganada)</text>
 
-  <!-- Carril 2 -->
-  <rect class="lane" x="20" y="210" width="960" height="210" rx="14"/>
-  <text class="lane-t" x="40" y="236">02 / Flujo existente (no cambia)</text>
+  <!-- Carril 2: lo que se calcula de las cotizaciones -->
+  <rect class="lane" x="20" y="230" width="960" height="220" rx="14"/>
+  <text class="lane-t" x="40" y="256">02 / Cotización · estado calculado (flujo existente)</text>
 
-  <rect class="gr" x="290" y="270" width="170" height="64" rx="10"/>
-  <text class="n-t" x="375" y="298">Cotización</text><text class="n-s" x="375" y="316">Borrador · oportunidad: Cotizada</text>
+  <rect class="gr" x="290" y="290" width="170" height="64" rx="10"/>
+  <text class="n-t" x="375" y="318">Cotizada</text><text class="n-s" x="375" y="336">tiene cotización ligada</text>
 
-  <rect class="gr" x="530" y="270" width="170" height="64" rx="10"/>
-  <text class="n-t" x="615" y="298">En revisión</text><text class="n-s" x="615" y="316">Mesa de control decide</text>
+  <rect class="gr" x="530" y="290" width="190" height="64" rx="10"/>
+  <text class="n-t" x="625" y="318">En revisión</text><text class="n-s" x="625" y="336">Mesa de control decide</text>
 
-  <rect class="ve" x="770" y="270" width="170" height="64" rx="10"/>
-  <text class="n-t" x="855" y="298">Pedido</text><text class="n-s" x="855" y="316">autorizada · oportunidad: Ganada</text>
+  <rect class="ve" x="790" y="290" width="170" height="64" rx="10"/>
+  <text class="n-t" x="875" y="318">Ganada</text><text class="n-s" x="875" y="336">alguna autorizada · pedido</text>
 
   <!-- Oportunidad -> cotización -->
-  <path class="arr-mo" d="M375 144V268"/><text class="lbl" x="408" y="210" style="text-anchor:start">POST /cotizar/ (crea Borrador)</text>
+  <path class="arr-mo" d="M375 144V288"/><text class="lbl" x="388" y="186" style="text-anchor:start">POST /cotizar/ (crea Borrador)</text>
+  <text class="lbl" x="388" y="202" style="text-anchor:start">o POST /cotizaciones/ (liga existentes)</text>
 
-  <path class="arr" d="M460 302H528"/><text class="lbl" x="494" y="292">enviar</text>
-  <path class="arr-ve" d="M700 302H768"/><text class="lbl" x="734" y="292">autoriza</text>
-  <path class="arr-ro" d="M615 334C615 385 375 385 375 336"/><text class="lbl" x="495" y="398">rechaza o pide cambios · vuelve a Borrador</text>
+  <path class="arr" d="M460 322H528"/><text class="lbl" x="494" y="312">enviar</text>
+  <path class="arr-ve" d="M720 322H788"/><text class="lbl" x="754" y="312">autoriza</text>
+  <path class="arr-ro" d="M625 354C625 405 375 405 375 356"/><text class="lbl" x="500" y="420">rechaza o pide cambios · vuelve a Borrador</text>
 </svg>
-<p><b>Cotizada</b> y <b>Ganada</b> no se guardan: se calculan de las cotizaciones ligadas a la oportunidad (con cotización = Cotizada; alguna autorizada = Ganada). Por eso el flujo cotización → mesa de control → pedido no se toca. Una oportunidad Ganada ya no se puede marcar Perdida.</p>
+<p><b>Cotizada</b> y <b>Ganada</b> no se guardan: se calculan de las cotizaciones ligadas (con cotización = Cotizada; alguna autorizada = Ganada). Por eso el flujo cotización → mesa de control → pedido no se toca.</p>
+<p><b>Reglas:</b> cotizar o ligar exige cliente y vendedor activo, y no se puede en Ganada ni Perdida (para vender más, abre otra). Una cotización autorizada no se quita de la oportunidad. Una Ganada no se puede marcar Perdida. Solo el admin de empresa transfiere oportunidades a otro vendedor. El vendedor ve las suyas; el admin, toda la empresa.</p>
+<p><b>API</b> (<code>/api/v1/ventas/</code>): <code>oportunidades/</code> (filtro <code>?estado=</code>), <code>embudo/</code>, <code>{id}/cotizar/</code>, <code>{id}/cotizaciones/</code> (GET/POST, DELETE <code>{id}/cotizaciones/{cot}/</code>), <code>{id}/transferir/</code>, <code>oportunidad-seguimientos/</code> (agenda de pendientes, <code>{id}/completar/</code>). Los recordatorios no avisan solos: el frontend consulta los pendientes.</p>
 </body>
 </html>
