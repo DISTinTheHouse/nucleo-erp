@@ -154,6 +154,7 @@ Table tipo_producto {
 Table categorias_producto {
   id_categoria_producto int [pk]
   id_empresa int
+  linea varchar  // INDUSTRIAL, EMPRESARIAL, ROPA_FRIO, EJECUTIVO, SERVICIOS, EPP, OTROS; vacía = MP
 }
 
 Table colores {
