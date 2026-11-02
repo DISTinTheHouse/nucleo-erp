@@ -1,10 +1,9 @@
 """Pruebas de ``hr``.
 
-Ejecutar SIEMPRE con BD desechable (el ``.env`` del repo apunta a Supabase de
-producción): un módulo de settings que haga ``from ERP.settings import *`` y
-apunte ``DATABASES`` a ``django.db.backends.sqlite3`` / ``:memory:``.
-
-    python manage.py test hr --settings=<ese_modulo>
+No correr con ``manage.py test``: crearía la BD de test en el Supabase de
+producción, y el proyecto ya no usa SQLite. Los cambios se verifican contra
+producción en solo lectura o dentro de una transacción con rollback (ver
+``CLAUDE.md``, sección Pruebas); estos casos documentan el comportamiento esperado.
 """
 
 from datetime import date, datetime, time

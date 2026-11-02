@@ -5,10 +5,10 @@ este endpoint de una fuga cross-tenant), la longitud mínima de ``q``, el tope d
 ``limit``, y que cada entidad conserve EXACTAMENTE el alcance de su propio ViewSet
 —incluidos los scopes extra por ``vendedor``/``vendedores`` que no todas tienen—.
 
-Ejecutar SIEMPRE con una BD desechable; el ``.env`` del repo apunta a Supabase de
-producción. Ejemplo con un settings de override a SQLite en memoria:
-
-    python manage.py test nucleo --settings=sqlite_settings
+No correr con ``manage.py test``: crearía la BD de test en el Supabase de
+producción, y el proyecto ya no usa SQLite. Los cambios se verifican contra
+producción en solo lectura o dentro de una transacción con rollback (ver
+``CLAUDE.md``, sección Pruebas); estos casos documentan el comportamiento esperado.
 """
 
 from unittest.mock import patch

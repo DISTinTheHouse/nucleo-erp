@@ -3,7 +3,7 @@
 Los índices del buscador global son de EXPRESIÓN con opclass
 (``OpClass(Upper("col"), name="text_pattern_ops" | "gin_trgm_ops")``): en
 PostgreSQL son los que sirven a ``UPPER("col"::text) LIKE UPPER(%s)``, que es como
-Django compila ``istartswith``/``icontains``. SQLite —donde corren las pruebas— no
+Django compila ``istartswith``/``icontains``. SQLite no
 conoce los opclasses y el DDL revienta (``near "text_pattern_ops": syntax error``).
 Con un campo simple Django descarta el opclass en SQLite; con una expresión, no.
 

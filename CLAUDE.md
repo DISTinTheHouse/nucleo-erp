@@ -21,7 +21,7 @@ python manage.py makemigrations
 python manage.py migrate
 python manage.py makemigrations --dry-run --check   # what CI enforces — must report "No changes"
 
-# Validation (this is the full CI gate — real tests exist locally but aren't run in CI, see note below)
+# Validation (this is the full CI gate — tests are not run, see Pruebas below)
 python manage.py check
 
 # Operational
@@ -38,9 +38,13 @@ docker compose run --rm web python manage.py migrate   # migrating is manual and
 
 Because of that, the `web` service runs **only** `runserver` and must **never** auto-run `migrate` on `up` — doing so applied every unapplied migration straight to production on each start. Migrating is a deliberate, manual action: `docker compose run --rm web python manage.py migrate`. Production migration policy lives in the `migrate_production` job (see below), not in compose.
 
-Same trap, different command: bare `manage.py test` would try to create its test database on that same production Supabase. Run the suite against an in-memory SQLite override settings module instead — `from ERP.settings import *`, then repoint `DATABASES` at `django.db.backends.sqlite3` / `:memory:`, and pass it with `--settings=`.
+### Pruebas — en producción, sin SQLite
 
-Test coverage is uneven but growing — `produccion`, `ventas`, `wms`, `compras`, `inventarios`, `finanzas`, `hr`, and `nucleo` have a real `tests.py`; the remaining apps have none. Don't infer the list by grepping: `def test_func` elsewhere in the codebase hits `UserPassesTestMixin` permission checks, not tests, and in `produccion` the method count understates the suite because subclassed test cases re-run inherited tests. Trust `manage.py test`. None of this runs in CI — the CI gate is still `manage.py check` + migration-drift check.
+- **Never run `manage.py test`.** There is no test settings module; a bare run creates its test database on the production Supabase (it happened on 2026-08-03 and left an orphaned `test_postgres`). SQLite was dropped on purpose (`a316b99`) and must not come back.
+- **Verify changes against production instead**, from a `manage.py shell -c` script with DRF's `APIClient` + `force_authenticate`:
+  - reads: plain `GET`s (read-only);
+  - writes and migrations: inside `transaction.atomic()` and raise an exception at the end so everything rolls back (`MigrationExecutor(connection).migrate(...)` for an unapplied migration).
+- `*/tests.py` files stay as executable documentation of expected behavior; keep them updated, but they are not a gate. The CI gate is `manage.py check` + migration-drift check only.
 
 ## Database & environments
 
@@ -112,7 +116,7 @@ Two ways to ask, one rule: `tiene_permiso(clave)` for a single key, and **`nucle
 
 - **Primary: Vercel** serverless. `vercel.json` declares an explicit `builds` array pointing at `ERP/wsgi.py` (which exports `app`), so that's the active entrypoint — Vercel ignores `/api` zero-config auto-detection once `builds` is set. `api/index.py` (also `ERP.wsgi.application`, just via the zero-config convention) has no commits since the explicit `builds` config was restored; treat it as likely-dead, not the documented entry, unless verified otherwise against the Vercel dashboard. Logs go to `/tmp/logs` (non-persistent). `/healthz/` is the health endpoint — liveness only (`{"ok": true}`), does not check DB connectivity.
 - **Contingency: Render** via `render.yaml` + `build.sh` (gunicorn; `build.sh` does run `migrate` + `collectstatic` at build time, unlike Vercel where migration is a separate GitHub Actions job — behavior differs under the same code if Render is ever promoted to primary).
-- CI/CD in `.github/workflows/vercel.yml`: PR → `ci` (check, migration-drift check, full test suite against `sqlite_settings`); push to `main` → `ci`, then `migrate_production` (Supabase migrate + axes_reset), then `deploy_production` (`vercel deploy --prod`). The workflow rejects a Supabase URL using the Session pooler (port 5432) — production must use the Transaction pooler (6543). Full pipeline detail: `DOCS/arquitectura/pipeline-despliegue-backend.md`.
+- CI/CD in `.github/workflows/vercel.yml`: PR → `ci` (`manage.py check` + migration-drift check; no tests); push to `main` → `ci`, then `migrate_production` (Supabase migrate + axes_reset), then `deploy_production` (`vercel deploy --prod`). The workflow rejects a Supabase URL using the Session pooler (port 5432) — production must use the Transaction pooler (6543). Full pipeline detail: `DOCS/arquitectura/pipeline-despliegue-backend.md`.
 
 ## Reference docs (Spanish, under `DOCS/`)
 `DOCS/api/DOCUMENTACION_API.md` (endpoint reference), `DOCS/arquitectura/ARQUITECTURA_APP.md` (architecture & security hardening), `DOCS/arquitectura/ESQUEMA_BD.md` (data model), `DOCS/seguridad/CIBERSEGURIDAD.md`/`DOCS/seguridad/SECURITY.md` (security), `DOCS/negocio/ASISTENTE_IA.md` (AI assistant), `DOCS/negocio/GUIA_USUARIO.md` (user manual). Deeper investigation write-ups (architecture audits, flow traces) live alongside them under `DOCS/arquitectura/` and `DOCS/api/`; `DOCS/wms/` and `DOCS/varios/` hold internal planning notes; `DOCS/datos/` holds data exports, not docs.
