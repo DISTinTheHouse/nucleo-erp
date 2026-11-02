@@ -8524,11 +8524,18 @@ class CuentaBancariaSinCredencialesTests(FinanzasBase):
     URL = "/api/v1/finanzas/cuentas-bancarias/"
     TOKENS = ("token", "refresh_token")
     # Lo que el front lee de la cuenta (``CuentaBancaria`` en erp-nextjs-v1).
-    CONTRATO = (
+    CAMPOS_DEL_FRONT = {
         "id", "empresa", "banco", "moneda", "banco_nombre", "moneda_codigo", "alias", "titular",
         "sucursal_bancaria", "numero_cuenta", "clabe", "numero_cliente", "convenio", "fecha_apertura",
-        "saldo_actual", "observaciones", "activo", "created_at", "updated_at", "cuenta_contable",
-    )
+        "saldo_actual", "observaciones", "activo", "created_at", "updated_at",
+    }
+    # Viajan en la respuesta pero el front no los declara: ``cuenta_contable`` lo
+    # usa el backend (plan contable) y los de Open Banking son de solo lectura.
+    CAMPOS_SOLO_BACKEND = {"cuenta_contable", "api_provider", "ultima_sincronizacion"}
+    # Igualdad exacta, no subconjunto: el serializer usa ``exclude``, así que un
+    # campo nuevo del modelo (p. ej. otro secreto de Open Banking, #850) saldría
+    # solo en la API. Esta prueba falla para obligar a decidir si se expone.
+    CONTRATO = CAMPOS_DEL_FRONT | CAMPOS_SOLO_BACKEND
     # Campos que el cliente no debe poder escribir, con valores que se notarían.
     PROHIBIDOS = {
         "token": "tok-del-cliente",
@@ -8561,9 +8568,29 @@ class CuentaBancariaSinCredencialesTests(FinanzasBase):
         self.assertEqual(detalle.status_code, 200)
         for datos in (fila, detalle.data):
             self._sin_tokens(datos)
-            for campo in self.CONTRATO:
-                self.assertIn(campo, datos)
+            self.assertEqual(set(datos), self.CONTRATO)
         self.assertEqual(detalle.data["saldo_actual"], "100.00")
+
+    def test_el_superusuario_crea_en_otra_empresa_sin_escribir_campos_de_solo_lectura(self):
+        # Sin empresa propia: es la rama del mixin en la que ``empresa`` es escribible.
+        root = Usuario.objects.create(username="root-ec710", email="root@ec710.test", is_superuser=True)
+        banco = Banco.objects.create(empresa=self.b["empresa"], nombre="Banco B")
+        payload = {
+            "empresa": self.b["empresa"].pk, "banco": banco.pk, "moneda": self.moneda.pk,
+            "alias": "De root", **self.PROHIBIDOS,
+        }
+        resp = self._client(root).post(self.URL, payload, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self._sin_tokens(resp.data)
+        self.assertEqual(resp.data["empresa"], self.b["empresa"].pk)
+
+        cuenta = CuentaBancaria.objects.get(pk=resp.data["id"])
+        self.assertEqual(cuenta.empresa_id, self.b["empresa"].pk)
+        self.assertEqual(cuenta.saldo_actual, Decimal("0.00"))
+        self.assertIsNone(cuenta.token)
+        self.assertIsNone(cuenta.refresh_token)
+        self.assertIsNone(cuenta.api_provider)
+        self.assertIsNone(cuenta.ultima_sincronizacion)
 
     def test_alta_ignora_los_campos_de_solo_lectura_y_no_devuelve_tokens(self):
         banco = Banco.objects.create(empresa=self.a["empresa"], nombre="Banco Alta")
