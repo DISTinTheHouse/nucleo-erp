@@ -507,8 +507,9 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         paginator = HistorialOrdenesCompraPagination()
         page = paginator.paginate_queryset(qs, request, view=self)
         # Permiso evaluado una vez; las filas se limpian en sitio (#836).
+        ver_montos = puede_ver_contabilidad(request.user)
         data = OrdenCompraSerializer(page, many=True).data
-        if not puede_ver_contabilidad(request.user):
+        if not ver_montos:
             for item in data:
                 quitar_montos_orden_compra(item)
         response = paginator.get_paginated_response(data)
