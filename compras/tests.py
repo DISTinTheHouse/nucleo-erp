@@ -307,13 +307,13 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
             sin_empresa, self.almacen, "empresa", "El usuario no tiene empresa asignada.",
         )
 
-    def test_superusuario_sin_empresa_sigue_recibiendo(self):
+    def test_superusuario_sin_empresa_es_rechazado(self):
+        # Mismo alcance que el GET de onboarding y el listado (#875): antes se
+        # saltaba la pertenencia de la OC/OP y recibía contra cualquier empresa.
         root = Usuario.objects.create(username="r@acme-ra.test", email="r@acme-ra.test", is_superuser=True)
-        resp = self._recibir(root, self.almacen, "2")
-        self.assertEqual(resp.status_code, 200, resp.content)
-        recepcion = Recepcion.objects.get(pk=resp.json()["recepcion"]["id"])
-        self.assertEqual(recepcion.estatus, Recepcion.EstatusRecepcion.EN_CALIDAD)
-        self.assertEqual(RecepcionDetalle.objects.get(recepcion=recepcion).cantidad_recibida, Decimal("2"))
+        self._assert_rechazo_sin_escrituras(
+            root, self.almacen, "empresa", "El usuario no tiene empresa asignada.",
+        )
 
     def test_convencion_de_compras_no_exige_sucursal_asignada_al_usuario(self):
         # Compras acota por empresa; el almacén queda atado a la sucursal de la
