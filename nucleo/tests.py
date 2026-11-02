@@ -1802,24 +1802,17 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
 
 class ConfigSatDesmontadaTests(TestCase):
     """EC-679: ``config-sat`` no acotaba por empresa y devolvía ``password_llave``
-    en claro. Se desmontó; el modelo sigue, pero sus secretos no salen ni por la
-    API ni por el admin."""
+    en claro. Se desmontó y el admin quedó de solo lectura. EC-685: los secretos
+    del CSD (llave, su contraseña y los PEM) ya ni siquiera existen en el modelo."""
 
-    VALOR_PASS = "marcador-uno-ec679"
-    VALOR_CERT = "marcador-dos-ec679"
-    VALOR_LLAVE = "marcador-tres-ec679"
-    RUTA_KEY = "sat/csd/sat-ec679/key_prueba.key"
+    CAMPOS_SECRETOS = ("password_llave", "certificado_pem", "llave_privada_pem", "archivo_key")
 
     @classmethod
     def setUpTestData(cls):
         cls.empresa = Empresa.objects.create(codigo="sat-ec679", razon_social="SAT EC679 SA")
         cls.config = EmpresaSatConfig.objects.create(
             empresa=cls.empresa,
-            password_llave=cls.VALOR_PASS,
-            certificado_pem=cls.VALOR_CERT,
-            llave_privada_pem=cls.VALOR_LLAVE,
             archivo_cer="sat/csd/sat-ec679/cer_prueba.cer",
-            archivo_key=cls.RUTA_KEY,
             no_certificado="30001000000400002434",
         )
         cls.otra = Empresa.objects.create(codigo="otra-ec679", razon_social="OTRA EC679 SA")
@@ -1843,6 +1836,14 @@ class ConfigSatDesmontadaTests(TestCase):
     def _login_admin(self):
         self.client.force_login(self.staff, backend="django.contrib.auth.backends.ModelBackend")
 
+    def test_la_definicion_del_modelo_no_declara_secretos_del_csd(self):
+        """Revisa la definición del modelo (``_meta``), no el esquema de la BD: las
+        columnas siguen ahí hasta que el deploy aplique la migración 0015."""
+        nombres = {f.name for f in EmpresaSatConfig._meta.get_fields()}
+        for campo in self.CAMPOS_SECRETOS:
+            with self.subTest(campo=campo):
+                self.assertNotIn(campo, nombres)
+
     def test_admin_no_muestra_los_secretos(self):
         self._login_admin()
         for url in (
@@ -1852,12 +1853,12 @@ class ConfigSatDesmontadaTests(TestCase):
             with self.subTest(url=url):
                 resp = self.client.get(url)
                 self.assertEqual(resp.status_code, 200)
-                for secreto in (self.VALOR_PASS, self.VALOR_CERT, self.VALOR_LLAVE, self.RUTA_KEY):
-                    self.assertNotContains(resp, secreto)
+                for campo in self.CAMPOS_SECRETOS:
+                    self.assertNotContains(resp, campo)
 
         # Detalle de solo lectura: sin inputs editables, pero con los datos no secretos.
         resp = self.client.get(reverse("admin:nucleo_empresasatconfig_change", args=[self.config.pk]))
-        for campo in ("password_llave", "certificado_pem", "llave_privada_pem", "archivo_key", "archivo_cer"):
+        for campo in (*self.CAMPOS_SECRETOS, "archivo_cer"):
             self.assertNotContains(resp, f'name="{campo}"')
         self.assertContains(resp, "30001000000400002434")
         self.assertContains(resp, "cer_prueba.cer")

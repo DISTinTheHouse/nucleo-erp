@@ -28,13 +28,9 @@ En esta fase se crea la estructura operativa de cada empresa.
    - El sistema valida formato y consistencia del RFC.
 
 2. **Configuración fiscal (SAT)**:
-   - Ve a _Organización > Empresas > Configuración SAT_.
-   - Carga los archivos `.cer` y `.key` con su contraseña.
-   - El sistema valida:
-     - correspondencia entre archivos
-     - contraseña correcta
-     - RFC del certificado
-     - vigencia del certificado
+   - El ERP no tiene pantalla de Configuración SAT ni recibe los archivos `.cer`, `.key` o su contraseña.
+   - El CSD vive en la cuenta de Facturama con la que se timbra; se administra allí, fuera del ERP.
+   - Solo la empresa dueña de esa cuenta (configurada por el equipo técnico) puede timbrar.
 
 3. **Crear sucursales**:
    - Ve a _Organización > Sucursales_.
