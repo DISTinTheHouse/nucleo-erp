@@ -97,6 +97,7 @@ from rest_framework.views import APIView
 from catalogo.api.views import _alcance_empresa as _alcance_empresa_catalogo
 from catalogo.models import ProductoVariante
 from finanzas.api.views import _aplicar_scope_empresa as _aplicar_scope_empresa_finanzas
+from finanzas.scope import por_sucursal as por_sucursal_finanzas
 from finanzas.models import Factura
 from nucleo.permisos import PermisosEfectivos, permisos_efectivos
 from nucleo.utils import entero_acotado
@@ -632,9 +633,9 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         # queryset base; aquí sí se agrega explícito, a propósito (mismo criterio
         # que ``producto``): una factura cancelada/soft-deleted no debe aparecer
         # en un buscador de uso diario.
-        alcance=lambda user: _aplicar_scope_empresa_finanzas(
+        alcance=lambda user: por_sucursal_finanzas(_aplicar_scope_empresa_finanzas(
             Factura.objects.filter(activo=True).select_related("cliente"), user
-        ),
+        ), user, "sucursal"),
         fila=_fila_factura,
         # El folio real es ``FAC-<consecutivo>``: empieza por lo que se teclea, así
         # que va por prefijo (CÓDIGO), como el de pedido.
