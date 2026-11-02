@@ -26,7 +26,7 @@ from drf_spectacular.generators import SchemaGenerator
 from rest_framework.test import APIClient
 from rest_framework.viewsets import ViewSetMixin
 
-from catalogo.models import Producto, Talla
+from catalogo.models import Producto, Talla, TipoProducto
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 from finanzas.api import views as finanzas_views
 from finanzas.api.serializers import CuentaPorPagarSerializer, PolizaDetalleRelacionadoSerializer
@@ -131,7 +131,7 @@ class FinanzasBase(TestCase):
             metodo_pago="PUE",
             uso_cfdi="G03",
         )
-        producto = Producto.objects.create(empresa=empresa, nombre=f"Prod {codigo}")
+        producto = Producto.objects.create(empresa=empresa, nombre=f"Prod {codigo}", tipo=cls.tipo_producto)
         detalle = PedidoDetalle.objects.create(
             pedido=pedido, producto=producto, precio_unitario=Decimal("100.00")
         )
@@ -164,6 +164,7 @@ class FinanzasBase(TestCase):
     def setUpTestData(cls):
         cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
         cls.talla = Talla.objects.create(nombre="M")
+        cls.tipo_producto = TipoProducto.objects.create(codigo="PT")
         cls.sat_regimen_fiscal = SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley")
         cls.sat_forma_pago = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
         cls.sat_metodo_pago = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
@@ -209,7 +210,7 @@ class FinanzasBase(TestCase):
             telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000",
             email="proveedor@test.mx",
         )
-        producto = Producto.objects.create(empresa=empresa, nombre="Insumo Test")
+        producto = Producto.objects.create(empresa=empresa, nombre="Insumo Test", tipo=self.tipo_producto)
         oc = OrdenCompra.objects.create(
             empresa=empresa, sucursal=sucursal, proveedor=proveedor, moneda=self.moneda,
             usuario=usuario, fecha_oc=date.today(),
@@ -8514,6 +8515,141 @@ class LecturasFinanzasPermisoTests(FinanzasBase):
     def test_con_r_contabilidad_las_lecturas_siguen_igual(self):
         resp = self._client(self.a["usuario"]).get("/api/v1/finanzas/cobros/")
         self.assertEqual(resp.status_code, 200)
+
+
+class CuentaBancariaSinCredencialesTests(FinanzasBase):
+    """EC-710: la API de cuentas bancarias no devuelve ni acepta los tokens de Open
+    Banking, y no deja escribir el saldo ni los datos de sincronización."""
+
+    URL = "/api/v1/finanzas/cuentas-bancarias/"
+    TOKENS = ("token", "refresh_token")
+    # Lo que el front lee de la cuenta (``CuentaBancaria`` en erp-nextjs-v1).
+    CAMPOS_DEL_FRONT = {
+        "id", "empresa", "banco", "moneda", "banco_nombre", "moneda_codigo", "alias", "titular",
+        "sucursal_bancaria", "numero_cuenta", "clabe", "numero_cliente", "convenio", "fecha_apertura",
+        "saldo_actual", "observaciones", "activo", "created_at", "updated_at",
+    }
+    # Viajan en la respuesta pero el front no los declara: ``cuenta_contable`` lo
+    # usa el backend (plan contable) y los de Open Banking son de solo lectura.
+    CAMPOS_SOLO_BACKEND = {"cuenta_contable", "api_provider", "ultima_sincronizacion"}
+    # Igualdad exacta, no subconjunto: el serializer usa ``exclude``, así que un
+    # campo nuevo del modelo (p. ej. otro secreto de Open Banking, #850) saldría
+    # solo en la API. Esta prueba falla para obligar a decidir si se expone.
+    CONTRATO = CAMPOS_DEL_FRONT | CAMPOS_SOLO_BACKEND
+    # Campos que el cliente no debe poder escribir, con valores que se notarían.
+    PROHIBIDOS = {
+        "token": "tok-del-cliente",
+        "refresh_token": "ref-del-cliente",
+        "saldo_actual": "999999.99",
+        "api_provider": "proveedor-del-cliente",
+        "ultima_sincronizacion": "2026-01-01T00:00:00Z",
+    }
+
+    def setUp(self):
+        self.cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        CuentaBancaria.objects.filter(pk=self.cuenta.pk).update(
+            token="tok-guardado", refresh_token="ref-guardado", api_provider="prov-guardado",
+            saldo_actual=Decimal("100.00"),
+        )
+
+    def _detalle(self, cuenta=None):
+        return f"{self.URL}{(cuenta or self.cuenta).pk}/"
+
+    def _sin_tokens(self, datos):
+        for campo in self.TOKENS:
+            self.assertNotIn(campo, datos)
+
+    def test_listado_y_detalle_no_traen_los_tokens_y_conservan_el_contrato(self):
+        client = self._client(self.a["usuario"])
+        listado = client.get(self.URL)
+        self.assertEqual(listado.status_code, 200)
+        fila = next(c for c in listado.data if c["id"] == self.cuenta.pk)
+        detalle = client.get(self._detalle())
+        self.assertEqual(detalle.status_code, 200)
+        for datos in (fila, detalle.data):
+            self._sin_tokens(datos)
+            self.assertEqual(set(datos), self.CONTRATO)
+        self.assertEqual(detalle.data["saldo_actual"], "100.00")
+
+    def test_el_superusuario_crea_en_otra_empresa_sin_escribir_campos_de_solo_lectura(self):
+        # Sin empresa propia: es la rama del mixin en la que ``empresa`` es escribible.
+        root = Usuario.objects.create(username="root-ec710", email="root@ec710.test", is_superuser=True)
+        banco = Banco.objects.create(empresa=self.b["empresa"], nombre="Banco B")
+        payload = {
+            "empresa": self.b["empresa"].pk, "banco": banco.pk, "moneda": self.moneda.pk,
+            "alias": "De root", **self.PROHIBIDOS,
+        }
+        resp = self._client(root).post(self.URL, payload, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self._sin_tokens(resp.data)
+        self.assertEqual(resp.data["empresa"], self.b["empresa"].pk)
+
+        cuenta = CuentaBancaria.objects.get(pk=resp.data["id"])
+        self.assertEqual(cuenta.empresa_id, self.b["empresa"].pk)
+        self.assertEqual(cuenta.saldo_actual, Decimal("0.00"))
+        self.assertIsNone(cuenta.token)
+        self.assertIsNone(cuenta.refresh_token)
+        self.assertIsNone(cuenta.api_provider)
+        self.assertIsNone(cuenta.ultima_sincronizacion)
+
+    def test_alta_ignora_los_campos_de_solo_lectura_y_no_devuelve_tokens(self):
+        banco = Banco.objects.create(empresa=self.a["empresa"], nombre="Banco Alta")
+        # Payload del formulario del front (``CuentaBancariaCreate``) más los prohibidos.
+        payload = {
+            "banco": banco.pk, "moneda": self.moneda.pk, "alias": "Nueva", "titular": None,
+            "sucursal_bancaria": None, "numero_cuenta": "0123456789", "clabe": None,
+            "numero_cliente": None, "convenio": None, "fecha_apertura": None, "observaciones": None,
+            **self.PROHIBIDOS,
+        }
+        resp = self._client(self.a["usuario"]).post(self.URL, payload, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self._sin_tokens(resp.data)
+        self.assertEqual(resp.data["saldo_actual"], "0.00")
+
+        cuenta = CuentaBancaria.objects.get(pk=resp.data["id"])
+        self.assertEqual(cuenta.empresa_id, self.a["empresa"].pk)
+        self.assertEqual(cuenta.alias, "Nueva")
+        self.assertEqual(cuenta.saldo_actual, Decimal("0.00"))
+        self.assertIsNone(cuenta.token)
+        self.assertIsNone(cuenta.refresh_token)
+        self.assertIsNone(cuenta.api_provider)
+        self.assertIsNone(cuenta.ultima_sincronizacion)
+
+    def test_edicion_ignora_los_campos_de_solo_lectura_y_no_devuelve_tokens(self):
+        client = self._client(self.a["usuario"])
+        for metodo in ("patch", "put"):
+            with self.subTest(metodo=metodo):
+                payload = {"alias": f"Editada {metodo}", **self.PROHIBIDOS}
+                if metodo == "put":
+                    payload.update(banco=self.cuenta.banco_id, moneda=self.moneda.pk)
+                resp = getattr(client, metodo)(self._detalle(), payload, format="json")
+                self.assertEqual(resp.status_code, 200, resp.data)
+                self._sin_tokens(resp.data)
+
+                cuenta = CuentaBancaria.objects.get(pk=self.cuenta.pk)
+                self.assertEqual(cuenta.alias, f"Editada {metodo}")
+                self.assertEqual(cuenta.token, "tok-guardado")
+                self.assertEqual(cuenta.refresh_token, "ref-guardado")
+                self.assertEqual(cuenta.api_provider, "prov-guardado")
+                self.assertEqual(cuenta.saldo_actual, Decimal("100.00"))
+                self.assertIsNone(cuenta.ultima_sincronizacion)
+
+    def test_activar_y_desactivar_sigue_funcionando(self):
+        client = self._client(self.a["usuario"])
+        for activo in (False, True):
+            with self.subTest(activo=activo):
+                resp = client.patch(self._detalle(), {"activo": activo}, format="json")
+                self.assertEqual(resp.status_code, 200, resp.data)
+                self._sin_tokens(resp.data)
+                self.assertIs(CuentaBancaria.objects.get(pk=self.cuenta.pk).activo, activo)
+
+    def test_otra_empresa_no_ve_ni_edita_la_cuenta(self):
+        client = self._client(self.b["usuario"])
+        self.assertNotIn(self.cuenta.pk, [c["id"] for c in client.get(self.URL).data])
+        self.assertEqual(client.get(self._detalle()).status_code, 404)
+        resp = client.patch(self._detalle(), {"alias": "Ajena"}, format="json")
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(CuentaBancaria.objects.get(pk=self.cuenta.pk).alias, "Cuenta operativa")
 
 
 class EmitirFacturaTests(MotorPolizasBase):
