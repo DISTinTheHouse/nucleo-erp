@@ -1836,7 +1836,9 @@ class ConfigSatDesmontadaTests(TestCase):
     def _login_admin(self):
         self.client.force_login(self.staff, backend="django.contrib.auth.backends.ModelBackend")
 
-    def test_el_modelo_no_guarda_secretos_del_csd(self):
+    def test_la_definicion_del_modelo_no_declara_secretos_del_csd(self):
+        """Revisa la definición del modelo (``_meta``), no el esquema de la BD: las
+        columnas siguen ahí hasta que el deploy aplique la migración 0015."""
         nombres = {f.name for f in EmpresaSatConfig._meta.get_fields()}
         for campo in self.CAMPOS_SECRETOS:
             with self.subTest(campo=campo):
@@ -1849,7 +1851,10 @@ class ConfigSatDesmontadaTests(TestCase):
             reverse("admin:nucleo_empresasatconfig_change", args=[self.config.pk]),
         ):
             with self.subTest(url=url):
-                self.assertEqual(self.client.get(url).status_code, 200)
+                resp = self.client.get(url)
+                self.assertEqual(resp.status_code, 200)
+                for campo in self.CAMPOS_SECRETOS:
+                    self.assertNotContains(resp, campo)
 
         # Detalle de solo lectura: sin inputs editables, pero con los datos no secretos.
         resp = self.client.get(reverse("admin:nucleo_empresasatconfig_change", args=[self.config.pk]))
