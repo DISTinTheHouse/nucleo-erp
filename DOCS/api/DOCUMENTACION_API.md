@@ -1247,6 +1247,7 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
 - `por_estatus` usa como llave el estatus **entero** (en JSON, string: `"3"`), igual que `results[].estatus`.
 - `monto_por_moneda[].total` es string decimal, igual que los montos de `results`.
 - Sin permiso de contabilidad (`puede_ver_contabilidad`): `results[]` omite los campos de montos y `resumen` no trae `monto_por_moneda`. Mismo filtro en `GET /api/v1/compras/ordenes/`.
+- `GET /api/v1/compras/ordenes/`: sin ese permiso, `?ordering=` por un importe (`gran_total`, `subtotal`, `total`, `a_cuenta`, `flete`…) se ignora y queda el orden por defecto (#837). `?search=` busca en folio, referencia y nombre/razón social del proveedor; en `recepciones/` en folio, folio de OC/OP y proveedor; en `terceros/proveedores/` en código, nombre, razón social y RFC (#839).
 
 ### Direcciones Cliente
 
@@ -2402,6 +2403,7 @@ Respuesta (`GET` lista/detalle, y `orden_compra` de onboarding/PUT/aceptar) aña
 - **Búsqueda**: `GET /api/v1/compras/ordenes/onboarding/?tipo_compra=PT` agrega `busqueda.variantes[]` (`id`, `sku`, `producto_id`, `producto_nombre`, `color`, `talla`, `precio_base`): variantes activas de productos activos de tipo Producto Terminado.
   - `limit` y `producto_q` aplican a todas las listas (como antes). Por lista: `proveedor_limit`, `producto_limit`, `variante_limit` (1–1000; `all`/`0`/`-1` = sin tope) y `variante_q` (SKU o nombre, solo variantes; si viene, `producto_q` ya no filtra variantes).
   - Ej. buscar solo SKU: `?tipo_compra=PT&variante_q=10500&variante_limit=20&proveedor_limit=1&producto_limit=1`.
+  - Sin `limit` cada lista se topa a 1000. `busqueda` trae `proveedores_truncado`, `productos_truncado` y `variantes_truncado`: `true` = hay más elementos que el tope; en ese caso busca en el servidor con `*_q` en vez de filtrar localmente (#838).
 - **Escritura** (`POST .../onboarding/` y `PUT`): renglón con `producto_variante` (el producto sale de la variante). Se valida contra el `tipo_compra` efectivo (body, si no el de la OC):
   - OC de `MP` con `producto_variante` → `400 {"detalle": ...}`; cambiar a `MP` una OC con renglones por SKU sin mandar `detalle` → `400 {"tipo_compra": ...}`.
   - La variante debe ser de las que ofrece la búsqueda (activa, producto activo y de PT) o ya estar en la OC; si no → `400 {"detalle": ...}`.
@@ -2818,8 +2820,8 @@ Distintos de `/dashboard/` de arriba: cada uno es la tarjeta de KPIs de **una pa
 - **Nunca se suman monedas ni unidades de medida distintas**: los montos vienen por moneda (cada fila con monto trae `moneda`) y las cantidades por unidad. Con más de una unidad, `cantidad_*`/`pct` agregados vienen `null` y `mezcla_unidades: true`; usar `por_unidad`. `unidad: null` = productos sin unidad capturada.
 - **Drill-down acotado**: máximo 20 filas, con `drill_down_total` y `drill_down_truncado`.
 - **Criterios compartidos** entre `recepciones/kpis/` y `proveedores/kpis/` (`compras/services/kpi_criterios.py`): OC *comprometida* = activa en Autorizada/Parcial/Recibida; *recibido neto* = recibido en recepciones de OC − rechazado por Calidad (igual que el estatus de la OC); *rechazo* = renglón de Calidad con `resultado = rechazo` en una recepción de **OC** (las de producción no cuentan); *diferencia de precio* = facturas `Registrada` y activas, solo si factura y OC están en la misma moneda.
-- **Superusuario**: ve todas las empresas (como el listado), con o sin empresa asignada. Un usuario normal sin empresa recibe `disponible: false` + `motivo`.
-- **Permiso de contabilidad** (mismo criterio que el listado de OC, `puede_ver_contabilidad`): sin permiso, `ordenes/kpis/` omite los `monto` y `gasto_por_categoria` llega como `{"disponible": false, "motivo": "Sin permiso de contabilidad."}`; `recepciones/kpis/` hace lo mismo con `diferencia_precio` y omite `valor_rechazado`, `por_moneda` y `valor_linea` de `material_rechazado`. Conteos y cantidades no cambian.
+- **Superusuario**: acotado a su empresa, igual que cualquier usuario y que el listado de OC (#834). Sin empresa (superusuario incluido) recibe `disponible: false` + `motivo`. El listado y el detalle de proveedores y recepciones siguen la misma regla: sin empresa, `[]` y `404`.
+- **Permiso de contabilidad** (mismo criterio que el listado de OC, `puede_ver_contabilidad`): sin permiso, `ordenes/kpis/` omite los `monto` y `gasto_por_categoria` llega como `{"disponible": false, "motivo": "Sin permiso de contabilidad."}`; `recepciones/kpis/` hace lo mismo con `diferencia_precio` y omite `valor_rechazado`, `por_moneda` y `valor_linea` de `material_rechazado`. Conteos y cantidades no cambian. Los 3 KPIs traen `"puede_ver_importes": true|false` con ese mismo criterio: úsalo para decidir si mostrar montos, no el texto de `motivo` (#841).
 
 ### Órdenes de Compra — `GET /api/v1/compras/ordenes/kpis/`
 

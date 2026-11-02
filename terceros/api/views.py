@@ -437,14 +437,15 @@ def _fecha_param(request, nombre):
 class ProveedorViewSet(viewsets.ModelViewSet):
     queryset = Proveedor.objects.filter(activo=True)
     serializer_class = ProveedorSerializer
+    # ``?search=`` se publicaba en el schema y se ignoraba sin esto (#839).
+    search_fields = ["codigo", "nombre", "razon_social", "rfc"]
 
     def get_queryset(self):
         user = self.request.user
         # Listado más reciente primero por fecha de alta del proveedor;
-        # ``-id`` como desempate estable.
+        # ``-id`` como desempate estable. Siempre la empresa del usuario,
+        # superusuario incluido: mismo alcance que el listado de OC (#834).
         qs = super().get_queryset().order_by("-fecha_alta", "-id")
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if empresa:
             return qs.filter(empresa=empresa)
@@ -470,8 +471,8 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         from compras.models import OrdenCompra
         from compras.api.serializers import OrdenCompraSerializer
         from compras.services.orden_compra_view_service import (
-            filtrar_campos_contabilidad_orden_compra,
             puede_ver_contabilidad,
+            quitar_montos_orden_compra,
         )
 
         proveedor = self.get_object()
@@ -505,11 +506,11 @@ class ProveedorViewSet(viewsets.ModelViewSet):
 
         paginator = HistorialOrdenesCompraPagination()
         page = paginator.paginate_queryset(qs, request, view=self)
-        ver_montos = puede_ver_contabilidad(request.user)
-        data = [
-            item if ver_montos else filtrar_campos_contabilidad_orden_compra(item, request.user)
-            for item in OrdenCompraSerializer(page, many=True).data
-        ]
+        # Permiso evaluado una vez; las filas se limpian en sitio (#836).
+        data = OrdenCompraSerializer(page, many=True).data
+        if not puede_ver_contabilidad(request.user):
+            for item in data:
+                quitar_montos_orden_compra(item)
         response = paginator.get_paginated_response(data)
 
         resumen = {
@@ -537,18 +538,16 @@ class ProveedorViewSet(viewsets.ModelViewSet):
     PARAMS_KPIS = {"proveedor", "sucursal", "fecha_desde", "fecha_hasta", "meta_scorecard", "limite"}
 
     def _alcance_kpis(self, request):
-        """Mismo alcance que el listado de proveedores: el superusuario ve
-        todas las empresas, el resto la suya; ``None`` si no hay empresa."""
+        """Mismo alcance que el listado de proveedores: la empresa del usuario,
+        superusuario incluido (#834); ``None`` si no hay empresa."""
         from compras.services.kpi_criterios import AlcanceCompras
 
-        user = request.user
-        es_superusuario = getattr(user, "is_superuser", False)
-        empresa = getattr(user, "empresa", None)
-        if empresa is None and not es_superusuario:
+        empresa = getattr(request.user, "empresa", None)
+        if empresa is None:
             return None
         fecha_desde, fecha_hasta = rango_fechas(request)
         return AlcanceCompras(
-            empresa=None if es_superusuario else empresa,
+            empresa=empresa,
             sucursal_id=entero_param(request, "sucursal"),
             proveedor_id=entero_param(request, "proveedor"),
             fecha_desde=fecha_desde,
@@ -592,10 +591,14 @@ class ProveedorViewSet(viewsets.ModelViewSet):
                 "truncado": False,
             })
 
+        from compras.services.orden_compra_view_service import puede_ver_contabilidad
+
         proveedores = calcular_scorecards(alcance, meta)
         return Response({
             "generado_en": timezone.now(),
             "disponible": True,
+            # Señal explícita para el front (#841), mismo criterio que OC.
+            "puede_ver_importes": puede_ver_contabilidad(request.user),
             "filtros": {**alcance.como_dict(), "meta_scorecard": meta, "limite": limite},
             "proveedores": proveedores[:limite],
             "total_proveedores": len(proveedores),

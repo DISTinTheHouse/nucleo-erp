@@ -59,6 +59,23 @@ def _drop_keys(d: dict, keys: list) -> None:
         d.pop(k, None)
 
 
+def quitar_montos_orden_compra(data) -> None:
+    """Quita en sitio los importes de una OC serializada (y de sus anidados).
+
+    Para listados: el permiso se evalúa una vez por petición y cada fila ya es
+    una copia propia del serializer, así que no hace falta ``deepcopy`` (#836).
+    """
+    _drop_keys(data, CAMPOS_CONTABILIDAD_OC)
+
+    for det in data.get("detalles") or []:
+        _drop_keys(det, CAMPOS_CONTABILIDAD_OC_DETALLE)
+
+    for rec in data.get("recepciones") or []:
+        _drop_keys(rec, CAMPOS_CONTABILIDAD_OC_RECEPCION)
+        for rd in rec.get("detalles") or []:
+            _drop_keys(rd, CAMPOS_CONTABILIDAD_OC_RECEPCION_DETALLE)
+
+
 def filtrar_campos_contabilidad_orden_compra(data, user):
     if puede_ver_contabilidad(user):
         return data
@@ -68,16 +85,7 @@ def filtrar_campos_contabilidad_orden_compra(data, user):
         logger.warning("No se pudo copiar serializer.data en filtro contabilidad OC")
         return data
 
-    _drop_keys(cleaned, CAMPOS_CONTABILIDAD_OC)
-
-    for det in cleaned.get("detalles") or []:
-        _drop_keys(det, CAMPOS_CONTABILIDAD_OC_DETALLE)
-
-    for rec in cleaned.get("recepciones") or []:
-        _drop_keys(rec, CAMPOS_CONTABILIDAD_OC_RECEPCION)
-        for rd in rec.get("detalles") or []:
-            _drop_keys(rd, CAMPOS_CONTABILIDAD_OC_RECEPCION_DETALLE)
-
+    quitar_montos_orden_compra(cleaned)
     return cleaned
 
 

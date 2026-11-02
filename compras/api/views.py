@@ -7,6 +7,7 @@ from django.db.models import Count, ExpressionWrapper, F, Prefetch, Q, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
+from rest_framework.filters import OrderingFilter
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
@@ -60,9 +61,11 @@ from compras.api.serializers import (
     RecepcionRFIDLecturaInputSerializer,
 )
 from compras.services.orden_compra_view_service import (
+    CAMPOS_CONTABILIDAD_OC,
     SIN_PERMISO_CONTABILIDAD,
     puede_ver_contabilidad,
     quitar_montos,
+    quitar_montos_orden_compra,
 )
 from hr.models import Empleado
 from inventarios.models import (
@@ -86,9 +89,30 @@ PERMISO_EDITAR_RUTA_CRITICA_OC = "E-COMPRAS-OC"
 _ip_auditoria = ip_auditoria
 
 
+class OrdenamientoSinMontosFilter(OrderingFilter):
+    """``?ordering=`` sin los importes que el usuario no puede ver (#837).
+
+    Ordenar por ``gran_total`` aunque la respuesta lo oculte deja deducir qué
+    OC cuesta más. Esos campos se descartan en silencio y queda el orden por
+    defecto de la vista, igual que con cualquier campo inválido.
+    """
+
+    def remove_invalid_fields(self, queryset, fields, view, request):
+        validos = super().remove_invalid_fields(queryset, fields, view, request)
+        if view.ver_montos():
+            return validos
+        return [f for f in validos if f.lstrip("-") not in CAMPOS_CONTABILIDAD_OC]
+
+
 class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = OrdenCompra.objects.filter(activo=True)
     serializer_class = OrdenCompraSerializer
+    filter_backends = [
+        *[b for b in viewsets.ReadOnlyModelViewSet.filter_backends if b is not OrderingFilter],
+        OrdenamientoSinMontosFilter,
+    ]
+    # ``?search=`` se publicaba en el schema y se ignoraba sin esto (#839).
+    search_fields = ["folio", "referencia", "proveedor__nombre", "proveedor__razon_social"]
 
     # Máquina de estados de la OC, en un solo lugar (mismo estilo que
     # ``ComprasDashboardView.ESTATUS_*_OC``). La recepción usa
@@ -208,21 +232,20 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             return OrdenCompraRetrieveSerializer
         return OrdenCompraSerializer
 
+    def ver_montos(self):
+        # Una sola evaluación por petición: ``puede_ver_contabilidad`` consulta
+        # los roles del usuario y antes se repetía por cada fila (#836).
+        if not hasattr(self, "_ver_montos"):
+            self._ver_montos = puede_ver_contabilidad(self.request.user)
+        return self._ver_montos
+
     def list(self, request, *args, **kwargs):
-        from compras.services.orden_compra_view_service import (
-            filtrar_campos_contabilidad_orden_compra,
-            puede_ver_contabilidad,
-        )
         response = super().list(request, *args, **kwargs)
-        if puede_ver_contabilidad(request.user):
+        if self.ver_montos():
             return response
         paginado = isinstance(response.data, dict) and "results" in response.data
-        filas = response.data["results"] if paginado else response.data
-        filas = [filtrar_campos_contabilidad_orden_compra(f, request.user) for f in filas]
-        if paginado:
-            response.data["results"] = filas
-        else:
-            response.data = filas
+        for fila in response.data["results"] if paginado else response.data:
+            quitar_montos_orden_compra(fila)
         return response
 
     def retrieve(self, request, *args, **kwargs):
@@ -645,12 +668,15 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             "id", "codigo", "cod_proscai", "nombre", "descripcion", "precio_base"
         )
 
-        if proveedor_limit is not None:
-            proveedores_qs = proveedores_qs[:proveedor_limit]
-        if producto_limit is not None:
-            productos_qs = productos_qs[:producto_limit]
+        # Se pide un elemento de más para saber si la lista quedó recortada sin
+        # contar todo el catálogo (``*_truncado``, #838).
+        def _recortar(qs, tope):
+            if tope is None:
+                return list(qs), False
+            filas = list(qs[: tope + 1])
+            return filas[:tope], len(filas) > tope
 
-        proveedores = list(proveedores_qs)
+        proveedores, proveedores_truncado = _recortar(proveedores_qs, proveedor_limit)
         # Moneda privada de otra empresa: no se ofrece como default (#825).
         disponibles = set(
             Moneda.objects.filter(Q(empresa__isnull=True) | Q(empresa=empresa))
@@ -660,10 +686,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         for p in proveedores:
             if p["moneda_id"] not in disponibles:
                 p["moneda_id"] = p["moneda__codigo_iso"] = None
-        productos = list(productos_qs)
+        productos, productos_truncado = _recortar(productos_qs, producto_limit)
         # OC de Producto Terminado (``?tipo_compra=PT``): se compra por SKU, así
         # que también viajan las variantes, buscables por SKU o nombre.
         variantes = []
+        variantes_truncado = False
         if (request.query_params.get("tipo_compra") or "").strip().upper() == OrdenCompra.TipoCompra.PRODUCTO_TERMINADO:
             variantes_qs = ProductoVariante.objects.filter(self.VARIANTE_COMPRABLE)
             if empresa:
@@ -676,15 +703,14 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             variantes_qs = variantes_qs.order_by("sku").values(
                 "id", "sku", "producto_id", "producto__nombre", "color__nombre", "talla__nombre", "precio_base",
             )
-            if variante_limit is not None:
-                variantes_qs = variantes_qs[:variante_limit]
+            filas_variantes, variantes_truncado = _recortar(variantes_qs, variante_limit)
             variantes = [
                 {
                     "id": v["id"], "sku": v["sku"], "producto_id": v["producto_id"],
                     "producto_nombre": v["producto__nombre"], "color": v["color__nombre"],
                     "talla": v["talla__nombre"], "precio_base": v["precio_base"],
                 }
-                for v in variantes_qs
+                for v in filas_variantes
             ]
         sucursales = []
         if empresa:
@@ -709,6 +735,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 "proveedores": proveedores,
                 "productos": productos,
                 "variantes": variantes,
+                "proveedores_truncado": proveedores_truncado,
+                "productos_truncado": productos_truncado,
+                "variantes_truncado": variantes_truncado,
             },
         }
 
@@ -1085,7 +1114,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             },
             "gasto_por_categoria": self._kpi_gasto_por_categoria(base),
         }
-        if not puede_ver_contabilidad(user):
+        # Señal explícita para el front (#841): no puede deducirla de las claves
+        # de departamento de los roles, que no viajan en la sesión.
+        data["puede_ver_importes"] = puede_ver_contabilidad(user)
+        if not data["puede_ver_importes"]:
             quitar_montos(data["ocs_abiertas"], ["monto"])
             data["gasto_por_categoria"] = SIN_PERMISO_CONTABILIDAD
         return Response(data)
@@ -1190,6 +1222,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     )
     serializer_class = RecepcionSerializer
     http_method_names = ["get", "post"]
+    # ``?search=`` se publicaba en el schema y se ignoraba sin esto (#839).
+    search_fields = ["folio", "orden_compra__folio", "op__folio_op", "proveedor__nombre"]
 
     # Estatus de OC contra los que se puede recibir (onboarding GET y POST).
     ESTATUS_OC_RECIBIBLES = {
@@ -1233,17 +1267,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 )
             qs = qs.filter(tipo_origen=tipo_origen)
 
-        # El superusuario se evalúa ANTES del filtro por empresa: con el orden
-        # inverso, un superusuario CON empresa asignada quedaba acotado a esa
-        # empresa en vez de ver todas. Mismo orden que
-        # ``PedidoViewSet``/``EmpleadoViewSet.get_queryset()``.
+        # Siempre la empresa del usuario, superusuario incluido: mismo alcance
+        # que el listado de OC, para que la pantalla de Compras cuadre (#834).
         empresa = getattr(user, "empresa", None)
-        if getattr(user, "is_superuser", False):
-            pass
-        elif empresa:
-            qs = qs.filter(empresa=empresa)
-        else:
+        if not empresa:
             return qs.none()
+        qs = qs.filter(empresa=empresa)
 
         # Filtro opcional por tipo de la OC de origen: MP (serie OC) / PT (serie O).
         # Es del listado: no altera el retrieve, y va después del alcance por
@@ -2026,15 +2055,14 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         user = request.user
         validar_parametros(request, self.PARAMS_KPIS)
         fecha_desde, fecha_hasta = rango_fechas(request)
-        # Mismo alcance que el listado (``get_queryset``): el superusuario ve
-        # todas las empresas, tenga o no empresa asignada; el resto, la suya.
-        es_superusuario = getattr(user, "is_superuser", False)
+        # Mismo alcance que el listado (``get_queryset``): la empresa del
+        # usuario, superusuario incluido (#834).
         empresa = getattr(user, "empresa", None)
-        if empresa is None and not es_superusuario:
+        if empresa is None:
             return Response(self._kpis_vacio())
 
         alcance = AlcanceCompras(
-            empresa=None if es_superusuario else empresa,
+            empresa=empresa,
             sucursal_id=entero_param(request, "sucursal"),
             proveedor_id=entero_param(request, "proveedor"),
             fecha_desde=fecha_desde,
@@ -2049,7 +2077,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             "diferencia_precio": self._kpi_diferencia_precio(alcance),
             "material_rechazado": self._kpi_material_rechazado(alcance),
         }
-        if not puede_ver_contabilidad(user):
+        data["puede_ver_importes"] = puede_ver_contabilidad(user)
+        if not data["puede_ver_importes"]:
             data["diferencia_precio"] = SIN_PERMISO_CONTABILIDAD
             quitar_montos(data["material_rechazado"], ["valor_rechazado", "valor_linea"])
             data["material_rechazado"].pop("por_moneda", None)
