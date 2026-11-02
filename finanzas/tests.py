@@ -12,6 +12,7 @@ semántica del lock.
 
 import importlib
 import inspect
+import itertools
 import time
 from datetime import date, timedelta
 from decimal import Decimal
@@ -103,6 +104,8 @@ POLIZAS_URL = "/api/v1/finanzas/polizas/"
 COBROS_URL = "/api/v1/finanzas/cobros/"
 PAGOS_URL = "/api/v1/finanzas/pagos/"
 NOTAS_CREDITO_URL = "/api/v1/finanzas/notas-credito/"
+# El código de proveedor es único por empresa (#715): cada alta del helper toma uno nuevo.
+CODIGOS_PROVEEDOR = itertools.count(1)
 FACTURAS_PROVEEDOR_URL = "/api/v1/finanzas/facturas-proveedor/"
 
 
@@ -209,7 +212,7 @@ class FinanzasBase(TestCase):
         proveedor = Proveedor.objects.create(
             empresa=empresa, nombre="Proveedor Test", moneda=self.moneda,
             sat_regimen_fiscal=self.sat_regimen_fiscal, sat_forma_pago=self.sat_forma_pago,
-            sat_metodo_pago=self.sat_metodo_pago, codigo=f"PROV-{empresa.pk}", razon_social="Proveedor Test SA",
+            sat_metodo_pago=self.sat_metodo_pago, codigo=f"PROV-{empresa.pk}-{next(CODIGOS_PROVEEDOR)}", razon_social="Proveedor Test SA",
             telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000",
             email="proveedor@test.mx",
         )
