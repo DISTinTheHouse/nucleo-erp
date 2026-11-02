@@ -2994,6 +2994,14 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 - `list`/`retrieve` de `facturas-proveedor` exponen `tiene_pdf_adjunto` (bool); **no** devuelven el binario (`pdf_adjunto` se excluye del serializer a propósito).
 - Deliberadamente simple: nada de storage en disco ni de servicios externos (Vercel serverless tiene filesystem efímero, y esto se va a Oracle OCI pronto) — el PDF vive como bytes en Postgres igual en cualquier infraestructura.
 
+### Permisos de finanzas (#856, EC-711)
+
+Aplica a todo `/api/v1/finanzas/` salvo Facturama (`facturama/...`) y el webhook de Syncfy:
+
+- **Leer** (`GET`, y los `POST` que solo calculan, como `polizas/{id}/validar-cuadre/`) exige `R-CONTABILIDAD`. Sin él → `403 {"detail": "Usted no tiene permiso para realizar esta acción."}`.
+- **Escribir** (`POST`, `PUT`, `PATCH`, `DELETE` y acciones como `cancelar/`, `generar/`, `desde-pedido/`, `onboarding/` POST, `adjuntar-pdf/`, `syncfy/sessions/`) exige `E-FIN-FACTURAS`. Sin él → `403 {"detail": "No tienes permiso para modificar datos de finanzas."}` (cobros, pólizas, conciliaciones y notas de crédito conservan su mensaje propio). Se revisa antes de validar el body: el `403` no trae datos ni errores de campo.
+- Superusuario y admin de empresa pasan siempre. Otra empresa sigue siendo `404`.
+
 ### Catálogo oficial de endpoints
 
 | Pantalla Next.js         | Endpoint principal                                    | Acciones útiles                                                                                           | Ids clave                                                   |
@@ -3379,7 +3387,7 @@ No mandes `pago` dentro de `pago_detalles`: mismo caso.
 
 #### Pólizas y conciliaciones bancarias
 
-- **Permiso:** toda escritura en `polizas/` y `conciliaciones-bancarias/` (`POST`, `PATCH`, `PUT`, `DELETE`, `cerrar/`, `cancelar/`, `preparar/`) exige `E-FIN-FACTURAS`; sin él → `403`. Excepción: `POST polizas/validar-cuadre/` sólo calcula y no lo exige.
+- **Permiso:** toda escritura en `polizas/` y `conciliaciones-bancarias/` (`POST`, `PATCH`, `PUT`, `DELETE`, `cerrar/`, `cancelar/`, `preparar/`) exige `E-FIN-FACTURAS`; sin él → `403`. Excepción: `POST polizas/validar-cuadre/` sólo calcula: exige `R-CONTABILIDAD`, no `E-FIN-FACTURAS`.
 - **Cancelar una conciliación `Cerrada`:** sus movimientos bancarios regresan a `Pendiente` (salvo los que estén en otra conciliación cerrada) y la conciliación queda `Cancelada`. Refresca la lista de movimientos después.
 
 #### Clientes contabilidad

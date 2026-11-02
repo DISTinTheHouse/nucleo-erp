@@ -354,30 +354,35 @@ class BorradoProtegidoComo409Mixin:
 # HTTP cambia: ``AlertaMoraViewSet`` sigue siendo de sólo lectura y
 # ``DashboardFinancieroViewSet`` sigue sin rutas de detalle. El mapeo de choques
 # de concurrencia a 409 va en las mismas bases por la misma razón.
-class LecturaContabilidad(BasePermission):
-    """Las lecturas de finanzas exigen ``R-CONTABILIDAD`` (#636). Las escrituras no cambian:
-    cada acción conserva su propio chequeo. Superusuario y admin de empresa pasan siempre."""
+class PermisoFinanzas(BasePermission):
+    """Lecturas: ``R-CONTABILIDAD`` (#636). Escrituras: ``E-FIN-FACTURAS`` (#856), revisado
+    antes de validar el body. Un POST que solo lee se declara en ``acciones_de_lectura`` del
+    viewset y se trata como lectura. Superusuario y admin de empresa pasan siempre."""
 
     def has_permission(self, request, view):
-        return request.method not in SAFE_METHODS or 'R-CONTABILIDAD' in permisos_efectivos(request.user)
+        permisos = permisos_efectivos(request.user)
+        if request.method in SAFE_METHODS or getattr(view, "action", None) in getattr(view, "acciones_de_lectura", ()):
+            return 'R-CONTABILIDAD' in permisos
+        self.message = getattr(view, "mensaje_sin_permiso_escritura", "No tienes permiso para modificar datos de finanzas.")
+        return PERMISO_CANCELAR_FACTURA in permisos
 
 
 class FinanzasBaseViewSet(
     BorradoProtegidoComo409Mixin, ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ModelViewSet
 ):
-    permission_classes = [IsAuthenticated, LecturaContabilidad]
+    permission_classes = [IsAuthenticated, PermisoFinanzas]
 
 
 class FinanzasBaseReadOnlyViewSet(
     BorradoProtegidoComo409Mixin, ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ReadOnlyModelViewSet
 ):
-    permission_classes = [IsAuthenticated, LecturaContabilidad]
+    permission_classes = [IsAuthenticated, PermisoFinanzas]
 
 
 class FinanzasBaseSimpleViewSet(
     BorradoProtegidoComo409Mixin, ConcurrencyConflictsAs409Mixin, ErroresDeNegocioComo400Mixin, viewsets.ViewSet
 ):
-    permission_classes = [IsAuthenticated, LecturaContabilidad]
+    permission_classes = [IsAuthenticated, PermisoFinanzas]
 
 
 def _aplicar_filtros_fecha(qs, params, fecha_campo="fecha"):
@@ -1243,17 +1248,10 @@ class PolizaViewSet(FinanzasBaseViewSet):
     queryset = Poliza.objects.prefetch_related("poliza_detalles")
     serializer_class = PolizaSerializer
 
-    def check_permissions(self, request):
-        # Crear, editar, borrar, contabilizar y cancelar (que genera contrapóliza)
-        # son asientos: permiso de escritura de finanzas, como cobros (#826).
-        # ``validar-cuadre`` es un POST que solo lee.
-        super().check_permissions(request)
-        if (
-            request.method not in SAFE_METHODS
-            and getattr(self, "action", None) != "validar_cuadre"
-            and not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA)
-        ):
-            raise PermissionDenied("No tienes permiso para registrar o cancelar pólizas.")
+    # Crear, editar, borrar, contabilizar y cancelar (que genera contrapóliza) son
+    # asientos (#826). ``validar-cuadre`` es un POST que solo lee.
+    acciones_de_lectura = {"validar_cuadre"}
+    mensaje_sin_permiso_escritura = "No tienes permiso para registrar o cancelar pólizas."
 
     def get_queryset(self):
         user = self.request.user
@@ -1932,12 +1930,8 @@ class CobroViewSet(FinanzasBaseViewSet):
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha_cobro")
         return _aplicar_ordering(qs, qp, ["-fecha_cobro", "-id"])
 
-    def check_permissions(self, request):
-        # Mueve CxC, banco y póliza: mismo permiso que emitir/cancelar factura (#581),
-        # revisado antes de validar el body (#589).
-        super().check_permissions(request)
-        if request.method not in SAFE_METHODS and not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
-            raise PermissionDenied("No tienes permiso para registrar o cancelar cobros.")
+    # Mueve CxC, banco y póliza (#581), revisado antes de validar el body (#589).
+    mensaje_sin_permiso_escritura = "No tienes permiso para registrar o cancelar cobros."
 
     @transaction.atomic
     def perform_create(self, serializer):
@@ -2280,12 +2274,8 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
     queryset = ConciliacionBancaria.objects.all()
     serializer_class = ConciliacionBancariaSerializer
 
-    def check_permissions(self, request):
-        # Preparar, cerrar y cancelar cambian el estatus de los movimientos del
-        # banco: permiso de escritura de finanzas, como cobros (#827).
-        super().check_permissions(request)
-        if request.method not in SAFE_METHODS and not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
-            raise PermissionDenied("No tienes permiso para conciliar cuentas bancarias.")
+    # Preparar, cerrar y cancelar cambian el estatus de los movimientos del banco (#827).
+    mensaje_sin_permiso_escritura = "No tienes permiso para conciliar cuentas bancarias."
 
     def get_queryset(self):
         user = self.request.user
@@ -2462,12 +2452,8 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
     queryset = NotaCredito.objects.all()
     serializer_class = NotaCreditoSerializer
 
-    def check_permissions(self, request):
-        # Crear, editar, borrar, emitir y cancelar mueven la CxC y la póliza: mismo
-        # permiso que cobros y facturas, revisado antes de tocar nada (#752).
-        super().check_permissions(request)
-        if request.method not in SAFE_METHODS and not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
-            raise PermissionDenied("No tienes permiso para registrar o cancelar notas de crédito.")
+    # Crear, editar, borrar, emitir y cancelar mueven la CxC y la póliza (#752).
+    mensaje_sin_permiso_escritura = "No tienes permiso para registrar o cancelar notas de crédito."
 
     def get_queryset(self):
         user = self.request.user
@@ -3089,6 +3075,8 @@ class FacturamaCfdiEmisionViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet
             return self.handle_facturama_error(exc)
 
 class SyncfySessionViewSet(ErroresDeNegocioComo400Mixin, viewsets.ViewSet):
+    # Abrir sesión de vinculación bancaria es escritura de finanzas (#856).
+    permission_classes = [IsAuthenticated, PermisoFinanzas]
     client_class = SyncfyClient
 
     def get_client(self):
