@@ -1,9 +1,9 @@
 """Tests del scope multi-tenant de ``PedidoViewSet``.
 
-Ejecutar SIEMPRE con una BD desechable; el ``.env`` del repo apunta a Supabase
-de producción. Ejemplo con un settings de override a SQLite en memoria:
-
-    python manage.py test ventas --settings=sqlite_settings
+No correr con ``manage.py test``: crearía la BD de test en el Supabase de
+producción, y el proyecto ya no usa SQLite. Los cambios se verifican contra
+producción en solo lectura o dentro de una transacción con rollback (ver
+``CLAUDE.md``, sección Pruebas); estos casos documentan el comportamiento esperado.
 """
 
 import time

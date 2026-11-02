@@ -1,13 +1,9 @@
 """Verificación de los 4 defectos corregidos en ``finanzas``.
 
-Ejecutar SIEMPRE con BD desechable (el ``.env`` del repo apunta a Supabase de
-producción):
-
-    python manage.py test finanzas --settings=sqlite_settings
-
-Nota: SQLite ignora ``select_for_update()`` (Django lo omite en backends sin
-soporte), así que estos tests cubren el filtro por empresa y los guards, no la
-semántica del lock.
+No correr con ``manage.py test``: crearía la BD de test en el Supabase de
+producción, y el proyecto ya no usa SQLite. Los cambios se verifican contra
+producción en solo lectura o dentro de una transacción con rollback (ver
+``CLAUDE.md``, sección Pruebas); estos casos documentan el comportamiento esperado.
 """
 
 import importlib

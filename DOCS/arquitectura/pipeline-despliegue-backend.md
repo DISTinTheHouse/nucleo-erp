@@ -14,8 +14,7 @@ flowchart TD
         C2["pip install -r requirements.txt"]
         C3["manage.py check"]
         C4["makemigrations --dry-run --check"]
-        C5["manage.py test --settings=sqlite_settings"]
-        C1 --> C2 --> C3 --> C4 --> C5
+        C1 --> C2 --> C3 --> C4
     end
 
     CI -->|solo en PR: termina aquí| DONE_PR["✅ status check en el PR"]
@@ -57,9 +56,10 @@ flowchart TD
 |---|---|---|
 | `manage.py check` | system checks de Django | ninguna (no conecta) |
 | `makemigrations --dry-run --check` | que no falten migraciones por generar | ninguna |
-| `manage.py test --settings=sqlite_settings` | suite completa (446 tests: produccion, ventas, wms, compras, inventarios, finanzas, hr, nucleo) | SQLite en memoria — **nunca** Supabase |
 
-Este último paso se agregó recientemente (antes solo corrían los dos primeros). En un PR, `ci` es el único job que corre — es el gate de revisión. En push a `main`, si `ci` falla, `migrate_production` y `deploy_production` ni siquiera arrancan (`needs: [ci]`).
+**No corre tests.** La suite en SQLite se quitó en `a316b99` y no vuelve. Los cambios se verifican contra producción: lecturas con `GET` y escrituras o migraciones dentro de una transacción con rollback (ver `CLAUDE.md`, sección Pruebas). Nunca `manage.py test`: crearía la BD de test en Supabase.
+
+En un PR, `ci` es el único job que corre — es el gate de revisión. En push a `main`, si `ci` falla, `migrate_production` y `deploy_production` ni siquiera arrancan (`needs: [ci]`).
 
 ## 2. `migrate_production` — solo en push a `main`, después de `ci`
 
