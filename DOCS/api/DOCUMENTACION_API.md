@@ -1249,6 +1249,13 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
 - `monto_por_moneda[].total` es string decimal, igual que los montos de `results`.
 - Sin permiso de contabilidad (`puede_ver_contabilidad`): `results[]` omite los campos de montos y `resumen` no trae `monto_por_moneda`. Mismo filtro en `GET /api/v1/compras/ordenes/`.
 - `GET /api/v1/compras/ordenes/`: sin ese permiso, `?ordering=` por un importe (`gran_total`, `subtotal`, `total`, `a_cuenta`, `flete`…) se ignora y queda el orden por defecto (#837). `?search=` busca en folio, referencia y nombre/razón social del proveedor; en `recepciones/` en folio, folio de OC/OP y proveedor; en `terceros/proveedores/` en código, nombre, razón social y RFC (#839).
+- **Paginación, orden y filtros de servidor** en `GET /api/v1/compras/ordenes/`, `compras/recepciones/` y `terceros/proveedores/` (#863):
+  - `?limit=&offset=` → `{count, next, previous, results}`; `limit` se topa en 500. Sin `?limit=` sigue llegando la lista completa.
+  - `?ordering=` acepta solo una lista blanca (campo inválido → orden por defecto). OC: `id`, `folio`, `referencia`, `tipo_compra`, `tipo`, `fecha_oc`, `fecha_entrega_estimada`, `fecha_autorizacion`, `fecha_vencimiento`, `estatus`, `proveedor__nombre`, `sucursal__nombre`, `moneda__codigo_iso`, `pedido__folio`, `total_piezas`, los importes (solo con contabilidad), `created_at`, `updated_at`. Recepciones: `id`, `folio`, `tipo_origen`, `fecha_recepcion`, `estatus`, `remision`, `factura_referencia`, `proveedor__nombre`, `almacen__nombre`, `orden_compra__folio`, `orden_compra__tipo_compra`, `created_at`, `updated_at`. Proveedores: `id`, `codigo`, `nombre`, `razon_social`, `rfc`, `tipo`, `ciudad`, `estado`, `contacto_principal`, `email`, `telefono`, `fecha_alta`, `fecha_baja`, `fecha_ultima_compra`, `plazo_dias`, `dias_credito`, `activo`, `created_at`, `updated_at`.
+  - Con `?ordering=` siempre se agrega `id` como último desempate (`-id` si el primer campo es descendente).
+  - OC y recepciones: `?estatus=` (entero), `?proveedor=`, `?sucursal=` (ids), `?fecha_desde=`/`?fecha_hasta=` (`YYYY-MM-DD`, sobre `fecha_oc` o el día de `fecha_recepcion`). Inválidos → `400`.
+  - Proveedores: `?activo=true|false` (default `true`; `false` lista las bajas). El detalle sigue siendo solo de activos.
+  - Todo se combina con `?search=`.
 
 ### Direcciones Cliente
 

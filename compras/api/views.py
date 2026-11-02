@@ -41,6 +41,7 @@ from compras.services.kpi_criterios import (
     rechazos_oc,
 )
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
+from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, filtrar_listado_compras
 from compras.api.serializers import (
     CalidadInspeccionInputSerializer,
     CalidadInspeccionSerializer,
@@ -89,7 +90,7 @@ PERMISO_EDITAR_RUTA_CRITICA_OC = "E-COMPRAS-OC"
 _ip_auditoria = ip_auditoria
 
 
-class OrdenamientoSinMontosFilter(OrderingFilter):
+class OrdenamientoSinMontosFilter(OrdenamientoEstableFilter):
     """``?ordering=`` sin los importes que el usuario no puede ver (#837).
 
     Ordenar por ``gran_total`` aunque la respuesta lo oculte deja deducir qué
@@ -113,6 +114,15 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     ]
     # ``?search=`` se publicaba en el schema y se ignoraba sin esto (#839).
     search_fields = ["folio", "referencia", "proveedor__nombre", "proveedor__razon_social"]
+    pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= regresa la lista completa
+    # Lista blanca de ``?ordering=`` (#863); los importes los quita
+    # ``OrdenamientoSinMontosFilter`` a quien no puede verlos.
+    ordering_fields = [
+        "id", "folio", "referencia", "tipo_compra", "tipo", "fecha_oc", "fecha_entrega_estimada",
+        "fecha_autorizacion", "fecha_vencimiento", "estatus", "proveedor__nombre", "sucursal__nombre",
+        "moneda__codigo_iso", "pedido__folio", "total_piezas", *CAMPOS_CONTABILIDAD_OC,
+        "created_at", "updated_at",
+    ]
 
     # Máquina de estados de la OC, en un solo lugar (mismo estilo que
     # ``ComprasDashboardView.ESTATUS_*_OC``). La recepción usa
@@ -168,6 +178,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         elif self.action not in ('cancelar', 'aceptar'):
             # list y las acciones de listado (historial, etc.) serializan ``pedidos``.
             qs = qs.prefetch_related('pedidos')
+        if self.action == "list":
+            # Filtros de servidor (#863), después del alcance por empresa.
+            qs = filtrar_listado_compras(
+                self.request, qs, OrdenCompra.EstatusOrdenCompra.values, "fecha_oc",
+            )
         # Listado más reciente primero; ``-id`` como desempate estable. Es el
         # orden de las órdenes de compra en sí: el ``order_by`` de arriba es del
         # Prefetch de recepciones anidadas y solo aplica en ``retrieve``.
@@ -1223,6 +1238,17 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     http_method_names = ["get", "post"]
     # ``?search=`` se publicaba en el schema y se ignoraba sin esto (#839).
     search_fields = ["folio", "orden_compra__folio", "op__folio_op", "proveedor__nombre"]
+    pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= regresa la lista completa
+    filter_backends = [
+        *[b for b in viewsets.ReadOnlyModelViewSet.filter_backends if b is not OrderingFilter],
+        OrdenamientoEstableFilter,
+    ]
+    # Lista blanca de ``?ordering=`` (#863).
+    ordering_fields = [
+        "id", "folio", "tipo_origen", "fecha_recepcion", "estatus", "remision", "factura_referencia",
+        "proveedor__nombre", "almacen__nombre", "orden_compra__folio", "orden_compra__tipo_compra",
+        "created_at", "updated_at",
+    ]
 
     # Estatus de OC contra los que se puede recibir (onboarding GET y POST).
     ESTATUS_OC_RECIBIBLES = {
@@ -1282,6 +1308,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 if tipo_compra not in OrdenCompra.TipoCompra.values:
                     raise ValidationError({"tipo_compra": "Valor inválido. Usa MP (OC) o PT (O)."})
                 qs = qs.filter(orden_compra__tipo_compra=tipo_compra)
+            # Filtros de servidor (#863); la fecha es el día local de la recepción.
+            qs = filtrar_listado_compras(
+                self.request, qs, Recepcion.EstatusRecepcion.values, "fecha_recepcion__date",
+            )
         return qs
 
     def get_serializer_class(self):
