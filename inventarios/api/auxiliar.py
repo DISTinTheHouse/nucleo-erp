@@ -97,6 +97,8 @@ def _documento(m):
         return "ORDEN_PRODUCCION", m["movimiento_inventario__op__folio_op"]
     if m["movimiento_inventario__ajuste_inventario_id"]:
         return "AJUSTE", f"AJ-{m['movimiento_inventario__ajuste_inventario_id']}"
+    if m["movimiento_inventario__factura_id"]:
+        return "FACTURA", m["movimiento_inventario__factura__folio"]
     if m["movimiento_inventario__pedido_id"]:
         return "PEDIDO", m["movimiento_inventario__pedido__folio"]
     return "MOVIMIENTO_MANUAL", None
@@ -124,7 +126,11 @@ def _deltas_ajuste(user, ajuste_ids):
     return deltas
 
 
-def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None, alcance=None):
+LIMITE_RENGLONES = 500
+LIMITE_RENGLONES_MAX = 5000
+
+
+def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None, alcance=None, limite=LIMITE_RENGLONES):
     """Filas del auxiliar en orden cronológico con saldo y costo promedio.
 
     ``alcance``: ``None`` sin restricción (superuser) o ``(almacen_ids,
@@ -179,6 +185,8 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None, al
             "movimiento_inventario__ajuste_inventario__almacen__nombre",
             "movimiento_inventario__pedido_id",
             "movimiento_inventario__pedido__folio",
+            "movimiento_inventario__factura_id",
+            "movimiento_inventario__factura__folio",
         )
     )
     if not user.is_superuser:
@@ -345,5 +353,8 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None, al
             "costo_promedio": str(costo_promedio.quantize(Decimal("0.01"))),
             "total_registros": len(filas),
         },
-        "results": filas,
+        # El saldo se calcula con toda la historia, pero la respuesta lleva solo
+        # los ``limite`` renglones más recientes del rango (#807).
+        "results_truncado": len(filas) > limite,
+        "results": filas[-limite:],
     }

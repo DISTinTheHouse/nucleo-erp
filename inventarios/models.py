@@ -184,6 +184,8 @@ class MovimientoInventario(StatusLifecycleModel):
     recepcion = models.ForeignKey('compras.Recepcion', on_delete=models.CASCADE, null=True, blank=True)
     transferencia = models.ForeignKey('wms.Transferencia', on_delete=models.CASCADE, null=True, blank=True)
     op = models.ForeignKey('produccion.OrdenProduccion', on_delete=models.CASCADE, null=True, blank=True)
+    # Reintegro / redescuento generado por una factura: su documento de origen (#804).
+    factura = models.ForeignKey('finanzas.Factura', on_delete=models.SET_NULL, null=True, blank=True, related_name="movimientos_inventario")
 
     class Meta:
         db_table = "movimientos_inventario"
