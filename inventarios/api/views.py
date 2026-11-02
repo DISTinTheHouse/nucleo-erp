@@ -232,11 +232,18 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         # ``nulls_last``: ``fecha_actualizacion`` se agregó como NULL-able
         # (migración 0011) y las filas previas siguen en NULL; en PostgreSQL un
         # DESC pone los NULL primero y se llevarían el ``limit`` entero.
-        qs = qs.order_by(models.F("fecha_actualizacion").desc(nulls_last=True), "-id")
-        if limit is None:
-            return qs
-        limit = max(1, min(limit, 2000))
-        return qs[:limit]
+        self._limite_listado = None if limit is None else max(1, min(limit, 2000))
+        return qs.order_by(models.F("fecha_actualizacion").desc(nulls_last=True), "-id")
+
+    def filter_queryset(self, queryset):
+        # El recorte por ``limit`` es solo del listado y va al final, después de
+        # ``?ordering=``. En ``get_queryset`` rompía ``get_object`` (detalle
+        # propio = 404) y el ``OrderingFilter`` (500) sobre el slice (#835).
+        queryset = super().filter_queryset(queryset)
+        limite = getattr(self, "_limite_listado", None)
+        if self.action == "list" and limite is not None:
+            return queryset[:limite]
+        return queryset
 
     def _validar_acceso_almacen(self, almacen):
         # Antes del save(): el almacén destino debe estar en el alcance del
