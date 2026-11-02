@@ -2895,102 +2895,73 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 }
             )
 
-        detalle_ids = list(
-            PedidoDetalle.objects.filter(pedido=pedido).values_list("pk", flat=True)
-        )
-        talla_ids = list(
-            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido).values_list(
-                "pk", flat=True
-            )
-        )
-
-        if detalle_ids:
-            if FacturaDetalle.objects.filter(pedido_detalle_id__in=detalle_ids).exists():
-                bloqueos.append(
-                    {
-                        "tipo": "factura_detalle_ligado",
-                        "accion_requerida": "Cancelar la factura y limpiar su detalle antes de editar el pedido.",
-                    }
-                )
-            if NotaCreditoDetalle.objects.filter(
-                factura_detalle__pedido_detalle_id__in=detalle_ids
-            ).exists():
-                bloqueos.append(
-                    {
-                        "tipo": "nota_credito_ligada",
-                        "accion_requerida": "Revisar/cancelar la nota de crédito ligada antes de editar el pedido.",
-                    }
-                )
-            if OrdenBordadoDetalle.objects.filter(pedido_detalle_id__in=detalle_ids).exists():
-                bloqueos.append(
-                    {
-                        "tipo": "orden_bordado_detalle_ligado",
-                        "accion_requerida": "Dar de baja los renglones de bordado ligados antes de editar el pedido.",
-                    }
-                )
-            if OrdenReflejanteDetalle.objects.filter(
-                pedido_detalle_id__in=detalle_ids
-            ).exists():
-                bloqueos.append(
-                    {
-                        "tipo": "orden_reflejante_detalle_ligado",
-                        "accion_requerida": "Dar de baja los renglones de reflejante ligados antes de editar el pedido.",
-                    }
-                )
-            if OrdenCorteMangaDetalle.objects.filter(
-                pedido_detalle_id__in=detalle_ids
-            ).exists():
-                bloqueos.append(
-                    {
-                        "tipo": "orden_corte_manga_detalle_ligado",
-                        "accion_requerida": "Dar de baja los renglones de corte de manga ligados antes de editar el pedido.",
-                    }
-                )
-            if OrdenProduccionDetalle.objects.filter(
-                pedido_detalle_id__in=detalle_ids
-            ).exists():
-                bloqueos.append(
-                    {
-                        "tipo": "orden_produccion_detalle_ligado",
-                        "accion_requerida": "Dar de baja los renglones de producción ligados antes de editar el pedido.",
-                    }
-                )
-            if PickingDetalle.objects.filter(pedido_detalle_id__in=detalle_ids).exists():
-                bloqueos.append(
-                    {
-                        "tipo": "picking_detalle_ligado",
-                        "accion_requerida": "Cancelar el picking y sus líneas antes de editar el pedido.",
-                    }
-                )
-            if inventario_reservas.objects.filter(
-                pedido_detalle_id__in=detalle_ids
-            ).exclude(
-                estado__in=[
-                    inventario_reservas.Estado.CANCELADA,
-                    inventario_reservas.Estado.LIBERADA,
-                ]
-            ).exists():
-                bloqueos.append(
-                    {
-                        "tipo": "reserva_inventario_activa",
-                        "accion_requerida": "Liberar o cancelar las reservas de inventario antes de editar el pedido.",
-                    }
-                )
-
-        if talla_ids and inventario_reservas.objects.filter(
-            pedido_detalle_talla_id__in=talla_ids
-        ).exclude(
+        # Los vínculos por renglón se revisan en UNA consulta (un ``EXISTS`` por
+        # tipo) en vez de dos listas de ids y una consulta por tipo. Mismo
+        # orden y mismo criterio: todo cuelga de ``pedido_detalle__pedido``.
+        reserva_viva = ~Q(
             estado__in=[
                 inventario_reservas.Estado.CANCELADA,
                 inventario_reservas.Estado.LIBERADA,
             ]
-        ).exists():
-            bloqueos.append(
-                {
-                    "tipo": "reserva_talla_activa",
-                    "accion_requerida": "Liberar o cancelar las reservas por talla antes de editar el pedido.",
-                }
-            )
+        )
+        vinculos = [
+            (
+                "factura_detalle_ligado",
+                FacturaDetalle.objects.filter(pedido_detalle__pedido_id=OuterRef("pk")),
+                "Cancelar la factura y limpiar su detalle antes de editar el pedido.",
+            ),
+            (
+                "nota_credito_ligada",
+                NotaCreditoDetalle.objects.filter(factura_detalle__pedido_detalle__pedido_id=OuterRef("pk")),
+                "Revisar/cancelar la nota de crédito ligada antes de editar el pedido.",
+            ),
+            (
+                "orden_bordado_detalle_ligado",
+                OrdenBordadoDetalle.objects.filter(pedido_detalle__pedido_id=OuterRef("pk")),
+                "Dar de baja los renglones de bordado ligados antes de editar el pedido.",
+            ),
+            (
+                "orden_reflejante_detalle_ligado",
+                OrdenReflejanteDetalle.objects.filter(pedido_detalle__pedido_id=OuterRef("pk")),
+                "Dar de baja los renglones de reflejante ligados antes de editar el pedido.",
+            ),
+            (
+                "orden_corte_manga_detalle_ligado",
+                OrdenCorteMangaDetalle.objects.filter(pedido_detalle__pedido_id=OuterRef("pk")),
+                "Dar de baja los renglones de corte de manga ligados antes de editar el pedido.",
+            ),
+            (
+                "orden_produccion_detalle_ligado",
+                OrdenProduccionDetalle.objects.filter(pedido_detalle__pedido_id=OuterRef("pk")),
+                "Dar de baja los renglones de producción ligados antes de editar el pedido.",
+            ),
+            (
+                "picking_detalle_ligado",
+                PickingDetalle.objects.filter(pedido_detalle__pedido_id=OuterRef("pk")),
+                "Cancelar el picking y sus líneas antes de editar el pedido.",
+            ),
+            (
+                "reserva_inventario_activa",
+                inventario_reservas.objects.filter(reserva_viva, pedido_detalle__pedido_id=OuterRef("pk")),
+                "Liberar o cancelar las reservas de inventario antes de editar el pedido.",
+            ),
+            (
+                "reserva_talla_activa",
+                inventario_reservas.objects.filter(
+                    reserva_viva, pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk")
+                ),
+                "Liberar o cancelar las reservas por talla antes de editar el pedido.",
+            ),
+        ]
+        hay = (
+            Pedido.objects.filter(pk=pedido.pk)
+            .annotate(**{tipo: Exists(sub) for tipo, sub, _ in vinculos})
+            .values(*[tipo for tipo, _, _ in vinculos])
+            .first()
+        ) or {}
+        for tipo, _, accion in vinculos:
+            if hay.get(tipo):
+                bloqueos.append({"tipo": tipo, "accion_requerida": accion})
 
         return bloqueos
 

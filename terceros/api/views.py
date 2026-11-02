@@ -46,7 +46,9 @@ class ClienteViewSetMesaControl(viewsets.ModelViewSet):
         # ``Cliente.objects``, con lo que perdía el ``activo=True`` de su propio
         # ``queryset`` de clase y servía clientes borrados; tampoco aplicaba el
         # scope por ``vendedores`` ni la política de superusuario.
-        return clientes_visibles(super().get_queryset(), self.request.user)
+        # ``vendedores`` en una sola consulta, igual que ``ClienteViewSet``: sin
+        # el prefetch era una consulta por cliente.
+        return clientes_visibles(super().get_queryset(), self.request.user).prefetch_related("vendedores")
 
 class ClienteViewSet(viewsets.ModelViewSet):
     queryset = clientes_base()
