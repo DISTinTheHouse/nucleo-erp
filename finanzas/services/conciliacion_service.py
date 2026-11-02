@@ -234,3 +234,29 @@ class ConciliacionService:
         conciliacion.estatus = ConciliacionBancaria.Estatus.CERRADA
         conciliacion.save(update_fields=["estatus", "updated_at"])
         return conciliacion
+
+    @staticmethod
+    @transaction.atomic
+    def cancelar_conciliacion(conciliacion: ConciliacionBancaria):
+        """Cancela y, si estaba Cerrada, regresa sus movimientos a Pendiente (#827).
+
+        Solo los que ninguna otra conciliación Cerrada ampara: un movimiento que
+        quedó en otra cerrada sigue Conciliado.
+        """
+        conciliacion = ConciliacionBancaria.objects.select_for_update().get(pk=conciliacion.pk)
+        if conciliacion.estatus == ConciliacionBancaria.Estatus.CANCELADA:
+            return conciliacion
+        if conciliacion.estatus == ConciliacionBancaria.Estatus.CERRADA:
+            mov_ids = ConciliacionDetalle.objects.filter(conciliacion=conciliacion).values_list(
+                "movimiento_bancario_id", flat=True
+            )
+            en_otra_cerrada = ConciliacionDetalle.objects.filter(
+                conciliacion__estatus=ConciliacionBancaria.Estatus.CERRADA,
+                movimiento_bancario_id__in=mov_ids,
+            ).exclude(conciliacion=conciliacion).values_list("movimiento_bancario_id", flat=True)
+            MovimientoBancario.objects.filter(
+                pk__in=mov_ids, estatus=MovimientoBancario.Estatus.CONCILIADO
+            ).exclude(pk__in=en_otra_cerrada).update(estatus=MovimientoBancario.Estatus.PENDIENTE)
+        conciliacion.estatus = ConciliacionBancaria.Estatus.CANCELADA
+        conciliacion.save(update_fields=["estatus", "updated_at"])
+        return conciliacion

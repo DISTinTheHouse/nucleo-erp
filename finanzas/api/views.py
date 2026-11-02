@@ -413,9 +413,9 @@ class ClienteViewSetContabilidad(FinanzasBaseViewSet):
         nombre = (qp.get("nombre") or "").strip()
         if nombre:
             qs = qs.filter(Q(nombre__icontains=nombre) | Q(razon_social__icontains=nombre))
-        activo_only = _bool_param(qp.get("activo")) or True
-        if activo_only:
-            qs = qs.filter(activo=True)
+        # Sin ``activo``, solo activos (como antes); ``?activo=false`` trae las bajas (#799).
+        activo = qp.get("activo")
+        qs = qs.filter(activo=_bool_param(activo) if activo not in (None, "") else True)
         return qs
 
 
@@ -1230,6 +1230,18 @@ class PolizaViewSet(FinanzasBaseViewSet):
     # Las líneas se leen una vez para todo el listado (el serializer las suma).
     queryset = Poliza.objects.prefetch_related("poliza_detalles")
     serializer_class = PolizaSerializer
+
+    def check_permissions(self, request):
+        # Crear, editar, borrar, contabilizar y cancelar (que genera contrapóliza)
+        # son asientos: permiso de escritura de finanzas, como cobros (#826).
+        # ``validar-cuadre`` es un POST que solo lee.
+        super().check_permissions(request)
+        if (
+            request.method not in SAFE_METHODS
+            and getattr(self, "action", None) != "validar_cuadre"
+            and not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA)
+        ):
+            raise PermissionDenied("No tienes permiso para registrar o cancelar pólizas.")
 
     def get_queryset(self):
         user = self.request.user
@@ -2255,6 +2267,13 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
     queryset = ConciliacionBancaria.objects.all()
     serializer_class = ConciliacionBancariaSerializer
 
+    def check_permissions(self, request):
+        # Preparar, cerrar y cancelar cambian el estatus de los movimientos del
+        # banco: permiso de escritura de finanzas, como cobros (#827).
+        super().check_permissions(request)
+        if request.method not in SAFE_METHODS and not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
+            raise PermissionDenied("No tienes permiso para conciliar cuentas bancarias.")
+
     def get_queryset(self):
         user = self.request.user
         empresa = getattr(user, "empresa", None)
@@ -2368,11 +2387,7 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
-        conciliacion = self.get_object()
-        if conciliacion.estatus == ConciliacionBancaria.Estatus.CANCELADA:
-            return Response(ConciliacionBancariaSerializer(conciliacion).data)
-        conciliacion.estatus = ConciliacionBancaria.Estatus.CANCELADA
-        conciliacion.save()
+        conciliacion = ConciliacionService.cancelar_conciliacion(self.get_object())
         return Response(ConciliacionBancariaSerializer(conciliacion).data)
 
 
