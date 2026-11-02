@@ -1573,7 +1573,6 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 ],
             )
             .select_related("pedido", "sucursal")
-            .prefetch_related("orden_produccion_detalle__producto_variante__producto")
             .order_by("-fecha_inicio", "-op_id")
         )
         if empresa:
@@ -2258,7 +2257,14 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = self.queryset.prefetch_related("detalles")
+        # Producto del renglón en el mismo prefetch: sin él, cada detalle
+        # disparaba 2 consultas (recepcion_detalle y su producto).
+        qs = self.queryset.prefetch_related(
+            Prefetch(
+                "detalles",
+                queryset=CalidadInspeccionDetalle.objects.select_related("recepcion_detalle__producto"),
+            )
+        )
         if getattr(user, "is_superuser", False):
             return qs.order_by("-fecha", "-id")
         empresa = getattr(user, "empresa", None)
