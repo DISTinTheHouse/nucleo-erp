@@ -586,20 +586,27 @@ class ProveedorViewSet(viewsets.ModelViewSet):
                 "generado_en": timezone.now(),
                 "disponible": False,
                 "motivo": "Usuario sin empresa asignada.",
+                # Clave fija del contrato; sin datos no hay importes (#860).
+                "puede_ver_importes": False,
                 "filtros": None,
                 "proveedores": [],
                 "total_proveedores": 0,
                 "truncado": False,
             })
 
-        from compras.services.orden_compra_view_service import puede_ver_contabilidad
+        from compras.services.orden_compra_view_service import puede_ver_contabilidad, quitar_montos
 
+        puede_ver_importes = puede_ver_contabilidad(request.user)
         proveedores = calcular_scorecards(alcance, meta)
+        if not puede_ver_importes:
+            # ``pct`` se queda: es porcentaje, no importe (#859).
+            for proveedor in proveedores:
+                quitar_montos(proveedor["diferencia_precio"], ["costo_facturado", "costo_pactado_oc"])
         return Response({
             "generado_en": timezone.now(),
             "disponible": True,
             # Señal explícita para el front (#841), mismo criterio que OC.
-            "puede_ver_importes": puede_ver_contabilidad(request.user),
+            "puede_ver_importes": puede_ver_importes,
             "filtros": {**alcance.como_dict(), "meta_scorecard": meta, "limite": limite},
             "proveedores": proveedores[:limite],
             "total_proveedores": len(proveedores),
@@ -613,6 +620,7 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         filtros de ``kpis``). Acotado a ``TOPE_DETALLE`` con ``total``."""
         from compras.services.kpi_criterios import AlcanceCompras
         from compras.services.kpi_proveedores import FACTORES_DETALLE, TOPE_DETALLE, detalle_proveedor
+        from compras.services.orden_compra_view_service import puede_ver_contabilidad, quitar_montos
 
         validar_parametros(request, {"factor", "sucursal", "fecha_desde", "fecha_hasta"})
         factor = (request.query_params.get("factor") or "").strip()
@@ -628,14 +636,19 @@ class ProveedorViewSet(viewsets.ModelViewSet):
             fecha_hasta=fecha_hasta,
         )
         filas, total = detalle_proveedor(alcance, factor)
-        return Response({
+        data = {
             "proveedor_id": proveedor.pk,
             "factor": factor,
+            "puede_ver_importes": puede_ver_contabilidad(request.user),
             "total": total,
             "truncado": total > len(filas),
             "tope": TOPE_DETALLE,
             "registros": filas,
-        })
+        }
+        if not data["puede_ver_importes"]:
+            # Precios unitarios de ``factor=precio``, como en ``kpis/`` (#859).
+            quitar_montos(data, ["precio_facturado", "precio_pactado"])
+        return Response(data)
 
     @staticmethod
     def _numero_param(request, nombre, default, minimo, maximo):

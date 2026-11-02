@@ -386,6 +386,7 @@ class ProveedorKpisTests(TestCase):
         # Distinto de "sin datos" (#390).
         self.assertFalse(resp.data["disponible"])
         self.assertIn("sin empresa", resp.data["motivo"])
+        self.assertFalse(resp.data["puede_ver_importes"])  # #860
 
     def test_con_empresa_sin_datos_si_esta_disponible(self):
         otra = Empresa.objects.create(codigo="vacia", razon_social="VACIA SA")
@@ -612,13 +613,29 @@ class ProveedorKpisTests(TestCase):
         self.assertFalse(resp.data["registros"][0]["a_tiempo"])
 
     def test_detalle_de_calidad_precio_y_cumplimiento(self):
+        admin = Usuario.objects.create(
+            username="adm@acme.test", email="adm@acme.test", empresa=self.empresa, is_admin_empresa=True,
+        )
         calidad = self.client_api_get_detalle(self.usuario, self.malo.pk, "calidad").data
-        precio = self.client_api_get_detalle(self.usuario, self.malo.pk, "precio").data
+        precio = self.client_api_get_detalle(admin, self.malo.pk, "precio").data
         cumplimiento = self.client_api_get_detalle(self.usuario, self.malo.pk, "cumplimiento").data
 
         self.assertEqual(calidad["registros"][0]["cantidad_rechazada"], 3)
         self.assertEqual(precio["registros"][0]["precio_facturado"], Decimal("7.00"))
         self.assertEqual(cumplimiento["registros"][0]["cantidad_recibida"], Decimal("4"))
+
+    def test_sin_contabilidad_no_viajan_importes(self):
+        """#859: ``pct`` se queda; los importes no salen en la respuesta."""
+        resp = self._get()
+        fila = self._fila(resp, self.malo.pk)
+        precio = self.client_api_get_detalle(self.usuario, self.malo.pk, "precio").data
+
+        self.assertFalse(resp.data["puede_ver_importes"])
+        self.assertAlmostEqual(fila["diferencia_precio"]["pct"], 40.0, places=1)
+        self.assertEqual(set(fila["diferencia_precio"]["por_moneda"][0]), {"moneda", "pct"})
+        self.assertFalse(precio["puede_ver_importes"])
+        self.assertNotIn("precio_facturado", precio["registros"][0])
+        self.assertNotIn("precio_pactado", precio["registros"][0])
 
     def test_detalle_factor_invalido_responde_400(self):
         self.assertEqual(self.client_api_get_detalle(self.usuario, self.malo.pk, "otro").status_code, 400)
