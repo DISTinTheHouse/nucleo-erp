@@ -502,6 +502,7 @@ class SatRegimenFiscal(models.Model):
 def get_upload_path_cer(instance, filename):
     return f"sat/csd/{instance.empresa.codigo}/cer_{filename}"
 
+# Sin campo que la use desde EC-685; se conserva porque la importa la migración 0005.
 def get_upload_path_key(instance, filename):
     return f"sat/csd/{instance.empresa.codigo}/key_{filename}"
 
@@ -510,15 +511,10 @@ class EmpresaSatConfig(models.Model):
     empresa = models.OneToOneField(Empresa, on_delete=models.CASCADE, related_name="sat_config")
     regimen_fiscal = models.ForeignKey(SatRegimenFiscal, on_delete=models.PROTECT, related_name="empresas_config", blank=True, null=True)
 
-    # Archivos físicos
+    # Archivos físicos. La llave privada, su contraseña y los PEM del CSD no se
+    # guardan aquí (EC-685): el timbrado usa el CSD cargado en Facturama.
     archivo_cer = models.FileField(upload_to=get_upload_path_cer, blank=True, null=True, help_text="Certificado (.cer)")
-    archivo_key = models.FileField(upload_to=get_upload_path_key, blank=True, null=True, help_text="Llave Privada (.key)")
-    
-    # Contenido en Base64/PEM para uso interno (se llena automático)
-    certificado_pem = models.TextField(blank=True, null=True)
-    llave_privada_pem = models.TextField(blank=True, null=True)
-    
-    password_llave = models.CharField(max_length=255, blank=True, null=True)
+
     no_certificado = models.CharField(max_length=50, blank=True, null=True)
     fecha_expiracion = models.DateTimeField(blank=True, null=True)
     
