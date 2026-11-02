@@ -37,12 +37,15 @@ Relación 1:1 con `Empresa`.
 |---------|------|-------------|
 | `id_empresa_sat_config` | PK | Identificador único. |
 | `empresa_id` | FK | Relación 1:1 con tabla Empresas. |
-| `archivo_cer` | FileField | Ruta al archivo .cer (Protegido). |
-| `archivo_key` | FileField | Ruta al archivo .key (Protegido). |
-| `password_llave` | Varchar | Contraseña para desbloquear la llave privada. |
-| `no_certificado` | Varchar | Extraído automáticamente del .cer. |
-| `fecha_expiracion` | DateTime | Extraído automáticamente del .cer. |
-| `validado` | Boolean | Indica si los archivos son válidos y correspondientes. |
+| `regimen_fiscal_id` | FK | Régimen fiscal (`sat_regimen_fiscal`), opcional. |
+| `archivo_cer` | FileField | Ruta al archivo .cer. |
+| `no_certificado` | Varchar | Número de certificado. |
+| `fecha_expiracion` | DateTime | Vencimiento del certificado. |
+| `validado` | Boolean | Indica si el CSD se validó. |
+| `mensaje_error` | Text | Motivo del último fallo de validación. |
+| `activo` | Boolean | Borrado lógico. |
+
+La tabla no guarda la llave privada (.key), su contraseña ni el CSD en PEM (EC-685): el timbrado usa el CSD cargado en la cuenta de Facturama. Hoy no hay flujo que la llene; el admin la expone en solo lectura.
 
 ---
 
