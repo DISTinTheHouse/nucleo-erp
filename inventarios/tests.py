@@ -337,6 +337,18 @@ class ExistenciaViewSetScopeTenantTests(TestCase):
         ajena.refresh_from_db()
         self.assertEqual(str(ajena.cantidad), "10.0000")
 
+    def test_detalle_propio_es_200_y_ordering_no_revienta(self):
+        """#835: el 404 de la ajena sale del alcance, no del ``limit`` recortado
+        en ``get_queryset``; el detalle propio y ``?ordering=`` funcionan."""
+        propia = self.a["existencia"]
+        for user in (self.a["admin"], self.superuser):
+            with self.subTest(user=user.email):
+                client = self._client(user)
+                self.assertEqual(client.get(f"{EXISTENCIAS_URL}{propia.pk}/").status_code, 200)
+                resp = client.get(EXISTENCIAS_URL, {"ordering": "cantidad"})
+                self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(self._ids(self.superuser, {"limit": "1"})), 1)
+
     # --- acceso al almacén en create (antes del save) ---------------------------
 
     def _crear(self, user, **payload):
