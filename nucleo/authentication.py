@@ -23,6 +23,10 @@ from auth_kit.authentication import (
     JWTCookieAuthenticationScheme,
 )
 from corsheaders.middleware import CorsMiddleware
+from django.utils.translation import gettext_lazy as _
+from rest_framework_simplejwt.exceptions import AuthenticationFailed, InvalidToken
+from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.utils import get_md5_hash_password
 from rest_framework import exceptions
 from rest_framework.permissions import SAFE_METHODS
 
@@ -67,6 +71,32 @@ class OriginEnforcedJWTCookieAuthentication(JWTCookieAuthentication):
             return result
         self.enforce_origin(request)
         return result
+
+    def get_user(self, validated_token):
+        """``JWTAuthentication.get_user`` (simplejwt 5.5) con ``empresa`` en la
+        misma consulta: casi toda vista lee ``user.empresa`` y, sin el
+        ``select_related``, cada petición pagaba un viaje extra a la BD (#840).
+        Mismas validaciones y mensajes que la clase base."""
+        try:
+            user_id = validated_token[api_settings.USER_ID_CLAIM]
+        except KeyError as e:
+            raise InvalidToken(_("Token contained no recognizable user identification")) from e
+
+        try:
+            user = self.user_model.objects.select_related("empresa").get(
+                **{api_settings.USER_ID_FIELD: user_id}
+            )
+        except self.user_model.DoesNotExist as e:
+            raise AuthenticationFailed(_("User not found"), code="user_not_found") from e
+
+        if api_settings.CHECK_USER_IS_ACTIVE and not user.is_active:
+            raise AuthenticationFailed(_("User is inactive"), code="user_inactive")
+
+        if api_settings.CHECK_REVOKE_TOKEN:
+            if validated_token.get(api_settings.REVOKE_TOKEN_CLAIM) != get_md5_hash_password(user.password):
+                raise AuthenticationFailed(_("The user's password has been changed."), code="password_changed")
+
+        return user
 
     def enforce_origin(self, request):
         """Valida el Origin de una petición de escritura autenticada por cookie."""

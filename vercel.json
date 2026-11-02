@@ -1,5 +1,8 @@
 {
     "version": 2,
+    "regions": [
+        "pdx1"
+    ],
     "builds": [
         {
             "src": "ERP/wsgi.py",
