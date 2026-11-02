@@ -2420,16 +2420,14 @@ def _mensaje_transicion_invalida(anterior, solicitado):
 CAMPOS_EDITABLES_NOTA_EMITIDA = {"observaciones", "estatus"}
 
 
-class _EmisionConEstado(Exception):
-    """400 de una emisión que dejó la nota guardada: el cuerpo dice cómo quedó.
-
-    Se responde directo, no con la ``ValidationError`` de DRF, porque ésta
-    convierte cada hoja en texto y ``nota_credito.id`` llegaba como ``"15"`` (#750).
-    """
+class TimbradoNotaCreditoFallido(ValidationError):
+    """400 del timbrado fallido al emitir: el error y ``nota_credito`` con cómo quedó (#724).
+    ``ValidationError`` convierte a texto todo valor anidado; ``nota_credito`` se agrega
+    después para que ``id`` llegue como entero."""
 
     def __init__(self, error, nota):
-        super().__init__(error)
-        self.data = {**error.message_dict, "nota_credito": {"id": nota.pk, "estatus": nota.estatus}}
+        super().__init__(get_error_detail(error))
+        self.detail["nota_credito"] = {"id": nota.pk, "estatus": nota.estatus}
 
 
 class NotaCreditoViewSet(FinanzasBaseViewSet):
@@ -2442,11 +2440,6 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
         super().check_permissions(request)
         if request.method not in SAFE_METHODS and not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
             raise PermissionDenied("No tienes permiso para registrar o cancelar notas de crédito.")
-
-    def handle_exception(self, exc):
-        if isinstance(exc, _EmisionConEstado):
-            return Response(exc.data, status=status.HTTP_400_BAD_REQUEST)
-        return super().handle_exception(exc)
 
     def get_queryset(self):
         user = self.request.user
@@ -2559,7 +2552,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
             except ErrorDeNegocio as exc:
                 error = error or exc
         if error:
-            raise _EmisionConEstado(error, nota)
+            raise TimbradoNotaCreditoFallido(error, nota)
 
     def perform_update(self, serializer):
         with transaction.atomic():
