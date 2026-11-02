@@ -70,6 +70,28 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
     tipo_compra_label = serializers.CharField(source='get_tipo_compra_display', read_only=True)
     pedidos = serializers.SerializerMethodField()
     pedidos_vinculados = serializers.SerializerMethodField()
+    # Progreso de recepción: lo anota ``anotar_progreso_oc`` en list/retrieve;
+    # en las demás respuestas sale ``null``.
+    cantidad_ordenada = serializers.SerializerMethodField()
+    cantidad_recibida = serializers.SerializerMethodField()
+    porcentaje_recibido = serializers.SerializerMethodField()
+
+    def get_cantidad_ordenada(self, obj):
+        valor = getattr(obj, "progreso_ordenado", None)
+        return None if valor is None else str(Decimal(valor).quantize(Decimal("0.0001")))
+
+    def get_cantidad_recibida(self, obj):
+        valor = getattr(obj, "progreso_recibido", None)
+        return None if valor is None else str(max(valor, Decimal("0")).quantize(Decimal("0.0001")))
+
+    def get_porcentaje_recibido(self, obj):
+        ordenado = getattr(obj, "progreso_ordenado", None)
+        recibido = getattr(obj, "progreso_recibido", None)
+        if ordenado is None or recibido is None:
+            return None
+        if ordenado <= 0:
+            return 0.0
+        return float(round(min(max(recibido, Decimal("0")) / ordenado * 100, Decimal("100")), 1))
 
     def _pedidos_de(self, obj):
         # ``pedidos.all()`` aprovecha el prefetch del viewset. Si la OC solo
@@ -125,6 +147,9 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'total',
             'tipo',
             'total_piezas',
+            'cantidad_ordenada',
+            'cantidad_recibida',
+            'porcentaje_recibido',
             'flete',
             'seguros',
             'porcentaje_iva',

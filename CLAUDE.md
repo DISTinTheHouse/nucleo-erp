@@ -46,6 +46,15 @@ Because of that, the `web` service runs **only** `runserver` and must **never** 
   - writes and migrations: inside `transaction.atomic()` and raise an exception at the end so everything rolls back (`MigrationExecutor(connection).migrate(...)` for an unapplied migration).
 - `*/tests.py` files stay as executable documentation of expected behavior; keep them updated, but they are not a gate. The CI gate is `manage.py check` + migration-drift check only.
 
+### Prioridad 1: velocidad de los endpoints
+
+La app está por liberarse a la operación real: **ningún endpoint puede sentirse lento** (2 s es inaceptable). Antes de agregar un campo o una acción:
+
+- Mide con `CaptureQueriesContext` antes y después (y `EXPLAIN ANALYZE` si cambia el SQL). El número de consultas no debe crecer con las filas: nada de N+1, `select_related`/`prefetch_related` o agregados en bloque.
+- Prefiere anotar en la misma consulta (subconsultas por FK indexada) o una sola consulta agrupada por página antes que trabajo por fila en el serializer.
+- Los listados ya optimizados (OC, recepciones, etc.) no se tocan si no es necesario; un campo nuevo no puede agregar viajes a la BD.
+- Reporta en el PR las consultas y el tiempo antes/después.
+
 ## Database & environments
 
 DB selection is driven by env vars, not Django settings files (`ERP/settings.py` is the only settings module):

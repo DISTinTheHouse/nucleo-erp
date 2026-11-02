@@ -3,7 +3,8 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Count, ExpressionWrapper, F, Prefetch, Q, Sum
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
@@ -105,6 +106,49 @@ class OrdenamientoSinMontosFilter(OrdenamientoEstableFilter):
         return [f for f in validos if f.lstrip("-") not in CAMPOS_CONTABILIDAD_OC]
 
 
+def _suma_por_oc(qs, campo):
+    """``SUM(campo)`` de ``qs`` para la OC de la fila externa, como subconsulta correlacionada."""
+    return Coalesce(
+        Subquery(
+            qs.order_by().values("oc_ref").annotate(total=Sum(campo)).values("total")[:1],
+            output_field=DecimalField(max_digits=18, decimal_places=4),
+        ),
+        Value(Decimal("0")),
+        output_field=DecimalField(max_digits=18, decimal_places=4),
+    )
+
+
+def anotar_progreso_oc(qs):
+    """Progreso de recepción de cada OC en el mismo SELECT (sin consultas extra).
+
+    Misma regla que el pendiente de ``recepciones/onboarding``: cuenta lo
+    recibido en recepciones activas no canceladas y descuenta lo que Calidad
+    rechaza. Las tres subconsultas van por FK indexada.
+    """
+    ordenado = OrdenCompraDetalle.objects.filter(orden_compra_id=OuterRef("pk")).annotate(
+        oc_ref=F("orden_compra_id")
+    )
+    recibido = (
+        RecepcionDetalle.objects.filter(
+            orden_compra_detalle__orden_compra_id=OuterRef("pk"), recepcion__activo=True,
+        )
+        .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        .annotate(oc_ref=F("orden_compra_detalle__orden_compra_id"))
+    )
+    rechazado = (
+        CalidadInspeccionDetalle.objects.filter(
+            recepcion_detalle__orden_compra_detalle__orden_compra_id=OuterRef("pk"),
+            recepcion_detalle__recepcion__activo=True,
+        )
+        .exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        .annotate(oc_ref=F("recepcion_detalle__orden_compra_detalle__orden_compra_id"))
+    )
+    return qs.annotate(
+        progreso_ordenado=_suma_por_oc(ordenado, "cantidad"),
+        progreso_recibido=_suma_por_oc(recibido, "cantidad_recibida") - _suma_por_oc(rechazado, "cantidad_rechazada"),
+    )
+
+
 class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = OrdenCompra.objects.filter(activo=True)
     serializer_class = OrdenCompraSerializer
@@ -178,6 +222,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         elif self.action not in ('cancelar', 'aceptar'):
             # list y las acciones de listado (historial, etc.) serializan ``pedidos``.
             qs = qs.prefetch_related('pedidos')
+        if self.action in ("list", "retrieve"):
+            qs = anotar_progreso_oc(qs)
         if self.action == "list":
             # Filtros de servidor (#863), después del alcance por empresa.
             qs = filtrar_listado_compras(
