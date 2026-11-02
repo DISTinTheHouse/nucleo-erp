@@ -1566,9 +1566,13 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
             raw = (qp.get(nombre) or "").strip()
             if raw:
                 try:
-                    return int(raw)
+                    valor = int(raw)
                 except ValueError:
-                    raise ValidationError({nombre: "Debe ser un id numérico."})
+                    valor = 0
+                # 0 o negativo también es 400: tratarlo como ausente quitaba el filtro (#815).
+                if valor <= 0:
+                    raise ValidationError({nombre: "Debe ser un id numérico mayor a 0."})
+                return valor
         return None
 
     @extend_schema(

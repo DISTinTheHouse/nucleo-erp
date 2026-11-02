@@ -103,6 +103,7 @@ class FacturaInventarioService:
                     producto_id=e["producto_id"],
                     producto_variante_id=e["producto_variante_id"],
                     **{("ubicacion_destino_id" if entrada else "ubicacion_origen_id"): e["ubicacion_id"]},
+                    almacen_id=e.get("almacen_id"),
                     cantidad=abs(Decimal(e["delta"])),
                     costo_unitario=Decimal("0"),
                 )

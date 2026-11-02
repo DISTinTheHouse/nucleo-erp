@@ -17,6 +17,20 @@ def parse_pk(raw):
         return None
 
 
+def parse_pk_estricto(raw, campo):
+    """Como ``parse_pk``, pero un valor presente que no es un id positivo es
+    400 en vez de tratarse como ausente (#817). Ausente -> ``None``."""
+    if raw in (None, ""):
+        return None
+    try:
+        valor = int(raw)
+    except (TypeError, ValueError):
+        valor = 0
+    if valor <= 0:
+        raise ValidationError({campo: "Debe ser un id numérico mayor a 0."})
+    return valor
+
+
 def validar_contexto_picking(pedido, almacen, almacen_destino, operador, user):
     """Scope empresa/sucursal + permisos para encabezados de un nuevo picking.
 
