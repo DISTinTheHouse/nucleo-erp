@@ -445,6 +445,23 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
         resp = api.post(f"{ORDENES_URL}onboarding/", cuerpo, format="json")
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(OrdenCompra.objects.latest("pk").moneda_id, self.moneda_global.pk)
+        # Al editar, ``moneda: null`` conserva la guardada (#824).
+        oc = OrdenCompra.objects.latest("pk")
+        resp = api.post(f"{ORDENES_URL}onboarding/", {"orden_compra_id": oc.pk, "orden_compra": {"moneda": None}}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        oc.refresh_from_db()
+        self.assertEqual(oc.moneda_id, self.moneda_global.pk)
+        # Moneda privada de otra empresa en el proveedor: ni se ofrece ni se usa (#825).
+        Proveedor.objects.filter(pk=self.a["proveedor"].pk).update(moneda=self.b["moneda"])
+        prov = next(
+            p for p in api.get(f"{ORDENES_URL}onboarding/").json()["busqueda"]["proveedores"]
+            if p["id"] == self.a["proveedor"].pk
+        )
+        self.assertIsNone(prov["moneda_id"])
+        resp = api.post(f"{ORDENES_URL}onboarding/", {"orden_compra": {"proveedor": self.a["proveedor"].pk}, "detalle": [self._linea(self.a["producto"])]}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(OrdenCompra.objects.latest("pk").moneda_id, self.a["moneda"].pk)
+        Proveedor.objects.filter(pk=self.a["proveedor"].pk).update(moneda=self.moneda_global)
         # La moneda elegida en el body manda sobre la del proveedor.
         cuerpo["orden_compra"]["moneda"] = self.a["moneda"].pk
         api.post(f"{ORDENES_URL}onboarding/", cuerpo, format="json")

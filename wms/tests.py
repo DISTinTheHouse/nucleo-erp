@@ -878,15 +878,25 @@ class OnboardingAlmacenSugeridoTests(TestCase):
         cls.pedido_norte = cls._pedido(cls.norte, "N-1", ["APARTADO", "BORDADO"])
 
     @classmethod
-    def _pedido(cls, sucursal, folio, destinos):
-        from ventas.models import Pedido
+    def _pedido(cls, sucursal, folio, destinos, pendiente=True):
+        from catalogo.models import Producto, Talla
+        from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
 
-        return Pedido.objects.create(
+        pedido = Pedido.objects.create(
             empresa=cls.empresa, sucursal=sucursal, cliente=cls.cliente, moneda=cls.moneda, folio=folio,
             estatus=3, programacion_conf={"programaciones": [{"destino": d, "cantidad": 1} for d in destinos]},
             persona_pagos="Pagos", correo_facturas="ec645@example.com", telefono_pagos="8100000000",
             forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
         )
+        if pendiente:
+            # El listado solo ofrece pedidos con algo surtible (#823).
+            detalle = PedidoDetalle.objects.create(
+                pedido=pedido, producto=Producto.objects.create(empresa=cls.empresa, nombre=f"Prod {folio}"),
+            )
+            PedidoDetalleTalla.objects.create(
+                pedido_detalle=detalle, talla=Talla.objects.create(nombre=f"T-{folio}"), cantidad=1,
+            )
+        return pedido
 
     def setUp(self):
         self.api = APIClient()
@@ -1046,6 +1056,34 @@ class OnboardingAlmacenSugeridoTests(TestCase):
             resp = self.api.get(self.URL, params)
             self.assertEqual(resp.status_code, 400, (params, resp.content))
             self.assertIn(campo, resp.json())
+
+    def test_listado_omite_pedidos_sin_pendiente(self):
+        from ventas.models import PedidoDetalle
+
+        sin_tallas = self._pedido(self.matriz, "S-1", ["APARTADO"], pendiente=False)
+        solo_muestra = self._pedido(self.matriz, "S-2", ["APARTADO"], pendiente=False)
+        PedidoDetalle.objects.create(pedido=solo_muestra, producto_nombre_externo="Muestra")
+        ids = {p["id"] for p in self._get()["pedidos"]}
+        self.assertNotIn(sin_tallas.pk, ids)
+        self.assertNotIn(solo_muestra.pk, ids)
+        self.assertIn(self.pedido_matriz.pk, ids)
+
+    def test_alta_rechaza_pedido_no_autorizado_o_inactivo(self):
+        # #822: el alta repite las reglas del listado.
+        from types import SimpleNamespace
+
+        from rest_framework.exceptions import ValidationError
+
+        from wms.services.picking_pipeline.context import validar_contexto_picking
+
+        for estatus, activo in ((1, True), (2, True), (3, False)):
+            pedido = SimpleNamespace(
+                empresa_id=self.empresa.pk, estatus=estatus, activo=activo, ESTATUS_CANCELADO=5,
+                programacion_conf={"programaciones": [{"destino": "APARTADO"}]},
+            )
+            with self.assertRaises(ValidationError) as ctx:
+                validar_contexto_picking(pedido, self.origen, self.apartados, None, self.usuario)
+            self.assertIn("pedido", ctx.exception.detail)
 
     def test_listado_avisa_si_se_recorto(self):
         # #818: 2 pedidos; con límite 1 se recorta y lo dice.
@@ -1263,7 +1301,7 @@ class PackingDespachoEC574Tests(TestCase):
         cls.pedido = Pedido.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal,
             cliente=Cliente.objects.create(empresa=cls.empresa, nombre="Cliente"),
-            moneda=Moneda.objects.create(codigo_iso="MXN", nombre="Peso"), folio="P-574",
+            moneda=Moneda.objects.create(codigo_iso="MXN", nombre="Peso"), folio="P-574", estatus=3,
             persona_pagos="Pagos", correo_facturas="ec574@example.com", telefono_pagos="8100000000",
             forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
             programacion_conf={"programaciones": [{"destino": "APARTADO", "cantidad": 1}]},

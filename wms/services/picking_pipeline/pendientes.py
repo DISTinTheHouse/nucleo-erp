@@ -2,7 +2,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 
-from django.db.models import Sum
+from django.db.models import DecimalField, Exists, F, OuterRef, Subquery, Sum, Value
+from django.db.models.functions import Coalesce
 
 from ventas.models import PedidoDetalleTalla
 from wms.models import Picking, PickingDetalle
@@ -61,6 +62,29 @@ def asignado_por_pedidos(pedido_ids):
     return {
         f["pedido_detalle__pedido_id"]: normalizar_decimal(f["total"]) for f in filas
     }
+
+
+def tiene_pendiente_surtible():
+    """``Exists`` para ``Pedido``: alguna talla surtible (línea con ``producto``,
+    #745) con cantidad pedida mayor a lo asignado en pickings activos. Misma
+    regla que el alta; en una sola consulta para el listado (#823)."""
+    asignado = (
+        PickingDetalle.objects.filter(pedido_detalle_talla=OuterRef("pk"))
+        .exclude(picking__estado=Picking.Estado.CANCELADO)
+        .exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
+        .order_by()
+        .values("pedido_detalle_talla")
+        .annotate(total=Sum("cantidad_asignada"))
+        .values("total")
+    )
+    tallas = (
+        PedidoDetalleTalla.objects.filter(
+            pedido_detalle__pedido=OuterRef("pk"), pedido_detalle__producto__isnull=False,
+        )
+        .annotate(asignado=Coalesce(Subquery(asignado), Value(Decimal("0")), output_field=DecimalField()))
+        .filter(cantidad__gt=F("asignado"))
+    )
+    return Exists(tallas)
 
 
 def historical_maps(pedido, talla_ids=None):
