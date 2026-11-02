@@ -2316,6 +2316,53 @@ class NotaCreditoTimbraAntesDeGuardar(Defecto9NotaCreditoFechaEmisionYCxCFaltant
         self.assertFalse(NotaCredito.objects.exists())
         mock.assert_not_called()
 
+    def test_sin_permiso_no_crea_ni_cancela(self):
+        """#752: toda escritura de notas exige E-FIN-FACTURAS, timbre o no."""
+        from seguridad.models import UsuarioPermiso
+        UsuarioPermiso.objects.filter(usuario=self.a["usuario"], permiso__clave="E-FIN-FACTURAS").delete()
+        _, _, resp = self._post(estatus="Borrador")
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertFalse(NotaCredito.objects.exists())
+
+    def test_factura_dada_de_baja_no_acepta_nota(self):
+        """#736: una factura con activo=false no recibe crédito."""
+        factura, cxc = self._factura_con_cxc()
+        Factura.objects.filter(pk=factura.pk).update(activo=False)
+        resp = self._client(self.a["usuario"]).post(
+            NOTAS_CREDITO_URL,
+            {"factura": factura.pk, "cliente": self.a["cliente"].pk, "estatus": "Emitida", "total": "100.00"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("factura", resp.data)
+        self.assertFalse(NotaCredito.objects.exists())
+
+    def test_poliza_que_no_se_puede_generar_no_timbra_ni_guarda(self):
+        """#749: el fallo contable se detecta antes del timbre, sin guardar nada."""
+        from finanzas.exceptions import ErrorDeNegocio
+        falta = ErrorDeNegocio({"configuracion_contable": "Faltan cuentas configuradas."})
+        with self._con_facturama(), patch(f"{self.SVC}.construir_payload_nota_credito", return_value={}),                 patch("finanzas.api.views.NotaCreditoPolizaService.validar", side_effect=falta),                 self._timbra() as mock:
+            _, cxc, resp = self._post()
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("configuracion_contable", resp.data)
+        self.assertFalse(NotaCredito.objects.exists())
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+        mock.assert_not_called()
+
+    def test_segundo_preparar_que_falla_responde_con_la_nota(self):
+        """#751: si otra petición cambió la nota antes del timbre, el 400 trae
+        ``nota_credito`` y la nota sin CFDI se revierte como en un rechazo."""
+        from finanzas.exceptions import ErrorDeNegocio
+        cambio = ErrorDeNegocio({"factura": "La factura está cancelada o su cancelación está en proceso."})
+        with self._con_facturama(), patch(f"{self.SVC}.construir_payload_nota_credito", return_value={}),                 patch(f"{self.SVC}.FacturaTimbradoService._timbrar_nota", side_effect=cambio),                 self._timbra():
+            _, cxc, resp = self._post()
+        self.assertEqual(resp.status_code, 400, resp.data)
+        nota = NotaCredito.objects.get()
+        self.assertEqual(resp.data["nota_credito"], {"id": nota.pk, "estatus": "Cancelada"})
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.saldo, Decimal("1000.00"))
+
 
 class Defecto10NotaCreditoDobleAplicacionConcurrente(FinanzasBase):
     """Emitir/cancelar la misma nota dos veces a la vez ya no duplica el crédito.
