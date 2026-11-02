@@ -5801,19 +5801,37 @@ class FacturamaAccesoTests(TestCase):
             self.assertEqual(self._get(self.admin_otra, self.CFDI).status_code, 403)
 
     def test_alta_de_cliente_solo_se_sube_a_facturama_desde_la_duena(self):
+        from nucleo.models import SatUsoCfdi
+        from terceros import facturama
+
+        # Completo para Facturama (#659): si la otra empresa no lo sube es por el
+        # candado de la cuenta, no porque le falte algún dato.
+        completo = {
+            "razon_social": "CLI SA DE CV", "rfc": "URE180429TM6", "correo": "pagos@cli.test",
+            "codigo_postal": "64000",
+            "sat_regimen_fiscal": SatRegimenFiscal.objects.create(codigo="601", descripcion="General").pk,
+            "sat_uso_cfdi": SatUsoCfdi.objects.create(codigo="G03", descripcion="Gastos").pk,
+        }
         with self.settings(FACTURAMA_EMPRESA_CODIGO="duena"), patch(
             "terceros.facturama.FacturamaService"
         ) as servicio:
             servicio.return_value.client.post.return_value = {"Id": "x"}
             alta_facturama = servicio.return_value.client.post
             self.client.force_authenticate(user=self.admin_otra)
-            r = self.client.post("/api/v1/terceros/clientes/", {"nombre": "Cliente otra"}, format="json")
+            r = self.client.post(
+                "/api/v1/terceros/clientes/", {**completo, "nombre": "Cliente otra"}, format="json",
+            )
             self.assertEqual(r.status_code, 201, r.content)
+            self.assertEqual(facturama.faltantes(Cliente.objects.get(pk=r.data["id"])), [])
+            self.assertFalse(r.data["facturama_sincronizado"])
             alta_facturama.assert_not_called()
 
             self.client.force_authenticate(user=self.admin_duena)
-            r = self.client.post("/api/v1/terceros/clientes/", {"nombre": "Cliente dueña"}, format="json")
+            r = self.client.post(
+                "/api/v1/terceros/clientes/", {**completo, "nombre": "Cliente dueña"}, format="json",
+            )
             self.assertEqual(r.status_code, 201, r.content)
+            self.assertTrue(r.data["facturama_sincronizado"])
             alta_facturama.assert_called_once()
 
     def test_paginas_core_de_facturama_solo_superusuario(self):
