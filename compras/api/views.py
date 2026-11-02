@@ -453,6 +453,17 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                     raise ValidationError(
                         {"detalle": f"El renglón #{idx + 1} trae SKU: en una OC de materia prima los renglones van por producto."}
                     )
+        elif tipo_compra == OrdenCompra.TipoCompra.PRODUCTO_TERMINADO:
+            # PT se compra por SKU (#792). Sin variante solo se conserva un
+            # renglón legado: el mismo producto ya iba sin variante en esta OC.
+            legados = set(
+                actuales.filter(producto_variante__isnull=True).values_list("producto_id", flat=True)
+            )
+            for idx, it in enumerate(detalle):
+                if not it.get("producto_variante") and it.get("producto") not in legados:
+                    raise ValidationError(
+                        {"detalle": f"El renglón #{idx + 1} no trae SKU: en una OC de producto terminado los renglones van por variante."}
+                    )
         empresa_id = getattr(empresa, "pk", None)
         # Un renglón por SKU (``producto_variante``) toma su producto de la
         # variante; si además manda ``producto``, debe ser el mismo. Solo

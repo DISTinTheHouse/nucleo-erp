@@ -145,6 +145,7 @@ def armar_payload_vacio():
     """
     return {
         "pedidos": [],
+        "pedidos_truncado": False,
         "operadores": [],
         "almacenes": [],
         "almacenes_origen": [],
@@ -167,7 +168,11 @@ def armar_payload_vacio():
     }
 
 
-def cargar_catalogos(user, empresa, es_staff, sucursal_ids):
+LIMITE_PEDIDOS = 50
+LIMITE_PEDIDOS_MAX = 500
+
+
+def cargar_catalogos(user, empresa, es_staff, sucursal_ids, limite_pedidos=LIMITE_PEDIDOS):
     """Devuelve (pedido_qs, pedidos_payload, operadores_payload, almacenes_qs,
     almacenes_payload, almacenes_origen_payload, almacenes_destino_payload,
     almacenes_por_sucursal).
@@ -193,7 +198,10 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids):
     if not es_staff:
         pedido_qs = pedido_qs.filter(sucursal_id__in=sucursal_ids)
 
-    pedidos = list(pedido_qs[:50])
+    # Uno de más para saber si el listado se recortó (#818).
+    pedidos = list(pedido_qs[:limite_pedidos + 1])
+    truncado = len(pedidos) > limite_pedidos
+    pedidos = pedidos[:limite_pedidos]
     # Almacén sugerido por destino: una consulta para las sucursales de los 50, no una por pedido.
     almacenes_por_sucursal = almacenes_por_destino_de_sucursales(
         empresa.pk, {pedido.sucursal_id for pedido in pedidos}
@@ -256,6 +264,7 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids):
     return (
         pedido_qs,
         pedidos_payload,
+        truncado,
         operadores_payload,
         almacenes_qs,
         almacenes_payload,

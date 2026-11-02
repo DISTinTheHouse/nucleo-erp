@@ -1931,6 +1931,15 @@ class OrdenCompraPedidosSeriesRendimientoTests(TestCase):
             telefono="8100000000", contacto_principal="Ana", rfc="XAXX010101000", email="p1@p.test",
         )
         cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Tela")
+        # PT se compra por SKU (#792): una variante comprable para las O.
+        from catalogo.models import TipoProducto
+        cls.variante_pt = ProductoVariante.objects.create(
+            producto=Producto.objects.create(
+                empresa=cls.empresa, nombre="Camisa", tipo=TipoProducto.objects.create(pk=3, codigo="PT"),
+            ),
+            empresa=cls.empresa, color=Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000"),
+            sku="CAM-PT", precio_base="1",
+        )
         cls.usuario = Usuario.objects.create(
             username="compras", email="c@acme.test", empresa=cls.empresa,
             sucursal_default=cls.sucursal, is_admin_empresa=True,
@@ -1961,7 +1970,10 @@ class OrdenCompraPedidosSeriesRendimientoTests(TestCase):
         return [{"producto": self.producto.pk, "cantidad": 2, "precio": "10.00"} for _ in range(n)]
 
     def _crear(self, header=None, n=1):
-        body = {"orden_compra": {"proveedor": self.proveedor.pk, **(header or {})}, "detalle": self._renglones(n)}
+        detalle = self._renglones(n)
+        if (header or {}).get("tipo_compra") == "PT":
+            detalle = [{"producto_variante": self.variante_pt.pk, "cantidad": 2, "precio": "10.00"} for _ in range(n)]
+        body = {"orden_compra": {"proveedor": self.proveedor.pk, **(header or {})}, "detalle": detalle}
         return self.client_api.post(f"{ORDENES_URL}onboarding/", body, format="json")
 
     def test_referencia_es_opcional(self):
@@ -2291,6 +2303,22 @@ class OrdenCompraVariantesPTTests(TestCase):
         resp = self._crear("MP", [{"producto_variante": self.ch.pk, "cantidad": 1}])
         self.assertEqual(resp.status_code, 400, resp.content)
         self.assertIn("detalle", resp.json())
+
+    def test_pt_sin_sku_es_400_salvo_renglon_legado(self):
+        resp = self._crear("PT", [{"producto": self.producto.pk, "cantidad": 1}])
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("detalle", resp.json())
+        # OC legada (renglón sin variante de ese producto): editarla lo conserva.
+        oc = OrdenCompra.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, proveedor=self.proveedor, moneda=self.proveedor.moneda,
+            usuario=self.usuario, fecha_oc=timezone.now().date(), tipo_compra="PT",
+        )
+        OrdenCompraDetalle.objects.create(orden_compra=oc, producto=self.producto, sucursal=self.sucursal, cantidad=2)
+        body = {"orden_compra_id": oc.pk, "orden_compra": {}, "detalle": [
+            {"producto": self.producto.pk, "cantidad": 3}, {"producto_variante": self.g.pk, "cantidad": 1},
+        ]}
+        resp = self.api.post(f"{ORDENES_URL}onboarding/", body, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
 
     def test_variante_inactiva_es_400(self):
         resp = self._crear("PT", [{"producto_variante": self.baja.pk, "cantidad": 1}])

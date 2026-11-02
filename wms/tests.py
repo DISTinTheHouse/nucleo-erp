@@ -1047,6 +1047,14 @@ class OnboardingAlmacenSugeridoTests(TestCase):
             self.assertEqual(resp.status_code, 400, (params, resp.content))
             self.assertIn(campo, resp.json())
 
+    def test_listado_avisa_si_se_recorto(self):
+        # #818: 2 pedidos; con límite 1 se recorta y lo dice.
+        data = self._get(pedidos_limit=1)
+        self.assertEqual((len(data["pedidos"]), data["pedidos_truncado"]), (1, True))
+        data = self._get()
+        self.assertEqual((len(data["pedidos"]), data["pedidos_truncado"]), (2, False))
+        self.assertEqual(self.api.get(self.URL, {"pedidos_limit": "x"}).status_code, 400)
+
     def test_programaciones_null_no_revienta(self):
         from types import SimpleNamespace
 
