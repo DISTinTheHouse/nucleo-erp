@@ -468,6 +468,11 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         "email", "telefono", "fecha_alta", "fecha_baja", "fecha_ultima_compra", "plazo_dias", "dias_credito",
         "activo", "created_at", "updated_at",
     ]
+    # Las bajas que lista ``?activo=false`` también se abren: detalle, historial
+    # y ``kpis-detalle`` en solo lectura; editarlas o darlas de baja es 400 (#888).
+    ACCIONES_CON_BAJAS = {
+        "retrieve", "historial_ordenes_compra", "kpis_detalle", "update", "partial_update", "destroy",
+    }
 
     def get_queryset(self):
         user = self.request.user
@@ -478,10 +483,18 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
-        # Solo el listado puede pedir las bajas (``?activo=false``, #863); el
-        # detalle y las acciones siguen viendo solo activos.
-        activo = booleano_param(self.request, "activo", True) if self.action == "list" else True
-        return qs.filter(empresa=empresa, activo=activo)
+        qs = qs.filter(empresa=empresa)
+        if self.action == "list":
+            # ``?activo=false`` lista las bajas (#863).
+            return qs.filter(activo=booleano_param(self.request, "activo", True))
+        if self.action in self.ACCIONES_CON_BAJAS:
+            return qs
+        return qs.filter(activo=True)
+
+    @staticmethod
+    def _exigir_activo(proveedor):
+        if not proveedor.activo:
+            raise ValidationError({"detail": "El proveedor está dado de baja."})
 
     def perform_create(self, serializer):
         empresa = getattr(self.request.user, "empresa", None)
@@ -490,7 +503,12 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             serializer.save(empresa=empresa, codigo=Proveedor.siguiente_codigo(empresa))
 
+    def perform_update(self, serializer):
+        self._exigir_activo(serializer.instance)
+        serializer.save()
+
     def perform_destroy(self, instance):
+        self._exigir_activo(instance)
         instance.activo = False
         instance.fecha_baja = timezone.localdate()
         instance.save(update_fields=["activo", "fecha_baja"])

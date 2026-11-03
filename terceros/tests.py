@@ -183,6 +183,27 @@ class ProveedorEmpresaTests(TestCase):
         self.assertFalse(proveedor.activo)
         self.assertIsNotNone(proveedor.fecha_baja)
 
+    def test_baja_se_abre_en_solo_lectura(self):
+        """#888: lo que lista ``?activo=false`` se abre; escribir sobre la baja es 400."""
+        proveedor = self._proveedor()
+        self.client_api.delete(f"{self.URL}{proveedor.pk}/")
+        url = f"{self.URL}{proveedor.pk}/"
+
+        bajas = self.client_api.get(f"{self.URL}?activo=false").json()
+        self.assertEqual([p["id"] for p in bajas], [proveedor.pk])
+        self.assertEqual(self.client_api.get(url).status_code, 200)
+        self.assertEqual(self.client_api.get(f"{url}historial-ordenes-compra/").status_code, 200)
+        self.assertEqual(self.client_api.get(f"{url}kpis-detalle/?factor=precio").status_code, 200)
+        for resp in (
+            self.client_api.patch(url, {"nombre": "Otro"}, format="json"),
+            self.client_api.put(url, self._body(), format="json"),
+            self.client_api.delete(url),
+        ):
+            self.assertEqual(resp.status_code, 400, resp.content)
+            self.assertEqual(resp.json(), {"detail": "El proveedor está dado de baja."})
+        # El listado por defecto sigue sin las bajas.
+        self.assertEqual(self.client_api.get(self.URL).json(), [])
+
 
     # --- #315: acumulados de solo lectura -------------------------------------
 
