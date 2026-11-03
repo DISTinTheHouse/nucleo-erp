@@ -975,6 +975,7 @@ Operaciones oficiales del módulo. Este es el flujo recomendado para modificar e
   - `AJUSTE`: reemplaza la cantidad final por el valor enviado.
   - El backend registra auditoría y también persiste en `MovimientoInventario` y `MovimientoInventarioDetalle`.
   - **SKU de muestra** (sin catálogo): en vez de `producto`/`producto_variante`, el item manda `sku_muestra` (el SKU de producción, el mismo `sku` que trae el renglón de muestra en `programar/`) o `variante_produccion` (su id). Ej.: `{"sku_muestra": "MP617-713-G", "cantidad": 5}`. La existencia queda en `Existencia.variante_produccion` (sin producto ni variante) y el movimiento en `MovimientoInventarioDetalle.variante_produccion`. El SKU debe ser de la empresa del almacén y estar activo; si no, `400 {"items": "Item #n: SKU de muestra no encontrado."}`. No se combina con `producto`/`producto_variante` en el mismo item. Aplica igual a salida y ajuste.
+  - **Autocompletado**: `GET /api/v1/inventarios/skus-muestra/?search=<texto>` busca en el SKU de muestra o en el folio del pedido (contiene, sin mayúsculas), máximo 10, de la empresa del usuario. Sin `search` → `[]`. Cada resultado: `{"variante_produccion": 80, "sku_muestra": "MP617-713-G", "pedido_folio": "P-00058-2026", "nombre": "...", "talla": "G"}`. Una sola consulta.
   - En `GET /existencias/` una existencia de muestra trae `variante_produccion` (id) y `producto_info` con `id: null`, `nombre`, `sku`, `color`, `talla` y `es_muestra: true`.
 
 ---
