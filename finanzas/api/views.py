@@ -3,7 +3,7 @@ from django.utils.dateparse import parse_date
 from decimal import Decimal
 from django.db import OperationalError, transaction
 from django.db.models.deletion import ProtectedError, RestrictedError
-from django.db.models import BooleanField, Case, DecimalField, Max, Min, OuterRef, Q, Subquery, Sum, Value, When
+from django.db.models import BooleanField, Case, Count, DecimalField, Max, Min, OuterRef, Q, Subquery, Sum, Value, When
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -89,7 +89,7 @@ from finanzas.services.alerta_mora_service import AlertaMoraService
 from finanzas.services.cobro_service import CobroService
 from finanzas.services.conciliacion_service import ConciliacionService
 from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
-from finanzas.services.dashboard_service import DashboardFinancieroService
+from finanzas.services.dashboard_service import DashboardFinancieroService, _quantize
 from finanzas.services.factura_service import FacturaService
 from finanzas.services.movimiento_bancario_service import MovimientoBancarioService
 from finanzas.services.nota_credito_service import NotaCreditoService
@@ -1914,23 +1914,25 @@ class CobroViewSet(FinanzasBaseViewSet):
     queryset = Cobro.objects.all()
     serializer_class = CobroSerializer
 
-    def get_queryset(self):
+    def _cobros_visibles(self):
+        """Alcance del listado sin sus filtros de ``?``: activos, empresa y sucursal (#753)."""
         user = self.request.user
-        # Cliente, cuenta (con su moneda, EC-746) y líneas en bloque: antes eran tres
-        # consultas por fila del listado.
-        qs = (
-            super().get_queryset().filter(activo=True)
-            .select_related("cliente", "cuenta_bancaria__moneda")
-            .prefetch_related("cobro_detalles")
-        )
-        if _puede_ver_todo(user):
-            pass
-        else:
+        qs = super().get_queryset().filter(activo=True)
+        if not _puede_ver_todo(user):
             empresa = getattr(user, "empresa", None)
             if not empresa:
                 return qs.none()
             qs = qs.filter(empresa=empresa)
-        qs = cobros_por_sucursal(qs, user)
+        return cobros_por_sucursal(qs, user)
+
+    def get_queryset(self):
+        # Cliente, cuenta (con su moneda, EC-746) y líneas en bloque: antes eran tres
+        # consultas por fila del listado.
+        qs = (
+            self._cobros_visibles()
+            .select_related("cliente", "cuenta_bancaria__moneda")
+            .prefetch_related("cobro_detalles")
+        )
         qp = self.request.query_params
         cliente = qp.get("cliente") or qp.get("cliente_id")
         metodo_pago = (qp.get("metodo_pago") or "").strip()
@@ -1954,6 +1956,88 @@ class CobroViewSet(FinanzasBaseViewSet):
 
     # Mueve CxC, banco y póliza (#581), revisado antes de validar el body (#589).
     mensaje_sin_permiso_escritura = "No tienes permiso para registrar o cancelar cobros."
+
+    @staticmethod
+    def _fecha_param(qp, nombre, alias, defecto):
+        valor = (qp.get(nombre) or qp.get(alias) or "").strip()
+        if not valor:
+            return defecto
+        try:
+            fecha = parse_date(valor)
+        except ValueError:
+            fecha = None
+        if fecha is None:
+            raise ValidationError({nombre: "Usa el formato AAAA-MM-DD."})
+        return fecha
+
+    @action(detail=False, methods=["get"], url_path="resumen", url_name="resumen")
+    def resumen(self, request):
+        """Cobros aplicados del periodo por moneda de la cuenta bancaria (EC-746).
+
+        Lo mismo que ``cobros_periodo`` del dashboard, pero por moneda y con el alcance
+        del listado (sucursal incluida), para quien sólo tiene ``R-CONTABILIDAD-CXC``.
+        Una entrada por cada moneda de las cuentas bancarias de la empresa (activas o
+        no), aunque no tenga cobros. Ignora los filtros del listado (cliente, estatus...).
+        Dos consultas, sin importar cuántos cobros haya.
+        """
+        user = request.user
+        qp = request.query_params
+        hoy = timezone.localdate()
+        fecha_inicio = self._fecha_param(qp, "fecha_inicio", "fecha_desde", hoy.replace(day=1))
+        fecha_fin = self._fecha_param(qp, "fecha_fin", "fecha_hasta", hoy)
+
+        # La empresa, como el dashboard: el superusuario elige con ``?empresa_id=`` o
+        # usa la suya; sin ninguna, 400. Los demás, la suya (sin empresa no ven nada).
+        cobros = self._cobros_visibles()
+        if _puede_ver_todo(user):
+            empresa_id = qp.get("empresa") or qp.get("empresa_id")
+            if empresa_id:
+                empresa = Empresa.objects.filter(pk=empresa_id).first()
+                if empresa is None:
+                    raise ValidationError({"empresa": "Empresa no encontrada."})
+            else:
+                empresa = getattr(user, "empresa", None)
+                if empresa is None:
+                    raise ValidationError({"empresa": "Superusuario debe especificar ?empresa_id=X para el resumen de cobros."})
+            cobros = cobros.filter(empresa=empresa)
+        else:
+            empresa = getattr(user, "empresa", None)
+
+        monedas = []
+        if empresa is not None:
+            monedas = list(
+                CuentaBancaria.objects.filter(empresa=empresa)
+                .exclude(moneda__codigo_iso="")
+                .values_list("moneda_id", "moneda__codigo_iso")
+                .distinct()
+                .order_by("moneda__codigo_iso", "moneda_id")
+            )
+        totales = {}
+        if monedas:
+            totales = {
+                fila["cuenta_bancaria__moneda_id"]: fila
+                for fila in cobros.filter(
+                    estatus=Cobro.Estatus.APLICADO,
+                    fecha_cobro__gte=fecha_inicio,
+                    fecha_cobro__lte=fecha_fin,
+                    cuenta_bancaria__moneda_id__in=[m[0] for m in monedas],
+                )
+                .values("cuenta_bancaria__moneda_id")
+                .annotate(cantidad=Count("id"), monto_total=Sum("total_cobrado"))
+                .order_by()
+            }
+        return Response({
+            "periodo": {"fecha_inicio": fecha_inicio.isoformat(), "fecha_fin": fecha_fin.isoformat()},
+            "por_moneda": [
+                {
+                    "moneda_id": moneda_id,
+                    "moneda_codigo": codigo,
+                    "cantidad": totales.get(moneda_id, {}).get("cantidad", 0),
+                    "monto_total": str(_quantize(totales.get(moneda_id, {}).get("monto_total"))),
+                }
+                for moneda_id, codigo in monedas
+            ],
+        })
 
     @transaction.atomic
     def perform_create(self, serializer):

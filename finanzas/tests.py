@@ -9290,3 +9290,148 @@ class CobroCamposCuentaBancariaTests(LecturaJerarquicaBase):
             )
         self.assertEqual(consultas(), una)
 
+
+class CobrosResumenTests(LecturaJerarquicaBase):
+    """EC-746: ``GET cobros/resumen/``, el ``cobros_periodo`` del dashboard por moneda."""
+
+    URL = f"{COBROS_URL}resumen/"
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.hoy = timezone.localdate()
+        cls.usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        cls.eur = Moneda.objects.create(codigo_iso="EUR", nombre="Euro")
+        banco_a = Banco.objects.create(empresa=cls.a["empresa"], nombre="Banco USD")
+        # Inactiva y sin cobros: su moneda sale igual, en cero.
+        CuentaBancaria.objects.create(
+            empresa=cls.a["empresa"], banco=banco_a, moneda=cls.usd, alias="Dólares", activo=False,
+        )
+        banco_b = Banco.objects.create(empresa=cls.b["empresa"], nombre="Banco EUR")
+        cuenta_eur_b = CuentaBancaria.objects.create(
+            empresa=cls.b["empresa"], banco=banco_b, moneda=cls.eur, alias="Euros",
+        )
+        Cobro.objects.create(
+            empresa=cls.b["empresa"], cliente=cls.b["cliente"], cuenta_bancaria=cuenta_eur_b,
+            total_cobrado=Decimal("999.00"),
+        )
+        # Además del cobro de 40.00 de ``_registros`` (hoy, Aplicado, MXN):
+        cuenta_a = cls.registros["a"]["cuenta"]
+
+        def cobro(total, **extra):
+            return Cobro.objects.create(
+                empresa=cls.a["empresa"], cliente=cls.a["cliente"], cuenta_bancaria=cuenta_a,
+                total_cobrado=Decimal(total), **extra,
+            )
+
+        cobro("10.01")
+        cobro("500.00", estatus=Cobro.Estatus.CANCELADO)
+        cobro("300.00", estatus=Cobro.Estatus.BORRADOR)
+        cobro("700.00", fecha_cobro=cls.hoy.replace(day=1) - timedelta(days=1))  # mes anterior
+
+    def _resumen(self, user, query=""):
+        return self._client(user).get(f"{self.URL}{query}")
+
+    def test_forma_monedas_en_cero_y_periodo_por_defecto(self):
+        resp = self._resumen(self._usuario_con("forma", ["R-CONTABILIDAD-CXC"]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {
+            "periodo": {"fecha_inicio": self.hoy.replace(day=1).isoformat(), "fecha_fin": self.hoy.isoformat()},
+            "por_moneda": [
+                {"moneda_id": self.moneda.pk, "moneda_codigo": "MXN", "cantidad": 2, "monto_total": "50.01"},
+                {"moneda_id": self.usd.pk, "moneda_codigo": "USD", "cantidad": 0, "monto_total": "0.00"},
+            ],
+        })
+
+    def test_periodo_explicito_y_alias(self):
+        user = self._usuario_con("periodo", ["R-CONTABILIDAD-CXC"])
+        inicio = (self.hoy.replace(day=1) - timedelta(days=1)).replace(day=1)
+        for query in (
+            f"?fecha_inicio={inicio}&fecha_fin={self.hoy}",
+            f"?fecha_desde={inicio}&fecha_hasta={self.hoy}",
+        ):
+            with self.subTest(query=query):
+                data = self._resumen(user, query).json()
+                self.assertEqual(data["periodo"], {"fecha_inicio": inicio.isoformat(), "fecha_fin": self.hoy.isoformat()})
+                self.assertEqual(data["por_moneda"][0]["cantidad"], 3)
+                self.assertEqual(data["por_moneda"][0]["monto_total"], "750.01")
+        self.assertEqual(self._resumen(user, "?fecha_inicio=2026-13-01").status_code, 400)
+
+    def test_igual_al_cobros_periodo_del_dashboard(self):
+        client = self._client(self._usuario_con("dash", ["R-CONTABILIDAD"]))
+        inicio = (self.hoy.replace(day=1) - timedelta(days=40)).isoformat()
+        for query in ("", f"?fecha_inicio={inicio}&fecha_fin={self.hoy}"):
+            for fila in client.get(f"{self.URL}{query}").json()["por_moneda"]:
+                sep = "&" if query else "?"
+                dash = client.get(f"/api/v1/finanzas/dashboard/{query}{sep}moneda_id={fila['moneda_id']}").json()
+                with self.subTest(query=query, moneda=fila["moneda_codigo"]):
+                    self.assertEqual(
+                        (fila["cantidad"], fila["monto_total"]),
+                        (dash["cobros_periodo"]["cantidad"], dash["cobros_periodo"]["monto_total"]),
+                    )
+
+    def test_no_cuenta_cobros_ni_monedas_de_otra_empresa(self):
+        data = self._resumen(self._usuario_con("tenant", ["R-CONTABILIDAD-CXC"])).json()
+        self.assertEqual([m["moneda_codigo"] for m in data["por_moneda"]], ["MXN", "USD"])
+        self.assertEqual(data["por_moneda"][0]["monto_total"], "50.01")
+        # Y la otra empresa sólo ve lo suyo, aunque la MXN sea la misma moneda.
+        data_b = self._resumen(self._usuario_con("tenant-b", ["R-CONTABILIDAD-CXC"], tenant=self.b)).json()
+        self.assertEqual(
+            [(m["moneda_codigo"], m["cantidad"], m["monto_total"]) for m in data_b["por_moneda"]],
+            [("EUR", 1, "999.00"), ("MXN", 1, "40.00")],
+        )
+
+    def test_respeta_el_alcance_por_sucursal_del_listado(self):
+        from finanzas.models import CobroDetalle
+
+        otra = Sucursal.objects.create(empresa=self.a["empresa"], codigo="SLP", nombre="SLP")
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=otra, cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+            total=Decimal("80.00"), saldo=Decimal("0.00"),
+        )
+        ajeno = Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=self.registros["a"]["cuenta"],
+            total_cobrado=Decimal("80.00"),
+        )
+        CobroDetalle.objects.create(cobro=ajeno, cxc=cxc, importe_aplicado=Decimal("80.00"))
+        acotado = self._usuario_con("suc", ["R-CONTABILIDAD-CXC"])
+        self.assertEqual(self._resumen(acotado).json()["por_moneda"][0]["monto_total"], "50.01")
+        self.assertNotIn(ajeno.pk, {f["id"] for f in self._client(acotado).get(COBROS_URL).data})
+        admin = self._usuario_con("suc-admin", [])
+        admin.is_admin_empresa = True
+        admin.save()
+        self.assertEqual(self._resumen(admin).json()["por_moneda"][0]["monto_total"], "130.01")
+
+    def test_superusuario_elige_empresa_o_usa_la_suya(self):
+        root = Usuario.objects.create(username="ec746-root@x.test", email="ec746-root@x.test", is_superuser=True)
+        self.assertEqual(self._resumen(root).status_code, 400)
+        data = self._resumen(root, f"?empresa_id={self.b['empresa'].pk}").json()
+        self.assertEqual([m["moneda_codigo"] for m in data["por_moneda"]], ["EUR", "MXN"])
+        root.empresa = self.a["empresa"]
+        root.save()
+        self.assertEqual(self._resumen(root).json()["por_moneda"][0]["monto_total"], "50.01")
+
+    def test_permiso_de_seccion(self):
+        for claves in (["R-CONTABILIDAD-FACTURACION"], ["R-CONTABILIDAD-CLIENTES"], []):
+            with self.subTest(claves=claves):
+                user = self._usuario_con(f"p-{len(claves)}-{''.join(claves).lower()}", claves)
+                self.assertEqual(self._resumen(user).status_code, 403)
+
+    def test_consultas_constantes(self):
+        user = self._usuario_con("coste", ["R-CONTABILIDAD-CXC"])
+
+        def consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertEqual(self._resumen(user).status_code, 200)
+            return len(ctx.captured_queries)
+
+        antes = consultas()
+        for _ in range(5):
+            Cobro.objects.create(
+                empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=self.registros["a"]["cuenta"],
+                total_cobrado=Decimal("1.00"),
+            )
+        self.assertEqual(consultas(), antes)
