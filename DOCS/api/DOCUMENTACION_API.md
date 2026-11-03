@@ -991,6 +991,8 @@ Entidad principal que agrupa las variantes. Contiene la información general (no
   - `q` (opcional): busca por coincidencia parcial en `nombre`, `codigo` o `cod_proscai`.
   - `tipo_id` (opcional): filtra por `TipoProducto`.
   - `linea` (opcional): filtra por la línea de su categoría (`INDUSTRIAL`, `EMPRESARIAL`, `ROPA_FRIO`, `EJECUTIVO`, `SERVICIOS`, `EPP`, `OTROS`).
+  - `es_compras` (opcional): `true`/`false`. Filtra el catálogo oficial de compras; otro valor → `400`.
+- **`es_compras`** (bool, default `false`): marca el producto (MP o PT) como parte del catálogo oficial de compras. Se lee y se escribe en `POST`/`PATCH`.
 - **`tipo` es opcional** (`null` = sin tipo); si se manda debe estar activo (`400` si no). El tipo es del producto, no de la variante.
 - **Respuesta**:
   ```json

@@ -170,6 +170,11 @@ class ProductoViewSet(viewsets.ModelViewSet):
         linea = self.request.query_params.get('linea')
         if linea:
             qs = qs.filter(categoria_producto__linea=linea)
+        es_compras = (self.request.query_params.get('es_compras') or '').strip().lower()
+        if es_compras:
+            if es_compras not in ('true', 'false', '1', '0'):
+                raise ValidationError({"es_compras": "Usa true o false."})
+            qs = qs.filter(es_compras=es_compras in ('true', '1'))
         q = (self.request.query_params.get('q') or '').strip()
         if q:
             qs = qs.filter(

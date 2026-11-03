@@ -113,12 +113,14 @@ class ProductoAdmin(admin.ModelAdmin):
         "tipo",
         "categoria_producto",
         "precio_base",
+        "es_compras",
         "activo",
         "created_at",
     )
     list_filter = (
         "empresa",
         "activo",
+        "es_compras",
         "tipo",
         "categoria_producto",
         "unidad_medida",
