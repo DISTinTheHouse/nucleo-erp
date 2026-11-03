@@ -9249,3 +9249,44 @@ class LecturaJerarquicaFinanzasTests(LecturaJerarquicaBase):
                 self.assertIn(self.registros["a"][ruta], ids)
                 self.assertNotIn(b[ruta], ids)
 
+
+class CobroCamposCuentaBancariaTests(LecturaJerarquicaBase):
+    """EC-746: el cobro trae la moneda y el estado de su cuenta, para quien no lee ``cuentas-bancarias/``."""
+
+    def test_listado_y_detalle_traen_moneda_y_activo_de_la_cuenta(self):
+        a = self.registros["a"]
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        banco = Banco.objects.create(empresa=self.a["empresa"], nombre="Banco USD")
+        cuenta_usd = CuentaBancaria.objects.create(
+            empresa=self.a["empresa"], banco=banco, moneda=usd, alias="Dólares", activo=False,
+        )
+        cobro_usd = Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=cuenta_usd,
+            total_cobrado=Decimal("5.00"),
+        )
+        client = self._client(self._usuario_con("campos", ["R-CONTABILIDAD-CXC"]))
+        filas = {f["id"]: f for f in client.get(COBROS_URL).data}
+        esperado = {a["cobros"]: ("MXN", True), cobro_usd.pk: ("USD", False)}
+        for pk, (codigo, activo) in esperado.items():
+            detalle = client.get(f"{COBROS_URL}{pk}/").data
+            for fuente, fila in (("listado", filas[pk]), ("detalle", detalle)):
+                with self.subTest(cobro=pk, fuente=fuente):
+                    self.assertEqual(fila["cuenta_bancaria_moneda_codigo"], codigo)
+                    self.assertIs(fila["cuenta_bancaria_activo"], activo)
+
+    def test_los_campos_no_agregan_consultas_por_fila(self):
+        client = self._client(self._usuario_con("n1", ["R-CONTABILIDAD-CXC"]))
+
+        def consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertEqual(client.get(COBROS_URL).status_code, 200)
+            return len(ctx.captured_queries)
+
+        una = consultas()
+        for _ in range(3):
+            Cobro.objects.create(
+                empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=self.registros["a"]["cuenta"],
+                total_cobrado=Decimal("1.00"),
+            )
+        self.assertEqual(consultas(), una)
+

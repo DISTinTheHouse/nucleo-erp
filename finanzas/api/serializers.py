@@ -1057,6 +1057,12 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
     cobro_detalles = CobroDetalleSerializer(many=True, required=False)
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)
+    # EC-746: quien sólo tiene ``R-CONTABILIDAD-CXC`` no lee ``cuentas-bancarias/``; la
+    # moneda y si la cuenta sigue activa le llegan con el cobro (``CobroViewSet`` las une).
+    cuenta_bancaria_moneda_codigo = serializers.CharField(
+        source="cuenta_bancaria.moneda.codigo_iso", read_only=True, allow_null=True
+    )
+    cuenta_bancaria_activo = serializers.BooleanField(source="cuenta_bancaria.activo", read_only=True)
 
     class Meta:
         model = Cobro

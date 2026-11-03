@@ -1916,7 +1916,13 @@ class CobroViewSet(FinanzasBaseViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset().filter(activo=True)
+        # Cliente, cuenta (con su moneda, EC-746) y líneas en bloque: antes eran tres
+        # consultas por fila del listado.
+        qs = (
+            super().get_queryset().filter(activo=True)
+            .select_related("cliente", "cuenta_bancaria__moneda")
+            .prefetch_related("cobro_detalles")
+        )
         if _puede_ver_todo(user):
             pass
         else:
