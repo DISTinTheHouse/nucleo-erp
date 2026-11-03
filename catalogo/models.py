@@ -121,7 +121,10 @@ class Producto(models.Model):
     descripcion = models.CharField(max_length=150, blank=True, default="")
     activo = models.BooleanField(default=True)
     # Obligatorio; PROTECT: borrar un tipo en uso ya no borra sus productos.
-    tipo = models.ForeignKey(TipoProducto, on_delete=models.PROTECT, related_name="productos", limit_choices_to={"activo": True})
+    tipo = models.ForeignKey(
+        TipoProducto, on_delete=models.PROTECT, related_name="productos", limit_choices_to={"activo": True},
+        null=True, blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     # campos para costo
