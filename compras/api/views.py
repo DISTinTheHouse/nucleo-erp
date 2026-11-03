@@ -123,11 +123,9 @@ def anotar_progreso_oc(qs):
 
     Misma regla que el pendiente de ``recepciones/onboarding``: cuenta lo
     recibido en recepciones activas no canceladas y descuenta lo que Calidad
-    rechaza. Las tres subconsultas van por FK indexada.
+    rechaza. Lo ordenado es ``total_piezas`` (columna de la OC). Las dos
+    subconsultas van por FK indexada.
     """
-    ordenado = OrdenCompraDetalle.objects.filter(orden_compra_id=OuterRef("pk")).annotate(
-        oc_ref=F("orden_compra_id")
-    )
     recibido = (
         RecepcionDetalle.objects.filter(
             orden_compra_detalle__orden_compra_id=OuterRef("pk"), recepcion__activo=True,
@@ -144,7 +142,6 @@ def anotar_progreso_oc(qs):
         .annotate(oc_ref=F("recepcion_detalle__orden_compra_detalle__orden_compra_id"))
     )
     return qs.annotate(
-        progreso_ordenado=_suma_por_oc(ordenado, "cantidad"),
         progreso_recibido=_suma_por_oc(recibido, "cantidad_recibida") - _suma_por_oc(rechazado, "cantidad_rechazada"),
     )
 
