@@ -420,6 +420,10 @@ class RecepcionDetalleRetrieveSerializer(serializers.ModelSerializer):
     """
 
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    # ``producto_variante`` ya viene en el ``select_related`` del retrieve: sin consultas extra.
+    producto_variante_sku = serializers.CharField(
+        source="producto_variante.sku", read_only=True, default=None
+    )
     ubicacion_nombre = serializers.SerializerMethodField()
 
     class Meta:
@@ -430,6 +434,7 @@ class RecepcionDetalleRetrieveSerializer(serializers.ModelSerializer):
             "producto",
             "producto_nombre",
             "producto_variante",
+            "producto_variante_sku",
             "ubicacion",
             "ubicacion_nombre",
             "lote",

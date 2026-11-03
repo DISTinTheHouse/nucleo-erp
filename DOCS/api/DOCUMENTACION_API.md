@@ -2476,6 +2476,7 @@ Seguimiento **informativo** de la OC: la fecha en que compras supo que llegó la
 - **Query Params (opcionales)**:
   - `orden_compra_id`: si se envía, `busqueda.ordenes_compra[]` trae solo esa orden (si es recibible); no es entero → `400`.
   - `tipo_compra`: `MP` (folio OC) o `PT` (folio O, producto terminado). Omitirlo devuelve ambas; otro valor es `400`. En `GET /recepciones/{id}/` no aplica.
+- **Detalle `GET /api/v1/compras/recepciones/{id}/`**: cada renglón de `detalles[]` trae `producto_variante_sku` (`null` sin variante). Sin consultas extra.
 - **Las O (PT) se reciben igual que las OC**: mismo `POST`, mismo paso por Calidad. Cada orden de `busqueda.ordenes_compra[]` trae `tipo_compra`. En `GET /recepciones/` (y `?tipo_compra=MP|PT`) cada fila trae `orden_compra_tipo_compra` (`null` si es de OP).
 - **Respuesta (resumen)**:
   ```json
