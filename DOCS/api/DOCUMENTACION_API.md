@@ -2243,12 +2243,14 @@ Pantalla de cola para mesa de control: una tabla con todos los pedidos y su esta
   - `clasificacion`/`clasificacion_display`/`fecha_confirmacion`/`fecha_entrega_min`/`fecha_entrega_max`: mismo significado y mismo cálculo que en el detalle del pedido (ver "Clasificar pedido" arriba) — `null` si el pedido aún no tiene clasificación.
   - `programacion_conf`: el JSON crudo de `PATCH /pedidos/{id}/programar/`, tal cual (cada renglón incluye `comentarios`) — `{"programaciones": []}` si no se ha programado nada.
   - `piezas_programables`: total de piezas programables del pedido, **muestras incluidas** — el mismo `total_piezas` que regresa `GET`/`PATCH /pedidos/{id}/programar/`. Para mostrar "programado X de Y" (X = suma de `parcialidades[].cantidad`). Hoy coincide con `piezas`.
+  - `piezas_muestra`: piezas de líneas de muestra (`es_muestra`), `0` si no tiene. `piezas_muestra == piezas` (y > 0) → "Solo muestras"; `0 < piezas_muestra < piezas` → "Con muestras".
   - `total_parcialidades`: cuántos renglones tiene `programacion_conf.programaciones` — para no obligar al frontend a contar el arreglo él mismo.
   - **`parcialidades`**: el mismo arreglo que `programacion_conf.programaciones` pero en top-level (`[]` si no se ha programado nada) — **para armar la tabla de "Programación de pedidos" con una línea por parcialidad**: por cada pedido con `total_parcialidades > 1`, itera `parcialidades` y pinta un renglón por cada una (repitiendo `folio`/`cliente_nombre`/etc. del pedido padre), en vez de una sola línea por pedido. `programacion_conf` se mantiene por compatibilidad, pero para este caso de uso es más directo consumir `parcialidades`.
 - **Filtros nuevos** (solo aplican en este listado, `?query_param` de siempre — no rompen el detalle del pedido):
   - `?estatus=3` o `?estatus=3,4` — uno o varios estatus separados por coma (mismos códigos de `Pedido.CHOICES_ESTATUS`: 1 BORRADOR, 2 POR AUTORIZAR, 3 AUTORIZADA, 4 EN PROCESO, 5 CANCELADO). Valor inválido responde `400 {"estatus": "Filtro inválido. Usa números separados por coma."}`.
   - `?sin_clasificar=true` — solo pedidos con `clasificacion` vacía (la cola de "pendientes por clasificar").
   - `?programado=true` — solo pedidos con al menos una entrada en `programacion_conf.programaciones` (ya se les corrió `PATCH /pedidos/{id}/programar/` con al menos un destino/cantidad). Un pedido programado y luego "limpiado" (`programaciones: []`) **no** cuenta como programado — vuelve a quedar fuera de este filtro.
+  - `?con_muestras=true` — solo pedidos con al menos una línea de muestra.
   - Se pueden combinar entre sí y con los filtros que ya existían (`?q=`/`?folio=`, `?mis_pedidos=true`).
 - **Dos vistas típicas para el frontend, misma llamada**:
   - **Cola de pendientes** (todo lo que falta atender): `GET /pedidos/?estatus=3,4` — clasificación y programación pueden venir vacías, esa es la tabla de "qué falta".
