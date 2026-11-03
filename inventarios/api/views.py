@@ -1330,6 +1330,46 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         return self._apply(request, "AJUSTE")
 
 
+class SkuMuestraViewSet(viewsets.ViewSet):
+    """Autocompletado de SKUs de muestra para la entrada a almacén.
+
+    ``?search=`` busca en el SKU o en el folio del pedido; máximo 10. Una sola
+    consulta con ``values()`` (sin instanciar modelos), acotada a la empresa del
+    usuario; el superusuario sin empresa ve todas.
+    """
+
+    permission_classes = [IsAuthenticatedAndScoped]
+    LIMITE = 10
+
+    def list(self, request):
+        texto = (request.query_params.get("search") or "").strip()
+        if not texto:
+            return Response([])
+        user = request.user
+        qs = VarianteProductoProduccion.objects.filter(activo=True, sku__isnull=False)
+        empresa_id = getattr(user, "empresa_id", None)
+        if empresa_id:
+            qs = qs.filter(empresa_id=empresa_id)
+        elif not user.is_superuser:
+            return Response([])
+        filas = (
+            qs.filter(models.Q(sku__icontains=texto) | models.Q(pedido_detalle__pedido__folio__icontains=texto))
+            .order_by("sku")
+            .values("id", "sku", "nombre", "talla__nombre", "pedido_detalle__pedido__folio",
+                    "pedido_detalle__producto_nombre_externo")[: self.LIMITE]
+        )
+        return Response([
+            {
+                "variante_produccion": f["id"],
+                "sku_muestra": f["sku"],
+                "pedido_folio": f["pedido_detalle__pedido__folio"],
+                "nombre": f["nombre"] or f["pedido_detalle__producto_nombre_externo"],
+                "talla": f["talla__nombre"],
+            }
+            for f in filas
+        ])
+
+
 class ReporteMovimientosPeriodoPagination(PageNumberPagination):
     # Instantiated explicitly inside reporte_movimientos_periodo, not set as
     # pagination_class on the ViewSet, so list()/detalles()/other actions are
