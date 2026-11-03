@@ -93,6 +93,8 @@ from ventas.utils.helpers import (
     nombre_para_mostrar,
 )
 from ventas.services.sku_produccion_service import (
+    TALLAS_DE_LINEA_NO_MUESTRA_Q,
+    linea_no_muestra_q,
     es_muestra,
     variante_produccion_de_talla,
     variantes_produccion_prefetch,
@@ -3042,6 +3044,12 @@ class PedidoViewSet(viewsets.ModelViewSet):
             programado = self.request.query_params.get("programado", "")
             if programado.lower() in ("true", "1"):
                 qs = qs.filter(programacion_conf__programaciones__0__isnull=False)
+            # ``?con_muestras=true``: pedidos con al menos una línea de muestra.
+            con_muestras = self.request.query_params.get("con_muestras", "")
+            if con_muestras.lower() in ("true", "1"):
+                qs = qs.filter(Exists(
+                    PedidoDetalle.objects.filter(pedido_id=OuterRef("pk")).exclude(linea_no_muestra_q(""))
+                ))
             # ``piezas`` (EC-571, PE-01): todas las tallas del pedido, muestras
             # incluidas. Subquery y no ``Sum`` sobre el join, igual que el listado de
             # cotizaciones: sin ``GROUP BY`` ni JOINs multivaluados en la consulta
@@ -3052,12 +3060,22 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 .annotate(total=Sum("cantidad"))
                 .values("total")
             )
+            # ``piezas_muestra``: tallas de líneas de muestra (mismo criterio que
+            # ``es_muestra``: ``producto_nombre_externo`` puesto).
+            muestra_qs = (
+                PedidoDetalleTalla.objects.filter(pedido_detalle__pedido_id=OuterRef("pk"))
+                .exclude(TALLAS_DE_LINEA_NO_MUESTRA_Q)
+                .values("pedido_detalle__pedido_id")
+                .annotate(total=Sum("cantidad"))
+                .values("total")
+            )
             # Solo las columnas del nombre, no las filas completas de cotización y
             # usuario (``aprobado_snapshot`` es un JSONB) en un listado sin paginar.
             qs = qs.annotate(
                 piezas=Coalesce(Subquery(piezas_qs[:1]), 0),
                 # Programable = todas las piezas, muestras incluidas (igual que ``programar``).
                 piezas_programables=Coalesce(Subquery(piezas_qs[:1]), 0),
+                piezas_muestra=Coalesce(Subquery(muestra_qs[:1]), 0),
                 vendedor_cotizacion_id=F("cotizacion__vendedor_id"),
                 vendedor_first_name=F("cotizacion__vendedor__first_name"),
                 vendedor_last_name=F("cotizacion__vendedor__last_name"),
