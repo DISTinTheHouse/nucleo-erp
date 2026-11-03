@@ -386,6 +386,12 @@ class CotizacionDashboardItemSerializer(_ImportesIvaMixin, serializers.ModelSeri
     piezas = serializers.SerializerMethodField()
     importe_sin_iva = serializers.SerializerMethodField()
     importe_iva = serializers.SerializerMethodField()
+    # ``vendedor`` ya viene en el ``select_related`` del ViewSet: sin consulta extra.
+    vendedor_nombre = serializers.SerializerMethodField()
+
+    def get_vendedor_nombre(self, obj):
+        v = obj.vendedor
+        return nombre_para_mostrar(v.first_name, v.last_name, v.email) if v else None
 
     def get_piezas(self, obj):
         piezas = getattr(obj, "piezas", None)
@@ -434,6 +440,8 @@ class CotizacionDashboardItemSerializer(_ImportesIvaMixin, serializers.ModelSeri
             "pedido_folio",
             "moneda",
             "moneda_codigo",
+            "vendedor",
+            "vendedor_nombre",
         ]
         read_only_fields = ["motivo_rechazo", "moneda"]
 
@@ -736,7 +744,12 @@ class PedidoListSerializer(serializers.ModelSerializer):
     piezas_programables = serializers.IntegerField(read_only=True)
     # Tallas de líneas de muestra (``es_muestra``); 0 si no tiene.
     piezas_muestra = serializers.IntegerField(read_only=True)
+    # Σ surtido de sus pickings (= ``tracker_picking.total_surtido`` del detalle), entero.
+    piezas_surtidas = serializers.SerializerMethodField()
     vendedor_nombre = serializers.SerializerMethodField()
+
+    def get_piezas_surtidas(self, obj):
+        return int(obj.piezas_surtidas or 0)
 
     def get_vendedor_nombre(self, obj):
         if obj.vendedor_cotizacion_id is None:
@@ -785,6 +798,7 @@ class PedidoListSerializer(serializers.ModelSerializer):
             "piezas",
             "piezas_programables",
             "piezas_muestra",
+            "piezas_surtidas",
             "vendedor_nombre",
         ]
 

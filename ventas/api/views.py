@@ -3070,6 +3070,19 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 .annotate(total=Sum("cantidad"))
                 .values("total")
             )
+            # ``piezas_surtidas``: Σ ``cantidad_surtida`` de sus pickings, mismo
+            # alcance que ``tracker_picking.total_surtido`` (picking y renglón no
+            # cancelados, con talla).
+            surtido_qs = (
+                PickingDetalle.objects.filter(
+                    pedido_detalle__pedido_id=OuterRef("pk"), pedido_detalle_talla__isnull=False,
+                )
+                .exclude(picking__estado=Picking.Estado.CANCELADO)
+                .exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
+                .values("pedido_detalle__pedido_id")
+                .annotate(total=Sum("cantidad_surtida"))
+                .values("total")
+            )
             # Solo las columnas del nombre, no las filas completas de cotización y
             # usuario (``aprobado_snapshot`` es un JSONB) en un listado sin paginar.
             qs = qs.annotate(
@@ -3077,6 +3090,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 # Programable = todas las piezas, muestras incluidas (igual que ``programar``).
                 piezas_programables=Coalesce(Subquery(piezas_qs[:1]), 0),
                 piezas_muestra=Coalesce(Subquery(muestra_qs[:1]), 0),
+                piezas_surtidas=Subquery(surtido_qs[:1]),
                 vendedor_cotizacion_id=F("cotizacion__vendedor_id"),
                 vendedor_first_name=F("cotizacion__vendedor__first_name"),
                 vendedor_last_name=F("cotizacion__vendedor__last_name"),
