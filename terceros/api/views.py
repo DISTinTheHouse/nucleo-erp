@@ -13,12 +13,13 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, F, Q, Sum
+from django.db.models import Count, F, OuterRef, Q, Subquery, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.shortcuts import get_object_or_404
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import (
+    ClienteMesaControlSerializer,
     ClienteSerializer,
     DireccionClienteSerializer,
     ProveedorSerializer,
@@ -39,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 class ClienteViewSetMesaControl(viewsets.ModelViewSet):
     queryset = clientes_base()
-    serializer_class = ClienteSerializer
+    serializer_class = ClienteMesaControlSerializer
     http_method_names = ['get']
 
     def get_queryset(self):
@@ -50,7 +51,22 @@ class ClienteViewSetMesaControl(viewsets.ModelViewSet):
         # scope por ``vendedores`` ni la política de superusuario.
         # ``vendedores`` en una sola consulta, igual que ``ClienteViewSet``: sin
         # el prefetch era una consulta por cliente.
-        return clientes_visibles(super().get_queryset(), self.request.user).prefetch_related("vendedores")
+        # ``fecha_ultima_compra``: ``created_at`` del pedido más reciente del
+        # cliente (activo, no cancelado, de su empresa) como subquery en la misma
+        # consulta. Import local por el ciclo ``ventas`` -> ``terceros``.
+        from ventas.models import Pedido
+
+        ultimo_pedido = (
+            Pedido.objects.filter(cliente_id=OuterRef("pk"), empresa_id=OuterRef("empresa_id"), activo=True)
+            .exclude(estatus=Pedido.ESTATUS_CANCELADO)
+            .order_by("-created_at")
+            .values("created_at")[:1]
+        )
+        return (
+            clientes_visibles(super().get_queryset(), self.request.user)
+            .prefetch_related("vendedores")
+            .annotate(ultimo_pedido_at=Subquery(ultimo_pedido))
+        )
 
 class ClienteViewSet(viewsets.ModelViewSet):
     queryset = clientes_base()
