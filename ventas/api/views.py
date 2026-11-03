@@ -500,6 +500,18 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 pedido_folio=Subquery(pedido_qs.values("folio")[:1]),
                 piezas=Coalesce(Subquery(piezas_qs[:1]), 0),
             )
+            # Solo las columnas que pinta ``CotizacionDashboardItemSerializer``:
+            # sin esto el ``select_related`` traía ~70 columnas por fila (JSONB de
+            # ``aprobado_snapshot`` incluido) de cotización, cliente, sucursal,
+            # moneda y vendedor (~1.6 MB por listado), y la transferencia pesaba
+            # más que la consulta. ``sucursal`` no se pinta: fuera del join.
+            qs = qs.select_related(None).select_related("cliente", "moneda", "vendedor").only(
+                "id", "estatus", "tipo_pedido", "oc", "uso_cfdi", "gran_total", "iva",
+                "autorizada_at", "cambios_solicitados_at", "motivo_rechazo", "created_at", "updated_at",
+                "cliente_id", "cliente__nombre", "cliente__razon_social",
+                "moneda_id", "moneda__codigo_iso",
+                "vendedor_id", "vendedor__first_name", "vendedor__last_name", "vendedor__email",
+            )
 
             # Los filtros de query param viven DENTRO del guard de ``list``,
             # igual que las anotaciones de arriba. ``_apply_filters`` se llama
