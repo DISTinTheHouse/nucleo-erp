@@ -1520,6 +1520,38 @@ class RecepcionKpisTests(TestCase):
         self.assertIn("cantidad_rechazada", data["material_rechazado"])
         self.assertIn("pct", data["cumplimiento_cantidad"])
 
+    def test_listado_filtra_por_almacen_orden_compra_y_tipo_compra(self):
+        """#889: ``?almacen=``/``?orden_compra=`` en recepciones y ``?tipo_compra=`` en OC."""
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        url = "/api/v1/compras/recepciones/"
+
+        def ids(base, query):
+            resp = client.get(f"{base}?{query}")
+            self.assertEqual(resp.status_code, 200, (query, resp.content))
+            data = resp.json()
+            return {r["id"] for r in (data["results"] if isinstance(data, dict) else data)}
+
+        self.assertEqual(ids(url, f"orden_compra={self.oc1.pk}"), {self.rec1.pk})
+        self.assertEqual(len(ids(url, f"almacen={self.almacen.pk}")), 2)
+        otro = Almacen.objects.create(empresa=self.empresa, sucursal=self.sucursal, codigo="ALM2", nombre="Otro")
+        self.assertEqual(ids(url, f"almacen={otro.pk}"), set())
+        self.assertEqual(ids(url, f"orden_compra={self.oc1.pk}&limit=1&search=RC"), {self.rec1.pk})
+        for query in ("almacen=x", "orden_compra=1.5"):
+            self.assertEqual(client.get(f"{url}?{query}").status_code, 400, query)
+
+        ordenes = "/api/v1/compras/ordenes/"
+        OrdenCompra.objects.filter(pk=self.oc2.pk).update(tipo_compra=OrdenCompra.TipoCompra.PRODUCTO_TERMINADO)
+        self.assertEqual(ids(ordenes, "tipo_compra=PT"), {self.oc2.pk})
+        self.assertEqual(ids(ordenes, "tipo_compra=mp"), {self.oc1.pk})
+        self.assertEqual(client.get(f"{ordenes}?tipo_compra=XX").status_code, 400)
+
+        # Sin empresa: lista vacía, sin 400 (#511).
+        sin_empresa = APIClient()
+        sin_empresa.force_authenticate(user=self.sin_empresa)
+        self.assertEqual(sin_empresa.get(f"{url}?almacen=x").json(), [])
+        self.assertEqual(sin_empresa.get(f"{ordenes}?tipo_compra=XX").json(), [])
+
     def test_cumplimiento_cantidad(self):
         resp = self._get()
 
