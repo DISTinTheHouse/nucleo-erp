@@ -152,6 +152,10 @@ class AjusteDetalle(models.Model):
 class Existencia(models.Model):
     producto = models.ForeignKey(Producto, on_delete=models.PROTECT, null=True, blank=True)
     producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.PROTECT, related_name="existencia", null=True, blank=True)
+    # SKU de muestra (fuera de catálogo): existencia propia, sin producto ni variante.
+    variante_produccion = models.ForeignKey(
+        "catalogo.VarianteProductoProduccion", on_delete=models.PROTECT, related_name="existencias", null=True, blank=True
+    )
     almacen = models.ForeignKey(Almacen, on_delete=models.PROTECT, related_name="existencia")
     ubicacion = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="existencia", null=True, blank=True)
     stock = models.IntegerField(default=0)
@@ -164,8 +168,8 @@ class Existencia(models.Model):
         verbose_name_plural = "Existencia"
 
     def __str__(self):
-        producto = self.producto or getattr(self.producto_variante, "producto", None)
-        nombre = getattr(producto, "nombre", "Sin producto")
+        producto = self.producto or getattr(self.producto_variante, "producto", None) or self.variante_produccion
+        nombre = getattr(producto, "nombre", None) or "Sin producto"
         return f"{nombre} - {self.almacen.nombre}"
 
 class MovimientoInventario(StatusLifecycleModel):
@@ -199,6 +203,9 @@ class MovimientoInventarioDetalle(models.Model):
     movimiento_inventario = models.ForeignKey(MovimientoInventario, on_delete=models.CASCADE, related_name="detalles")
     producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle", null=True, blank=True)
     producto_variante = models.ForeignKey('catalogo.ProductoVariante', on_delete=models.CASCADE, related_name='transferencia_detalle', blank=True, null=True)
+    variante_produccion = models.ForeignKey(
+        'catalogo.VarianteProductoProduccion', on_delete=models.PROTECT, related_name='movimiento_inventario_detalle', blank=True, null=True
+    )
     ubicacion_origen = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle_origen", null=True, blank=True)
     ubicacion_destino = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle_destino", null=True, blank=True)
     # Almacén afectado cuando la existencia no tiene ubicación (movimientos por
