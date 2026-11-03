@@ -91,6 +91,12 @@ from terceros.models import Cliente, Proveedor
 from usuarios.models import Usuario
 from ventas.models import Cotizacion, Pedido, PedidoDetalle, PedidoDetalleTalla
 
+
+def _tipo_producto():
+    """Tipo de producto obligatorio (#871); PT tiene pk=3 como en producción."""
+    return TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})[0]
+
+
 ONBOARDING_URL = "/api/v1/finanzas/facturas/onboarding/"
 DESDE_PEDIDO_URL = "/api/v1/finanzas/facturas/desde-pedido/"
 PENDIENTE_COBRO_URL = "/api/v1/finanzas/facturas/registrar-pendiente-cobro/"
@@ -164,7 +170,7 @@ class FinanzasBase(TestCase):
     def setUpTestData(cls):
         cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
         cls.talla = Talla.objects.create(nombre="M")
-        cls.tipo_producto = TipoProducto.objects.create(codigo="PT")
+        cls.tipo_producto = _tipo_producto()
         cls.sat_regimen_fiscal = SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley")
         cls.sat_forma_pago = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
         cls.sat_metodo_pago = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
@@ -1804,7 +1810,7 @@ class Defecto7ErroresDeNegocioYTransacciones(FinanzasBase):
         ) = self._crear_oc_recepcion_y_factura_proveedor(
             self.a["empresa"], self.a["sucursal"], self.a["usuario"],
         )
-        producto_ajeno = Producto.objects.create(empresa=self.b["empresa"], nombre="Insumo ajeno")
+        producto_ajeno = Producto.objects.create(tipo=_tipo_producto(), empresa=self.b["empresa"], nombre="Insumo ajeno")
         client = self._client(self.a["usuario"])
         facturas_antes = FacturaProveedor.objects.count()
 

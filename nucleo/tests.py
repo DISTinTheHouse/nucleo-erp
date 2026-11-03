@@ -20,7 +20,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import NoReverseMatch, reverse
 from rest_framework.test import APIClient
 
-from catalogo.models import Color, Producto, ProductoVariante, Talla
+from catalogo.models import Color, Producto, ProductoVariante, Talla, TipoProducto
 from finanzas.models import Factura
 from nucleo.api.search import REGISTRO
 from nucleo.models import Empresa, EmpresaSatConfig, Moneda, Sucursal
@@ -32,6 +32,12 @@ from usuarios.models import Usuario
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from ventas.models import Cotizacion, Oportunidad, Pedido
+
+
+def _tipo_producto():
+    """Tipo de producto obligatorio (#871); PT tiene pk=3 como en producción."""
+    return TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})[0]
+
 
 SEARCH_URL = "/api/v1/search/"
 COTIZACIONES_URL = "/api/v1/ventas/cotizaciones/"
@@ -1341,8 +1347,8 @@ class ProductoBusquedaTests(_GrupoPropioMixin, BusquedaGlobalBaseTestCase):
         # Mismo nombre de producto y mismo prefijo de SKU en las dos empresas: una
         # fuga de aislamiento se vería al buscar cualquiera de los dos. Formato de
         # SKU real: modelo + color + talla concatenados (``10808015XG``).
-        cls.prod_a = Producto.objects.create(empresa=cls.a["empresa"], nombre="Camisola ignifuga")
-        cls.prod_b = Producto.objects.create(empresa=cls.b["empresa"], nombre="Camisola ignifuga")
+        cls.prod_a = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.a["empresa"], nombre="Camisola ignifuga")
+        cls.prod_b = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.b["empresa"], nombre="Camisola ignifuga")
         cls.var_a = cls._variante(cls.a, cls.prod_a, "1080801XG")
         cls.var_b = cls._variante(cls.b, cls.prod_b, "1080802XG")
 
