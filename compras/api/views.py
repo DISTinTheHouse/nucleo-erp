@@ -146,6 +146,14 @@ def anotar_progreso_oc(qs):
     )
 
 
+def _tipo_compra_param(request):
+    """``?tipo_compra=`` de los listados: MP (serie OC) / PT (serie O); otro valor → 400."""
+    tipo_compra = (request.query_params.get("tipo_compra") or "").strip().upper()
+    if tipo_compra and tipo_compra not in OrdenCompra.TipoCompra.values:
+        raise ValidationError({"tipo_compra": "Valor inválido. Usa MP (OC) o PT (O)."})
+    return tipo_compra
+
+
 class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = OrdenCompra.objects.filter(activo=True)
     serializer_class = OrdenCompraSerializer
@@ -222,7 +230,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         if self.action in ("list", "retrieve"):
             qs = anotar_progreso_oc(qs)
         if self.action == "list":
-            # Filtros de servidor (#863), después del alcance por empresa.
+            # Filtros de servidor (#863, #889), después del alcance por empresa.
+            tipo_compra = _tipo_compra_param(self.request)
+            if tipo_compra:
+                qs = qs.filter(tipo_compra=tipo_compra)
             qs = filtrar_listado_compras(
                 self.request, qs, OrdenCompra.EstatusOrdenCompra.values, "fecha_oc",
             )
@@ -1346,11 +1357,14 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         # Es del listado: no altera el retrieve, y va después del alcance por
         # empresa para que un usuario sin empresa no vea un 400 (#511).
         if self.action == "list":
-            tipo_compra = (self.request.query_params.get("tipo_compra") or "").strip().upper()
+            tipo_compra = _tipo_compra_param(self.request)
             if tipo_compra:
-                if tipo_compra not in OrdenCompra.TipoCompra.values:
-                    raise ValidationError({"tipo_compra": "Valor inválido. Usa MP (OC) o PT (O)."})
                 qs = qs.filter(orden_compra__tipo_compra=tipo_compra)
+            # Almacén destino y OC de origen (#889); un id ajeno no trae filas.
+            for nombre in ("almacen", "orden_compra"):
+                valor = entero_param(self.request, nombre)
+                if valor is not None:
+                    qs = qs.filter(**{f"{nombre}_id": valor})
             # Filtros de servidor (#863); la fecha es el día local de la recepción.
             qs = filtrar_listado_compras(
                 self.request, qs, Recepcion.EstatusRecepcion.values, "fecha_recepcion__date",
