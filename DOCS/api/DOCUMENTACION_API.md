@@ -320,14 +320,15 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
 | `orden_bordado` | Órdenes de bordado | — | `folio_bordado` | `R-PRODUCCION-OB` | más reciente primero (`fecha_inicio`) |
 | `orden_reflejante` | Órdenes de reflejante | — | `folio_reflejante` | `R-PRODUCCION-OR` | más reciente primero (`fecha_inicio`) |
 | `orden_corte_manga` | Órdenes de corte de manga | — | `folio_ocm` | `R-PRODUCCION-CM` | más reciente primero (`fecha_inicio`) |
-| `cliente` | Clientes | — | `nombre`, `razon_social`, `correo` | `R-CRM-CLIENTES`, `R-MESACONTROL-CLIENTES`, `R-CONTABILIDAD-CLIENTES` | alfabético |
+| `cliente` | Clientes | — | `nombre`, `razon_social`, `correo` | `R-CRM-CLIENTES`, `R-MESACONTROL-CLIENTES`, `R-CONTABILIDAD-CLIENTES`, `R-CONTABILIDAD` | alfabético |
 | `cotizacion` | Cotizaciones | — | nombre y razón social del cliente | `R-CRM-COTIZACIONES`, `R-CRM`, `R-MESACONTROL-COTI`, `R-MESACONTROL` | más reciente primero |
 | `producto` | Productos | `sku` | nombre de la variante, nombre del producto | `R-CATALOGO-PRODUCTOS` ⚠️ | nombre del producto, sku |
-| `factura` | Facturas | `folio` | nombre y razón social del cliente | `R-CONTABILIDAD-FACTURACION` | `fecha_emision` desc |
+| `factura` | Facturas | `folio` | nombre y razón social del cliente | `R-CONTABILIDAD-FACTURACION`, `R-CONTABILIDAD` | `fecha_emision` desc |
 | `oportunidad` | Oportunidades | — | `titulo`, `nombre_contacto`, `cliente.nombre` (si lo ve) | `R-CRM-OPORTUNIDADES`, `R-CRM` | más reciente primero |
 
 **Regla de los permisos de visibilidad**: las claves de una entidad son las que le permiten al usuario *abrir* esa entidad en algún lugar del frontend.
-- `orden_bordado` / `orden_reflejante` / `orden_corte_manga` / `factura`: sólo la clave de sección (`R-PRODUCCION-OB` / `R-PRODUCCION-OR` / `R-PRODUCCION-CM` / `R-CONTABILIDAD-FACTURACION`); los códigos de módulo `R-PRODUCCION` / `R-CONTABILIDAD` no abren esas rutas.
+- `orden_bordado` / `orden_reflejante` / `orden_corte_manga`: sólo la clave de sección (`R-PRODUCCION-OB` / `R-PRODUCCION-OR` / `R-PRODUCCION-CM`); el código de módulo `R-PRODUCCION` no abre esas rutas.
+- `factura` / `cliente`: en Contabilidad la lectura es jerárquica (EC-746, ver *Permisos de finanzas*): el código de módulo `R-CONTABILIDAD` abre todas las secciones y cada clave de sección (`R-CONTABILIDAD-FACTURACION`, `R-CONTABILIDAD-CLIENTES`) sólo la suya, así que ambas cuentan.
 - `cotizacion`: `R-CRM` / `R-MESACONTROL` sí cuentan, porque los dashboards de esos módulos (`/sales`, `/operations`) abren cotizaciones.
 - `pedido`: incluye claves de otras secciones (OB/OR/CM, OC, picking) porque esas vistas enlazan al pedido y la ruta `/orders/[id]` las acepta.
 

@@ -444,7 +444,8 @@ class VisibilidadPorPermisosTests(BusquedaGlobalBaseTestCase):
                 self.assertIn("pedido", self._tipos(user))
 
     def test_un_solo_codigo_de_cliente_basta(self):
-        for clave in ("R-CRM-CLIENTES", "R-MESACONTROL-CLIENTES", "R-CONTABILIDAD-CLIENTES"):
+        # ``R-CONTABILIDAD`` cuenta desde EC-746: lee todas las secciones de Contabilidad.
+        for clave in ("R-CRM-CLIENTES", "R-MESACONTROL-CLIENTES", "R-CONTABILIDAD-CLIENTES", "R-CONTABILIDAD"):
             with self.subTest(clave=clave):
                 user = self._usuario_con(clave.lower(), [clave])
                 self.assertIn("cliente", self._tipos(user))
@@ -1204,12 +1205,12 @@ class FacturaBusquedaTests(_GrupoPropioMixin, BusquedaGlobalBaseTestCase):
         user = self._usuario_con("sec", ["R-CONTABILIDAD-FACTURACION"])
         self.assertIn("factura", self._tipos(user, "FAC"))
 
-    def test_codigo_de_modulo_solo_no_basta(self):
-        """``R-CONTABILIDAD`` no abre la sección de facturación en el frontend."""
+    def test_codigo_de_modulo_solo_basta(self):
+        """EC-746: ``R-CONTABILIDAD`` lee todas las secciones de Contabilidad, facturación incluida."""
         user = self._usuario_con("mod", ["R-CONTABILIDAD"])
-        self.assertNotIn("factura", self._tipos(user, "FAC"))
+        self.assertIn("factura", self._tipos(user, "FAC"))
 
-    def test_sin_el_codigo_de_seccion_se_omite(self):
+    def test_sin_el_codigo_de_seccion_ni_el_de_modulo_se_omite(self):
         # Ni la sección de clientes de Contabilidad ni la de CxC conceden facturas.
         user = self._usuario_con(
             "otros", ["R-CONTABILIDAD-CLIENTES", "R-CONTABILIDAD-CXC", "R-CRM-PEDIDOS"]
