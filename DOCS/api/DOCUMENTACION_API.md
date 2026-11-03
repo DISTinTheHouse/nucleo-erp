@@ -2033,6 +2033,7 @@ En qué paso va el pedido, cuánto lleva y si va a tiempo. Todo se calcula en el
     - si el pedido no tiene `cotizacion` relacionada, responde error `400`
     - si el pedido tiene documentos contables, operativos o logísticos ligados, responde error **`409 Conflict`** con payload amigable para frontend
     - si se intenta **quitar** renglones/tallas/servicios extras ya existentes desde este endpoint, responde error `400`
+    - si las tallas nuevas suman menos piezas que lo ya programado en `programacion_conf`, responde `400 {"detalle": "El pedido quedaría con N piezas y tiene M programadas. Ajusta la programación primero."}` y no guarda nada; primero se baja la programación con `PATCH .../programar/` (#918)
   - Ejemplo de bloqueo (`409`):
 
     ```json
