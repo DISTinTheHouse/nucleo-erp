@@ -9091,3 +9091,161 @@ class FacturaTipoCambioTests(MotorPolizasBase):
         self._encender()
         with self.assertRaises(ErrorDeNegocio):
             NotaCreditoPolizaService.generar(nota)
+
+
+class LecturaJerarquicaBase(FinanzasBase):
+    """EC-746: ``R-CONTABILIDAD`` lee todo Finanzas; un código de sección, sólo su sección."""
+
+    SECCIONES = ("R-CONTABILIDAD-FACTURACION", "R-CONTABILIDAD-CXC", "R-CONTABILIDAD-CLIENTES")
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from seguridad.models import Permiso
+
+        for clave in cls.SECCIONES:
+            Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
+        cls.registros = {t: cls._registros(t) for t in ("a", "b")}
+
+    @classmethod
+    def _registros(cls, clave_tenant):
+        t = getattr(cls, clave_tenant)
+        factura = Factura.objects.create(
+            empresa=t["empresa"], sucursal=t["sucursal"], cliente=t["cliente"], moneda=cls.moneda,
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=t["empresa"], cliente=t["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+        banco = Banco.objects.create(empresa=t["empresa"], nombre=f"Banco {clave_tenant}")
+        cuenta = CuentaBancaria.objects.create(
+            empresa=t["empresa"], banco=banco, moneda=cls.moneda, alias=f"Operativa {clave_tenant}",
+        )
+        cobro = Cobro.objects.create(
+            empresa=t["empresa"], cliente=t["cliente"], cuenta_bancaria=cuenta, total_cobrado=Decimal("40.00"),
+        )
+        return {
+            "facturas": factura.pk,
+            "cuentas-por-cobrar": cxc.pk,
+            "cobros": cobro.pk,
+            "clientes-contabilidad": t["cliente"].pk,
+            "cuenta": cuenta,
+            "cobro": cobro,
+        }
+
+    def _usuario_con(self, sufijo, claves, *, tenant=None):
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        t = tenant or self.a
+        user = Usuario.objects.create(
+            username=f"ec746-{sufijo}@{t['empresa'].codigo}.test",
+            email=f"ec746-{sufijo}@{t['empresa'].codigo}.test",
+            empresa=t["empresa"],
+            sucursal_default=t["sucursal"],
+        )
+        for clave in claves:
+            UsuarioPermiso.objects.create(
+                usuario=user, permiso=Permiso.objects.get(clave=clave),
+                tipo=UsuarioPermiso.TIPO_GRANT, empresa=t["empresa"],
+            )
+        return user
+
+
+class LecturaJerarquicaFinanzasTests(LecturaJerarquicaBase):
+    URL = "/api/v1/finanzas/"
+    # Ruta -> código de la sección que la lee además de ``R-CONTABILIDAD``.
+    RUTAS_DE_SECCION = {
+        "facturas": "R-CONTABILIDAD-FACTURACION",
+        "cuentas-por-cobrar": "R-CONTABILIDAD-CXC",
+        "cobros": "R-CONTABILIDAD-CXC",
+        "clientes-contabilidad": "R-CONTABILIDAD-CLIENTES",
+    }
+    RUTAS_SOLO_MODULO = ("cuentas-bancarias", "notas-credito", "dashboard", "cuentas-por-pagar")
+
+    def _get(self, user, ruta, pk=None):
+        url = f"{self.URL}{ruta}/" if pk is None else f"{self.URL}{ruta}/{pk}/"
+        return self._client(user).get(url)
+
+    def test_seccion_se_lee_con_el_modulo_o_con_su_codigo(self):
+        for ruta, codigo in self.RUTAS_DE_SECCION.items():
+            for claves in (["R-CONTABILIDAD"], [codigo]):
+                user = self._usuario_con(f"{ruta}-{claves[0].lower()}", claves)
+                with self.subTest(ruta=ruta, claves=claves):
+                    self.assertEqual(self._get(user, ruta).status_code, 200)
+                    self.assertEqual(self._get(user, ruta, self.registros["a"][ruta]).status_code, 200)
+
+    def test_seccion_ajena_o_sin_codigo_responde_403(self):
+        for ruta, codigo in self.RUTAS_DE_SECCION.items():
+            ajenas = [[c] for c in self.SECCIONES if c != codigo]
+            for claves in ajenas + [[]]:
+                sufijo = claves[0].lower() if claves else "nada"
+                user = self._usuario_con(f"{ruta}-x-{sufijo}", claves)
+                with self.subTest(ruta=ruta, claves=claves):
+                    self.assertEqual(self._get(user, ruta).status_code, 403)
+                    self.assertEqual(self._get(user, ruta, self.registros["a"][ruta]).status_code, 403)
+
+    def test_fuera_de_las_secciones_solo_lee_el_modulo(self):
+        modulo = self._usuario_con("modulo", ["R-CONTABILIDAD"])
+        for ruta in self.RUTAS_SOLO_MODULO:
+            with self.subTest(ruta=ruta, claves="R-CONTABILIDAD"):
+                self.assertEqual(self._get(modulo, ruta).status_code, 200)
+            for codigo in self.SECCIONES:
+                user = self._usuario_con(f"solo-{ruta}-{codigo.lower()}", [codigo])
+                with self.subTest(ruta=ruta, claves=codigo):
+                    self.assertEqual(self._get(user, ruta).status_code, 403)
+
+    def test_acciones_de_lectura_de_la_factura_con_su_seccion(self):
+        pk = self.registros["a"]["facturas"]
+        fact = self._client(self._usuario_con("acc-fact", ["R-CONTABILIDAD-FACTURACION"]))
+        cxc = self._client(self._usuario_con("acc-cxc", ["R-CONTABILIDAD-CXC"]))
+        # ``desglose`` trae la cobranza y las notas de crédito de la factura: se lee
+        # con la sección de facturación (excepción documentada), no con la de CxC.
+        self.assertEqual(fact.get(f"{self.URL}facturas/{pk}/desglose/").status_code, 200)
+        self.assertEqual(fact.get(ONBOARDING_URL).status_code, 200)
+        self.assertNotEqual(fact.get(f"{self.URL}facturas/{pk}/cfdi/").status_code, 403)
+        self.assertEqual(cxc.get(f"{self.URL}facturas/{pk}/desglose/").status_code, 403)
+
+    def test_previsualizar_poliza_sigue_solo_con_el_modulo(self):
+        """El asiento contable es de Contabilidad: la sección de facturación no lo abre (pendiente)."""
+        url = f"{self.URL}facturas/{self.registros['a']['facturas']}/previsualizar-poliza/"
+        fact = self._client(self._usuario_con("prev-fact", ["R-CONTABILIDAD-FACTURACION"]))
+        modulo = self._client(self._usuario_con("prev-mod", ["R-CONTABILIDAD"]))
+        self.assertEqual(fact.get(url).status_code, 403)
+        self.assertNotEqual(modulo.get(url).status_code, 403)
+
+    def test_rep_del_cobro_se_lee_con_la_seccion_de_cxc(self):
+        cxc = self._usuario_con("rep", ["R-CONTABILIDAD-CXC"])
+        resp = self._client(cxc).get(f"{self.URL}cobros/{self.registros['a']['cobros']}/rep/")
+        self.assertEqual(resp.status_code, 400)  # pasa el permiso; el cobro no tiene REP
+        self.assertIn("rep", resp.data)
+
+    def test_escrituras_no_cambian(self):
+        a = self.registros["a"]
+        cobro_post = {
+            "cliente": self.a["cliente"].pk, "cuenta_bancaria": a["cuenta"].pk, "total_cobrado": "10.00",
+        }
+        for claves in (["R-CONTABILIDAD-CXC"], ["R-CONTABILIDAD-FACTURACION"], ["R-CONTABILIDAD"]):
+            client = self._client(self._usuario_con(f"esc-{claves[0].lower()}", claves))
+            with self.subTest(claves=claves):
+                resp = client.post(f"{self.URL}cobros/", cobro_post, format="json")
+                self.assertEqual(resp.status_code, 403)
+                self.assertEqual(str(resp.data["detail"]), "No tienes permiso para registrar o cancelar cobros.")
+                resp = client.patch(f"{self.URL}cuentas-por-cobrar/{a['cuentas-por-cobrar']}/", {}, format="json")
+                self.assertEqual(resp.status_code, 403)
+                resp = client.patch(f"{self.URL}facturas/{a['facturas']}/", {}, format="json")
+                self.assertEqual(resp.status_code, 403)
+                self.assertEqual(client.post(f"{self.URL}cobros/{a['cobros']}/cancelar/").status_code, 403)
+        self.assertEqual(Cobro.objects.filter(empresa=self.a["empresa"]).count(), 1)
+
+    def test_otra_empresa_404_en_detalle_y_fuera_del_listado(self):
+        b = self.registros["b"]
+        for ruta, codigo in self.RUTAS_DE_SECCION.items():
+            user = self._usuario_con(f"tenant-{ruta}", [codigo])
+            with self.subTest(ruta=ruta):
+                self.assertEqual(self._get(user, ruta, b[ruta]).status_code, 404)
+                data = self._get(user, ruta).data
+                filas = data["results"] if isinstance(data, dict) and "results" in data else data
+                ids = {fila["id"] for fila in filas}
+                self.assertIn(self.registros["a"][ruta], ids)
+                self.assertNotIn(b[ruta], ids)
+

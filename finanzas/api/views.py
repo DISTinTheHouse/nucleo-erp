@@ -355,14 +355,21 @@ class BorradoProtegidoComo409Mixin:
 # ``DashboardFinancieroViewSet`` sigue sin rutas de detalle. El mapeo de choques
 # de concurrencia a 409 va en las mismas bases por la misma razón.
 class PermisoFinanzas(BasePermission):
-    """Lecturas: ``R-CONTABILIDAD`` (#636). Escrituras: ``E-FIN-FACTURAS`` (#856), revisado
-    antes de validar el body. Un POST que solo lee se declara en ``acciones_de_lectura`` del
-    viewset y se trata como lectura. Superusuario y admin de empresa pasan siempre."""
+    """Lecturas: ``R-CONTABILIDAD`` (#636) o, en los viewsets que declaran
+    ``codigo_lectura_seccion``, también ese código de sección (EC-746): el de módulo lee
+    todo Finanzas y el de sección sólo su sección, igual que en el frontend. Escrituras:
+    ``E-FIN-FACTURAS`` (#856), revisado antes de validar el body. Un POST que solo lee se
+    declara en ``acciones_de_lectura`` del viewset y se trata como lectura. Las acciones en
+    ``acciones_solo_modulo`` no aceptan el código de sección: siguen exigiendo
+    ``R-CONTABILIDAD``. Superusuario y admin de empresa pasan siempre."""
 
     def has_permission(self, request, view):
         permisos = permisos_efectivos(request.user)
         if request.method in SAFE_METHODS or getattr(view, "action", None) in getattr(view, "acciones_de_lectura", ()):
-            return 'R-CONTABILIDAD' in permisos
+            seccion = getattr(view, "codigo_lectura_seccion", None)
+            if getattr(view, "action", None) in getattr(view, "acciones_solo_modulo", ()):
+                seccion = None
+            return 'R-CONTABILIDAD' in permisos or bool(seccion and seccion in permisos)
         self.message = getattr(view, "mensaje_sin_permiso_escritura", "No tienes permiso para modificar datos de finanzas.")
         return PERMISO_CANCELAR_FACTURA in permisos
 
@@ -407,6 +414,7 @@ def _aplicar_ordering(qs, params, default):
 
 
 class ClienteViewSetContabilidad(FinanzasBaseViewSet):
+    codigo_lectura_seccion = "R-CONTABILIDAD-CLIENTES"  # EC-746
     queryset = Cliente.objects.filter(activo=True)
     serializer_class = ClienteSerializer
     http_method_names = ['get']
@@ -429,6 +437,7 @@ ClienteViewSet = ClienteViewSetContabilidad
 
 
 class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
+    codigo_lectura_seccion = "R-CONTABILIDAD-CXC"  # EC-746
     serializer_class = CuentaPorCobrarSerializer
     # Sin POST: una CxC nace de la factura (``uq_cxc_factura``). El alta manual daba
     # 500 -- el serializer no recibe ``factura`` y la columna es NOT NULL-- y de
@@ -516,6 +525,12 @@ class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
 
 
 class FacturaViewSet(FinanzasBaseViewSet):
+    # EC-746. Incluye ``desglose``, que trae la cobranza (CxC) y las notas de crédito
+    # de la factura: son su seguimiento, no la sección de CxC.
+    codigo_lectura_seccion = "R-CONTABILIDAD-FACTURACION"
+    # El asiento contable (cuentas contables) es de Contabilidad: sólo con el módulo,
+    # pendiente de decisión. Quitarla de aquí la abre a la sección.
+    acciones_solo_modulo = {"previsualizar_poliza"}
     serializer_class = FacturaSerializer
     http_method_names = ['delete', 'get', 'post', 'put', 'patch']
 
@@ -1895,6 +1910,7 @@ def _validar_transicion_estatus_cobro_pago(Estatus, anterior, nuevo, documento):
 
 
 class CobroViewSet(FinanzasBaseViewSet):
+    codigo_lectura_seccion = "R-CONTABILIDAD-CXC"  # EC-746: CxC y Cobros son una sección
     queryset = Cobro.objects.all()
     serializer_class = CobroSerializer
 
