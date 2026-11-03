@@ -3384,6 +3384,27 @@ class PedidoViewSet(viewsets.ModelViewSet):
             self._snapshot_facturacion(pedido)
             _save_pedido_detalle(pedido, detalle_data, pedido.empresa, user)
             exigir_color_si_hay_variantes(PedidoDetalle.objects.filter(pedido=pedido))
+            # Misma regla que ``programar`` con las tallas nuevas (#918): no
+            # quedan menos piezas que las ya programadas. El 400 deshace todo.
+            programado = sum(
+                p.get("cantidad") or 0
+                for p in (pedido.programacion_conf or {}).get("programaciones", [])
+            )
+            if programado:
+                total_piezas = (
+                    PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
+                    .aggregate(total=Sum("cantidad"))["total"]
+                    or 0
+                )
+                if programado > total_piezas:
+                    raise ValidationError(
+                        {
+                            "detalle": (
+                                f"El pedido quedaría con {total_piezas} piezas y tiene "
+                                f"{programado} programadas. Ajusta la programación primero."
+                            )
+                        }
+                    )
             _save_pedido_servicios_extras(pedido, servicios_extras_data)
             self._aplicar_pedido_a_cotizacion(
                 pedido, cotizacion, detalle_data, servicios_extras_data

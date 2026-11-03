@@ -1326,6 +1326,28 @@ class PedidoMesaControlUpdateTests(TestCase):
         # Los campos legítimos del flujo sí se escriben.
         self.assertEqual(self.pedido.persona_pagos, "Pagos Mesa")
 
+    def test_editar_mesa_control_no_deja_menos_piezas_que_lo_programado(self):
+        """#918: el payload deja 3 piezas; con 4 programadas es 400 y no guarda nada."""
+        def programar(cantidad):
+            conf = {"programaciones": [{**self.PROGRAMACION_VIGENTE["programaciones"][0], "cantidad": cantidad}]}
+            Pedido.objects.filter(pk=self.pedido.pk).update(programacion_conf=conf)
+
+        programar(4)
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk), self._payload(), format="json"
+        )
+        self.assertEqual(response.status_code, 400, response.json())
+        self.assertIn("detalle", response.json())
+        self.pedido.refresh_from_db()
+        self.assertNotEqual(self.pedido.persona_pagos, "Pagos Mesa")
+        self.assertEqual(self.pedido.detalles.first().tallas.first().cantidad, 2)
+
+        programar(3)
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk), self._payload(), format="json"
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+
     def test_patch_generico_no_escribe_programacion_conf(self):
         Pedido.objects.filter(pk=self.pedido.pk).update(
             programacion_conf=self.PROGRAMACION_VIGENTE
