@@ -3053,10 +3053,20 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 .annotate(total=Sum("cantidad"))
                 .values("total")
             )
+            # ``piezas_programables``: mismo total que ``programar`` (sin líneas de
+            # muestra), para el "programado X de Y" de mesa de control.
+            programables_qs = (
+                PedidoDetalleTalla.objects.filter(pedido_detalle__pedido_id=OuterRef("pk"))
+                .filter(TALLAS_DE_LINEA_NO_MUESTRA_Q)
+                .values("pedido_detalle__pedido_id")
+                .annotate(total=Sum("cantidad"))
+                .values("total")
+            )
             # Solo las columnas del nombre, no las filas completas de cotización y
             # usuario (``aprobado_snapshot`` es un JSONB) en un listado sin paginar.
             qs = qs.annotate(
                 piezas=Coalesce(Subquery(piezas_qs[:1]), 0),
+                piezas_programables=Coalesce(Subquery(programables_qs[:1]), 0),
                 vendedor_cotizacion_id=F("cotizacion__vendedor_id"),
                 vendedor_first_name=F("cotizacion__vendedor__first_name"),
                 vendedor_last_name=F("cotizacion__vendedor__last_name"),
