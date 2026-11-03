@@ -20,6 +20,9 @@ class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
     # ``producto`` es NOT NULL en el modelo, así que ``source=`` basta (mismo
     # patrón que ``RecepcionDetalleResumenSerializer.producto_nombre``).
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    # Identifica la materia prima, que no tiene variante (``producto`` va en el select_related).
+    producto_codigo = serializers.CharField(source='producto.codigo', read_only=True, default=None)
+    producto_cod_proscai = serializers.CharField(source='producto.cod_proscai', read_only=True, default=None)
     producto_variante_sku = serializers.CharField(
         source='producto_variante.sku', read_only=True, default=None
     )
@@ -38,6 +41,8 @@ class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
             'id',
             'producto_id',
             'producto_nombre',
+            'producto_codigo',
+            'producto_cod_proscai',
             'producto_variante_id',
             'producto_variante_sku',
             'producto_variante_color',
@@ -220,6 +225,9 @@ class OrdenCompraDetalleSerializer(serializers.ModelSerializer):
 
 class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    # Identifica la materia prima, que no tiene variante (``producto`` va en el select_related).
+    producto_codigo = serializers.CharField(source="producto.codigo", read_only=True, default=None)
+    producto_cod_proscai = serializers.CharField(source="producto.cod_proscai", read_only=True, default=None)
     # ``producto_variante`` viene en el ``select_related`` del retrieve de la OC.
     producto_variante_sku = serializers.CharField(
         source="producto_variante.sku", read_only=True, default=None
@@ -233,6 +241,8 @@ class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
             "orden_compra_detalle",
             "producto",
             "producto_nombre",
+            "producto_codigo",
+            "producto_cod_proscai",
             "producto_variante",
             "producto_variante_sku",
             "ubicacion",
@@ -431,6 +441,9 @@ class RecepcionDetalleRetrieveSerializer(serializers.ModelSerializer):
     """
 
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    # Identifica la materia prima, que no tiene variante (``producto`` va en el select_related).
+    producto_codigo = serializers.CharField(source="producto.codigo", read_only=True, default=None)
+    producto_cod_proscai = serializers.CharField(source="producto.cod_proscai", read_only=True, default=None)
     # ``producto_variante`` ya viene en el ``select_related`` del retrieve: sin consultas extra.
     producto_variante_sku = serializers.CharField(
         source="producto_variante.sku", read_only=True, default=None
@@ -444,6 +457,8 @@ class RecepcionDetalleRetrieveSerializer(serializers.ModelSerializer):
             "orden_compra_detalle",
             "producto",
             "producto_nombre",
+            "producto_codigo",
+            "producto_cod_proscai",
             "producto_variante",
             "producto_variante_sku",
             "ubicacion",
