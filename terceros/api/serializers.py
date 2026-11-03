@@ -1,4 +1,5 @@
 from drf_spectacular.utils import extend_schema_field
+from django.utils import timezone
 from rest_framework import serializers
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from nucleo.models import SatRegimenFiscal, SatUsoCfdi
@@ -204,3 +205,17 @@ class DireccionClienteSerializer(serializers.ModelSerializer):
             "telefono_envio": {"validators": [validate_telefono]},
             "celular_envio": {"validators": [validate_telefono]},
         }
+
+
+class ClienteMesaControlSerializer(ClienteSerializer):
+    """``ClienteSerializer`` + ``fecha_ultima_compra`` para Mesa de Control.
+
+    La fecha sale de ``ultimo_pedido_at``, que anota ``ClienteViewSetMesaControl``
+    (pedido más reciente activo y no cancelado); ``None`` si nunca ha comprado.
+    """
+
+    fecha_ultima_compra = serializers.SerializerMethodField()
+
+    def get_fecha_ultima_compra(self, obj):
+        ultimo = getattr(obj, "ultimo_pedido_at", None)
+        return timezone.localtime(ultimo).date().isoformat() if ultimo else None

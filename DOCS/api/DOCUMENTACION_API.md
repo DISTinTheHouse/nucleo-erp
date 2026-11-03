@@ -1087,6 +1087,11 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
 
 ## 👤 Terceros
 
+### Clientes en Mesa de Control
+
+- **Endpoint**: `GET /api/v1/terceros/clientes-mesa-control/` (y `{id}/`). Mismos campos y alcance que `GET /clientes/`, más:
+  - `fecha_ultima_compra`: fecha ISO (`"2026-10-28"`, hora local) del pedido más reciente del cliente — activo, no cancelado, de la empresa del cliente — o `null` si nunca ha comprado. Columna "Última Compra". Se calcula en la misma consulta del listado.
+
 ### Detalle de Cliente (con resumen comercial)
 
 - **Endpoint**: `GET /api/v1/terceros/clientes/{id}/`
