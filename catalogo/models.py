@@ -132,6 +132,9 @@ class Producto(models.Model):
     precio_base = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     cod_proscai = models.CharField(max_length=50, blank=True, default="")
     codigo = models.CharField(max_length=5, null=True, blank=True)
+    # Catálogo oficial de compras (MP y PT): lo marca la carga del Excel oficial.
+    # ``db_default`` agrega la columna sin reescribir la tabla.
+    es_compras = models.BooleanField("Es de compras", default=False, db_default=False)
 
     history = HistoricalRecords()
 
