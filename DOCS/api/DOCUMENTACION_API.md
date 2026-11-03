@@ -991,7 +991,7 @@ Entidad principal que agrupa las variantes. Contiene la información general (no
   - `q` (opcional): busca por coincidencia parcial en `nombre`, `codigo` o `cod_proscai`.
   - `tipo_id` (opcional): filtra por `TipoProducto`.
   - `linea` (opcional): filtra por la línea de su categoría (`INDUSTRIAL`, `EMPRESARIAL`, `ROPA_FRIO`, `EJECUTIVO`, `SERVICIOS`, `EPP`, `OTROS`).
-- **`tipo` es obligatorio** al crear (`400` si falta o si el tipo está inactivo). El tipo es del producto, no de la variante.
+- **`tipo` es opcional** (`null` = sin tipo); si se manda debe estar activo (`400` si no). El tipo es del producto, no de la variante.
 - **Respuesta**:
   ```json
   [

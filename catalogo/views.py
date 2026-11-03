@@ -25,7 +25,7 @@ def importar_productos_excel(request):
                 <p>Sube un archivo .xlsx con una columna llamada <b>nombre</b> o con el nombre en la primera columna.</p>
                 <form method="post" enctype="multipart/form-data">
                   <input type="hidden" name="csrfmiddlewaretoken" value="{csrf_token}">
-                  <select name="tipo" required>{tipos}</select>
+                  <select name="tipo"><option value="">Sin tipo</option>{tipos}</select>
                   <input type="file" name="archivo" accept=".xlsx,.xlsm,.xltx,.xltm" required />
                   <button type="submit">Importar</button>
                 </form>
@@ -40,11 +40,13 @@ def importar_productos_excel(request):
     archivo = request.FILES.get("archivo")
     if not archivo:
         return HttpResponseBadRequest("Falta el archivo.")
-    # Todo producto lleva tipo (MP, PT, ...); el archivo trae sólo nombres.
+    # El tipo (MP, PT, ...) es opcional; el archivo trae sólo nombres.
     tipo_id = request.POST.get("tipo", "")
-    tipo = TipoProducto.objects.filter(activo=True, pk=tipo_id).first() if tipo_id.isdigit() else None
-    if tipo is None:
-        return HttpResponseBadRequest("Falta el tipo de producto.")
+    tipo = None
+    if tipo_id:
+        tipo = TipoProducto.objects.filter(activo=True, pk=tipo_id).first() if tipo_id.isdigit() else None
+        if tipo is None:
+            return HttpResponseBadRequest("Tipo de producto inválido.")
 
     user = request.user
     empresa = getattr(user, "empresa", None)

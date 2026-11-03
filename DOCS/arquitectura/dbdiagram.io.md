@@ -174,7 +174,7 @@ Table productos {
   id_impuesto int
   id_sat_prodserv int
   id_sat_unidad int
-  id_tipo_producto int   // obligatorio: MP, PT, SERVICIO, COMPRAS
+  id_tipo_producto int   // opcional: MP, PT, SERVICIO, COMPRAS
 }
 
 Table variantes_producto {
