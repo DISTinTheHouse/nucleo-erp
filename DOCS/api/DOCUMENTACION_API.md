@@ -1361,6 +1361,7 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 - **Campos útiles para tabla**:
   - `estatus_label`, `cliente_nombre`, `cliente_razon_social`, `pedido_id`, `pedido_folio`
   - `piezas`: sumatoria de `cantidad` en tallas (detalle de la cotización)
+  - `vendedor` (id) y `vendedor_nombre` (string | null): nombre del vendedor de la cotización, sin consulta extra.
   - `importe_sin_iva`: importe antes de IVA (calculado a partir de `gran_total` e `iva`)
 
 - **Ver cotización completa (modal)**: `GET /api/v1/ventas/cotizaciones/{id}/`
@@ -2247,6 +2248,7 @@ Pantalla de cola para mesa de control: una tabla con todos los pedidos y su esta
   - `programacion_conf`: el JSON crudo de `PATCH /pedidos/{id}/programar/`, tal cual (cada renglón incluye `comentarios`) — `{"programaciones": []}` si no se ha programado nada.
   - `piezas_programables`: total de piezas programables del pedido, **muestras incluidas** — el mismo `total_piezas` que regresa `GET`/`PATCH /pedidos/{id}/programar/`. Para mostrar "programado X de Y" (X = suma de `parcialidades[].cantidad`). Hoy coincide con `piezas`.
   - `piezas_muestra`: piezas de líneas de muestra (`es_muestra`), `0` si no tiene. `piezas_muestra == piezas` (y > 0) → "Solo muestras"; `0 < piezas_muestra < piezas` → "Con muestras".
+  - `piezas_surtidas`: entero, suma de lo surtido por todos los pickings del pedido (picking y renglón no cancelados) — el mismo número que `tracker_picking.total_surtido` del detalle. `0` si no se ha surtido nada. Se calcula en la misma consulta del listado.
   - `total_parcialidades`: cuántos renglones tiene `programacion_conf.programaciones` — para no obligar al frontend a contar el arreglo él mismo.
   - **`parcialidades`**: el mismo arreglo que `programacion_conf.programaciones` pero en top-level (`[]` si no se ha programado nada) — **para armar la tabla de "Programación de pedidos" con una línea por parcialidad**: por cada pedido con `total_parcialidades > 1`, itera `parcialidades` y pinta un renglón por cada una (repitiendo `folio`/`cliente_nombre`/etc. del pedido padre), en vez de una sola línea por pedido. `programacion_conf` se mantiene por compatibilidad, pero para este caso de uso es más directo consumir `parcialidades`.
 - **Filtros nuevos** (solo aplican en este listado, `?query_param` de siempre — no rompen el detalle del pedido):
