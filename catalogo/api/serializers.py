@@ -49,6 +49,16 @@ class TipoProductoSerializer(serializers.ModelSerializer):
     class Meta:
         model = TipoProducto
         fields = '__all__'
+        # Sin nombre el selector del frontend sale en blanco (#909).
+        extra_kwargs = {'nombre': {'required': True, 'allow_blank': False}}
+
+    def get_extra_kwargs(self):
+        # El alta nace activa (#908): un tipo inactivo desde el POST no se
+        # listaría. Reactivar o dar de baja es por update o ``DELETE`` (#907).
+        extra_kwargs = super().get_extra_kwargs()
+        if self.instance is None:
+            extra_kwargs['activo'] = {'read_only': True}
+        return extra_kwargs
 
 class CategoriaProductoSerializer(EmpresaValidadaEnCreateMixin, serializers.ModelSerializer):
     class Meta:

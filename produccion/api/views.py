@@ -85,9 +85,9 @@ from produccion.api.serializers import (
     VarianteProduccionOnboardingSerializer,
     VarianteProduccionSerializer,
 )
-from catalogo.models import CategoriaProducto, Producto, ProductoVariante, VarianteProductoProduccion
+from catalogo.models import CategoriaProducto, Producto, ProductoVariante, TipoProducto, VarianteProductoProduccion
 from catalogo.codigos import siguiente_codigo_producto
-from catalogo.api.views import TIPO_PRODUCTO_TERMINADO_ID
+from catalogo.api.views import CODIGO_PRODUCTO_TERMINADO
 from inventarios.models import Existencia
 
 from produccion.services.orden_bordado_service import OrdenBordadoService
@@ -1981,7 +1981,7 @@ def _crear_producto_catalogo(pedido, detalle, categoria, nombre):
     # consecutivo de la categoría, Producto Terminado.
     return Producto.objects.create(
         empresa=pedido.empresa, categoria_producto=categoria,
-        codigo=siguiente_codigo_producto(categoria), tipo_id=TIPO_PRODUCTO_TERMINADO_ID,
+        codigo=siguiente_codigo_producto(categoria), tipo=TipoProducto.objects.get(codigo=CODIGO_PRODUCTO_TERMINADO),
         unidad_medida=categoria.unidad_medida,
         nombre=nombre[:Producto._meta.get_field('nombre').max_length].rstrip(' -_,;:./|'),
         precio_base=detalle.precio_unitario,

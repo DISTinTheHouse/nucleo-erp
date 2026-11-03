@@ -993,7 +993,7 @@ Entidad principal que agrupa las variantes. Contiene la información general (no
 - **Listar**: `GET /api/v1/catalogo/producto/`
   - `q` (opcional): busca por coincidencia parcial en `nombre`, `codigo` o `cod_proscai`.
   - `tipo_id` (opcional): filtra por `TipoProducto`.
-  - `linea` (opcional): filtra por la línea de su categoría (`INDUSTRIAL`, `EMPRESARIAL`, `ROPA_FRIO`, `EJECUTIVO`, `SERVICIOS`, `EPP`, `OTROS`).
+  - `linea` (opcional): filtra por la línea de su categoría (`INDUSTRIAL`, `EMPRESARIAL`, `ROPA_FRIO`, `EJECUTIVO`, `SERVICIOS`, `EPP`, `OTROS`). Acepta varios (repetido o separado por comas) y no distingue mayúsculas; `SIN_LINEA` = categoría con línea vacía (materia prima) o producto sin categoría; vacío no filtra; otro valor → `400` (#922, #923).
   - `es_compras` (opcional): `true`/`false`. Filtra el catálogo oficial de compras; otro valor → `400`.
 - **`es_compras`** (bool, default `false`): marca el producto (MP o PT) como parte del catálogo oficial de compras. Se lee y se escribe en `POST`/`PATCH`.
 - **`tipo` es opcional** (`null` = sin tipo); si se manda debe estar activo (`400` si no). El tipo es del producto, no de la variante.
@@ -1073,9 +1073,9 @@ Flujo guiado para que producción dé de alta un Producto y su(s) variante(s) (S
 
 Todos soportan CRUD estándar (`GET`, `POST`, `PATCH`, `DELETE`).
 
-- **Tipos de Producto**: `/api/v1/catalogo/tipo-producto/` — `{id, codigo, nombre, activo}` (MP, PT, SERVICIO, COMPRAS). Global; lista sólo activos. Sólo el superusuario escribe (`403` el resto); `DELETE` = baja lógica.
-- **Categorías**: `/api/v1/catalogo/categoria-producto/` — `linea` agrupa las categorías (valores arriba; vacía = materia prima), `?linea=` filtra; no cambia SKU, tallas ni procesos. Incluye `unidad_medida` (FK opcional, la que hereda `Producto` en el onboarding) y `tallas` (M2M vía `CategoriaProductoTalla`: qué tallas son válidas para productos de esta categoría; se administra desde el admin de Django, inline en cada categoría).
-- **Colores**: `/api/v1/catalogo/color/` — incluye `pantone` (opcional).
+- **Tipos de Producto**: `/api/v1/catalogo/tipo-producto/` — `{id, codigo, nombre, activo}` (MP, PT, SERVICIO, COMPRAS). Global; el listado trae los activos y `?activo=false` las bajas; el detalle ve ambos y `PATCH {"activo": true}` reactiva (#907). `nombre` es obligatorio (#909) y el alta nace activa: `activo` se ignora en el `POST` (#908). Sólo el superusuario escribe (`403` el resto); `DELETE` = baja lógica. La regla de Producto Terminado se resuelve por `codigo=PT`, no por id (#910).
+- **Categorías**: `/api/v1/catalogo/categoria-producto/` — `linea` agrupa las categorías (valores arriba; vacía = materia prima), `?linea=` filtra con las mismas reglas que en productos (`SIN_LINEA` = línea vacía); no cambia SKU, tallas ni procesos. Escriben sólo el admin de empresa y el superusuario (`403` el resto, #921); `DELETE` = baja lógica, no toca sus productos (#920). Incluye `unidad_medida` (FK opcional, la que hereda `Producto` en el onboarding) y `tallas` (M2M vía `CategoriaProductoTalla`: qué tallas son válidas para productos de esta categoría; se administra desde el admin de Django, inline en cada categoría).
+- **Colores**: `/api/v1/catalogo/color/` — incluye `pantone` (opcional). Global: sólo el superusuario escribe (`403` el resto); `DELETE` = baja lógica (#914).
 - **Tallas**: `/api/v1/catalogo/talla/` — `?categoria_producto={id}` (opcional) filtra solo las tallas permitidas para esa categoría (via `CategoriaProductoTalla`); sin el parámetro regresa todas.
 
 **Convención de tallas por categoría** (para dar de alta categorías nuevas — configurar en el admin, inline de `CategoriaProducto`):
