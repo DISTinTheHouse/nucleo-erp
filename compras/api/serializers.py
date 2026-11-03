@@ -70,28 +70,34 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
     tipo_compra_label = serializers.CharField(source='get_tipo_compra_display', read_only=True)
     pedidos = serializers.SerializerMethodField()
     pedidos_vinculados = serializers.SerializerMethodField()
-    # Progreso de recepción: lo anota ``anotar_progreso_oc`` en list/retrieve;
-    # en las demás respuestas sale ``null``.
-    cantidad_ordenada = serializers.SerializerMethodField()
-    cantidad_recibida = serializers.SerializerMethodField()
-    porcentaje_recibido = serializers.SerializerMethodField()
+    # Progreso de recepción contra ``total_piezas``: ``progreso_recibido`` lo
+    # anota ``anotar_progreso_oc`` en list/retrieve; en las demás respuestas sale ``null``.
+    piezas_recibidas = serializers.SerializerMethodField()
+    piezas_pendientes = serializers.SerializerMethodField()
+    progreso_pct = serializers.SerializerMethodField()
 
-    def get_cantidad_ordenada(self, obj):
-        valor = getattr(obj, "progreso_ordenado", None)
-        return None if valor is None else str(Decimal(valor).quantize(Decimal("0.0001")))
-
-    def get_cantidad_recibida(self, obj):
+    def _recibidas(self, obj):
         valor = getattr(obj, "progreso_recibido", None)
-        return None if valor is None else str(max(valor, Decimal("0")).quantize(Decimal("0.0001")))
+        return None if valor is None else max(valor, Decimal("0"))
 
-    def get_porcentaje_recibido(self, obj):
-        ordenado = getattr(obj, "progreso_ordenado", None)
-        recibido = getattr(obj, "progreso_recibido", None)
-        if ordenado is None or recibido is None:
+    def get_piezas_recibidas(self, obj):
+        recibidas = self._recibidas(obj)
+        return None if recibidas is None else str(recibidas.quantize(Decimal("0.0001")))
+
+    def get_piezas_pendientes(self, obj):
+        recibidas = self._recibidas(obj)
+        if recibidas is None:
             return None
-        if ordenado <= 0:
+        return str(max(Decimal(obj.total_piezas or 0) - recibidas, Decimal("0")).quantize(Decimal("0.0001")))
+
+    def get_progreso_pct(self, obj):
+        recibidas = self._recibidas(obj)
+        if recibidas is None:
+            return None
+        total = Decimal(obj.total_piezas or 0)
+        if total <= 0:
             return 0.0
-        return float(round(min(max(recibido, Decimal("0")) / ordenado * 100, Decimal("100")), 1))
+        return float(round(min(recibidas / total * 100, Decimal("100")), 1))
 
     def _pedidos_de(self, obj):
         # ``pedidos.all()`` aprovecha el prefetch del viewset. Si la OC solo
@@ -147,9 +153,9 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'total',
             'tipo',
             'total_piezas',
-            'cantidad_ordenada',
-            'cantidad_recibida',
-            'porcentaje_recibido',
+            'piezas_recibidas',
+            'piezas_pendientes',
+            'progreso_pct',
             'flete',
             'seguros',
             'porcentaje_iva',
@@ -214,6 +220,10 @@ class OrdenCompraDetalleSerializer(serializers.ModelSerializer):
 
 class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    # ``producto_variante`` viene en el ``select_related`` del retrieve de la OC.
+    producto_variante_sku = serializers.CharField(
+        source="producto_variante.sku", read_only=True, default=None
+    )
     ubicacion_nombre = serializers.SerializerMethodField()
 
     class Meta:
@@ -224,6 +234,7 @@ class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
             "producto",
             "producto_nombre",
             "producto_variante",
+            "producto_variante_sku",
             "ubicacion",
             "ubicacion_nombre",
             "lote",
