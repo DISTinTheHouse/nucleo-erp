@@ -9,6 +9,12 @@ from rest_framework.test import APIClient
 from usuarios.models import Usuario
 from nucleo.models import Empresa
 from terceros.models import Cliente, Proveedor
+from catalogo.models import TipoProducto
+
+
+def _tipo_producto():
+    """Tipo de producto obligatorio (#871); PT tiene pk=3 como en producción."""
+    return TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})[0]
 
 
 class ClientePatchTest(TestCase):
@@ -246,7 +252,7 @@ class ProveedorKpisTests(TestCase):
 
         from catalogo.models import Producto
 
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Insumo Test")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Insumo Test")
 
         departamento = Departamento.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal, codigo="CAL", nombre="Calidad",
@@ -538,7 +544,7 @@ class ProveedorKpisTests(TestCase):
         metros = UnidadMedida.objects.create(clave="MTR", nombre="Metro")
         piezas = UnidadMedida.objects.create(clave="PZA", nombre="Pieza")
         Producto.objects.filter(pk=self.producto.pk).update(unidad_medida=metros)
-        otro = Producto.objects.create(empresa=self.empresa, nombre="Botón", unidad_medida=piezas)
+        otro = Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre="Botón", unidad_medida=piezas)
         OrdenCompraDetalle.objects.create(orden_compra=oc, producto=otro, sucursal=self.sucursal, cantidad=1000, precio=1)
 
         cumplimiento = self._fila(self._get(), prov.pk)["cumplimiento_cantidad"]
@@ -567,7 +573,7 @@ class ProveedorKpisTests(TestCase):
             sat_forma_pago=self.bueno.sat_forma_pago, sat_metodo_pago=self.bueno.sat_metodo_pago, codigo="PG",
             razon_social="PG SA", telefono="8100000000", contacto_principal="C", rfc="XAXX010101000", email="pg@t.mx",
         )
-        producto = Producto.objects.create(empresa=globex, nombre="Insumo G")
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=globex, nombre="Insumo G")
         oc = OrdenCompra.objects.create(
             empresa=globex, sucursal=suc, proveedor=prov, moneda=self.moneda, usuario=usuario_g,
             fecha_oc=date(2026, 1, 1), estatus=OrdenCompra.EstatusOrdenCompra.RECIBIDA,

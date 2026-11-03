@@ -17,7 +17,7 @@ from django.test import TestCase
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient
 
-from catalogo.models import Producto
+from catalogo.models import Producto, TipoProducto
 from nucleo.models import Empresa, Sucursal
 from usuarios.models import Usuario
 from wms.api.serializers import EtiquetaRFIDCreateSerializer
@@ -27,6 +27,12 @@ from wms.services.rfid_label_service import (
     EtiquetaRFIDColision409,
     RFIDLabelService,
 )
+
+
+def _tipo_producto():
+    """Tipo de producto obligatorio (#871); PT tiene pk=3 como en producción."""
+    return TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})[0]
+
 
 EPC_EXISTENTE = "AAAABBBBCCCCDDDDEEEE0001"
 
@@ -41,6 +47,7 @@ class EtiquetaRFIDBaseTestCase(TestCase):
             codigo="test-epc-2", razon_social="Otra empresa"
         )
         cls.producto = Producto.objects.create(
+            tipo=_tipo_producto(),
             empresa=cls.empresa, nombre="Playera básica", codigo="PB01"
         )
         cls.sucursal = Sucursal.objects.create(
@@ -725,6 +732,7 @@ class PickingGeneraTransferenciaTests(TestCase):
             permite_salida=True,
         )
         cls.producto = Producto.objects.create(
+            tipo=_tipo_producto(),
             empresa=cls.empresa, nombre="Playera", codigo="PL01"
         )
         Existencia.objects.create(
@@ -891,7 +899,7 @@ class OnboardingAlmacenSugeridoTests(TestCase):
         if pendiente:
             # El listado solo ofrece pedidos con algo surtible (#823).
             detalle = PedidoDetalle.objects.create(
-                pedido=pedido, producto=Producto.objects.create(empresa=cls.empresa, nombre=f"Prod {folio}"),
+                pedido=pedido, producto=Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre=f"Prod {folio}"),
             )
             PedidoDetalleTalla.objects.create(
                 pedido_detalle=detalle, talla=Talla.objects.create(nombre=f"T-{folio}"), cantidad=1,
@@ -1296,7 +1304,7 @@ class PackingDespachoEC574Tests(TestCase):
         cls.origen = Almacen.objects.create(codigo="PT", nombre="Terminado", **kw)
         cls.destino = Almacen.objects.create(codigo="APA", nombre="Apartados", **kw)
         cls.otro = Almacen.objects.create(codigo="BOR", nombre="Bordados", **kw)
-        producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera", codigo="PL574")
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera", codigo="PL574")
         Existencia.objects.create(producto=producto, almacen=cls.origen, stock=20, cantidad=Decimal("20"))
         cls.pedido = Pedido.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal,

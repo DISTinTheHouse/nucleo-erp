@@ -19,7 +19,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import CategoriaProducto, Color, Producto, ProductoVariante
+from catalogo.models import CategoriaProducto, Color, Producto, ProductoVariante, TipoProducto
 from compras.api.views import CalidadInspeccionViewSet, OrdenCompraViewSet, RecepcionViewSet
 from compras.models import (
     CalidadInspeccion,
@@ -36,6 +36,12 @@ from inventarios.models import Almacen, Existencia, MovimientoInventario, Movimi
 from nucleo.models import Departamento, Empresa, Moneda, SatFormaPago, SatMetodoPago, SatRegimenFiscal, SerieFolio, Sucursal
 from terceros.models import Proveedor
 from usuarios.models import Usuario
+
+
+def _tipo_producto():
+    """Tipo de producto obligatorio (#871); PT tiene pk=3 como en producción."""
+    return TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})[0]
+
 
 RECEPCIONES_URL = "/api/v1/compras/recepciones/"
 
@@ -140,11 +146,11 @@ class RecepcionMovimientoFormalVarianteTests(TestCase):
         cls.ubicacion = Ubicacion.objects.create(almacen=cls.almacen, pasillo="1")
         usuario = Usuario.objects.create(username="u@acme-rv.test", email="u@acme-rv.test", empresa=empresa)
         color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
-        cls.producto_pt = Producto.objects.create(empresa=empresa, nombre="Playera")
+        cls.producto_pt = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre="Playera")
         cls.variante = ProductoVariante.objects.create(
             producto=cls.producto_pt, empresa=empresa, color=color, sku="PLA-NEG", precio_base="1",
         )
-        cls.producto_mp = Producto.objects.create(empresa=empresa, nombre="Hilo")
+        cls.producto_mp = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre="Hilo")
         cls.recepcion = Recepcion.objects.create(
             empresa=empresa, sucursal=sucursal, almacen=cls.almacen, usuario=usuario,
             folio="RC-RV-1", fecha_recepcion=timezone.now(),
@@ -242,7 +248,7 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
             empresa=cls.empresa, sucursal=cls.suc_1, proveedor=proveedor, moneda=moneda, usuario=cls.usuario,
             fecha_oc=timezone.now().date(), estatus=OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
         )
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Tela")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Tela")
         cls.oc_detalle = OrdenCompraDetalle.objects.create(
             orden_compra=cls.oc, producto=cls.producto, sucursal=cls.suc_1, cantidad=100,
         )
@@ -368,7 +374,7 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
                 sat_forma_pago=forma, sat_metodo_pago=metodo, codigo=f"PROV-{codigo}", razon_social="Prov SA",
                 telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000", email=f"p@{codigo}.test",
             )
-            producto = Producto.objects.create(empresa=empresa, nombre=f"Insumo {codigo}")
+            producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Insumo {codigo}")
             return {"empresa": empresa, "sucursal": sucursal, "moneda": moneda, "proveedor": proveedor, "producto": producto}
 
         cls.a = tenant("acme-oc")
@@ -620,7 +626,7 @@ class OrdenCompraCancelacionTests(TestCase):
                 telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000", email=f"p@{codigo}.test",
             )
             almacen = Almacen.objects.create(empresa=empresa, sucursal=sucursal, codigo="ALM", nombre="Almacen")
-            producto = Producto.objects.create(empresa=empresa, nombre=f"Insumo {codigo}")
+            producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Insumo {codigo}")
             usuario = Usuario.objects.create(
                 username=f"u@{codigo}.test", email=f"u@{codigo}.test", empresa=empresa, sucursal_default=sucursal,
             )
@@ -1346,7 +1352,7 @@ class OrdenCompraPutPlanoYFechaLocalTests(TestCase):
             sat_forma_pago=forma, sat_metodo_pago=metodo, codigo="P1", razon_social="P1",
             telefono="8100000000", contacto_principal="Ana", rfc="XAXX010101000", email="p1@p.test",
         )
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Tela")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Tela")
         cls.usuario = Usuario.objects.create(
             username="compras", email="c@acme.test", empresa=cls.empresa,
             sucursal_default=cls.sucursal, is_admin_empresa=True,
@@ -1418,7 +1424,7 @@ class RecepcionKpisTests(TestCase):
             telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000", email="p@acme.test",
         )
         cls.almacen = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM", nombre="Almacen")
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Insumo Test")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Insumo Test")
         # Ve montos (admin de empresa): estos tests fijan los cálculos.
         cls.usuario = Usuario.objects.create(
             username="u@acme.test", email="u@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
@@ -1646,7 +1652,7 @@ class RecepcionKpisTests(TestCase):
         sucursal = Sucursal.objects.create(empresa=self.otra, codigo="GDL", nombre="GDL")
         almacen = Almacen.objects.create(empresa=self.otra, sucursal=sucursal, codigo="ALG", nombre="Almacen G")
         usuario = Usuario.objects.create(username="ug", email="ug@globex.test", empresa=self.otra)
-        producto = Producto.objects.create(empresa=self.otra, nombre="Insumo G")
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=self.otra, nombre="Insumo G")
         oc = self._oc(empresa=self.otra, sucursal=sucursal, usuario=usuario, estatus=OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA)
         return self._linea_recibida(
             oc, producto=producto, cantidad=100, recibida=100, rechazada=40, folio="RC-GLOBEX",
@@ -1755,8 +1761,8 @@ class RecepcionKpisTests(TestCase):
 
         metros = UnidadMedida.objects.create(clave="MTR", nombre="Metro")
         piezas = UnidadMedida.objects.create(clave="PZA", nombre="Pieza")
-        tela = Producto.objects.create(empresa=self.empresa, nombre="Tela", unidad_medida=metros)
-        boton = Producto.objects.create(empresa=self.empresa, nombre="Botón", unidad_medida=piezas)
+        tela = Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre="Tela", unidad_medida=metros)
+        boton = Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre="Botón", unidad_medida=piezas)
         oc = self._oc()
         self._linea_recibida(oc, producto=tela, cantidad=1000, recibida=500, rechazada=30)
         self._linea_recibida(oc, producto=boton, cantidad=10, recibida=10, rechazada=1)
@@ -1878,8 +1884,8 @@ class OrdenCompraKpisTests(TestCase):
 
         tela = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Tela", codigo="TEL", descripcion="")
         hilo = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Hilo", codigo="HIL", descripcion="")
-        cls.prod_tela = Producto.objects.create(empresa=cls.empresa, nombre="Tela Azul", categoria_producto=tela)
-        cls.prod_hilo = Producto.objects.create(empresa=cls.empresa, nombre="Hilo Blanco", categoria_producto=hilo)
+        cls.prod_tela = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Tela Azul", categoria_producto=tela)
+        cls.prod_hilo = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Hilo Blanco", categoria_producto=hilo)
 
         hoy = timezone.now().date()
 
@@ -2032,12 +2038,11 @@ class OrdenCompraPedidosSeriesRendimientoTests(TestCase):
             sat_forma_pago=forma, sat_metodo_pago=metodo, codigo="P1", razon_social="P1",
             telefono="8100000000", contacto_principal="Ana", rfc="XAXX010101000", email="p1@p.test",
         )
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Tela")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Tela")
         # PT se compra por SKU (#792): una variante comprable para las O.
-        from catalogo.models import TipoProducto
         cls.variante_pt = ProductoVariante.objects.create(
             producto=Producto.objects.create(
-                empresa=cls.empresa, nombre="Camisa", tipo=TipoProducto.objects.create(pk=3, codigo="PT"),
+                empresa=cls.empresa, nombre="Camisa", tipo=_tipo_producto(),
             ),
             empresa=cls.empresa, color=Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000"),
             sku="CAM-PT", precio_base="1",
@@ -2354,7 +2359,7 @@ class OrdenCompraVariantesPTTests(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        from catalogo.models import Talla, TipoProducto
+        from catalogo.models import Talla
         regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General")
         forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
         metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Una exhibición")
@@ -2367,7 +2372,7 @@ class OrdenCompraVariantesPTTests(TestCase):
             sat_forma_pago=forma, sat_metodo_pago=metodo, codigo="P1", razon_social="P1",
             telefono="8100000000", contacto_principal="Ana", rfc="XAXX010101000", email="p1@p.test",
         )
-        pt = TipoProducto.objects.create(pk=3, codigo="PT")
+        pt = _tipo_producto()
         color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
         cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Camisa", tipo=pt)
         cls.ch, cls.g = [

@@ -21,7 +21,7 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import CategoriaProducto, Color, Producto, ProductoVariante, Talla, VarianteProductoProduccion
+from catalogo.models import CategoriaProducto, Color, Producto, ProductoVariante, Talla, TipoProducto, VarianteProductoProduccion
 from inventarios.models import MovimientoInventario
 from notificaciones.models import Notificacion
 from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
@@ -62,6 +62,12 @@ from ventas.models import (
 )
 from ventas.servicios_bordado import TipoServicioBordado, validar_tipos_servicio_array
 from ventas.utils.helpers import _save_cotizacion_detalle
+
+
+def _tipo_producto():
+    """Tipo de producto obligatorio (#871); PT tiene pk=3 como en producción."""
+    return TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})[0]
+
 
 PEDIDOS_URL = "/api/v1/ventas/pedidos/"
 PEDIDO_DETALLE_URL = "/api/v1/ventas/pedido-detalle/"
@@ -342,7 +348,7 @@ class PedidoDetalleScopeTenantTests(TestCase):
             metodo_pago="PUE",
             uso_cfdi="G03",
         )
-        producto = Producto.objects.create(empresa=empresa, nombre=f"Prod {codigo}")
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Prod {codigo}")
         detalle = PedidoDetalle.objects.create(pedido=pedido, producto=producto)
         talla_row = PedidoDetalleTalla.objects.create(
             pedido_detalle=detalle, talla=cls.talla, cantidad=5
@@ -560,7 +566,7 @@ class TiposServicioBordadoValidacionTests(TestCase):
         cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
         cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente ACME")
         cls.talla = Talla.objects.create(nombre="M")
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera")
         cls.vendedor = Usuario.objects.create(
             username="vendedor@acme.test",
             email="vendedor@acme.test",
@@ -704,7 +710,7 @@ class RequiereProduccionMuestraTests(TestCase):
         cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
         cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente ACME")
         cls.talla = Talla.objects.create(nombre="M")
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera")
         cls.vendedor = Usuario.objects.create(
             username="vendedor_muestra@acme.test",
             email="vendedor_muestra@acme.test",
@@ -807,9 +813,11 @@ class PedidoMesaControlUpdateTests(TestCase):
         cls.talla_m = Talla.objects.create(nombre="M")
         cls.talla_l = Talla.objects.create(nombre="L")
         cls.producto_a = Producto.objects.create(
+            tipo=_tipo_producto(),
             empresa=cls.empresa, nombre="Playera Industrial", codigo="PLAY"
         )
         cls.producto_b = Producto.objects.create(
+            tipo=_tipo_producto(),
             empresa=cls.empresa, nombre="Chamarra Softshell", codigo="CHAM"
         )
         cls.admin_mesa = Usuario.objects.create(
@@ -1540,8 +1548,8 @@ class CotizacionOnboardingOrdenTallasTests(TestCase):
         }
         cls.rojo = Color.objects.create(nombre="Rojo", codigo="ROJ", codigo_hex="#f00")
         cls.azul = Color.objects.create(nombre="Azul", codigo="AZU", codigo_hex="#00f")
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
-        otro = Producto.objects.create(empresa=cls.empresa, nombre="Pantalón")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera")
+        otro = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Pantalón")
         variantes = [
             (cls.producto, cls.rojo, ["UNI", "M", "2XCH", "CH", "3", "30", "22"]),
             (cls.producto, cls.azul, ["2XG", "XCH", "CH"]),
@@ -1615,6 +1623,7 @@ class PedidoProgramarTests(TestCase):
         cls.talla_m = Talla.objects.create(nombre="M")
         cls.talla_l = Talla.objects.create(nombre="L")
         cls.producto = Producto.objects.create(
+            tipo=_tipo_producto(),
             empresa=cls.empresa, nombre="Playera Industrial", codigo="PLAY"
         )
         cls.admin_mesa = Usuario.objects.create(
@@ -1758,7 +1767,7 @@ class PedidoProgramarTests(TestCase):
         variante = ProductoVariante.objects.create(producto=self.producto, empresa=self.empresa, color=color,
                                                    talla=self.talla_m, sku="PLAY-M", precio_base="1")
         PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=self.pedido, cantidad=50).update(variante=variante)
-        sin_variantes = Producto.objects.create(empresa=self.empresa, nombre="Mandil liso", codigo="MAND")
+        sin_variantes = Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre="Mandil liso", codigo="MAND")
         PedidoDetalle.objects.filter(tallas__pedido_detalle__pedido=self.pedido, tallas__cantidad=40).update(
             producto=sin_variantes)
         return alm00, alm00_otra, variante, sin_variantes
@@ -2686,7 +2695,7 @@ class PedidoDestinosAplicablesTests(TestCase):
         cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
         cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente ACME")
         cls.talla = Talla.objects.create(nombre="M")
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera")
         cls.admin_mesa = Usuario.objects.create(
             username="mesa_admin_da",
             email="mesa_admin_da@acme.test",
@@ -2807,11 +2816,11 @@ class PedidoMovimientoInventarioVarianteTests(TestCase):
             telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
         )
         color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera")
         cls.variante = ProductoVariante.objects.create(
             producto=cls.producto, empresa=cls.empresa, color=color, sku="PLA-NEG", precio_base="1",
         )
-        cls.producto_sin_tallas = Producto.objects.create(empresa=cls.empresa, nombre="Gorra")
+        cls.producto_sin_tallas = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Gorra")
 
     def setUp(self):
         # Dos existencias de la misma variante: un renglón del plan consume de
@@ -2996,7 +3005,7 @@ class RechazarCambiosCotizacionTests(TestCase):
             empresa=cls.empresa, is_admin_empresa=True,
         )
         cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera")
         # ``autorizar`` exige una Serie/Folio activa de PEDIDO en la sucursal.
         SerieFolio.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="PEDIDO", serie="P"
@@ -3381,7 +3390,7 @@ class FkCrossTenantEscrituraTests(TestCase):
             empresa=empresa, codigo_iso="USD", nombre=f"Dolar {codigo}"
         )
         oportunidad = Oportunidad.objects.create(empresa=empresa, titulo="Oportunidad")
-        producto = Producto.objects.create(empresa=empresa, nombre=f"Prod {codigo}")
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Prod {codigo}")
         variante = ProductoVariante.objects.create(
             producto=producto,
             empresa=empresa,
@@ -4258,7 +4267,7 @@ class PedidoTrazabilidadTests(TestCase):
             empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
         )
         cls.talla = Talla.objects.create(nombre="M")
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera")
         cls.almacen = Almacen.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM", nombre="Almacen",
         )
@@ -4528,10 +4537,10 @@ class PedidoDetalleSkuBaseTests(TestCase):
         cls.talla = Talla.objects.create(nombre="M")
         cls.color = Color.objects.create(nombre="Marino", codigo="703", codigo_hex="#000080")
         cls.color_sin_codigo = Color.objects.create(nombre="Sin codigo", codigo="", codigo_hex="#FFFFFF")
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera", codigo="6003")
-        cls.producto_sin_codigo = Producto.objects.create(empresa=cls.empresa, nombre="Legacy")
-        cls.producto_codigo_vacio = Producto.objects.create(empresa=cls.empresa, nombre="Vacio", codigo="")
-        cls.producto_minusculas = Producto.objects.create(empresa=cls.empresa, nombre="Min", codigo="ab 1")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera", codigo="6003")
+        cls.producto_sin_codigo = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Legacy")
+        cls.producto_codigo_vacio = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Vacio", codigo="")
+        cls.producto_minusculas = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Min", codigo="ab 1")
         cls.pedido = Pedido.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente,
             moneda=cls.moneda, folio="P-00001",
@@ -4614,7 +4623,7 @@ class AceptarCambiosConDependenciasTests(TestCase):
             username="admin@acme-ac.test", email="admin@acme-ac.test", empresa=cls.empresa, is_admin_empresa=True,
         )
         cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera")
         cls.talla = Talla.objects.create(nombre="CH")
         cls.almacen = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="A1", nombre="A1")
 
@@ -4705,7 +4714,7 @@ class DescuentoVentaAlmacenesConSalidaTests(TestCase):
             empresa=cls.empresa, sucursal=cls.sucursal, codigo="PT2", nombre="PT viejo",
             tipo_almacen="PT", permite_salida=True, estatus="INACTIVO",
         )
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera")
 
     def setUp(self):
         self.ex_mp = Existencia.objects.create(producto=self.producto, almacen=self.mp, cantidad=Decimal("100"))
@@ -5790,7 +5799,7 @@ class CotizacionOnboardingRendimientoTests(TestCase):
         cls.color = Color.objects.create(nombre="Rojo", codigo="ROJ", codigo_hex="#f00")
         cls.productos = []
         for i in range(cls.N_PRODUCTOS):
-            p = Producto.objects.create(empresa=cls.empresa, nombre=f"Prod {i}", codigo=f"P{i}")
+            p = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre=f"Prod {i}", codigo=f"P{i}")
             cls.productos.append(p)
             # Sólo algunas combinaciones con variante (el resto cae al SKU armado).
             if i % 2 == 0:
@@ -5891,7 +5900,7 @@ class AutorizarCotizacionRendimientoTests(TestCase):
             subtotal="100.00", gran_total="116.00",
         )
         for i in range(cls.N_PRODUCTOS):
-            p = Producto.objects.create(empresa=cls.empresa, nombre=f"Prod {i}", codigo=f"P{i}")
+            p = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre=f"Prod {i}", codigo=f"P{i}")
             det = CotizacionDetalle.objects.create(
                 cotizacion=cls.cotizacion, producto=p, color=cls.color,
                 precio_unitario="10.00", subtotal_linea="30.00",
@@ -6773,7 +6782,7 @@ class PedidoListadoPiezasVendedorTests(TestCase):
         cls.sin_nombre = Usuario.objects.create(username="sn@acme-pz.test", email="sn@acme-pz.test", empresa=cls.empresa)
         cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
         cls.talla = Talla.objects.create(nombre="M")
-        cls.producto = Producto.objects.create(empresa=cls.empresa, nombre="Playera", codigo="PLY")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera", codigo="PLY")
 
     def _pedido(self, folio, vendedor=None, tallas=()):
         cot = None
@@ -6870,6 +6879,7 @@ class CompatibilidadPrendaProcesoVentasTests(TestCase):
         )
         cls.playera, cls.pantalon, cls.libre = categoria("Playera"), categoria("Pantalón"), categoria("Libre")
         producto = lambda nombre, cat: Producto.objects.create(
+            tipo=_tipo_producto(),
             empresa=cls.empresa, nombre=nombre, codigo=nombre[:4], categoria_producto=cat
         )
         cls.p_playera = producto("Playera polo", cls.playera)

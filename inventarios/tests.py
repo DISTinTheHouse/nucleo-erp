@@ -22,7 +22,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import Color, Producto, ProductoVariante, Talla
+from catalogo.models import Color, Producto, ProductoVariante, Talla, TipoProducto
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 from inventarios.api import auxiliar as auxiliar_mod
 from inventarios.api.serializers import ExistenciaSerializer
@@ -48,6 +48,12 @@ from produccion.models import ListaMaterialBom, OrdenProduccion, OrdenProduccion
 from terceros.models import Proveedor
 from usuarios.models import Usuario
 from wms.models import Transferencia
+
+
+def _tipo_producto():
+    """Tipo de producto obligatorio (#871); PT tiene pk=3 como en producción."""
+    return TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})[0]
+
 
 MOVIMIENTOS_URL = "/api/v1/inventarios/movimientos/"
 
@@ -231,7 +237,7 @@ class ExistenciaViewSetScopeTenantTests(TestCase):
             empresa=empresa, sucursal=sucursal, codigo=f"{codigo}-1", nombre=f"{codigo} 1",
         )
         ubicacion = Ubicacion.objects.create(almacen=almacen, pasillo="1")
-        producto = Producto.objects.create(empresa=empresa, nombre=f"Producto {codigo}")
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Producto {codigo}")
         variante = ProductoVariante.objects.create(
             producto=producto, empresa=empresa, color=cls.color, sku=f"{codigo}-SKU", precio_base="1",
         )
@@ -439,7 +445,7 @@ class OperacionInventarioScopeTenantTests(TestCase):
             empresa=empresa, sucursal=sucursal, codigo=f"{codigo}-1", nombre=f"{codigo} 1",
         )
         ubicacion = Ubicacion.objects.create(almacen=almacen, pasillo="1")
-        producto = Producto.objects.create(empresa=empresa, nombre=f"Producto {codigo}")
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Producto {codigo}")
         variante = ProductoVariante.objects.create(
             producto=producto, empresa=empresa, color=cls.color, sku=f"{codigo}-SKU", precio_base="1",
         )
@@ -704,7 +710,7 @@ class ReporteExistenciasProduccionComprasTests(TestCase):
         )
         regular.sucursales.add(sucursal)
 
-        producto = Producto.objects.create(empresa=empresa, nombre=f"Playera {codigo}", codigo=f"{codigo}-SKU")
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Playera {codigo}", codigo=f"{codigo}-SKU")
         var_ch = ProductoVariante.objects.create(
             producto=producto, empresa=empresa, color=cls.color, talla=cls.talla_ch,
             sku=f"{codigo}-CH", precio_base="100",
@@ -869,7 +875,7 @@ class ReporteExistenciasProduccionComprasTests(TestCase):
         self.assertEqual(self._get(sin_sucursal), [])
 
     def test_filtro_por_producto_id_y_por_sku(self):
-        otro_producto = Producto.objects.create(empresa=self.a["empresa"], nombre="Otro", codigo="OTRO-RS")
+        otro_producto = Producto.objects.create(tipo=_tipo_producto(), empresa=self.a["empresa"], nombre="Otro", codigo="OTRO-RS")
         otra_var = ProductoVariante.objects.create(
             producto=otro_producto, empresa=self.a["empresa"], color=self.color, talla=self.talla_ch,
             sku="OTRO-RS-CH", precio_base="50",
@@ -1011,7 +1017,7 @@ class AuxiliarMovimientosTests(TestCase):
         cls.alm2 = Almacen.objects.create(empresa=cls.empresa, sucursal=sucursal, codigo="A2", nombre="Dos")
         cls.ub1 = Ubicacion.objects.create(almacen=cls.alm1, pasillo="1")
         cls.ub2 = Ubicacion.objects.create(almacen=cls.alm2, pasillo="1")
-        producto = Producto.objects.create(empresa=cls.empresa, nombre="Camisa azul")
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Camisa azul")
         cls.variante = ProductoVariante.objects.create(
             producto=producto, empresa=cls.empresa, color=color, sku="CAM-01", precio_base="1",
         )
@@ -1026,7 +1032,7 @@ class AuxiliarMovimientosTests(TestCase):
         cls.alm3 = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.otra_sucursal, codigo="A3", nombre="Tres")
         otra = Empresa.objects.create(codigo="globex-aux", razon_social="globex SA")
         cls.ajena = ProductoVariante.objects.create(
-            producto=Producto.objects.create(empresa=otra, nombre="Camisa ajena"),
+            producto=Producto.objects.create(tipo=_tipo_producto(), empresa=otra, nombre="Camisa ajena"),
             empresa=otra, color=color, sku="CAM-99", precio_base="1",
         )
 
