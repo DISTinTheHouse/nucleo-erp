@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import transaction
+from django.utils import timezone
 
 from rest_framework.exceptions import ValidationError
 
@@ -51,6 +52,7 @@ class PickingService:
     - Los campos ``cantidad_asignada / cantidad_surtida`` de
       ``PickingDetalle`` alimentan los dashboards de ``% surtido`` y
       ``% avance`` del pedido y de sus órdenes de trabajo vinculadas.
+      Lo asignado cuenta como surtido desde que se crea el picking.
 
     Flujo real operativo:
       1. ``GET onboarding`` → seleccionar pedido / origen / destino / cantidades.
@@ -373,7 +375,9 @@ class PickingService:
             **data,
         )
 
-        # 6. bulk_create PickingDetalle + contar líneas completas
+        # 6. bulk_create PickingDetalle + contar líneas completas. Crear la orden
+        #    de surtido es surtir: lo asignado queda como surtido en ese momento.
+        ahora = timezone.now()
         picking_rows = []
         lineas_completas = 0
         for item in requested_items:
@@ -393,14 +397,25 @@ class PickingService:
                     variante_produccion=talla.sku_muestra_obj,
                     cantidad_solicitada=cantidad,
                     cantidad_asignada=cantidad,
+                    cantidad_surtida=cantidad,
+                    estado=PickingDetalle.EstadoLinea.SURTIDA,
+                    fecha_surtido=ahora,
                     operador=operador,
                     observaciones=item.get("observaciones") or None,
                 )
             )
 
         PickingDetalle.objects.bulk_create(picking_rows)
+        # Completado si cada línea cubre todo lo pendiente de su talla; si no, parcial.
         picking.total_lineas_completas = lineas_completas
-        picking.save(update_fields=["total_lineas_completas", "updated_at"])
+        update_fields = ["total_lineas_completas", "estado", "updated_at"]
+        if lineas_completas == len(picking_rows):
+            picking.estado = Picking.Estado.COMPLETADO
+            picking.fecha_fin = ahora
+            update_fields.append("fecha_fin")
+        else:
+            picking.estado = Picking.Estado.PARCIAL
+        picking.save(update_fields=update_fields)
 
         # 7. Return: ordenes_trabajo_generadas vacío (low-noise: las OT van por
         #    módulo Produccion endpoints dedicados).
@@ -413,6 +428,7 @@ class PickingService:
         Picking.Estado.EN_PROCESO,
         Picking.Estado.PAUSADO,
         Picking.Estado.PARCIAL,
+        Picking.Estado.COMPLETADO,
     )
 
     @classmethod
@@ -446,11 +462,7 @@ class PickingService:
             if picking.sucursal_id not in user.sucursales_permitidas():
                 raise ValidationError({"picking": "No tiene acceso a la sucursal del picking."})
 
-        # Lo ya surtido quedó atribuido a un almacén/ubicación: moverlo borraría ese historial.
-        if picking.picking_detalle.filter(cantidad_surtida__gt=0).exists():
-            raise ValidationError(
-                {"estado": "No se puede trasladar un picking con líneas ya surtidas."}
-            )
+        # Trasladar solo mueve las prendas; lo surtido no cambia.
 
         lineas = [
             {

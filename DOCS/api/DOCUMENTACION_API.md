@@ -5301,7 +5301,7 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 
 > El **movimiento de inventario** sí ocurre en este endpoint, vía la transferencia TR del paso 3; no se crean reservas. Las órdenes de producción quedan **fuera**: se generan desde el módulo Producción.
 >
-> Alimentación de dashboards: en cuanto el picking se crea, el `header.tracker` del GET onboarding aumenta `total_asignado` y `pct_asignado_pedido` según las cantidades asignadas en ese documento. Cuando más adelante se marcan líneas como `SURTIDA` (vía actualizaciones de `PickingDetalle`), aumenta `total_surtido` y `pct_surtido_pedido`.
+> Crear el picking es surtir: cada línea nace con `cantidad_surtida = cantidad_asignada` y estado `SURTIDA`. El picking queda `Completado` si cada línea cubre todo lo pendiente de su talla; si no, `Parcial`. Desde ese momento suben `total_asignado`, `total_surtido` y sus porcentajes en `header.tracker`, `cantidad_surtida_picking` por talla y `piezas_surtidas` del listado de pedidos. Empacar ya no cambia `cantidad_surtida`: solo registra lo empacado, con lo surtido como tope.
 
 **Body**
 
@@ -5434,7 +5434,7 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 - Después: `almacen` = el nuevo, `almacen_destino` = `null`, `transferencia` = la TR del traslado (`null` si el picking no tiene líneas que mover).
 - Exige el permiso `C-WMS-PICKING` (`403` sin él). La TR se timbra con la empresa/sucursal del picking, no la del usuario.
 - El picking expone ese almacén ya resuelto como `almacen_actual` / `almacen_actual_nombre` (solo lectura) en el listado, el detalle, el alta y esta respuesta.
-- Solo estados Pendiente/Asignado/En proceso/Pausado/Parcial y sin líneas surtidas. El almacén debe ser de la misma empresa y sucursal, activo, permitir entradas y ser distinto al actual. Sin existencia suficiente en el almacén actual → `400` y no se mueve nada. Se limpian las `ubicacion` de línea de otro almacén y se registra en observaciones y en auditoría (`TRASLADO_PICKING`).
+- Solo estados Pendiente/Asignado/En proceso/Pausado/Parcial/Completado; lo surtido no lo impide y no cambia. El almacén debe ser de la misma empresa y sucursal, activo, permitir entradas y ser distinto al actual. Sin existencia suficiente en el almacén actual → `400` y no se mueve nada. Se limpian las `ubicacion` de línea de otro almacén y se registra en observaciones y en auditoría (`TRASLADO_PICKING`).
 - Respuesta `200` con el picking actualizado; `400` si no cumple; `404` si es de otra empresa/sucursal.
 
 ### 3) Listar Pickings
