@@ -115,6 +115,9 @@ class ExistenciaSerializer(serializers.ModelSerializer):
         variante = resuelto('producto_variante')
         if variante is not None and variante.empresa_id != empresa_id:
             errores['producto_variante'] = 'La variante no pertenece a la empresa del almacén.'
+        muestra = resuelto('variante_produccion')
+        if muestra is not None and muestra.empresa_id != empresa_id:
+            errores['variante_produccion'] = 'El SKU de muestra no pertenece a la empresa del almacén.'
         ubicacion = resuelto('ubicacion')
         if ubicacion is not None and getattr(ubicacion.almacen, 'empresa_id', None) != empresa_id:
             errores['ubicacion'] = 'La ubicación no pertenece a la empresa del almacén.'
@@ -126,7 +129,17 @@ class ExistenciaSerializer(serializers.ModelSerializer):
         variante = getattr(obj, "producto_variante", None)
         producto = getattr(obj, "producto", None) or (getattr(variante, "producto", None) if variante else None)
         if not producto:
-            return None
+            muestra = getattr(obj, "variante_produccion", None)
+            if not muestra:
+                return None
+            # SKU de muestra: sin producto de catálogo.
+            return {
+                'id': None, 'nombre': muestra.nombre, 'descripcion': None, 'tipo': None, 'tipo_id': None,
+                'categoria_producto': None, 'unidad_medida': None, 'sku': muestra.sku,
+                'color_id': muestra.color_id, 'color': getattr(muestra.color, 'nombre', None),
+                'talla_id': muestra.talla_id, 'talla': getattr(muestra.talla, 'nombre', None),
+                'es_muestra': True,
+            }
         tipo_producto = getattr(producto, 'tipo', None)
         return {
             'id': producto.pk,

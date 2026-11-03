@@ -97,6 +97,7 @@ from ventas.services.sku_produccion_service import (
     linea_no_muestra_q,
     es_muestra,
     variante_produccion_de_talla,
+    variantes_produccion_activas,
     variantes_produccion_prefetch,
 )
 from ventas.services.pedido_field_filter_service import (
@@ -3515,13 +3516,24 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 producto_id=OuterRef("pedido_detalle__producto_id"), empresa_id=pedido.empresa_id)))
             .order_by("pedido_detalle_id", "id")
         )
+        # SKU de muestra por (línea, talla): una query para todas las muestras.
+        muestras = {t.pedido_detalle_id for t in tallas if es_muestra(t.pedido_detalle)}
+        sku_muestra_por_talla = {
+            (pd, talla): vp
+            for pd, talla, vp in variantes_produccion_activas()
+            .filter(pedido_detalle_id__in=muestras)
+            .values_list("pedido_detalle_id", "talla_id", "pk")
+        } if muestras else {}
+
         # Clave de stock como en ``ExistenciaService``: la variante o, sin ella, el
         # producto (filas de ``Existencia`` sin variante). Sólo si el producto no tiene
         # ninguna variante: si las tiene, la talla quedó sin resolver (#731) y su stock
-        # por producto no dice nada. Las muestras no se surten de aquí: sin clave.
+        # por producto no dice nada. Una muestra se mide por su SKU de muestra
+        # (``Existencia.variante_produccion``); sin SKU generado, sin clave.
         def clave(t):
             if es_muestra(t.pedido_detalle):
-                return None
+                vp = sku_muestra_por_talla.get((t.pedido_detalle_id, t.talla_id))
+                return ("muestra", vp) if vp else None
             if t.variante_id:
                 return ("variante", t.variante_id)
             if t.pedido_detalle.producto_id and not t.producto_con_variantes:
@@ -3532,6 +3544,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         claves = {c for c in clave_por_talla.values() if c}
         variantes = {i for tipo, i in claves if tipo == "variante"}
         productos = {i for tipo, i in claves if tipo == "producto"}
+        skus_muestra = {i for tipo, i in claves if tipo == "muestra"}
         alcance = dict(almacen__empresa_id=pedido.empresa_id, almacen__sucursal_id=pedido.sucursal_id,
                        almacen__codigo=self.ALMACEN_SURTIDO)
 
@@ -3539,11 +3552,15 @@ class PedidoViewSet(viewsets.ModelViewSet):
             """Una query: suma ``cantidad`` por clave. Se acumula porque una fila con
             variante agrupa también por su ``producto_id``."""
             producto, variante = f"{prefijo}producto_id", f"{prefijo}producto_variante_id"
+            muestra = f"{prefijo}variante_produccion_id"
             qs = qs.filter(Q(**{f"{variante}__in": variantes})
-                           | Q(**{f"{producto}__in": productos, f"{variante}__isnull": True}))
+                           | Q(**{f"{producto}__in": productos, f"{variante}__isnull": True})
+                           | Q(**{f"{muestra}__in": skus_muestra}))
             totales = {}
-            for p, v, total in qs.values(producto, variante).annotate(t=Sum("cantidad")).values_list(producto, variante, "t"):
-                c = ("variante", v) if v else ("producto", p)
+            filas = qs.values(producto, variante, muestra).annotate(t=Sum("cantidad")).values_list(
+                producto, variante, muestra, "t")
+            for p, v, m, total in filas:
+                c = ("muestra", m) if m else ("variante", v) if v else ("producto", p)
                 totales[c] = totales.get(c, 0) + total
             return totales
 

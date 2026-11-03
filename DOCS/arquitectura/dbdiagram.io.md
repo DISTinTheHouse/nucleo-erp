@@ -417,6 +417,7 @@ Table series {
 Table existencias {
   id_existencia int [pk]
   id_producto int
+  id_variante_produccion int   // SKU de muestra (variantes_producto_produccion); sin producto
   id_almacen int
   id_ubicacion int
   id_lote int
@@ -440,6 +441,7 @@ Table movimiento_inventario_detalle {
   id_movimiento_detalle int [pk]
   id_movimiento_inventario int
   id_producto int
+  id_variante_produccion int   // SKU de muestra
   id_ubicacion_origen int
   id_ubicacion_destino int
   id_lote int

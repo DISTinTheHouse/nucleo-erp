@@ -24,7 +24,7 @@ from inventarios.models import (
     MovimientoInventarioDetalle,
     AjusteInventario,
 )
-from catalogo.models import Producto, ProductoVariante
+from catalogo.models import Producto, ProductoVariante, VarianteProductoProduccion
 from auditoria.models import AuditoriaEvento
 from nucleo.models import Sucursal
 from ventas.models import Pedido
@@ -165,6 +165,8 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         "producto_variante__producto__tipo",
         "producto_variante__color",
         "producto_variante__talla",
+        "variante_produccion__color",
+        "variante_produccion__talla",
         "almacen",
         "ubicacion",
         "ubicacion__almacen",
@@ -927,14 +929,23 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         normalized = []
         producto_ids = set()
         producto_variante_ids = set()
+        muestra_ids, muestra_skus = set(), set()
         for idx, it in enumerate(items):
             if not isinstance(it, dict):
                 raise ValidationError({"items": f"Item #{idx+1} inválido."})
             producto_id = self._to_int(it.get("producto") or it.get("producto_id"))
             pv_id = self._to_int(it.get("producto_variante") or it.get("producto_variante_id"))
-            if not producto_id and not pv_id:
+            # SKU de muestra (``VarianteProductoProduccion``): por id o por SKU.
+            vp_id = self._to_int(it.get("variante_produccion") or it.get("variante_produccion_id"))
+            sku_muestra = (it.get("sku_muestra") or "").strip() or None
+            es_muestra = bool(vp_id or sku_muestra)
+            if es_muestra and (producto_id or pv_id):
                 raise ValidationError(
-                    {"items": f"Item #{idx+1}: producto o producto_variante es requerido."}
+                    {"items": f"Item #{idx+1}: un SKU de muestra no lleva producto ni producto_variante."}
+                )
+            if not producto_id and not pv_id and not es_muestra:
+                raise ValidationError(
+                    {"items": f"Item #{idx+1}: producto, producto_variante o variante_produccion es requerido."}
                 )
             qty = self._to_decimal(it.get("cantidad"))
             if qty is None:
@@ -946,10 +957,16 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 producto_ids.add(producto_id)
             if pv_id:
                 producto_variante_ids.add(pv_id)
+            if vp_id:
+                muestra_ids.add(vp_id)
+            elif sku_muestra:
+                muestra_skus.add(sku_muestra)
             normalized.append(
                 {
                     "producto_id": producto_id,
                     "producto_variante_id": pv_id,
+                    "variante_produccion_id": vp_id,
+                    "sku_muestra": sku_muestra,
                     "cantidad": qty,
                     "ubicacion_id": ubicacion_id,
                     "lote_id": lote_id,
@@ -970,6 +987,15 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             producto.pk: producto
             for producto in Producto.objects.filter(pk__in=producto_ids).only("id", "empresa_id")
         }
+        # SKUs de muestra de la empresa del almacén (aislamiento para todos).
+        muestras_por_id, muestras_por_sku = {}, {}
+        if muestra_ids or muestra_skus:
+            for muestra in VarianteProductoProduccion.objects.filter(
+                models.Q(pk__in=muestra_ids) | models.Q(sku__in=muestra_skus),
+                empresa_id=almacen.empresa_id, activo=True,
+            ).only("id", "sku"):
+                muestras_por_id[muestra.pk] = muestra
+                muestras_por_sku[muestra.sku] = muestra
         # La ubicación debe ser del almacén de la operación (regla que ya existía;
         # implica la misma empresa). Se resuelve aquí, antes de cualquier escritura.
         ubicaciones = {
@@ -983,6 +1009,21 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         for idx, item in enumerate(normalized):
             variante_id = item["producto_variante_id"]
             producto_id = item["producto_id"]
+
+            if item["variante_produccion_id"] or item["sku_muestra"]:
+                muestra = (
+                    muestras_por_id.get(item["variante_produccion_id"]) if item["variante_produccion_id"]
+                    else muestras_por_sku.get(item["sku_muestra"])
+                )
+                if not muestra:
+                    raise ValidationError({"items": f"Item #{idx+1}: SKU de muestra no encontrado."})
+                item["variante_produccion_id"] = muestra.pk
+                item["ubicacion"] = None
+                if item["ubicacion_id"]:
+                    item["ubicacion"] = ubicaciones.get(item["ubicacion_id"])
+                    if not item["ubicacion"]:
+                        raise ValidationError({"ubicacion": "Ubicación inválida para el almacén."})
+                continue
 
             if variante_id:
                 variante = variantes.get(variante_id)
@@ -1076,6 +1117,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 movimiento_inventario=movimiento,
                 producto_id=item["producto_id"],
                 producto_variante_id=item["producto_variante_id"],
+                variante_produccion_id=item["variante_produccion_id"],
                 ubicacion_origen_id=item["ubicacion_origen_id"],
                 ubicacion_destino_id=item["ubicacion_destino_id"],
                 lote_id=item["lote_id"],
@@ -1123,12 +1165,15 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                     .filter(almacen_id=almacen.pk, ubicacion_id=(ubicacion.pk if ubicacion else None))
                     .order_by("id")
                 )
-                if it["producto_variante_id"]:
+                if it["variante_produccion_id"]:
+                    ex = ex.filter(variante_produccion_id=it["variante_produccion_id"])
+                elif it["producto_variante_id"]:
                     ex = ex.filter(producto_variante_id=it["producto_variante_id"])
                 else:
                     ex = ex.filter(
                         producto_id=it["producto_id"],
                         producto_variante__isnull=True,
+                        variante_produccion__isnull=True,
                     )
                 ex = ex.first()
                 if not ex and tipo == "SALIDA":
@@ -1137,12 +1182,15 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                         .filter(almacen_id=almacen.pk)
                         .order_by("-cantidad", "id")
                     )
-                    if it["producto_variante_id"]:
+                    if it["variante_produccion_id"]:
+                        fallback = fallback.filter(variante_produccion_id=it["variante_produccion_id"])
+                    elif it["producto_variante_id"]:
                         fallback = fallback.filter(producto_variante_id=it["producto_variante_id"])
                     else:
                         fallback = fallback.filter(
                             producto_id=it["producto_id"],
                             producto_variante__isnull=True,
+                            variante_produccion__isnull=True,
                         )
                     fallback = fallback.first()
                     ex = fallback
@@ -1155,6 +1203,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                     ex = Existencia.objects.create(
                         producto_id=it["producto_id"],
                         producto_variante_id=it["producto_variante_id"],
+                        variante_produccion_id=it["variante_produccion_id"],
                         almacen=almacen,
                         ubicacion=ubicacion,
                         stock=0,
@@ -1188,6 +1237,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                     {
                         "producto_id": ex.producto_id,
                         "producto_variante_id": ex.producto_variante_id,
+                        "variante_produccion_id": ex.variante_produccion_id,
                         "ubicacion_id": ex.ubicacion_id,
                         "cantidad_before": str(current),
                         "cantidad_after": str(new_qty),
@@ -1200,6 +1250,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                         # ``ex`` se buscó por la variante de la línea (o sin
                         # variante si la línea no trae): es la misma.
                         "producto_variante_id": ex.producto_variante_id,
+                        "variante_produccion_id": ex.variante_produccion_id,
                         "ubicacion_origen_id": ubicacion_origen_id,
                         "ubicacion_destino_id": ubicacion_destino_id,
                         "lote_id": it["lote_id"],
@@ -1212,6 +1263,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                         "id": ex.pk,
                         "producto_id": ex.producto_id,
                         "producto_variante_id": ex.producto_variante_id,
+                        "variante_produccion_id": ex.variante_produccion_id,
                         "almacen_id": ex.almacen_id,
                         "ubicacion_id": ex.ubicacion_id,
                         "cantidad": str(ex.cantidad),
