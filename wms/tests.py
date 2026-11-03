@@ -1192,7 +1192,7 @@ class PickingTrasladoTests(TestCase):
         self.assertEqual(list(ajeno.json()), list(inexistente.json()))
         self.assertNotIn("empresa", str(ajeno.json()))
 
-    def test_picking_con_lineas_surtidas_no_se_traslada(self):
+    def test_picking_con_lineas_surtidas_se_traslada(self):
         from ventas.models import PedidoDetalle
         from wms.models import PickingDetalle
         PickingDetalle.objects.create(
@@ -1200,15 +1200,16 @@ class PickingTrasladoTests(TestCase):
             pedido_detalle=PedidoDetalle.objects.create(
                 pedido=self.picking.pedido, producto_nombre_externo="Muestra"
             ),
-            cantidad_solicitada=2, cantidad_asignada=2, cantidad_surtida=1,
+            cantidad_solicitada=2, cantidad_asignada=2, cantidad_surtida=2,
         )
-        self.assertEqual(self._post(self.apartados).status_code, 400)
+        # Trasladar solo mueve las prendas: lo surtido no lo impide ni cambia.
+        self.assertEqual(self._post(self.apartados).status_code, 200)
         self.picking.refresh_from_db()
-        self.assertEqual(self.picking.almacen_id, self.bordados.pk)
+        self.assertEqual(self.picking.almacen_id, self.apartados.pk)
 
-    def test_picking_completado_no_se_traslada(self):
+    def test_picking_cancelado_no_se_traslada(self):
         from wms.models import Picking
-        Picking.objects.filter(pk=self.picking.pk).update(estado=Picking.Estado.COMPLETADO)
+        Picking.objects.filter(pk=self.picking.pk).update(estado=Picking.Estado.CANCELADO)
         self.assertEqual(self._post(self.apartados).status_code, 400)
 
     def test_sin_permiso_c_wms_picking_responde_403(self):  # #695: mueve inventario
@@ -1269,11 +1270,12 @@ class PickingTrasladoTests(TestCase):
         self.assertEqual(actuales["PK-4"], (self.apartados.pk, "Apartados"))
 
 class PackingDespachoEC574Tests(TestCase):
-    """EC-574: empacar confirma el surtido (WM-01, opción B) y, sin embarque
-    parcial, despachar exige todo el pedido empacado (WM-02, regla O1).
+    """Crear el picking ya surte lo asignado; empacar solo registra lo empacado
+    con lo surtido como tope y, sin embarque parcial, despachar exige todo el
+    pedido empacado (WM-02, regla O1).
 
-    Todo por la API sobre un picking creado con ``PickingService`` (surtida 0):
-    ninguna prueba fija ``cantidad_surtida`` a mano.
+    Todo por la API sobre un picking creado con ``PickingService``: ninguna
+    prueba fija ``cantidad_surtida`` a mano.
     """
 
     # Patrones con los que el front trata un 400 como "dato desactualizado"
@@ -1375,49 +1377,19 @@ class PackingDespachoEC574Tests(TestCase):
         return cuerpo if isinstance(cuerpo, str) else cuerpo[0]
 
     # --- WM-01 -------------------------------------------------------------
-    def test_picking_nuevo_arranca_sin_surtido(self):
-        self.assertEqual((self.linea_m.cantidad_surtida, self.linea_g.cantidad_surtida), (0, 0))
+    def test_picking_nuevo_nace_surtido(self):
+        from wms.models import PickingDetalle
 
-    def test_empacar_confirma_el_surtido_y_audita(self):
+        for linea, asignada in ((self.linea_m, 4), (self.linea_g, 2)):
+            self.assertEqual(linea.cantidad_surtida, Decimal(asignada))
+            self.assertEqual(linea.estado, PickingDetalle.EstadoLinea.SURTIDA)
+            self.assertIsNotNone(linea.fecha_surtido)
+
+    def test_empacar_no_cambia_el_surtido(self):
         from auditoria.models import AuditoriaEvento
         from wms.models import Picking, PickingDetalle
 
-        packing = self._empacar_ok((self.linea_m, 3))
-
-        self.linea_m.refresh_from_db()
-        self.linea_g.refresh_from_db()
-        self.picking.refresh_from_db()
-        self.assertEqual(self.linea_m.cantidad_surtida, Decimal("3"))
-        self.assertIsNotNone(self.linea_m.fecha_surtido)
-        self.assertEqual(self.linea_m.estado, PickingDetalle.EstadoLinea.PARCIAL)
-        self.assertEqual(self.linea_g.cantidad_surtida, 0)
-        self.assertEqual(self.linea_g.estado, PickingDetalle.EstadoLinea.PENDIENTE)
-        self.assertEqual(self.picking.estado, Picking.Estado.PARCIAL)
-        self.assertEqual(self.picking.total_lineas_completas, 0)
-        self.assertIsNone(self.picking.fecha_fin)
-
-        evento = AuditoriaEvento.objects.get(accion="SURTIDO_POR_PACKING")
-        self.assertEqual(
-            (evento.modulo, evento.tabla, evento.id_registro, evento.usuario_id, evento.empresa_id),
-            ("wms", "picking", str(self.picking.pk), self.usuario.pk, self.empresa.pk),
-        )
-        clave = str(self.linea_m.pk)
-        self.assertEqual(set(evento.antes_json["lineas"]), {clave})
-        self.assertEqual(evento.antes_json["estado"], Picking.Estado.PENDIENTE)
-        self.assertEqual(Decimal(evento.antes_json["lineas"][clave]["cantidad_surtida"]), 0)
-        self.assertEqual(evento.antes_json["lineas"][clave]["estado"], "PENDIENTE")
-        self.assertEqual(evento.despues_json["estado"], Picking.Estado.PARCIAL)
-        self.assertEqual(Decimal(evento.despues_json["lineas"][clave]["cantidad_surtida"]), Decimal("3"))
-        self.assertEqual(evento.despues_json["lineas"][clave]["estado"], "PARCIAL")
-        self.assertEqual(
-            (evento.despues_json["packing_id"], evento.despues_json["packing_folio"]),
-            (packing["id"], packing["folio"]),
-        )
-
-    def test_segundo_packing_completa_el_picking(self):
-        from auditoria.models import AuditoriaEvento
-        from wms.models import Picking, PickingDetalle
-
+        estado = self.picking.estado
         self._empacar_ok((self.linea_m, 3))
         self._empacar_ok((self.linea_m, 1), (self.linea_g, 2))
 
@@ -1426,12 +1398,10 @@ class PackingDespachoEC574Tests(TestCase):
             linea.refresh_from_db()
             self.assertEqual(linea.cantidad_surtida, Decimal(surtida))
             self.assertEqual(linea.estado, PickingDetalle.EstadoLinea.SURTIDA)
-        self.assertEqual(self.picking.estado, Picking.Estado.COMPLETADO)
-        self.assertEqual(self.picking.total_lineas_completas, 2)
-        self.assertIsNotNone(self.picking.fecha_fin)
-        self.assertEqual(AuditoriaEvento.objects.filter(accion="SURTIDO_POR_PACKING").count(), 2)
+        self.assertEqual(self.picking.estado, estado)
+        self.assertFalse(AuditoriaEvento.objects.filter(accion="SURTIDO_POR_PACKING").exists())
 
-    def test_empacar_mas_de_lo_asignado_es_400(self):
+    def test_empacar_mas_de_lo_surtido_es_400(self):
         resp = self._empacar((self.linea_m, 5))
         self.assertEqual(resp.status_code, 400)
         self.assertIn("excede lo pendiente", self._mensaje(resp, "packing_detalle"))
@@ -1631,25 +1601,6 @@ class PackingDespachoEC574Tests(TestCase):
         self.linea_m.refresh_from_db()
         self.assertEqual(self.linea_m.cantidad_surtida, Decimal("4"))
         self.assertEqual(self.linea_m.estado, PickingDetalle.EstadoLinea.SURTIDA)
-
-    def test_linea_empacada_antes_del_cambio_llega_a_surtida(self):
-        from wms.models import Packing, PackingDetalle, PickingDetalle
-
-        # Packing previo a EC-574: dejó 3 piezas empacadas sin tocar el surtido.
-        previo = Packing.objects.create(
-            folio="PA-PREVIO", empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
-            picking=self.picking, operador=self.usuario, usuario=self.usuario,
-        )
-        PackingDetalle.objects.create(packing=previo, picking_detalle=self.linea_m, cantidad_empacada=3)
-        self.linea_m.refresh_from_db()
-        self.assertEqual(self.linea_m.cantidad_surtida, 0)
-
-        self._empacar_ok((self.linea_m, 1))
-        self.linea_m.refresh_from_db()
-        self.assertEqual(self.linea_m.cantidad_surtida, Decimal("4"))
-        self.assertEqual(self.linea_m.estado, PickingDetalle.EstadoLinea.SURTIDA)
-        self.linea_g.refresh_from_db()
-        self.assertEqual(self.linea_g.cantidad_surtida, 0)  # no tocada: no se recalcula
 
     def test_linea_de_picking_cancelada_no_cuenta_en_o1(self):
         from wms.models import PickingDetalle
