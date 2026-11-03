@@ -732,7 +732,7 @@ class PedidoListSerializer(serializers.ModelSerializer):
     # listado (piezas: todas las tallas, muestras incluidas); ``vendedor_nombre``
     # es ``None`` sin cotización o sin vendedor.
     piezas = serializers.IntegerField(read_only=True)
-    # Sin líneas de muestra: el ``total_piezas`` de ``programar``.
+    # El ``total_piezas`` de ``programar`` (muestras incluidas, hoy igual a ``piezas``).
     piezas_programables = serializers.IntegerField(read_only=True)
     vendedor_nombre = serializers.SerializerMethodField()
 

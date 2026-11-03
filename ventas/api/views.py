@@ -93,7 +93,6 @@ from ventas.utils.helpers import (
     nombre_para_mostrar,
 )
 from ventas.services.sku_produccion_service import (
-    TALLAS_DE_LINEA_NO_MUESTRA_Q,
     es_muestra,
     variante_produccion_de_talla,
     variantes_produccion_prefetch,
@@ -3053,20 +3052,12 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 .annotate(total=Sum("cantidad"))
                 .values("total")
             )
-            # ``piezas_programables``: mismo total que ``programar`` (sin líneas de
-            # muestra), para el "programado X de Y" de mesa de control.
-            programables_qs = (
-                PedidoDetalleTalla.objects.filter(pedido_detalle__pedido_id=OuterRef("pk"))
-                .filter(TALLAS_DE_LINEA_NO_MUESTRA_Q)
-                .values("pedido_detalle__pedido_id")
-                .annotate(total=Sum("cantidad"))
-                .values("total")
-            )
             # Solo las columnas del nombre, no las filas completas de cotización y
             # usuario (``aprobado_snapshot`` es un JSONB) en un listado sin paginar.
             qs = qs.annotate(
                 piezas=Coalesce(Subquery(piezas_qs[:1]), 0),
-                piezas_programables=Coalesce(Subquery(programables_qs[:1]), 0),
+                # Programable = todas las piezas, muestras incluidas (igual que ``programar``).
+                piezas_programables=Coalesce(Subquery(piezas_qs[:1]), 0),
                 vendedor_cotizacion_id=F("cotizacion__vendedor_id"),
                 vendedor_first_name=F("cotizacion__vendedor__first_name"),
                 vendedor_last_name=F("cotizacion__vendedor__last_name"),
@@ -3410,17 +3401,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
             # toma este mismo lock para reescribir las tallas, así que el total
             # validado no puede cambiar entre la validación y el guardado.
             pedido = Pedido.objects.select_for_update().get(pk=base_pedido.pk)
-            # Excluye líneas de MUESTRA (``PedidoDetalle.producto_nombre_externo``
-            # puesto -- mismo criterio que ``sku_produccion_service.nombre_es_muestra``,
-            # NO el flag ``requiere_produccion`` porque se desincroniza): esas
-            # piezas no tienen SKU todavía y no se surten/embarcan/bordan por este
-            # flujo genérico de programación, tienen el suyo propio
-            # (``PedidoEspecialViewSet.variante_onboarding``). Antes de este fix
-            # contaban aquí y mesa de control podía "programar" piezas de muestra
-            # que nunca iban a poder cumplirse por esta vía.
+            # Todas las piezas del pedido, muestras incluidas: un pedido de solo
+            # muestras también se programa. El diálogo las distingue por ``es_muestra``.
             total_piezas = (
                 PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
-                .filter(TALLAS_DE_LINEA_NO_MUESTRA_Q)
                 .aggregate(total=Sum("cantidad"))["total"]
                 or 0
             )
@@ -3590,7 +3574,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             "pedido_id": pedido.pk,
             "folio": pedido.folio,
             "almacen_surtido": self.ALMACEN_SURTIDO,
-            "total_piezas": sum(r["cantidad"] for r in renglones if not r["es_muestra"]),
+            "total_piezas": sum(r["cantidad"] for r in renglones),
             # Mismo criterio que ``destinos_aplicables``, sin volver a consultar.
             "destinos_aplicables": [d for d, campo in _DESTINOS_POR_SERVICIO if any(getattr(t, campo) for t in tallas)]
             + list(_DESTINOS_LOGISTICA),
