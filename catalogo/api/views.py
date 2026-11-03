@@ -11,12 +11,16 @@ from catalogo.tallas import talla_sort_key
 from catalogo.validaciones import talla_permitida_para_producto
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso, VarianteProductoProduccion
 from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
+from nucleo.listados import booleano_param
 from produccion.models import ListaMaterialBom
 
 # Solo Producto Terminado exige talla en el onboarding de variante; materia
-# prima, compras, etc. no tienen tallas. Mismo id que usa el picker del
-# frontend (useProductVariantForm.ts) para filtrar el selector de producto.
-TIPO_PRODUCTO_TERMINADO_ID = 3
+# prima, compras, etc. no tienen tallas. Se resuelve por ``TipoProducto.codigo``
+# (único), no por id: el id depende del entorno (#910).
+CODIGO_PRODUCTO_TERMINADO = "PT"
+
+# ``?linea=SIN_LINEA`` pide la línea vacía: materia prima (TELAS, AVIOS) (#923).
+SIN_LINEA = "SIN_LINEA"
 
 
 def _alcance_empresa(qs, user):
@@ -30,35 +34,26 @@ def _alcance_empresa(qs, user):
     return qs.none()
 
 
+def _lineas_param(request):
+    """``?linea=`` (#922): uno o varios, repetido o separado por comas, sin
+    distinguir mayúsculas; vacío no filtra. ``SIN_LINEA`` se traduce a la línea
+    vacía (#923). Un valor fuera de ``CategoriaProducto.Linea`` es 400."""
+    valores = {
+        valor.strip().upper()
+        for crudo in request.query_params.getlist("linea")
+        for valor in crudo.split(",")
+    } - {""}
+    validos = [*CategoriaProducto.Linea.values, SIN_LINEA]
+    if valores - set(validos):
+        raise ValidationError({"linea": f"Valor inválido. Usa uno de: {', '.join(validos)}."})
+    return ["" if valor == SIN_LINEA else valor for valor in valores]
+
+
 class SoloSuperusuarioEscribe(BasePermission):
     """Catálogo global (sin empresa): todos leen, solo el superusuario escribe (#535)."""
 
     def has_permission(self, request, view):
         return request.method in SAFE_METHODS or request.user.is_superuser
-
-
-class TipoProductoViewSet(viewsets.ModelViewSet):
-    """Tipos activos (MP, PT, ...). Global; ``DELETE`` = baja lógica (``activo=False``)."""
-    queryset = TipoProducto.objects.filter(activo=True).order_by("codigo")
-    serializer_class = TipoProductoSerializer
-    permission_classes = [IsAuthenticated, SoloSuperusuarioEscribe]
-
-    def perform_destroy(self, instance):
-        instance.activo = False
-        instance.save(update_fields=["activo"])
-
-class CategoriaProductoViewSet(viewsets.ModelViewSet):
-    serializer_class = CategoriaProductoSerializer
-
-    def get_queryset(self):
-        qs = CategoriaProducto.objects.filter(activo=True).order_by("-created_at", "-id")
-        linea = self.request.query_params.get("linea")
-        if linea:
-            qs = qs.filter(linea=linea)
-        return _alcance_empresa(qs, self.request.user)
-
-# Nombre del ``UniqueConstraint`` parcial de ``CategoriaProductoProceso`` (models.py).
-UNIQUE_REGLA_ACTIVA = "uq_categoria_proceso_ubicacion_activo"
 
 
 class SoloAdminEmpresaEscribe(BasePermission):
@@ -69,6 +64,48 @@ class SoloAdminEmpresaEscribe(BasePermission):
         return request.method in SAFE_METHODS or bool(
             getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)
         )
+
+
+class TipoProductoViewSet(viewsets.ModelViewSet):
+    """Tipos (MP, PT, ...). Global; ``DELETE`` = baja lógica (``activo=False``).
+
+    El listado trae los activos y ``?activo=false`` las bajas; el detalle ve
+    ambos, así que una baja se consulta y se reactiva con
+    ``PATCH {"activo": true}`` (#907)."""
+    serializer_class = TipoProductoSerializer
+    permission_classes = [IsAuthenticated, SoloSuperusuarioEscribe]
+
+    def get_queryset(self):
+        qs = TipoProducto.objects.order_by("codigo")
+        if self.action == "list":
+            qs = qs.filter(activo=booleano_param(self.request, "activo", True))
+        return qs
+
+    def perform_destroy(self, instance):
+        instance.activo = False
+        instance.save(update_fields=["activo"])
+
+class CategoriaProductoViewSet(viewsets.ModelViewSet):
+    """Por empresa: todos leen, escriben el admin de empresa y el superusuario (#921)."""
+    serializer_class = CategoriaProductoSerializer
+    permission_classes = [IsAuthenticated, SoloAdminEmpresaEscribe]
+
+    def get_queryset(self):
+        # ``tallas`` (M2M) en bloque: sin el prefetch era una consulta por fila.
+        qs = CategoriaProducto.objects.filter(activo=True).prefetch_related("tallas").order_by("-created_at", "-id")
+        lineas = _lineas_param(self.request)
+        if lineas:
+            qs = qs.filter(linea__in=lineas)
+        return _alcance_empresa(qs, self.request.user)
+
+    def perform_destroy(self, instance):
+        # Baja lógica (#920): el DELETE físico arrastraba en cascada los
+        # productos de la categoría y, con ellos, compras, producción y ventas.
+        instance.activo = False
+        instance.save(update_fields=["activo", "updated_at"])
+
+# Nombre del ``UniqueConstraint`` parcial de ``CategoriaProductoProceso`` (models.py).
+UNIQUE_REGLA_ACTIVA = "uq_categoria_proceso_ubicacion_activo"
 
 
 class CategoriaProductoProcesoViewSet(viewsets.ModelViewSet):
@@ -114,9 +151,16 @@ class CategoriaProductoProcesoViewSet(viewsets.ModelViewSet):
 
 class ColorViewSet(viewsets.ModelViewSet):
     serializer_class = ColorSerializer
+    permission_classes = [IsAuthenticated, SoloSuperusuarioEscribe]
 
     def get_queryset(self):
         return Color.objects.filter(activo=True).order_by(Lower("nombre"), "id")
+
+    def perform_destroy(self, instance):
+        # Baja lógica (#914): el borrado físico arrastraba en cascada variantes
+        # de todas las empresas, igual que la talla.
+        instance.activo = False
+        instance.save(update_fields=["activo"])
 
 class TallaViewSet(viewsets.ModelViewSet):
     serializer_class = TallaSerializer
@@ -167,9 +211,13 @@ class ProductoViewSet(viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 raise ValidationError({"tipo_id": "Must be an integer."})
             qs = qs.filter(tipo_id__in=tipo_ids)
-        linea = self.request.query_params.get('linea')
-        if linea:
-            qs = qs.filter(categoria_producto__linea=linea)
+        lineas = _lineas_param(self.request)
+        if lineas:
+            filtro = Q(categoria_producto__linea__in=lineas)
+            if "" in lineas:
+                # Sin categoría tampoco hay línea: entra en ``SIN_LINEA``.
+                filtro |= Q(categoria_producto__isnull=True)
+            qs = qs.filter(filtro)
         es_compras = (self.request.query_params.get('es_compras') or '').strip().lower()
         if es_compras:
             if es_compras not in ('true', 'false', '1', '0'):
@@ -326,7 +374,7 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
             raise ValidationError({"producto": "El producto no tiene codigo asignado; no se puede generar el SKU."})
 
         # Solo Producto Terminado exige talla -- materia prima, compras, etc. no.
-        es_producto_terminado = producto.tipo_id == TIPO_PRODUCTO_TERMINADO_ID
+        es_producto_terminado = producto.tipo is not None and producto.tipo.codigo == CODIGO_PRODUCTO_TERMINADO
         if es_producto_terminado and talla is None:
             raise ValidationError({"talla": "Requerida para variantes de Producto Terminado."})
 

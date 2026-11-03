@@ -16,7 +16,7 @@ from rest_framework.views import APIView
 from simple_history.utils import bulk_create_with_history
 
 from auditoria.models import AuditoriaEvento
-from catalogo.api.views import TIPO_PRODUCTO_TERMINADO_ID
+from catalogo.api.views import CODIGO_PRODUCTO_TERMINADO
 from catalogo.models import Producto, ProductoVariante
 from compras.models import (
     CalidadInspeccion,
@@ -192,7 +192,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     }
     # Variantes que se compran en una OC de PT: las que ofrece el GET de
     # onboarding y las que acepta la escritura de renglones (#792).
-    VARIANTE_COMPRABLE = Q(activo=True, producto__activo=True, producto__tipo_id=TIPO_PRODUCTO_TERMINADO_ID)
+    VARIANTE_COMPRABLE = Q(activo=True, producto__activo=True, producto__tipo__codigo=CODIGO_PRODUCTO_TERMINADO)
 
     def get_queryset(self):
         user = self.request.user

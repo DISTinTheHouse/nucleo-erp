@@ -192,8 +192,9 @@ class AislamientoEmpresaCatalogoTests(TestCase):
         )
         ListaMaterialBom.objects.create(empresa=cls.empresa_a, producto_variante=cls.var_a)
 
+        # Admin de empresa: la categoría solo la escribe él o el superusuario (#921).
         cls.user_a = Usuario.objects.create(
-            username="a@cat.test", email="a@cat.test", empresa=cls.empresa_a,
+            username="a@cat.test", email="a@cat.test", empresa=cls.empresa_a, is_admin_empresa=True,
         )
         cls.sin_empresa = Usuario.objects.create(username="n@cat.test", email="n@cat.test")
         cls.superuser = Usuario.objects.create(
@@ -759,3 +760,165 @@ class CompatibilidadPrendaProcesoTests(TestCase):
         with mock.patch.object(CategoriaProductoProcesoSerializer, "save", side_effect=otro):
             with self.assertRaises(IntegrityError):
                 self._alta(ubicacion="A")
+
+
+class LineaCategoriaTests(TestCase):
+    """``CategoriaProducto.linea`` y el filtro ``?linea=`` (#922, #923, #925)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa_a = Empresa.objects.create(codigo="lin-a", razon_social="A SA")
+        cls.empresa_b = Empresa.objects.create(codigo="lin-b", razon_social="B SA")
+        cls.industrial = CategoriaProducto.objects.create(
+            empresa=cls.empresa_a, nombre="Camisa", codigo="100", descripcion="c", linea="INDUSTRIAL",
+        )
+        cls.epp = CategoriaProducto.objects.create(
+            empresa=cls.empresa_a, nombre="Casco", codigo="500", descripcion="c", linea="EPP",
+        )
+        cls.telas = CategoriaProducto.objects.create(
+            empresa=cls.empresa_a, nombre="TELAS", codigo="900", descripcion="t",
+        )
+        cls.industrial_b = CategoriaProducto.objects.create(
+            empresa=cls.empresa_b, nombre="Camisa B", codigo="100", descripcion="c", linea="INDUSTRIAL",
+        )
+        cls.prod_industrial = Producto.objects.create(
+            empresa=cls.empresa_a, categoria_producto=cls.industrial, nombre="Camisa", codigo="10000",
+        )
+        cls.prod_epp = Producto.objects.create(
+            empresa=cls.empresa_a, categoria_producto=cls.epp, nombre="Casco", codigo="50000",
+        )
+        cls.prod_tela = Producto.objects.create(
+            empresa=cls.empresa_a, categoria_producto=cls.telas, nombre="Tela", codigo="90000",
+        )
+        cls.prod_sin_categoria = Producto.objects.create(empresa=cls.empresa_a, nombre="Suelto")
+        cls.user_a = Usuario.objects.create(
+            username="a@lin.test", email="a@lin.test", empresa=cls.empresa_a, is_admin_empresa=True,
+        )
+
+    def _get(self, url, query=""):
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        return client.get(f"{url}?{query}")
+
+    def _ids(self, url, query):
+        resp = self._get(url, query)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return {row["id"] for row in resp.json()}
+
+    def test_cada_categoria_trae_su_linea_y_vacia_es_materia_prima(self):
+        lineas = {row["id"]: row["linea"] for row in self._get(CATEGORIAS_URL).json()}
+        self.assertEqual(lineas, {self.industrial.pk: "INDUSTRIAL", self.epp.pk: "EPP", self.telas.pk: ""})
+
+    def test_filtra_categorias_y_productos_dentro_de_la_empresa(self):
+        self.assertEqual(self._ids(CATEGORIAS_URL, "linea=INDUSTRIAL"), {self.industrial.pk})
+        self.assertEqual(self._ids(PRODUCTOS_URL, "linea=INDUSTRIAL"), {self.prod_industrial.pk})
+
+    def test_varios_valores_y_minusculas(self):
+        ambas = {self.industrial.pk, self.epp.pk}
+        self.assertEqual(self._ids(CATEGORIAS_URL, "linea=INDUSTRIAL&linea=EPP"), ambas)
+        self.assertEqual(self._ids(CATEGORIAS_URL, "linea=industrial,epp"), ambas)
+        self.assertEqual(self._ids(CATEGORIAS_URL, "linea=INDUSTRIAL,"), {self.industrial.pk})
+
+    def test_sin_linea_pide_la_materia_prima(self):
+        self.assertEqual(self._ids(CATEGORIAS_URL, "linea=SIN_LINEA"), {self.telas.pk})
+        # En productos también entra el que no tiene categoría.
+        self.assertEqual(
+            self._ids(PRODUCTOS_URL, "linea=SIN_LINEA"), {self.prod_tela.pk, self.prod_sin_categoria.pk},
+        )
+        self.assertEqual(
+            self._ids(PRODUCTOS_URL, "linea=sin_linea,EPP"),
+            {self.prod_tela.pk, self.prod_sin_categoria.pk, self.prod_epp.pk},
+        )
+
+    def test_vacio_no_filtra(self):
+        self.assertEqual(self._ids(CATEGORIAS_URL, "linea="), {self.industrial.pk, self.epp.pk, self.telas.pk})
+
+    def test_valor_invalido_es_400(self):
+        for url in (CATEGORIAS_URL, PRODUCTOS_URL):
+            for query in ("linea=FOO", "linea=INDUSTRIAL&linea=FOO"):
+                resp = self._get(url, query)
+                self.assertEqual(resp.status_code, 400, (url, query))
+                self.assertIn("linea", resp.json())
+
+    def test_alta_con_linea_fuera_del_catalogo_es_400(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        resp = client.post(CATEGORIAS_URL, {
+            "empresa": self.empresa_a.pk, "nombre": "X", "codigo": "999", "descripcion": "x", "linea": "FOO",
+        }, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("linea", resp.json())
+
+
+class EscrituraCatalogoTests(TestCase):
+    """Quién escribe categorías (#921), colores (#914) y tipos (#907-#909), y bajas lógicas (#920)."""
+
+    TIPOS_URL = "/api/v1/catalogo/tipo-producto/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="esc", razon_social="Esc SA")
+        cls.categoria = CategoriaProducto.objects.create(
+            empresa=cls.empresa, nombre="Camisa", codigo="100", descripcion="c",
+        )
+        cls.producto = Producto.objects.create(
+            empresa=cls.empresa, categoria_producto=cls.categoria, nombre="Camisa", codigo="10000",
+        )
+        cls.color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        cls.tipo_baja = TipoProducto.objects.create(codigo="VIEJO", nombre="Viejo", activo=False)
+        cls.vendedor = Usuario.objects.create(username="v@esc.test", email="v@esc.test", empresa=cls.empresa)
+        cls.admin = Usuario.objects.create(
+            username="a@esc.test", email="a@esc.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.superuser = Usuario.objects.create(username="s@esc.test", email="s@esc.test", is_superuser=True)
+
+    def _api(self, user):
+        api = APIClient()
+        api.force_authenticate(user=user)
+        return api
+
+    def test_categoria_solo_la_escribe_el_admin_de_empresa(self):
+        url = f"{CATEGORIAS_URL}{self.categoria.pk}/"
+        payload = {"empresa": self.empresa.pk, "nombre": "Gorra", "codigo": "300", "descripcion": "g"}
+        vendedor = self._api(self.vendedor)
+        self.assertEqual(vendedor.get(url).status_code, 200)
+        self.assertEqual(vendedor.post(CATEGORIAS_URL, payload, format="json").status_code, 403)
+        self.assertEqual(vendedor.patch(url, {"linea": "OTROS"}, format="json").status_code, 403)
+        self.assertEqual(vendedor.delete(url).status_code, 403)
+        self.assertEqual(self._api(self.admin).post(CATEGORIAS_URL, payload, format="json").status_code, 201)
+        self.assertEqual(self._api(self.admin).patch(url, {"linea": "OTROS"}, format="json").status_code, 200)
+
+    def test_delete_de_categoria_es_baja_logica_y_no_toca_sus_productos(self):
+        api = self._api(self.admin)
+        self.assertEqual(api.delete(f"{CATEGORIAS_URL}{self.categoria.pk}/").status_code, 204)
+        self.categoria.refresh_from_db()
+        self.assertFalse(self.categoria.activo)
+        self.assertTrue(Producto.objects.filter(pk=self.producto.pk, activo=True).exists())
+        self.assertEqual(api.get(CATEGORIAS_URL).json(), [])
+
+    def test_color_solo_lo_escribe_el_superusuario_y_delete_es_baja_logica(self):
+        url = f"{COLORES_URL}{self.color.pk}/"
+        alta = {"nombre": "Rojo", "codigo": "ROJ", "codigo_hex": "#FF0000"}
+        self.assertEqual(self._api(self.admin).post(COLORES_URL, alta, format="json").status_code, 403)
+        self.assertEqual(self._api(self.admin).delete(url).status_code, 403)
+        self.assertEqual(self._api(self.superuser).post(COLORES_URL, alta, format="json").status_code, 201)
+        self.assertEqual(self._api(self.superuser).delete(url).status_code, 204)
+        self.color.refresh_from_db()
+        self.assertFalse(self.color.activo)
+
+    def test_tipos_inactivos_se_listan_y_se_reactivan(self):
+        api = self._api(self.superuser)
+        self.assertNotIn(self.tipo_baja.pk, {t["id"] for t in api.get(self.TIPOS_URL).json()})
+        self.assertEqual([t["id"] for t in api.get(f"{self.TIPOS_URL}?activo=false").json()], [self.tipo_baja.pk])
+        self.assertEqual(api.get(f"{self.TIPOS_URL}{self.tipo_baja.pk}/").status_code, 200)
+        resp = api.patch(f"{self.TIPOS_URL}{self.tipo_baja.pk}/", {"activo": True}, format="json")
+        self.assertEqual((resp.status_code, resp.json()["activo"]), (200, True), resp.content)
+
+    def test_alta_de_tipo_exige_nombre_y_nace_activa(self):
+        api = self._api(self.superuser)
+        for payload in ({"codigo": "SIN"}, {"codigo": "SIN", "nombre": ""}):
+            resp = api.post(self.TIPOS_URL, payload, format="json")
+            self.assertEqual(resp.status_code, 400, payload)
+            self.assertIn("nombre", resp.json())
+        resp = api.post(self.TIPOS_URL, {"codigo": "NUEVO", "nombre": "Nuevo", "activo": False}, format="json")
+        self.assertEqual((resp.status_code, resp.json()["activo"]), (201, True), resp.content)
