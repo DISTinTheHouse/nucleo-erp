@@ -6,6 +6,7 @@ from rest_framework.exceptions import ValidationError
 
 from auditoria.models import AuditoriaEvento
 from ventas.models import PedidoDetalleTalla
+from ventas.services.sku_produccion_service import es_muestra
 from wms.models import Picking, PickingDetalle
 from wms.services.existencia_service import ExistenciaService
 from wms.services.transferencia_service import TransferenciaService
@@ -196,12 +197,11 @@ class PickingService:
             payload["almacen_origen"] = serializar_almacen(almacen_origen)
 
         tallas = list(
-            # Las muestras (línea sin ``producto``) no se surten por picking: van
-            # por su flujo de pedido especial (#745).
-            PedidoDetalleTalla.objects.filter(
-                pedido_detalle__pedido=pedido, pedido_detalle__producto__isnull=False
-            )
+            # Las muestras se surten por su SKU de muestra (existencia propia en
+            # ``Existencia.variante_produccion``); ``build_snapshots`` lo resuelve.
+            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
             .select_related(
+                "talla",
                 "pedido_detalle__producto",
                 "variante",
                 "variante__talla",
@@ -230,25 +230,33 @@ class PickingService:
             requiere_bordado = bool(getattr(talla, "lleva_bordado", False))
             requiere_reflejante = bool(getattr(talla, "lleva_reflejante", False))
             requiere_corte_manga = bool(getattr(talla, "lleva_corte_manga", False))
+            muestra = talla.sku_muestra_obj
+            producto = talla.pedido_detalle.producto
 
             detalle_payload.append(
                 {
                     "pedido_detalle": talla.pedido_detalle_id,
                     "pedido_detalle_talla": talla.id,
                     "producto": talla.pedido_detalle.producto_id,
-                    "producto_nombre": talla.pedido_detalle.producto.nombre,
+                    "producto_nombre": (
+                        producto.nombre if producto else talla.pedido_detalle.producto_nombre_externo
+                    ),
                     "producto_variante": talla.variante_id,
                     "producto_variante_nombre": (
                         str(talla.variante) if talla.variante_id else None
                     ),
-                    "talla": getattr(talla.variante, "talla_id", None),
+                    # Muestra: se surte por su SKU de muestra (``null`` si aún no tiene).
+                    "es_muestra": es_muestra(talla.pedido_detalle),
+                    "variante_produccion": getattr(muestra, "pk", None),
+                    "sku_muestra": getattr(muestra, "sku", None),
+                    "talla": getattr(talla.variante, "talla_id", None) or talla.talla_id,
                     "talla_nombre": getattr(
                         getattr(talla.variante, "talla", None), "nombre", None
-                    ),
-                    "color": getattr(talla.variante, "color_id", None),
+                    ) or getattr(talla.talla, "nombre", None),
+                    "color": getattr(talla.variante, "color_id", None) or getattr(muestra, "color_id", None),
                     "color_nombre": getattr(
                         getattr(talla.variante, "color", None), "nombre", None
-                    ),
+                    ) or getattr(getattr(muestra, "color", None), "nombre", None),
                     "cantidad_pedida": str(snap.cantidad_pedida),
                     "cantidad_ya_asignada": str(snap.cantidad_asignada_historica),
                     "cantidad_ya_surtida": str(snap.cantidad_surtida_historica),
@@ -338,6 +346,7 @@ class PickingService:
                     {
                         "producto": item["talla"].pedido_detalle.producto,
                         "producto_variante": item["talla"].variante,
+                        "variante_produccion": item["talla"].sku_muestra_obj,
                         "cantidad": item["cantidad"],
                     }
                     for item in requested_items
@@ -381,6 +390,7 @@ class PickingService:
                     pedido_detalle_talla=talla,
                     producto=talla.pedido_detalle.producto,
                     producto_variante=talla.variante,
+                    variante_produccion=talla.sku_muestra_obj,
                     cantidad_solicitada=cantidad,
                     cantidad_asignada=cantidad,
                     operador=operador,
@@ -443,11 +453,14 @@ class PickingService:
             )
 
         lineas = [
-            {"producto": d.producto, "producto_variante": d.producto_variante, "cantidad": d.cantidad_asignada}
+            {
+                "producto": d.producto, "producto_variante": d.producto_variante,
+                "variante_produccion": d.variante_produccion, "cantidad": d.cantidad_asignada,
+            }
             for d in picking.picking_detalle.exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
             .filter(cantidad_asignada__gt=0)
-            .exclude(producto__isnull=True, producto_variante__isnull=True)
-            .select_related("producto", "producto_variante")
+            .exclude(producto__isnull=True, producto_variante__isnull=True, variante_produccion__isnull=True)
+            .select_related("producto", "producto_variante", "variante_produccion")
         ]
         # Las prendas cambian de almacén: la TR las saca del actual y las mete al nuevo.
         transferencia = None

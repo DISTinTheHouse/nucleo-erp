@@ -180,6 +180,10 @@ class PickingDetalle(models.Model):
 
     producto = models.ForeignKey("catalogo.Producto", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
     producto_variante = models.ForeignKey("catalogo.ProductoVariante", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
+    # Línea de muestra: su SKU de muestra (sin producto ni variante de catálogo).
+    variante_produccion = models.ForeignKey(
+        "catalogo.VarianteProductoProduccion", on_delete=models.PROTECT, related_name="picking_detalle", blank=True, null=True
+    )
     ubicacion = models.ForeignKey("inventarios.Ubicacion", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
     lote = models.ForeignKey("inventarios.Lote", on_delete=models.CASCADE, related_name="picking_detalle", blank=True, null=True)
 
@@ -413,6 +417,14 @@ class TransferenciaDetalle(models.Model):
         "catalogo.ProductoVariante",
         on_delete=models.CASCADE,
         related_name="transferencia_detalle_variante",
+        blank=True,
+        null=True,
+    )
+    # SKU de muestra (``inventarios.Existencia.variante_produccion``).
+    variante_produccion = models.ForeignKey(
+        "catalogo.VarianteProductoProduccion",
+        on_delete=models.PROTECT,
+        related_name="transferencia_detalle",
         blank=True,
         null=True,
     )

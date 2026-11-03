@@ -208,20 +208,31 @@ class PickingDetalleSerializer(serializers.ModelSerializer):
     + estado), al igual que ``TransferenciaDetalleReadSerializer`` con ``Ubicacion``.
     """
 
-    producto_nombre = serializers.CharField(
-        source="producto.nombre", read_only=True, default=None
-    )
+    producto_nombre = serializers.SerializerMethodField()
     producto_variante_nombre = serializers.CharField(
         source="producto_variante.nombre", read_only=True, default=None
     )
-    talla_id = serializers.IntegerField(
-        source="pedido_detalle_talla.variante.talla_id", read_only=True
-    )
-    talla_nombre = serializers.CharField(
-        source="pedido_detalle_talla.variante.talla.nombre", read_only=True, default=None
-    )
+    # Línea de muestra: su SKU de muestra (``variante_produccion``).
+    sku_muestra = serializers.CharField(source="variante_produccion.sku", read_only=True, default=None)
+    talla_id = serializers.SerializerMethodField()
+    talla_nombre = serializers.SerializerMethodField()
     ubicacion_nombre = serializers.SerializerMethodField()
     operador_nombre = serializers.SerializerMethodField()
+
+    def get_producto_nombre(self, obj):
+        if obj.producto_id:
+            return obj.producto.nombre
+        return getattr(obj.variante_produccion, "nombre", None)
+
+    def _talla(self, obj):
+        variante = getattr(obj.pedido_detalle_talla, "variante", None)
+        return getattr(variante, "talla", None) or getattr(obj.variante_produccion, "talla", None)
+
+    def get_talla_id(self, obj):
+        return getattr(self._talla(obj), "pk", None)
+
+    def get_talla_nombre(self, obj):
+        return getattr(self._talla(obj), "nombre", None)
 
     class Meta:
         model = PickingDetalle

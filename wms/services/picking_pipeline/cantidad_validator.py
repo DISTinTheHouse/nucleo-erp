@@ -5,7 +5,8 @@ from rest_framework.exceptions import ValidationError
 
 from ventas.models import PedidoDetalleTalla
 from wms.services.existencia_service import ExistenciaService
-from wms.services.picking_pipeline.pendientes import build_snapshots
+from ventas.services.sku_produccion_service import es_muestra
+from wms.services.picking_pipeline.pendientes import anotar_sku_muestra, build_snapshots
 from wms.utils.decimales import normalizar_decimal
 
 
@@ -53,10 +54,10 @@ def _cargar_tallas_del_pedido(pedido, talla_ids):
     tallas = list(
         PedidoDetalleTalla.objects.filter(
             pedido_detalle__pedido=pedido,
-            pedido_detalle__producto__isnull=False,
             pk__in=list(talla_ids),
         )
         .select_related(
+            "talla",
             "pedido_detalle__producto",
             "variante",
             "variante__talla",
@@ -66,7 +67,14 @@ def _cargar_tallas_del_pedido(pedido, talla_ids):
     )
     if len(tallas) != len(talla_ids):
         raise ValidationError(
-            {"picking_detalle": "Una o más líneas no pertenecen al pedido indicado o son muestras (no se surten por picking)."}
+            {"picking_detalle": "Una o más líneas no pertenecen al pedido indicado."}
+        )
+    # Una muestra se surte por su SKU de muestra: sin él no tiene stock que mover.
+    anotar_sku_muestra(tallas)
+    sin_sku = [t.pk for t in tallas if es_muestra(t.pedido_detalle) and t.sku_muestra_obj is None]
+    if sin_sku:
+        raise ValidationError(
+            {"picking_detalle": f"Las tallas de muestra {sin_sku} aún no tienen SKU de muestra."}
         )
     return tallas
 
@@ -146,16 +154,17 @@ def _validar_por_clave_stock(requested_items, almacen_origen):
                 almacen=almacen_origen,
                 producto=clave[0],
                 producto_variante=clave[1],
+                variante_produccion=clave[2],
             )
             disponible_por_clave[clave] = normalizar_decimal(dis)
 
     for clave, total_solicitado in solicitado_por_clave.items():
         total_disponible = disponible_por_clave.get(clave, Decimal("0"))
         if total_solicitado > total_disponible:
-            producto_id, variante_id = clave
+            producto_id, variante_id, muestra_id = clave
             scope = (
-                f"producto_variante {variante_id}"
-                if variante_id
+                f"SKU de muestra {muestra_id}" if muestra_id
+                else f"producto_variante {variante_id}" if variante_id
                 else f"producto {producto_id}"
             )
             raise ValidationError(

@@ -147,6 +147,8 @@ class PackingService:
                 "picking_detalle__pedido_detalle_talla__variante",
                 "picking_detalle__pedido_detalle_talla__variante__talla",
                 "picking_detalle__pedido_detalle_talla__variante__color",
+                "picking_detalle__variante_produccion__talla",
+                "picking_detalle__variante_produccion__color",
                 "picking_detalle__ubicacion",
                 "picking_detalle__ubicacion__almacen",
             )
@@ -183,37 +185,29 @@ class PackingService:
             "almacen_nombre": getattr(picking.almacen, "nombre", None),
             "estado": picking.estado,
         }
+        def _variante(row):
+            # Talla/color de la variante de catálogo o, en una muestra, de su SKU de muestra.
+            if row.pedido_detalle_talla_id and row.pedido_detalle_talla.variante_id:
+                return row.pedido_detalle_talla.variante
+            return row.variante_produccion
+
         payload["packing_detalle"] = [
             {
                 "picking_detalle": row.id,
                 "pedido_detalle": row.pedido_detalle_id,
                 "pedido_detalle_talla": row.pedido_detalle_talla_id,
                 "producto": row.producto_id,
-                "producto_nombre": getattr(row.producto, "nombre", None),
+                "producto_nombre": getattr(row.producto, "nombre", None)
+                or getattr(row.variante_produccion, "nombre", None),
                 "producto_variante": row.producto_variante_id,
                 "producto_variante_nombre": getattr(
                     row.producto_variante, "nombre", None
                 ),
-                "talla": getattr(row.pedido_detalle_talla.variante, "talla_id", None)
-                if row.pedido_detalle_talla_id and row.pedido_detalle_talla.variante_id
-                else None,
-                "talla_nombre": getattr(
-                    getattr(row.pedido_detalle_talla.variante, "talla", None),
-                    "nombre",
-                    None,
-                )
-                if row.pedido_detalle_talla_id and row.pedido_detalle_talla.variante_id
-                else None,
-                "color": getattr(row.pedido_detalle_talla.variante, "color_id", None)
-                if row.pedido_detalle_talla_id and row.pedido_detalle_talla.variante_id
-                else None,
-                "color_nombre": getattr(
-                    getattr(row.pedido_detalle_talla.variante, "color", None),
-                    "nombre",
-                    None,
-                )
-                if row.pedido_detalle_talla_id and row.pedido_detalle_talla.variante_id
-                else None,
+                "sku_muestra": getattr(row.variante_produccion, "sku", None),
+                "talla": getattr(_variante(row), "talla_id", None),
+                "talla_nombre": getattr(getattr(_variante(row), "talla", None), "nombre", None),
+                "color": getattr(_variante(row), "color_id", None),
+                "color_nombre": getattr(getattr(_variante(row), "color", None), "nombre", None),
                 "ubicacion": row.ubicacion_id,
                 "ubicacion_nombre": str(row.ubicacion) if row.ubicacion_id else None,
                 "cantidad_solicitada": str(

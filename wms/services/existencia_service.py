@@ -10,8 +10,9 @@ from wms.utils.decimales import normalizar_decimal
 class ExistenciaService:
     """Cálculo de existencia física, reservada y disponible por clave de stock.
 
-    La *clave de stock* de una línea es el par ``(producto_id, producto_variante_id)``
-    y es **exacta**: ``(P, None)`` designa el stock del producto *sin variante*, no
+    La *clave de stock* de una línea es ``(producto_id, producto_variante_id,
+    variante_produccion_id)`` —el tercero sólo en muestras, cuyo stock vive en
+    ``Existencia.variante_produccion`` sin producto ni variante— y es **exacta**: ``(P, None)`` designa el stock del producto *sin variante*, no
     la suma de todas sus variantes (``Existencia.producto`` está poblado también en
     las filas que sí tienen variante, así que filtrar sólo por producto mezclaba
     ambos espacios).
@@ -35,28 +36,38 @@ class ExistenciaService:
     _normalize = staticmethod(normalizar_decimal)
 
     @staticmethod
-    def _key_filters(producto_id, producto_variante_id):
+    def _key_filters(producto_id, producto_variante_id, variante_produccion_id=None):
         """Filtro canónico de ``Existencia`` para una clave de stock.
 
-        Con variante la identidad es la variante; sin variante son las filas del
-        producto que explícitamente no tienen variante.
+        Con SKU de muestra la identidad es ese SKU; con variante, la variante; sin
+        variante son las filas del producto que explícitamente no tienen variante.
         """
+        if variante_produccion_id:
+            return {"variante_produccion_id": variante_produccion_id}
         if producto_variante_id:
             return {"producto_variante_id": producto_variante_id}
         return {"producto_id": producto_id, "producto_variante_id": None}
 
     @staticmethod
-    def _split_keys(keys):
-        """Indexa las claves pedidas por variante y por producto-sin-variante."""
+    def _partes(clave):
+        """``(producto_id, variante_id, muestra_id)`` de una clave de 2 o 3 elementos."""
+        return (tuple(clave) + (None,))[:3]
+
+    @classmethod
+    def _split_keys(cls, keys):
+        """Indexa las claves pedidas por muestra, por variante y por producto-sin-variante."""
         por_variante = {}
         sin_variante = {}
+        por_muestra = {}
         for clave in keys:
-            producto_id, variante_id = clave
-            if variante_id is not None:
+            producto_id, variante_id, muestra_id = cls._partes(clave)
+            if muestra_id is not None:
+                por_muestra[muestra_id] = clave
+            elif variante_id is not None:
                 por_variante[variante_id] = clave
             elif producto_id is not None:
                 sin_variante[producto_id] = clave
-        return por_variante, sin_variante
+        return por_variante, sin_variante, por_muestra
 
     @staticmethod
     def _or_conditions(condiciones):
@@ -68,7 +79,7 @@ class ExistenciaService:
         return q_cond
 
     @classmethod
-    def get_existencia_rows(cls, almacen, producto, producto_variante, lock=False):
+    def get_existencia_rows(cls, almacen, producto, producto_variante, lock=False, variante_produccion=None):
         """Todas las filas de ``Existencia`` de la clave en el almacén, por pk.
 
         Un mismo producto/variante puede estar repartido en varias ubicaciones;
@@ -81,14 +92,14 @@ class ExistenciaService:
 
         qs = Existencia.objects.filter(
             almacen_id=almacen_id,
-            **cls._key_filters(producto_id, producto_variante_id),
+            **cls._key_filters(producto_id, producto_variante_id, getattr(variante_produccion, "pk", variante_produccion)),
         )
         if lock:
             qs = qs.select_for_update()
         return list(qs.order_by("pk"))
 
     @classmethod
-    def get_existencia(cls, almacen, producto, producto_variante):
+    def get_existencia(cls, almacen, producto, producto_variante, variante_produccion=None):
         """Una sola fila de ``Existencia`` de la clave (la de menor pk).
 
         Sólo debe usarse para elegir la fila **destino** a la que sumar stock.
@@ -102,7 +113,7 @@ class ExistenciaService:
             Existencia.objects.select_for_update()
             .filter(
                 almacen_id=almacen_id,
-                **cls._key_filters(producto_id, producto_variante_id),
+                **cls._key_filters(producto_id, producto_variante_id, getattr(variante_produccion, "pk", variante_produccion)),
             )
             .order_by("pk")
             .first()
@@ -120,9 +131,11 @@ class ExistenciaService:
             return resultado
 
         almacen_id = getattr(almacen_id, "pk", almacen_id)
-        keys_por_variante, keys_sin_variante = cls._split_keys(keys)
+        keys_por_variante, keys_sin_variante, keys_por_muestra = cls._split_keys(keys)
 
         condiciones = []
+        if keys_por_muestra:
+            condiciones.append(Q(variante_produccion_id__in=list(keys_por_muestra)))
         if keys_por_variante:
             condiciones.append(
                 Q(producto_variante_id__in=list(keys_por_variante))
@@ -141,12 +154,14 @@ class ExistenciaService:
         rows = (
             Existencia.objects.filter(almacen_id=almacen_id)
             .filter(q_cond)
-            .values("producto_id", "producto_variante_id")
+            .values("producto_id", "producto_variante_id", "variante_produccion_id")
             .annotate(total=Sum("cantidad"))
         )
         for row in rows:
             variante_id = row["producto_variante_id"]
-            if variante_id is not None:
+            if row["variante_produccion_id"] is not None:
+                clave = keys_por_muestra.get(row["variante_produccion_id"])
+            elif variante_id is not None:
                 clave = keys_por_variante.get(variante_id)
             else:
                 clave = keys_sin_variante.get(row["producto_id"])
@@ -176,11 +191,14 @@ class ExistenciaService:
             return resultado
 
         almacen_id = getattr(almacen_id, "pk", almacen_id)
-        keys_por_variante, keys_sin_variante = cls._split_keys(keys)
+        keys_por_variante, keys_sin_variante, keys_por_muestra = cls._split_keys(keys)
 
         # Cada rama del pre-filtro selecciona la fila por una sola vía: las que
         # tienen ``existencia`` se resuelven por ella y el resto por la talla.
+        # Las de muestra sólo existen ligadas a su ``existencia``.
         condiciones = []
+        if keys_por_muestra:
+            condiciones.append(Q(existencia__variante_produccion_id__in=list(keys_por_muestra)))
         if keys_por_variante:
             variantes = list(keys_por_variante)
             condiciones.append(Q(existencia__producto_variante_id__in=variantes))
@@ -226,13 +244,18 @@ class ExistenciaService:
                 estado__in=cls.ESTADOS_RESERVA_BLOQUEANTES,
             )
             .filter(q_cond)
-            .annotate(clave_producto=clave_producto, clave_variante=clave_variante)
-            .values("clave_producto", "clave_variante")
+            .annotate(
+                clave_producto=clave_producto, clave_variante=clave_variante,
+                clave_muestra=F("existencia__variante_produccion_id"),
+            )
+            .values("clave_producto", "clave_variante", "clave_muestra")
             .annotate(total=Sum("cantidad"))
         )
         for row in rows:
             variante_id = row["clave_variante"]
-            if variante_id is not None:
+            if row["clave_muestra"] is not None:
+                clave = keys_por_muestra.get(row["clave_muestra"])
+            elif variante_id is not None:
                 clave = keys_por_variante.get(variante_id)
             else:
                 clave = keys_sin_variante.get(row["clave_producto"])
@@ -242,12 +265,12 @@ class ExistenciaService:
         return resultado
 
     @classmethod
-    def get_existencia_agregada(cls, almacen, producto, producto_variante):
+    def get_existencia_agregada(cls, almacen, producto, producto_variante, variante_produccion=None):
         """Existencia (física, reservada, disponible) de una clave en un almacén."""
         almacen_id = getattr(almacen, "pk", almacen)
         producto_id = getattr(producto, "pk", producto)
         producto_variante_id = getattr(producto_variante, "pk", producto_variante)
-        clave = (producto_id, producto_variante_id)
+        clave = (producto_id, producto_variante_id, getattr(variante_produccion, "pk", variante_produccion))
 
         fisica = cls._normalize(
             cls._sum_existencia_por_clave(almacen_id, [clave]).get(clave)
@@ -286,9 +309,12 @@ class ExistenciaService:
         for talla in tallas:
             talla_id = getattr(talla, "pk", talla)
             detalle = getattr(talla, "pedido_detalle", None)
-            clave = (
+            # Muestra: su SKU de muestra (``anotar_sku_muestra``) es la clave.
+            muestra = getattr(talla, "sku_muestra_obj", None)
+            clave = (None, None, muestra.pk) if muestra else (
                 getattr(detalle, "producto_id", None),
                 getattr(talla, "variante_id", None),
+                None,
             )
             clave_by_talla[talla_id] = clave
             all_keys.add(clave)
@@ -346,18 +372,19 @@ class SaldoExistenciaAlmacen:
         self._consumido_por_pk = {}
 
     @staticmethod
-    def _clave(producto, producto_variante):
+    def _clave(producto, producto_variante, variante_produccion=None):
         return (
             getattr(producto, "pk", producto),
             getattr(producto_variante, "pk", producto_variante),
+            getattr(variante_produccion, "pk", variante_produccion),
         )
 
-    def filas(self, producto, producto_variante):
+    def filas(self, producto, producto_variante, variante_produccion=None):
         """Filas de la clave, ordenadas por pk. Se leen y bloquean una sola vez."""
-        clave = self._clave(producto, producto_variante)
+        clave = self._clave(producto, producto_variante, variante_produccion)
         if clave not in self._filas_por_clave:
             filas = ExistenciaService.get_existencia_rows(
-                self.almacen, clave[0], clave[1], lock=self._lock
+                self.almacen, clave[0], clave[1], lock=self._lock, variante_produccion=clave[2]
             )
             self._filas_por_clave[clave] = filas
             for fila in filas:
@@ -365,14 +392,14 @@ class SaldoExistenciaAlmacen:
                 self._saldo_por_pk[fila.pk] = ExistenciaService._normalize(fila.cantidad)
         return self._filas_por_clave[clave]
 
-    def disponible(self, producto, producto_variante):
+    def disponible(self, producto, producto_variante, variante_produccion=None):
         """Saldo restante de la clave, ya descontado lo consumido en esta operación."""
         return sum(
-            (self._saldo_por_pk[fila.pk] for fila in self.filas(producto, producto_variante)),
+            (self._saldo_por_pk[fila.pk] for fila in self.filas(producto, producto_variante, variante_produccion)),
             Decimal("0"),
         )
 
-    def consumir(self, producto, producto_variante, cantidad):
+    def consumir(self, producto, producto_variante, cantidad, variante_produccion=None):
         """Reparte ``cantidad`` entre las filas de la clave, en orden de pk.
 
         Devuelve ``(asignaciones, faltante)`` donde ``asignaciones`` es una lista
@@ -381,7 +408,7 @@ class SaldoExistenciaAlmacen:
         levantar con su propio mensaje de dominio.
         """
         cantidad = ExistenciaService._normalize(cantidad)
-        filas = self.filas(producto, producto_variante)
+        filas = self.filas(producto, producto_variante, variante_produccion)
         disponible = sum((self._saldo_por_pk[fila.pk] for fila in filas), Decimal("0"))
         if disponible < cantidad:
             return [], cantidad - disponible

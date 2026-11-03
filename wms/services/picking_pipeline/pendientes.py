@@ -2,10 +2,12 @@ from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 
-from django.db.models import DecimalField, Exists, F, OuterRef, Subquery, Sum, Value
+from django.db.models import DecimalField, Exists, F, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.functions import Coalesce
 
+from catalogo.models import VarianteProductoProduccion
 from ventas.models import PedidoDetalleTalla
+from ventas.services.sku_produccion_service import es_muestra, variantes_produccion_activas
 from wms.models import Picking, PickingDetalle
 from wms.services.existencia_service import ExistenciaService
 from wms.utils.decimales import normalizar_decimal
@@ -64,10 +66,26 @@ def asignado_por_pedidos(pedido_ids):
     }
 
 
+def anotar_sku_muestra(tallas):
+    """Deja en cada talla su SKU de muestra en ``talla.sku_muestra_obj`` (``None``
+    si no es muestra o aún no tiene SKU). Una consulta para todas las muestras."""
+    lineas = {t.pedido_detalle_id for t in tallas if es_muestra(t.pedido_detalle)}
+    por_talla = {}
+    if lineas:
+        por_talla = {
+            (v.pedido_detalle_id, v.talla_id): v
+            for v in variantes_produccion_activas().filter(pedido_detalle_id__in=lineas).select_related("talla", "color")
+        }
+    for t in tallas:
+        t.sku_muestra_obj = por_talla.get((t.pedido_detalle_id, t.talla_id)) if es_muestra(t.pedido_detalle) else None
+    return tallas
+
+
 def tiene_pendiente_surtible():
     """``Exists`` para ``Pedido``: alguna talla surtible (línea con ``producto``,
-    #745) con cantidad pedida mayor a lo asignado en pickings activos. Misma
-    regla que el alta; en una sola consulta para el listado (#823)."""
+    #745, o muestra con SKU de muestra) con cantidad pedida mayor a lo asignado
+    en pickings activos. Misma regla que el alta; en una sola consulta para el
+    listado (#823)."""
     asignado = (
         PickingDetalle.objects.filter(pedido_detalle_talla=OuterRef("pk"))
         .exclude(picking__estado=Picking.Estado.CANCELADO)
@@ -78,8 +96,13 @@ def tiene_pendiente_surtible():
         .values("total")
     )
     tallas = (
-        PedidoDetalleTalla.objects.filter(
-            pedido_detalle__pedido=OuterRef("pk"), pedido_detalle__producto__isnull=False,
+        PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=OuterRef("pk"))
+        .filter(
+            Q(pedido_detalle__producto__isnull=False)
+            | Exists(VarianteProductoProduccion.objects.filter(
+                activo=True, sku__isnull=False,
+                pedido_detalle_id=OuterRef("pedido_detalle_id"), talla_id=OuterRef("talla_id"),
+            ))
         )
         .annotate(asignado=Coalesce(Subquery(asignado), Value(Decimal("0")), output_field=DecimalField()))
         .filter(cantidad__gt=F("asignado"))
@@ -142,9 +165,13 @@ class PickingLineaSnapshot:
 
     @property
     def clave_stock(self):
+        muestra = getattr(self.talla, "sku_muestra_obj", None)
+        if muestra:
+            return (None, None, muestra.pk)
         return (
             getattr(self.talla.pedido_detalle, "producto_id", None),
             getattr(self.talla, "variante_id", None),
+            None,
         )
 
 
@@ -174,6 +201,7 @@ def build_snapshots(tallas, pedido, almacen_origen=None, picking_maps=None):
             pedido, talla_ids=[t.id for t in tallas]
         )
 
+    anotar_sku_muestra([t for t in tallas if not hasattr(t, "sku_muestra_obj")])
     existencia_by_talla = {}
     if almacen_origen:
         existencia_by_talla = ExistenciaService.get_existencia_batch(

@@ -105,35 +105,42 @@ class TransferenciaService:
         for row in transferencia_detalle_rows:
             producto = row.get("producto")
             producto_variante = row.get("producto_variante")
+            muestra = row.get("variante_produccion")
             cantidad = TransferenciaService._normalize(row["cantidad"])
-            producto_id = producto_variante.id if producto_variante else producto.id  # la clave del stock (#706)
+            # La clave del stock (#706); una muestra se identifica por su SKU.
+            etiqueta = (
+                f"del SKU de muestra {muestra.sku}" if muestra
+                else f"del producto/variante con id {producto_variante.id if producto_variante else producto.id}"
+            )
 
-            if not saldos_origen.filas(producto, producto_variante):
+            if not saldos_origen.filas(producto, producto_variante, muestra):
                 raise ValidationError(
-                    f"No hay existencia del producto/variante con id {producto_id} en el almacén de origen."
+                    f"No hay existencia {etiqueta} en el almacén de origen."
                 )
 
-            disponible = saldos_origen.disponible(producto, producto_variante)
+            disponible = saldos_origen.disponible(producto, producto_variante, muestra)
             _asignaciones, faltante = saldos_origen.consumir(
-                producto, producto_variante, cantidad
+                producto, producto_variante, cantidad, muestra
             )
             if faltante > Decimal("0"):
                 raise ValidationError(
-                    f"Inventario insuficiente del producto/variante con id {producto_id} "
+                    f"Inventario insuficiente {etiqueta} "
                     f"(disponible={disponible}, solicitado={cantidad})."
                 )
 
-            clave = SaldoExistenciaAlmacen._clave(producto, producto_variante)
+            clave = SaldoExistenciaAlmacen._clave(producto, producto_variante, muestra)
             if clave not in destinos_por_clave:
                 existencia_destino = ExistenciaService.get_existencia(
                     almacen_destino,
                     producto,
                     producto_variante,
+                    muestra,
                 )
                 if existencia_destino is None:
                     existencia_destino = Existencia(
                         producto=producto,
                         producto_variante=producto_variante,
+                        variante_produccion=muestra,
                         almacen=almacen_destino,
                         stock=0,
                         cantidad=Decimal("0"),
@@ -194,6 +201,7 @@ class TransferenciaService:
                 {
                     "producto_id": producto.pk if producto else None,
                     "producto_variante_id": producto_variante.pk if producto_variante else None,
+                    "variante_produccion_id": getattr(row.get("variante_produccion"), "pk", None),
                     "cantidad": str(TransferenciaService._normalize(row["cantidad"])),
                     "ubicacion_origen_id": getattr(row.get("ubicacion_origen"), "pk", None),
                     "ubicacion_destino_id": getattr(row.get("ubicacion_destino"), "pk", None),
