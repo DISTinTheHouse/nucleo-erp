@@ -18,7 +18,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.shortcuts import get_object_or_404
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import (
     ClienteMesaControlSerializer,
@@ -739,9 +739,16 @@ class ProveedorViewSet(viewsets.ModelViewSet):
             OpenApiParameter(
                 "cliente", OpenApiTypes.INT,
                 description="Solo las direcciones de ese cliente (pk). De otra empresa o inexistente: "
-                "lista vacía. No entero: 400. Sin él, todas las de la empresa.",
+                "lista vacía. No entero: 400. Sin él, todas las de la empresa del usuario "
+                "(el superusuario, las de todas).",
             ),
         ],
+        responses={
+            200: DireccionClienteSerializer(many=True),
+            400: OpenApiResponse(
+                description='``cliente`` no entero: {"cliente": "Debe ser un entero válido."}',
+            ),
+        },
     ),
 )
 class DireccionClienteViewSet(viewsets.ModelViewSet):
@@ -758,17 +765,18 @@ class DireccionClienteViewSet(viewsets.ModelViewSet):
         # (antes indefinido, EC-775). Un ``?ordering=`` válido lo reemplaza: el
         # ``OrderingFilter`` global hace su propio ``order_by``.
         qs = super().get_queryset().order_by("-is_default", "id")
+        # ``?cliente=`` del listado (EC-775). Se valida antes del alcance para que
+        # un valor no entero sea 400 para todos, también sin empresa.
+        cliente_id = entero_param(self.request, "cliente") if self.action == "list" else None
         if not getattr(user, "is_superuser", False):
             empresa = getattr(user, "empresa", None)
             if not empresa:
                 return qs.none()
             qs = qs.filter(empresa=empresa, cliente__empresa=empresa)
-        # ``?cliente=`` del listado (EC-775), después del alcance: un cliente de
-        # otra empresa no trae filas, igual que un id inexistente.
-        if self.action == "list":
-            cliente_id = entero_param(self.request, "cliente")
-            if cliente_id is not None:
-                qs = qs.filter(cliente_id=cliente_id)
+        # El filtro va después del alcance: un cliente de otra empresa no trae
+        # filas, igual que un id inexistente.
+        if cliente_id is not None:
+            qs = qs.filter(cliente_id=cliente_id)
         return qs
 
     def perform_create(self, serializer):
