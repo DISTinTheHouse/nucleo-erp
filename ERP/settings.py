@@ -118,6 +118,10 @@ MIGRATION_MODULES = {
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Vercel no comprime la salida de la función: sin esto un listado de 400 KB
+    # viaja crudo. Antes de todo lo que lee o escribe el cuerpo de la respuesta.
+    # Django mitiga BREACH desde 4.2 (relleno aleatorio en el gzip).
+    'django.middleware.gzip.GZipMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
