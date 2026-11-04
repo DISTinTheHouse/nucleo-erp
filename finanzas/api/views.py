@@ -99,7 +99,7 @@ from finanzas.services.plan_contable_service import PlanContableService
 from finanzas.services.factura_cancelacion_service import FacturaCancelacionService
 from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.services.factura_emision_service import FacturaEmisionService
-from finanzas.services.factura_timbrado_service import FacturaTimbradoService
+from finanzas.services.factura_timbrado_service import PENDIENTE_CFDI, FacturaTimbradoService
 from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
@@ -663,6 +663,10 @@ class FacturaViewSet(FinanzasBaseViewSet):
             raise ValidationError({
                 'estatus': 'La factura ya tiene CFDI: cancélala en vez de eliminarla.'
             })
+        # Con el timbre en vuelo el CFDI puede existir: eliminada, ya no se podría
+        # cancelar ante el SAT (EC-760). Primero se concilia.
+        if instance.cfdi_pendiente:
+            raise ValidationError({'cfdi': PENDIENTE_CFDI})
         # Como al cancelarlo: un Borrador regresa lo que su alta volvió a descontar (#858).
         with transaction.atomic():
             instance.soft_delete()
@@ -1098,11 +1102,11 @@ class CuentaContableViewSet(FinanzasBaseViewSet):
             qs = qs.filter(tipo=tipo)
         if nivel:
             qs = qs.filter(nivel=nivel)
-        if acepta_movimientos is not None:
+        if acepta_movimientos not in (None, ""):
             qs = qs.filter(acepta_movimientos=_bool_param(acepta_movimientos, "acepta_movimientos"))
-        if activo is not None and _bool_param(activo, "activo"):
+        if activo not in (None, "") and _bool_param(activo, "activo"):
             qs = qs.filter(activo=True)
-        elif activo is not None and not _bool_param(activo, "activo"):
+        elif activo not in (None, "") and not _bool_param(activo, "activo"):
             qs = qs.filter(activo=False)
         return _aplicar_ordering(qs, qp, ["codigo", "id"])
 
@@ -1159,7 +1163,7 @@ class CentroCostoViewSet(FinanzasBaseViewSet):
             qs = qs.filter(codigo__icontains=codigo)
         if nombre:
             qs = qs.filter(nombre__icontains=nombre)
-        if activo is not None:
+        if activo not in (None, ""):
             qs = qs.filter(activo=_bool_param(activo, "activo"))
         return _aplicar_ordering(qs, qp, ["codigo", "id"])
 
@@ -1211,7 +1215,7 @@ class ConfiguracionContableViewSet(FinanzasBaseViewSet):
         activo = qp.get("activo")
         if concepto:
             qs = qs.filter(concepto=concepto)
-        if activo is not None:
+        if activo not in (None, ""):
             qs = qs.filter(activo=_bool_param(activo, "activo"))
         return _aplicar_ordering(qs, qp, ["concepto", "clave", "id"])
 
@@ -1689,7 +1693,7 @@ class BancoViewSet(FinanzasBaseViewSet):
             qs = qs.filter(codigo__icontains=codigo)
         if swift:
             qs = qs.filter(swift__icontains=swift)
-        if activo is not None:
+        if activo not in (None, ""):
             qs = qs.filter(activo=_bool_param(activo, "activo"))
         return _aplicar_ordering(qs, qp, ["nombre", "codigo", "id"])
 
@@ -1743,7 +1747,7 @@ class CuentaBancariaViewSet(FinanzasBaseViewSet):
             qs = qs.filter(alias__icontains=alias)
         if numero:
             qs = qs.filter(numero_cuenta__icontains=numero)
-        if activo is not None:
+        if activo not in (None, ""):
             qs = qs.filter(activo=_bool_param(activo, "activo"))
         return _aplicar_ordering(qs.select_related("banco", "moneda"), qp, ["banco__nombre", "alias", "id"])
 
@@ -2881,7 +2885,7 @@ class AlertaMoraViewSet(FinanzasBaseReadOnlyViewSet):
             qs = qs.filter(cuenta_por_cobrar_id=cxc)
         if cxp:
             qs = qs.filter(cuenta_por_pagar_id=cxp)
-        if notificado is not None:
+        if notificado not in (None, ""):
             qs = qs.filter(notificado=_bool_param(notificado, "notificado"))
         return _aplicar_ordering(qs, qp, ["-dias_mora", "-fecha_generada"])
 
