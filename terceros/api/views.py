@@ -71,13 +71,30 @@ class ClienteViewSetMesaControl(viewsets.ModelViewSet):
 class ClienteViewSet(viewsets.ModelViewSet):
     queryset = clientes_base()
     serializer_class = ClienteSerializer
+    # Modo servidor como ``ProveedorViewSet`` (EC-757): sin ``?limit=`` regresa la
+    # lista completa; ``?search=`` busca por nombre, razón social, RFC, clave o correo.
+    pagination_class = PaginacionOpcionalLimitOffset
+    filter_backends = [
+        *[b for b in viewsets.ModelViewSet.filter_backends if b is not OrderingFilter],
+        OrdenamientoEstableFilter,
+    ]
+    search_fields = ["nombre", "razon_social", "rfc", "clave", "correo"]
+    ordering_fields = [
+        "id", "clave", "nombre", "razon_social", "rfc", "correo", "telefono", "ciudad", "estado",
+        "giro_empresarial", "dias_credito", "fecha_alta", "fecha_ultima_compra", "created_at", "updated_at",
+    ]
 
     def get_queryset(self):
         # El predicado de aislamiento vive en ``terceros.scope`` para que el
         # buscador global (``/api/v1/search/``) reutilice EXACTAMENTE éste y no
         # una copia que pueda separarse de él. ``vendedores`` (M2M del serializer)
-        # en una sola consulta, no una por cliente.
-        return clientes_visibles(super().get_queryset(), self.request.user).prefetch_related("vendedores")
+        # en una sola consulta, no una por cliente. Orden por defecto: nombre, con
+        # ``id`` como desempate estable (antes era indefinido, EC-757).
+        return (
+            clientes_visibles(super().get_queryset(), self.request.user)
+            .prefetch_related("vendedores")
+            .order_by("nombre", "id")
+        )
 
     def retrieve(self, request, *args, **kwargs):
         # Sólo el detalle (no el listado) lleva ``resumen_comercial``: es la
