@@ -624,6 +624,60 @@ Permite consultar el inventario actual.
   - `producto_variante` queda como opcional para escenarios donde sí aplique.
   - Las existencias se afectan por operaciones o recepciones, no por crear una orden de compra.
 
+- **Existencias de un almacén, paginadas (pantalla de stock, EC-774)**: `GET /api/v1/inventarios/existencias/por-almacen/`
+  - Solo lectura. Reemplaza `existencias/?almacen_id=X&limit=all` en la pantalla de stock (WMS, Compras y Producción); el listado de arriba no cambia.
+  - `almacen_id`: **obligatorio**, entero positivo (si falta o es inválido → `400`). Un almacén fuera del alcance del usuario (o inexistente) da resultado vacío, no `403`. Superusuario: cualquier almacén.
+  - Paginación `limit`/`offset` (`PaginacionOpcionalLimitOffset`): sin `limit` regresa la lista completa (arreglo); con `limit` regresa `{count, next, previous, results}`. `limit` máximo 500.
+  - `search`: contiene, sin distinguir mayúsculas, sobre el **nombre** y el **SKU** de la fila (producto, variante o SKU de muestra).
+  - Filtros (un parámetro cada uno; las opciones salen de `por-almacen/resumen/`):
+    - `nombre`, `tipo`, `color`: igualdad **exacta** sobre el valor mostrado (`producto_info.nombre`/`tipo`/`color`).
+    - `ubicacion`: `id_ubicacion` (entero positivo, si no `400`).
+    - `existencias`: rango de `stock`: `cero` (< 1), `1-10`, `11-100`, `mas-100` (≥ 101). Otro valor → `400`.
+    - `mes`: `AAAA-MM` de `fecha_actualizacion` en hora de México. Otro formato → `400`. Las filas sin fecha no entran en ningún mes.
+    - `estado`: `full` | `ok` | `low` | `critical` (ver abajo). Otro valor → `400`.
+  - `ordering`: separado por comas, `-` = descendente, sobre `sku`, `nombre`, `tipo`, `color`, `stock`, `fecha_actualizacion`, `ubicacion_nombre`, `id`. Los NULL van siempre al final y se agrega `id` como desempate. Campos fuera de la lista se ignoran. Por defecto: `-fecha_actualizacion,-id`.
+  - `estado` = `stock / max_stock` del almacén completo (sin filtros): > 80 % `full` (Óptimo), > 40 % `ok` (Normal), > 15 % `low` (Bajo), el resto `critical` (Crítico). `max_stock` = mayor `stock` del almacén, nunca menor a 0; con 0 todo es `critical`.
+  - **Respuesta** (con `limit=1`):
+    ```json
+    {
+      "count": 3127,
+      "next": "https://.../existencias/por-almacen/?almacen_id=1&limit=1&offset=1",
+      "previous": null,
+      "results": [
+        {
+          "id": 8441,
+          "producto_info": {"nombre": "PRUEBA EC-671 REVIEW B (CLAUDE)", "sku": "MP774-703-G", "tipo": null, "color": "MARINO"},
+          "ubicacion_info": {"id_ubicacion": 63, "nombre_completo": "PRODUCTO TERMINADO - AB-09-02-07"},
+          "stock": 10,
+          "cantidad": "9.0000",
+          "fecha_actualizacion": "2026-11-03T14:01:41.393887-06:00",
+          "estado": "critical"
+        }
+      ]
+    }
+    ```
+  - `producto_info` se resuelve igual que en el listado: el `producto` de la fila o el de su variante; sin ninguno, el SKU de muestra (`tipo: null`). Sin variante, `sku` y `color` son `null`. `producto_info` es `null` solo si la fila no tiene producto, variante ni muestra. `ubicacion_info` es `null` sin ubicación; `nombre_completo` lleva el almacén **de la ubicación**.
+
+- **Resumen de un almacén (KPIs y opciones de filtros)**: `GET /api/v1/inventarios/existencias/por-almacen/resumen/?almacen_id=X`
+  - Mismo `almacen_id` obligatorio y mismo alcance. Siempre es del **almacén completo**: ignora `search` y los filtros.
+  - **Respuesta**:
+    ```json
+    {
+      "almacen_id": 1,
+      "max_stock": 2300,
+      "kpis": {"total_registros": 3127, "skus_en_existencia": 3125, "requiere_stock": 20, "total_stock": 6207178},
+      "opciones": {
+        "nombre": [{"value": "330 ANTI-CUT LENARD BLANCO", "label": "330 ANTI-CUT LENARD BLANCO"}],
+        "tipo": [{"value": "MP", "label": "MP"}, {"value": "PT", "label": "PT"}],
+        "color": [{"value": "AMARILLO", "label": "AMARILLO"}],
+        "ubicacion": [{"value": 1, "label": "PRODUCTO TERMINADO - AA-01-01-01"}],
+        "mes": [{"value": "2026-11", "label": "Noviembre 2026"}]
+      }
+    }
+    ```
+  - `kpis`: `total_registros` = filas; `skus_en_existencia` = filas con `stock > 0`; `requiere_stock` = filas en estado `low` o `critical`; `total_stock` = suma de `stock`. Cuentan filas, no SKUs distintos (igual que la pantalla).
+  - `opciones`: valores distintos del almacén, sin vacíos, en orden alfabético (`mes`: el más reciente primero). `value` es lo que se manda en el filtro del mismo nombre.
+
 - **Reporte de cierre por periodo**: `GET /api/v1/inventarios/existencias/reporte-existencias-periodo/`
 - **Uso esperado en frontend**:
   - Seleccionar `fecha_inicio`
