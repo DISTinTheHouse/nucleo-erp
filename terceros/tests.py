@@ -1559,6 +1559,26 @@ class DireccionClienteTests(TestCase):
         url = f"{DIRECCIONES_URL}{self.direccion.pk}/"
         self.assertEqual(self._api(self.admin).get(url, {"cliente": self.ajeno.pk}).status_code, 200)
 
+    def test_orden_por_defecto_predeterminada_primero_y_luego_id(self):
+        from terceros.models import DireccionCliente
+
+        segunda = DireccionCliente.objects.create(cliente=self.cliente, empresa=self.empresa, **self._datos_modelo())
+        predeterminada = DireccionCliente.objects.create(
+            cliente=self.cliente, empresa=self.empresa, **self._datos_modelo(is_default=True)
+        )
+        self.assertEqual(
+            self._listado(self.admin, cliente=self.cliente.pk), [predeterminada.pk, self.direccion.pk, segunda.pk]
+        )
+        self.assertEqual(
+            self._listado(self.admin),
+            [predeterminada.pk, *sorted([self.direccion.pk, self.direccion_sin_asignar.pk, segunda.pk])],
+        )
+        # Un ``?ordering=`` explícito sigue reemplazando el orden por defecto.
+        self.assertEqual(
+            self._listado(self.admin, cliente=self.cliente.pk, ordering="-id"),
+            [predeterminada.pk, segunda.pk, self.direccion.pk],
+        )
+
 
 class ClientesContabilidadTests(TestCase):
     """CONTABILIDAD ve todos los clientes de su empresa, no solo los asignados."""
