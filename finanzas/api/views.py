@@ -959,8 +959,8 @@ class FacturaViewSet(FinanzasBaseViewSet):
         factura = self.get_object()  # otra empresa -> 404 antes que 403
         if not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
             raise PermissionDenied('No tienes permiso para timbrar facturas.')
-        resultado = FacturaTimbradoService.conciliar_cfdi(factura)
-        return Response({'resultado': resultado, 'factura': FacturaSerializer(factura).data})
+        resultado, aviso = FacturaTimbradoService.conciliar_cfdi(factura)
+        return Response({'resultado': resultado, 'aviso': aviso, 'factura': FacturaSerializer(factura).data})
 
     @action(detail=True, methods=['post'], url_path='enviar-cfdi', url_name='enviar-cfdi')
     def enviar_cfdi(self, request, pk=None):
@@ -2829,8 +2829,8 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
     def conciliar_cfdi(self, request, pk=None):
         """Resuelve un ``cfdi_pendiente`` contra Facturama: trae el timbre o libera la reserva."""
         nota = self.get_object()  # otra empresa -> 404
-        resultado = FacturaTimbradoService.conciliar_cfdi(nota)
-        return Response({"resultado": resultado, "nota_credito": NotaCreditoSerializer(nota).data})
+        resultado, aviso = FacturaTimbradoService.conciliar_cfdi(nota)
+        return Response({"resultado": resultado, "aviso": aviso, "nota_credito": NotaCreditoSerializer(nota).data})
 
 
 class AlertaMoraViewSet(FinanzasBaseReadOnlyViewSet):

@@ -5,7 +5,7 @@ Acción aparte de ``emitir``: no toca CxC, póliza ni estatus de la factura.
 
 import base64
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from smtplib import SMTPException
 
 from django.core.exceptions import ValidationError
@@ -62,7 +62,11 @@ def _timbrar(modelo, pk, preparar, campos, clave, nombre):
         obj = modelo.objects.select_for_update(of=("self",)).get(pk=pk)
         payload = preparar(obj)
         setattr(obj, f_pendiente, True)
-        obj.save(update_fields=[f_pendiente, "updated_at"])
+        reservado = [f_pendiente, "updated_at"]
+        if hasattr(obj, f"{f_pendiente}_desde"):  # facturas y notas (#901)
+            setattr(obj, f"{f_pendiente}_desde", timezone.now())
+            reservado.append(f"{f_pendiente}_desde")
+        obj.save(update_fields=reservado)
     rechazo = None
     try:
         respuesta = FacturamaService().create_cfdi_emision(payload)
@@ -115,6 +119,21 @@ PENDIENTE_CFDI = "Hay un timbrado sin confirmar: usa conciliar-cfdi/ para traer 
 PAGINAS_CONCILIAR = 30
 
 
+def _es_candidato(c, tipo, folio, total):
+    """El CFDI ``c`` del listado de Facturama es de este documento. Un registro mal formado
+    (sin ``Id``/``Uuid`` o con ``Total`` no numérico) no se compara: nunca un 500 (#903)."""
+    if not isinstance(c, dict) or not c.get("Uuid") or not c.get("Id"):
+        return False
+    if c.get("CfdiType") != tipo or str(c.get("Folio") or "").strip() != folio:
+        return False
+    if str(c.get("Status") or "").lower() != "active":
+        return False
+    try:
+        return abs(Decimal(str(c.get("Total") or 0)) - total) <= Decimal("0.01")
+    except InvalidOperation:
+        return False
+
+
 def _buscar_cfdi(obj, tipo, factura):
     """``(uuid, id, fecha)`` del CFDI de ``obj`` en Facturama, o ``None`` si no existe (#758).
 
@@ -143,11 +162,17 @@ def _buscar_cfdi(obj, tipo, factura):
     try:
         for pagina in range(PAGINAS_CONCILIAR):
             lote = servicio.list_cfdis(**params, page=pagina) or []
-            candidatos += [c for c in lote if c.get("CfdiType") == tipo and str(c.get("Folio") or "").strip() == folio
-                           and c.get("Uuid") and str(c.get("Status") or "").lower() == "active"
-                           and abs(Decimal(str(c.get("Total") or 0)) - obj.total) <= Decimal("0.01")]
+            if not isinstance(lote, list):  # #903
+                raise ErrorDeNegocio({"cfdi": "Facturama devolvió datos inesperados; revísalo ahí."})
+            candidatos += [c for c in lote if _es_candidato(c, tipo, folio, obj.total)]
             if len(lote) < 10:
                 break
+        else:
+            # Se agotaron las páginas sin terminar el listado: no se puede afirmar que no existe (#900).
+            raise ErrorDeNegocio({"cfdi": (
+                f"No se pudo confirmar en Facturama: el cliente tiene más de {PAGINAS_CONCILIAR * 10} CFDIs "
+                "en el periodo. Revísalo ahí."
+            )})
     except FacturamaAPIException as exc:
         raise ErrorDeNegocio({"cfdi": f"Facturama no respondió ({_mensaje(exc)}). Vuelve a intentar."})
     # Un UUID que ya es de otro documento del ERP no es de éste.
@@ -328,8 +353,10 @@ class FacturaTimbradoService:
         """Resuelve un ``cfdi_pendiente`` (factura o nota de crédito) contra Facturama (#758).
 
         Si el CFDI existe guarda UUID, ``facturama_id`` y fecha; si no, libera la reserva para
-        reintentar ``timbrar/`` o cancelar. Regresa ``"timbrado"`` o ``"liberado"``. Facturama
-        va fuera de toda transacción; si no responde no se toca nada.
+        reintentar ``timbrar/`` o cancelar. Regresa ``(resultado, aviso)``: ``"timbrado"`` o
+        ``"liberado"``, y un aviso si el documento está cancelado o eliminado en el ERP pero su
+        CFDI quedó vigente ante el SAT (#902). Facturama va fuera de toda transacción; si no
+        responde no se toca nada.
         """
         modelo = type(obj)
         es_nota = modelo is NotaCredito
@@ -341,7 +368,9 @@ class FacturaTimbradoService:
         if not actual.cfdi_pendiente:
             raise ErrorDeNegocio({"cfdi": "No hay un timbrado sin confirmar que conciliar."})
         # Un timbrado en curso todavía puede contestar: no se libera su reserva a media llamada.
-        if actual.updated_at and actual.updated_at > timezone.now() - timedelta(seconds=int(settings.FACTURAMA_TIMEOUT) + 30):
+        # Se mide desde la reserva, no desde ``updated_at``, que mueve cualquier PATCH (#901).
+        desde = actual.cfdi_pendiente_desde
+        if desde and desde > timezone.now() - timedelta(seconds=int(settings.FACTURAMA_TIMEOUT) + 30):
             raise ErrorDeNegocio({"cfdi": "El timbrado es muy reciente; espera un minuto y vuelve a conciliar."})
         encontrado = _buscar_cfdi(actual, "E" if es_nota else "I", factura)
         with transaction.atomic():
@@ -351,9 +380,22 @@ class FacturaTimbradoService:
             if encontrado:
                 bloqueado.cfdi_uuid, bloqueado.facturama_id, bloqueado.cfdi_fecha_timbrado = encontrado
             bloqueado.cfdi_pendiente = False
-            bloqueado.save(update_fields=[*CAMPOS_CFDI, "updated_at"])
+            bloqueado.cfdi_pendiente_desde = None
+            bloqueado.save(update_fields=[*CAMPOS_CFDI, "cfdi_pendiente_desde", "updated_at"])
         _copiar(bloqueado, obj, CAMPOS_CFDI)
-        return "timbrado" if encontrado else "liberado"
+        if not encontrado:
+            return "liberado", None
+        aviso = None
+        if bloqueado.estatus == modelo.Estatus.CANCELADA if es_nota else (
+            bloqueado.estatus == Factura.FacturaStatus.CANCELADA or not bloqueado.activo
+        ):
+            aviso = (
+                "La nota está cancelada en el ERP pero su CFDI de egreso quedó vigente ante el SAT: cancélalo en Facturama."
+                if es_nota else
+                "La factura está cancelada o eliminada en el ERP pero su CFDI quedó vigente ante el SAT: "
+                "vuelve a usar cancelar/ para cancelarlo."
+            )
+        return "timbrado", aviso
 
     @staticmethod
     def cancelar_cfdi(factura):

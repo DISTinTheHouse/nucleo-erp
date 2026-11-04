@@ -3418,7 +3418,8 @@ No mandes `pago` dentro de `pago_detalles`: mismo caso.
 | `201`/`200` | — (el cuerpo es la nota) | `Emitida`, CxC rebajada, con `cfdi_uuid` y póliza | Éxito |
 | `400` sin `nota_credito` (claves `cfdi`, `factura`, `total`, `estatus`, `configuracion_contable`, `cuenta_contable`, `poliza`) | No | **No se guardó nada** | Mostrar el error del campo, corregir y reintentar |
 | `400` + `nota_credito.estatus` `Cancelada` (POST) o `Borrador` (PATCH) | Sí | Facturama rechazó; CxC sin cambios | Corregir; por PATCH se reintenta sobre la misma nota |
-| `400` + `nota_credito.estatus` `Emitida` | Sí | CxC rebajada; `cfdi_pendiente: true` (Facturama no confirmó) | **No reintentar**: `POST /notas-credito/{id}/conciliar-cfdi/` |
+| `400` + `nota_credito.estatus` `Emitida` y `cfdi_pendiente: true` | Sí | CxC rebajada; Facturama no confirmó | **No reintentar**: `POST /notas-credito/{id}/conciliar-cfdi/` |
+| `400` + `nota_credito.estatus` `Emitida` con `cfdi_uuid` y `cfdi_pendiente: false` | Sí | CxC rebajada y timbrada; **falló la póliza** | No hay nada que conciliar: revisar la configuración contable (#905) |
 | `403` | No | Nada | Sin `E-FIN-FACTURAS` |
 
 - Regla simple: **si el 400 trae `nota_credito`, la nota existe** con `id` (número) y `estatus`; refresca esa nota en lugar de crear otra. Si no lo trae, no se guardó nada.
@@ -3827,10 +3828,19 @@ Errores (`400`, cada clave trae una **lista** de mensajes):
 
 - Datos que usa: `Sucursal.cp`, receptor del pedido (respaldo en `Cliente`), forma/método de pago del pedido (PPD → forma `99`), un concepto por renglón con `sat_prodserv`/`sat_unidad` del producto e IVA del renglón, `Factura.folio` y `serie_folio.serie`.
 - **Moneda distinta de MXN (EC-581):** la factura necesita `tipo_cambio` (pesos por unidad). Se captura con `PATCH /facturas/{id}/ {"tipo_cambio": "18.25"}` **solo en Borrador y antes de timbrar** (`> 0`; emitida o timbrada → `400 {"tipo_cambio": [...]}`, #669). En MXN no aplica: se ignora y queda `null`. Sin él, `emitir` responde `400 {"tipo_cambio": ["La factura está en USD: captura su tipo de cambio antes de emitirla."]}` y `timbrar` (factura o nota) responde `400` con el resumen en `cfdi` y el detalle también en `tipo_cambio`. `registrar-pendiente-cobro/` lo exige desde el alta (#668). El CFDI de la factura y el de sus notas de crédito van con `Currency` y `CurrencyExchangeRate` (el de la factura). Las pólizas de factura, nota de crédito y cobro se registran en pesos (importe × tipo de cambio; el cobro con el suyo). La diferencia cambiaria entre factura y cobro aún no se contabiliza.
-- **Conciliar un timbrado sin confirmar (#758):** `POST /facturas/{id}/conciliar-cfdi/` o `POST /notas-credito/{id}/conciliar-cfdi/`, solo si `cfdi_pendiente=true`. Busca el CFDI en Facturama (por `facturama_id`, o por RFC del cliente + folio + total) y responde `200 {"resultado": ..., "factura"|"nota_credito": {...}}`:
+- **Conciliar un timbrado sin confirmar (#758):** `POST /facturas/{id}/conciliar-cfdi/` o `POST /notas-credito/{id}/conciliar-cfdi/`, solo si `cfdi_pendiente=true`. Busca el CFDI en Facturama (por `facturama_id`, o por RFC del cliente + folio + total) y responde `200 {"resultado": ..., "aviso": ..., "factura"|"nota_credito": {...}}`:
   - `"timbrado"`: el CFDI existe; ya trae `cfdi_uuid` y `cfdi_pendiente=false`. Listo.
-  - `"liberado"`: el CFDI no existe; `cfdi_pendiente=false` y sin UUID. Ya se puede volver a `timbrar/` o cancelar.
-  - `400 cfdi`: no hay pendiente, el timbrado tiene menos de ~1 min (reintentar después), Facturama no respondió (reintentar) o hay varios CFDIs iguales (revisar en Facturama). No se toca nada.
+  - `"liberado"`: el CFDI no existe; `cfdi_pendiente=false` y sin UUID. Ya se puede volver a `timbrar/` o cancelar. Solo se libera si la búsqueda revisó todo el listado de Facturama.
+  - `aviso` (texto o `null`): con `"timbrado"` sobre una factura cancelada o eliminada, o una nota cancelada, el CFDI quedó **vigente ante el SAT**: mostrar el aviso (factura → volver a `cancelar/`; nota → cancelarlo en Facturama) (#902).
+  - `400 cfdi` (no se toca nada):
+    - no hay pendiente (`"No hay un timbrado sin confirmar que conciliar."`);
+    - la reserva tiene menos de ~1 min (`"El timbrado es muy reciente…"`; se mide desde la reserva, no desde la última edición, #901);
+    - Facturama no respondió (reintentar) o devolvió datos inesperados (#903);
+    - hay varios CFDIs iguales, o el cliente tiene más de 300 CFDIs en el periodo y no se pudo confirmar (#900): revisar en Facturama;
+    - la factura no tiene folio (`"Sin folio no se puede buscar el CFDI en Facturama; revísalo ahí."`);
+    - otra operación lo resolvió al mismo tiempo (`"Otra operación ya resolvió el timbrado; recarga."`);
+    - la empresa no es dueña de la cuenta de Facturama.
+  - `cancelar/` de una factura o nota con `cfdi_pendiente` responde `400 {"cfdi": "Hay un timbrado sin confirmar: usa conciliar-cfdi/ …"}` (#904).
   - Exige `E-FIN-FACTURAS` (sin él → `403`). En Next.js: mostrar el botón "Conciliar con Facturama" solo cuando `cfdi_pendiente` sea `true`.
 - Cancelar (`POST /facturas/{id}/cancelar/`) de una timbrada cancela primero el CFDI ante el SAT (motivo 02) y guarda `cfdi_cancelado`; si no queda `canceled` → `400 {"cfdi": [...]}` y la factura no se toca.
 - REP: `POST /cobros/{id}/timbrar-rep/` (facturas PPD timbradas; errores bajo `rep`).
