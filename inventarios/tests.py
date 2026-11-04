@@ -1332,8 +1332,18 @@ class ExistenciasPorAlmacenTests(TestCase):
         self.assertEqual(len(data["results"]), 4)
         self.assertIsNotNone(data["next"])
         self.assertIsNotNone(data["previous"])
-        # ``limit`` se topa en 500 (``PaginacionOpcionalLimitOffset``).
-        self.assertEqual(len(self._get({"almacen_id": self.alm.pk, "limit": 9999}).json()["results"]), 9)
+
+    def test_limit_se_topa_en_500(self):
+        """``PaginacionOpcionalLimitOffset.max_limit``: con más de 500 filas,
+        ``limit=9999`` trae una página de 500, no el almacén entero."""
+        tela = Producto.objects.get(empresa=self.empresa, nombre="Tela sin variante")
+        Existencia.objects.bulk_create(
+            Existencia(almacen=self.alm_ceros, producto=tela, stock=1, cantidad="1") for _ in range(510)
+        )
+        data = self._get({"almacen_id": self.alm_ceros.pk, "limit": 9999}).json()
+        self.assertEqual(data["count"], 512)
+        self.assertEqual(len(data["results"]), 500)
+        self.assertIsNotNone(data["next"])
 
     def test_forma_del_renglon(self):
         filas = {f["id"]: f for f in self._get({"almacen_id": self.alm.pk}).json()}
