@@ -38,6 +38,7 @@ from finanzas.services.factura_proveedor_montos import (
     totales_desde_lineas,
 )
 from finanzas.scope import por_sucursal
+from finanzas.api.permisos import permisos_de_la_peticion
 from finanzas.services.poliza_service import PolizaService
 from finanzas.services.cuenta_por_pagar_service import (
     CuentaPorPagarService,
@@ -459,6 +460,14 @@ class CuentaPorCobrarDetalleSerializer(CuentaPorCobrarSerializer):
         return str((total - saldo).quantize(Decimal("0.01")))
 
     def get_polizas(self, obj):
+        # EC-746: el detalle de CxC se lee con ``R-CONTABILIDAD-CXC``, pero las pólizas
+        # (cuentas contables, centros de costo, cargos y abonos) son de Contabilidad:
+        # sin ``R-CONTABILIDAD`` llegan vacías. Superusuario y admin de empresa las ven
+        # siempre (``permisos_efectivos`` los trata como "tienen todo"). El conjunto es el
+        # que ya resolvió ``PermisoFinanzas`` en esta petición: no vuelve a consultar.
+        request = self.context.get("request")
+        if request is None or "R-CONTABILIDAD" not in permisos_de_la_peticion(request):
+            return []
         detalles = (
             PolizaDetalle.objects.filter(factura=obj.factura)
             .select_related("poliza", "cuenta_contable", "centro_costo")
@@ -1052,11 +1061,24 @@ class CobroDetalleSerializer(serializers.ModelSerializer):
         }
 
 
+class _CodigoONulo(serializers.CharField):
+    """Cadena de solo lectura; vacía se entrega como ``null`` (contrato nullable)."""
+
+    def to_representation(self, value):
+        return super().to_representation(value) or None
+
+
 class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     nested_write_on_create_only = ()  # EC-541: las líneas también se editan en Borrador (lo decide la vista)
     cobro_detalles = CobroDetalleSerializer(many=True, required=False)
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)
+    # EC-746: quien sólo tiene ``R-CONTABILIDAD-CXC`` no lee ``cuentas-bancarias/``; la
+    # moneda y si la cuenta sigue activa le llegan con el cobro (``CobroViewSet`` las une).
+    cuenta_bancaria_moneda_codigo = _CodigoONulo(
+        source="cuenta_bancaria.moneda.codigo_iso", read_only=True, allow_null=True
+    )
+    cuenta_bancaria_activo = serializers.BooleanField(source="cuenta_bancaria.activo", read_only=True)
 
     class Meta:
         model = Cobro

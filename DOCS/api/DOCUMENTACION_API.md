@@ -320,14 +320,15 @@ Endpoint específico para actualizar masivamente los permisos de un rol (Matrix 
 | `orden_bordado` | Órdenes de bordado | — | `folio_bordado` | `R-PRODUCCION-OB` | más reciente primero (`fecha_inicio`) |
 | `orden_reflejante` | Órdenes de reflejante | — | `folio_reflejante` | `R-PRODUCCION-OR` | más reciente primero (`fecha_inicio`) |
 | `orden_corte_manga` | Órdenes de corte de manga | — | `folio_ocm` | `R-PRODUCCION-CM` | más reciente primero (`fecha_inicio`) |
-| `cliente` | Clientes | — | `nombre`, `razon_social`, `correo` | `R-CRM-CLIENTES`, `R-MESACONTROL-CLIENTES`, `R-CONTABILIDAD-CLIENTES` | alfabético |
+| `cliente` | Clientes | — | `nombre`, `razon_social`, `correo` | `R-CRM-CLIENTES`, `R-MESACONTROL-CLIENTES`, `R-CONTABILIDAD-CLIENTES`, `R-CONTABILIDAD` | alfabético |
 | `cotizacion` | Cotizaciones | — | nombre y razón social del cliente | `R-CRM-COTIZACIONES`, `R-CRM`, `R-MESACONTROL-COTI`, `R-MESACONTROL` | más reciente primero |
 | `producto` | Productos | `sku` | nombre de la variante, nombre del producto | `R-CATALOGO-PRODUCTOS` ⚠️ | nombre del producto, sku |
-| `factura` | Facturas | `folio` | nombre y razón social del cliente | `R-CONTABILIDAD-FACTURACION` | `fecha_emision` desc |
+| `factura` | Facturas | `folio` | nombre y razón social del cliente | `R-CONTABILIDAD-FACTURACION`, `R-CONTABILIDAD` | `fecha_emision` desc |
 | `oportunidad` | Oportunidades | — | `titulo`, `nombre_contacto`, `cliente.nombre` (si lo ve) | `R-CRM-OPORTUNIDADES`, `R-CRM` | más reciente primero |
 
 **Regla de los permisos de visibilidad**: las claves de una entidad son las que le permiten al usuario *abrir* esa entidad en algún lugar del frontend.
-- `orden_bordado` / `orden_reflejante` / `orden_corte_manga` / `factura`: sólo la clave de sección (`R-PRODUCCION-OB` / `R-PRODUCCION-OR` / `R-PRODUCCION-CM` / `R-CONTABILIDAD-FACTURACION`); los códigos de módulo `R-PRODUCCION` / `R-CONTABILIDAD` no abren esas rutas.
+- `orden_bordado` / `orden_reflejante` / `orden_corte_manga`: sólo la clave de sección (`R-PRODUCCION-OB` / `R-PRODUCCION-OR` / `R-PRODUCCION-CM`); el código de módulo `R-PRODUCCION` no abre esas rutas.
+- `factura` / `cliente`: en Contabilidad la lectura es jerárquica (EC-746, ver *Permisos de finanzas*): el código de módulo `R-CONTABILIDAD` abre todas las secciones y cada clave de sección (`R-CONTABILIDAD-FACTURACION`, `R-CONTABILIDAD-CLIENTES`) sólo la suya, así que ambas cuentan.
 - `cotizacion`: `R-CRM` / `R-MESACONTROL` sí cuentan, porque los dashboards de esos módulos (`/sales`, `/operations`) abren cotizaciones.
 - `pedido`: incluye claves de otras secciones (OB/OR/CM, OC, picking) porque esas vistas enlazan al pedido y la ruta `/orders/[id]` las acepta.
 
@@ -3017,9 +3018,57 @@ La forma más simple de integrar este módulo es pensar en 4 flujos:
 
 Aplica a todo `/api/v1/finanzas/` salvo Facturama (`facturama/...`) y el webhook de Syncfy:
 
-- **Leer** (`GET`, y los `POST` que solo calculan, como `polizas/{id}/validar-cuadre/`) exige `R-CONTABILIDAD`. Sin él → `403 {"detail": "Usted no tiene permiso para realizar esta acción."}`.
+- **Leer** (`GET`, y los `POST` que solo calculan, como `polizas/{id}/validar-cuadre/`) es **jerárquico** (EC-746), igual que en el frontend: `R-CONTABILIDAD` (código de módulo) lee todo Finanzas; un código de sección lee sólo los endpoints de su sección. Sin ninguno de los dos → `403 {"detail": "Usted no tiene permiso para realizar esta acción."}`.
+
+  | Endpoints (lectura) | Se leen con |
+  |---|---|
+  | `facturas/` (listado, detalle, `desglose/`, `cfdi/`, `onboarding/` GET) | `R-CONTABILIDAD` o `R-CONTABILIDAD-FACTURACION` |
+  | `facturas/{id}/previsualizar-poliza/` | sólo `R-CONTABILIDAD` (es un asiento contable; pendiente de decidir si la sección de facturación lo abre) |
+  | `cuentas-por-cobrar/` (listado y detalle) | `R-CONTABILIDAD` o `R-CONTABILIDAD-CXC` |
+  | `cobros/` (listado, detalle, `rep/`, `resumen/`) | `R-CONTABILIDAD` o `R-CONTABILIDAD-CXC` (CxC y Cobros son una sola sección) |
+  | `clientes-contabilidad/` (listado y detalle) | `R-CONTABILIDAD` o `R-CONTABILIDAD-CLIENTES` |
+  | Todo lo demás: `cuentas-bancarias/`, `bancos/`, `notas-credito/`, `cuentas-por-pagar/`, `facturas-proveedor/`, `pagos/`, `polizas/`, `movimientos-bancarios/`, `conciliaciones-bancarias/`, `alertas-mora/`, `dashboard/`, `reportes-contables/`, catálogos contables, etc. | sólo `R-CONTABILIDAD` |
+
+  Los códigos de sección no se heredan entre sí: `R-CONTABILIDAD-CXC` no lee facturas ni `R-CONTABILIDAD-FACTURACION` lee cobros. Lo que una sección necesita de otra va embebido en su propia respuesta (ver los campos del cobro abajo) o el frontend lo deshabilita con su motivo.
+
+  **Excepción aceptada:** `GET facturas/{id}/desglose/` se lee con `R-CONTABILIDAD-FACTURACION` aunque embebe `cobranza` (la CxC de la factura: estatus, total, saldo, fechas) y `notas_credito` (folio, estatus, motivo, fecha de emisión, total). Es el seguimiento de la propia factura, no la sección de CxC.
+
+  **Pólizas del detalle de CxC:** `GET cuentas-por-cobrar/{id}/` se lee con `R-CONTABILIDAD-CXC`, pero su campo `polizas` (asientos con cuentas contables, centros de costo, cargos y abonos) es de Contabilidad: sin `R-CONTABILIDAD` llega como `[]`. Superusuario y admin de empresa lo reciben siempre. Un `[]` significa entonces "sin pólizas" **o** "sin permiso para verlas"; quien lo muestre debe distinguirlo por el permiso del usuario. La `factura` embebida sí viene completa con la sección (seguimiento de la propia CxC, mismo criterio que `desglose`).
 - **Escribir** (`POST`, `PUT`, `PATCH`, `DELETE` y acciones como `cancelar/`, `generar/`, `desde-pedido/`, `onboarding/` POST, `adjuntar-pdf/`, `syncfy/sessions/`) exige `E-FIN-FACTURAS`. Sin él → `403 {"detail": "No tienes permiso para modificar datos de finanzas."}` (cobros, pólizas, conciliaciones y notas de crédito conservan su mensaje propio). Se revisa antes de validar el body: el `403` no trae datos ni errores de campo.
 - Superusuario y admin de empresa pasan siempre. Otra empresa sigue siendo `404`.
+- La regla de lectura no cambia el alcance de filas: empresa siempre y, en facturas, CxC y cobros, sucursal para quien no es admin (#753).
+
+#### Campos de cuenta bancaria en el cobro (EC-746)
+
+`GET cobros/` y `GET cobros/{id}/` traen, además de `cuenta_bancaria` (id) y `cuenta_bancaria_alias`, dos campos de solo lectura para quien sólo tiene `R-CONTABILIDAD-CXC` y no puede leer `cuentas-bancarias/`:
+
+- `cuenta_bancaria_moneda_codigo` (string, p. ej. `"MXN"`): código ISO de la moneda de la cuenta (la misma fuente que `moneda_codigo` de `cuentas-bancarias/`). `null` si la moneda no tiene código ISO (nunca `""`); la cuenta y su moneda son obligatorias, así que no hay otro caso de `null`. Esas monedas tampoco salen en `cobros/resumen/`.
+- `cuenta_bancaria_activo` (bool): si la cuenta sigue activa.
+
+No agregan consultas: el listado une cliente, cuenta y moneda y trae las líneas en bloque (2 consultas en total, antes 3 por fila).
+
+#### Resumen de cobros por moneda — `GET /api/v1/finanzas/cobros/resumen/` (EC-746)
+
+Los cobros aplicados del periodo, agrupados por el código de la moneda de la cuenta bancaria, legibles con `R-CONTABILIDAD-CXC`.
+
+- **Parámetros**: `fecha_inicio` / `fecha_fin` (`AAAA-MM-DD`; alias `fecha_desde` / `fecha_hasta`). Por omisión, del día 1 del mes en curso a hoy, igual que el dashboard. Fecha mal formada → `400` con el nombre del parámetro; `fecha_inicio` posterior a `fecha_fin` → `400 {"fecha_fin": "No puede ser anterior a fecha_inicio."}` (mismo mensaje que `reportes-contables/`). Superusuario: `?empresa_id=` (o `?empresa=`); sin él usa su propia empresa y, si no tiene, `400`, como el dashboard. Un `empresa_id` que no es un entero o no existe → `400 {"empresa": "Empresa no encontrada."}`, aquí y en `dashboard/` (antes uno no numérico daba `500`).
+- **Respuesta**:
+
+```json
+{
+  "periodo": {"fecha_inicio": "2026-11-01", "fecha_fin": "2026-11-03"},
+  "por_moneda": [
+    {"moneda_id": null, "moneda_codigo": "MXN", "cantidad": 3, "monto_total": "60.00"},
+    {"moneda_id": 7, "moneda_codigo": "USD", "cantidad": 0, "monto_total": "0.00"}
+  ]
+}
+```
+
+- `por_moneda`: una entrada por cada **código** (`codigo_iso` tal como está guardado, sin normalizar mayúsculas ni espacios; los vacíos se excluyen) de las monedas de las cuentas bancarias de la empresa (activas o no), ordenadas por `moneda_codigo`, **incluidos los que no tienen cobros** (`cantidad: 0`, `monto_total: "0.00"`). Varias filas de `Moneda` con el mismo código (p. ej. la MXN global y una MXN privada de la empresa) dan una sola entrada con los cobros sumados. Lista vacía si la empresa no tiene cuentas. Sólo se exponen id y código de la moneda, ningún otro dato bancario.
+- `moneda_id` es **nullable**: el id cuando una sola `Moneda` respalda la entrada, `null` cuando son varias con ese código. La clave estable de cada entrada es `moneda_codigo`.
+- Por código: cobros `Aplicado` con `fecha_cobro` dentro del periodo y cuenta en una moneda con ese código; `cantidad` es el número y `monto_total` la suma de `total_cobrado` con 2 decimales, en string.
+- **Alcance**: el del listado de cobros (activos, empresa y, para quien no es admin, sucursal #753), sin sus filtros de query (`cliente`, `estatus`, etc.). Para quien ve toda la empresa, cada entrada es la SUMA de `cobros_periodo` del dashboard con `?moneda_id=` sobre cada moneda de ese código (el dashboard filtra por id, no por código).
+- Tres consultas como máximo, sin importar cuántos cobros haya.
 
 ### Catálogo oficial de endpoints
 
@@ -3401,7 +3450,7 @@ No mandes `pago` dentro de `pago_detalles`: mismo caso.
 ```
 
 - `oc_detalle` debe ser de la `oc` del encabezado y `recepcion_detalle` de la `recepcion`; si no coinciden → 400.
-- No genera CxP automática. Crea `cuenta-por-pagar` aparte con `factura_proveedor` = id devuelto.
+- Al quedar `Registrada` —al crearla ya con ese estatus o al pasarla de `Borrador` a `Registrada` con `PUT`/`PATCH`— se genera su CxP (total, saldo y vencimiento de la factura; si ya tenía una `Cancelada` se revive en la misma fila) y su póliza de diario (compras e IVA acreditable contra proveedores), esta última sólo si la empresa tiene la contabilización activa. Una factura en `Borrador` no genera nada. `POST cuentas-por-pagar/` con `factura_proveedor` sigue existiendo para una factura ya `Registrada` que aún no tenga CxP.
 - `sucursal` debe ser la de la `oc` y la de la `recepcion`; si no → `400` con `sucursal`. Sólo se valida cuando el body trae `sucursal`, `oc` o `recepcion`.
 
 #### Pólizas y conciliaciones bancarias
@@ -3668,6 +3717,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 - El backend devuelve únicamente cuentas por cobrar ligadas a facturas activas de la empresa del usuario autenticado.
 - Este endpoint es solo lectura; no crea ni modifica registros.
+- `polizas` llega como `[]` si el usuario no tiene `R-CONTABILIDAD` (por ejemplo, sólo `R-CONTABILIDAD-CXC`); superusuario y admin de empresa la reciben siempre (EC-746, ver *Permisos de finanzas*).
 - El listado devuelve un resumen ligero.
 - El detalle `GET /api/v1/finanzas/cuentas-por-cobrar/{id}/` devuelve la factura relacionada, el `total_pagado` y las pólizas asociadas a esa factura con sus partidas.
 

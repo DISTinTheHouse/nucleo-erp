@@ -3,7 +3,7 @@ from django.utils.dateparse import parse_date
 from decimal import Decimal
 from django.db import OperationalError, transaction
 from django.db.models.deletion import ProtectedError, RestrictedError
-from django.db.models import BooleanField, Case, DecimalField, Max, Min, OuterRef, Q, Subquery, Sum, Value, When
+from django.db.models import BooleanField, Case, Count, DecimalField, Max, Min, OuterRef, Q, Subquery, Sum, Value, When
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -13,7 +13,7 @@ from rest_framework.fields import get_error_detail
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
-from nucleo.permisos import permisos_efectivos
+from finanzas.api.permisos import permisos_de_la_peticion
 from finanzas.services.facturama.acceso import empresa_usa_facturama, puede_consultar_cfdis, puede_usar_facturama
 from finanzas.services.facturama.service import FacturamaService
 from finanzas.services.facturama.exceptions import FacturamaAPIException
@@ -89,7 +89,7 @@ from finanzas.services.alerta_mora_service import AlertaMoraService
 from finanzas.services.cobro_service import CobroService
 from finanzas.services.conciliacion_service import ConciliacionService
 from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
-from finanzas.services.dashboard_service import DashboardFinancieroService
+from finanzas.services.dashboard_service import DashboardFinancieroService, _quantize
 from finanzas.services.factura_service import FacturaService
 from finanzas.services.movimiento_bancario_service import MovimientoBancarioService
 from finanzas.services.nota_credito_service import NotaCreditoService
@@ -154,6 +154,28 @@ def _aplicar_scope_empresa(qs, user, lookup="empresa"):
     if empresa is None:
         return qs.none()
     return qs.filter(**{lookup: empresa})
+
+
+def _empresa_del_superusuario(user, qp, mensaje_sin_empresa):
+    """Empresa que consulta un superusuario en un resumen de lectura (dashboard, resumen
+    de cobros): la de ``?empresa_id=`` (o ``?empresa=``) o, sin él, la suya. Un id que no
+    es un entero o no existe → 400 "Empresa no encontrada." (antes, uno no numérico daba
+    500); sin id ni empresa propia → 400 con ``mensaje_sin_empresa``.
+    """
+    empresa_id = qp.get("empresa") or qp.get("empresa_id")
+    if empresa_id:
+        try:
+            pk = int(empresa_id)
+        except (TypeError, ValueError):
+            pk = None
+        empresa = Empresa.objects.filter(pk=pk).first() if pk is not None else None
+        if empresa is None:
+            raise ValidationError({"empresa": "Empresa no encontrada."})
+        return empresa
+    empresa = getattr(user, "empresa", None)
+    if empresa is None:
+        raise ValidationError({"empresa": mensaje_sin_empresa})
+    return empresa
 
 
 def _resolve_empresa(user, validated_data=None, *, required=True, allow_user_empresa_fallback=True):
@@ -355,14 +377,21 @@ class BorradoProtegidoComo409Mixin:
 # ``DashboardFinancieroViewSet`` sigue sin rutas de detalle. El mapeo de choques
 # de concurrencia a 409 va en las mismas bases por la misma razón.
 class PermisoFinanzas(BasePermission):
-    """Lecturas: ``R-CONTABILIDAD`` (#636). Escrituras: ``E-FIN-FACTURAS`` (#856), revisado
-    antes de validar el body. Un POST que solo lee se declara en ``acciones_de_lectura`` del
-    viewset y se trata como lectura. Superusuario y admin de empresa pasan siempre."""
+    """Lecturas: ``R-CONTABILIDAD`` (#636) o, en los viewsets que declaran
+    ``codigo_lectura_seccion``, también ese código de sección (EC-746): el de módulo lee
+    todo Finanzas y el de sección sólo su sección, igual que en el frontend. Escrituras:
+    ``E-FIN-FACTURAS`` (#856), revisado antes de validar el body. Un POST que solo lee se
+    declara en ``acciones_de_lectura`` del viewset y se trata como lectura. Las acciones en
+    ``acciones_solo_modulo`` no aceptan el código de sección: siguen exigiendo
+    ``R-CONTABILIDAD``. Superusuario y admin de empresa pasan siempre."""
 
     def has_permission(self, request, view):
-        permisos = permisos_efectivos(request.user)
+        permisos = permisos_de_la_peticion(request)
         if request.method in SAFE_METHODS or getattr(view, "action", None) in getattr(view, "acciones_de_lectura", ()):
-            return 'R-CONTABILIDAD' in permisos
+            seccion = getattr(view, "codigo_lectura_seccion", None)
+            if getattr(view, "action", None) in getattr(view, "acciones_solo_modulo", ()):
+                seccion = None
+            return 'R-CONTABILIDAD' in permisos or bool(seccion and seccion in permisos)
         self.message = getattr(view, "mensaje_sin_permiso_escritura", "No tienes permiso para modificar datos de finanzas.")
         return PERMISO_CANCELAR_FACTURA in permisos
 
@@ -407,6 +436,7 @@ def _aplicar_ordering(qs, params, default):
 
 
 class ClienteViewSetContabilidad(FinanzasBaseViewSet):
+    codigo_lectura_seccion = "R-CONTABILIDAD-CLIENTES"  # EC-746
     queryset = Cliente.objects.filter(activo=True)
     serializer_class = ClienteSerializer
     http_method_names = ['get']
@@ -429,6 +459,7 @@ ClienteViewSet = ClienteViewSetContabilidad
 
 
 class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
+    codigo_lectura_seccion = "R-CONTABILIDAD-CXC"  # EC-746
     serializer_class = CuentaPorCobrarSerializer
     # Sin POST: una CxC nace de la factura (``uq_cxc_factura``). El alta manual daba
     # 500 -- el serializer no recibe ``factura`` y la columna es NOT NULL-- y de
@@ -516,6 +547,12 @@ class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
 
 
 class FacturaViewSet(FinanzasBaseViewSet):
+    # EC-746. Incluye ``desglose``, que trae la cobranza (CxC) y las notas de crédito
+    # de la factura: son su seguimiento, no la sección de CxC.
+    codigo_lectura_seccion = "R-CONTABILIDAD-FACTURACION"
+    # El asiento contable (cuentas contables) es de Contabilidad: sólo con el módulo,
+    # pendiente de decisión. Quitarla de aquí la abre a la sección.
+    acciones_solo_modulo = {"previsualizar_poliza"}
     serializer_class = FacturaSerializer
     http_method_names = ['delete', 'get', 'post', 'put', 'patch']
 
@@ -1895,20 +1932,28 @@ def _validar_transicion_estatus_cobro_pago(Estatus, anterior, nuevo, documento):
 
 
 class CobroViewSet(FinanzasBaseViewSet):
+    codigo_lectura_seccion = "R-CONTABILIDAD-CXC"  # EC-746: CxC y Cobros son una sección
     queryset = Cobro.objects.all()
     serializer_class = CobroSerializer
 
-    def get_queryset(self):
+    def _cobros_visibles(self):
+        """Alcance del listado sin sus filtros de ``?``: activos, empresa y sucursal (#753)."""
         user = self.request.user
         qs = super().get_queryset().filter(activo=True)
-        if _puede_ver_todo(user):
-            pass
-        else:
+        if not _puede_ver_todo(user):
             empresa = getattr(user, "empresa", None)
             if not empresa:
                 return qs.none()
             qs = qs.filter(empresa=empresa)
-        qs = cobros_por_sucursal(qs, user)
+        return cobros_por_sucursal(qs, user)
+
+    def get_queryset(self):
+        # Cliente, cuenta (con su moneda, EC-746) y líneas en bloque: antes eran tres
+        # consultas por fila del listado. Sólo al leer: en las escrituras ``get_object``
+        # no usa esa caché (los servicios releen las líneas) y sería una consulta más.
+        qs = self._cobros_visibles()
+        if self.action in ("list", "retrieve"):
+            qs = qs.select_related("cliente", "cuenta_bancaria__moneda").prefetch_related("cobro_detalles")
         qp = self.request.query_params
         cliente = qp.get("cliente") or qp.get("cliente_id")
         metodo_pago = (qp.get("metodo_pago") or "").strip()
@@ -1932,6 +1977,92 @@ class CobroViewSet(FinanzasBaseViewSet):
 
     # Mueve CxC, banco y póliza (#581), revisado antes de validar el body (#589).
     mensaje_sin_permiso_escritura = "No tienes permiso para registrar o cancelar cobros."
+
+    @staticmethod
+    def _fecha_param(qp, nombre, alias, defecto):
+        valor = (qp.get(nombre) or qp.get(alias) or "").strip()
+        if not valor:
+            return defecto
+        try:
+            fecha = parse_date(valor)
+        except ValueError:
+            fecha = None
+        if fecha is None:
+            raise ValidationError({nombre: "Usa el formato AAAA-MM-DD."})
+        return fecha
+
+    @action(detail=False, methods=["get"], url_path="resumen", url_name="resumen")
+    def resumen(self, request):
+        """Cobros aplicados del periodo por moneda de la cuenta bancaria (EC-746).
+
+        El ``cobros_periodo`` del dashboard por código de moneda y con el alcance del
+        listado (sucursal incluida), para quien sólo tiene ``R-CONTABILIDAD-CXC``. Una
+        entrada por cada ``codigo_iso`` (tal cual, sin normalizar) de las monedas de las
+        cuentas bancarias de la empresa (activas o no), aunque no tenga cobros: varias
+        filas de ``Moneda`` con el mismo código (global y privada) se suman, y entonces
+        ``moneda_id`` es ``None``. Por código equivale a la SUMA del dashboard con
+        ``?moneda_id=`` sobre cada moneda de ese código. Ignora los filtros del listado.
+        Tres consultas como máximo, sin importar cuántos cobros haya: la empresa (sólo el
+        superusuario con ``?empresa_id=``), las monedas y el agregado, además de las de
+        permisos.
+        """
+        user = request.user
+        qp = request.query_params
+        hoy = timezone.localdate()
+        fecha_inicio = self._fecha_param(qp, "fecha_inicio", "fecha_desde", hoy.replace(day=1))
+        fecha_fin = self._fecha_param(qp, "fecha_fin", "fecha_hasta", hoy)
+        if fecha_inicio > fecha_fin:  # mismo mensaje que reportes-contables/
+            raise ValidationError({"fecha_fin": "No puede ser anterior a fecha_inicio."})
+
+        # La empresa, como el dashboard: el superusuario elige con ``?empresa_id=`` o
+        # usa la suya; sin ninguna, 400. Los demás, la suya (sin empresa no ven nada).
+        cobros = self._cobros_visibles()
+        if _puede_ver_todo(user):
+            empresa = _empresa_del_superusuario(
+                user, qp, "Superusuario debe especificar ?empresa_id=X para el resumen de cobros."
+            )
+            cobros = cobros.filter(empresa=empresa)
+        else:
+            empresa = getattr(user, "empresa", None)
+
+        # Código -> ids de ``Moneda`` de las cuentas de la empresa con ese código.
+        monedas_por_codigo = {}
+        if empresa is not None:
+            for moneda_id, codigo in (
+                CuentaBancaria.objects.filter(empresa=empresa)
+                .exclude(moneda__codigo_iso="")
+                .values_list("moneda_id", "moneda__codigo_iso")
+                .distinct()
+            ):
+                monedas_por_codigo.setdefault(codigo, set()).add(moneda_id)
+        totales = {}
+        if monedas_por_codigo:
+            totales = {
+                fila["cuenta_bancaria__moneda__codigo_iso"]: fila
+                for fila in cobros.filter(
+                    estatus=Cobro.Estatus.APLICADO,
+                    fecha_cobro__gte=fecha_inicio,
+                    fecha_cobro__lte=fecha_fin,
+                    cuenta_bancaria__moneda_id__in=set().union(*monedas_por_codigo.values()),
+                )
+                .values("cuenta_bancaria__moneda__codigo_iso")
+                .annotate(cantidad=Count("id"), monto_total=Sum("total_cobrado"))
+                .order_by()
+            }
+        por_moneda = []
+        for codigo in sorted(monedas_por_codigo):
+            ids = monedas_por_codigo[codigo]
+            fila = totales.get(codigo, {})
+            por_moneda.append({
+                "moneda_id": next(iter(ids)) if len(ids) == 1 else None,
+                "moneda_codigo": codigo,
+                "cantidad": fila.get("cantidad", 0),
+                "monto_total": str(_quantize(fila.get("monto_total"))),
+            })
+        return Response({
+            "periodo": {"fecha_inicio": fecha_inicio.isoformat(), "fecha_fin": fecha_fin.isoformat()},
+            "por_moneda": por_moneda,
+        })
 
     @transaction.atomic
     def perform_create(self, serializer):
@@ -2749,16 +2880,9 @@ class DashboardFinancieroViewSet(FinanzasBaseSimpleViewSet):
         superuser = _puede_ver_todo(user)
         qp = request.query_params
         if superuser:
-            empresa_id = qp.get("empresa") or qp.get("empresa_id")
-            if empresa_id:
-                from nucleo.models import Empresa
-                empresa = Empresa.objects.filter(pk=empresa_id).first()
-                if empresa is None:
-                    raise ValidationError({"empresa": "Empresa no encontrada."})
-            else:
-                empresa = getattr(user, "empresa", None)
-                if empresa is None:
-                    raise ValidationError({"empresa": "Superusuario debe especificar ?empresa_id=X para filtrar el dashboard."})
+            empresa = _empresa_del_superusuario(
+                user, qp, "Superusuario debe especificar ?empresa_id=X para filtrar el dashboard."
+            )
         else:
             empresa = getattr(user, "empresa", None)
             if empresa is None:

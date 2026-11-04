@@ -9091,3 +9091,499 @@ class FacturaTipoCambioTests(MotorPolizasBase):
         self._encender()
         with self.assertRaises(ErrorDeNegocio):
             NotaCreditoPolizaService.generar(nota)
+
+
+class LecturaJerarquicaBase(FinanzasBase):
+    """EC-746: ``R-CONTABILIDAD`` lee todo Finanzas; un código de sección, sólo su sección."""
+
+    SECCIONES = ("R-CONTABILIDAD-FACTURACION", "R-CONTABILIDAD-CXC", "R-CONTABILIDAD-CLIENTES")
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from seguridad.models import Permiso
+
+        for clave in cls.SECCIONES:
+            Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
+        cls.registros = {t: cls._registros(t) for t in ("a", "b")}
+
+    @classmethod
+    def _registros(cls, clave_tenant):
+        t = getattr(cls, clave_tenant)
+        factura = Factura.objects.create(
+            empresa=t["empresa"], sucursal=t["sucursal"], cliente=t["cliente"], moneda=cls.moneda,
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=t["empresa"], cliente=t["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+        banco = Banco.objects.create(empresa=t["empresa"], nombre=f"Banco {clave_tenant}")
+        cuenta = CuentaBancaria.objects.create(
+            empresa=t["empresa"], banco=banco, moneda=cls.moneda, alias=f"Operativa {clave_tenant}",
+        )
+        cobro = Cobro.objects.create(
+            empresa=t["empresa"], cliente=t["cliente"], cuenta_bancaria=cuenta, total_cobrado=Decimal("40.00"),
+        )
+        return {
+            "facturas": factura.pk,
+            "cuentas-por-cobrar": cxc.pk,
+            "cobros": cobro.pk,
+            "clientes-contabilidad": t["cliente"].pk,
+            "cuenta": cuenta,
+            "cobro": cobro,
+        }
+
+    def _usuario_con(self, sufijo, claves, *, tenant=None):
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        t = tenant or self.a
+        user = Usuario.objects.create(
+            username=f"ec746-{sufijo}@{t['empresa'].codigo}.test",
+            email=f"ec746-{sufijo}@{t['empresa'].codigo}.test",
+            empresa=t["empresa"],
+            sucursal_default=t["sucursal"],
+        )
+        for clave in claves:
+            UsuarioPermiso.objects.create(
+                usuario=user, permiso=Permiso.objects.get(clave=clave),
+                tipo=UsuarioPermiso.TIPO_GRANT, empresa=t["empresa"],
+            )
+        return user
+
+
+class LecturaJerarquicaFinanzasTests(LecturaJerarquicaBase):
+    URL = "/api/v1/finanzas/"
+    # Ruta -> código de la sección que la lee además de ``R-CONTABILIDAD``.
+    RUTAS_DE_SECCION = {
+        "facturas": "R-CONTABILIDAD-FACTURACION",
+        "cuentas-por-cobrar": "R-CONTABILIDAD-CXC",
+        "cobros": "R-CONTABILIDAD-CXC",
+        "clientes-contabilidad": "R-CONTABILIDAD-CLIENTES",
+    }
+    RUTAS_SOLO_MODULO = ("cuentas-bancarias", "notas-credito", "dashboard", "cuentas-por-pagar")
+
+    def _get(self, user, ruta, pk=None):
+        url = f"{self.URL}{ruta}/" if pk is None else f"{self.URL}{ruta}/{pk}/"
+        return self._client(user).get(url)
+
+    def test_seccion_se_lee_con_el_modulo_o_con_su_codigo(self):
+        for ruta, codigo in self.RUTAS_DE_SECCION.items():
+            for claves in (["R-CONTABILIDAD"], [codigo]):
+                user = self._usuario_con(f"{ruta}-{claves[0].lower()}", claves)
+                with self.subTest(ruta=ruta, claves=claves):
+                    self.assertEqual(self._get(user, ruta).status_code, 200)
+                    self.assertEqual(self._get(user, ruta, self.registros["a"][ruta]).status_code, 200)
+
+    def test_seccion_ajena_o_sin_codigo_responde_403(self):
+        for ruta, codigo in self.RUTAS_DE_SECCION.items():
+            ajenas = [[c] for c in self.SECCIONES if c != codigo]
+            for claves in ajenas + [[]]:
+                sufijo = claves[0].lower() if claves else "nada"
+                user = self._usuario_con(f"{ruta}-x-{sufijo}", claves)
+                with self.subTest(ruta=ruta, claves=claves):
+                    self.assertEqual(self._get(user, ruta).status_code, 403)
+                    self.assertEqual(self._get(user, ruta, self.registros["a"][ruta]).status_code, 403)
+
+    def test_fuera_de_las_secciones_solo_lee_el_modulo(self):
+        modulo = self._usuario_con("modulo", ["R-CONTABILIDAD"])
+        for ruta in self.RUTAS_SOLO_MODULO:
+            with self.subTest(ruta=ruta, claves="R-CONTABILIDAD"):
+                self.assertEqual(self._get(modulo, ruta).status_code, 200)
+            for codigo in self.SECCIONES:
+                user = self._usuario_con(f"solo-{ruta}-{codigo.lower()}", [codigo])
+                with self.subTest(ruta=ruta, claves=codigo):
+                    self.assertEqual(self._get(user, ruta).status_code, 403)
+
+    def test_acciones_de_lectura_de_la_factura_con_su_seccion(self):
+        pk = self.registros["a"]["facturas"]
+        fact = self._client(self._usuario_con("acc-fact", ["R-CONTABILIDAD-FACTURACION"]))
+        cxc = self._client(self._usuario_con("acc-cxc", ["R-CONTABILIDAD-CXC"]))
+        # ``desglose`` trae la cobranza y las notas de crédito de la factura: se lee
+        # con la sección de facturación (excepción documentada), no con la de CxC.
+        self.assertEqual(fact.get(f"{self.URL}facturas/{pk}/desglose/").status_code, 200)
+        self.assertEqual(fact.get(ONBOARDING_URL).status_code, 200)
+        self.assertNotEqual(fact.get(f"{self.URL}facturas/{pk}/cfdi/").status_code, 403)
+        self.assertEqual(cxc.get(f"{self.URL}facturas/{pk}/desglose/").status_code, 403)
+
+    def test_previsualizar_poliza_sigue_solo_con_el_modulo(self):
+        """El asiento contable es de Contabilidad: la sección de facturación no lo abre (pendiente)."""
+        url = f"{self.URL}facturas/{self.registros['a']['facturas']}/previsualizar-poliza/"
+        fact = self._client(self._usuario_con("prev-fact", ["R-CONTABILIDAD-FACTURACION"]))
+        modulo = self._client(self._usuario_con("prev-mod", ["R-CONTABILIDAD"]))
+        self.assertEqual(fact.get(url).status_code, 403)
+        self.assertNotEqual(modulo.get(url).status_code, 403)
+
+    def test_rep_del_cobro_se_lee_con_la_seccion_de_cxc(self):
+        cxc = self._usuario_con("rep", ["R-CONTABILIDAD-CXC"])
+        resp = self._client(cxc).get(f"{self.URL}cobros/{self.registros['a']['cobros']}/rep/")
+        self.assertEqual(resp.status_code, 400)  # pasa el permiso; el cobro no tiene REP
+        self.assertIn("rep", resp.data)
+
+    def test_escrituras_no_cambian(self):
+        a = self.registros["a"]
+        cobro_post = {
+            "cliente": self.a["cliente"].pk, "cuenta_bancaria": a["cuenta"].pk, "total_cobrado": "10.00",
+        }
+        for claves in (["R-CONTABILIDAD-CXC"], ["R-CONTABILIDAD-FACTURACION"], ["R-CONTABILIDAD"]):
+            client = self._client(self._usuario_con(f"esc-{claves[0].lower()}", claves))
+            with self.subTest(claves=claves):
+                resp = client.post(f"{self.URL}cobros/", cobro_post, format="json")
+                self.assertEqual(resp.status_code, 403)
+                self.assertEqual(str(resp.data["detail"]), "No tienes permiso para registrar o cancelar cobros.")
+                resp = client.patch(f"{self.URL}cuentas-por-cobrar/{a['cuentas-por-cobrar']}/", {}, format="json")
+                self.assertEqual(resp.status_code, 403)
+                resp = client.patch(f"{self.URL}facturas/{a['facturas']}/", {}, format="json")
+                self.assertEqual(resp.status_code, 403)
+                self.assertEqual(client.post(f"{self.URL}cobros/{a['cobros']}/cancelar/").status_code, 403)
+        self.assertEqual(Cobro.objects.filter(empresa=self.a["empresa"]).count(), 1)
+
+    def test_otra_empresa_404_en_detalle_y_fuera_del_listado(self):
+        b = self.registros["b"]
+        for ruta, codigo in self.RUTAS_DE_SECCION.items():
+            user = self._usuario_con(f"tenant-{ruta}", [codigo])
+            with self.subTest(ruta=ruta):
+                self.assertEqual(self._get(user, ruta, b[ruta]).status_code, 404)
+                data = self._get(user, ruta).data
+                filas = data["results"] if isinstance(data, dict) and "results" in data else data
+                ids = {fila["id"] for fila in filas}
+                self.assertIn(self.registros["a"][ruta], ids)
+                self.assertNotIn(b[ruta], ids)
+
+
+class CobroCamposCuentaBancariaTests(LecturaJerarquicaBase):
+    """EC-746: el cobro trae la moneda y el estado de su cuenta, para quien no lee ``cuentas-bancarias/``."""
+
+    def test_listado_y_detalle_traen_moneda_y_activo_de_la_cuenta(self):
+        a = self.registros["a"]
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        banco = Banco.objects.create(empresa=self.a["empresa"], nombre="Banco USD")
+        cuenta_usd = CuentaBancaria.objects.create(
+            empresa=self.a["empresa"], banco=banco, moneda=usd, alias="Dólares", activo=False,
+        )
+        cobro_usd = Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=cuenta_usd,
+            total_cobrado=Decimal("5.00"),
+        )
+        client = self._client(self._usuario_con("campos", ["R-CONTABILIDAD-CXC"]))
+        filas = {f["id"]: f for f in client.get(COBROS_URL).data}
+        esperado = {a["cobros"]: ("MXN", True), cobro_usd.pk: ("USD", False)}
+        for pk, (codigo, activo) in esperado.items():
+            detalle = client.get(f"{COBROS_URL}{pk}/").data
+            for fuente, fila in (("listado", filas[pk]), ("detalle", detalle)):
+                with self.subTest(cobro=pk, fuente=fuente):
+                    self.assertEqual(fila["cuenta_bancaria_moneda_codigo"], codigo)
+                    self.assertIs(fila["cuenta_bancaria_activo"], activo)
+
+    def test_moneda_sin_codigo_llega_como_null(self):
+        sin_codigo = Moneda.objects.create(codigo_iso="", nombre="Sin código")
+        banco = Banco.objects.create(empresa=self.a["empresa"], nombre="Banco sin código")
+        cuenta = CuentaBancaria.objects.create(
+            empresa=self.a["empresa"], banco=banco, moneda=sin_codigo, alias="Sin código",
+        )
+        cobro = Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=cuenta,
+            total_cobrado=Decimal("3.00"),
+        )
+        client = self._client(self._usuario_con("sin-codigo", ["R-CONTABILIDAD-CXC"]))
+        filas = {f["id"]: f for f in client.get(COBROS_URL).data}
+        self.assertIsNone(filas[cobro.pk]["cuenta_bancaria_moneda_codigo"])
+        self.assertIsNone(client.get(f"{COBROS_URL}{cobro.pk}/").data["cuenta_bancaria_moneda_codigo"])
+        self.assertEqual(filas[self.registros["a"]["cobros"]]["cuenta_bancaria_moneda_codigo"], "MXN")
+        # Y el resumen no la lista: sólo monedas con código.
+        monedas = [m["moneda_codigo"] for m in client.get(f"{COBROS_URL}resumen/").json()["por_moneda"]]
+        self.assertEqual(monedas, ["MXN"])
+
+    def test_los_campos_no_agregan_consultas_por_fila(self):
+        client = self._client(self._usuario_con("n1", ["R-CONTABILIDAD-CXC"]))
+
+        def consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertEqual(client.get(COBROS_URL).status_code, 200)
+            return len(ctx.captured_queries)
+
+        una = consultas()
+        for _ in range(3):
+            Cobro.objects.create(
+                empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=self.registros["a"]["cuenta"],
+                total_cobrado=Decimal("1.00"),
+            )
+        self.assertEqual(consultas(), una)
+
+
+class CobrosResumenTests(LecturaJerarquicaBase):
+    """EC-746: ``GET cobros/resumen/``, el ``cobros_periodo`` del dashboard por moneda."""
+
+    URL = f"{COBROS_URL}resumen/"
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.hoy = timezone.localdate()
+        cls.usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        cls.eur = Moneda.objects.create(codigo_iso="EUR", nombre="Euro")
+        banco_a = Banco.objects.create(empresa=cls.a["empresa"], nombre="Banco USD")
+        # Inactiva y sin cobros: su moneda sale igual, en cero.
+        CuentaBancaria.objects.create(
+            empresa=cls.a["empresa"], banco=banco_a, moneda=cls.usd, alias="Dólares", activo=False,
+        )
+        banco_b = Banco.objects.create(empresa=cls.b["empresa"], nombre="Banco EUR")
+        cuenta_eur_b = CuentaBancaria.objects.create(
+            empresa=cls.b["empresa"], banco=banco_b, moneda=cls.eur, alias="Euros",
+        )
+        Cobro.objects.create(
+            empresa=cls.b["empresa"], cliente=cls.b["cliente"], cuenta_bancaria=cuenta_eur_b,
+            total_cobrado=Decimal("999.00"),
+        )
+        # Además del cobro de 40.00 de ``_registros`` (hoy, Aplicado, MXN):
+        cuenta_a = cls.registros["a"]["cuenta"]
+
+        def cobro(total, **extra):
+            return Cobro.objects.create(
+                empresa=cls.a["empresa"], cliente=cls.a["cliente"], cuenta_bancaria=cuenta_a,
+                total_cobrado=Decimal(total), **extra,
+            )
+
+        cobro("10.01")
+        cobro("500.00", estatus=Cobro.Estatus.CANCELADO)
+        cobro("300.00", estatus=Cobro.Estatus.BORRADOR)
+        cobro("700.00", fecha_cobro=cls.hoy.replace(day=1) - timedelta(days=1))  # mes anterior
+
+    def _resumen(self, user, query=""):
+        return self._client(user).get(f"{self.URL}{query}")
+
+    def test_forma_monedas_en_cero_y_periodo_por_defecto(self):
+        resp = self._resumen(self._usuario_con("forma", ["R-CONTABILIDAD-CXC"]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {
+            "periodo": {"fecha_inicio": self.hoy.replace(day=1).isoformat(), "fecha_fin": self.hoy.isoformat()},
+            "por_moneda": [
+                {"moneda_id": self.moneda.pk, "moneda_codigo": "MXN", "cantidad": 2, "monto_total": "50.01"},
+                {"moneda_id": self.usd.pk, "moneda_codigo": "USD", "cantidad": 0, "monto_total": "0.00"},
+            ],
+        })
+
+    def test_periodo_explicito_y_alias(self):
+        user = self._usuario_con("periodo", ["R-CONTABILIDAD-CXC"])
+        inicio = (self.hoy.replace(day=1) - timedelta(days=1)).replace(day=1)
+        for query in (
+            f"?fecha_inicio={inicio}&fecha_fin={self.hoy}",
+            f"?fecha_desde={inicio}&fecha_hasta={self.hoy}",
+        ):
+            with self.subTest(query=query):
+                data = self._resumen(user, query).json()
+                self.assertEqual(data["periodo"], {"fecha_inicio": inicio.isoformat(), "fecha_fin": self.hoy.isoformat()})
+                self.assertEqual(data["por_moneda"][0]["cantidad"], 3)
+                self.assertEqual(data["por_moneda"][0]["monto_total"], "750.01")
+        self.assertEqual(self._resumen(user, "?fecha_inicio=2026-13-01").status_code, 400)
+
+    def test_rango_invertido_es_400(self):
+        user = self._usuario_con("invertido", ["R-CONTABILIDAD-CXC"])
+        for query in (
+            f"?fecha_inicio={self.hoy}&fecha_fin={self.hoy - timedelta(days=1)}",
+            f"?fecha_desde={self.hoy}&fecha_hasta={self.hoy - timedelta(days=1)}",
+            # Sin fecha_fin el fin es hoy: un inicio futuro también queda invertido.
+            f"?fecha_inicio={self.hoy + timedelta(days=1)}",
+        ):
+            with self.subTest(query=query):
+                resp = self._resumen(user, query)
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("fecha_fin", resp.data)
+        mismo_dia = self._resumen(user, f"?fecha_inicio={self.hoy}&fecha_fin={self.hoy}")
+        self.assertEqual(mismo_dia.status_code, 200)
+
+    def test_igual_al_cobros_periodo_del_dashboard(self):
+        client = self._client(self._usuario_con("dash", ["R-CONTABILIDAD"]))
+        inicio = (self.hoy.replace(day=1) - timedelta(days=40)).isoformat()
+        for query in ("", f"?fecha_inicio={inicio}&fecha_fin={self.hoy}"):
+            for fila in client.get(f"{self.URL}{query}").json()["por_moneda"]:
+                sep = "&" if query else "?"
+                dash = client.get(f"/api/v1/finanzas/dashboard/{query}{sep}moneda_id={fila['moneda_id']}").json()
+                with self.subTest(query=query, moneda=fila["moneda_codigo"]):
+                    self.assertEqual(
+                        (fila["cantidad"], fila["monto_total"]),
+                        (dash["cobros_periodo"]["cantidad"], dash["cobros_periodo"]["monto_total"]),
+                    )
+
+    def _cuenta(self, tenant, moneda, alias):
+        banco = Banco.objects.create(empresa=tenant["empresa"], nombre=f"Banco {alias}")
+        return CuentaBancaria.objects.create(empresa=tenant["empresa"], banco=banco, moneda=moneda, alias=alias)
+
+    def test_monedas_con_el_mismo_codigo_se_suman_y_moneda_id_es_null(self):
+        # ``self.moneda`` es la MXN global (empresa=None); ésta, una MXN privada de la empresa.
+        mxn_privada = Moneda.objects.create(codigo_iso="MXN", nombre="Peso privado", empresa=self.a["empresa"])
+        Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"],
+            cuenta_bancaria=self._cuenta(self.a, mxn_privada, "MXN privada"), total_cobrado=Decimal("9.99"),
+        )
+        # Otra USD (privada) sin cobros: la USD sale una sola vez, en cero.
+        usd_privada = Moneda.objects.create(codigo_iso="USD", nombre="Dólar privado", empresa=self.a["empresa"])
+        self._cuenta(self.a, usd_privada, "USD privada")
+        # La MXN privada de la otra empresa, con un cobro, no aparece ni suma.
+        mxn_b = Moneda.objects.create(codigo_iso="MXN", nombre="Peso de B", empresa=self.b["empresa"])
+        Cobro.objects.create(
+            empresa=self.b["empresa"], cliente=self.b["cliente"],
+            cuenta_bancaria=self._cuenta(self.b, mxn_b, "MXN de B"), total_cobrado=Decimal("777.00"),
+        )
+        user = self._usuario_con("mismo-codigo", ["R-CONTABILIDAD"])
+        data = self._resumen(user).json()
+        self.assertEqual(data["por_moneda"], [
+            {"moneda_id": None, "moneda_codigo": "MXN", "cantidad": 3, "monto_total": "60.00"},
+            {"moneda_id": None, "moneda_codigo": "USD", "cantidad": 0, "monto_total": "0.00"},
+        ])
+        # Por código es la suma del dashboard sobre cada moneda_id de ese código.
+        client = self._client(user)
+        cantidad, monto = 0, Decimal("0")
+        for moneda in (self.moneda, mxn_privada):
+            dash = client.get(f"/api/v1/finanzas/dashboard/?moneda_id={moneda.pk}").json()["cobros_periodo"]
+            cantidad += dash["cantidad"]
+            monto += Decimal(dash["monto_total"])
+        self.assertEqual((cantidad, f"{monto:.2f}"), (3, "60.00"))
+        # La otra empresa suma su MXN privada con la global (cobro de _registros), sin lo de A.
+        data_b = self._resumen(self._usuario_con("mismo-codigo-b", ["R-CONTABILIDAD-CXC"], tenant=self.b)).json()
+        mxn_de_b = next(m for m in data_b["por_moneda"] if m["moneda_codigo"] == "MXN")
+        self.assertIsNone(mxn_de_b["moneda_id"])  # la global (de _registros) y la privada de B
+        self.assertEqual((mxn_de_b["cantidad"], mxn_de_b["monto_total"]), (2, "817.00"))
+
+    def test_una_sola_moneda_por_codigo_lleva_su_id(self):
+        data = self._resumen(self._usuario_con("un-id", ["R-CONTABILIDAD-CXC"])).json()
+        self.assertEqual(
+            [(m["moneda_codigo"], m["moneda_id"]) for m in data["por_moneda"]],
+            [("MXN", self.moneda.pk), ("USD", self.usd.pk)],
+        )
+
+    def test_no_cuenta_cobros_ni_monedas_de_otra_empresa(self):
+        data = self._resumen(self._usuario_con("tenant", ["R-CONTABILIDAD-CXC"])).json()
+        self.assertEqual([m["moneda_codigo"] for m in data["por_moneda"]], ["MXN", "USD"])
+        self.assertEqual(data["por_moneda"][0]["monto_total"], "50.01")
+        # Y la otra empresa sólo ve lo suyo, aunque la MXN sea la misma moneda.
+        data_b = self._resumen(self._usuario_con("tenant-b", ["R-CONTABILIDAD-CXC"], tenant=self.b)).json()
+        self.assertEqual(
+            [(m["moneda_codigo"], m["cantidad"], m["monto_total"]) for m in data_b["por_moneda"]],
+            [("EUR", 1, "999.00"), ("MXN", 1, "40.00")],
+        )
+
+    def test_respeta_el_alcance_por_sucursal_del_listado(self):
+        from finanzas.models import CobroDetalle
+
+        otra = Sucursal.objects.create(empresa=self.a["empresa"], codigo="SLP", nombre="SLP")
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=otra, cliente=self.a["cliente"], moneda=self.moneda,
+        )
+        cxc = CuentaPorCobrar.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+            total=Decimal("80.00"), saldo=Decimal("0.00"),
+        )
+        ajeno = Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=self.registros["a"]["cuenta"],
+            total_cobrado=Decimal("80.00"),
+        )
+        CobroDetalle.objects.create(cobro=ajeno, cxc=cxc, importe_aplicado=Decimal("80.00"))
+        acotado = self._usuario_con("suc", ["R-CONTABILIDAD-CXC"])
+        self.assertEqual(self._resumen(acotado).json()["por_moneda"][0]["monto_total"], "50.01")
+        self.assertNotIn(ajeno.pk, {f["id"] for f in self._client(acotado).get(COBROS_URL).data})
+        admin = self._usuario_con("suc-admin", [])
+        admin.is_admin_empresa = True
+        admin.save()
+        self.assertEqual(self._resumen(admin).json()["por_moneda"][0]["monto_total"], "130.01")
+
+    def test_superusuario_elige_empresa_o_usa_la_suya(self):
+        root = Usuario.objects.create(username="ec746-root@x.test", email="ec746-root@x.test", is_superuser=True)
+        self.assertEqual(self._resumen(root).status_code, 400)
+        data = self._resumen(root, f"?empresa_id={self.b['empresa'].pk}").json()
+        self.assertEqual([m["moneda_codigo"] for m in data["por_moneda"]], ["EUR", "MXN"])
+        root.empresa = self.a["empresa"]
+        root.save()
+        self.assertEqual(self._resumen(root).json()["por_moneda"][0]["monto_total"], "50.01")
+
+    def test_empresa_id_no_numerico_o_inexistente_es_400_tambien_en_el_dashboard(self):
+        root = Usuario.objects.create(username="ec746-root2@x.test", email="ec746-root2@x.test", is_superuser=True)
+        for url in (self.URL, "/api/v1/finanzas/dashboard/"):
+            for valor in ("abc", "1.5", "999999999"):
+                with self.subTest(url=url, empresa_id=valor):
+                    resp = self._client(root).get(f"{url}?empresa_id={valor}")
+                    self.assertEqual(resp.status_code, 400)
+                    self.assertEqual(str(resp.data["empresa"]), "Empresa no encontrada.")
+
+    def test_permiso_de_seccion(self):
+        for claves in (["R-CONTABILIDAD-FACTURACION"], ["R-CONTABILIDAD-CLIENTES"], []):
+            with self.subTest(claves=claves):
+                user = self._usuario_con(f"p-{len(claves)}-{''.join(claves).lower()}", claves)
+                self.assertEqual(self._resumen(user).status_code, 403)
+
+    def test_consultas_constantes(self):
+        user = self._usuario_con("coste", ["R-CONTABILIDAD-CXC"])
+
+        def consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertEqual(self._resumen(user).status_code, 200)
+            return len(ctx.captured_queries)
+
+        antes = consultas()
+        for _ in range(5):
+            Cobro.objects.create(
+                empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=self.registros["a"]["cuenta"],
+                total_cobrado=Decimal("1.00"),
+            )
+        self.assertEqual(consultas(), antes)
+
+
+class CxcDetallePolizasTests(LecturaJerarquicaBase):
+    """EC-746: el detalle de CxC se lee con ``R-CONTABILIDAD-CXC``, pero sus pólizas (cuentas
+    contables, centros de costo, cargos y abonos) son de Contabilidad: llegan vacías sin
+    ``R-CONTABILIDAD``. Superusuario y admin de empresa las reciben siempre."""
+
+    def setUp(self):
+        super().setUp()
+        a = self.registros["a"]
+        empresa = self.a["empresa"]
+        cuenta_cargo, _, centro_costo = self._crear_cuentas_contables(empresa)
+        poliza = Poliza.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"], centro_costo=centro_costo,
+            folio="POL-EC746", folio_consecutivo=1,
+        )
+        PolizaDetalle.objects.create(
+            poliza=poliza, cuenta_contable=cuenta_cargo, centro_costo=centro_costo,
+            factura_id=a["facturas"], cargo=Decimal("100.00"), abono=Decimal("0.00"), orden=1,
+        )
+        self.url = f"/api/v1/finanzas/cuentas-por-cobrar/{a['cuentas-por-cobrar']}/"
+
+    def _polizas(self, user):
+        resp = self._client(user).get(self.url)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data["polizas"]
+
+    def test_con_solo_la_seccion_de_cxc_llegan_vacias(self):
+        self.assertEqual(self._polizas(self._usuario_con("pol-cxc", ["R-CONTABILIDAD-CXC"])), [])
+
+    def test_con_el_modulo_llegan_con_sus_lineas(self):
+        polizas = self._polizas(self._usuario_con("pol-mod", ["R-CONTABILIDAD"]))
+        self.assertEqual([p["folio"] for p in polizas], ["POL-EC746"])
+        self.assertEqual(len(polizas[0]["detalles"]), 1)
+
+    def test_admin_de_empresa_y_superusuario_las_reciben(self):
+        admin = self._usuario_con("pol-admin", [])
+        admin.is_admin_empresa = True
+        admin.save(update_fields=["is_admin_empresa"])
+        root = self._usuario_con("pol-root", [])
+        root.is_superuser = True
+        root.save(update_fields=["is_superuser"])
+        for user in (admin, root):
+            with self.subTest(user=user.username):
+                self.assertEqual([p["folio"] for p in self._polizas(user)], ["POL-EC746"])
+
+    def test_los_permisos_se_resuelven_una_vez_por_peticion(self):
+        """``PermisoFinanzas`` y ``get_polizas`` comparten el conjunto ya resuelto."""
+        from finanzas.api import permisos as permisos_finanzas
+
+        user = self._usuario_con("pol-una-vez", ["R-CONTABILIDAD"])
+        with patch.object(
+            permisos_finanzas, "permisos_efectivos", wraps=permisos_finanzas.permisos_efectivos
+        ) as espia:
+            self.assertEqual([p["folio"] for p in self._polizas(user)], ["POL-EC746"])
+        self.assertEqual(espia.call_count, 1)
+
+    def test_el_resto_del_detalle_no_cambia_con_la_seccion(self):
+        """La factura embebida sigue viniendo completa: es el seguimiento de la propia CxC."""
+        resp = self._client(self._usuario_con("pol-fact", ["R-CONTABILIDAD-CXC"])).get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["factura"]["id"], self.registros["a"]["facturas"])

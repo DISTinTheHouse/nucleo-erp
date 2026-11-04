@@ -561,11 +561,15 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         campos_only=("nombre", "razon_social", "correo"),
         # Además de CRM, Mesa de Control ve y edita clientes, y Contabilidad los
         # consulta para facturar. Sin esas dos, el rol Mesa-de-control se quedaba
-        # sin ver en el buscador clientes que sí puede abrir y editar.
+        # sin ver en el buscador clientes que sí puede abrir y editar. En
+        # Contabilidad la lectura es jerárquica (EC-746): el código de módulo
+        # ``R-CONTABILIDAD`` abre también la sección de clientes, en el frontend y
+        # en ``clientes-contabilidad/``.
         permisos_visibilidad=(
             "R-CRM-CLIENTES",
             "R-MESACONTROL-CLIENTES",
             "R-CONTABILIDAD-CLIENTES",
+            "R-CONTABILIDAD",
         ),
         orden=("nombre", "id"),
     ),
@@ -650,11 +654,11 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         campos_codigo=("folio",),
         campos_nombre=("cliente__nombre", "cliente__razon_social"),
         campos_only=("folio", "estatus", "cliente__nombre", "cliente__razon_social"),
-        # Sólo la SECCIÓN, sin el código de módulo ``R-CONTABILIDAD``, por la
-        # misma razón que en órdenes de bordado: en el frontend el listado de
-        # facturación exige ``R-CONTABILIDAD-FACTURACION`` y el código de módulo
-        # no lo abre.
-        permisos_visibilidad=("R-CONTABILIDAD-FACTURACION",),
+        # La sección y el código de módulo: en Contabilidad la lectura es
+        # jerárquica (EC-746). ``R-CONTABILIDAD`` lee todo Finanzas y
+        # ``R-CONTABILIDAD-FACTURACION`` sólo la facturación, igual en el frontend
+        # que en ``facturas/``.
+        permisos_visibilidad=("R-CONTABILIDAD-FACTURACION", "R-CONTABILIDAD"),
         orden=("-fecha_emision", "-id"),
     ),
     EntidadBuscable(
