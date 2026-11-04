@@ -75,8 +75,8 @@ class FacturaInventarioService:
     @staticmethod
     def _piezas(factura):
         piezas = defaultdict(lambda: Decimal("0"))
-        detalles = factura.factura_detalles.select_related("pedido_detalle_talla")
-        for det in detalles:
+        detalles = factura.factura_detalles.filter(producto__isnull=False).select_related("pedido_detalle_talla")
+        for det in detalles:  # los servicios extras no mueven existencias (#744)
             talla = det.pedido_detalle_talla
             variante_id = talla.variante_id if talla else None
             piezas[(det.producto_id, variante_id)] += det.cantidad

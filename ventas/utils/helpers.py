@@ -1,3 +1,4 @@
+from decimal import Decimal
 from django.db.models import Q
 from catalogo.compatibilidad import exigir_compatibilidad
 from catalogo.models import CategoriaProductoTalla, Talla, Producto, ProductoVariante
@@ -728,12 +729,50 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
 def _save_pedido_servicios_extras(pedido_obj, rows):
     existentes = list(PedidoServicioExtra.objects.filter(pedido=pedido_obj).order_by("id"))
     rows = rows or []
+    # Un servicio en una factura vigente (Borrador incluido) quedó congelado en
+    # ella: no se cambia su importe ni se elimina (#744). Una consulta.
+    from finanzas.models import Factura, FacturaDetalle
+
+    facturados = dict(
+        FacturaDetalle.objects.filter(pedido_servicio_extra__pedido=pedido_obj, factura__activo=True)
+        .exclude(factura__estatus=Factura.FacturaStatus.CANCELADA)
+        .values_list("pedido_servicio_extra_id", "factura__folio")
+    )
+    # Uno que solo estuvo en facturas canceladas sí se edita, pero su renglón lo
+    # protege (PROTECT): tampoco se elimina.
+    en_alguna = set(
+        FacturaDetalle.objects.filter(pedido_servicio_extra__pedido=pedido_obj)
+        .values_list("pedido_servicio_extra_id", flat=True)
+    ) if len(existentes) > len(rows) else set()
+    errores = []
+    for index, extra in enumerate(existentes):
+        row = rows[index] if index < len(rows) else None
+        if row is None and extra.pk in en_alguna:
+            errores.append(f"{extra.nombre}: ya se facturó; no se puede eliminar.")
+            continue
+        if extra.pk not in facturados or row is None:
+            continue
+        elif (
+            Decimal(str(row.get("monto") or 0)) != extra.monto
+            or int(row.get("cantidad") or 1) != extra.cantidad
+            or not bool(row.get("visible_en_factura", True))
+        ):
+            errores.append(
+                f"{extra.nombre}: está en la factura {facturados[extra.pk]}; no se cambia su importe ni se oculta."
+            )
+    if errores:
+        raise ValidationError({"servicios_extras": errores})
+
     for index, row in enumerate(rows):
         extra = existentes[index] if index < len(existentes) else PedidoServicioExtra(pedido=pedido_obj)
         extra.nombre = row.get("nombre") or ""
         extra.monto = row.get("monto") or 0
         extra.cantidad = row.get("cantidad") or 1
         extra.visible_en_factura = bool(row.get("visible_en_factura", True))
+        if "sat_prodserv" in row:
+            extra.sat_prodserv = row["sat_prodserv"]
+        if "sat_unidad" in row:
+            extra.sat_unidad = row["sat_unidad"]
         extra.save()
     if len(existentes) > len(rows):
         # Mesa de control puede eliminar servicios extras desde edición estricta

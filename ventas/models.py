@@ -535,6 +535,16 @@ class PedidoServicioExtra(models.Model):
     monto = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     cantidad = models.PositiveIntegerField(default=1, verbose_name="cantidad")
     visible_en_factura = models.BooleanField(default=True)
+    # Claves SAT del concepto al facturarlo (#744). Vacías = las de servicio por
+    # defecto (``finanzas.services.factura_service.SAT_SERVICIO_DEFECTO``).
+    sat_prodserv = models.ForeignKey(
+        "nucleo.SatClaveProdServ", on_delete=models.PROTECT, related_name="pedido_servicios_extras",
+        null=True, blank=True,
+    )
+    sat_unidad = models.ForeignKey(
+        "nucleo.SatClaveUnidad", on_delete=models.PROTECT, related_name="pedido_servicios_extras",
+        null=True, blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

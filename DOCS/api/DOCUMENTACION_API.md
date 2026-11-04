@@ -3512,6 +3512,21 @@ No mandes `pago` dentro de `pago_detalles`: mismo caso.
 
 ---
 
+## 💰 Finanzas - Servicios extras en la factura (#744)
+
+Los servicios extras del pedido (`PedidoServicioExtra` con `visible_en_factura=true`: envío, bordado, etc.) se facturan como conceptos propios, **completos y una sola vez**. El usuario elige en qué parcialidad va cada uno.
+
+- **`GET /api/v1/finanzas/facturas/onboarding/?pedido={id}`** suma `servicios_extras`: `[{ pedido_servicio_extra, nombre, cantidad, precio_unitario, importe, sat_prodserv, sat_unidad, facturado, facturado_en }]`. `importe` = `precio_unitario` × `cantidad`; `facturado_en` es el folio de la factura que ya lo tomó (Borrador incluido; las canceladas lo liberan).
+- **`POST /api/v1/finanzas/facturas/onboarding/`** acepta `servicios_extras: [ids]`. `factura_detalles` puede ir vacío si van servicios (factura solo de servicios). Cada servicio es un renglón de `factura_detalles` con `pedido_servicio_extra` y `producto`/`pedido_detalle`/`pedido_detalle_talla` en `null`; `producto_nombre` trae el nombre del servicio. IVA del pedido.
+  - `400 servicios_extras`: no es del pedido, no es visible, viene repetido, ya está en otra factura o tiene importe 0.
+- **`GET /facturas/{id}/desglose/`** trae `servicios_extras` aparte de `conceptos` (piezas); `importes.total_piezas` cuenta solo prendas.
+- **CFDI**: concepto con el `nombre` del servicio y sus claves SAT; sin claves, `78101802` / `E48` (Unidad de servicio).
+- **Claves SAT del servicio**: `servicios_extras[].sat_prodserv` / `sat_unidad` (ids de `/catalogos-sat/`) opcionales al guardar el pedido.
+- Un servicio en factura vigente no cambia `monto`/`cantidad` ni se oculta, y uno que ya se facturó no se elimina: `400 servicios_extras`.
+- Los servicios no mueven inventario ni cuentan como piezas en el listado de facturas ni en la trazabilidad.
+
+---
+
 ## 💰 Finanzas - Registrar Factura Pendiente por Cobrar
 
 **Base URL**: `/api/v1/finanzas/`

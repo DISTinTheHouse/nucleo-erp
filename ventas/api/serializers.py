@@ -18,6 +18,7 @@ from ventas.services.sku_produccion_service import (
     skus_produccion_por_talla,
 )
 from catalogo.compatibilidad import exigir_compatibilidad
+from nucleo.models import SatClaveProdServ, SatClaveUnidad
 from nucleo.utils import exigir_codigos_postales, validate_telefono
 from ventas.utils.helpers import nombre_para_mostrar
 
@@ -1129,6 +1130,13 @@ class ServicioExtraInputSerializer(serializers.Serializer):
     monto = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, default=0)
     cantidad = serializers.IntegerField(min_value=1, required=False, default=1)
     visible_en_factura = serializers.BooleanField(required=False, default=True)
+    # Claves SAT del concepto al facturar (#744); solo las guarda el pedido.
+    sat_prodserv = serializers.PrimaryKeyRelatedField(
+        queryset=SatClaveProdServ.objects.filter(activo=True), required=False, allow_null=True
+    )
+    sat_unidad = serializers.PrimaryKeyRelatedField(
+        queryset=SatClaveUnidad.objects.filter(activo=True), required=False, allow_null=True
+    )
 
 
 class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):

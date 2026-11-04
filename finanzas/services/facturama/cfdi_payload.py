@@ -77,10 +77,32 @@ def _receptor(factura, errores):
     }
 
 
+def _claves_servicio_defecto(renglones, errores):
+    """Claves SAT por defecto de los servicios extras sin las suyas (#744).
+    ``(None, None)`` si no hacen falta; ``None`` (con error) si faltan en el catálogo."""
+    if not any(r.pedido_servicio_extra_id and not (
+        r.pedido_servicio_extra.sat_prodserv_id and r.pedido_servicio_extra.sat_unidad_id
+    ) for r in renglones):
+        return (None, None)
+    from finanzas.services.factura_service import SAT_SERVICIO_DEFECTO
+    from nucleo.models import SatClaveProdServ, SatClaveUnidad
+
+    prodserv = SatClaveProdServ.objects.filter(codigo=SAT_SERVICIO_DEFECTO[0]).first()
+    unidad = SatClaveUnidad.objects.filter(codigo=SAT_SERVICIO_DEFECTO[1]).first()
+    if prodserv is None or unidad is None:
+        errores["servicios_extras"] = (
+            f"Falta en el catálogo SAT la clave de servicio por defecto {SAT_SERVICIO_DEFECTO[0]}/"
+            f"{SAT_SERVICIO_DEFECTO[1]}; asígnale claves al servicio."
+        )
+        return None
+    return (prodserv, unidad)
+
+
 def _conceptos(factura, errores):
     renglones = list(
         factura.factura_detalles.select_related(
-            "producto__sat_prodserv", "producto__sat_unidad", "pedido_detalle_talla__talla"
+            "producto__sat_prodserv", "producto__sat_unidad", "pedido_detalle_talla__talla",
+            "pedido_servicio_extra__sat_prodserv", "pedido_servicio_extra__sat_unidad",
         ).order_by("id")
     )
     if not renglones:
@@ -89,7 +111,7 @@ def _conceptos(factura, errores):
 
     sin_claves = sorted({
         r.producto.nombre for r in renglones
-        if r.producto.sat_prodserv is None or r.producto.sat_unidad is None
+        if r.producto is not None and (r.producto.sat_prodserv is None or r.producto.sat_unidad is None)
     })
     if sin_claves:
         errores["productos"] = (
@@ -97,16 +119,28 @@ def _conceptos(factura, errores):
         )
         return []
 
+    servicio_defecto = _claves_servicio_defecto(renglones, errores)
+    if servicio_defecto is None:
+        return []
+
     conceptos = []
     for r in renglones:
         producto = r.producto
-        talla = getattr(getattr(r.pedido_detalle_talla, "talla", None), "nombre", None)
+        servicio = r.pedido_servicio_extra
+        if servicio is not None:  # #744
+            prodserv = servicio.sat_prodserv or servicio_defecto[0]
+            unidad = servicio.sat_unidad or servicio_defecto[1]
+            descripcion = servicio.nombre
+        else:
+            talla = getattr(getattr(r.pedido_detalle_talla, "talla", None), "nombre", None)
+            prodserv, unidad = producto.sat_prodserv, producto.sat_unidad
+            descripcion = f"{producto.nombre} - Talla {talla}" if talla else producto.nombre
         base = r.subtotal - r.descuento
         concepto = {
-            "ProductCode": producto.sat_prodserv.codigo,
-            "Description": f"{producto.nombre} - Talla {talla}" if talla else producto.nombre,
-            "Unit": producto.sat_unidad.descripcion[:20],
-            "UnitCode": producto.sat_unidad.codigo,
+            "ProductCode": prodserv.codigo,
+            "Description": descripcion,
+            "Unit": unidad.descripcion[:20],
+            "UnitCode": unidad.codigo,
             "UnitPrice": _numero(r.precio_unitario),
             "Quantity": _numero(r.cantidad),
             "Subtotal": _numero(r.subtotal),
@@ -121,7 +155,7 @@ def _conceptos(factura, errores):
             }],
             "Total": _numero(r.total),
         }
-        identificador = _texto(producto.codigo) or _texto(producto.cod_proscai)
+        identificador = producto and (_texto(producto.codigo) or _texto(producto.cod_proscai))
         if identificador:
             concepto["IdentificationNumber"] = identificador
         conceptos.append(concepto)

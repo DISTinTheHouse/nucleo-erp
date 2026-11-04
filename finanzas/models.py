@@ -338,7 +338,15 @@ class Factura(StatusLifecycleModel):
 
 class FacturaDetalle(models.Model):
     factura = models.ForeignKey(Factura, on_delete=models.CASCADE, related_name="factura_detalles")
-    pedido_detalle = models.ForeignKey('ventas.PedidoDetalle', on_delete=models.PROTECT, related_name="factura_detalles")
+    # Un renglón es de piezas (``pedido_detalle`` + talla + ``producto``) o de un
+    # servicio extra del pedido (``pedido_servicio_extra``, sin producto) (#744).
+    pedido_detalle = models.ForeignKey(
+        'ventas.PedidoDetalle', on_delete=models.PROTECT, related_name="factura_detalles", null=True, blank=True
+    )
+    pedido_servicio_extra = models.ForeignKey(
+        'ventas.PedidoServicioExtra', on_delete=models.PROTECT, related_name="factura_detalles",
+        null=True, blank=True,
+    )
     # Talla exacta que se factura: un pedido se factura en parcialidades, por
     # piezas de cada talla. Nulo solo en renglones anteriores a la facturación
     # parcial, que facturaban el renglón del pedido sin distinguir talla.
@@ -349,7 +357,9 @@ class FacturaDetalle(models.Model):
         null=True,
         blank=True,
     )
-    producto = models.ForeignKey('catalogo.Producto', on_delete=models.PROTECT, related_name="factura_detalles")
+    producto = models.ForeignKey(
+        'catalogo.Producto', on_delete=models.PROTECT, related_name="factura_detalles", null=True, blank=True
+    )
 
     cantidad = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     precio_unitario = models.DecimalField(max_digits=18, decimal_places=2, default=0)

@@ -240,7 +240,8 @@ class PolizaDetalleRelacionadoSerializer(serializers.ModelSerializer):
 
 
 class FacturaDetalleSerializer(serializers.ModelSerializer):
-    producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    # Producto del renglón de piezas, o nombre del servicio extra (#744).
+    producto_nombre = serializers.SerializerMethodField()
     talla_nombre = serializers.CharField(
         source='pedido_detalle_talla.talla.nombre', read_only=True, default=None
     )
@@ -258,7 +259,8 @@ class FacturaDetalleSerializer(serializers.ModelSerializer):
             'impuesto',
             'subtotal',
             'total',
-            'producto'
+            'producto',
+            'pedido_servicio_extra',
         ]
         fields = '__all__'
         extra_kwargs = {
@@ -266,9 +268,19 @@ class FacturaDetalleSerializer(serializers.ModelSerializer):
             'cantidad': {'required': True},
         }
 
+    def get_producto_nombre(self, obj):
+        if obj.producto_id:
+            return obj.producto.nombre
+        servicio = obj.pedido_servicio_extra
+        return servicio.nombre if servicio else None
+
 
 class FacturaSerializer(serializers.ModelSerializer):
-    factura_detalles = FacturaDetalleSerializer(many=True)
+    factura_detalles = FacturaDetalleSerializer(many=True, required=False)
+    # Alta: ids de ``PedidoServicioExtra`` del pedido a facturar completos (#744).
+    servicios_extras = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), write_only=True, required=False
+    )
     moneda_nombre = serializers.CharField(source='moneda.codigo_iso', read_only=True)
     cliente_nombre = serializers.CharField(source='cliente.nombre', read_only=True)
     correo_facturas = serializers.SerializerMethodField()
