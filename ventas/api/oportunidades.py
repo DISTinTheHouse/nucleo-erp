@@ -12,7 +12,7 @@ from django.utils.dateparse import parse_date
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
-from rest_framework.pagination import LimitOffsetPagination
+from nucleo.listados import PaginacionOpcionalLimitOffset
 from rest_framework.response import Response
 
 from terceros.cartera import cartera_de_cliente
@@ -206,7 +206,7 @@ class OportunidadViewSet(viewsets.ModelViewSet):
     queryset = oportunidades_base()
     serializer_class = OportunidadSerializer
     http_method_names = ["get", "post", "patch", "delete"]
-    pagination_class = LimitOffsetPagination  # sin ?limit= regresa la lista completa
+    pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= la lista completa; ?limit= topado (EC-757)
     # Explícitos: sin esto DRF acepta en ``?ordering=`` los ``source`` del serializer, y
     # ``vendedor__get_full_name`` no es una columna (500). Son los que ya se aceptaban.
     ordering_fields = [
@@ -457,7 +457,7 @@ class SeguimientoViewSet(viewsets.ModelViewSet):
     queryset = OportunidadSeguimiento.objects.select_related("oportunidad__cliente", "vendedor")
     serializer_class = SeguimientoSerializer
     http_method_names = ["get", "post", "patch", "delete"]
-    pagination_class = LimitOffsetPagination
+    pagination_class = PaginacionOpcionalLimitOffset
     # Explícitos: sin esto DRF acepta en ``?ordering=`` los ``source`` del serializer, y
     # ``vendedor__get_full_name`` no es una columna (500).
     ordering_fields = [

@@ -59,6 +59,7 @@ from ventas.api.serializers import (
     errores_montos_guardados,
 )
 
+from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset
 from nucleo.models import SerieFolio, Empresa
 from notificaciones.services.notificacion_service import crear_notificacion_usuario
 from produccion.models import (
@@ -377,13 +378,23 @@ def _texto_comentario(data):
 FILTER_BACKENDS_SIN_ORDERING = tuple(
     backend for backend in api_settings.DEFAULT_FILTER_BACKENDS if not issubclass(backend, OrderingFilter)
 )
+# Modo servidor (EC-757): ``?ordering=`` solo con la lista blanca de cada vista y
+# ``id`` como desempate. Sin el parámetro queda el orden fijo de ``get_queryset``
+# (más reciente primero, EC-619). Los importes no entran: ordenar por un monto
+# que la lectura oculta (#537) dejaría deducirlo.
+FILTER_BACKENDS_LISTADO = (*FILTER_BACKENDS_SIN_ORDERING, OrdenamientoEstableFilter)
 
 
 class CotizacionViewSet(viewsets.ModelViewSet):
     queryset = cotizaciones_base()
     serializer_class = CotizacionSerializer
     http_method_names = ["get", "post", "patch"]
-    filter_backends = FILTER_BACKENDS_SIN_ORDERING
+    pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= regresa la lista completa
+    ordering_fields = [
+        "id", "estatus", "tipo_pedido", "oc", "created_at", "updated_at", "autorizada_at",
+        "cliente__nombre", "cliente__razon_social",
+    ]
+    filter_backends = FILTER_BACKENDS_LISTADO
 
     def get_serializer_class(self):
         if getattr(self, "action", None) == "list":
@@ -2609,10 +2620,15 @@ def _nombre_corto(nombre, largo=40):
 
 
 class PedidoViewSet(viewsets.ModelViewSet):
+    pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= regresa la lista completa
+    ordering_fields = [
+        "id", "folio", "estatus", "clasificacion", "oc", "created_at", "updated_at", "fecha_confirmacion",
+        "cliente_nombre", "cliente_razon_social", "cliente_rfc",
+    ]
     http_method_names = ["get", "post", "put", "patch", "head", "options"]
     queryset = pedidos_base()
     serializer_class = PedidoSerializer
-    filter_backends = FILTER_BACKENDS_SIN_ORDERING
+    filter_backends = FILTER_BACKENDS_LISTADO
 
     def get_serializer_class(self):
         # Listado: serializer minimalista (9 campos escalares). Resto de acciones
@@ -3024,9 +3040,21 @@ class PedidoViewSet(viewsets.ModelViewSet):
         mis_pedidos = self.request.query_params.get("mis_pedidos", "")
         if mis_pedidos.lower() in ("true", "1"):
             qs = qs.filter(cotizacion__vendedor=user)
-        q = self.request.query_params.get("q") or self.request.query_params.get("folio")
+        # ``?q=`` busca en folio, OC y los datos del cliente congelados en el pedido
+        # (EC-757): todo en la tabla ``pedidos``, sin JOIN, con los índices trigram
+        # de nombre y razón social. ``?folio=`` sigue buscando solo el folio.
+        q = (self.request.query_params.get("q") or "").strip()
         if q:
-            qs = qs.filter(folio__icontains=q)
+            qs = qs.filter(
+                Q(folio__icontains=q)
+                | Q(oc__icontains=q)
+                | Q(cliente_nombre__icontains=q)
+                | Q(cliente_razon_social__icontains=q)
+                | Q(cliente_rfc__icontains=q)
+            )
+        folio = (self.request.query_params.get("folio") or "").strip()
+        if folio:
+            qs = qs.filter(folio__icontains=folio)
         # ``estatus``/``sin_clasificar`` sólo en el listado — mismo motivo que
         # ``CotizacionViewSet._apply_filters``: un filtro suelto que se cuele a
         # una acción de detalle (``get_object()`` también pasa por aquí) puede

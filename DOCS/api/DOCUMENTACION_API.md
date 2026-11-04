@@ -1322,6 +1322,13 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
   - Con `?ordering=` siempre se agrega `id` como último desempate (`-id` si el primer campo es descendente).
   - OC y recepciones: `?estatus=` (entero), `?proveedor=`, `?sucursal=` (ids), `?fecha_desde=`/`?fecha_hasta=` (`YYYY-MM-DD`, sobre `fecha_oc` o el día de `fecha_recepcion`), `?tipo_compra=MP|PT` (en recepciones, el de la OC de origen). Solo recepciones: `?almacen=` y `?orden_compra=` (ids; uno de otra empresa no trae filas). Inválidos → `400` (#889).
   - Proveedores: `?activo=true|false` (default `true`; `false` lista las bajas). Una baja se abre en solo lectura: `GET {id}/`, `historial-ordenes-compra/` y `kpis-detalle/` responden `200`; `PUT`/`PATCH`/`DELETE` sobre ella → `400 {"detail": "El proveedor está dado de baja."}` (#888).
+- **Mismo modo servidor en ventas y clientes (EC-757)**: `GET /api/v1/terceros/clientes/`, `ventas/cotizaciones/` (y `ventas/mesa-control/`), `ventas/pedidos/` y `ventas/oportunidades/`.
+  - `?limit=&offset=` igual que arriba (tope 500; en oportunidades antes no había tope). Sin `?limit=` sigue la lista completa.
+  - `?ordering=` con lista blanca y `id` de desempate; sin él, el orden por defecto: clientes por `nombre` (antes indefinido), cotizaciones y pedidos más reciente primero. Los importes (`gran_total`, `subtotal`…) **no** se aceptan (#537): se ignoran y queda el orden por defecto.
+    - Clientes: `id`, `clave`, `nombre`, `razon_social`, `rfc`, `correo`, `telefono`, `ciudad`, `estado`, `giro_empresarial`, `dias_credito`, `fecha_alta`, `fecha_ultima_compra`, `created_at`, `updated_at`.
+    - Cotizaciones: `id`, `estatus`, `tipo_pedido`, `oc`, `created_at`, `updated_at`, `autorizada_at`, `cliente__nombre`, `cliente__razon_social`.
+    - Pedidos: `id`, `folio`, `estatus`, `clasificacion`, `oc`, `created_at`, `updated_at`, `fecha_confirmacion`, `cliente_nombre`, `cliente_razon_social`, `cliente_rfc`.
+  - Búsqueda: clientes `?search=` (nombre, razón social, RFC, clave, correo); pedidos `?q=` ahora busca en folio, OC, nombre, razón social y RFC del cliente (`?folio=` sigue solo por folio); cotizaciones `?q=` sin cambios (OC, cliente, id).
   - Todo se combina con `?search=`.
 
 ### Direcciones Cliente
