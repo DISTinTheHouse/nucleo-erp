@@ -17,6 +17,8 @@ from django.db.models import Count, F, OuterRef, Q, Subquery, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.shortcuts import get_object_or_404
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import (
     ClienteMesaControlSerializer,
@@ -731,6 +733,17 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         return numero
 
 
+@extend_schema_view(
+    list=extend_schema(
+        parameters=[
+            OpenApiParameter(
+                "cliente", OpenApiTypes.INT,
+                description="Solo las direcciones de ese cliente (pk). De otra empresa o inexistente: "
+                "lista vacía. No entero: 400. Sin él, todas las de la empresa.",
+            ),
+        ],
+    ),
+)
 class DireccionClienteViewSet(viewsets.ModelViewSet):
     queryset = DireccionCliente.objects.filter(activo=True)
     serializer_class = DireccionClienteSerializer
