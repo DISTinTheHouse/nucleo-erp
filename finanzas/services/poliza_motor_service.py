@@ -18,9 +18,10 @@ from finanzas.utils.folios import generate_poliza_folio
 from nucleo.models import Sucursal
 
 
-def _origen(origen_tipo, origen_id):
+def _origen(origen_tipo, origen_id, empresa_id):
+    # De la empresa del documento: una póliza ajena nunca pasa por la suya (#892).
     return Poliza.objects.filter(
-        origen_tipo=origen_tipo, origen_id=origen_id, poliza_reversa_de__isnull=True
+        empresa_id=empresa_id, origen_tipo=origen_tipo, origen_id=origen_id, poliza_reversa_de__isnull=True
     ).first()
 
 
@@ -43,7 +44,7 @@ class PolizaMotorService:
         """
         if not PlanContableService.contabilizacion_activa(empresa_id, fecha=fecha):
             return None
-        existente = _origen(origen_tipo, origen_id)
+        existente = _origen(origen_tipo, origen_id, empresa_id)
         if existente:
             return existente
         if callable(lineas):  # se arman solo si hay póliza que crear (#676)
@@ -55,7 +56,7 @@ class PolizaMotorService:
                 )
         except IntegrityError:
             # Otra petición contabilizó el mismo documento al mismo tiempo.
-            existente = _origen(origen_tipo, origen_id)
+            existente = _origen(origen_tipo, origen_id, empresa_id)
             if existente is None:
                 raise
             return existente
@@ -167,9 +168,9 @@ class PolizaMotorService:
         return primera
 
     @staticmethod
-    def cancelar_de(origen_tipo, origen_id, usuario=None):
+    def cancelar_de(origen_tipo, origen_id, usuario=None, *, empresa_id):
         """Contrapóliza de la póliza del documento. Sin póliza no hace nada."""
-        poliza = _origen(origen_tipo, origen_id)
+        poliza = _origen(origen_tipo, origen_id, empresa_id)
         if poliza is None:
             return None
         return PolizaService.cancelar(poliza, usuario)

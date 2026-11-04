@@ -740,6 +740,16 @@ class PolizaSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixi
     class Meta:
         model = Poliza
         fields = "__all__"
+        # Los fija el servidor: la póliza nace en Borrador y cambia de estatus solo con
+        # ``contabilizar/`` (que exige el cuadre) y ``cancelar/``; origen y reversa los
+        # pone el motor, y ``usuario_creacion`` es quien la da de alta (#892, #896).
+        read_only_fields = ("estatus", "origen_tipo", "origen_id", "poliza_reversa_de", "usuario_creacion")
+
+    def get_validators(self):
+        # Sin el validador que DRF deriva de ``uq_poliza_origen``: sus campos ya no
+        # llegan del cliente (los pone el motor, que ya maneja el choque) y con ellos de
+        # solo lectura el validador truena con ``KeyError`` en cada PATCH (#844).
+        return []
 
     def _sumas(self, obj):
         # Una sola lectura de las líneas (prefetch en el listado) en vez de tres agregados.
@@ -842,9 +852,12 @@ class FacturaProveedorSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnSe
             oc = attrs.get("oc")
             if oc and emp_id and getattr(oc, "empresa_id", None) and oc.empresa_id != emp_id:
                 raise ValidationError({"oc": "Orden de compra no pertenece a la empresa."})
-            recepcion = attrs.get("recepcion")
-            if recepcion and oc and getattr(recepcion, "orden_compra_id", None) and recepcion.orden_compra_id != getattr(oc, "pk", oc):
-                raise ValidationError({"recepcion": "Recepción no corresponde a la OC."})
+            # Contra lo guardado si el cuerpo trae solo una de las dos (#897).
+            if {"oc", "recepcion"} & attrs.keys():
+                oc = attrs["oc"] if "oc" in attrs else getattr(self.instance, "oc", None)
+                recepcion = attrs["recepcion"] if "recepcion" in attrs else getattr(self.instance, "recepcion", None)
+                if recepcion and oc and getattr(recepcion, "orden_compra_id", None) and recepcion.orden_compra_id != getattr(oc, "pk", oc):
+                    raise ValidationError({"recepcion": "Recepción no corresponde a la OC."})
         self._validar_sucursal_del_documento(attrs)
         self._validar_montos_contra_lineas(attrs)
         return attrs

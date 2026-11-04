@@ -97,6 +97,7 @@ from finanzas.services.nota_credito_poliza_service import NotaCreditoPolizaServi
 from finanzas.services.pago_service import PagoService
 from finanzas.services.plan_contable_service import PlanContableService
 from finanzas.services.factura_cancelacion_service import FacturaCancelacionService
+from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.services.factura_emision_service import FacturaEmisionService
 from finanzas.services.factura_timbrado_service import FacturaTimbradoService
 from finanzas.services.factura_poliza_service import FacturaPolizaService
@@ -113,8 +114,19 @@ from terceros.models import Cliente
 from terceros.api.serializers import ClienteSerializer
 
 
-def _bool_param(v):
-    return (str(v or "").strip().lower() in {"1", "true", "si", "sí", "yes"})
+_VERDADEROS = {"1", "true", "si", "sí", "yes"}
+_FALSOS = {"", "0", "false", "no"}
+
+
+def _bool_param(v, campo="valor"):
+    """Booleano de query string. Ausente o vacío = False; un valor que no es ni
+    verdadero ni falso responde 400 en vez de invertir el filtro en silencio (#899)."""
+    s = str(v if v is not None else "").strip().lower()
+    if s in _VERDADEROS:
+        return True
+    if s in _FALSOS:
+        return False
+    raise ValidationError({campo: "Debe ser true o false."})
 
 
 def _puede_ver_todo(user):
@@ -421,7 +433,7 @@ class ClienteViewSetContabilidad(FinanzasBaseViewSet):
             qs = qs.filter(Q(nombre__icontains=nombre) | Q(razon_social__icontains=nombre))
         # Sin ``activo``, solo activos (como antes); ``?activo=false`` trae las bajas (#799).
         activo = qp.get("activo")
-        qs = qs.filter(activo=_bool_param(activo) if activo not in (None, "") else True)
+        qs = qs.filter(activo=_bool_param(activo, "activo") if activo not in (None, "") else True)
         return qs
 
 
@@ -475,9 +487,9 @@ class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
             qs = qs.filter(cliente_id=cliente_id)
         if estatus:
             qs = qs.filter(estatus=estatus)
-        if _bool_param(saldo_pendiente):
+        if _bool_param(saldo_pendiente, "saldo_pendiente"):
             qs = qs.filter(saldo__gt=0).exclude(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA)
-        if _bool_param(vencidas):
+        if _bool_param(vencidas, "vencidas"):
             qs = qs.filter(
                 fecha_vencimiento__isnull=False,
                 fecha_vencimiento__lt=timezone.localdate(),
@@ -582,7 +594,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
             qs = qs.filter(moneda_id=moneda)
         if pedido:
             qs = qs.filter(pedido_id=pedido)
-        if _bool_param(saldo_pendiente):
+        if _bool_param(saldo_pendiente, "saldo_pendiente"):
             # Una CxC cancelada conserva su saldo: no es pendiente (#734, como en CxC #591).
             vivas = [e for e in CuentaPorCobrar.EstatusCxC.values if e != CuentaPorCobrar.EstatusCxC.CANCELADA]
             qs = qs.filter(cuentas_por_cobrar__saldo__gt=0, cuentas_por_cobrar__estatus__in=vivas).distinct()
@@ -613,7 +625,10 @@ class FacturaViewSet(FinanzasBaseViewSet):
             raise ValidationError({
                 'estatus': 'La factura ya tiene CFDI: cancélala en vez de eliminarla.'
             })
-        instance.soft_delete()
+        # Como al cancelarlo: un Borrador regresa lo que su alta volvió a descontar (#858).
+        with transaction.atomic():
+            instance.soft_delete()
+            FacturaInventarioService.reintegrar(instance, self.request.user, solo_redescontado=True)
 
     def _get_default_sucursal(self, user, empresa):
         sucursal = getattr(user, "sucursal_default", None)
@@ -1030,10 +1045,10 @@ class CuentaContableViewSet(FinanzasBaseViewSet):
         if nivel:
             qs = qs.filter(nivel=nivel)
         if acepta_movimientos is not None:
-            qs = qs.filter(acepta_movimientos=_bool_param(acepta_movimientos))
-        if activo is not None and _bool_param(activo):
+            qs = qs.filter(acepta_movimientos=_bool_param(acepta_movimientos, "acepta_movimientos"))
+        if activo is not None and _bool_param(activo, "activo"):
             qs = qs.filter(activo=True)
-        elif activo is not None and not _bool_param(activo):
+        elif activo is not None and not _bool_param(activo, "activo"):
             qs = qs.filter(activo=False)
         return _aplicar_ordering(qs, qp, ["codigo", "id"])
 
@@ -1051,6 +1066,11 @@ class CuentaContableViewSet(FinanzasBaseViewSet):
             empresa = getattr(user, "empresa", None)
             if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
                 raise PermissionDenied()
+        # La cuenta padre, de la empresa de la cuenta, también al editar (#894).
+        if "cuenta_padre" in serializer.validated_data:
+            _validate_fk_empresa(
+                user, serializer.validated_data["cuenta_padre"], "cuenta_padre", serializer.instance.empresa
+            )
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -1086,7 +1106,7 @@ class CentroCostoViewSet(FinanzasBaseViewSet):
         if nombre:
             qs = qs.filter(nombre__icontains=nombre)
         if activo is not None:
-            qs = qs.filter(activo=_bool_param(activo))
+            qs = qs.filter(activo=_bool_param(activo, "activo"))
         return _aplicar_ordering(qs, qp, ["codigo", "id"])
 
     def perform_create(self, serializer):
@@ -1138,7 +1158,7 @@ class ConfiguracionContableViewSet(FinanzasBaseViewSet):
         if concepto:
             qs = qs.filter(concepto=concepto)
         if activo is not None:
-            qs = qs.filter(activo=_bool_param(activo))
+            qs = qs.filter(activo=_bool_param(activo, "activo"))
         return _aplicar_ordering(qs, qp, ["concepto", "clave", "id"])
 
     def perform_create(self, serializer):
@@ -1302,10 +1322,7 @@ class PolizaViewSet(FinanzasBaseViewSet):
         cc = serializer.validated_data.get("centro_costo")
         _validate_fk_empresa(user, cc, "centro_costo", empresa)
         detalles_data = serializer.validated_data.pop("poliza_detalles", [])
-        poliza = serializer.save(
-            empresa=empresa,
-            usuario_creacion=serializer.validated_data.get("usuario_creacion") or user,
-        )
+        poliza = serializer.save(empresa=empresa, usuario_creacion=user)
         for detalle_data in detalles_data:
             for field_name in (
                 "cuenta_contable",
@@ -1619,7 +1636,7 @@ class BancoViewSet(FinanzasBaseViewSet):
         if swift:
             qs = qs.filter(swift__icontains=swift)
         if activo is not None:
-            qs = qs.filter(activo=_bool_param(activo))
+            qs = qs.filter(activo=_bool_param(activo, "activo"))
         return _aplicar_ordering(qs, qp, ["nombre", "codigo", "id"])
 
     def perform_create(self, serializer):
@@ -1673,7 +1690,7 @@ class CuentaBancariaViewSet(FinanzasBaseViewSet):
         if numero:
             qs = qs.filter(numero_cuenta__icontains=numero)
         if activo is not None:
-            qs = qs.filter(activo=_bool_param(activo))
+            qs = qs.filter(activo=_bool_param(activo, "activo"))
         return _aplicar_ordering(qs.select_related("banco", "moneda"), qp, ["banco__nombre", "alias", "id"])
 
     def perform_create(self, serializer):
@@ -1733,9 +1750,9 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             qs = qs.filter(proveedor_id=proveedor)
         if estatus:
             qs = qs.filter(estatus=estatus)
-        if _bool_param(saldo_pendiente):
+        if _bool_param(saldo_pendiente, "saldo_pendiente"):
             qs = qs.filter(saldo__gt=0)
-        if _bool_param(vencidas):
+        if _bool_param(vencidas, "vencidas"):
             qs = qs.filter(
                 fecha_vencimiento__isnull=False,
                 fecha_vencimiento__lt=timezone.localdate(),
@@ -2717,7 +2734,7 @@ class AlertaMoraViewSet(FinanzasBaseReadOnlyViewSet):
         if cxp:
             qs = qs.filter(cuenta_por_pagar_id=cxp)
         if notificado is not None:
-            qs = qs.filter(notificado=_bool_param(notificado))
+            qs = qs.filter(notificado=_bool_param(notificado, "notificado"))
         return _aplicar_ordering(qs, qp, ["-dias_mora", "-fecha_generada"])
 
     @action(detail=False, methods=["post"], url_path="generar")

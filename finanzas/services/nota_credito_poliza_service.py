@@ -70,4 +70,4 @@ class NotaCreditoPolizaService:
 
     @staticmethod
     def cancelar(nota, usuario=None):
-        return PolizaMotorService.cancelar_de(ORIGEN, nota.pk, usuario)
+        return PolizaMotorService.cancelar_de(ORIGEN, nota.pk, usuario, empresa_id=nota.factura.empresa_id)

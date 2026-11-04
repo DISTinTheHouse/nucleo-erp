@@ -37,4 +37,4 @@ class PagoPolizaService:
 
     @staticmethod
     def cancelar(pago, usuario=None):
-        return PolizaMotorService.cancelar_de(ORIGEN, pago.pk, usuario)
+        return PolizaMotorService.cancelar_de(ORIGEN, pago.pk, usuario, empresa_id=pago.empresa_id)
