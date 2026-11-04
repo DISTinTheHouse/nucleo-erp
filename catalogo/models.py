@@ -138,6 +138,25 @@ class Producto(models.Model):
 
     history = HistoricalRecords()
 
+    # Claves SAT de la prenda terminada si el alta no trae las suyas: sin ellas
+    # la factura no se timbra. No aplica a materia prima (línea vacía) ni a
+    # SERVICIOS, que necesitan otra clave.
+    SAT_PRENDA_DEFECTO = ("53102700", "H87")  # Uniformes / Pieza
+
+    def _completar_claves_sat(self):
+        categoria = self.categoria_producto
+        if categoria is None or categoria.linea in ("", CategoriaProducto.Linea.SERVICIOS):
+            return
+        if self.sat_prodserv_id is None:
+            self.sat_prodserv = SatClaveProdServ.objects.filter(codigo=self.SAT_PRENDA_DEFECTO[0]).first()
+        if self.sat_unidad_id is None:
+            self.sat_unidad = SatClaveUnidad.objects.filter(codigo=self.SAT_PRENDA_DEFECTO[1]).first()
+
+    def save(self, *args, **kwargs):
+        if self._state.adding:
+            self._completar_claves_sat()
+        super().save(*args, **kwargs)
+
     class Meta:
         db_table = "productos"
         verbose_name = "Producto"
