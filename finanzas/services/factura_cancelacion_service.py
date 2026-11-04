@@ -6,7 +6,7 @@ from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import CuentaPorCobrar, Factura, NotaCredito
 from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.services.factura_poliza_service import FacturaPolizaService
-from finanzas.services.factura_timbrado_service import FacturaTimbradoService
+from finanzas.services.factura_timbrado_service import PENDIENTE_CFDI, FacturaTimbradoService
 
 
 class FacturaCancelacionService:
@@ -32,8 +32,8 @@ class FacturaCancelacionService:
                 FacturaTimbradoService.cancelar_cfdi(factura)
             return None
         FacturaCancelacionService._exigir_sin_notas_emitidas(actual)
-        if actual.cfdi_pendiente:  # #562
-            raise ErrorDeNegocio({"cfdi": "La factura tiene un timbrado sin confirmar: revísalo en Facturama antes de cancelarla."})
+        if actual.cfdi_pendiente:  # #562, #904
+            raise ErrorDeNegocio({"cfdi": PENDIENTE_CFDI})
         if actual.cfdi_uuid and not actual.cfdi_cancelado:
             FacturaTimbradoService.cancelar_cfdi(factura)
         return FacturaCancelacionService._cancelar_en_erp(factura, usuario, motivo)
@@ -53,6 +53,9 @@ class FacturaCancelacionService:
             raise ErrorDeNegocio({"estatus": "La factura está eliminada y no se puede cancelar."})
         if bloqueada.estatus == Factura.FacturaStatus.CANCELADA:
             return None
+        # Un ``timbrar/`` pudo reservar entre la lectura sin lock y ésta (#902).
+        if bloqueada.cfdi_pendiente:
+            raise ErrorDeNegocio({"cfdi": PENDIENTE_CFDI})
         FacturaCancelacionService._exigir_sin_notas_emitidas(bloqueada)
 
         era_emitida = bloqueada.estatus == Factura.FacturaStatus.EMITIDA

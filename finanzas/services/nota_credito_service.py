@@ -127,10 +127,12 @@ class NotaCreditoService:
         if nota.estatus == NotaCredito.Estatus.CANCELADA:
             return
         # El ERP no cancela CFDI de egreso: cancelar aquí dejaría el CFDI vigente ante el SAT (#612).
-        if nota.cfdi_uuid or nota.cfdi_pendiente:
+        if nota.cfdi_pendiente:  # #904
+            from finanzas.services.factura_timbrado_service import PENDIENTE_CFDI  # import circular
+            raise ErrorDeNegocio({"cfdi": PENDIENTE_CFDI})
+        if nota.cfdi_uuid:
             raise ErrorDeNegocio({"cfdi": (
-                "La nota tiene CFDI de egreso timbrado o pendiente de confirmar; "
-                "cancélalo en Facturama antes de cancelarla aquí."
+                "La nota tiene CFDI de egreso timbrado; cancélalo en Facturama antes de cancelarla aquí."
             )})
         # Sólo se revierte lo que realmente se aplicó: una nota en Borrador
         # nunca tocó la CxC.

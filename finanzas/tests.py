@@ -8995,6 +8995,91 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.facturama.create_cfdi_emision.assert_not_called()
 
 
+@override_settings(FACTURAMA_EMPRESA_CODIGO="acme")
+class ConciliarCfdiTests(TimbrarFacturaTests):
+    """``POST /facturas/{id}/conciliar-cfdi/`` con Facturama mockeado (#758, #900-#905)."""
+
+    UUID = "11111111-2222-3333-4444-555555555555"
+
+    def _pendiente(self, **campos):
+        factura = self._borrador()
+        Factura.objects.filter(pk=factura.pk).update(cfdi_pendiente=True, facturama_id=None, **campos)
+        factura.refresh_from_db()
+        return factura
+
+    def _conciliar(self, factura, usuario=None):
+        return self._client(usuario or self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/conciliar-cfdi/", {}, format="json")
+
+    def _cfdi(self, factura, **cambios):
+        return dict({"Id": "FAC-1", "Uuid": self.UUID, "CfdiType": "I", "Folio": factura.folio,
+                     "Status": "active", "Total": str(factura.total), "Date": "2026-11-01T10:00:00"}, **cambios)
+
+    def test_por_rfc_folio_y_total_lo_timbra(self):
+        factura = self._pendiente()
+        self.facturama.list_cfdis.return_value = [self._cfdi(factura)]
+        resp = self._conciliar(factura)
+        self.assertEqual((resp.status_code, resp.data["resultado"], resp.data["aviso"]), (200, "timbrado", None))
+        factura.refresh_from_db()
+        self.assertEqual((factura.cfdi_uuid, factura.cfdi_pendiente), (self.UUID, False))
+
+    def test_sin_cfdi_lo_libera(self):
+        factura = self._pendiente()
+        self.facturama.list_cfdis.return_value = []
+        resp = self._conciliar(factura)
+        self.assertEqual(resp.data["resultado"], "liberado")
+        factura.refresh_from_db()
+        self.assertEqual((factura.cfdi_uuid, factura.cfdi_pendiente), (None, False))
+
+    def test_dos_candidatos_400(self):
+        factura = self._pendiente()
+        self.facturama.list_cfdis.return_value = [self._cfdi(factura), self._cfdi(factura, Id="FAC-2", Uuid="otro")]
+        self.assertEqual(self._conciliar(factura).status_code, 400)
+
+    def test_paginas_agotadas_no_libera(self):  # #900
+        factura = self._pendiente()
+        self.facturama.list_cfdis.return_value = [self._cfdi(factura, Folio="X", Uuid=f"u{i}") for i in range(10)]
+        resp = self._conciliar(factura)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("No se pudo confirmar", str(resp.data["cfdi"]))
+        factura.refresh_from_db()
+        self.assertTrue(factura.cfdi_pendiente)
+
+    def test_ventana_desde_la_reserva_no_desde_updated_at(self):  # #901
+        factura = self._pendiente(cfdi_pendiente_desde=timezone.now())
+        self.facturama.list_cfdis.return_value = []
+        self.assertEqual(self._conciliar(factura).status_code, 400)
+        Factura.objects.filter(pk=factura.pk).update(cfdi_pendiente_desde=timezone.now() - timedelta(hours=1))
+        Factura.objects.get(pk=factura.pk).save()  # un PATCH cualquiera mueve updated_at
+        self.assertEqual(self._conciliar(factura).data["resultado"], "liberado")
+
+    def test_cancelada_con_cfdi_avisa(self):  # #902
+        factura = self._pendiente(estatus=Factura.FacturaStatus.CANCELADA)
+        self.facturama.list_cfdis.return_value = [self._cfdi(factura)]
+        resp = self._conciliar(factura)
+        self.assertEqual(resp.data["resultado"], "timbrado")
+        self.assertIn("vigente ante el SAT", resp.data["aviso"])
+
+    def test_datos_mal_formados_no_dan_500(self):  # #903
+        factura = self._pendiente()
+        self.facturama.list_cfdis.return_value = [self._cfdi(factura, Total="N/A"), {k: v for k, v in self._cfdi(factura).items() if k != "Id"}]
+        self.assertEqual(self._conciliar(factura).data["resultado"], "liberado")
+        self.facturama.list_cfdis.return_value = {"error": "x"}
+        self.assertEqual(self._conciliar(self._pendiente()).status_code, 400)
+
+    def test_cancelar_con_pendiente_manda_a_conciliar(self):  # #904
+        factura = self._pendiente()
+        resp = self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/cancelar/", {}, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("conciliar-cfdi/", str(resp.data["cfdi"]))
+
+    def test_sin_pendiente_400(self):
+        self.assertEqual(self._conciliar(self._borrador()).status_code, 400)
+
+    def test_otra_empresa_404(self):
+        factura = self._pendiente()
+        self.assertEqual(self._conciliar(factura, usuario=self.b["usuario"]).status_code, 404)
+
+
 class FacturaTipoCambioTests(MotorPolizasBase):
     """#668/#669: tipo de cambio de la factura de venta fuera de MXN."""
 
