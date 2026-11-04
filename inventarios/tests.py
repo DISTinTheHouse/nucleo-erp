@@ -13,6 +13,7 @@ producción en solo lectura o dentro de una transacción con rollback (ver
 ``CLAUDE.md``, sección Pruebas); estos casos documentan el comportamiento esperado.
 """
 
+from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
 from unittest import mock
 
@@ -22,7 +23,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
 
 from auditoria.models import AuditoriaEvento
-from catalogo.models import Color, Producto, ProductoVariante, Talla, TipoProducto
+from catalogo.models import Color, Producto, ProductoVariante, Talla, TipoProducto, VarianteProductoProduccion
 from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
 from inventarios.api import auxiliar as auxiliar_mod
 from inventarios.api.serializers import ExistenciaSerializer
@@ -1183,3 +1184,388 @@ class AuxiliarMovimientosTests(TestCase):
         )
         fila = self._get(producto_variante=self.variante.pk).json()["results"][-1]
         self.assertEqual((fila["tm"], fila["salidas"]), ("AJUSTE", "4.0000"))
+
+POR_ALMACEN_URL = f"{EXISTENCIAS_URL}por-almacen/"
+POR_ALMACEN_RESUMEN_URL = f"{POR_ALMACEN_URL}resumen/"
+
+
+class ExistenciasPorAlmacenTests(TestCase):
+    """``GET existencias/por-almacen/`` y ``por-almacen/resumen/`` (EC-774):
+    la pantalla de stock paginada en servidor. Replica lo que el front hace
+    hoy en memoria (``StockView``/``StockColumns``/``StockFilter``).
+
+    Almacén principal con ``max_stock`` = 100 y un renglón en cada borde de
+    estado (> 80 % full, > 40 % ok, > 15 % low, resto critical).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        negro = Color.objects.create(nombre="Negro EC774", codigo="N74", codigo_hex="#000000")
+        rojo = Color.objects.create(nombre="Rojo EC774", codigo="R74", codigo_hex="#ff0000")
+        pt = _tipo_producto()
+        mp = TipoProducto.objects.get_or_create(codigo="MP", defaults={"nombre": "Materia prima"})[0]
+
+        cls.empresa = Empresa.objects.create(codigo="ec774-a", razon_social="ec774 A SA")
+        sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="E7A", nombre="ec774 a")
+        cls.alm = Almacen.objects.create(empresa=cls.empresa, sucursal=sucursal, codigo="E7-1", nombre="Alm EC774")
+        cls.alm_otro = Almacen.objects.create(empresa=cls.empresa, sucursal=sucursal, codigo="E7-2", nombre="Otro EC774")
+        cls.alm_ceros = Almacen.objects.create(empresa=cls.empresa, sucursal=sucursal, codigo="E7-3", nombre="Ceros EC774")
+        cls.u1 = Ubicacion.objects.create(almacen=cls.alm, pasillo="A", rack="1", nivel="2", posicion="3")
+        cls.u2 = Ubicacion.objects.create(almacen=cls.alm, pasillo="B", rack="1", nivel="1", posicion="1")
+        # Ubicación de OTRO almacén: el nombre completo lleva el almacén de la ubicación.
+        cls.u_otro = Ubicacion.objects.create(almacen=cls.alm_otro, pasillo="Z", rack="9", nivel="9", posicion="9")
+
+        playera = Producto.objects.create(tipo=pt, empresa=cls.empresa, nombre="Playera azul")
+        chamarra = Producto.objects.create(tipo=mp, empresa=cls.empresa, nombre="Chamarra")
+        tela = Producto.objects.create(tipo=pt, empresa=cls.empresa, nombre="Tela sin variante")
+        v_playera = ProductoVariante.objects.create(
+            producto=playera, empresa=cls.empresa, color=negro, sku="ZZEC774-PLA-01", precio_base="1",
+        )
+        v_chamarra = ProductoVariante.objects.create(
+            producto=chamarra, empresa=cls.empresa, color=rojo, sku="ZZEC774-CHA-01", precio_base="1",
+        )
+        muestra = VarianteProductoProduccion.objects.create(
+            empresa=cls.empresa, nombre="Muestra bordada", sku="ZZEC774-MUE-01", color=rojo,
+        )
+
+        def ex(stock, ubicacion=None, almacen=None, **fuente):
+            return Existencia.objects.create(
+                almacen=almacen or cls.alm, ubicacion=ubicacion, stock=stock, cantidad=f"{stock}.5", **fuente,
+            )
+
+        cls.e = {
+            "full100": ex(100, cls.u1, producto=playera, producto_variante=v_playera),
+            "ok80": ex(80, cls.u2, producto_variante=v_chamarra),        # 80 % exacto → ok
+            "full81": ex(81, cls.u1, producto=tela),                     # sin variante: sku/color null
+            "low40": ex(40, cls.u2, variante_produccion=muestra),        # 40 % exacto → low
+            "ok41": ex(41, cls.u1, producto=playera, producto_variante=v_playera),
+            "crit15": ex(15, cls.u2, producto_variante=v_chamarra),      # 15 % exacto → critical
+            "low16": ex(16, cls.u1, variante_produccion=muestra),
+            "crit0": ex(0, None, producto=playera, producto_variante=v_playera),
+            "otra_ubic5": ex(5, cls.u_otro, producto_variante=v_chamarra),
+        }
+        # Otro almacén del mismo tenant: su stock no cuenta para el máximo.
+        ex(1000, almacen=cls.alm_otro, producto=tela)
+        cls.ceros = [ex(0, almacen=cls.alm_ceros, producto=tela), ex(0, almacen=cls.alm_ceros, producto=playera)]
+
+        mx = timezone.get_default_timezone()
+        fechas = {
+            "full100": datetime(2026, 10, 15, 12, 0, tzinfo=mx),
+            # 1-nov 05:00 UTC = 31-oct 23:00 en México: cuenta para octubre.
+            "ok80": datetime(2026, 11, 1, 5, 0, tzinfo=dt_timezone.utc),
+            "full81": datetime(2026, 11, 2, 9, 0, tzinfo=mx),
+            "low40": datetime(2026, 9, 1, 0, 30, tzinfo=mx),
+        }
+        for clave, fecha in fechas.items():
+            Existencia.objects.filter(pk=cls.e[clave].pk).update(fecha_actualizacion=fecha)
+        # El resto queda sin fecha (``auto_now`` la llenó al crear): se limpia.
+        Existencia.objects.filter(almacen=cls.alm).exclude(
+            pk__in=[cls.e[c].pk for c in fechas]
+        ).update(fecha_actualizacion=None)
+
+        cls.user = Usuario.objects.create(username="u@ec774.test", email="u@ec774.test", empresa=cls.empresa)
+        cls.user.sucursales.add(sucursal)
+
+        otra = Empresa.objects.create(codigo="ec774-b", razon_social="ec774 B SA")
+        suc_b = Sucursal.objects.create(empresa=otra, codigo="E7B", nombre="ec774 b")
+        cls.alm_b = Almacen.objects.create(empresa=otra, sucursal=suc_b, codigo="E7B-1", nombre="Alm B EC774")
+        prod_b = Producto.objects.create(tipo=pt, empresa=otra, nombre="Producto B")
+        cls.e_b = Existencia.objects.create(almacen=cls.alm_b, producto=prod_b, stock=7, cantidad="7")
+        cls.superuser = Usuario.objects.create(username="root-ec774", email="root@ec774.test", is_superuser=True)
+
+    def _get(self, params, user=None, url=POR_ALMACEN_URL):
+        client = APIClient()
+        client.force_authenticate(user=user or self.user)
+        return client.get(url, params)
+
+    def _ids(self, **params):
+        resp = self._get({"almacen_id": self.alm.pk, **params})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return [fila["id"] for fila in resp.json()]
+
+    def _set(self, *claves):
+        return sorted(self.e[c].pk for c in claves)
+
+    # --- almacen_id y alcance ---------------------------------------------------
+
+    def test_almacen_id_obligatorio_y_entero_positivo(self):
+        for url in (POR_ALMACEN_URL, POR_ALMACEN_RESUMEN_URL):
+            for params in ({}, {"almacen_id": ""}, {"almacen_id": "x"}, {"almacen_id": "0"}, {"almacen_id": "-3"}):
+                resp = self._get(params, url=url)
+                self.assertEqual(resp.status_code, 400, (url, params))
+                self.assertIn("almacen_id", resp.json())
+
+    def test_almacen_de_otra_empresa_da_vacio(self):
+        params = {"almacen_id": self.alm_b.pk}
+        self.assertEqual(self._get(params).json(), [])
+        self.assertEqual(self._get({**params, "limit": 5}).json()["count"], 0)
+        resumen = self._get(params, url=POR_ALMACEN_RESUMEN_URL).json()
+        self.assertEqual(resumen["max_stock"], 0)
+        self.assertEqual(
+            resumen["kpis"],
+            {"total_registros": 0, "skus_en_existencia": 0, "requiere_stock": 0, "total_stock": 0},
+        )
+        self.assertEqual(resumen["opciones"], {"nombre": [], "tipo": [], "color": [], "ubicacion": [], "mes": []})
+
+    def test_almacen_inexistente_da_vacio(self):
+        self.assertEqual(self._get({"almacen_id": 999999999}).json(), [])
+
+    def test_superusuario_consulta_cualquier_almacen(self):
+        filas = self._get({"almacen_id": self.alm_b.pk}, user=self.superuser).json()
+        self.assertEqual([f["id"] for f in filas], [self.e_b.pk])
+        resumen = self._get({"almacen_id": self.alm_b.pk}, user=self.superuser, url=POR_ALMACEN_RESUMEN_URL).json()
+        self.assertEqual(resumen["kpis"]["total_registros"], 1)
+
+    def test_solo_get(self):
+        client = APIClient()
+        client.force_authenticate(user=self.superuser)
+        for url in (POR_ALMACEN_URL, POR_ALMACEN_RESUMEN_URL):
+            self.assertEqual(client.post(f"{url}?almacen_id={self.alm.pk}", {}).status_code, 405)
+
+    # --- paginación y forma -----------------------------------------------------
+
+    def test_sin_limit_lista_completa_y_con_limit_sobre_drf(self):
+        self.assertEqual(sorted(self._ids()), sorted(e.pk for e in self.e.values()))
+        data = self._get({"almacen_id": self.alm.pk, "limit": 4, "offset": 4}).json()
+        self.assertEqual(set(data), {"count", "next", "previous", "results"})
+        self.assertEqual(data["count"], 9)
+        self.assertEqual(len(data["results"]), 4)
+        self.assertIsNotNone(data["next"])
+        self.assertIsNotNone(data["previous"])
+        # ``limit`` se topa en 500 (``PaginacionOpcionalLimitOffset``).
+        self.assertEqual(len(self._get({"almacen_id": self.alm.pk, "limit": 9999}).json()["results"]), 9)
+
+    def test_forma_del_renglon(self):
+        filas = {f["id"]: f for f in self._get({"almacen_id": self.alm.pk}).json()}
+        self.assertEqual(
+            filas[self.e["full100"].pk],
+            {
+                "id": self.e["full100"].pk,
+                "producto_info": {"nombre": "Playera azul", "sku": "ZZEC774-PLA-01", "tipo": "PT", "color": "Negro EC774"},
+                "ubicacion_info": {"id_ubicacion": self.u1.pk, "nombre_completo": "Alm EC774 - A-1-2-3"},
+                "stock": 100,
+                "cantidad": "100.5000",
+                "fecha_actualizacion": "2026-10-15T12:00:00-06:00",
+                "estado": "full",
+            },
+        )
+        # Solo variante: el producto sale de la variante.
+        self.assertEqual(
+            filas[self.e["ok80"].pk]["producto_info"],
+            {"nombre": "Chamarra", "sku": "ZZEC774-CHA-01", "tipo": "MP", "color": "Rojo EC774"},
+        )
+        # Producto sin variante: sin SKU ni color, como ``ExistenciaSerializer``.
+        self.assertEqual(
+            filas[self.e["full81"].pk]["producto_info"],
+            {"nombre": "Tela sin variante", "sku": None, "tipo": "PT", "color": None},
+        )
+        # SKU de muestra: sin tipo.
+        self.assertEqual(
+            filas[self.e["low40"].pk]["producto_info"],
+            {"nombre": "Muestra bordada", "sku": "ZZEC774-MUE-01", "tipo": None, "color": "Rojo EC774"},
+        )
+        self.assertIsNone(filas[self.e["crit0"].pk]["ubicacion_info"])
+        self.assertIsNone(filas[self.e["crit0"].pk]["fecha_actualizacion"])
+        self.assertEqual(
+            filas[self.e["otra_ubic5"].pk]["ubicacion_info"]["nombre_completo"], "Otro EC774 - Z-9-9-9",
+        )
+
+    def test_coincide_con_el_listado_clasico(self):
+        """Mismos valores que ``GET existencias/?limit=all`` para cada campo que lee la pantalla."""
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        viejo = {
+            f["id"]: f for f in client.get(EXISTENCIAS_URL, {"almacen_id": self.alm.pk, "limit": "all"}).json()
+        }
+        for fila in self._get({"almacen_id": self.alm.pk}).json():
+            o = viejo[fila["id"]]
+            self.assertEqual(
+                fila["producto_info"], {k: o["producto_info"][k] for k in ("nombre", "sku", "tipo", "color")},
+            )
+            self.assertEqual(
+                fila["ubicacion_info"] and fila["ubicacion_info"]["nombre_completo"],
+                o["ubicacion_info"] and o["ubicacion_info"]["nombre_completo"],
+            )
+            for campo in ("stock", "cantidad", "fecha_actualizacion"):
+                self.assertEqual(fila[campo], o[campo], campo)
+
+    # --- búsqueda -----------------------------------------------------------------
+
+    def test_busqueda_por_nombre_y_sku_de_las_tres_fuentes(self):
+        casos = {
+            "PLAYERA": ("full100", "ok41", "crit0"),        # nombre del producto de la fila
+            "chamar": ("ok80", "crit15", "otra_ubic5"),     # nombre del producto de la variante
+            "sin variante": ("full81",),                    # producto sin variante
+            "bordada": ("low40", "low16"),                  # nombre de la muestra
+            "zzec774-pla": ("full100", "ok41", "crit0"),    # SKU de variante
+            "MUE-01": ("low40", "low16"),                   # SKU de muestra
+        }
+        for texto, esperadas in casos.items():
+            self.assertEqual(sorted(self._ids(search=texto)), self._set(*esperadas), texto)
+        # Ni color ni ubicación entran a la búsqueda.
+        self.assertEqual(self._ids(search="Negro EC774"), [])
+
+    # --- filtros ------------------------------------------------------------------
+
+    def test_filtros_exactos_de_nombre_tipo_y_color(self):
+        self.assertEqual(sorted(self._ids(nombre="Playera azul")), self._set("full100", "ok41", "crit0"))
+        self.assertEqual(self._ids(nombre="playera azul"), [])  # exacto, como ``exactFilter``
+        self.assertEqual(sorted(self._ids(nombre="Muestra bordada")), self._set("low40", "low16"))
+        self.assertEqual(sorted(self._ids(tipo="MP")), self._set("ok80", "crit15", "otra_ubic5"))
+        self.assertEqual(
+            sorted(self._ids(color="Rojo EC774")), self._set("ok80", "crit15", "otra_ubic5", "low40", "low16"),
+        )
+
+    def test_filtro_de_ubicacion(self):
+        self.assertEqual(sorted(self._ids(ubicacion=self.u2.pk)), self._set("ok80", "low40", "crit15"))
+        for invalido in ("x", "0"):
+            self.assertEqual(self._get({"almacen_id": self.alm.pk, "ubicacion": invalido}).status_code, 400)
+
+    def test_filtro_de_rango_de_existencias(self):
+        casos = {
+            "cero": ("crit0",),
+            "1-10": ("otra_ubic5",),
+            "11-100": ("full100", "ok80", "full81", "low40", "ok41", "crit15", "low16"),
+            "mas-100": (),
+        }
+        for rango, esperadas in casos.items():
+            self.assertEqual(sorted(self._ids(existencias=rango)), self._set(*esperadas), rango)
+        self.assertEqual(self._get({"almacen_id": self.alm.pk, "existencias": "10-20"}).status_code, 400)
+
+    def test_filtro_de_mes_en_hora_de_mexico(self):
+        self.assertEqual(sorted(self._ids(mes="2026-10")), self._set("full100", "ok80"))
+        self.assertEqual(self._ids(mes="2026-11"), [self.e["full81"].pk])
+        for invalido in ("2026-13", "2026-1", "oct"):
+            self.assertEqual(self._get({"almacen_id": self.alm.pk, "mes": invalido}).status_code, 400, invalido)
+
+    def test_estado_y_su_filtro_en_los_bordes(self):
+        casos = {
+            "full": ("full100", "full81"),
+            "ok": ("ok80", "ok41"),
+            "low": ("low40", "low16"),
+            "critical": ("crit15", "crit0", "otra_ubic5"),
+        }
+        estados = {f["id"]: f["estado"] for f in self._get({"almacen_id": self.alm.pk}).json()}
+        for estado, esperadas in casos.items():
+            self.assertEqual(sorted(self._ids(estado=estado)), self._set(*esperadas), estado)
+            for clave in esperadas:
+                self.assertEqual(estados[self.e[clave].pk], estado, clave)
+        self.assertEqual(self._get({"almacen_id": self.alm.pk, "estado": "Óptimo"}).status_code, 400)
+
+    def test_max_stock_cero_todo_es_critico(self):
+        filas = self._get({"almacen_id": self.alm_ceros.pk}).json()
+        self.assertEqual({f["estado"] for f in filas}, {"critical"})
+        resumen = self._get({"almacen_id": self.alm_ceros.pk}, url=POR_ALMACEN_RESUMEN_URL).json()
+        self.assertEqual(resumen["max_stock"], 0)
+        self.assertEqual(resumen["kpis"]["requiere_stock"], 2)
+        self.assertEqual(resumen["kpis"]["skus_en_existencia"], 0)
+
+    def test_filtros_se_combinan_con_busqueda(self):
+        self.assertEqual(self._ids(search="chamarra", estado="ok"), [self.e["ok80"].pk])
+
+    # --- ordenamiento -------------------------------------------------------------
+
+    def test_orden_por_defecto_fecha_desc_nulos_al_final_y_desempate_id(self):
+        con_fecha = [self.e[c].pk for c in ("full81", "ok80", "full100", "low40")]
+        sin_fecha = sorted(
+            (self.e[c].pk for c in ("ok41", "crit15", "low16", "crit0", "otra_ubic5")), reverse=True,
+        )
+        self.assertEqual(self._ids(), con_fecha + sin_fecha)
+
+    def test_ordering_lista_blanca_y_desempate(self):
+        # ``-stock``; sin empates en stock aquí, el desempate se prueba con tipo.
+        self.assertEqual(
+            self._ids(ordering="-stock"),
+            self._ids_por(lambda e: -e.stock),
+        )
+        # ``tipo`` con empates: el desempate por ``id`` sigue la dirección del primero
+        # y los NULL (muestras) van al final.
+        orden = self._ids(ordering="tipo")
+        tipos = {"MP": ("ok80", "crit15", "otra_ubic5"), "PT": ("full100", "full81", "ok41", "crit0")}
+        esperado = self._set(*tipos["MP"]) + self._set(*tipos["PT"]) + self._set("low40", "low16")
+        self.assertEqual(orden, esperado)
+        desc = self._ids(ordering="-tipo")
+        self.assertEqual(
+            desc,
+            sorted(self._set(*tipos["PT"]), reverse=True)
+            + sorted(self._set(*tipos["MP"]), reverse=True)
+            + sorted(self._set("low40", "low16"), reverse=True),
+        )
+        # sku y nombre por las anotaciones; SKU null (producto sin variante) al final.
+        por_sku = self._ids(ordering="sku")
+        self.assertEqual(por_sku[-1], self.e["full81"].pk)
+        self.assertEqual(self._ids(ordering="nombre")[:3], self._set("ok80", "crit15", "otra_ubic5"))
+        self.assertEqual(self._ids(ordering="ubicacion_nombre")[-1], self.e["crit0"].pk)
+        # Fuera de la lista blanca: se ignora y queda el orden por defecto (sin 500).
+        self.assertEqual(self._ids(ordering="producto__empresa__razon_social"), self._ids())
+        self.assertEqual(self._ids(ordering="estado"), self._ids())
+
+    def _ids_por(self, clave):
+        return [e.pk for e in sorted(self.e.values(), key=lambda e: (clave(e), e.pk))]
+
+    # --- resumen ------------------------------------------------------------------
+
+    def test_resumen_kpis_y_opciones(self):
+        resumen = self._get({"almacen_id": self.alm.pk}, url=POR_ALMACEN_RESUMEN_URL).json()
+        stocks = [e.stock for e in self.e.values()]
+        self.assertEqual(resumen["almacen_id"], self.alm.pk)
+        self.assertEqual(resumen["max_stock"], 100)
+        self.assertEqual(
+            resumen["kpis"],
+            {
+                "total_registros": 9,
+                "skus_en_existencia": 8,           # stock > 0
+                "requiere_stock": 5,               # low + critical
+                "total_stock": sum(stocks),
+            },
+        )
+        opciones = resumen["opciones"]
+        self.assertEqual(
+            [o["value"] for o in opciones["nombre"]],
+            ["Chamarra", "Muestra bordada", "Playera azul", "Tela sin variante"],
+        )
+        self.assertEqual([o["value"] for o in opciones["tipo"]], ["MP", "PT"])
+        self.assertEqual([o["value"] for o in opciones["color"]], ["Negro EC774", "Rojo EC774"])
+        self.assertEqual(
+            opciones["ubicacion"],
+            [
+                {"value": self.u1.pk, "label": "Alm EC774 - A-1-2-3"},
+                {"value": self.u2.pk, "label": "Alm EC774 - B-1-1-1"},
+                {"value": self.u_otro.pk, "label": "Otro EC774 - Z-9-9-9"},
+            ],
+        )
+        self.assertEqual(
+            opciones["mes"],
+            [
+                {"value": "2026-11", "label": "Noviembre 2026"},
+                {"value": "2026-10", "label": "Octubre 2026"},
+                {"value": "2026-09", "label": "Septiembre 2026"},
+            ],
+        )
+
+    def test_resumen_es_del_almacen_completo_e_ignora_filtros(self):
+        url = POR_ALMACEN_RESUMEN_URL
+        completo = self._get({"almacen_id": self.alm.pk}, url=url).json()
+        filtrado = self._get({"almacen_id": self.alm.pk, "search": "playera", "estado": "full"}, url=url).json()
+        self.assertEqual(completo, filtrado)
+
+    # --- consultas ----------------------------------------------------------------
+
+    def test_numero_de_consultas_constante(self):
+        params = {"almacen_id": self.alm.pk, "limit": 3, "search": "a", "ordering": "nombre"}
+
+        # Las 2 primeras de cada request son el alcance del usuario (sus empresas
+        # M2M y sus sucursales, ``almacenes_en_alcance``), igual que el listado.
+        def medir():
+            with self.assertNumQueries(2 + 2):   # count + página
+                self._get(params)
+            with self.assertNumQueries(2 + 1):   # sin limit: la lista
+                self._get({"almacen_id": self.alm.pk})
+            with self.assertNumQueries(2 + 1):   # todo el resumen
+                self._get({"almacen_id": self.alm.pk}, url=POR_ALMACEN_RESUMEN_URL)
+
+        medir()
+        tela = Producto.objects.get(empresa=self.empresa, nombre="Tela sin variante")
+        for stock in range(20):
+            Existencia.objects.create(almacen=self.alm, ubicacion=self.u1, producto=tela, stock=stock, cantidad="1")
+        medir()
