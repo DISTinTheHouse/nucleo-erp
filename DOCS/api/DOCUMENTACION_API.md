@@ -3042,7 +3042,7 @@ Aplica a todo `/api/v1/finanzas/` salvo Facturama (`facturama/...`) y el webhook
 
 `GET cobros/` y `GET cobros/{id}/` traen, además de `cuenta_bancaria` (id) y `cuenta_bancaria_alias`, dos campos de solo lectura para quien sólo tiene `R-CONTABILIDAD-CXC` y no puede leer `cuentas-bancarias/`:
 
-- `cuenta_bancaria_moneda_codigo` (string, p. ej. `"MXN"`): código ISO de la moneda de la cuenta (la misma fuente que `moneda_codigo` de `cuentas-bancarias/`). Declarado nullable; en la práctica la cuenta y su moneda son obligatorias.
+- `cuenta_bancaria_moneda_codigo` (string, p. ej. `"MXN"`): código ISO de la moneda de la cuenta (la misma fuente que `moneda_codigo` de `cuentas-bancarias/`). `null` si la moneda no tiene código ISO (nunca `""`); la cuenta y su moneda son obligatorias, así que no hay otro caso de `null`. Esas monedas tampoco salen en `cobros/resumen/`.
 - `cuenta_bancaria_activo` (bool): si la cuenta sigue activa.
 
 No agregan consultas: el listado une cliente, cuenta y moneda y trae las líneas en bloque (2 consultas en total, antes 3 por fila).

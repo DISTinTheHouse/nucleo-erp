@@ -9274,6 +9274,25 @@ class CobroCamposCuentaBancariaTests(LecturaJerarquicaBase):
                     self.assertEqual(fila["cuenta_bancaria_moneda_codigo"], codigo)
                     self.assertIs(fila["cuenta_bancaria_activo"], activo)
 
+    def test_moneda_sin_codigo_llega_como_null(self):
+        sin_codigo = Moneda.objects.create(codigo_iso="", nombre="Sin código")
+        banco = Banco.objects.create(empresa=self.a["empresa"], nombre="Banco sin código")
+        cuenta = CuentaBancaria.objects.create(
+            empresa=self.a["empresa"], banco=banco, moneda=sin_codigo, alias="Sin código",
+        )
+        cobro = Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=cuenta,
+            total_cobrado=Decimal("3.00"),
+        )
+        client = self._client(self._usuario_con("sin-codigo", ["R-CONTABILIDAD-CXC"]))
+        filas = {f["id"]: f for f in client.get(COBROS_URL).data}
+        self.assertIsNone(filas[cobro.pk]["cuenta_bancaria_moneda_codigo"])
+        self.assertIsNone(client.get(f"{COBROS_URL}{cobro.pk}/").data["cuenta_bancaria_moneda_codigo"])
+        self.assertEqual(filas[self.registros["a"]["cobros"]]["cuenta_bancaria_moneda_codigo"], "MXN")
+        # Y el resumen no la lista: sólo monedas con código.
+        monedas = [m["moneda_codigo"] for m in client.get(f"{COBROS_URL}resumen/").json()["por_moneda"]]
+        self.assertEqual(monedas, ["MXN"])
+
     def test_los_campos_no_agregan_consultas_por_fila(self):
         client = self._client(self._usuario_con("n1", ["R-CONTABILIDAD-CXC"]))
 
