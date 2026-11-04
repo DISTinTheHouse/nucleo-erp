@@ -9455,7 +9455,7 @@ class CobrosResumenTests(LecturaJerarquicaBase):
                 with self.subTest(url=url, empresa_id=valor):
                     resp = self._client(root).get(f"{url}?empresa_id={valor}")
                     self.assertEqual(resp.status_code, 400)
-                    self.assertEqual(str(resp.data["empresa"][0]), "Empresa no encontrada.")
+                    self.assertEqual(str(resp.data["empresa"]), "Empresa no encontrada.")
 
     def test_permiso_de_seccion(self):
         for claves in (["R-CONTABILIDAD-FACTURACION"], ["R-CONTABILIDAD-CLIENTES"], []):

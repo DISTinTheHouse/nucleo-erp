@@ -3051,7 +3051,7 @@ No agregan consultas: el listado une cliente, cuenta y moneda y trae las líneas
 
 El `cobros_periodo` del dashboard, desglosado por la moneda de la cuenta bancaria, legible con `R-CONTABILIDAD-CXC`.
 
-- **Parámetros**: `fecha_inicio` / `fecha_fin` (`AAAA-MM-DD`; alias `fecha_desde` / `fecha_hasta`). Por omisión, del día 1 del mes en curso a hoy, igual que el dashboard. Fecha mal formada → `400` con el nombre del parámetro; `fecha_inicio` posterior a `fecha_fin` → `400 {"fecha_fin": ["No puede ser anterior a fecha_inicio."]}` (mismo mensaje que `reportes-contables/`). Superusuario: `?empresa_id=` (o `?empresa=`); sin él usa su propia empresa y, si no tiene, `400`, como el dashboard. Un `empresa_id` que no es un entero o no existe → `400 {"empresa": ["Empresa no encontrada."]}`, aquí y en `dashboard/` (antes uno no numérico daba `500`).
+- **Parámetros**: `fecha_inicio` / `fecha_fin` (`AAAA-MM-DD`; alias `fecha_desde` / `fecha_hasta`). Por omisión, del día 1 del mes en curso a hoy, igual que el dashboard. Fecha mal formada → `400` con el nombre del parámetro; `fecha_inicio` posterior a `fecha_fin` → `400 {"fecha_fin": "No puede ser anterior a fecha_inicio."}` (mismo mensaje que `reportes-contables/`). Superusuario: `?empresa_id=` (o `?empresa=`); sin él usa su propia empresa y, si no tiene, `400`, como el dashboard. Un `empresa_id` que no es un entero o no existe → `400 {"empresa": "Empresa no encontrada."}`, aquí y en `dashboard/` (antes uno no numérico daba `500`).
 - **Respuesta**:
 
 ```json
