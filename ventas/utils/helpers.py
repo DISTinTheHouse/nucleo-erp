@@ -253,7 +253,8 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user, validar_matriz
         empresa_id=cotizacion_obj.empresa_id,
     ).in_bulk()
     # Tallas permitidas por categoría, para las muestras (las de catálogo ya las
-    # valida su variante). Una consulta; categoría sin tallas configuradas no restringe.
+    # valida su variante). Una consulta; como en el catálogo, una categoría sin
+    # tallas configuradas no acepta ninguna (#927).
     tallas_por_categoria = {}
     for cat_id, talla_id in CategoriaProductoTalla.objects.filter(
         categoria_producto_id__in=categorias
@@ -368,11 +369,18 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user, validar_matriz
             permitidas = tallas_por_categoria.get(getattr(categoria_producto_obj, "pk", None))
             # La copia del servidor desde mesa de control (``validar_matriz=False``)
             # no revalida: el pedido ya aceptó la talla y no se puede corregir ahí (#761).
-            if validar_matriz and producto is None and permitidas and talla.pk not in permitidas:
-                raise ValidationError({"detalle": (
-                    f"Partida {numero}: la talla {talla.nombre} no corresponde a la categoría "
-                    f"{categoria_producto_obj.nombre}."
-                )})
+            # Sin categoría no hay matriz que validar.
+            if validar_matriz and producto is None and categoria_producto_obj is not None:
+                if not permitidas:
+                    raise ValidationError({"detalle": (
+                        f"Partida {numero}: la categoría {categoria_producto_obj.nombre} "
+                        "no tiene tallas configuradas."
+                    )})
+                if talla.pk not in permitidas:
+                    raise ValidationError({"detalle": (
+                        f"Partida {numero}: la talla {talla.nombre} no corresponde a la categoría "
+                        f"{categoria_producto_obj.nombre}."
+                    )})
             if t.get("lleva_bordado") and t.get("bordado_config") is None:
                 raise ValidationError(
                     {

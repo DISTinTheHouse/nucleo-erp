@@ -1959,8 +1959,15 @@ def _categoria_para_alta(pedido, detalle, tallas):
         raise ValidationError({'alta_catalogo': (
             f"La categoría {categoria.nombre} está inactiva; no se puede dar de alta en catálogo."
         )})
+    # Misma regla que el catálogo (``talla_permitida_para_producto``): una categoría
+    # sin tallas configuradas no acepta ninguna (#927).
     permitidas = set(categoria.tallas.values_list('pk', flat=True))
-    fuera = [t.nombre for t in tallas if permitidas and t.pk not in permitidas]
+    if not permitidas:
+        raise ValidationError({'alta_catalogo': (
+            f"La categoría {categoria.nombre} no tiene tallas configuradas; "
+            'no se puede dar de alta en catálogo.'
+        )})
+    fuera = [t.nombre for t in tallas if t.pk not in permitidas]
     if fuera:
         raise ValidationError({'alta_catalogo': (
             f"Tallas que no son de la categoría {categoria.nombre}: {', '.join(fuera)}."
