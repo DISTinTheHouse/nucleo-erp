@@ -1,0 +1,198 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Flujo de Mesa de control",
+    "output": "flujo-mesa-control.html",
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "database": {
+          "label": "Pedido"
+        },
+        "security": {
+          "label": "Mesa de control"
+        },
+        "backend": {
+          "label": "Destino"
+        },
+        "external": {
+          "label": "Excepción"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "pedido",
+      "label": "01 / Cotización y pedido"
+    },
+    {
+      "id": "excepcion",
+      "label": "EX / Excepciones",
+      "variant": "exception"
+    },
+    {
+      "id": "destinos",
+      "label": "02 / Destinos"
+    }
+  ],
+  "mainPath": [
+    "revision",
+    "autorizado",
+    "confirmacion",
+    "programacion"
+  ],
+  "nodes": [
+    {
+      "id": "revision",
+      "lane": "pedido",
+      "col": 0,
+      "type": "security",
+      "label": "En revisión",
+      "sublabel": "cotización"
+    },
+    {
+      "id": "autorizado",
+      "lane": "pedido",
+      "col": 1,
+      "type": "database",
+      "label": "Pedido autorizado",
+      "sublabel": "stock descontado",
+      "width": 140
+    },
+    {
+      "id": "confirmacion",
+      "lane": "pedido",
+      "col": 2,
+      "type": "security",
+      "label": "Confirmación",
+      "sublabel": "clasificación + fecha",
+      "width": 140
+    },
+    {
+      "id": "programacion",
+      "lane": "pedido",
+      "col": 3,
+      "type": "security",
+      "label": "Programación",
+      "sublabel": "piezas por destino",
+      "width": 140
+    },
+    {
+      "id": "produccion",
+      "lane": "destinos",
+      "col": 3,
+      "type": "backend",
+      "label": "Producción",
+      "sublabel": "bordado · reflejante · corte",
+      "width": 160
+    },
+    {
+      "id": "embarque",
+      "lane": "destinos",
+      "col": 4,
+      "type": "backend",
+      "label": "Embarque / apartado",
+      "sublabel": "almacén",
+      "width": 150
+    },
+    {
+      "id": "rechazada",
+      "lane": "excepcion",
+      "col": 0,
+      "type": "external",
+      "label": "Rechazada",
+      "sublabel": "regresa al vendedor"
+    },
+    {
+      "id": "cambios",
+      "lane": "excepcion",
+      "col": 1,
+      "type": "external",
+      "label": "Cambios solicitados",
+      "sublabel": "acepta o revierte",
+      "width": 140
+    },
+    {
+      "id": "cancelado",
+      "lane": "excepcion",
+      "col": 2,
+      "type": "external",
+      "label": "Pedido cancelado",
+      "sublabel": "devuelve stock · terminal",
+      "width": 160
+    }
+  ],
+  "edges": [
+    {
+      "from": "revision",
+      "to": "autorizado",
+      "label": "autoriza",
+      "role": "main"
+    },
+    {
+      "from": "autorizado",
+      "to": "confirmacion",
+      "label": "confirma",
+      "role": "main"
+    },
+    {
+      "from": "confirmacion",
+      "to": "programacion",
+      "label": "solo confirmado",
+      "role": "main"
+    },
+    {
+      "from": "programacion",
+      "to": "produccion",
+      "label": "servicios",
+      "role": "branch"
+    },
+    {
+      "from": "programacion",
+      "to": "embarque",
+      "label": "logística",
+      "role": "branch"
+    },
+    {
+      "from": "revision",
+      "to": "rechazada",
+      "label": "rechaza",
+      "role": "error"
+    },
+    {
+      "from": "autorizado",
+      "to": "cambios",
+      "label": "vendedor edita",
+      "role": "branch"
+    },
+    {
+      "from": "confirmacion",
+      "to": "cancelado",
+      "label": "cancelar con motivo",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Qué decide Mesa de control",
+      "items": [
+        "Autorizar copia la cotización al pedido y descuenta stock; sin stock no se autoriza",
+        "Solo se programa un pedido confirmado y no cancelado (EC-750)",
+        "Ya programado, el pedido no pierde su confirmación",
+        "Producción solo abre órdenes del destino que Mesa programó"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Cambios y cancelación",
+      "items": [
+        "Aceptar ajusta el inventario a la nueva versión; revertir restaura la aprobada",
+        "Cancelar exige motivo y nada vivo: devuelve el stock y libera reservas",
+        "Un pedido CANCELADO no cambia de estatus ni se programa"
+      ]
+    }
+  ]
+}
