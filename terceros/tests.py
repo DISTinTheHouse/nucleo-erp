@@ -1543,6 +1543,14 @@ class DireccionClienteTests(TestCase):
                 self.assertEqual(resp.status_code, 400)
                 self.assertIn("cliente", resp.data)
 
+    def test_filtro_invalido_es_400_tambien_sin_empresa(self):
+        sin_empresa = Usuario.objects.create(username="sin@x.test", email="sin@x.test")
+        resp = self._api(sin_empresa).get(DIRECCIONES_URL, {"cliente": "abc"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.data, {"cliente": "Debe ser un entero válido."})
+        # Con un entero válido sigue sin ver nada.
+        self.assertEqual(self._listado(sin_empresa, cliente=self.cliente.pk), [])
+
     def test_sin_filtro_o_vacio_regresa_el_listado_completo_de_la_empresa(self):
         propias = {self.direccion.pk, self.direccion_sin_asignar.pk}
         self.assertEqual(set(self._listado(self.admin)), propias)
@@ -1553,6 +1561,14 @@ class DireccionClienteTests(TestCase):
         self.assertEqual(self._listado(self.superusuario, cliente=self.cliente.pk), [self.direccion.pk])
         todas = set(self._listado(self.superusuario))
         self.assertTrue({self.direccion.pk, self.direccion_ajena.pk} <= todas)
+
+    def test_superusuario_con_empresa_sigue_viendo_todas_las_empresas(self):
+        # Su ``empresa`` no lo acota (a diferencia de produccion, #361).
+        superusuario = Usuario.objects.create(
+            username="su-a@x.test", email="su-a@x.test", empresa=self.empresa, is_superuser=True
+        )
+        self.assertTrue({self.direccion.pk, self.direccion_ajena.pk} <= set(self._listado(superusuario)))
+        self.assertEqual(self._listado(superusuario, cliente=self.ajeno.pk), [self.direccion_ajena.pk])
 
     def test_filtro_no_aplica_al_detalle(self):
         # Como en recepciones (#889), el filtro es del listado.
@@ -1573,10 +1589,11 @@ class DireccionClienteTests(TestCase):
             self._listado(self.admin),
             [predeterminada.pk, *sorted([self.direccion.pk, self.direccion_sin_asignar.pk, segunda.pk])],
         )
-        # Un ``?ordering=`` explícito sigue reemplazando el orden por defecto.
+        # Un ``?ordering=`` explícito reemplaza el orden por defecto: con ``id``
+        # ascendente la predeterminada (el id más alto) ya no va primero.
         self.assertEqual(
-            self._listado(self.admin, cliente=self.cliente.pk, ordering="-id"),
-            [predeterminada.pk, segunda.pk, self.direccion.pk],
+            self._listado(self.admin, cliente=self.cliente.pk, ordering="id"),
+            [self.direccion.pk, segunda.pk, predeterminada.pk],
         )
 
 
