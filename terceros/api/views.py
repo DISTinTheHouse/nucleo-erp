@@ -742,12 +742,18 @@ class DireccionClienteViewSet(viewsets.ModelViewSet):
         # payload antes de EC-570.
         user = self.request.user
         qs = super().get_queryset()
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if empresa:
-            return qs.filter(empresa=empresa, cliente__empresa=empresa)
-        return qs.none()
+        if not getattr(user, "is_superuser", False):
+            empresa = getattr(user, "empresa", None)
+            if not empresa:
+                return qs.none()
+            qs = qs.filter(empresa=empresa, cliente__empresa=empresa)
+        # ``?cliente=`` del listado (EC-775), después del alcance: un cliente de
+        # otra empresa no trae filas, igual que un id inexistente.
+        if self.action == "list":
+            cliente_id = entero_param(self.request, "cliente")
+            if cliente_id is not None:
+                qs = qs.filter(cliente_id=cliente_id)
+        return qs
 
     def perform_create(self, serializer):
         # ``validate_cliente`` ya garantizó que el cliente es de la empresa y tiene empresa.

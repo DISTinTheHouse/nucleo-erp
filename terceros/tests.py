@@ -1510,6 +1510,55 @@ class DireccionClienteTests(TestCase):
         resp = self._api(self.admin).patch(url, {"cliente": self.extranjero.pk, "codigo_postal": "1234"}, format="json")
         self.assertEqual(resp.status_code, 200, resp.data)
 
+    # EC-775: ``?cliente=`` acota el listado después del alcance por empresa.
+
+    def _listado(self, user, **params):
+        resp = self._api(user).get(DIRECCIONES_URL, params)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIsInstance(resp.data, list)  # Arreglo plano, sin paginación.
+        return [fila["id"] for fila in resp.data]
+
+    def test_filtro_por_cliente_solo_trae_sus_direcciones_activas(self):
+        from terceros.models import DireccionCliente
+
+        segunda = DireccionCliente.objects.create(cliente=self.cliente, empresa=self.empresa, **self._datos_modelo())
+        baja = DireccionCliente.objects.create(cliente=self.cliente, empresa=self.empresa, **self._datos_modelo())
+        baja.soft_delete()
+        # El vendedor también: el alcance es la empresa, no sus clientes asignados.
+        for user in (self.admin, self.vendedor):
+            with self.subTest(user=user.email):
+                self.assertEqual(set(self._listado(user, cliente=self.cliente.pk)), {self.direccion.pk, segunda.pk})
+                self.assertEqual(self._listado(user, cliente=self.cliente_sin_asignar.pk), [self.direccion_sin_asignar.pk])
+
+    def test_filtro_con_cliente_de_otra_empresa_regresa_lista_vacia(self):
+        # 200 [] como un id inexistente: el alcance por empresa ya lo excluye.
+        self.assertEqual(self._listado(self.admin, cliente=self.ajeno.pk), [])
+        self.assertEqual(self._listado(self.admin, cliente=999999999), [])
+        self.assertEqual(self._listado(self.admin_otra, cliente=self.cliente.pk), [])
+
+    def test_filtro_con_valor_invalido_es_400(self):
+        for valor in ("abc", "1.5", "1,2"):
+            with self.subTest(valor=valor):
+                resp = self._api(self.admin).get(DIRECCIONES_URL, {"cliente": valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("cliente", resp.data)
+
+    def test_sin_filtro_o_vacio_regresa_el_listado_completo_de_la_empresa(self):
+        propias = {self.direccion.pk, self.direccion_sin_asignar.pk}
+        self.assertEqual(set(self._listado(self.admin)), propias)
+        self.assertEqual(set(self._listado(self.admin, cliente="")), propias)
+
+    def test_superusuario_filtra_por_cliente_de_cualquier_empresa(self):
+        self.assertEqual(self._listado(self.superusuario, cliente=self.ajeno.pk), [self.direccion_ajena.pk])
+        self.assertEqual(self._listado(self.superusuario, cliente=self.cliente.pk), [self.direccion.pk])
+        todas = set(self._listado(self.superusuario))
+        self.assertTrue({self.direccion.pk, self.direccion_ajena.pk} <= todas)
+
+    def test_filtro_no_aplica_al_detalle(self):
+        # Como en recepciones (#889), el filtro es del listado.
+        url = f"{DIRECCIONES_URL}{self.direccion.pk}/"
+        self.assertEqual(self._api(self.admin).get(url, {"cliente": self.ajeno.pk}).status_code, 200)
+
 
 class ClientesContabilidadTests(TestCase):
     """CONTABILIDAD ve todos los clientes de su empresa, no solo los asignados."""
