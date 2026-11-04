@@ -76,4 +76,4 @@ class FacturaPolizaService:
     @staticmethod
     def cancelar(factura, usuario=None):
         """Contrapóliza de la factura, fechada hoy. Sin póliza no hace nada."""
-        return PolizaMotorService.cancelar_de(ORIGEN, factura.pk, usuario)
+        return PolizaMotorService.cancelar_de(ORIGEN, factura.pk, usuario, empresa_id=factura.empresa_id)

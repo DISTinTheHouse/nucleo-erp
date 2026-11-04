@@ -3456,6 +3456,9 @@ No mandes `pago` dentro de `pago_detalles`: mismo caso.
 #### Pólizas y conciliaciones bancarias
 
 - **Permiso:** toda escritura en `polizas/` y `conciliaciones-bancarias/` (`POST`, `PATCH`, `PUT`, `DELETE`, `cerrar/`, `cancelar/`, `preparar/`) exige `E-FIN-FACTURAS`; sin él → `403`. Excepción: `POST polizas/validar-cuadre/` sólo calcula: exige `R-CONTABILIDAD`, no `E-FIN-FACTURAS`.
+- **Pólizas, campos de solo lectura (#892, #896):** `estatus`, `origen_tipo`, `origen_id`, `poliza_reversa_de` y `usuario_creacion` se ignoran si llegan en `POST`/`PATCH`. La póliza nace en `Borrador` y su estatus cambia solo con `contabilizar/` (exige cuadre) y `cancelar/`; origen y reversa los pone el motor; `usuario_creacion` es quien la da de alta.
+- **Filtros booleanos de finanzas (#899):** `activo`, `acepta_movimientos`, `saldo_pendiente`, `vencidas` y `notificado` aceptan `true/1/si/yes` y `false/0/no` (o vacío). Otro valor → `400 {"<campo>": "Debe ser true o false."}`.
+- **Facturas eliminadas (#857, #858):** `cancelar/` sobre una factura con `activo=false` → `400 {"estatus": "La factura está eliminada y no se puede cancelar."}`. Eliminar un Borrador regresa a existencia lo que su alta volvió a descontar (refacturación), igual que cancelarlo.
 - **Cancelar una conciliación `Cerrada`:** sus movimientos bancarios regresan a `Pendiente` (salvo los que estén en otra conciliación cerrada) y la conciliación queda `Cancelada`. Refresca la lista de movimientos después.
 
 #### Clientes contabilidad

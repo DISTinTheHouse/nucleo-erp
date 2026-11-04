@@ -58,7 +58,7 @@ class PolizaService:
         Si ya tiene contrapóliza, regresa esa: cancelar dos veces no duplica nada.
         """
         original = Poliza.objects.select_for_update().get(pk=poliza.pk)
-        existente = Poliza.objects.filter(poliza_reversa_de=original).first()
+        existente = Poliza.objects.filter(poliza_reversa_de=original, empresa_id=original.empresa_id).first()
         if existente:
             return existente
         if original.estatus != Poliza.PolizaStatus.CONTABILIZADA:

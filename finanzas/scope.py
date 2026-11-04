@@ -11,6 +11,8 @@ from rest_framework.exceptions import ValidationError
 
 def sucursales_visibles(user):
     """Ids de sucursal que ve ``user``; ``None`` = sin acotar."""
+    if not getattr(user, "is_authenticated", False):
+        return []  # p. ej. al generar el schema OpenAPI (#890)
     if user.is_superuser or getattr(user, "is_admin_empresa", False):
         return None
     return user.sucursales_permitidas()

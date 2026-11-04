@@ -44,4 +44,4 @@ class MovimientoBancarioPolizaService:
 
     @staticmethod
     def cancelar(movimiento, usuario=None):
-        return PolizaMotorService.cancelar_de(ORIGEN, movimiento.pk, usuario)
+        return PolizaMotorService.cancelar_de(ORIGEN, movimiento.pk, usuario, empresa_id=movimiento.cuenta_bancaria.empresa_id)

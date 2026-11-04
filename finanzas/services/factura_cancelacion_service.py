@@ -24,6 +24,8 @@ class FacturaCancelacionService:
         SAT y el ERP no pierde que el CFDI ya está cancelado (#554).
         """
         actual = Factura.objects.get(pk=factura.pk)
+        if not actual.activo:  # #857, como emitir/ y timbrar/
+            raise ErrorDeNegocio({"estatus": "La factura está eliminada y no se puede cancelar."})
         if actual.estatus == Factura.FacturaStatus.CANCELADA:
             # #567: cancelada en el ERP antes de cancelar su CFDI; se cancela ahora.
             if actual.cfdi_uuid and not actual.cfdi_cancelado:
@@ -47,6 +49,8 @@ class FacturaCancelacionService:
     @transaction.atomic
     def _cancelar_en_erp(factura, usuario, motivo):
         bloqueada = Factura.objects.select_for_update().get(pk=factura.pk)
+        if not bloqueada.activo:
+            raise ErrorDeNegocio({"estatus": "La factura está eliminada y no se puede cancelar."})
         if bloqueada.estatus == Factura.FacturaStatus.CANCELADA:
             return None
         FacturaCancelacionService._exigir_sin_notas_emitidas(bloqueada)
