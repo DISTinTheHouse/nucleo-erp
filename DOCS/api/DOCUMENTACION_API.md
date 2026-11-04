@@ -3049,7 +3049,7 @@ No agregan consultas: el listado une cliente, cuenta y moneda y trae las líneas
 
 #### Resumen de cobros por moneda — `GET /api/v1/finanzas/cobros/resumen/` (EC-746)
 
-El `cobros_periodo` del dashboard, desglosado por la moneda de la cuenta bancaria, legible con `R-CONTABILIDAD-CXC`.
+Los cobros aplicados del periodo, agrupados por el código de la moneda de la cuenta bancaria, legibles con `R-CONTABILIDAD-CXC`.
 
 - **Parámetros**: `fecha_inicio` / `fecha_fin` (`AAAA-MM-DD`; alias `fecha_desde` / `fecha_hasta`). Por omisión, del día 1 del mes en curso a hoy, igual que el dashboard. Fecha mal formada → `400` con el nombre del parámetro; `fecha_inicio` posterior a `fecha_fin` → `400 {"fecha_fin": "No puede ser anterior a fecha_inicio."}` (mismo mensaje que `reportes-contables/`). Superusuario: `?empresa_id=` (o `?empresa=`); sin él usa su propia empresa y, si no tiene, `400`, como el dashboard. Un `empresa_id` que no es un entero o no existe → `400 {"empresa": "Empresa no encontrada."}`, aquí y en `dashboard/` (antes uno no numérico daba `500`).
 - **Respuesta**:
@@ -3058,15 +3058,16 @@ El `cobros_periodo` del dashboard, desglosado por la moneda de la cuenta bancari
 {
   "periodo": {"fecha_inicio": "2026-11-01", "fecha_fin": "2026-11-03"},
   "por_moneda": [
-    {"moneda_id": 1, "moneda_codigo": "MXN", "cantidad": 2, "monto_total": "50.01"},
+    {"moneda_id": null, "moneda_codigo": "MXN", "cantidad": 3, "monto_total": "60.00"},
     {"moneda_id": 7, "moneda_codigo": "USD", "cantidad": 0, "monto_total": "0.00"}
   ]
 }
 ```
 
-- `por_moneda`: una entrada por cada moneda distinta de las cuentas bancarias de la empresa (activas o no) que tenga código ISO, ordenadas por `moneda_codigo`, **incluidas las que no tienen cobros** (`cantidad: 0`, `monto_total: "0.00"`). Lista vacía si la empresa no tiene cuentas. Sólo se exponen id y código de la moneda, ningún otro dato bancario.
-- Por moneda: cobros `Aplicado` con `fecha_cobro` dentro del periodo y cuenta en esa moneda; `cantidad` es el número y `monto_total` la suma de `total_cobrado` con 2 decimales, en string.
-- **Alcance**: el del listado de cobros (activos, empresa y, para quien no es admin, sucursal #753), sin sus filtros de query (`cliente`, `estatus`, etc.). Para quien ve toda la empresa coincide con `cobros_periodo` del dashboard con `?moneda_id=`.
+- `por_moneda`: una entrada por cada **código** (`codigo_iso` tal como está guardado, sin normalizar mayúsculas ni espacios; los vacíos se excluyen) de las monedas de las cuentas bancarias de la empresa (activas o no), ordenadas por `moneda_codigo`, **incluidos los que no tienen cobros** (`cantidad: 0`, `monto_total: "0.00"`). Varias filas de `Moneda` con el mismo código (p. ej. la MXN global y una MXN privada de la empresa) dan una sola entrada con los cobros sumados. Lista vacía si la empresa no tiene cuentas. Sólo se exponen id y código de la moneda, ningún otro dato bancario.
+- `moneda_id` es **nullable**: el id cuando una sola `Moneda` respalda la entrada, `null` cuando son varias con ese código. La clave estable de cada entrada es `moneda_codigo`.
+- Por código: cobros `Aplicado` con `fecha_cobro` dentro del periodo y cuenta en una moneda con ese código; `cantidad` es el número y `monto_total` la suma de `total_cobrado` con 2 decimales, en string.
+- **Alcance**: el del listado de cobros (activos, empresa y, para quien no es admin, sucursal #753), sin sus filtros de query (`cliente`, `estatus`, etc.). Para quien ve toda la empresa, cada entrada es la SUMA de `cobros_periodo` del dashboard con `?moneda_id=` sobre cada moneda de ese código (el dashboard filtra por id, no por código).
 - Tres consultas como máximo, sin importar cuántos cobros haya.
 
 ### Catálogo oficial de endpoints

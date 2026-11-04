@@ -9404,6 +9404,53 @@ class CobrosResumenTests(LecturaJerarquicaBase):
                         (dash["cobros_periodo"]["cantidad"], dash["cobros_periodo"]["monto_total"]),
                     )
 
+    def _cuenta(self, tenant, moneda, alias):
+        banco = Banco.objects.create(empresa=tenant["empresa"], nombre=f"Banco {alias}")
+        return CuentaBancaria.objects.create(empresa=tenant["empresa"], banco=banco, moneda=moneda, alias=alias)
+
+    def test_monedas_con_el_mismo_codigo_se_suman_y_moneda_id_es_null(self):
+        # ``self.moneda`` es la MXN global (empresa=None); ésta, una MXN privada de la empresa.
+        mxn_privada = Moneda.objects.create(codigo_iso="MXN", nombre="Peso privado", empresa=self.a["empresa"])
+        Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"],
+            cuenta_bancaria=self._cuenta(self.a, mxn_privada, "MXN privada"), total_cobrado=Decimal("9.99"),
+        )
+        # Otra USD (privada) sin cobros: la USD sale una sola vez, en cero.
+        usd_privada = Moneda.objects.create(codigo_iso="USD", nombre="Dólar privado", empresa=self.a["empresa"])
+        self._cuenta(self.a, usd_privada, "USD privada")
+        # La MXN privada de la otra empresa, con un cobro, no aparece ni suma.
+        mxn_b = Moneda.objects.create(codigo_iso="MXN", nombre="Peso de B", empresa=self.b["empresa"])
+        Cobro.objects.create(
+            empresa=self.b["empresa"], cliente=self.b["cliente"],
+            cuenta_bancaria=self._cuenta(self.b, mxn_b, "MXN de B"), total_cobrado=Decimal("777.00"),
+        )
+        user = self._usuario_con("mismo-codigo", ["R-CONTABILIDAD"])
+        data = self._resumen(user).json()
+        self.assertEqual(data["por_moneda"], [
+            {"moneda_id": None, "moneda_codigo": "MXN", "cantidad": 3, "monto_total": "60.00"},
+            {"moneda_id": None, "moneda_codigo": "USD", "cantidad": 0, "monto_total": "0.00"},
+        ])
+        # Por código es la suma del dashboard sobre cada moneda_id de ese código.
+        client = self._client(user)
+        cantidad, monto = 0, Decimal("0")
+        for moneda in (self.moneda, mxn_privada):
+            dash = client.get(f"/api/v1/finanzas/dashboard/?moneda_id={moneda.pk}").json()["cobros_periodo"]
+            cantidad += dash["cantidad"]
+            monto += Decimal(dash["monto_total"])
+        self.assertEqual((cantidad, f"{monto:.2f}"), (3, "60.00"))
+        # La otra empresa suma su MXN privada con la global (cobro de _registros), sin lo de A.
+        data_b = self._resumen(self._usuario_con("mismo-codigo-b", ["R-CONTABILIDAD-CXC"], tenant=self.b)).json()
+        mxn_de_b = next(m for m in data_b["por_moneda"] if m["moneda_codigo"] == "MXN")
+        self.assertIsNone(mxn_de_b["moneda_id"])  # la global (de _registros) y la privada de B
+        self.assertEqual((mxn_de_b["cantidad"], mxn_de_b["monto_total"]), (2, "817.00"))
+
+    def test_una_sola_moneda_por_codigo_lleva_su_id(self):
+        data = self._resumen(self._usuario_con("un-id", ["R-CONTABILIDAD-CXC"])).json()
+        self.assertEqual(
+            [(m["moneda_codigo"], m["moneda_id"]) for m in data["por_moneda"]],
+            [("MXN", self.moneda.pk), ("USD", self.usd.pk)],
+        )
+
     def test_no_cuenta_cobros_ni_monedas_de_otra_empresa(self):
         data = self._resumen(self._usuario_con("tenant", ["R-CONTABILIDAD-CXC"])).json()
         self.assertEqual([m["moneda_codigo"] for m in data["por_moneda"]], ["MXN", "USD"])

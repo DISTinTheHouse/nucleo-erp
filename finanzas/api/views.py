@@ -1995,10 +1995,13 @@ class CobroViewSet(FinanzasBaseViewSet):
     def resumen(self, request):
         """Cobros aplicados del periodo por moneda de la cuenta bancaria (EC-746).
 
-        Lo mismo que ``cobros_periodo`` del dashboard, pero por moneda y con el alcance
-        del listado (sucursal incluida), para quien sólo tiene ``R-CONTABILIDAD-CXC``.
-        Una entrada por cada moneda de las cuentas bancarias de la empresa (activas o
-        no), aunque no tenga cobros. Ignora los filtros del listado (cliente, estatus...).
+        El ``cobros_periodo`` del dashboard por código de moneda y con el alcance del
+        listado (sucursal incluida), para quien sólo tiene ``R-CONTABILIDAD-CXC``. Una
+        entrada por cada ``codigo_iso`` (tal cual, sin normalizar) de las monedas de las
+        cuentas bancarias de la empresa (activas o no), aunque no tenga cobros: varias
+        filas de ``Moneda`` con el mismo código (global y privada) se suman, y entonces
+        ``moneda_id`` es ``None``. Por código equivale a la SUMA del dashboard con
+        ``?moneda_id=`` sobre cada moneda de ese código. Ignora los filtros del listado.
         Tres consultas como máximo, sin importar cuántos cobros haya: la empresa (sólo el
         superusuario con ``?empresa_id=``), las monedas y el agregado, además de las de
         permisos.
@@ -2022,40 +2025,43 @@ class CobroViewSet(FinanzasBaseViewSet):
         else:
             empresa = getattr(user, "empresa", None)
 
-        monedas = []
+        # Código -> ids de ``Moneda`` de las cuentas de la empresa con ese código.
+        monedas_por_codigo = {}
         if empresa is not None:
-            monedas = list(
+            for moneda_id, codigo in (
                 CuentaBancaria.objects.filter(empresa=empresa)
                 .exclude(moneda__codigo_iso="")
                 .values_list("moneda_id", "moneda__codigo_iso")
                 .distinct()
-                .order_by("moneda__codigo_iso", "moneda_id")
-            )
+            ):
+                monedas_por_codigo.setdefault(codigo, set()).add(moneda_id)
         totales = {}
-        if monedas:
+        if monedas_por_codigo:
             totales = {
-                fila["cuenta_bancaria__moneda_id"]: fila
+                fila["cuenta_bancaria__moneda__codigo_iso"]: fila
                 for fila in cobros.filter(
                     estatus=Cobro.Estatus.APLICADO,
                     fecha_cobro__gte=fecha_inicio,
                     fecha_cobro__lte=fecha_fin,
-                    cuenta_bancaria__moneda_id__in=[m[0] for m in monedas],
+                    cuenta_bancaria__moneda_id__in=set().union(*monedas_por_codigo.values()),
                 )
-                .values("cuenta_bancaria__moneda_id")
+                .values("cuenta_bancaria__moneda__codigo_iso")
                 .annotate(cantidad=Count("id"), monto_total=Sum("total_cobrado"))
                 .order_by()
             }
+        por_moneda = []
+        for codigo in sorted(monedas_por_codigo):
+            ids = monedas_por_codigo[codigo]
+            fila = totales.get(codigo, {})
+            por_moneda.append({
+                "moneda_id": next(iter(ids)) if len(ids) == 1 else None,
+                "moneda_codigo": codigo,
+                "cantidad": fila.get("cantidad", 0),
+                "monto_total": str(_quantize(fila.get("monto_total"))),
+            })
         return Response({
             "periodo": {"fecha_inicio": fecha_inicio.isoformat(), "fecha_fin": fecha_fin.isoformat()},
-            "por_moneda": [
-                {
-                    "moneda_id": moneda_id,
-                    "moneda_codigo": codigo,
-                    "cantidad": totales.get(moneda_id, {}).get("cantidad", 0),
-                    "monto_total": str(_quantize(totales.get(moneda_id, {}).get("monto_total"))),
-                }
-                for moneda_id, codigo in monedas
-            ],
+            "por_moneda": por_moneda,
         })
 
     @transaction.atomic
