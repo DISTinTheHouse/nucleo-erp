@@ -10,9 +10,13 @@ from finanzas.models import Factura, FacturaDetalle
 from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.utils.folios import TIPOS_DOCUMENTO_FACTURA, generate_factura_folio
 from nucleo.models import SerieFolio
-from ventas.models import PedidoDetalleTalla
+from ventas.models import PedidoDetalleTalla, PedidoServicioExtra
 
 CENTAVO = Decimal('0.01')
+
+# Claves SAT de un servicio extra sin las suyas (#744): "Servicios de
+# transporte de carga..." no aplica a todo; se usa la genérica de servicio.
+SAT_SERVICIO_DEFECTO = ('78101802', 'E48')
 
 
 def _redondear(valor):
@@ -99,6 +103,33 @@ class FacturaService:
         return piezas
 
     @staticmethod
+    def servicios_por_facturar(pedido):
+        """Servicios extras del pedido visibles en factura, con la factura que
+        ya los tomó. Un servicio se factura completo y una sola vez: lo aparta
+        cualquier factura activa no cancelada, Borrador incluido (#744)."""
+        servicios = list(
+            PedidoServicioExtra.objects.filter(pedido=pedido, visible_en_factura=True)
+            .select_related('sat_prodserv', 'sat_unidad')
+            .order_by('id')
+        )
+        tomados = dict(
+            FacturaDetalle.objects.filter(
+                pedido_servicio_extra__pedido=pedido, factura__activo=True
+            )
+            .exclude(factura__estatus=Factura.FacturaStatus.CANCELADA)
+            .values_list('pedido_servicio_extra_id', 'factura__folio')
+        )
+        return [
+            {
+                'servicio': servicio,
+                'importe': _redondear(Decimal(servicio.monto or 0) * servicio.cantidad),
+                'facturado_en': tomados.get(servicio.pk),
+                'facturado': servicio.pk in tomados,
+            }
+            for servicio in servicios
+        ]
+
+    @staticmethod
     def desglose(factura):
         """Factura completa para consulta: emisor, receptor, pedido, conceptos
         por producto con las piezas de cada talla, importes, avance de
@@ -113,6 +144,7 @@ class FacturaService:
                 'producto__unidad_medida',
                 'pedido_detalle__color',
                 'pedido_detalle_talla__talla',
+                'pedido_servicio_extra',
             )
             .order_by('pedido_detalle_id', 'pedido_detalle_talla_id', 'id')
         )
@@ -129,8 +161,21 @@ class FacturaService:
             }
 
         conceptos = {}
+        servicios = []
         total_piezas = Decimal('0')
         for renglon in renglones:
+            if renglon.pedido_servicio_extra_id is not None:
+                servicios.append({
+                    'factura_detalle': renglon.pk,
+                    'pedido_servicio_extra': renglon.pedido_servicio_extra_id,
+                    'nombre': renglon.pedido_servicio_extra.nombre,
+                    'cantidad': int(renglon.cantidad),
+                    'precio_unitario': _texto(renglon.precio_unitario),
+                    'subtotal': _texto(renglon.subtotal),
+                    'impuesto': _texto(renglon.impuesto),
+                    'total': _texto(renglon.total),
+                })
+                continue
             concepto = conceptos.get(renglon.pedido_detalle_id)
             if concepto is None:
                 producto = renglon.producto
@@ -255,6 +300,7 @@ class FacturaService:
                 'simbolo': factura.moneda.simbolo,
             },
             'conceptos': list(conceptos.values()),
+            'servicios_extras': servicios,
             'importes': {
                 'total_piezas': int(total_piezas),
                 'subtotal': _texto(factura.subtotal),
@@ -304,8 +350,10 @@ class FacturaService:
             (renglon['pedido_detalle_talla'], renglon['cantidad'])
             for renglon in renglones
         ]
+        servicios = validated_data.pop('servicios_extras', None) or []
         return FacturaService._crear_factura(
-            getattr(user, 'empresa', None), sucursal, pedido, lineas, usuario=user, **validated_data
+            getattr(user, 'empresa', None), sucursal, pedido, lineas, usuario=user,
+            servicios=servicios, **validated_data
         )
 
     @staticmethod
@@ -328,9 +376,34 @@ class FacturaService:
             raise ErrorDeNegocio({'pedido': 'El pedido está CANCELADO; no se puede facturar.'})
 
     @staticmethod
-    def _validar_lineas(pedido, lineas):
+    def _validar_servicios(pedido, ids):
+        """Servicios elegidos para la factura: del pedido, visibles, sin repetir
+        y sin facturar todavía (#744)."""
+        if not ids:
+            return []
+        por_id = {s['servicio'].pk: s for s in FacturaService.servicios_por_facturar(pedido)}
+        errores = []
+        elegidos = []
+        for servicio_id in ids:
+            fila = por_id.get(servicio_id)
+            if fila is None:
+                errores.append(f'El servicio {servicio_id} no es del pedido o no es visible en factura.')
+            elif fila in elegidos:
+                errores.append(f'El servicio {servicio_id} viene repetido.')
+            elif fila['facturado']:
+                errores.append(f'{fila["servicio"].nombre}: ya está en la factura {fila["facturado_en"]}.')
+            elif fila['importe'] <= 0:
+                errores.append(f'{fila["servicio"].nombre}: no tiene importe que facturar.')
+            else:
+                elegidos.append(fila)
+        if errores:
+            raise ErrorDeNegocio({'servicios_extras': errores})
+        return elegidos
+
+    @staticmethod
+    def _validar_lineas(pedido, lineas, hay_servicios=False):
         FacturaService._exigir_pedido_vigente(pedido)
-        if not lineas:
+        if not lineas and not hay_servicios:
             raise ErrorDeNegocio({
                 'factura_detalles': 'La factura debe incluir al menos una línea.'
             })
@@ -384,9 +457,10 @@ class FacturaService:
         return pendientes
 
     @staticmethod
-    def _crear_factura(empresa, sucursal, pedido, lineas, usuario=None, **campos):
+    def _crear_factura(empresa, sucursal, pedido, lineas, usuario=None, servicios=(), **campos):
         # Se valida todo antes de generar el folio para no consumirlo en balde.
-        pendientes = FacturaService._validar_lineas(pedido, lineas)
+        servicios = FacturaService._validar_servicios(pedido, servicios)
+        pendientes = FacturaService._validar_lineas(pedido, lineas, hay_servicios=bool(servicios))
         try:
             folio = generate_factura_folio(empresa, sucursal)
         except DjangoValidationError as exc:
@@ -441,6 +515,28 @@ class FacturaService:
             factura_descuento += descuento
             factura_impuestos += impuesto
             factura_total += total
+
+        # Servicios extras: un renglón por servicio, completo (#744).
+        for fila in servicios:
+            servicio = fila['servicio']
+            subtotal = fila['importe']
+            impuesto = _redondear(subtotal * porcentaje_impuesto / Decimal('100'))
+            bulk_data.append(
+                FacturaDetalle(
+                    factura=factura,
+                    pedido_servicio_extra=servicio,
+                    cantidad=Decimal(servicio.cantidad),
+                    precio_unitario=Decimal(servicio.monto or 0),
+                    descuento=Decimal('0.00'),
+                    porcentaje_impuesto=porcentaje_impuesto,
+                    impuesto=impuesto,
+                    subtotal=subtotal,
+                    total=subtotal + impuesto,
+                )
+            )
+            factura_subtotal += subtotal
+            factura_impuestos += impuesto
+            factura_total += subtotal + impuesto
 
         FacturaDetalle.objects.bulk_create(bulk_data)
         factura.subtotal = factura_subtotal

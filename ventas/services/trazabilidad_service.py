@@ -271,6 +271,7 @@ def _facturado(pedido_ids):
         factura__pedido_id__in=pedido_ids,
         factura__activo=True,
         factura__estatus=Factura.FacturaStatus.EMITIDA,
+        producto__isnull=False,  # piezas, no servicios extras (#744)
     )
     return _suma_por_pedido(qs, "factura__pedido_id", "cantidad")
 

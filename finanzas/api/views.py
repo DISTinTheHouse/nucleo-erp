@@ -596,7 +596,8 @@ class FacturaViewSet(FinanzasBaseViewSet):
             # Piezas y precio por subconsulta, no uniendo renglones: el filtro
             # ``saldo_pendiente`` ya une con CxC y multiplicaría las sumas.
             renglones = (
-                FacturaDetalle.objects.filter(factura=OuterRef('pk'))
+                # Solo piezas: los servicios extras no son prendas (#744).
+                FacturaDetalle.objects.filter(factura=OuterRef('pk'), producto__isnull=False)
                 .order_by()
                 .values('factura')
             )
@@ -1039,10 +1040,26 @@ class FacturaViewSet(FinanzasBaseViewSet):
                 'cantidad_pendiente': int(pieza['cantidad_pendiente']),
             })
 
+        servicios = [
+            {
+                'pedido_servicio_extra': fila['servicio'].pk,
+                'nombre': fila['servicio'].nombre,
+                'cantidad': fila['servicio'].cantidad,
+                'precio_unitario': str(fila['servicio'].monto),
+                'importe': str(fila['importe']),
+                'sat_prodserv': fila['servicio'].sat_prodserv_id,
+                'sat_unidad': fila['servicio'].sat_unidad_id,
+                'facturado': fila['facturado'],
+                'facturado_en': fila['facturado_en'],
+            }
+            for fila in FacturaService.servicios_por_facturar(pedido)
+        ]
+
         return Response({
             'pedido': pedido.pk,
             'pedido_folio': pedido.folio,
             'porcentaje_impuesto': str(Decimal(pedido.iva or 0)),
+            'servicios_extras': servicios,
             'total_piezas_pedidas': sum(t['cantidad_pedida'] for t in tallas),
             'total_piezas_facturadas': sum(t['cantidad_facturada'] for t in tallas),
             'total_piezas_pendientes': sum(t['cantidad_pendiente'] for t in tallas),
