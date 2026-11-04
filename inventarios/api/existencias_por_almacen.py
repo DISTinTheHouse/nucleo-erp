@@ -45,6 +45,7 @@ from django.db.models.functions import Cast, Coalesce, Concat, Greatest, JSONObj
 from django.db.models.lookups import GreaterThan, LessThanOrEqual
 from rest_framework.exceptions import ValidationError
 
+from nucleo.kpis import entero_param
 from nucleo.listados import OrdenamientoEstableFilter
 
 ESTADOS = ("full", "ok", "low", "critical")
@@ -73,18 +74,20 @@ _ES_CATALOGO = Q(producto__isnull=False) | Q(producto_variante__isnull=False)
 _ES_MUESTRA = Q(variante_produccion__isnull=False)
 
 
+def _entero_positivo(request, nombre):
+    """``entero_param`` (vacío → ``None``, no entero → 400) más positividad."""
+    valor = entero_param(request, nombre)
+    if valor is not None and valor <= 0:
+        raise ValidationError({nombre: "Debe ser un entero positivo."})
+    return valor
+
+
 def almacen_id_requerido(request):
     """``?almacen_id=`` obligatorio y entero positivo; si no, 400."""
-    raw = (request.query_params.get("almacen_id") or "").strip()
-    if not raw:
+    almacen_id = _entero_positivo(request, "almacen_id")
+    if almacen_id is None:
         raise ValidationError({"almacen_id": "Este parámetro es obligatorio."})
-    try:
-        valor = int(raw)
-    except ValueError:
-        valor = 0
-    if valor <= 0:
-        raise ValidationError({"almacen_id": "Debe ser un entero positivo."})
-    return valor
+    return almacen_id
 
 
 def _max_stock_del_almacen(base):
@@ -174,14 +177,8 @@ def filtrar(request, qs):
         if valor:
             qs = qs.filter(**{campo: valor})
 
-    ubicacion = _texto(request, "ubicacion")
-    if ubicacion:
-        try:
-            ubicacion_id = int(ubicacion)
-        except ValueError:
-            ubicacion_id = 0
-        if ubicacion_id <= 0:
-            raise ValidationError({"ubicacion": "Debe ser un entero positivo."})
+    ubicacion_id = _entero_positivo(request, "ubicacion")
+    if ubicacion_id is not None:
         qs = qs.filter(ubicacion_id=ubicacion_id)
 
     rango = _texto(request, "existencias")
