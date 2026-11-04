@@ -389,12 +389,16 @@ class FacturaTimbradoService:
         if bloqueado.estatus == modelo.Estatus.CANCELADA if es_nota else (
             bloqueado.estatus == Factura.FacturaStatus.CANCELADA or not bloqueado.activo
         ):
-            aviso = (
-                "La nota está cancelada en el ERP pero su CFDI de egreso quedó vigente ante el SAT: cancélalo en Facturama."
-                if es_nota else
-                "La factura está cancelada o eliminada en el ERP pero su CFDI quedó vigente ante el SAT: "
-                "vuelve a usar cancelar/ para cancelarlo."
-            )
+            # Texto para el usuario final, sin nombres de endpoints (EC-760).
+            if es_nota:
+                aviso = ("La nota de crédito está cancelada, pero su CFDI sigue vigente ante el SAT. "
+                         "Pide a contabilidad que lo cancele en Facturama.")
+            elif not bloqueado.activo:
+                aviso = ("La factura fue eliminada, pero su CFDI sigue vigente ante el SAT. "
+                         "Pide a contabilidad que lo cancele en Facturama.")
+            else:
+                aviso = ("La factura está cancelada, pero su CFDI sigue vigente ante el SAT. "
+                         "Vuelve a cancelar la factura para cancelarlo también ante el SAT.")
         return "timbrado", aviso
 
     @staticmethod
