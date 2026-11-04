@@ -1949,12 +1949,11 @@ class CobroViewSet(FinanzasBaseViewSet):
 
     def get_queryset(self):
         # Cliente, cuenta (con su moneda, EC-746) y líneas en bloque: antes eran tres
-        # consultas por fila del listado.
-        qs = (
-            self._cobros_visibles()
-            .select_related("cliente", "cuenta_bancaria__moneda")
-            .prefetch_related("cobro_detalles")
-        )
+        # consultas por fila del listado. Sólo al leer: en las escrituras ``get_object``
+        # no usa esa caché (los servicios releen las líneas) y sería una consulta más.
+        qs = self._cobros_visibles()
+        if self.action in ("list", "retrieve"):
+            qs = qs.select_related("cliente", "cuenta_bancaria__moneda").prefetch_related("cobro_detalles")
         qp = self.request.query_params
         cliente = qp.get("cliente") or qp.get("cliente_id")
         metodo_pago = (qp.get("metodo_pago") or "").strip()
