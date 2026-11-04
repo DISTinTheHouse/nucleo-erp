@@ -741,7 +741,10 @@ class DireccionClienteViewSet(viewsets.ModelViewSet):
         # la empresa del cliente porque ``empresa`` de la dirección venía del
         # payload antes de EC-570.
         user = self.request.user
-        qs = super().get_queryset()
+        # Orden por defecto estable: la predeterminada arriba y ``id`` de desempate
+        # (antes indefinido, EC-775). Un ``?ordering=`` válido lo reemplaza: el
+        # ``OrderingFilter`` global hace su propio ``order_by``.
+        qs = super().get_queryset().order_by("-is_default", "id")
         if not getattr(user, "is_superuser", False):
             empresa = getattr(user, "empresa", None)
             if not empresa:
