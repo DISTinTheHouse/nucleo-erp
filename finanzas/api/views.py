@@ -156,6 +156,28 @@ def _aplicar_scope_empresa(qs, user, lookup="empresa"):
     return qs.filter(**{lookup: empresa})
 
 
+def _empresa_del_superusuario(user, qp, mensaje_sin_empresa):
+    """Empresa que consulta un superusuario en un resumen de lectura (dashboard, resumen
+    de cobros): la de ``?empresa_id=`` (o ``?empresa=``) o, sin él, la suya. Un id que no
+    es un entero o no existe → 400 "Empresa no encontrada." (antes, uno no numérico daba
+    500); sin id ni empresa propia → 400 con ``mensaje_sin_empresa``.
+    """
+    empresa_id = qp.get("empresa") or qp.get("empresa_id")
+    if empresa_id:
+        try:
+            pk = int(empresa_id)
+        except (TypeError, ValueError):
+            pk = None
+        empresa = Empresa.objects.filter(pk=pk).first() if pk is not None else None
+        if empresa is None:
+            raise ValidationError({"empresa": "Empresa no encontrada."})
+        return empresa
+    empresa = getattr(user, "empresa", None)
+    if empresa is None:
+        raise ValidationError({"empresa": mensaje_sin_empresa})
+    return empresa
+
+
 def _resolve_empresa(user, validated_data=None, *, required=True, allow_user_empresa_fallback=True):
     """Resuelve la empresa para operaciones write (create/update/action).
 
@@ -1990,15 +2012,9 @@ class CobroViewSet(FinanzasBaseViewSet):
         # usa la suya; sin ninguna, 400. Los demás, la suya (sin empresa no ven nada).
         cobros = self._cobros_visibles()
         if _puede_ver_todo(user):
-            empresa_id = qp.get("empresa") or qp.get("empresa_id")
-            if empresa_id:
-                empresa = Empresa.objects.filter(pk=empresa_id).first()
-                if empresa is None:
-                    raise ValidationError({"empresa": "Empresa no encontrada."})
-            else:
-                empresa = getattr(user, "empresa", None)
-                if empresa is None:
-                    raise ValidationError({"empresa": "Superusuario debe especificar ?empresa_id=X para el resumen de cobros."})
+            empresa = _empresa_del_superusuario(
+                user, qp, "Superusuario debe especificar ?empresa_id=X para el resumen de cobros."
+            )
             cobros = cobros.filter(empresa=empresa)
         else:
             empresa = getattr(user, "empresa", None)
@@ -2855,16 +2871,9 @@ class DashboardFinancieroViewSet(FinanzasBaseSimpleViewSet):
         superuser = _puede_ver_todo(user)
         qp = request.query_params
         if superuser:
-            empresa_id = qp.get("empresa") or qp.get("empresa_id")
-            if empresa_id:
-                from nucleo.models import Empresa
-                empresa = Empresa.objects.filter(pk=empresa_id).first()
-                if empresa is None:
-                    raise ValidationError({"empresa": "Empresa no encontrada."})
-            else:
-                empresa = getattr(user, "empresa", None)
-                if empresa is None:
-                    raise ValidationError({"empresa": "Superusuario debe especificar ?empresa_id=X para filtrar el dashboard."})
+            empresa = _empresa_del_superusuario(
+                user, qp, "Superusuario debe especificar ?empresa_id=X para filtrar el dashboard."
+            )
         else:
             empresa = getattr(user, "empresa", None)
             if empresa is None:

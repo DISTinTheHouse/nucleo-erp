@@ -9414,6 +9414,15 @@ class CobrosResumenTests(LecturaJerarquicaBase):
         root.save()
         self.assertEqual(self._resumen(root).json()["por_moneda"][0]["monto_total"], "50.01")
 
+    def test_empresa_id_no_numerico_o_inexistente_es_400_tambien_en_el_dashboard(self):
+        root = Usuario.objects.create(username="ec746-root2@x.test", email="ec746-root2@x.test", is_superuser=True)
+        for url in (self.URL, "/api/v1/finanzas/dashboard/"):
+            for valor in ("abc", "1.5", "999999999"):
+                with self.subTest(url=url, empresa_id=valor):
+                    resp = self._client(root).get(f"{url}?empresa_id={valor}")
+                    self.assertEqual(resp.status_code, 400)
+                    self.assertEqual(str(resp.data["empresa"][0]), "Empresa no encontrada.")
+
     def test_permiso_de_seccion(self):
         for claves in (["R-CONTABILIDAD-FACTURACION"], ["R-CONTABILIDAD-CLIENTES"], []):
             with self.subTest(claves=claves):
