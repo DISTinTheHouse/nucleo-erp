@@ -19,38 +19,28 @@ que la pantalla hace hoy en memoria (``StockView.tsx``, ``StockColumns.tsx``,
 - Estado: ``stock / max_stock`` del almacén completo; > 80 % Óptimo (``full``),
   > 40 % Normal (``ok``), > 15 % Bajo (``low``), el resto Crítico
   (``critical``). ``max_stock`` = mayor ``stock`` del almacén, nunca menor a 0;
-  con 0 todo es crítico. Se compara en enteros (``stock * 100 > max * 80``)
-  para no depender del redondeo de un flotante.
+  con 0 todo es crítico. Se calcula UNA vez por request (``max_stock()``, una
+  consulta aparte) y entra como constante: un piso entero por estado
+  (``stock > max * pct // 100``, equivalente exacto de ``stock / max > pct %``
+  para ``stock`` entero), sin flotantes ni subconsultas repetidas.
 """
 
 import re
 import unicodedata
 
 from django.contrib.postgres.aggregates import ArrayAgg
-from django.db.models import (
-    BigIntegerField,
-    CharField,
-    Count,
-    DateField,
-    F,
-    Max,
-    Q,
-    Subquery,
-    Sum,
-    Value,
-    When,
-    Case,
-)
-from django.db.models.functions import Cast, Coalesce, Concat, Greatest, JSONObject, Trunc
-from django.db.models.lookups import GreaterThan, LessThanOrEqual
+from django.db.models import Case, CharField, Count, DateField, F, Max, Q, Sum, Value, When
+from django.db.models.functions import Coalesce, Concat, JSONObject, Trunc
 from rest_framework.exceptions import ValidationError
 
 from nucleo.kpis import entero_param
 from nucleo.listados import OrdenamientoEstableFilter
 
-ESTADOS = ("full", "ok", "low", "critical")
-# (estado, porcentaje mínimo EXCLUSIVO). ``critical`` es el resto.
-_UMBRALES_ESTADO = (("full", 80), ("ok", 40), ("low", 15))
+# (estado, porcentaje mínimo EXCLUSIVO), de mayor a menor; el último
+# (``critical``) no tiene piso: es el resto. Única fuente de los cortes de la
+# columna (``_estado``) y del filtro (``_condiciones_estado``).
+_UMBRALES_ESTADO = (("full", 80), ("ok", 40), ("low", 15), ("critical", None))
+ESTADOS = tuple(estado for estado, _ in _UMBRALES_ESTADO)
 
 # ``matchesRangeFilter`` del front: ``min`` inclusivo, ``max`` exclusivo.
 RANGOS_EXISTENCIAS = {
@@ -90,29 +80,30 @@ def almacen_id_requerido(request):
     return almacen_id
 
 
-def _max_stock_del_almacen(base):
-    """Mayor ``stock`` del almacén (sin filtros del cliente), nunca menor a 0.
-
-    Subconsulta no correlacionada: PostgreSQL la evalúa una vez por consulta.
-    """
-    maximo = base.order_by().values("almacen_id").annotate(m=Max("stock")).values("m")[:1]
-    return Greatest(Coalesce(Subquery(maximo), 0), 0)
+def max_stock(base):
+    """Mayor ``stock`` del almacén (sin filtros del cliente), nunca menor a 0."""
+    return max(base.aggregate(m=Max("stock"))["m"] or 0, 0)
 
 
-def _estado(stock_x100, max_stock):
+def _umbrales(maximo):
+    """``[(estado, piso)]`` en el orden de ``_UMBRALES_ESTADO``: el estado aplica
+    con ``stock > piso`` (``None`` = sin piso). Para ``stock`` entero,
+    ``stock > max * pct // 100`` equivale a ``stock * 100 > max * pct``."""
+    return [(estado, None if pct is None else maximo * pct // 100) for estado, pct in _UMBRALES_ESTADO]
+
+
+def _estado(maximo):
     return Case(
-        *[
-            When(GreaterThan(stock_x100, max_stock * pct), then=Value(estado))
-            for estado, pct in _UMBRALES_ESTADO
-        ],
-        default=Value("critical"),
+        *[When(stock__gt=piso, then=Value(estado)) for estado, piso in _umbrales(maximo) if piso is not None],
+        default=Value(ESTADOS[-1]),
         output_field=CharField(),
     )
 
 
-def anotar(base):
+def anotar(base, maximo):
     """Campos de la pantalla como anotaciones planas (``nombre``, ``sku``,
-    ``tipo``, ``color``, ``ubicacion_nombre``, ``max_stock``, ``estado``)."""
+    ``tipo``, ``color``, ``ubicacion_nombre``, ``estado``); ``maximo`` es el
+    ``max_stock(base)`` del almacén."""
     ubicacion_nombre = Concat(
         Coalesce(F("ubicacion__almacen__nombre"), Value("(sin almacén)")),
         Value(" - "), F("ubicacion__pasillo"),
@@ -152,11 +143,7 @@ def anotar(base):
             default=ubicacion_nombre,
             output_field=CharField(),
         ),
-        max_stock=_max_stock_del_almacen(base),
-    ).annotate(
-        estado=_estado(
-            Cast("stock", BigIntegerField()) * 100, Cast("max_stock", BigIntegerField()),
-        ),
+        estado=_estado(maximo),
     )
 
 
@@ -164,7 +151,7 @@ def _texto(request, nombre):
     return (request.query_params.get(nombre) or "").strip()
 
 
-def filtrar(request, qs):
+def filtrar(request, qs, maximo):
     """``search`` y un parámetro por cada filtro de encabezado. Valores fuera
     de catálogo (rango, estado, mes, ubicación) → 400."""
     buscar = _texto(request, "search")
@@ -203,26 +190,23 @@ def filtrar(request, qs):
     if estado:
         if estado not in ESTADOS:
             raise ValidationError({"estado": f"Usa uno de: {', '.join(ESTADOS)}."})
-        qs = qs.filter(*_condiciones_estado(estado))
+        qs = qs.filter(**_condiciones_estado(estado, maximo))
     return qs
 
 
-def _condiciones_estado(estado):
-    """El filtro de estado como desigualdades sobre ``stock`` y no como
-    igualdad contra el ``CASE`` de ``estado``: con la igualdad el planificador
-    estima ~1 fila, elige nested loops contra ``colores`` y, junto con
-    ``search``, la página pasa de ~40 ms a ~200 ms (EXPLAIN ANALYZE, almacén de
-    3,466 filas). Mismos cortes que ``_estado``."""
-    stock_x100 = Cast("stock", BigIntegerField()) * 100
-    maximo = Cast("max_stock", BigIntegerField())
-    cortes = dict(_UMBRALES_ESTADO)
-    piso = {"full": cortes["full"], "ok": cortes["ok"], "low": cortes["low"], "critical": None}[estado]
-    techo = {"full": None, "ok": cortes["full"], "low": cortes["ok"], "critical": cortes["low"]}[estado]
-    condiciones = []
-    if piso is not None:
-        condiciones.append(GreaterThan(stock_x100, maximo * piso))
-    if techo is not None:
-        condiciones.append(LessThanOrEqual(stock_x100, maximo * techo))
+def _condiciones_estado(estado, maximo):
+    """El filtro de estado como rango sobre ``stock`` (``> piso`` propio y
+    ``<= piso`` del estado de arriba), no como igualdad contra el ``CASE`` de
+    ``estado``: con la igualdad el planificador estima ~1 fila, elige nested
+    loops contra ``colores`` y, junto con ``search``, la página pasa de ~40 ms
+    a ~200 ms (EXPLAIN ANALYZE, almacén de 3,466 filas)."""
+    umbrales = _umbrales(maximo)
+    i = ESTADOS.index(estado)
+    condiciones = {}
+    if umbrales[i][1] is not None:
+        condiciones["stock__gt"] = umbrales[i][1]
+    if i > 0:
+        condiciones["stock__lte"] = umbrales[i - 1][1]
     return condiciones
 
 
@@ -266,15 +250,16 @@ def _opciones(valores):
     return sorted(({"value": v, "label": v.strip()} for v in vistos), key=lambda o: _clave_orden(o["label"]))
 
 
-def resumen(qs):
+def resumen(qs, maximo):
     """KPIs del almacén completo (no reaccionan a filtros ni búsqueda, como
-    ``StockStats`` hoy), ``max_stock`` y opciones de filtros, en UNA consulta."""
+    ``StockStats`` hoy) y opciones de filtros, en UNA consulta; ``maximo`` ya
+    viene de ``max_stock()``."""
     datos = qs.aggregate(
         total_registros=Count("id"),
         skus_en_existencia=Count("id", filter=Q(stock__gt=0)),
-        requiere_stock=Count("id", filter=Q(estado__in=["low", "critical"])),
+        # low + critical = no supera el piso de ``ok``.
+        requiere_stock=Count("id", filter=Q(stock__lte=dict(_umbrales(maximo))["ok"])),
         total_stock=Coalesce(Sum("stock"), 0),
-        maximo=Greatest(Coalesce(Max("stock"), 0), 0),
         nombres=ArrayAgg("nombre", distinct=True),
         tipos=ArrayAgg("tipo", distinct=True),
         colores=ArrayAgg("color", distinct=True),
@@ -298,7 +283,7 @@ def resumen(qs):
         for m in sorted(datos["meses"] or [], reverse=True)
     ]
     return {
-        "max_stock": datos["maximo"],
+        "max_stock": maximo,
         "kpis": {
             "total_registros": datos["total_registros"],
             "skus_en_existencia": datos["skus_en_existencia"],

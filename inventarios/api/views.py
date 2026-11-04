@@ -281,7 +281,8 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         # Mismo alcance que ``get_queryset``: un almacén ajeno da vacío, no 403.
         if not request.user.is_superuser:
             qs = qs.filter(almacen__in=self._almacenes_en_alcance())
-        return almacen_id, por_almacen_mod.anotar(qs)
+        maximo = por_almacen_mod.max_stock(qs)
+        return almacen_id, maximo, por_almacen_mod.anotar(qs, maximo)
 
     @extend_schema(
         summary="Existencias de un almacén, paginadas (pantalla de stock)",
@@ -310,8 +311,8 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         pagination_class=PaginacionOpcionalLimitOffset,
     )
     def por_almacen(self, request):
-        _, qs = self._por_almacen_base(request)
-        qs = por_almacen_mod.filtrar(request, qs)
+        _, maximo, qs = self._por_almacen_base(request)
+        qs = por_almacen_mod.filtrar(request, qs, maximo)
         qs = por_almacen_mod.OrdenamientoPorAlmacenFilter().filter_queryset(request, qs, self)
         filas = por_almacen_mod.filas(qs)
         page = self.paginate_queryset(filas)
@@ -328,8 +329,8 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
     )
     @action(detail=False, methods=["get"], url_path="por-almacen/resumen")
     def por_almacen_resumen(self, request):
-        almacen_id, qs = self._por_almacen_base(request)
-        return Response({"almacen_id": almacen_id, **por_almacen_mod.resumen(qs)})
+        almacen_id, maximo, qs = self._por_almacen_base(request)
+        return Response({"almacen_id": almacen_id, **por_almacen_mod.resumen(qs, maximo)})
 
     def _report_to_int(self, value):
         if value in (None, ""):

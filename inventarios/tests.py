@@ -1554,14 +1554,15 @@ class ExistenciasPorAlmacenTests(TestCase):
     def test_numero_de_consultas_constante(self):
         params = {"almacen_id": self.alm.pk, "limit": 3, "search": "a", "ordering": "nombre"}
 
-        # Las 2 primeras de cada request son el alcance del usuario (sus empresas
-        # M2M y sus sucursales, ``almacenes_en_alcance``), igual que el listado.
+        # Cada request: 2 del alcance del usuario (sus empresas M2M y sus
+        # sucursales, ``almacenes_en_alcance``, igual que el listado) + 1 del
+        # ``max_stock`` del almacén, que entra como constante a las demás.
         def medir():
-            with self.assertNumQueries(2 + 2):   # count + página
+            with self.assertNumQueries(2 + 1 + 2):   # count + página
                 self._get(params)
-            with self.assertNumQueries(2 + 1):   # sin limit: la lista
+            with self.assertNumQueries(2 + 1 + 1):   # sin limit: la lista
                 self._get({"almacen_id": self.alm.pk})
-            with self.assertNumQueries(2 + 1):   # todo el resumen
+            with self.assertNumQueries(2 + 1 + 1):   # todo el resumen
                 self._get({"almacen_id": self.alm.pk}, url=POR_ALMACEN_RESUMEN_URL)
 
         medir()
