@@ -28,11 +28,14 @@ from catalogo.models import Producto, ProductoVariante, VarianteProductoProducci
 from auditoria.models import AuditoriaEvento
 from nucleo.models import Sucursal
 from ventas.models import Pedido
+from nucleo.listados import PaginacionOpcionalLimitOffset
 from . import auxiliar as auxiliar_mod
+from . import existencias_por_almacen as por_almacen_mod
 from .serializers import (
     AlmacenSerializer,
     UbicacionSerializer,
     ExistenciaSerializer,
+    ExistenciaPorAlmacenSerializer,
     MovimientoInventarioSerializer,
     MovimientoInventarioDetalleSerializer,
     AjusteInventarioSerializer,
@@ -267,6 +270,63 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
             serializer.validated_data.get("almacen", serializer.instance.almacen)
         )
         serializer.save()
+
+    # --- Pantalla de stock por almacén (EC-774) ---------------------------------
+    # Acciones propias, de solo lectura: el listado de arriba, su ``limit`` y su
+    # serializer no cambian. Detalle en ``existencias_por_almacen.py``.
+
+    def _por_almacen_base(self, request):
+        almacen_id = por_almacen_mod.almacen_id_requerido(request)
+        qs = Existencia.objects.filter(almacen_id=almacen_id)
+        # Mismo alcance que ``get_queryset``: un almacén ajeno da vacío, no 403.
+        if not request.user.is_superuser:
+            qs = qs.filter(almacen__in=self._almacenes_en_alcance())
+        return almacen_id, por_almacen_mod.anotar(qs)
+
+    @extend_schema(
+        summary="Existencias de un almacén, paginadas (pantalla de stock)",
+        parameters=[
+            OpenApiParameter("almacen_id", OpenApiTypes.INT, required=True, description="Almacén (obligatorio)."),
+            OpenApiParameter("limit", OpenApiTypes.INT, description="Tamaño de página (máx. 500). Sin él, la lista completa."),
+            OpenApiParameter("offset", OpenApiTypes.INT),
+            OpenApiParameter("search", OpenApiTypes.STR, description="Nombre o SKU (producto, variante o muestra), contiene."),
+            OpenApiParameter("nombre", OpenApiTypes.STR, description="Nombre exacto (opciones en resumen)."),
+            OpenApiParameter("tipo", OpenApiTypes.STR, description="Código de tipo exacto."),
+            OpenApiParameter("color", OpenApiTypes.STR, description="Nombre de color exacto."),
+            OpenApiParameter("ubicacion", OpenApiTypes.INT, description="id_ubicacion."),
+            OpenApiParameter("existencias", OpenApiTypes.STR, enum=list(por_almacen_mod.RANGOS_EXISTENCIAS)),
+            OpenApiParameter("mes", OpenApiTypes.STR, description="AAAA-MM de fecha_actualizacion (hora de México)."),
+            OpenApiParameter("estado", OpenApiTypes.STR, enum=list(por_almacen_mod.ESTADOS)),
+            OpenApiParameter(
+                "ordering", OpenApiTypes.STR,
+                description="Separado por comas, '-' = descendente: " + ", ".join(por_almacen_mod.CAMPOS_ORDENAMIENTO),
+            ),
+        ],
+        responses=ExistenciaPorAlmacenSerializer(many=True),
+    )
+    @action(detail=False, methods=["get"], url_path="por-almacen")
+    def por_almacen(self, request):
+        _, qs = self._por_almacen_base(request)
+        qs = por_almacen_mod.filtrar(request, qs)
+        qs = por_almacen_mod.OrdenamientoPorAlmacenFilter().filter_queryset(request, qs, self)
+        filas = por_almacen_mod.filas(qs)
+        paginator = PaginacionOpcionalLimitOffset()
+        page = paginator.paginate_queryset(filas, request, view=self)
+        if page is None:
+            return Response(ExistenciaPorAlmacenSerializer(filas, many=True).data)
+        return paginator.get_paginated_response(ExistenciaPorAlmacenSerializer(page, many=True).data)
+
+    @extend_schema(
+        summary="KPIs, max_stock y opciones de filtros de un almacén (pantalla de stock)",
+        parameters=[
+            OpenApiParameter("almacen_id", OpenApiTypes.INT, required=True, description="Almacén (obligatorio)."),
+        ],
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="por-almacen/resumen")
+    def por_almacen_resumen(self, request):
+        almacen_id, qs = self._por_almacen_base(request)
+        return Response({"almacen_id": almacen_id, **por_almacen_mod.resumen(qs)})
 
     def _report_to_int(self, value):
         if value in (None, ""):
