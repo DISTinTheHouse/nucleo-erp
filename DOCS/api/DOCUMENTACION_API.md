@@ -1338,6 +1338,12 @@ Listado de direcciones registradas de los clientes, incluyendo información de u
 ### Obtener Listado
 
 - **Endpoint**: `GET terceros/direcciones-clientes/`
+- **Alcance**: direcciones activas de la empresa del usuario (no solo de sus clientes asignados); el superusuario ve todas.
+- **Filtros** (EC-775):
+  - `?cliente=<id>`: solo las direcciones de ese cliente. Se aplica después del alcance por empresa: un cliente de otra empresa o inexistente regresa `200 []`. Un valor no entero es `400` (`{"cliente": [...]}`). Sin el parámetro (o vacío), la lista completa de la empresa.
+  - Solo el listado: el detalle `{id}/` lo ignora.
+- **Orden**: la predeterminada primero (`is_default=true`) y luego `id` ascendente. `?ordering=` lo reemplaza.
+- **Paginación**: no; arreglo plano.
 - **Respuesta**:
   ```json
   [
