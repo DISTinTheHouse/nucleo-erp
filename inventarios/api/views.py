@@ -287,8 +287,6 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         summary="Existencias de un almacén, paginadas (pantalla de stock)",
         parameters=[
             OpenApiParameter("almacen_id", OpenApiTypes.INT, required=True, description="Almacén (obligatorio)."),
-            OpenApiParameter("limit", OpenApiTypes.INT, description="Tamaño de página (máx. 500). Sin él, la lista completa."),
-            OpenApiParameter("offset", OpenApiTypes.INT),
             OpenApiParameter("search", OpenApiTypes.STR, description="Nombre o SKU (producto, variante o muestra), contiene."),
             OpenApiParameter("nombre", OpenApiTypes.STR, description="Nombre exacto (opciones en resumen)."),
             OpenApiParameter("tipo", OpenApiTypes.STR, description="Código de tipo exacto."),
@@ -302,19 +300,24 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 description="Separado por comas, '-' = descendente: " + ", ".join(por_almacen_mod.CAMPOS_ORDENAMIENTO),
             ),
         ],
+        # Con ``pagination_class`` en la acción, drf-spectacular publica el sobre
+        # ``{count, next, previous, results}`` y ``limit``/``offset``, como en los
+        # listados de OC y proveedores. Sin ``?limit=`` la respuesta es el arreglo.
         responses=ExistenciaPorAlmacenSerializer(many=True),
     )
-    @action(detail=False, methods=["get"], url_path="por-almacen")
+    @action(
+        detail=False, methods=["get"], url_path="por-almacen",
+        pagination_class=PaginacionOpcionalLimitOffset,
+    )
     def por_almacen(self, request):
         _, qs = self._por_almacen_base(request)
         qs = por_almacen_mod.filtrar(request, qs)
         qs = por_almacen_mod.OrdenamientoPorAlmacenFilter().filter_queryset(request, qs, self)
         filas = por_almacen_mod.filas(qs)
-        paginator = PaginacionOpcionalLimitOffset()
-        page = paginator.paginate_queryset(filas, request, view=self)
+        page = self.paginate_queryset(filas)
         if page is None:
             return Response(ExistenciaPorAlmacenSerializer(filas, many=True).data)
-        return paginator.get_paginated_response(ExistenciaPorAlmacenSerializer(page, many=True).data)
+        return self.get_paginated_response(ExistenciaPorAlmacenSerializer(page, many=True).data)
 
     @extend_schema(
         summary="KPIs, max_stock y opciones de filtros de un almacén (pantalla de stock)",
