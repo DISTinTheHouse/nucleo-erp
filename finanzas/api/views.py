@@ -2000,13 +2000,17 @@ class CobroViewSet(FinanzasBaseViewSet):
         del listado (sucursal incluida), para quien sólo tiene ``R-CONTABILIDAD-CXC``.
         Una entrada por cada moneda de las cuentas bancarias de la empresa (activas o
         no), aunque no tenga cobros. Ignora los filtros del listado (cliente, estatus...).
-        Dos consultas, sin importar cuántos cobros haya.
+        Tres consultas como máximo, sin importar cuántos cobros haya: la empresa (sólo el
+        superusuario con ``?empresa_id=``), las monedas y el agregado, además de las de
+        permisos.
         """
         user = request.user
         qp = request.query_params
         hoy = timezone.localdate()
         fecha_inicio = self._fecha_param(qp, "fecha_inicio", "fecha_desde", hoy.replace(day=1))
         fecha_fin = self._fecha_param(qp, "fecha_fin", "fecha_hasta", hoy)
+        if fecha_inicio > fecha_fin:  # mismo mensaje que reportes-contables/
+            raise ValidationError({"fecha_fin": "No puede ser anterior a fecha_inicio."})
 
         # La empresa, como el dashboard: el superusuario elige con ``?empresa_id=`` o
         # usa la suya; sin ninguna, 400. Los demás, la suya (sin empresa no ven nada).

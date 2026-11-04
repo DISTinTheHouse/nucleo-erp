@@ -9357,6 +9357,21 @@ class CobrosResumenTests(LecturaJerarquicaBase):
                 self.assertEqual(data["por_moneda"][0]["monto_total"], "750.01")
         self.assertEqual(self._resumen(user, "?fecha_inicio=2026-13-01").status_code, 400)
 
+    def test_rango_invertido_es_400(self):
+        user = self._usuario_con("invertido", ["R-CONTABILIDAD-CXC"])
+        for query in (
+            f"?fecha_inicio={self.hoy}&fecha_fin={self.hoy - timedelta(days=1)}",
+            f"?fecha_desde={self.hoy}&fecha_hasta={self.hoy - timedelta(days=1)}",
+            # Sin fecha_fin el fin es hoy: un inicio futuro también queda invertido.
+            f"?fecha_inicio={self.hoy + timedelta(days=1)}",
+        ):
+            with self.subTest(query=query):
+                resp = self._resumen(user, query)
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("fecha_fin", resp.data)
+        mismo_dia = self._resumen(user, f"?fecha_inicio={self.hoy}&fecha_fin={self.hoy}")
+        self.assertEqual(mismo_dia.status_code, 200)
+
     def test_igual_al_cobros_periodo_del_dashboard(self):
         client = self._client(self._usuario_con("dash", ["R-CONTABILIDAD"]))
         inicio = (self.hoy.replace(day=1) - timedelta(days=40)).isoformat()
