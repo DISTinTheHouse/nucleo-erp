@@ -255,3 +255,30 @@ class AuditoriaMovimientoSerializer(serializers.ModelSerializer):
             return None
         nombre = usuario.get_full_name().strip()
         return nombre or usuario.email
+
+
+class ExistenciaPorAlmacenSerializer(serializers.Serializer):
+    """Renglón de ``existencias/por-almacen/`` (EC-774): solo lo que pinta la
+    pantalla de stock, con las mismas llaves y anidación que
+    ``ExistenciaSerializer`` para que el tipo del front cambie lo mínimo. Lee
+    los diccionarios de ``existencias_por_almacen.filas()``, no modelos."""
+
+    id = serializers.IntegerField()
+    producto_info = serializers.SerializerMethodField()
+    ubicacion_info = serializers.SerializerMethodField()
+    stock = serializers.IntegerField()
+    cantidad = serializers.DecimalField(max_digits=18, decimal_places=4)
+    fecha_actualizacion = serializers.DateTimeField(allow_null=True)
+    estado = serializers.ChoiceField(choices=["full", "ok", "low", "critical"])
+
+    def get_producto_info(self, fila) -> dict | None:
+        # Sin producto, variante ni muestra no hay nombre: ``null``, igual que
+        # ``ExistenciaSerializer.get_producto_info``.
+        if fila["nombre"] is None:
+            return None
+        return {"nombre": fila["nombre"], "sku": fila["sku"], "tipo": fila["tipo"], "color": fila["color"]}
+
+    def get_ubicacion_info(self, fila) -> dict | None:
+        if fila["ubicacion_id"] is None:
+            return None
+        return {"id_ubicacion": fila["ubicacion_id"], "nombre_completo": fila["ubicacion_nombre"]}
