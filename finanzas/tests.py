@@ -9524,6 +9524,17 @@ class CxcDetallePolizasTests(LecturaJerarquicaBase):
             with self.subTest(user=user.username):
                 self.assertEqual([p["folio"] for p in self._polizas(user)], ["POL-EC746"])
 
+    def test_los_permisos_se_resuelven_una_vez_por_peticion(self):
+        """``PermisoFinanzas`` y ``get_polizas`` comparten el conjunto ya resuelto."""
+        from finanzas.api import permisos as permisos_finanzas
+
+        user = self._usuario_con("pol-una-vez", ["R-CONTABILIDAD"])
+        with patch.object(
+            permisos_finanzas, "permisos_efectivos", wraps=permisos_finanzas.permisos_efectivos
+        ) as espia:
+            self.assertEqual([p["folio"] for p in self._polizas(user)], ["POL-EC746"])
+        self.assertEqual(espia.call_count, 1)
+
     def test_el_resto_del_detalle_no_cambia_con_la_seccion(self):
         """La factura embebida sigue viniendo completa: es el seguimiento de la propia CxC."""
         resp = self._client(self._usuario_con("pol-fact", ["R-CONTABILIDAD-CXC"])).get(self.url)

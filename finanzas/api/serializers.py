@@ -38,7 +38,7 @@ from finanzas.services.factura_proveedor_montos import (
     totales_desde_lineas,
 )
 from finanzas.scope import por_sucursal
-from nucleo.permisos import permisos_efectivos
+from finanzas.api.permisos import permisos_de_la_peticion
 from finanzas.services.poliza_service import PolizaService
 from finanzas.services.cuenta_por_pagar_service import (
     CuentaPorPagarService,
@@ -463,9 +463,10 @@ class CuentaPorCobrarDetalleSerializer(CuentaPorCobrarSerializer):
         # EC-746: el detalle de CxC se lee con ``R-CONTABILIDAD-CXC``, pero las pólizas
         # (cuentas contables, centros de costo, cargos y abonos) son de Contabilidad:
         # sin ``R-CONTABILIDAD`` llegan vacías. Superusuario y admin de empresa las ven
-        # siempre (``permisos_efectivos`` los trata como "tienen todo").
+        # siempre (``permisos_efectivos`` los trata como "tienen todo"). El conjunto es el
+        # que ya resolvió ``PermisoFinanzas`` en esta petición: no vuelve a consultar.
         request = self.context.get("request")
-        if request is None or "R-CONTABILIDAD" not in permisos_efectivos(request.user):
+        if request is None or "R-CONTABILIDAD" not in permisos_de_la_peticion(request):
             return []
         detalles = (
             PolizaDetalle.objects.filter(factura=obj.factura)

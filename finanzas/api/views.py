@@ -13,7 +13,7 @@ from rest_framework.fields import get_error_detail
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
-from nucleo.permisos import permisos_efectivos
+from finanzas.api.permisos import permisos_de_la_peticion
 from finanzas.services.facturama.acceso import empresa_usa_facturama, puede_consultar_cfdis, puede_usar_facturama
 from finanzas.services.facturama.service import FacturamaService
 from finanzas.services.facturama.exceptions import FacturamaAPIException
@@ -386,7 +386,7 @@ class PermisoFinanzas(BasePermission):
     ``R-CONTABILIDAD``. Superusuario y admin de empresa pasan siempre."""
 
     def has_permission(self, request, view):
-        permisos = permisos_efectivos(request.user)
+        permisos = permisos_de_la_peticion(request)
         if request.method in SAFE_METHODS or getattr(view, "action", None) in getattr(view, "acciones_de_lectura", ()):
             seccion = getattr(view, "codigo_lectura_seccion", None)
             if getattr(view, "action", None) in getattr(view, "acciones_solo_modulo", ()):
