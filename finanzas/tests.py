@@ -9435,3 +9435,54 @@ class CobrosResumenTests(LecturaJerarquicaBase):
                 total_cobrado=Decimal("1.00"),
             )
         self.assertEqual(consultas(), antes)
+
+
+class CxcDetallePolizasTests(LecturaJerarquicaBase):
+    """EC-746: el detalle de CxC se lee con ``R-CONTABILIDAD-CXC``, pero sus pólizas (cuentas
+    contables, centros de costo, cargos y abonos) son de Contabilidad: llegan vacías sin
+    ``R-CONTABILIDAD``. Superusuario y admin de empresa las reciben siempre."""
+
+    def setUp(self):
+        super().setUp()
+        a = self.registros["a"]
+        empresa = self.a["empresa"]
+        cuenta_cargo, _, centro_costo = self._crear_cuentas_contables(empresa)
+        poliza = Poliza.objects.create(
+            empresa=empresa, sucursal=self.a["sucursal"], centro_costo=centro_costo,
+            folio="POL-EC746", folio_consecutivo=1,
+        )
+        PolizaDetalle.objects.create(
+            poliza=poliza, cuenta_contable=cuenta_cargo, centro_costo=centro_costo,
+            factura_id=a["facturas"], cargo=Decimal("100.00"), abono=Decimal("0.00"), orden=1,
+        )
+        self.url = f"/api/v1/finanzas/cuentas-por-cobrar/{a['cuentas-por-cobrar']}/"
+
+    def _polizas(self, user):
+        resp = self._client(user).get(self.url)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data["polizas"]
+
+    def test_con_solo_la_seccion_de_cxc_llegan_vacias(self):
+        self.assertEqual(self._polizas(self._usuario_con("pol-cxc", ["R-CONTABILIDAD-CXC"])), [])
+
+    def test_con_el_modulo_llegan_con_sus_lineas(self):
+        polizas = self._polizas(self._usuario_con("pol-mod", ["R-CONTABILIDAD"]))
+        self.assertEqual([p["folio"] for p in polizas], ["POL-EC746"])
+        self.assertEqual(len(polizas[0]["detalles"]), 1)
+
+    def test_admin_de_empresa_y_superusuario_las_reciben(self):
+        admin = self._usuario_con("pol-admin", [])
+        admin.is_admin_empresa = True
+        admin.save(update_fields=["is_admin_empresa"])
+        root = self._usuario_con("pol-root", [])
+        root.is_superuser = True
+        root.save(update_fields=["is_superuser"])
+        for user in (admin, root):
+            with self.subTest(user=user.username):
+                self.assertEqual([p["folio"] for p in self._polizas(user)], ["POL-EC746"])
+
+    def test_el_resto_del_detalle_no_cambia_con_la_seccion(self):
+        """La factura embebida sigue viniendo completa: es el seguimiento de la propia CxC."""
+        resp = self._client(self._usuario_con("pol-fact", ["R-CONTABILIDAD-CXC"])).get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["factura"]["id"], self.registros["a"]["facturas"])

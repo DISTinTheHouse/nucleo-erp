@@ -3032,6 +3032,8 @@ Aplica a todo `/api/v1/finanzas/` salvo Facturama (`facturama/...`) y el webhook
   Los códigos de sección no se heredan entre sí: `R-CONTABILIDAD-CXC` no lee facturas ni `R-CONTABILIDAD-FACTURACION` lee cobros. Lo que una sección necesita de otra va embebido en su propia respuesta (ver los campos del cobro abajo) o el frontend lo deshabilita con su motivo.
 
   **Excepción aceptada:** `GET facturas/{id}/desglose/` se lee con `R-CONTABILIDAD-FACTURACION` aunque embebe `cobranza` (la CxC de la factura: estatus, total, saldo, fechas) y `notas_credito` (folio, estatus, motivo, fecha de emisión, total). Es el seguimiento de la propia factura, no la sección de CxC.
+
+  **Pólizas del detalle de CxC:** `GET cuentas-por-cobrar/{id}/` se lee con `R-CONTABILIDAD-CXC`, pero su campo `polizas` (asientos con cuentas contables, centros de costo, cargos y abonos) es de Contabilidad: sin `R-CONTABILIDAD` llega como `[]`. Superusuario y admin de empresa lo reciben siempre. Un `[]` significa entonces "sin pólizas" **o** "sin permiso para verlas"; quien lo muestre debe distinguirlo por el permiso del usuario. La `factura` embebida sí viene completa con la sección (seguimiento de la propia CxC, mismo criterio que `desglose`).
 - **Escribir** (`POST`, `PUT`, `PATCH`, `DELETE` y acciones como `cancelar/`, `generar/`, `desde-pedido/`, `onboarding/` POST, `adjuntar-pdf/`, `syncfy/sessions/`) exige `E-FIN-FACTURAS`. Sin él → `403 {"detail": "No tienes permiso para modificar datos de finanzas."}` (cobros, pólizas, conciliaciones y notas de crédito conservan su mensaje propio). Se revisa antes de validar el body: el `403` no trae datos ni errores de campo.
 - Superusuario y admin de empresa pasan siempre. Otra empresa sigue siendo `404`.
 - La regla de lectura no cambia el alcance de filas: empresa siempre y, en facturas, CxC y cobros, sucursal para quien no es admin (#753).
@@ -3714,6 +3716,7 @@ Endpoint directo para registrar una factura manual pendiente de cobro para un cl
 
 - El backend devuelve únicamente cuentas por cobrar ligadas a facturas activas de la empresa del usuario autenticado.
 - Este endpoint es solo lectura; no crea ni modifica registros.
+- `polizas` llega como `[]` si el usuario no tiene `R-CONTABILIDAD` (por ejemplo, sólo `R-CONTABILIDAD-CXC`); superusuario y admin de empresa la reciben siempre (EC-746, ver *Permisos de finanzas*).
 - El listado devuelve un resumen ligero.
 - El detalle `GET /api/v1/finanzas/cuentas-por-cobrar/{id}/` devuelve la factura relacionada, el `total_pagado` y las pólizas asociadas a esa factura con sus partidas.
 
