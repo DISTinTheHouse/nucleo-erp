@@ -2136,6 +2136,8 @@ En qué paso va el pedido, cuánto lleva y si va a tiempo. Todo se calcula en el
     - el `GET /api/v1/ventas/pedidos/{id}/` ya devuelve `detalles[].id` y `tallas[]`, así que el frontend puede reutilizar ese payload para construir el body de edición sin tener que inventar IDs o hacer mapeos especiales
 ### Programar pedido (parcialidades de entrega, una vez aceptado)
 
+> **EC-750:** `GET` y `PATCH /pedidos/{id}/programar/` responden `400 {"fecha_confirmacion": ...}` si el pedido no está confirmado y `400 {"estatus": ...}` si está CANCELADO. Vaciar `fecha_confirmacion` con `PATCH /pedidos/{id}/` en un pedido que ya tiene programaciones responde `400`: primero se quita la programación.
+
 Una vez que el pedido ya fue aceptado/autorizado, mesa de control reparte sus piezas en una o más entregas parciales por destino (bordado, embarque, etc.) — **no** reescribe renglones ni cantidades del pedido, solo registra el plan de entrega. Vive **separado** de `editar-mesa-control`: no valida los bloqueos de documentos ligados (facturas, órdenes, picking) porque no toca ningún renglón, y no sincroniza la cotización relacionada (la programación es propia del pedido).
 
 #### `GET /api/v1/ventas/pedidos/{id}/programar/` — pantalla única

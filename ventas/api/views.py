@@ -3181,6 +3181,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # La restricción #537 (campos de contabilidad) ya corrió en ``update()``,
         # antes de validar el payload.
         self._validar_cambio_estatus(serializer.instance, serializer.validated_data.get("estatus"))
+        self._validar_vaciado_confirmacion(serializer.instance, serializer.validated_data)
         serializer.save()
         # ``UpdateModelMixin.update`` vacía el prefetch de ``serializer.instance``
         # después de este método y la respuesta recargaba renglones y tallas uno
@@ -3188,6 +3189,29 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # instancia recargada con el mismo prefetch que el detalle.
         serializer.instance = self.get_queryset().select_related("cotizacion").get(pk=serializer.instance.pk)
         serializer.context.update(self._contexto_detalle(serializer.instance))
+
+    @staticmethod
+    def _exigir_programable(pedido):
+        """Solo se programa un pedido confirmado y no cancelado (EC-750). Sin consultas:
+        ambos campos vienen en la fila ya cargada (con lock en el PATCH)."""
+        if pedido.estatus == Pedido.ESTATUS_CANCELADO:
+            raise ValidationError({"estatus": "El pedido está CANCELADO; no se puede programar."})
+        if pedido.fecha_confirmacion is None:
+            raise ValidationError({"fecha_confirmacion": "Confirma el pedido antes de programarlo."})
+
+    @staticmethod
+    def _validar_vaciado_confirmacion(pedido, validated_data):
+        """Un pedido ya programado no pierde su confirmación (EC-750): vaciarla dejaría una
+        programación de un pedido sin confirmar. Primero se quita la programación."""
+        if "fecha_confirmacion" not in validated_data or validated_data["fecha_confirmacion"] is not None:
+            return
+        programaciones = (pedido.programacion_conf or {}).get("programaciones") if isinstance(
+            pedido.programacion_conf, dict
+        ) else None
+        if pedido.fecha_confirmacion is not None and programaciones:
+            raise ValidationError({"fecha_confirmacion": (
+                "El pedido ya está programado; quita la programación antes de vaciar la confirmación."
+            )})
 
     def _validar_cambio_estatus(self, pedido, nuevo):
         """CANCELADO es terminal y solo se pone con ``POST /pedidos/{id}/cancelar/``."""
@@ -3459,6 +3483,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         if request.method == "GET":
             # Sin ``get_object()``: su queryset prefetchea renglones que aquí no se usan.
             pedido = get_object_or_404(pedidos_visibles(pedidos_base(), user), pk=pk)
+            self._exigir_programable(pedido)
             return Response(self._programar_contexto(pedido))
         base_pedido = self.get_object()
 
@@ -3467,6 +3492,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             # toma este mismo lock para reescribir las tallas, así que el total
             # validado no puede cambiar entre la validación y el guardado.
             pedido = Pedido.objects.select_for_update().get(pk=base_pedido.pk)
+            self._exigir_programable(pedido)
             # Todas las piezas del pedido, muestras incluidas: un pedido de solo
             # muestras también se programa. El diálogo las distingue por ``es_muestra``.
             total_piezas = (
