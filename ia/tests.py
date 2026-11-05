@@ -2,27 +2,18 @@ import json
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
-from rest_framework.test import APIClient
 
-import ventas.tests as ventas_tests
 from ia.api.views import AIAssistantAPIView
+from ventas.tests import ImportesPedidoFixture
 
 CHAT_URL = "/api/v1/ai/chat/"
 
 
-class UltimaCompraImportesPorPerfilTests(TestCase):
+class UltimaCompraImportesPorPerfilTests(ImportesPedidoFixture, TestCase):
     """EC-784: la herramienta ``get_last_cliente_compra`` del asistente sigue la regla
     de importes del pedido (contabilidad de ventas O de compras). Sin ella omite
     ``last_purchase.gran_total`` tanto en lo que se manda al modelo (mensaje
     ``tool``) como en ``tool_results``; trae ``puede_ver_importes``."""
-
-    @classmethod
-    def setUpTestData(cls):
-        # Mismo fixture que ``ImportesPedidoPorPerfilTests`` (perfiles, pedidos, otra empresa).
-        base = ventas_tests.ImportesPedidoPorPerfilTests
-        for helper in ("_usuario", "_pedido"):
-            setattr(cls, helper, classmethod(base.__dict__[helper].__func__))
-        base.setUpTestData.__func__(cls)
 
     def _chat(self, usuario):
         """Corre ``/ai/chat/`` con un modelo falso que pide la herramienta y luego
@@ -40,8 +31,7 @@ class UltimaCompraImportesPorPerfilTests(TestCase):
             enviados.append(json.loads(json.dumps(messages)))
             return next(respuestas)
 
-        api = APIClient()
-        api.force_authenticate(usuario)
+        api = self._api(usuario)
         with override_settings(OPENAI_API_KEY="sk-test"), patch.object(AIAssistantAPIView, "_openai_chat", falso):
             resp = api.post(CHAT_URL, {"message": "¿Quién fue mi último cliente?"}, format="json")
         self.assertEqual(resp.status_code, 200, resp.content)

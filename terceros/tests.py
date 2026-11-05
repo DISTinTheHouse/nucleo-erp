@@ -10,6 +10,7 @@ from usuarios.models import Usuario
 from nucleo.models import Empresa
 from terceros.models import Cliente, Proveedor
 from catalogo.models import TipoProducto
+from ventas.tests import ImportesPedidoFixture
 
 
 def _tipo_producto():
@@ -1795,7 +1796,7 @@ class ClienteEmpresaSucursalTests(TestCase):
         self.assertFalse(Cliente.objects.exists())
 
 
-class ResumenComercialImportesPorPerfilTests(TestCase):
+class ResumenComercialImportesPorPerfilTests(ImportesPedidoFixture, TestCase):
     """EC-784: ``resumen_comercial`` del detalle de cliente sigue la regla de importes
     del pedido (contabilidad de ventas O de compras). Sin ella se omiten
     ``montos_por_moneda`` y el ``gran_total`` de ``pedidos_recientes``/``ultimo_pedido``;
@@ -1803,22 +1804,12 @@ class ResumenComercialImportesPorPerfilTests(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        import ventas.tests as ventas_tests
-
-        # Mismo fixture que ``ImportesPedidoPorPerfilTests`` (perfiles, pedidos, otra empresa).
-        base = ventas_tests.ImportesPedidoPorPerfilTests
-        for helper in ("_usuario", "_pedido"):
-            setattr(cls, helper, classmethod(base.__dict__[helper].__func__))
-        base.setUpTestData.__func__(cls)
-        cls.cliente = next(iter(cls.pedidos.values())).cliente
-        cls.cliente_otra = cls.pedido_otra.cliente
+        super().setUpTestData()
         # Sin ser Mesa de Control/Contabilidad, un usuario sólo ve sus clientes asignados.
         cls.cliente.vendedores.add(*(usuario for usuario, _ in cls.perfiles))
 
     def _resumen(self, usuario, cliente):
-        api = APIClient()
-        api.force_authenticate(usuario)
-        return api.get(f"{CLIENTES_URL}{cliente.pk}/")
+        return self._api(usuario).get(f"{CLIENTES_URL}{cliente.pk}/")
 
     def test_resumen_por_perfil(self):
         for usuario, ve in self.perfiles:

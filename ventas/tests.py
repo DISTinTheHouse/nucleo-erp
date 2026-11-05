@@ -7934,9 +7934,11 @@ class OportunidadLigarCotizacionesTests(OportunidadesBase):
         self.assertEqual(len(pocas), len(muchas))
 
 
-class ImportesPedidoPorPerfilTests(TestCase):
-    """EC-784: una sola regla de importes del pedido —contabilidad de ventas O de
-    compras— en el listado, el detalle y ``kpis/``. Ningún perfil cruza de empresa."""
+class ImportesPedidoFixture:
+    """Fixture de EC-784, compartido por las pruebas de importes de ventas, terceros
+    (``resumen_comercial``) e IA (``get_last_cliente_compra``): un usuario por perfil
+    de contabilidad, cada uno vendedor de un pedido propio, y una segunda empresa con
+    su cliente y su pedido. Mixin, no ``TestCase``: se hereda junto con ``TestCase``."""
 
     @classmethod
     def _usuario(cls, nombre, empresa=None, clave=None, **extra):
@@ -7968,10 +7970,10 @@ class ImportesPedidoPorPerfilTests(TestCase):
         cls.moneda = Moneda.objects.create(codigo_iso="XEC", nombre="Moneda EC-784")
         cls.empresa = Empresa.objects.create(codigo="ec784", razon_social="EC784 SA")
         cls.otra = Empresa.objects.create(codigo="ec784-otra", razon_social="Otra EC784 SA")
-        sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="EC784", nombre="EC784")
-        sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="EC784O", nombre="EC784 otra")
-        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente EC784")
-        cliente_otra = Cliente.objects.create(empresa=cls.otra, nombre="Cliente otra EC784")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="EC784", nombre="EC784")
+        cls.sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="EC784O", nombre="EC784 otra")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente EC784")
+        cls.cliente_otra = Cliente.objects.create(empresa=cls.otra, nombre="Cliente otra EC784")
 
         cls.sin_permiso = cls._usuario("wms", cls.empresa, "WMS")
         cls.ventas = cls._usuario("ventas", cls.empresa, "VENTAS")
@@ -7987,11 +7989,11 @@ class ImportesPedidoPorPerfilTests(TestCase):
         # Cada perfil es vendedor de un pedido propio, para que ``kpis/`` (que sólo
         # cuenta "mis pedidos") tenga algo que mostrar.
         cls.pedidos = {
-            usuario.pk: cls._pedido(cls.empresa, sucursal, cliente, usuario, f"EC784-{i}", f"{i}00.00")
+            usuario.pk: cls._pedido(cls.empresa, cls.sucursal, cls.cliente, usuario, f"EC784-{i}", f"{i}00.00")
             for i, (usuario, _) in enumerate(cls.perfiles, start=1)
         }
         cls.pedido_otra = cls._pedido(
-            cls.otra, sucursal_otra, cliente_otra, cls._usuario("ajeno", cls.otra, "VENTAS"),
+            cls.otra, cls.sucursal_otra, cls.cliente_otra, cls._usuario("ajeno", cls.otra, "VENTAS"),
             "EC784-OTRA", "999.00",
         )
 
@@ -7999,6 +8001,11 @@ class ImportesPedidoPorPerfilTests(TestCase):
         api = APIClient()
         api.force_authenticate(usuario)
         return api
+
+
+class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
+    """EC-784: una sola regla de importes del pedido —contabilidad de ventas O de
+    compras— en el listado, el detalle y ``kpis/``. Ningún perfil cruza de empresa."""
 
     def test_regla_es_la_union_de_ventas_y_compras(self):
         from seguridad.role_identity import CLAVES_CONTABILIDAD_COMPRAS, CLAVES_CONTABILIDAD_VENTAS
