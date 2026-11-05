@@ -150,7 +150,7 @@ Pasar de impresion normal a impresion con identidad RFID trazable.
 - [x] Workspace QA `/QA/imprimir_orden_compra/<id>/` con botón **"Guardar y imprimir etiquetas RFID"** (renglones de OC, guarda por renglon, badge de guardado).
 - [x] Backend `RFIDLabelService` (archivo `wms/services/rfid_label_service.py`):
   - `_generate_epc_list()`: 24 hex = 96 bits SGTIN Gen2 (prefix 8 + ts_chunk 4 + idx 4 + random 8).
-  - `_build_zpl_rfid()`: `^RS8,E` + `^RB96,,,1` + `^RFW,E,,N` + `^FD{EPC}^FS` (escribe EPC Gen2 96 bits al chip, sin padding 128 bits).
+  - `_build_zpl_rfid()`: `^RS8` + `^RFW,H,,,E^FD{EPC}^FS` (escribe en hex el EPC Gen2 de 96 bits). Corregido el 2026-11-05: la versión anterior (`^RB96,,,1` + `^RFW,E`) usaba el formato *por particiones*, no hex, y el chip se quedaba con su EPC de fábrica.
   - `store_impresion()`: transacción atómica, exige sucursal del usuario, crea `EtiquetaRFIDImpresion` + bulk `EtiquetaRFIDDetalle` (epc=UPPER, UNIQUE, estado IMPRESO).
   - `_resolve_context()`: pertenencia a empresa + sucursal default ligada al usuario.
 - [x] Endpoints guardar impresión (archivo `QA/views.py`):
@@ -187,8 +187,8 @@ Poder registrar lecturas RFID dentro del ERP.
 
 - [x] Ya existe una prueba funcional de lectura en `QA/rfid/recepciones/`, pero hoy resuelve por `sku`, `codigo` o `cod_proscai`.
 - [x] Workspace dedicado `GET /QA/scanner_rfid/` para lectura RFID en vivo.
-- [x] El endpoint de hardware `POST /QA/scanner_rfid/receive/` recibe webhook del lector FX.
-- [x] El endpoint de polling `GET /QA/scanner_rfid/get/` devuelve scans + match cruzado con EtiquetaRFIDDetalle.
+- [x] El endpoint de hardware `POST /QA/scanner_rfid/receive/` recibe webhook del lector FX. Hoy: `POST /api/v1/wms/etiquetas-rfid/scans/receive/` con token del `LectorRFID`.
+- [x] El endpoint de polling `GET /QA/scanner_rfid/get/` devuelve scans + match cruzado con EtiquetaRFIDDetalle. Hoy: `GET /api/v1/wms/etiquetas-rfid/scans/`.
 - [x] El endpoint `GET /QA/scanner_rfid/clear/` purga staging rfid_scans (Purge List).
 - [x] Match en vivo: cada scan nuevo indica MATCH=SI con folio LAB-xxxx, SKU, talla, color, barcode, serial y estado; o MATCH=NO si EPC no está registrado.
 
@@ -237,7 +237,30 @@ Tener trazabilidad de lectura, aunque todavia no automatice procesos.
 ### PENDIENTES menores por confirmar con hardware
 
 - [ ] Que antenna y rssi dejen de ser `-` (null) en admin `wms/rfidscan/` — depende de las keys reales que mande el FX; ya hay logger 4096 chars y fuzzy match listo.
-- [ ] Confirmar MATCH=SI con etiqueta re-impresa CON el nuevo ZPL `^RS8,E ^RB96,,,1 ^RFW,E` (antes chip no tenía el EPC correcto; LAB-000012 salió sin ese fix, hay que reimprimir una nueva).
+- [ ] Confirmar MATCH=SI con una etiqueta impresa con el ZPL corregido `^RS8` + `^RFW,H,,,E` (todas las etiquetas hasta LAB-000039 salieron con el ZPL viejo y su chip trae el EPC de fábrica; hay que imprimir nuevas). Ver "Ligado lectura ↔ etiqueta" abajo.
+
+### Ligado lectura ↔ etiqueta (2026-11-05)
+
+Diagnóstico: de 1,199 EPCs leídos solo 1 coincidía con `etiquetas_rfid_detalle`, y ese se había insertado a mano. Había tres causas, y ninguna era de sincronización:
+
+1. El ZPL no grababa nuestro EPC en el chip (`^RFW,E`): el lector veía el EPC de fábrica.
+2. No había ningún `LectorRFID` dado de alta. Desde que el webhook exige token (2026-10-06), el FX recibe 401 y no ha llegado ninguna lectura real.
+3. Los `3035…` (SGTIN-96) son tags ajenos (de fábrica o de proveedores). Es correcto que no hagan match.
+
+Resuelto en backend:
+- [x] ZPL corregido: `^RS8` + `^RFW,H,,,E^FD{EPC}^FS` (una sola escritura; se quitaron `^RB96` y `^HV1`, que no validaban nada).
+- [x] `RfidScan.etiqueta` (FK a `EtiquetaRFIDDetalle`): cada lectura queda ligada a la etiqueta que imprimimos, de la misma empresa del lector. Los tags ajenos quedan sin etiqueta.
+- [x] Se liga al recibir la lectura (`scans/receive/`) y, si la lectura llegó antes que el registro, al registrar la impresión.
+- [x] Primera lectura: `EtiquetaRFIDDetalle` pasa a `LEIDO` y guarda `leida_at`.
+- [x] EPC normalizado igual en ambos lados (hex en mayúsculas, sin separadores); tolera relleno a 128 bits y ceros a la izquierda.
+- [x] `scans/` lee el match ya ligado: 1 consulta para las 50 lecturas (antes, 2 y variantes recalculadas en cada polling).
+- [x] Migración `wms.0020`: lecturas existentes en mayúsculas y ligadas (LAB-000039 queda `LEIDO`).
+
+Prueba en piso (pendiente):
+- [ ] Admin → `wms/lectorrfid/`: alta del lector (empresa + sucursal) y copiar su token.
+- [ ] Configurar el FX: `POST https://<backend>/api/v1/wms/etiquetas-rfid/scans/receive/` con header `X-RFID-Token: <token>`.
+- [ ] Imprimir una etiqueta nueva desde el ERP (ZPL corregido).
+- [ ] Leerla con el FX: la pantalla Scanner RFID muestra ✓ con folio/SKU/talla y la etiqueta pasa a `LEIDO`.
 
 ---
 
@@ -312,7 +335,7 @@ Reducir errores, mejorar velocidad y aumentar trazabilidad en almacen.
 - definir EPC antes de imprimir masivamente
 - no automatizar WMS con RFID sin tener trazabilidad base estable
 - validar compatibilidad exacta del modelo de impresora Zebra
-- [x] Usar `^RS8,E + ^RB96,,,1` ANTES de `^RFW,E` para escritura real de EPC 96 bits Gen2 (sin padding de 128 bits; sin esto, el papel muestra el EPC pero el chip lo escribe con otra longitud o directamente no lo sobreescribe)
+- [x] Escribir el EPC con `^RS8` + `^RFW,H,,,E` (hex, EPC de 96 bits). `^RFW,E` + `^RB96,,,1` **no sirve**: es el formato por particiones decimales y deja el EPC de fábrica en el chip (corregido 2026-11-05).
 - [x] Extractor antenna/rssi con fuzzy find + logger 4096 chars para payloads FX variables
 
 ---
@@ -353,7 +376,7 @@ Ese orden reduce riesgo, facilita mantenimiento y permite avanzar con valor real
 ## Resumen CHECKBOX actualizado al commit `ace44de`
 
 - **FASE 1 = 100% ✅** (Zebra normales, F1 validación QA, endpoints, MVPs, flujo).
-- **FASE 2 = 100% ✅** (Estructura EPC 24 hex, ZPL RFID Gen2 `^RS8,E ^RB96,,,1 ^RFW,E`, registro impreso en DB con usuario/empresa/sucursal, 2 workspaces QA SKU+OC, MVPs).
+- **FASE 2 = 100% ✅** (Estructura EPC 24 hex, ZPL RFID Gen2 `^RS8` + `^RFW,H,,,E` —corregido 2026-11-05—, registro impreso en DB con usuario/empresa/sucursal, 2 workspaces QA SKU+OC, MVPs).
 - **FASE 3 = 95% ✅** (receive+get+clear implementados, match live robusto, antenna/rssi extracción + logger 4096 chars). Los 2 únicos pendientes son confirmaciones de hardware que dependen de probar una etiqueta nueva:
   - [ ] antenna/rssi aparecen en admin (código listo, falta correr un FX post).
   - [ ] MATCH=SI real con chip con EPC bien grabado (LAB-000012 no sirve porque salió sin ^RS/^RB, hay que reimprimir).

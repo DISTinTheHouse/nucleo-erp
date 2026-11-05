@@ -34,7 +34,12 @@ from wms.models import (
     TransferenciaDetalle,
 )
 from wms.services.despacho_service import DespachoService
-from wms.services.rfid_scan_service import lector_desde_request, recibir_lecturas
+from wms.services.rfid_scan_service import (
+    lector_desde_request,
+    normalizar_epc,
+    recibir_lecturas,
+    variantes_epc,
+)
 from wms.services.transferencia_service import TransferenciaService
 from wms.services.picking_service import PickingService
 from wms.services.packing_service import PackingService
@@ -732,100 +737,39 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                  match_impresion: bool,
                  impresion_folio, impresion_id, producto_nombre, sku, color, talla,
                  barcode_value, serial, estado, detalle_id,
-                 match_debug: {scan_epc, scan_epc_len, variants_tried, variant_used,
-                               detalle_epc_raw, detalle_epc_len, detalle_epc_variants} |
-                              {scan_epc, scan_epc_len, variants_tried, variant_used:null,
-                               detalle_lookup_count:int}
+                 match_debug: {scan_epc, detalle_epc_raw | null}
                 }, ...
               ],
               debug_get: {...lookup info, query_epc_search si lo mandaste...}
             }
         """
         user = request.user
+        # El match ya viene ligado desde que se recibió la lectura (``etiqueta``):
+        # una sola consulta, sin recalcular variantes de EPC en cada polling.
         scans = list(
-            RfidScan.objects.visibles_para(user).order_by("-created_at", "-id")[:50]
-        )
-        epc_list = [s.epc for s in scans if s.epc]
-        epc_lower_set = {e.lower() for e in epc_list if e}
-
-        def _epc_variants(epc):
-            base = (epc or "").strip().lower()
-            if not base:
-                return set()
-            vars = {base}
-            vars.add(base.lstrip("0"))
-            vars.add(base.rstrip("0"))
-            vars.add(base.strip("0"))
-            if len(base) > 24:
-                vars.add(base[:24])
-                vars.add(base[-24:])
-                vars.add(base[:24].lstrip("0"))
-                vars.add(base[-24:].lstrip("0"))
-                for target_len in (28, 32):
-                    if len(base) >= target_len:
-                        vars.add(base[:target_len])
-                        vars.add(base[-target_len:])
-            elif len(base) < 24:
-                pad_left = base.rjust(24, "0")
-                pad_right = base.ljust(24, "0")
-                vars.add(pad_left)
-                vars.add(pad_right)
-                vars.add(pad_left.lstrip("0"))
-                vars.add(pad_right.rstrip("0"))
-            return {v for v in vars if len(v) >= 8}
-
-        epc_search_set = set()
-        for e in list(epc_lower_set):
-            epc_search_set |= _epc_variants(e)
-
-        detalle_qs = (
-            EtiquetaRFIDDetalle.objects.filter(
-                epc__in=list(epc_search_set) + list({v.upper() for v in epc_search_set})
-            )
+            RfidScan.objects.visibles_para(user)
             .select_related(
-                "impresion",
-                "impresion__producto",
-                "impresion__producto_variante",
-                "impresion__producto_variante__color",
-                "impresion__producto_variante__talla",
+                "etiqueta__impresion__producto",
+                "etiqueta__impresion__producto_variante__color",
+                "etiqueta__impresion__producto_variante__talla",
             )
-            .only(
-                "epc", "barcode_value", "serial", "estado",
-                "impresion__id",
-                "impresion__producto_id", "impresion__producto__nombre",
-                "impresion__producto_variante_id", "impresion__producto_variante__nombre",
-                "impresion__producto_variante__sku",
-                "impresion__producto_variante__color_id",
-                "impresion__producto_variante__color__nombre",
-                "impresion__producto_variante__talla_id",
-                "impresion__producto_variante__talla__nombre",
-            )
+            .order_by("-created_at", "-id")[:50]
         )
-        # Mismo alcance que get_queryset: sin empresa o sin sucursales no hay match.
-        if not getattr(user, "is_superuser", False):
-            detalle_qs = detalle_qs.filter(impresion__empresa_id=user.empresa_id)
-            if not getattr(user, "is_admin_empresa", False):
-                detalle_qs = detalle_qs.filter(
-                    impresion__sucursal_id__in=user.sucursales_permitidas()
-                )
-
-        detalle_by_epc_variant = {}
-        for d in detalle_qs:
-            for v in _epc_variants(d.epc):
-                detalle_by_epc_variant.setdefault(v, d)
+        # Mismo alcance que get_queryset: un no admin solo ve el detalle de las
+        # etiquetas impresas en sus sucursales.
+        sucursales = None
+        if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
+            if any(s.etiqueta_id for s in scans):
+                sucursales = set(user.sucursales_permitidas())
 
         data = []
+        ligadas = 0
         for scan in scans:
             epc = scan.epc or ""
-            epc_lower = epc.lower()
-            detalle = None
-            variant_used = None
-            variants_tried = list(_epc_variants(epc_lower))
-            for variant in variants_tried:
-                detalle = detalle_by_epc_variant.get(variant)
-                if detalle is not None:
-                    variant_used = variant
-                    break
+            detalle = scan.etiqueta
+            impresion = detalle.impresion if detalle is not None else None
+            if impresion is not None and sucursales is not None and impresion.sucursal_id not in sucursales:
+                detalle = impresion = None
             item = {
                 "id": scan.pk,
                 "epc": epc,
@@ -835,13 +779,10 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                 "reader_ip": scan.reader_ip,
             }
             if detalle is not None:
-                impresion = detalle.impresion
-                variante = impresion.producto_variante if impresion else None
-                producto = impresion.producto if impresion else None
-                nombre_producto = None
-                sku = None
-                color_nombre = None
-                talla_nombre = None
+                ligadas += 1
+                variante = impresion.producto_variante
+                producto = impresion.producto
+                nombre_producto = sku = color_nombre = talla_nombre = None
                 if variante:
                     sku = variante.sku
                     if variante.color:
@@ -853,8 +794,8 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                     nombre_producto = producto.nombre
                 item.update({
                     "match_impresion": True,
-                    "impresion_folio": impresion.folio if impresion else None,
-                    "impresion_id": impresion.id if impresion else None,
+                    "impresion_folio": impresion.folio,
+                    "impresion_id": impresion.id,
                     "producto_nombre": nombre_producto,
                     "sku": sku,
                     "color": color_nombre,
@@ -863,52 +804,28 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                     "serial": detalle.serial,
                     "estado": detalle.estado,
                     "detalle_id": detalle.id,
-                    "match_debug": {
-                        "scan_epc": epc_lower,
-                        "scan_epc_len": len(epc_lower),
-                        "variants_tried": variants_tried,
-                        "variant_used": variant_used,
-                        "detalle_epc_raw": detalle.epc,
-                        "detalle_epc_len": len(detalle.epc or ""),
-                        "detalle_epc_variants": sorted(_epc_variants(detalle.epc)),
-                    },
+                    "match_debug": {"scan_epc": epc, "detalle_epc_raw": detalle.epc},
                 })
             else:
                 item["match_impresion"] = False
-                item["match_debug"] = {
-                    "scan_epc": epc_lower,
-                    "scan_epc_len": len(epc_lower),
-                    "variants_tried": variants_tried,
-                    "variant_used": None,
-                    "detalle_lookup_count": len(detalle_by_epc_variant),
-                }
+                item["match_debug"] = {"scan_epc": epc, "detalle_epc_raw": None}
             data.append(item)
 
-        epc_all_scans_lower = [s.epc.lower() for s in scans if s.epc]
-        epc_all_scans_set = set(epc_all_scans_lower)
-        q_epc = (request.query_params.get("epc") or "").strip().lower()
+        epcs = {(s.epc or "").upper() for s in scans if s.epc}
+        q_epc = normalizar_epc(request.query_params.get("epc"))
         q_search_debug = None
         if q_epc:
-            q_vars = sorted(_epc_variants(q_epc))
-            hit = None
-            for v in q_vars:
-                if v in epc_all_scans_set:
-                    hit = v
-                    break
+            hit = next((v for v in sorted(variantes_epc(q_epc)) if v in epcs), None)
             q_search_debug = {
                 "query_epc": q_epc,
-                "query_epc_len": len(q_epc),
-                "variants_count": len(q_vars),
-                "variants_head5": q_vars[:5],
                 "found_in_scans": bool(hit),
                 "hit_variant": hit,
             }
         debug_get = {
             "scans_returned": len(data),
-            "scans_total_max_50": len(scans),
-            "lookup_detalle_count": len(detalle_by_epc_variant),
-            "unique_epc_in_50_scans_count": len(epc_all_scans_set),
-            "unique_epc_prefixes_head30": sorted({e[:4] for e in epc_all_scans_lower})[:30],
+            "scans_ligados": ligadas,
+            "unique_epc_in_50_scans_count": len(epcs),
+            "unique_epc_prefixes_head30": sorted({e[:4] for e in epcs})[:30],
             "query_epc_search": q_search_debug,
         }
         return Response({"scans": data, "debug_get": debug_get})

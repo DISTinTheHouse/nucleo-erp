@@ -550,6 +550,8 @@ class EtiquetaRFIDDetalle(models.Model):
     estado = models.CharField(
         max_length=16, choices=Estado.choices, default=Estado.PENDIENTE
     )
+    # Primera vez que un lector la leyó (pasa a ``LEIDO``).
+    leida_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -633,6 +635,16 @@ class RfidScan(models.Model):
         blank=True,
     )
     epc = models.CharField(max_length=255, db_index=True)
+    # Etiqueta impresa por el ERP con este EPC. Se liga al recibir la lectura o,
+    # si la lectura llegó antes que el registro, al registrar la impresión.
+    # Nula = tag ajeno a nuestras impresiones (de fábrica, de otro proveedor...).
+    etiqueta = models.ForeignKey(
+        EtiquetaRFIDDetalle,
+        on_delete=models.SET_NULL,
+        related_name="lecturas",
+        null=True,
+        blank=True,
+    )
     reader_ip = models.GenericIPAddressField(null=True, blank=True)
     antenna = models.IntegerField(null=True, blank=True)
     rssi = models.FloatField(null=True, blank=True)

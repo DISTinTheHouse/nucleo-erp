@@ -9,6 +9,7 @@ from rest_framework.exceptions import APIException, ValidationError
 
 from catalogo.models import Producto, ProductoVariante
 from wms.models import EtiquetaRFIDDetalle, EtiquetaRFIDImpresion
+from wms.services.rfid_scan_service import ligar_lecturas_previas
 
 logger = logging.getLogger(__name__)
 
@@ -98,8 +99,7 @@ class RFIDLabelService:
 
         El total se mantiene en **24 hex** a propósito: 96 bits es el tamaño
         estándar del banco EPC de un tag Gen2 (SGTIN-96) y ``_build_zpl_rfid``
-        escribe el dato con ``^RFW,E`` sin declarar ``^RS``, así que el printer
-        asume el tamaño nativo del inlay. Ampliarlo a 112 bits (28 hex) fallaría
+        escribe el dato con ``^RFW,H,,,E`` (EPC de 96 bits). Ampliarlo a 112 bits (28 hex) fallaría
         la escritura contra un inlay de 96 bits —void físico, etiqueta RFID
         desperdiciada— y en este repo no hay ningún documento que fije el modelo
         de tag en uso, de modo que no es verificable desde código.
@@ -195,44 +195,23 @@ class RFIDLabelService:
 
     @classmethod
     def _build_zpl_rfid(cls, epc, variante=None, producto=None, barcode_value=""):
-        """ZPL para ZD621R / ZD421R / ZT411 (RFID Programming Guide 3,
-        secuencia OFICIAL para escritura ASCII Hex Gen2 EPC 96 bits.
+        """ZPL para ZD621R / ZD421R / ZT411: graba el EPC (24 hex) en el chip.
 
-        HISTORIAL de configuraciones fallidas (porque fui quitando/poniendo ^RB):
-          - ^RB96,E,8,E  → ZD621R Link-OS v7 ignoraba completamente el param4=E offset check
-          - sin ^RB del todo  → no escribía EPC, dejaba EPC de fábrica
-          - ^MTD (Tag Do)  → en algunos firmwares no tiene efecto contrario
-        La SECUENCIA QUE SIEMPRE FUNCIONA (ZD621R tests RFID Programming 3 pág 134-137):
-          ^XA                -> ^RB96,,,1        <- 96 bits, formato ASCII HEX (param4=1 = HEX ASCII)
-      -> ^RS8,E          <- Gen2 EPC global standard
-      -> ^RFW,E          <- Write banco EPC, sin lockeo, sin password
-      -> ^FD<24hex>^FS  <- dato 24 chars hex ascii
-      repetimos #2 veces (redundancia driver Wifi ZD621R)
-      -> ^HV1,3,E,0      <- validación normal (param1=1 = beep rojo si falla,
-                              así si no escribió, el usuario lo nota. Param3=E= banco
-                              Param4=0 compara FD último escrito vs FD actual)
-      -> ZPL visual + ^XZ
+        ``^RS8`` = tag Gen2. ``^RFW,H,,,E`` = escribir en **hex** el EPC de 96 bits
+        (Gen2 bit 20h, 12 bytes; la impresora ignora inicio/longitud y ajusta sola).
+
+        Antes se mandaba ``^RB96,,,1`` + ``^RFW,E``: ``E`` es formato *EPC por
+        particiones* (decimales separados por puntos según ``^RB``), no hex, así
+        que el chip se quedaba con el EPC de fábrica y el lector nunca hacía
+        match. ``^HV1,3,E,0`` tampoco validaba nada (reportaba un ``^FN1`` que no
+        existe). Si la escritura falla, la impresora reintenta y marca la
+        etiqueta como VOID por sí sola.
         """
         lines = cls._graphic_zpl_lines(
             variante=variante, producto=producto, barcode_value=barcode_value
         )
-
-        # Escritura #1 con ^RB96,,,1 (96 bits, ASCII HEX)
-        lines.append("^RB96,,,1")
-        lines.append("^RS8,E")
-        lines.append("^RFW,E")
-        lines.append(f"^FD{epc}^FS")
-
-        # Escritura #2 (redundancia - 1er RFW se pierde a veces en LAN/Wifi
-        lines.append("^RB96,,,1")
-        lines.append("^RS8,E")
-        lines.append("^RFW,E")
-        lines.append(f"^FD{epc}^FS")
-
-        # Validación POST (beep rojo si no escribió.
-        lines.append("^RB96,,,1")
-        lines.append("^RS8,E")
-        lines.append("^HV1,3,E,0")
+        lines.append("^RS8")
+        lines.append(f"^RFW,H,,,E^FD{epc}^FS")
 
         # Texto visual del EPC
         display = epc
@@ -552,5 +531,8 @@ class RFIDLabelService:
                             empresa.pk,
                             cantidad,
                         )
+
+            # Lecturas que llegaron antes que este registro: se ligan ya.
+            ligar_lecturas_previas(impresion)
 
         return impresion

@@ -177,13 +177,18 @@ class GeneracionEPCTests(EtiquetaRFIDBaseTestCase):
         self.assertEqual(len(generados[-1]["epc"]), 24)
 
     def test_zpl_rfid_escribe_el_epc_completo(self):
-        """``^RFW,E`` debe llevar el EPC íntegro, sin recortes."""
+        """El chip se graba en hex (``^RFW,H,,,E``) con el EPC íntegro, una sola vez."""
         epc = RFIDLabelService._generate_epc_list(1, producto=self.producto)[0]["epc"]
 
         zpl = RFIDLabelService._build_zpl_rfid(epc, producto=self.producto)
 
-        self.assertIn("^RFW,E", zpl)
-        self.assertIn(f"^FD{epc}^FS", zpl)
+        self.assertIn("^RS8
+", zpl)
+        self.assertIn(f"^RFW,H,,,E^FD{epc}^FS", zpl)
+        self.assertEqual(zpl.count("^RFW"), 1)
+        # ``^RFW,E`` (formato por particiones) dejaba el EPC de fábrica.
+        self.assertNotIn("^RFW,E", zpl)
+        self.assertNotIn("^RB96", zpl)
 
 
 class LayerBServiceColisionTests(EtiquetaRFIDBaseTestCase):
@@ -641,6 +646,55 @@ class ScannerRFIDSeguridadTests(TestCase):
 
         self.assertFalse(scan["match_impresion"])
         self.assertNotIn("impresion_folio", scan)
+
+    def _etiqueta_a(self, epc="00001A7F61EC000474479706"):
+        impresion = EtiquetaRFIDImpresion.objects.create(
+            empresa=self.empresa_a, sucursal=self.sucursal_a, cantidad=1, status="EXITO"
+        )
+        return EtiquetaRFIDDetalle.objects.create(
+            impresion=impresion, epc=epc, barcode_value="X", estado="IMPRESO"
+        )
+
+    def test_receive_liga_la_lectura_y_marca_leida(self):
+        detalle = self._etiqueta_a()
+        self.client.post(
+            self.RECEIVE_URL,
+            data=json.dumps([{"epcId": detalle.epc.lower()}, {"epcId": "3035C9D350033A40004311F1"}]),
+            content_type="application/json",
+            HTTP_X_RFID_TOKEN=self.lector_a.token,
+        )
+
+        nuestra = RfidScan.objects.get(epc=detalle.epc)
+        ajena = RfidScan.objects.get(epc="3035C9D350033A40004311F1")
+        self.assertEqual(nuestra.etiqueta_id, detalle.pk)
+        self.assertIsNone(ajena.etiqueta_id)
+        detalle.refresh_from_db()
+        self.assertEqual(detalle.estado, "LEIDO")
+        self.assertIsNotNone(detalle.leida_at)
+
+        scans = {s["epc"]: s for s in self._api(self.usuario_a).get(self.SCANS_URL).json()["scans"]}
+        self.assertTrue(scans[detalle.epc]["match_impresion"])
+        self.assertEqual(scans[detalle.epc]["impresion_folio"], detalle.impresion.folio)
+        self.assertFalse(scans["3035C9D350033A40004311F1"]["match_impresion"])
+
+    def test_registro_tardio_liga_lecturas_previas(self):
+        RfidScan.objects.create(
+            empresa=self.empresa_a, lector=self.lector_a, epc="00001A7F61EC000474479706"
+        )
+        impresion = EtiquetaRFIDImpresion.objects.create(
+            empresa=self.empresa_a, sucursal=self.sucursal_a, cantidad=1
+        )
+        EtiquetaRFIDDetalle.objects.create(
+            impresion=impresion, epc="00001A7F61EC000474479706", barcode_value="X"
+        )
+
+        from wms.services.rfid_scan_service import ligar_lecturas_previas
+
+        self.assertEqual(ligar_lecturas_previas(impresion), 1)
+        self.assertEqual(
+            RfidScan.objects.get().etiqueta.epc, "00001A7F61EC000474479706"
+        )
+        self.assertEqual(impresion.etiquetas.get().estado, "LEIDO")
 
     def test_lector_sin_sucursal_no_valida(self):
         with self.assertRaises(DjangoValidationError):
