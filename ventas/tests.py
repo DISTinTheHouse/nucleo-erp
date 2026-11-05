@@ -8095,13 +8095,67 @@ class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
         for usuario, puede in self._escritores():
             with self.subTest(usuario=usuario.username):
                 api = self._api(usuario)
-                resp = api.patch(f"{PEDIDOS_URL}{pedido.pk}/", {"forma_pago": "03"}, format="json")
+                pedido.refresh_from_db()
+                # Un valor distinto del guardado: reenviar el mismo no cuenta como escribir.
+                otra = "01" if pedido.forma_pago != "01" else "03"
+                resp = api.patch(f"{PEDIDOS_URL}{pedido.pk}/", {"forma_pago": otra}, format="json")
                 self.assertEqual(resp.status_code, 200 if puede else 403, resp.content)
                 if not puede:
                     resp = api.patch(f"{PEDIDOS_URL}{pedido.pk}/", {"gran_total": "1.00"}, format="json")
                     self.assertEqual(resp.status_code, 403, resp.content)
         pedido.refresh_from_db()
         self.assertEqual(pedido.gran_total, Decimal("200.00"))
+
+    def _eco_contable(self, usuario, pedido):
+        """Lo que un formulario reenviaría: los campos contables escribibles tal
+        como los devolvió el GET del detalle a ``usuario``."""
+        from ventas.services.pedido_field_filter_service import CAMPOS_CONTABILIDAD_PEDIDO
+
+        detalle = self._api(usuario).get(f"{PEDIDOS_URL}{pedido.pk}/").data
+        return {c: detalle[c] for c in CAMPOS_CONTABILIDAD_PEDIDO if c in detalle and c != "importe_iva"}
+
+    def test_reenviar_importes_sin_cambio_no_exige_escribirlos(self):
+        """Quien ve los importes pero no los escribe (Compras, Contabilidad) puede
+        mandarlos de vuelta sin cambio junto con otro campo (EC-784)."""
+        pedido = self.pedidos[self.ventas.pk]
+        for usuario in (self.compras, self.contabilidad):
+            with self.subTest(usuario=usuario.username):
+                eco = self._eco_contable(usuario, pedido)
+                self.assertIn("gran_total", eco)
+                # Mismo valor en otro formato: se compara ya interpretado.
+                eco["gran_total"] = str(Decimal(eco["gran_total"]).normalize())
+                eco["oc"] = f"OC-{usuario.pk}"
+                resp = self._api(usuario).patch(f"{PEDIDOS_URL}{pedido.pk}/", eco, format="json")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                pedido.refresh_from_db()
+                self.assertEqual(
+                    (pedido.oc, pedido.gran_total, pedido.forma_pago, pedido.uso_cfdi),
+                    (f"OC-{usuario.pk}", Decimal("200.00"), "03", "G03"),
+                )
+
+    def test_cambiar_un_importe_sigue_exigiendo_contabilidad_de_ventas(self):
+        pedido = self.pedidos[self.ventas.pk]
+        cambios = ({"gran_total": "1.00"}, {"forma_pago": "01"}, {"uso_cfdi": "G01"}, {"anticipo_total": True})
+        for usuario in (self.compras, self.contabilidad):
+            for cambio in cambios:
+                with self.subTest(usuario=usuario.username, cambio=cambio):
+                    eco = {**self._eco_contable(usuario, pedido), **cambio}
+                    resp = self._api(usuario).patch(f"{PEDIDOS_URL}{pedido.pk}/", eco, format="json")
+                    self.assertEqual(resp.status_code, 403, resp.content)
+                    self.assertIn(next(iter(cambio)), str(resp.data))
+        resp = self._api(self.ventas).patch(f"{PEDIDOS_URL}{pedido.pk}/", {"forma_pago": "01"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        pedido.refresh_from_db()
+        self.assertEqual((pedido.forma_pago, pedido.gran_total), ("01", Decimal("200.00")))
+
+    def test_quien_no_ve_importes_no_puede_adivinarlos(self):
+        """A quien no ve los importes se le rechaza con sólo mandarlos, aunque
+        acierte el valor guardado: un 200 al acertar los delataría."""
+        pedido = self.pedidos[self.ventas.pk]
+        resp = self._api(self.sin_permiso).patch(
+            f"{PEDIDOS_URL}{pedido.pk}/", {"oc": "X", "gran_total": "200.00"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 403, resp.content)
 
     def test_recomprar_exige_contabilidad_de_ventas(self):
         pedido = self.pedidos[self.ventas.pk]

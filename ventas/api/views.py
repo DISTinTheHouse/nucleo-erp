@@ -4,6 +4,7 @@ import logging
 import operator
 from functools import reduce
 from decimal import Decimal, ROUND_HALF_UP
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import router, transaction
 from django.db.models.deletion import Collector, ProtectedError, RestrictedError
@@ -18,6 +19,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from catalogo.compatibilidad import exigir_compatibilidad, matriz_onboarding
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
+from rest_framework.fields import ChoiceField
 from rest_framework.filters import OrderingFilter
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
@@ -3295,14 +3297,42 @@ class PedidoViewSet(viewsets.ModelViewSet):
         CFDI) tampoco lo puede escribir. Corre ANTES de validar el payload: un 400
         por el valor (p. ej. anticipo contra gran_total) le dejaría deducir lo oculto,
         así que con cualquier valor la respuesta es el mismo 403. Escribirlos exige
-        contabilidad de ventas, aunque compras ya los vea (EC-784)."""
-        if puede_modificar_importes_pedido(request.user, claves_de_la_peticion(self)):
+        contabilidad de ventas, aunque compras ya los vea (EC-784).
+
+        Quien SÍ ve los importes pero no los escribe (compras, contabilidad) puede
+        reenviarlos sin cambio —un formulario que devuelve lo que leyó—: sólo se
+        rechaza si el valor cambia. A quien no los ve se le rechaza con sólo
+        mandarlos: aceptarle el valor exacto le dejaría adivinarlo (200 si acierta).
+        """
+        user = request.user
+        if puede_modificar_importes_pedido(user, claves_de_la_peticion(self)):
             return
-        escribibles = {n for n, f in self.get_serializer().fields.items() if not f.read_only}
-        ocultos = sorted(set(CAMPOS_CONTABILIDAD_PEDIDO) & escribibles & set(request.data))
-        if ocultos:
-            self.get_object()  # un pedido ajeno sigue siendo 404, no 403
-            raise PermissionDenied(f"No puedes modificar: {', '.join(ocultos)}.")
+        campos = self.get_serializer().fields
+        escribibles = {n for n, f in campos.items() if not f.read_only}
+        enviados = sorted(set(CAMPOS_CONTABILIDAD_PEDIDO) & escribibles & set(request.data))
+        if not enviados:
+            return
+        pedido = self.get_object()  # un pedido ajeno sigue siendo 404, no 403
+        if puede_ver_contabilidad(user, claves_de_la_peticion(self)):
+            enviados = [n for n in enviados if self._cambia_campo(campos[n], pedido, request.data[n])]
+        if enviados:
+            raise PermissionDenied(f"No puedes modificar: {', '.join(enviados)}.")
+
+    @staticmethod
+    def _cambia_campo(campo, pedido, valor):
+        """``True`` si ``valor`` (crudo del payload) cambia lo guardado, comparado ya
+        interpretado por el propio campo del serializer: ``"1.00"`` y ``Decimal("1")``,
+        ``"true"`` y ``True`` o ``"16"`` y ``16`` son iguales. En los choices, ``""`` y
+        ``None`` también (``forma_pago`` vacía). Un valor que el campo no acepta cuenta
+        como cambio: 403, igual que antes, sin el 400 de la validación."""
+        try:
+            nuevo = campo.run_validation(valor)
+        except (ValidationError, DjangoValidationError, TypeError, ValueError):
+            return True
+        actual = getattr(pedido, campo.source)
+        if isinstance(campo, ChoiceField):
+            return (nuevo or "") != (actual or "")
+        return nuevo != actual
 
     def _filtrar_respuesta_contabilidad(self, response):
         # Mismo filtro que ``retrieve`` y ``editar-mesa-control``: la respuesta del
