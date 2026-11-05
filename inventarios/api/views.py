@@ -4,6 +4,8 @@ from datetime import datetime, time
 from decimal import Decimal
 
 from django.db import models, transaction
+from django.db.models import ExpressionWrapper, F, OuterRef, Subquery, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from drf_spectacular.types import OpenApiTypes
@@ -742,9 +744,60 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         ``compras_por_talla`` desglosa solo los renglones de OC con
         ``producto_variante`` (O de PT, #763). Los de MP o legados sin variante
         quedan solo en el total.
+
+        Producción y compras cuentan solo lo **pendiente** de cada renglón: lo
+        pedido menos lo recibido en recepciones activas no canceladas, menos lo
+        que Calidad rechaza — la misma regla que ``recepciones/onboarding`` (EC-785).
+        Se calcula en SQL (subconsultas por FK indexada) y solo bajan los
+        renglones con pendiente (EC-777). ``?sucursal``/``?almacen`` acotan
+        también OP y OC a la sucursal de esos almacenes. ``?limit=&offset=``
+        pagina los productos (sin ``limit``, la lista completa como antes).
         """
         from produccion.models import OrdenProduccion, OrdenProduccionDetalle
-        from compras.models import OrdenCompra, OrdenCompraDetalle, RecepcionDetalle
+        from compras.models import (
+            CalidadInspeccionDetalle, OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle,
+        )
+        from nucleo.listados import PaginacionOpcionalLimitOffset
+
+        decimal_qty = models.DecimalField(max_digits=18, decimal_places=4)
+
+        def _pendiente(campo_detalle):
+            """``cantidad`` − recibido neto del renglón (``campo_detalle`` es el FK de
+            ``RecepcionDetalle`` al renglón de origen), como expresión SQL."""
+            def _suma(qs, valor):
+                return Coalesce(
+                    Subquery(
+                        qs.order_by().values(campo_detalle).annotate(t=models.Sum(valor)).values("t")[:1],
+                        output_field=decimal_qty,
+                    ),
+                    Value(Decimal("0")),
+                    output_field=decimal_qty,
+                )
+            recibido = (
+                RecepcionDetalle.objects.filter(**{campo_detalle: OuterRef("pk")}, recepcion__activo=True)
+                .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            )
+            rechazado = (
+                CalidadInspeccionDetalle.objects.filter(
+                    **{f"recepcion_detalle__{campo_detalle}": OuterRef("pk")},
+                    recepcion_detalle__recepcion__activo=True,
+                )
+                .exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            )
+            # ``values(campo)`` agrupa por el renglón; en ``rechazado`` el campo va con el prefijo.
+            rechazado_sum = Coalesce(
+                Subquery(
+                    rechazado.order_by().values(f"recepcion_detalle__{campo_detalle}")
+                    .annotate(t=models.Sum("cantidad_rechazada")).values("t")[:1],
+                    output_field=decimal_qty,
+                ),
+                Value(Decimal("0")),
+                output_field=decimal_qty,
+            )
+            return ExpressionWrapper(
+                F("cantidad") - (_suma(recibido, "cantidad_recibida") - rechazado_sum),
+                output_field=decimal_qty,
+            )
 
         user = request.user
         qp = request.query_params
@@ -754,9 +807,17 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         almacenes_pt = self._build_report_almacenes_queryset().filter(
             tipo_almacen=TipoAlmacen.PRODUCTO_TERMINADO
         )
-        almacen_ids = set(almacenes_pt.values_list("id_almacen", flat=True))
+        almacenes_info = list(almacenes_pt.values("id_almacen", "empresa_id", "sucursal_id"))
+        almacen_ids = {a["id_almacen"] for a in almacenes_info}
         if not almacen_ids:
             return Response({"resultados": []})
+        empresa_ids = {a["empresa_id"] for a in almacenes_info}
+        # Con ``?sucursal``/``?almacen`` el reporte es de esa sucursal también en OP y OC.
+        acotar_sucursal = bool(
+            self._report_to_int(qp.get("sucursal") or qp.get("sucursal_id"))
+            or self._report_to_int(qp.get("almacen") or qp.get("almacen_id"))
+        )
+        sucursal_ids = {a["sucursal_id"] for a in almacenes_info}
 
         # --- 1) Disponible: Existencia en almacenes PT, por producto+talla ---
         existencias = (
@@ -803,14 +864,18 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         op_detalles = (
             OrdenProduccionDetalle.objects.filter(
                 op__activo=True,
-                op__empresa_id__in={a["empresa_id"] for a in almacenes_pt.values("empresa_id")},
+                op__empresa_id__in=empresa_ids,
             )
             .exclude(op__estatus_op__in=[
                 OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
                 OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
             ])
+            .annotate(pendiente=_pendiente("orden_produccion_detalle"))
+            .filter(pendiente__gt=0)
             .select_related("producto_variante__producto", "producto_variante__talla", "op")
         )
+        if acotar_sucursal:
+            op_detalles = op_detalles.filter(op__sucursal_id__in=sucursal_ids)
         if producto_id:
             op_detalles = op_detalles.filter(producto_variante__producto_id=producto_id)
         if sku_q:
@@ -826,7 +891,7 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 continue
             bucket = _producto_bucket(variante.producto)
             talla_nombre = variante.talla.nombre if variante.talla else "N/A"
-            bucket["produccion_por_talla"][talla_nombre] += self._report_to_decimal(det.cantidad)
+            bucket["produccion_por_talla"][talla_nombre] += self._report_to_decimal(det.pendiente)
             op = det.op
             bucket["ordenes_produccion"][op.pk] = {
                 "folio": op.folio_op,
@@ -838,7 +903,6 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
             }
 
         # --- 3) Por llegar de compras: OC no recibidas del todo, por producto (y talla si hay variante) ---
-        empresa_ids = {a["empresa_id"] for a in almacenes_pt.values("empresa_id")}
         oc_detalles = (
             OrdenCompraDetalle.objects.filter(
                 orden_compra__empresa_id__in=empresa_ids,
@@ -849,8 +913,13 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 OrdenCompra.EstatusOrdenCompra.CANCELADA,
                 OrdenCompra.EstatusOrdenCompra.BORRADOR,
             ])
+            .filter(producto__isnull=False)
+            .annotate(pendiente=_pendiente("orden_compra_detalle"))
+            .filter(pendiente__gt=0)
             .select_related("producto", "producto_variante__talla", "orden_compra")
         )
+        if acotar_sucursal:
+            oc_detalles = oc_detalles.filter(orden_compra__sucursal_id__in=sucursal_ids)
         if producto_id:
             oc_detalles = oc_detalles.filter(
                 models.Q(producto_id=producto_id) | models.Q(producto_variante__producto_id=producto_id)
@@ -862,21 +931,8 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 | models.Q(producto__codigo__icontains=sku_q)
             )
 
-        recibido_por_detalle = defaultdict(lambda: Decimal("0"))
-        oc_detalle_ids = list(oc_detalles.values_list("pk", flat=True))
-        for row in (
-            RecepcionDetalle.objects.filter(orden_compra_detalle_id__in=oc_detalle_ids)
-            .values("orden_compra_detalle_id")
-            .annotate(total=models.Sum("cantidad_recibida"))
-        ):
-            recibido_por_detalle[row["orden_compra_detalle_id"]] = self._report_to_decimal(row["total"])
-
         for det in oc_detalles.iterator():
-            if det.producto_id is None:
-                continue
-            pendiente = self._report_to_decimal(det.cantidad) - recibido_por_detalle[det.pk]
-            if pendiente <= 0:
-                continue
+            pendiente = self._report_to_decimal(det.pendiente)
             bucket = _producto_bucket(det.producto)
             bucket["compras_pendiente_cantidad"] += pendiente
             if det.producto_variante_id:
@@ -922,7 +978,14 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
             })
 
         resultados.sort(key=lambda r: r["codigo"] or "")
-        return Response({"resultados": resultados})
+        # ``?limit=`` pagina los productos (EC-777); sin él, la respuesta de siempre.
+        paginador = PaginacionOpcionalLimitOffset()
+        pagina = paginador.paginate_queryset(resultados, request, view=self)
+        if pagina is None:
+            return Response({"resultados": resultados})
+        respuesta = paginador.get_paginated_response(pagina)
+        respuesta.data["resultados"] = respuesta.data.pop("results")
+        return respuesta
 
 
 class OperacionInventarioViewSet(viewsets.ViewSet):
