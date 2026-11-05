@@ -256,10 +256,17 @@ Resuelto en backend:
 - [x] `scans/` lee el match ya ligado: 1 consulta para las 50 lecturas (antes, 2 y variantes recalculadas en cada polling).
 - [x] Migración `wms.0020`: lecturas existentes en mayúsculas y ligadas (LAB-000039 queda `LEIDO`).
 
+Listo para el FX (2026-11-05, segunda revisión):
+- [x] Autenticación **Basic** del IoT Connector: contraseña = token del lector, usuario libre. El HTTP POST del IoT Connector solo ofrece Basic o TLS; no admite headers propios ni Bearer. También sigue sirviendo `?token=` en la URL.
+- [x] Parser: un evento suelto `{"data": {"idHex": …}, "type": "SIMPLE"}` ya no se descarta; también acepta lotes en arreglo y NDJSON. Solo se guardan EPCs en hex (heartbeats y eventos de gestión se ignoran).
+- [x] Reimpresión desde el historial: `zpl_enviado` de impresiones viejas se entrega con el bloque de grabado corregido (al vuelo, sin tocar la BD; 0.21 ms por listado).
+- [x] Admin: `RfidScan` muestra su etiqueta; una lectura capturada a mano se liga igual que las del lector. `EtiquetaRFIDDetalle` muestra `leida_at`.
+- [x] Simulación punta a punta en producción con rollback: preview → lectura antes del registro → registro como el frontend → lote con tag ajeno → NDJSON + heartbeat → polling (1 consulta, 0.10–0.15 s) → detalle `LEIDO` → reimpresión de LAB-000039 con ZPL correcto.
+
 Prueba en piso (pendiente):
-- [ ] Admin → `wms/lectorrfid/`: alta del lector (empresa + sucursal) y copiar su token.
-- [ ] Configurar el FX: `POST https://<backend>/api/v1/wms/etiquetas-rfid/scans/receive/` con header `X-RFID-Token: <token>`.
-- [ ] Imprimir una etiqueta nueva desde el ERP (ZPL corregido).
+- [ ] Admin → `wms/lectorrfid/`: alta del lector en **LAZZAR / Toneles** (misma empresa y sucursal donde se imprime) y copiar su token.
+- [ ] FX (IoT Connector) → endpoint **HTTP POST**: URL `https://nucleo-erp.vercel.app/api/v1/wms/etiquetas-rfid/scans/receive/`, autenticación **Basic** con usuario libre (p. ej. `fx-toneles`) y contraseña = token. Si el firmware no ofrece Basic: la misma URL con `?token=<token>`. Siempre `https` (la URL vieja `/QA/scanner_rfid/receive/` ya no existe: 404).
+- [ ] Imprimir una etiqueta **nueva** desde el ERP (ZPL corregido).
 - [ ] Leerla con el FX: la pantalla Scanner RFID muestra ✓ con folio/SKU/talla y la etiqueta pasa a `LEIDO`.
 
 ---

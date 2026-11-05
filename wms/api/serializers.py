@@ -18,6 +18,7 @@ from wms.models import (
     Transferencia,
     TransferenciaDetalle,
 )
+from wms.services.rfid_label_service import zpl_rfid_vigente
 
 class TransferenciaDetalleSerializer(serializers.ModelSerializer):
     class Meta:
@@ -714,6 +715,14 @@ class EtiquetaRFIDSerializer(serializers.ModelSerializer):
     class Meta:
         model = EtiquetaRFIDImpresion
         fields = "__all__"
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # El frontend reimprime ``zpl_enviado`` desde el historial: las
+        # impresiones viejas traen un bloque RFID que no graba el chip.
+        if instance.rfid_mode:
+            data["zpl_enviado"] = zpl_rfid_vigente(data.get("zpl_enviado"))
+        return data
 
 
 class EtiquetaRFIDCreateSerializer(serializers.Serializer):

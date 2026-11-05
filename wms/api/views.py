@@ -917,7 +917,11 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             "query_epc_found_samples": q_found_samples,
             "receive_endpoint_info": {
                 "fx_post_url_required": "POST https://TU-BACKEND/api/v1/wms/etiquetas-rfid/scans/receive/ (el FX llama aquí, NO Next.js)",
-                "method_required": "POST con token del LectorRFID (header X-RFID-Token o ?token=). Next.js NO usa receive/",
+                "method_required": (
+                    "POST con token del LectorRFID: Basic (usuario libre, contraseña = token; "
+                    "así lo configura el IoT Connector del FX), header X-RFID-Token o ?token=. "
+                    "Next.js NO usa receive/"
+                ),
                 "example_POST_test_1_tag": (
                     "Invoke-RestMethod -Uri 'https://nucleo-erp.vercel.app/api/v1/wms/etiquetas-rfid/scans/receive/' "
                     "-Method POST -Headers @{'X-RFID-Token'='<token>'} -ContentType 'application/json' -Body "

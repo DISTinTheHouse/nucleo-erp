@@ -1,4 +1,5 @@
 import logging
+import re
 import secrets
 import time
 from decimal import Decimal
@@ -12,6 +13,56 @@ from wms.models import EtiquetaRFIDDetalle, EtiquetaRFIDImpresion
 from wms.services.rfid_scan_service import ligar_lecturas_previas
 
 logger = logging.getLogger(__name__)
+
+def bloque_zpl_grabado_rfid(epc):
+    """Líneas ZPL que graban ``epc`` (hex) en el banco EPC de un tag Gen2.
+
+    ``^RS8`` = Gen2. ``^RFW,H`` = escribir en hex. Banco ``E`` = EPC de 96 bits
+    (bit 20h, 12 bytes): el de todas nuestras etiquetas (24 hex). Para otro
+    largo se usa ``A``, que escribe los bytes del ``^FD`` y ajusta los bits PC.
+    """
+    banco = "E" if len(epc) == 24 else "A"
+    return ["^RS8", f"^RFW,H,,,{banco}^FD{epc}^FS"]
+
+
+_LINEA_RFID = re.compile(r"^\^(RB|RS|RF|HV|RR)")
+_FD_EPC = re.compile(r"\^FD([0-9A-Fa-f]{8,64})\^FS")
+
+
+def zpl_rfid_vigente(zpl):
+    """ZPL con el bloque de grabado RFID vigente (para reimprimir del historial).
+
+    Las impresiones hasta 2026-11-05 guardaron en ``zpl_enviado`` variantes de
+    ``^RB96`` + ``^RFW,E`` (+ ``^HV``), que no graban el EPC en el chip. El
+    frontend reimprime ese mismo ZPL, así que al leerlo se cambia ese bloque por
+    :func:`bloque_zpl_grabado_rfid` con el mismo EPC. El resto del ZPL (texto,
+    código de barras) queda igual. Si ya está vigente o no trae EPC, no se toca.
+    """
+    if not zpl or "^RF" not in zpl or "^RFW,H," in zpl:
+        return zpl
+    salida, epc, posicion, tras_rfw = [], None, None, False
+    for linea in zpl.replace("\r\n", "\n").split("\n"):
+        limpia = linea.strip()
+        if _LINEA_RFID.match(limpia):
+            if posicion is None:
+                posicion = len(salida)
+            m = _FD_EPC.search(limpia)
+            if m and epc is None:
+                epc = m.group(1).upper()
+            tras_rfw = limpia.startswith("^RFW") and m is None
+            continue
+        if tras_rfw:
+            tras_rfw = False
+            m = _FD_EPC.fullmatch(limpia)
+            if m:
+                epc = epc or m.group(1).upper()
+                continue
+        salida.append(linea)
+    if epc is None or posicion is None:
+        return zpl
+    salida[posicion:posicion] = bloque_zpl_grabado_rfid(epc)
+    return "\n".join(salida)
+
 
 # Intentos de regeneración ante colisión de EPC en la rama generada por backend.
 MAX_INTENTOS_EPC = 3
@@ -210,8 +261,7 @@ class RFIDLabelService:
         lines = cls._graphic_zpl_lines(
             variante=variante, producto=producto, barcode_value=barcode_value
         )
-        lines.append("^RS8")
-        lines.append(f"^RFW,H,,,E^FD{epc}^FS")
+        lines.extend(bloque_zpl_grabado_rfid(epc))
 
         # Texto visual del EPC
         display = epc

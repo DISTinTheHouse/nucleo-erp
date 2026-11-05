@@ -182,13 +182,34 @@ class GeneracionEPCTests(EtiquetaRFIDBaseTestCase):
 
         zpl = RFIDLabelService._build_zpl_rfid(epc, producto=self.producto)
 
-        self.assertIn("^RS8
-", zpl)
+        self.assertIn("^RS8\n", zpl)
         self.assertIn(f"^RFW,H,,,E^FD{epc}^FS", zpl)
         self.assertEqual(zpl.count("^RFW"), 1)
         # ``^RFW,E`` (formato por particiones) dejaba el EPC de fábrica.
         self.assertNotIn("^RFW,E", zpl)
         self.assertNotIn("^RB96", zpl)
+
+    def test_zpl_viejo_se_corrige_para_reimprimir(self):
+        """El historial reimprime ``zpl_enviado``: el bloque viejo se reemplaza."""
+        from wms.services.rfid_label_service import zpl_rfid_vigente
+
+        epc = "000015D80438000188F0D54F"
+        viejo = "\n".join([
+            "^XA", "^FO40,245^BCN,90,Y,N,N^FD6000100M^FS",
+            "^RB96,,,1", "^RS8,E", "^RFW,E", f"^FD{epc}^FS",
+            "^RB96,,,1", "^RS8,E", "^RFW,E", f"^FD{epc}^FS",
+            "^RB96,,,1", "^RS8,E", "^HV1,3,E,0",
+            f"^FO40,360^A0N,18,18^FDEPC: {epc[:16]}...{epc[-8:]}^FS", "^XZ",
+        ])
+
+        nuevo = zpl_rfid_vigente(viejo)
+
+        self.assertEqual(nuevo, "\n".join([
+            "^XA", "^FO40,245^BCN,90,Y,N,N^FD6000100M^FS",
+            "^RS8", f"^RFW,H,,,E^FD{epc}^FS",
+            f"^FO40,360^A0N,18,18^FDEPC: {epc[:16]}...{epc[-8:]}^FS", "^XZ",
+        ]))
+        self.assertEqual(zpl_rfid_vigente(nuevo), nuevo)
 
 
 class LayerBServiceColisionTests(EtiquetaRFIDBaseTestCase):
@@ -695,6 +716,63 @@ class ScannerRFIDSeguridadTests(TestCase):
             RfidScan.objects.get().etiqueta.epc, "00001A7F61EC000474479706"
         )
         self.assertEqual(impresion.etiquetas.get().estado, "LEIDO")
+
+    # ── Formato real del IoT Connector de Zebra (FX7500/FX9600) ───────
+
+    def _evento_simple(self, epc, antena=1, rssi=-55):
+        return {
+            "data": {"eventNum": 1, "format": "epc", "idHex": epc, "antenna": antena, "peakRssi": rssi},
+            "timestamp": "2026-11-05T10:00:00.000-0600",
+            "type": "SIMPLE",
+        }
+
+    def test_receive_basic_auth_con_token_como_password(self):
+        """El HTTP POST del IoT Connector solo ofrece Basic: contraseña = token."""
+        import base64
+
+        cred = base64.b64encode(f"fx-toneles:{self.lector_a.token}".encode()).decode()
+        resp = self._post_receive(HTTP_AUTHORIZATION=f"Basic {cred}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(RfidScan.objects.get().lector_id, self.lector_a.pk)
+
+        malo = base64.b64encode(b"fx-toneles:otro").decode()
+        self.assertEqual(self._post_receive(HTTP_AUTHORIZATION=f"Basic {malo}").status_code, 401)
+
+    def test_receive_un_solo_evento_simple(self):
+        """Un evento suelto ({"data": {...}}) antes se descartaba completo."""
+        detalle = self._etiqueta_a()
+        resp = self._post_receive(
+            self._evento_simple(detalle.epc.lower(), antena=2, rssi=-61),
+            HTTP_X_RFID_TOKEN=self.lector_a.token,
+        )
+        self.assertEqual(resp.status_code, 200)
+        scan = RfidScan.objects.get()
+        self.assertEqual((scan.epc, scan.antenna, scan.rssi), (detalle.epc, 2, -61.0))
+        self.assertEqual(scan.etiqueta_id, detalle.pk)
+
+    def test_receive_lote_en_arreglo_y_en_ndjson(self):
+        detalle = self._etiqueta_a()
+        ajeno = "3035C9D350033A40004311F1"
+        self._post_receive(
+            [self._evento_simple(detalle.epc), self._evento_simple(ajeno)],
+            HTTP_X_RFID_TOKEN=self.lector_a.token,
+        )
+        ndjson = "\n".join(json.dumps(self._evento_simple(e)) for e in (detalle.epc, ajeno))
+        resp = self.client.post(
+            self.RECEIVE_URL, data=ndjson, content_type="application/json",
+            HTTP_X_RFID_TOKEN=self.lector_a.token,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(RfidScan.objects.filter(etiqueta=detalle).count(), 2)
+        self.assertEqual(RfidScan.objects.filter(epc=ajeno, etiqueta__isnull=True).count(), 2)
+
+    def test_receive_ignora_eventos_sin_epc_hex(self):
+        """Un heartbeat o evento de gestión no se guarda como lectura."""
+        self._post_receive(
+            {"type": "heartbeat", "data": {"tagSummary": "sin lecturas", "hostName": "FX9600-TONELES"}},
+            HTTP_X_RFID_TOKEN=self.lector_a.token,
+        )
+        self.assertFalse(RfidScan.objects.exists())
 
     def test_lector_sin_sucursal_no_valida(self):
         with self.assertRaises(DjangoValidationError):

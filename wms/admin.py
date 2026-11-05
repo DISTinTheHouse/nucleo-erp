@@ -10,6 +10,7 @@ from .models import (
     LectorRFID,
     RfidScan,
 )
+from .services.rfid_scan_service import etiquetas_por_epc, marcar_leidas, normalizar_epc
 
 
 admin.site.register(Picking)
@@ -337,6 +338,7 @@ class EtiquetaRFIDDetalleAdmin(admin.ModelAdmin):
         "barcode_value",
         "serial",
         "estado",
+        "leida_at",
         "created_at",
     )
     list_filter = ("estado", "created_at")
@@ -347,7 +349,7 @@ class EtiquetaRFIDDetalleAdmin(admin.ModelAdmin):
         "impresion__id",
     )
     raw_id_fields = ("impresion",)
-    readonly_fields = ("created_at", "updated_at")
+    readonly_fields = ("leida_at", "created_at", "updated_at")
     ordering = ("-created_at", "-id")
     show_full_result_count = False
 
@@ -365,6 +367,7 @@ class RfidScanAdmin(admin.ModelAdmin):
     list_display = (
         "id",
         "epc",
+        "etiqueta",
         "empresa",
         "lector",
         "reader_ip",
@@ -373,10 +376,24 @@ class RfidScanAdmin(admin.ModelAdmin):
         "created_at",
     )
     list_filter = ("created_at", "empresa", "lector", "antenna", "reader_ip")
+    list_select_related = ("empresa", "lector", "etiqueta")
     search_fields = ("epc", "reader_ip", "id")
+    raw_id_fields = ("etiqueta",)
     readonly_fields = ("created_at",)
     ordering = ("-created_at", "-id")
     show_full_result_count = False
+
+    def save_model(self, request, obj, form, change):
+        """Una lectura capturada a mano se liga igual que las del lector."""
+        obj.epc = normalizar_epc(obj.epc)
+        nueva_liga = None
+        if obj.etiqueta_id is None and obj.empresa_id:
+            nueva_liga = etiquetas_por_epc([obj.epc], obj.empresa_id).get(obj.epc)
+            if nueva_liga is not None:
+                obj.etiqueta_id = nueva_liga.pk
+        super().save_model(request, obj, form, change)
+        if nueva_liga is not None:
+            marcar_leidas([nueva_liga.pk])
 
     def get_queryset(self, request):
         # Staff no superusuario: solo lecturas de su empresa.
