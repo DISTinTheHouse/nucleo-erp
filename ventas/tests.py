@@ -7183,17 +7183,20 @@ class CotizacionListadoMonedaTests(TestCase):
         self._sin_consultas_por_fila(MESA_CONTROL_URL, self.mesa_no_admin)
 
 
-class VentasOrderingIgnoradoTests(TestCase):
-    """EC-619: ``?ordering=`` no cambia el orden fijo (``-created_at, -id``) de
-    cotizaciones, mesa de control y pedidos, ni da 500 con fuentes que no son
-    columnas (``get_*_display``). El ``created_at`` va escalonado al revés del id
-    para que ``-id`` o un orden ascendente se distingan del orden fijo."""
+class VentasOrderingServidorTests(TestCase):
+    """EC-757 (reemplaza a EC-619, #949): cotizaciones, mesa de control y pedidos
+    respetan ``?ordering=`` de su lista blanca (``ordering_fields``), con ``id`` como
+    desempate en la dirección del primer campo. Lo que queda fuera de la lista
+    (importes por #537, ``get_*_display``, campos inexistentes) se ignora sin 500 y
+    deja el orden por defecto: más reciente primero (``-created_at, -id``). El
+    ``created_at`` va escalonado al revés del id para que ``-id`` o un orden
+    ascendente se distingan del orden por defecto."""
 
-    TERMINOS_COTIZACION = (
-        "created_at", "-id", "gran_total", "moneda__codigo_iso",
+    IGNORADOS_COTIZACION = (
+        "gran_total", "-gran_total", "moneda__codigo_iso",
         "get_estatus_display", "-get_tipo_pedido_display", "no_existe",
     )
-    TERMINOS_PEDIDO = ("created_at", "-id", "get_estatus_display", "get_clasificacion_display", "no_existe")
+    IGNORADOS_PEDIDO = ("gran_total", "-subtotal", "get_estatus_display", "get_clasificacion_display", "no_existe")
 
     @classmethod
     def setUpTestData(cls):
@@ -7223,7 +7226,7 @@ class VentasOrderingIgnoradoTests(TestCase):
             Pedido.objects.filter(pk=pedido.pk).update(created_at=ahora - timedelta(days=dias))
             cotizaciones.append(cot)
             pedidos.append(pedido)
-        # Orden fijo: created_at descendente.
+        # Orden por defecto: created_at descendente.
         cls.orden_cotizaciones = [cotizaciones[0].pk, cotizaciones[2].pk, cotizaciones[1].pk]
         cls.orden_pedidos = [pedidos[0].pk, pedidos[2].pk, pedidos[1].pk]
         cls.cotizacion = cotizaciones[0]
@@ -7240,17 +7243,29 @@ class VentasOrderingIgnoradoTests(TestCase):
         filas = data["results"] if isinstance(data, dict) else data
         return [f["id"] for f in filas]
 
-    def _revisar(self, url, terminos, esperado):
-        self.assertEqual(self._ids(url), esperado)
-        for termino in terminos:
+    def _revisar(self, url, ignorados, por_defecto):
+        self.assertEqual(self._ids(url), por_defecto)
+        # Lista blanca: se respeta.
+        respetados = {
+            "created_at": por_defecto[::-1],
+            "-created_at": por_defecto,
+            "id": sorted(por_defecto),
+            "-id": sorted(por_defecto, reverse=True),
+        }
+        for termino, esperado in respetados.items():
             with self.subTest(url=url, ordering=termino):
                 self.assertEqual(self._ids(url, termino), esperado)
+        # Fuera de la lista: orden por defecto, sin 500; junto a uno válido, solo cuenta el válido.
+        for termino in ignorados:
+            with self.subTest(url=url, ordering=termino):
+                self.assertEqual(self._ids(url, termino), por_defecto)
+                self.assertEqual(self._ids(url, f"{termino},created_at"), por_defecto[::-1])
 
     def test_cotizaciones(self):
-        self._revisar(COTIZACIONES_URL, self.TERMINOS_COTIZACION, self.orden_cotizaciones)
+        self._revisar(COTIZACIONES_URL, self.IGNORADOS_COTIZACION, self.orden_cotizaciones)
 
     def test_mesa_control(self):
-        self._revisar(MESA_CONTROL_URL, self.TERMINOS_COTIZACION, self.orden_cotizaciones)
+        self._revisar(MESA_CONTROL_URL, self.IGNORADOS_COTIZACION, self.orden_cotizaciones)
 
     def test_detalle_de_cotizacion(self):
         for url in (COTIZACIONES_URL, MESA_CONTROL_URL):
@@ -7259,19 +7274,36 @@ class VentasOrderingIgnoradoTests(TestCase):
                 self.assertEqual(data["id"], self.cotizacion.pk)
 
     def test_pedidos(self):
-        self._revisar(PEDIDOS_URL, self.TERMINOS_PEDIDO, self.orden_pedidos)
+        self._revisar(PEDIDOS_URL, self.IGNORADOS_PEDIDO, self.orden_pedidos)
 
-    def test_backends_sin_ordering(self):
+    def test_desempate_por_id(self):
+        """Los tres registros tienen el mismo ``estatus``: decide el ``id``, en la
+        dirección del primer campo (``OrdenamientoEstableFilter``)."""
+        for url, ids in (
+            (COTIZACIONES_URL, self.orden_cotizaciones),
+            (MESA_CONTROL_URL, self.orden_cotizaciones),
+            (PEDIDOS_URL, self.orden_pedidos),
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(self._ids(url, "estatus"), sorted(ids))
+                self.assertEqual(self._ids(url, "-estatus"), sorted(ids, reverse=True))
+
+    def test_backends_con_ordering_de_lista_blanca(self):
         from django_filters.rest_framework import DjangoFilterBackend
         from rest_framework.filters import SearchFilter
+        from nucleo.listados import OrdenamientoEstableFilter
         from ventas.api.views import MesaControlViewSet
 
-        # Exactamente los dos globales que no ordenan, en el mismo orden.
+        # Los globales sin el ``OrderingFilter`` de DRF, más el de lista blanca y desempate.
         for viewset in (CotizacionViewSet, MesaControlViewSet, PedidoViewSet):
             with self.subTest(viewset=viewset.__name__):
-                self.assertEqual(tuple(viewset.filter_backends), (DjangoFilterBackend, SearchFilter))
+                self.assertEqual(
+                    tuple(viewset.filter_backends), (DjangoFilterBackend, SearchFilter, OrdenamientoEstableFilter),
+                )
+                # Ningún importe en la lista blanca (#537): ordenar por él dejaría deducirlo.
+                self.assertFalse({"gran_total", "subtotal"} & set(viewset.ordering_fields))
 
-    def test_schema_sin_parametro_ordering(self):
+    def test_schema_con_parametro_ordering(self):
         from drf_spectacular.generators import SchemaGenerator
 
         # Mismo generador que ``/api/schema/`` (y que el test de esquema de finanzas).
@@ -7279,9 +7311,7 @@ class VentasOrderingIgnoradoTests(TestCase):
         for url in (COTIZACIONES_URL, MESA_CONTROL_URL, PEDIDOS_URL):
             with self.subTest(url=url):
                 parametros = {p["name"] for p in schema["paths"][url]["get"].get("parameters", [])}
-                self.assertNotIn("ordering", parametros)
-                # ``SearchFilter`` se conserva: su parámetro sigue en el schema.
-                self.assertIn("search", parametros)
+                self.assertLessEqual({"ordering", "search", "limit", "offset"}, parametros)
 
 
 class PedidoListadoPiezasVendedorTests(TestCase):
