@@ -7981,6 +7981,7 @@ class ImportesPedidoFixture:
         cls.contabilidad = cls._usuario("conta", cls.empresa, "CONTABILIDAD")
         cls.superusuario = cls._usuario("super", cls.empresa, is_superuser=True)
         cls.superusuario_sin_empresa = cls._usuario("super-se", is_superuser=True)
+        cls.admin_empresa = cls._usuario("admin", cls.empresa, is_admin_empresa=True)
         # Perfiles que ven importes / que no, en el orden de los ``subTest``.
         cls.perfiles = (
             (cls.sin_permiso, False), (cls.ventas, True), (cls.compras, True),
@@ -8033,6 +8034,36 @@ class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
             with self.subTest(usuario=usuario.username):
                 resp = self._api(usuario).get(f"{PEDIDOS_URL}{self.pedido_otra.pk}/")
                 self.assertEqual(resp.status_code, 404)
+
+    def _escritores(self):
+        """(usuario, puede escribir importes/recomprar): VER es la unión ventas/compras,
+        ESCRIBIR sigue siendo sólo contabilidad de ventas, como en main (EC-784)."""
+        return (
+            (self.sin_permiso, False), (self.ventas, True), (self.compras, False),
+            (self.contabilidad, False), (self.superusuario, True), (self.admin_empresa, True),
+        )
+
+    def test_escribir_campos_contables_exige_contabilidad_de_ventas(self):
+        pedido = self.pedidos[self.ventas.pk]
+        for usuario, puede in self._escritores():
+            with self.subTest(usuario=usuario.username):
+                api = self._api(usuario)
+                resp = api.patch(f"{PEDIDOS_URL}{pedido.pk}/", {"forma_pago": "03"}, format="json")
+                self.assertEqual(resp.status_code, 200 if puede else 403, resp.content)
+                if not puede:
+                    resp = api.patch(f"{PEDIDOS_URL}{pedido.pk}/", {"gran_total": "1.00"}, format="json")
+                    self.assertEqual(resp.status_code, 403, resp.content)
+        pedido.refresh_from_db()
+        self.assertEqual(pedido.gran_total, Decimal("200.00"))
+
+    def test_recomprar_exige_contabilidad_de_ventas(self):
+        pedido = self.pedidos[self.ventas.pk]
+        for usuario, puede in self._escritores():
+            with self.subTest(usuario=usuario.username):
+                antes = Cotizacion.objects.filter(vendedor=usuario).count()
+                resp = self._api(usuario).post(f"{PEDIDOS_URL}{pedido.pk}/recomprar/")
+                self.assertEqual(resp.status_code, 201 if puede else 403, resp.content)
+                self.assertEqual(Cotizacion.objects.filter(vendedor=usuario).count(), antes + int(puede))
 
     def _filas(self, resp):
         self.assertEqual(resp.status_code, 200, resp.content)
