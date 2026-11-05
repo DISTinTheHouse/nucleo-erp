@@ -708,8 +708,10 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
 
         sobrantes = [row for row in tallas_actuales if row.pk not in tallas_usadas]
         if sobrantes:
-            # Mesa de control puede eliminar tallas desde edición estricta
-            # porque ya validamos en _get_bloqueos_edicion_estricta() que no hay documentos ligados
+            # Mesa de control puede eliminar tallas desde edición estricta: antes,
+            # _get_bloqueos_edicion_estricta() descarta facturas, notas, órdenes,
+            # pickings y reservas vivas ligados. No revisa entregas, devoluciones ni
+            # reservas canceladas/liberadas, que se borran en cascada.
             sobrantes_ids = [row.pk for row in sobrantes]
             PedidoDetalleTalla.objects.filter(pk__in=sobrantes_ids).delete()
 
@@ -717,8 +719,10 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
         detalle_id for detalle_id in existing_detalles.keys() if detalle_id not in touched_ids
     ]
     if sobrantes_detalle:
-        # Mesa de control puede eliminar renglones desde edición estricta
-        # porque ya validamos en _get_bloqueos_edicion_estricta() que no hay documentos ligados
+        # Mesa de control puede eliminar renglones desde edición estricta: antes,
+        # _get_bloqueos_edicion_estricta() descarta facturas, notas, órdenes,
+        # pickings y reservas vivas ligados. No revisa entregas, devoluciones ni
+        # reservas canceladas/liberadas, que se borran en cascada.
         PedidoDetalle.objects.filter(pk__in=sobrantes_detalle).delete()
     # Matriz prenda/proceso (EC-575), dentro de la transacción del llamador.
     exigir_compatibilidad(
@@ -775,8 +779,9 @@ def _save_pedido_servicios_extras(pedido_obj, rows):
             extra.sat_unidad = row["sat_unidad"]
         extra.save()
     if len(existentes) > len(rows):
-        # Mesa de control puede eliminar servicios extras desde edición estricta
-        # Eliminar los que no vienen en el payload actual
+        # Mesa de control puede eliminar servicios extras desde edición estricta:
+        # _get_bloqueos_edicion_estricta() ya descartó líneas de factura (y sus notas)
+        # sobre ellos, que son PROTECT. Se eliminan los que no vienen en el payload.
         ids_a_eliminar = [existentes[i].pk for i in range(len(rows), len(existentes))]
         PedidoServicioExtra.objects.filter(pk__in=ids_a_eliminar).delete()
 

@@ -2836,10 +2836,15 @@ class PedidoViewSet(viewsets.ModelViewSet):
         acota a la empresa del pedido: un documento de otra empresa ligado al pedido
         (dato heredado) no se muestra. Los ``EXISTS`` de renglón NO se acotan: son la
         garantía con la que ``_save_pedido_detalle`` borra renglones y tallas
-        sobrantes, y un vínculo de cualquier empresa lo rompería (``FacturaDetalle``
-        es PROTECT -> 500; picking, órdenes y reservas son CASCADE -> borraría filas
-        de otra empresa). Sólo informan ``tipo`` y ``accion_requerida``, así que no
-        exponen nada del documento ajeno.
+        sobrantes y ``_save_pedido_servicios_extras`` borra servicios extras, y un
+        vínculo de cualquier empresa lo rompería (``FacturaDetalle`` es PROTECT ->
+        500; picking, órdenes y reservas son CASCADE -> borraría filas de otra
+        empresa). Sólo informan ``tipo`` y ``accion_requerida``, así que no exponen
+        nada del documento ajeno.
+
+        No se revisan entregas ni devoluciones (``EntregaDetalle`` y
+        ``DevolucionDetalle`` son CASCADE sobre el renglón): quitar un renglón con
+        ellas las borra sin bloqueo. Tampoco las reservas canceladas o liberadas.
 
         Mismo shape que antes: los tipos en el mismo orden, los documentos de cada
         tipo por ``id`` y ``estatus`` con el tipo de su columna (texto en factura y
