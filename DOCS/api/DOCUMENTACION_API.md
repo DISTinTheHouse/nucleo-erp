@@ -1663,6 +1663,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 > - Para surtido de almacén se usa el flujo tradicional `WMS → Picking` (documento-only, sin transferencias ni OT automáticas).
 
 - **Listar**: `GET /api/v1/ventas/pedidos/`
+  - **Importes**: sin permiso de contabilidad (`puede_ver_contabilidad`), cada fila omite `gran_total` y `subtotal` (los campos de `CAMPOS_CONTABILIDAD_PEDIDO`), igual que el detalle. Paginado o no, la llave no viene; el frontend no debe suponerla (#947).
   - **Orden**: fijo, más reciente primero (`created_at` descendente, desempate por `id` descendente). No es configurable: el parámetro `ordering` no se admite y se ignora si se envía.
 - **Detalle**: `GET /api/v1/ventas/pedidos/{id}/`
 - **Cancelar**: `POST /api/v1/ventas/pedidos/{id}/cancelar/` con `{"motivo": "..."}`. Solo mesa de control / admin. En una transacción:
