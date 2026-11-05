@@ -1309,7 +1309,7 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
   }
   ```
 - `resumen` se calcula sobre el queryset ya filtrado (respeta `estatus`/`fecha_inicio`/`fecha_final` si se mandan), no solo sobre la página actual.
-- `monto_por_moneda` excluye `CANCELADA` (mismo criterio que `resumen_comercial` de cliente y que el dashboard de compras).
+- `monto_por_moneda` excluye `CANCELADA` (mismo criterio que `resumen_comercial` de cliente).
 - Solo trae OC activas (`activo=true`); una OC dada de baja no aparece aquí.
 - `por_estatus` usa como llave el estatus **entero** (en JSON, string: `"3"`), igual que `results[].estatus`.
 - `monto_por_moneda[].total` es string decimal, igual que los montos de `results`.
@@ -2857,68 +2857,9 @@ Resuelve por `sku` de variante, o `codigo`/`cod_proscai` de producto. Con SKU, l
 
 ---
 
-## 🧾 Compras - Dashboard
-
-**Endpoint**: `GET /api/v1/compras/dashboard/`
-
-KPIs para agente de compras y mesa directiva. **4 queries fijas, agregadas en DB** (`values().annotate()` / `aggregate()` con `Count`/`Sum`) — nunca itera `OrdenCompra`/`Recepcion` fila por fila. No pagina, no crece con el número de OCs.
-
-### Query params (todos opcionales)
-
-| Param | Formato | Default | Efecto |
-|---|---|---|---|
-| `dias` | int, `1-90` | `7` | Ventana de "por vencer" (`fecha_vencimiento` entre hoy y hoy+`dias`) |
-| `desde` | `YYYY-MM-DD` | ninguno | Filtra `gasto_por_moneda`/`top_proveedores` por `fecha_oc >= desde` |
-| `hasta` | `YYYY-MM-DD` | ninguno | Igual, `fecha_oc <= hasta` |
-
-Sin `desde`/`hasta` el gasto es histórico completo. `desde`/`hasta` inválidos → `400`.
-
-### Respuesta
-
-```json
-{
-  "generado_en": "2026-09-24T18:00:00Z",
-  "filtros": { "dias_por_vencer": 7, "desde": null, "hasta": null },
-  "ordenes_por_estatus": [
-    { "estatus": 3, "estatus_label": "Autorizada", "total": 12 },
-    { "estatus": 5, "estatus_label": "Recibida", "total": 40 }
-  ],
-  "ordenes_vencidas": 2,
-  "ordenes_por_vencer": 5,
-  "recepciones_por_estatus": [
-    { "estatus": 2, "estatus_label": "Recibida", "total": 30 },
-    { "estatus": 3, "estatus_label": "Parcial", "total": 4 }
-  ],
-  "recepciones_por_origen": [
-    { "tipo_origen": "OC", "tipo_origen_label": "Orden de compra", "total": 30 },
-    { "tipo_origen": "OP", "tipo_origen_label": "Orden de produccion", "total": 4 }
-  ],
-  "gasto_por_moneda": [
-    { "moneda_codigo": "MXN", "total": "1250000.00", "ordenes": 45 }
-  ],
-  "top_proveedores": [
-    { "proveedor_id": 7, "proveedor_nombre": "Textiles ACME", "total": "310000.00", "ordenes": 9 }
-  ]
-}
-```
-
-### Reglas de cada campo
-
-- `ordenes_por_estatus` / `recepciones_por_estatus` / `recepciones_por_origen`: conteo de TODO lo activo (`activo=true`), sin filtro de fecha. Es "estado actual", no histórico.
-- `ordenes_vencidas` / `ordenes_por_vencer`: excluyen OC en `RECIBIDA`(5) y `CANCELADA`(6) — ya cerradas, no hay nada que vencer.
-- `gasto_por_moneda` / `top_proveedores`: solo OC con `estatus` en `AUTORIZADA`(3) / `PARCIALMENTE_RECIBIDA`(4) / `RECIBIDA`(5). `BORRADOR`/`POR_AUTORIZAR` no son gasto comprometido todavía.
-- `top_proveedores`: top 5 por `gran_total` sumado, misma ventana de fechas que `gasto_por_moneda`.
-
-### ⚠️ Léelo antes de graficarlo
-
-- **`top_proveedores` NO separa por moneda** — suma `gran_total` tal cual, sin convertir tipo de cambio. Si la empresa opera en más de una moneda, ese top mezcla importes no comparables. Usa `gasto_por_moneda` para desagregar por moneda; no hay tasa de cambio en ningún lado del sistema.
-- Sin `empresa` asignada y sin `is_superuser` → todo en cero (`filtros: null`), mismo patrón multi-tenant que el resto de `/api/v1/`.
-- **No incluye nada de Calidad todavía** (`recepciones_por_estatus` ya puede traer `EN_CALIDAD`/`CERRADA`, pero no hay un desglose de aprobado/rechazado/cuarentena en este dashboard — pendiente si lo necesitan). `EnvioProveedor` sigue sin usarse en ningún lado, ese sí es puro modelo sin dato real.
-- Desde este cambio, `Existencia` se abona en `POST /api/v1/compras/calidad-inspecciones/onboarding/`, no en `recepciones/onboarding/` — ver `DOCS/arquitectura/flujo-recepcion-calidad-compras.md`.
-
 ## 🧾 Compras - KPIs por pantalla (EC-432 / EC-434 / EC-436)
 
-Distintos de `/dashboard/` de arriba: cada uno es la tarjeta de KPIs de **una pantalla específica**, no el resumen general. Mismo patrón en los 3: `GET`, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.
+Cada uno es la tarjeta de KPIs de **una pantalla específica**. `GET /compras/dashboard/` (el resumen general) se retiró en EC-784: responde `404`; el dashboard de Compras se servirá desde `ordenes/kpis/` (EC-782). Mismo patrón en los 3: `GET`, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.
 
 **Reglas comunes**
 - **Parámetros no soportados → `400`** (`{"parametros": "..."}`), nunca se ignoran en silencio. `ordenes/kpis/` no acepta ninguno; `recepciones/kpis/` y `proveedores/kpis/` aceptan los de su sección. Los filtros aplicados se devuelven en `filtros`.

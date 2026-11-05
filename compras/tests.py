@@ -2520,3 +2520,21 @@ class OrdenCompraVariantesPTTests(TestCase):
         }).json()["busqueda"]
         self.assertEqual([v["sku"] for v in busqueda["variantes"]], ["CAM-G"])
         self.assertEqual((len(busqueda["proveedores"]), len(busqueda["productos"])), (1, 1))
+
+
+class ComprasDashboardRetiradoTests(TestCase):
+    """EC-784: ``GET /compras/dashboard/`` se retiró (ignoraba ``puede_ver_importes``,
+    al superusuario sin empresa le mostraba todas y sumaba monedas en
+    ``top_proveedores``). El dashboard de Compras lo servirá ``ordenes/kpis/``."""
+
+    def test_la_ruta_ya_no_existe(self):
+        empresa = Empresa.objects.create(codigo="ec784-dash", razon_social="EC784 Dashboard SA")
+        usuarios = (
+            Usuario.objects.create(username="dash-u", email="dash-u@ec784.test", empresa=empresa),
+            Usuario.objects.create(username="dash-su", email="dash-su@ec784.test", is_superuser=True),
+        )
+        for usuario in usuarios:
+            with self.subTest(usuario=usuario.username):
+                api = APIClient()
+                api.force_authenticate(usuario)
+                self.assertEqual(api.get("/api/v1/compras/dashboard/").status_code, 404)

@@ -4224,9 +4224,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
 
     def _kpi_pedidos_activos(self, base, ver_importes):
         # "Activo" = AUTORIZADA o EN PROCESO: ya es un pedido en firme, no un
-        # borrador ni algo cancelado. Mismo criterio que
-        # ``ComprasDashboardView.ESTATUS_GASTO_OC`` (excluir lo que todavía no
-        # es compromiso real).
+        # borrador ni algo cancelado (se excluye lo que todavía no es compromiso
+        # real).
         activos = base.filter(estatus__in=self.ESTATUS_PEDIDO_ACTIVOS)
         # El valor va por moneda (#370): un pedido en USD no se suma con los MXN.
         por_moneda = [
