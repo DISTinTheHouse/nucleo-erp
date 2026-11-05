@@ -34,7 +34,7 @@ from inventarios.models import (
     Ubicacion,
     inventario_reservas,
 )
-from ventas.api.views import CotizacionViewSet, PedidoViewSet
+from ventas.api.views import ACCIONES_BLOQUEO_MESA_CONTROL, CotizacionViewSet, PedidoViewSet
 from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal
 from produccion.models import (
     BordadoAvances,
@@ -1281,6 +1281,411 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertIn("bloqueos", response.json())
         tipos = {item["tipo"] for item in response.json()["bloqueos"]}
         self.assertIn("picking_activo", tipos)
+
+    # --- EC-776: bloqueos en una consulta y acotados a la empresa del pedido ---
+
+    def _factura_emitida_ligada(self, empresa, sucursal, folio):
+        factura = Factura.objects.create(
+            empresa=empresa,
+            sucursal=sucursal,
+            cliente=self.cliente,
+            pedido=self.pedido,
+            moneda=self.moneda,
+            folio=folio,
+            subtotal="100.00",
+            descuento="0.00",
+            impuestos="16.00",
+            total="116.00",
+            estatus=Factura.FacturaStatus.EMITIDA,
+        )
+        FacturaDetalle.objects.create(
+            factura=factura,
+            pedido_detalle=self.pedido.detalles.get(),
+            producto=self.producto_a,
+            cantidad="2.00",
+            precio_unitario="95.00",
+            descuento="0.00",
+            impuesto="0.00",
+            subtotal="190.00",
+            total="190.00",
+        )
+        return factura
+
+    def _picking_activo(self, folio, empresa=None, sucursal=None):
+        return Picking.objects.create(
+            folio=folio,
+            empresa=empresa or self.empresa,
+            sucursal=sucursal or self.sucursal,
+            pedido=self.pedido,
+            operador=self.admin_mesa,
+            almacen=self.almacen,
+            prioridad=Picking.Prioridad.MEDIA,
+            tipo=Picking.TipoPicking.ORDER_PICKING,
+            estado=Picking.Estado.EN_PROCESO,
+            usuario=self.admin_mesa,
+        )
+
+    def test_contexto_conserva_las_dos_formas_de_bloqueo_y_su_orden(self):
+        factura = self._factura_emitida_ligada(self.empresa, self.sucursal, "FAC-0001")
+        orden = OrdenesBordado.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido, folio_bordado="OB-1",
+        )
+        # Dos pickings: el mismo tipo se repite, por ``id``.
+        picking_1 = self._picking_activo("PK-001")
+        picking_2 = self._picking_activo("PK-002")
+
+        response = self._client(self.admin_mesa).get(
+            pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(
+            list(body),
+            [
+                "pedido_id", "folio", "editable", "modo", "requiere_ids_detalle",
+                "permite_eliminar_renglones", "permite_eliminar_tallas",
+                "permite_eliminar_servicios_extras", "requiere_cancelacion_previa",
+                "codigo", "mensaje", "bloqueos", "tipos_bloqueo",
+            ],
+        )
+        self.assertFalse(body["editable"])
+        self.assertEqual(body["codigo"], "pedido_con_bloqueos")
+        self.assertEqual(
+            [list(b) for b in body["bloqueos"]],
+            [["tipo", "id", "folio", "estatus", "accion_requerida"]] * 4
+            + [["tipo", "accion_requerida"]],
+        )
+        self.assertEqual(
+            [{k: v for k, v in b.items() if k != "accion_requerida"} for b in body["bloqueos"]],
+            [
+                {"tipo": "factura_emitida", "id": factura.pk, "folio": "FAC-0001", "estatus": "Emitida"},
+                {"tipo": "orden_bordado_activa", "id": orden.pk, "folio": "OB-1", "estatus": orden.estatus_bordado},
+                {"tipo": "picking_activo", "id": picking_1.pk, "folio": "PK-001", "estatus": "En proceso"},
+                {"tipo": "picking_activo", "id": picking_2.pk, "folio": "PK-002", "estatus": "En proceso"},
+                {"tipo": "factura_detalle_ligado"},
+            ],
+        )
+        # ``estatus`` conserva el tipo de su columna: texto en factura y picking,
+        # entero en las órdenes de producción.
+        self.assertIsInstance(body["bloqueos"][0]["estatus"], str)
+        self.assertIsInstance(body["bloqueos"][1]["estatus"], int)
+        self.assertIsInstance(body["bloqueos"][2]["estatus"], str)
+        # ``tipos_bloqueo`` va en paralelo 1:1, con duplicados.
+        self.assertEqual(body["tipos_bloqueo"], [b["tipo"] for b in body["bloqueos"]])
+        self.assertEqual(body["tipos_bloqueo"].count("picking_activo"), 2)
+
+    def _assert_vinculo_ajeno_oculta_documento_y_bloquea(self, tipo_documento, tipo_vinculo, filas_ajenas):
+        """Documento de otra empresa ligado a un renglón del pedido (dato heredado,
+        como la factura 34 -> pedido 255 de la BD): no se lista con id/folio/estatus,
+        pero su vínculo de renglón sí bloquea, y el POST que quitaría el renglón
+        responde 409 sin borrar nada en ninguna de las dos empresas."""
+        detalle = self.pedido.detalles.get()
+        antes_ajenas = filas_ajenas()
+
+        response = self._client(self.admin_mesa).get(
+            pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["editable"])
+        self.assertEqual(body["codigo"], "pedido_con_bloqueos")
+        self.assertNotIn(tipo_documento, body["tipos_bloqueo"])
+        self.assertFalse([b for b in body["bloqueos"] if "id" in b])
+        self.assertEqual(
+            body["bloqueos"],
+            [{"tipo": tipo_vinculo, "accion_requerida": ACCIONES_BLOQUEO_MESA_CONTROL[tipo_vinculo]}],
+        )
+        self.assertEqual(body["tipos_bloqueo"], [tipo_vinculo])
+
+        # El payload cambia el renglón por uno nuevo: sin el bloqueo, el renglón
+        # ligado se borraría (PROTECT -> 500, CASCADE -> filas ajenas borradas).
+        payload = self._payload()
+        payload["detalle"][0].pop("id")
+        payload["detalle"][0]["producto"] = self.producto_b.pk
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk), payload, format="json"
+        )
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertEqual(response.json()["tipos_bloqueo"], [tipo_vinculo])
+        self.assertEqual(list(self.pedido.detalles.values_list("id", flat=True)), [detalle.pk])
+        self.assertEqual(detalle.tallas.count(), 1)
+        self.assertEqual(filas_ajenas(), antes_ajenas)
+
+    def test_factura_de_otra_empresa_no_se_lista_pero_su_renglon_bloquea(self):
+        factura = self._factura_emitida_ligada(self.empresa_b, self.sucursal_b, "FAC-AJENA")
+        self._assert_vinculo_ajeno_oculta_documento_y_bloquea(
+            "factura_emitida",
+            "factura_detalle_ligado",
+            lambda: list(FacturaDetalle.objects.filter(factura=factura).values_list("id", "pedido_detalle_id")),
+        )
+
+    def test_picking_de_otra_empresa_no_se_lista_pero_su_renglon_bloquea(self):
+        picking = self._picking_activo("PK-AJENO", empresa=self.empresa_b, sucursal=self.sucursal_b)
+        detalle = self.pedido.detalles.get()
+        PickingDetalle.objects.create(
+            picking=picking,
+            pedido_detalle=detalle,
+            pedido_detalle_talla=detalle.tallas.get(),
+            producto=self.producto_a,
+            cantidad_solicitada="2.0000",
+            cantidad_asignada="1.0000",
+            cantidad_surtida="0.0000",
+            estado=PickingDetalle.EstadoLinea.PENDIENTE,
+        )
+        self._assert_vinculo_ajeno_oculta_documento_y_bloquea(
+            "picking_activo",
+            "picking_detalle_ligado",
+            lambda: list(PickingDetalle.objects.filter(picking=picking).values_list("id", "pedido_detalle_id")),
+        )
+
+    def _assert_linea_de_servicio_extra_bloquea(self, empresa, sucursal, estatus):
+        """Factura cuya única línea factura un servicio extra (#744, PROTECT): no se
+        lista si no es emitida de la empresa del pedido, pero su línea bloquea, y el
+        POST que quitaría el servicio responde 409 (antes 500) sin borrar nada."""
+        servicio = self.pedido.servicios_extras.get()
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=self.cliente, pedido=self.pedido,
+            moneda=self.moneda, folio="FAC-SRV", subtotal="20.00", descuento="0.00",
+            impuestos="0.00", total="20.00", estatus=estatus,
+        )
+        linea = FacturaDetalle.objects.create(
+            factura=factura, pedido_servicio_extra=servicio, cantidad="1.00",
+            precio_unitario="20.00", descuento="0.00", impuesto="0.00", subtotal="20.00", total="20.00",
+        )
+
+        response = self._client(self.admin_mesa).get(
+            pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["editable"])
+        self.assertFalse([b for b in body["bloqueos"] if "id" in b])
+        self.assertEqual(
+            body["bloqueos"],
+            [{"tipo": "factura_detalle_ligado", "accion_requerida": ACCIONES_BLOQUEO_MESA_CONTROL["factura_detalle_ligado"]}],
+        )
+        self.assertEqual(body["tipos_bloqueo"], ["factura_detalle_ligado"])
+
+        # Sin servicios extras en el payload: sin el bloqueo se borraría el servicio.
+        payload = self._payload()
+        payload["servicios_extras"] = []
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk), payload, format="json"
+        )
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertEqual(response.json()["tipos_bloqueo"], ["factura_detalle_ligado"])
+        self.assertEqual(list(self.pedido.servicios_extras.values_list("id", flat=True)), [servicio.pk])
+        self.assertTrue(FacturaDetalle.objects.filter(pk=linea.pk, pedido_servicio_extra=servicio).exists())
+        self.pedido.refresh_from_db()
+        self.assertNotEqual(self.pedido.persona_pagos, "Pagos Mesa")
+
+    def test_factura_de_otra_empresa_sobre_servicio_extra_bloquea(self):
+        self._assert_linea_de_servicio_extra_bloquea(
+            self.empresa_b, self.sucursal_b, Factura.FacturaStatus.EMITIDA
+        )
+
+    def test_factura_borrador_sobre_servicio_extra_bloquea(self):
+        self._assert_linea_de_servicio_extra_bloquea(
+            self.empresa, self.sucursal, Factura.FacturaStatus.BORRADOR
+        )
+
+    def test_nota_de_credito_sobre_servicio_extra_se_reporta(self):
+        """La nota sobre una línea de servicio extra también es ``nota_credito_ligada``
+        (antes solo se veía la línea como ``factura_detalle_ligado``)."""
+        from finanzas.models import NotaCredito, NotaCreditoDetalle
+
+        servicio = self.pedido.servicios_extras.get()
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, pedido=self.pedido,
+            moneda=self.moneda, folio="FAC-SRV", subtotal="20.00", descuento="0.00",
+            impuestos="0.00", total="20.00", estatus=Factura.FacturaStatus.BORRADOR,
+        )
+        linea = FacturaDetalle.objects.create(
+            factura=factura, pedido_servicio_extra=servicio, cantidad="1.00",
+            precio_unitario="20.00", descuento="0.00", impuesto="0.00", subtotal="20.00", total="20.00",
+        )
+        nota = NotaCredito.objects.create(factura=factura, cliente=self.cliente, folio="NC-SRV")
+        NotaCreditoDetalle.objects.create(nota_credito=nota, factura_detalle=linea, cantidad="1.00", total="20.00")
+
+        response = self._client(self.admin_mesa).get(
+            pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["editable"])
+        self.assertEqual(
+            body["bloqueos"],
+            [
+                {"tipo": "factura_detalle_ligado", "accion_requerida": ACCIONES_BLOQUEO_MESA_CONTROL["factura_detalle_ligado"]},
+                {"tipo": "nota_credito_ligada", "accion_requerida": ACCIONES_BLOQUEO_MESA_CONTROL["nota_credito_ligada"]},
+            ],
+        )
+
+        payload = self._payload()
+        payload["servicios_extras"] = []
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk), payload, format="json"
+        )
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertEqual(response.json()["tipos_bloqueo"], ["factura_detalle_ligado", "nota_credito_ligada"])
+        self.assertEqual(list(self.pedido.servicios_extras.values_list("id", flat=True)), [servicio.pk])
+        self.assertTrue(NotaCreditoDetalle.objects.filter(nota_credito=nota, factura_detalle=linea).exists())
+
+    def test_linea_de_factura_solo_con_talla_bloquea(self):
+        """Línea de factura con ``pedido_detalle_talla`` y sin ``pedido_detalle``: el
+        POST que cambia esa talla por otra la borraría (PROTECT -> 500)."""
+        detalle = self.pedido.detalles.get()
+        talla = detalle.tallas.get()
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, pedido=self.pedido,
+            moneda=self.moneda, folio="FAC-TALLA", subtotal="95.00", descuento="0.00",
+            impuestos="0.00", total="95.00", estatus=Factura.FacturaStatus.BORRADOR,
+        )
+        linea = FacturaDetalle.objects.create(
+            factura=factura, pedido_detalle_talla=talla, cantidad="1.00",
+            precio_unitario="95.00", descuento="0.00", impuesto="0.00", subtotal="95.00", total="95.00",
+        )
+
+        response = self._client(self.admin_mesa).get(
+            pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["editable"])
+        self.assertEqual(
+            body["bloqueos"],
+            [{"tipo": "factura_detalle_ligado", "accion_requerida": ACCIONES_BLOQUEO_MESA_CONTROL["factura_detalle_ligado"]}],
+        )
+
+        payload = self._payload()
+        payload["detalle"][0]["tallas"][0]["talla"] = self.talla_l.pk
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk), payload, format="json"
+        )
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertEqual(response.json()["tipos_bloqueo"], ["factura_detalle_ligado"])
+        self.assertEqual(list(detalle.tallas.values_list("id", flat=True)), [talla.pk])
+        self.assertTrue(FacturaDetalle.objects.filter(pk=linea.pk, pedido_detalle_talla=talla).exists())
+
+    def test_contexto_consultas_constantes(self):
+        url = pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+
+        def medir(user):
+            with CaptureQueriesContext(connection) as ctx:
+                response = self._client(user).get(url)
+            self.assertEqual(response.status_code, 200)
+            return len(ctx), response.json()
+
+        self._factura_emitida_ligada(self.empresa, self.sucursal, "FAC-0001")
+        self._picking_activo("PK-001")
+        self._picking_activo("PK-002")
+        # Pedido + bloqueos (una consulta). Sin prefetch de renglones; quien no es
+        # admin suma la consulta de roles de ``_require_mesa_control``.
+        pocos_admin, body = medir(self.admin_mesa)
+        pocos_mesa, _ = medir(self.mesa_no_admin)
+        self.assertEqual((pocos_admin, pocos_mesa), (2, 3))
+        self.assertEqual(len(body["bloqueos"]), 4)
+
+        # Más documentos de cada tipo y más renglones ligados: mismas consultas.
+        detalle = self.pedido.detalles.get()
+        for i in range(3, 7):
+            picking = self._picking_activo(f"PK-00{i}")
+            PickingDetalle.objects.create(
+                picking=picking,
+                pedido_detalle=detalle,
+                pedido_detalle_talla=detalle.tallas.get(),
+                producto=self.producto_a,
+                cantidad_solicitada="1.0000",
+                cantidad_asignada="0.0000",
+                cantidad_surtida="0.0000",
+                estado=PickingDetalle.EstadoLinea.PENDIENTE,
+            )
+        for i in range(3):
+            OrdenesBordado.objects.create(
+                empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido, folio_bordado=f"OB-{i}",
+            )
+        muchos_admin, body = medir(self.admin_mesa)
+        muchos_mesa, _ = medir(self.mesa_no_admin)
+        self.assertEqual(len(body["bloqueos"]), 1 + 6 + 3 + 2)
+        self.assertEqual((muchos_admin, muchos_mesa), (pocos_admin, pocos_mesa))
+
+    def test_edicion_exitosa_guarda_y_responde_el_pedido_completo(self):
+        """EC-776: el 200 de ``editar-mesa-control`` sin el prefetch del pedido base.
+        Guarda los cambios y responde el pedido con sus renglones, tallas y servicios
+        (el prefetch de la respuesta se conserva). No depende de filas previas de la BD."""
+        detalle = self.pedido.detalles.get()
+        talla = detalle.tallas.get()
+        payload = self._payload()
+
+        with CaptureQueriesContext(connection) as ctx:
+            response = self._client(self.admin_mesa).post(
+                pedido_editar_mesa_control_url(self.pedido.pk), payload, format="json"
+            )
+        self.assertEqual(response.status_code, 200, response.json())
+
+        # Lo que EC-776 cambió en el POST, sin fijar el resto del flujo: lo previo a
+        # la primera escritura (pedido base, bloqueos de fila y bloqueos de edición).
+        sqls = [q["sql"] for q in ctx.captured_queries]
+        primera_escritura = next(
+            i for i, sql in enumerate(sqls) if sql.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE"))
+        )
+        lectura = sqls[:primera_escritura]
+        candado = next(
+            i for i, sql in enumerate(lectura) if sql.startswith('SELECT "pedidos".') and "FOR UPDATE" in sql
+        )
+        # El pedido base de ``get_object()`` no carga renglones, tallas, variantes
+        # de producción ni servicios extras antes del ``select_for_update``.
+        for tabla in ("pedido_detalle", "pedido_detalle_talla", "variantes_producto_produccion", "pedido_servicios_extras"):
+            self.assertFalse([sql for sql in lectura[:candado] if f'FROM "{tabla}"' in sql], tabla)
+        # Los bloqueos salen en UNA consulta: ninguna otra lectura va a las tablas
+        # de documentos ni de renglones ligados.
+        bloqueos = [sql for sql in lectura if 'AS "reserva_talla_activa"' in sql]
+        self.assertEqual(len(bloqueos), 1)
+        for tabla in ("facturas", "orden_bordado", "orden_reflejante", "orden_corte_manga",
+                      "ordenes_produccion", "picking", "factura_detalle", "picking_detalle"):
+            self.assertEqual(
+                [sql for sql in lectura if f'"{tabla}"' in sql and sql not in bloqueos], [], tabla
+            )
+        body = response.json()
+        self.assertEqual(list(body), ["pedido", "cotizacion", "sincronizado", "modo"])
+        self.assertTrue(body["sincronizado"])
+        self.assertEqual(body["modo"], "estricto_contable_operativo")
+
+        pedido = body["pedido"]
+        for campo in ("id", "folio", "detalles", "servicios_extras", "documentos", "programacion_conf"):
+            self.assertIn(campo, pedido)
+        self.assertEqual(
+            (pedido["id"], pedido["folio"], pedido["persona_pagos"], pedido["oc"], pedido["subtotal"]),
+            (self.pedido.pk, "P-000001", "Pagos Mesa", "OC-MESA-01", "250.00"),
+        )
+        self.assertEqual(len(pedido["detalles"]), 1)
+        renglon = pedido["detalles"][0]
+        # El renglón se edita en su lugar (``requiere_ids_detalle``), no se recrea.
+        self.assertEqual((renglon["id"], renglon["producto"]), (detalle.pk, self.producto_a.pk))
+        self.assertEqual(len(renglon["tallas"]), 1)
+        self.assertEqual(
+            {k: renglon["tallas"][0][k] for k in ("id", "talla", "cantidad")},
+            {"id": talla.pk, "talla": self.talla_m.pk, "cantidad": 3},
+        )
+        self.assertIn("sku_produccion", renglon["tallas"][0])
+        self.assertEqual(
+            [(s["nombre"], s["cantidad"], s["visible_en_factura"]) for s in pedido["servicios_extras"]],
+            [("Urgencia", 2, False)],
+        )
+        self.assertEqual(body["cotizacion"]["id"], self.cotizacion.pk)
+        self.assertEqual(body["cotizacion"]["oc"], "OC-MESA-01")
+
+        self.pedido.refresh_from_db()
+        self.assertEqual((self.pedido.persona_pagos, self.pedido.oc), ("Pagos Mesa", "OC-MESA-01"))
+        self.assertEqual(
+            list(PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=self.pedido).values_list("id", "cantidad")),
+            [(talla.pk, 3)],
+        )
+        self.assertEqual(
+            list(self.pedido.servicios_extras.values_list("nombre", "cantidad")), [("Urgencia", 2)]
+        )
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.oc, "OC-MESA-01")
 
     PROGRAMACION_VIGENTE = {
         "programaciones": [
@@ -6862,6 +7267,36 @@ class PedidoListadoPiezasVendedorTests(TestCase):
         sql_listado = " ".join(q["sql"] for q in varios.captured_queries if '"pedidos"' in q["sql"])
         self.assertNotIn("aprobado_snapshot", sql_listado)
         self.assertNotIn("password", sql_listado)
+
+    def test_piezas_programables_sin_repetir_el_subquery(self):
+        """EC-776: ``piezas_programables`` sale de la misma anotación que ``piezas``;
+        el SQL calcula las piezas una vez (más la de muestras), no dos."""
+        con_muestra = self._pedido("P-1", self.ana, tallas=[(2, False), (49, True)])
+        vacio = self._pedido("P-2", self.sin_nombre)
+        with self.assertNumQueries(1):
+            filas = self._listado()
+        for pedido, piezas in ((con_muestra, 51), (vacio, 0)):
+            fila = filas[pedido.pk]
+            self.assertEqual((fila["piezas"], fila["piezas_programables"]), (piezas, piezas))
+            self.assertIsInstance(fila["piezas_programables"], int)
+        # El orden de campos del listado no cambia.
+        campos = list(filas[con_muestra.pk])
+        self.assertEqual(campos[campos.index("piezas"):campos.index("piezas") + 4],
+                         ["piezas", "piezas_programables", "piezas_muestra", "piezas_surtidas"])
+        # Sin depender del SQL generado: el queryset del listado anota ``piezas`` pero
+        # no ``piezas_programables``, que el serializer toma de ``piezas``.
+        from rest_framework.request import Request
+        from rest_framework.test import APIRequestFactory
+        from ventas.api.serializers import PedidoListSerializer
+
+        view = PedidoViewSet()
+        view.action = "list"
+        view.request = Request(APIRequestFactory().get(PEDIDOS_URL))
+        view.request.user = self.admin
+        anotaciones = view.get_queryset().query.annotations
+        self.assertIn("piezas", anotaciones)
+        self.assertNotIn("piezas_programables", anotaciones)
+        self.assertEqual(PedidoListSerializer().fields["piezas_programables"].source, "piezas")
 
 
 class MetodoPagoEtiquetaTests(TestCase):
