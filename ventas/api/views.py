@@ -3141,7 +3141,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # El listado usa ``PedidoListSerializer`` (9 campos escalares) y NO los
         # toca, así que ahí se omite el prefetch — es lo que baja el tiempo del
         # listado de ~15s a <1s. ``documentos`` sólo lo añade ``retrieve()``.
-        if getattr(self, "action", None) not in ("list", "cancelar"):
+        # ``editar-mesa-control-contexto`` tampoco: sólo lee ``pk`` y ``folio``
+        # del pedido; los bloqueos van por su propia consulta (EC-776).
+        if getattr(self, "action", None) not in ("list", "cancelar", "editar_mesa_control_contexto"):
             qs = qs.prefetch_related(
                 _pedido_detalles_prefetch(),
                 _pedido_servicios_extras_prefetch(),
