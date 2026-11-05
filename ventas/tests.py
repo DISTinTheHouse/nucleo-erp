@@ -8003,6 +8003,13 @@ class ImportesPedidoFixture:
         api.force_authenticate(usuario)
         return api
 
+    def _consultas_de_roles(self, peticion):
+        """Cuántas veces ``peticion()`` lee los roles del usuario (``usuarios_roles``)."""
+        with CaptureQueriesContext(connection) as consultas:
+            resp = peticion()
+        self.assertLess(resp.status_code, 300, getattr(resp, "content", resp))
+        return sum('"usuarios_roles"' in q["sql"] for q in consultas.captured_queries)
+
 
 class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
     """EC-784: una sola regla de importes del pedido —contabilidad de ventas O de
@@ -8019,6 +8026,21 @@ class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
         for usuario, ve in (*self.perfiles, (self.superusuario_sin_empresa, True)):
             with self.subTest(usuario=usuario.username):
                 self.assertEqual(puede_ver_contabilidad(usuario), ve)
+
+    def test_claves_del_usuario_se_consultan_una_vez_por_peticion(self):
+        """El alcance, la regla de lectura, la de escritura y los documentos del
+        detalle comparten las claves de departamento: una sola consulta de roles."""
+        pedido = self.pedidos[self.compras.pk]
+        api = self._api(self.compras)
+        url = f"{PEDIDOS_URL}{pedido.pk}/"
+        for nombre, peticion in (
+            ("listado", lambda: api.get(f"{PEDIDOS_URL}?q=EC784")),
+            ("kpis", lambda: api.get(f"{PEDIDOS_URL}kpis/")),
+            ("detalle", lambda: api.get(url)),
+            ("patch", lambda: api.patch(url, {"oc": "OC-EC784"}, format="json")),
+        ):
+            with self.subTest(peticion=nombre):
+                self.assertEqual(self._consultas_de_roles(peticion), 1)
 
     def test_filtro_del_detalle_falla_cerrado(self):
         """Un valor que ``deepcopy`` no puede copiar hacía que el filtro devolviera

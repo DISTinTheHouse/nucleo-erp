@@ -1811,6 +1811,16 @@ class ResumenComercialImportesPorPerfilTests(ImportesPedidoFixture, TestCase):
     def _resumen(self, usuario, cliente):
         return self._api(usuario).get(f"{CLIENTES_URL}{cliente.pk}/")
 
+    def test_detalle_consulta_las_claves_una_vez(self):
+        """El alcance (``clientes_visibles``) y la regla de importes comparten las
+        claves de departamento: una sola consulta de roles por petición."""
+        for usuario in (self.compras, self.sin_permiso):
+            with self.subTest(usuario=usuario.username):
+                api = self._api(usuario)
+                self.assertEqual(
+                    self._consultas_de_roles(lambda: api.get(f"{CLIENTES_URL}{self.cliente.pk}/")), 1
+                )
+
     def test_resumen_por_perfil(self):
         for usuario, ve in self.perfiles:
             with self.subTest(usuario=usuario.username):

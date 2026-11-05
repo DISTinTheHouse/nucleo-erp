@@ -178,14 +178,15 @@ def documentos_related_prefetch_args():
 TIPOS_POR_SUCURSAL = {"orden_bordado", "orden_reflejante", "orden_corte_manga", "picking", "packing"}
 
 
-def _alcance(user):
-    """``(ve_facturas, sucursales)``; ``sucursales`` es ``None`` si ve todas."""
+def _alcance(user, claves=None):
+    """``(ve_facturas, sucursales)``; ``sucursales`` es ``None`` si ve todas.
+    ``claves``: las del usuario si la vista ya las resolvió en esta petición."""
     from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
 
     if user is None:
         return True, None
     todas = user.is_superuser or user.is_admin_empresa
-    return puede_ver_contabilidad(user), None if todas else user.sucursales_permitidas()
+    return puede_ver_contabilidad(user, claves), None if todas else user.sucursales_permitidas()
 
 
 def _visible(doc, cfg, alcance):
@@ -199,12 +200,12 @@ def _visible(doc, cfg, alcance):
     return True
 
 
-def listar_documentos_pedido(pedido, user=None, tipos=None):
+def listar_documentos_pedido(pedido, user=None, tipos=None, claves=None):
     """Documentos del pedido. Con ``user``: sin bajas, sin facturas si no ve
     contabilidad y, en los tipos por sucursal, solo los de sus sucursales.
     ``tipos``: solo esos (un pedido recién creado solo puede tener su cotización)."""
     documentos = []
-    alcance = _alcance(user)
+    alcance = _alcance(user, claves)
     for cfg in DOCUMENTOS_CONFIG:
         if tipos is not None and cfg["tipo"] not in tipos:
             continue

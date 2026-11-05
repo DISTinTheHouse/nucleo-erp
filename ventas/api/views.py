@@ -114,7 +114,7 @@ from ventas.services.pedido_field_filter_service import (
     puede_ver_contabilidad,
     quitar_campos_contabilidad_pedido,
 )
-from nucleo.importes import quitar_montos
+from nucleo.importes import claves_de_la_peticion, quitar_montos
 from wms.models import Estado as EstadoWms, Picking, PickingDetalle
 
 logger = logging.getLogger(__name__)
@@ -2706,7 +2706,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # ``ordering_fields`` no incluye importes, así que ``?ordering=`` tampoco
         # deja deducirlos (a diferencia de las OC, #837).
         response = super().list(request, *args, **kwargs)
-        if puede_ver_contabilidad(request.user):
+        if puede_ver_contabilidad(request.user, claves_de_la_peticion(self)):
             return response
         paginado = isinstance(response.data, dict) and "results" in response.data
         for fila in response.data["results"] if paginado else response.data:
@@ -2771,9 +2771,12 @@ class PedidoViewSet(viewsets.ModelViewSet):
         serializer_class = self.get_serializer_class()
         context = dict(self.get_serializer_context() or {})
         context.update(self._contexto_detalle(instance))
+        # Claves del usuario una sola vez: las usan los documentos (facturas visibles)
+        # y el filtro de importes de abajo.
+        context["_claves_departamento"] = claves_de_la_peticion(self)
         serializer = serializer_class(instance, context=context)
 
-        data = filtrar_campos_contabilidad_pedido(serializer.data, request.user)
+        data = filtrar_campos_contabilidad_pedido(serializer.data, request.user, claves_de_la_peticion(self))
         return Response(data)
 
     @staticmethod
@@ -3293,7 +3296,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         por el valor (p. ej. anticipo contra gran_total) le dejaría deducir lo oculto,
         así que con cualquier valor la respuesta es el mismo 403. Escribirlos exige
         contabilidad de ventas, aunque compras ya los vea (EC-784)."""
-        if puede_modificar_importes_pedido(request.user):
+        if puede_modificar_importes_pedido(request.user, claves_de_la_peticion(self)):
             return
         escribibles = {n for n, f in self.get_serializer().fields.items() if not f.read_only}
         ocultos = sorted(set(CAMPOS_CONTABILIDAD_PEDIDO) & escribibles & set(request.data))
@@ -3304,7 +3307,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
     def _filtrar_respuesta_contabilidad(self, response):
         # Mismo filtro que ``retrieve`` y ``editar-mesa-control``: la respuesta del
         # alta o la edición no muestra lo que el detalle oculta.
-        response.data = filtrar_campos_contabilidad_pedido(response.data, self.request.user)
+        response.data = filtrar_campos_contabilidad_pedido(
+            response.data, self.request.user, claves_de_la_peticion(self)
+        )
         return response
 
     def create(self, request, *args, **kwargs):
@@ -3350,6 +3355,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # instancia recargada con el mismo prefetch que el detalle.
         serializer.instance = self.get_queryset().select_related("cotizacion").get(pk=serializer.instance.pk)
         serializer.context.update(self._contexto_detalle(serializer.instance))
+        serializer.context["_claves_departamento"] = claves_de_la_peticion(self)
 
     @staticmethod
     def _exigir_programable(pedido):
@@ -4188,7 +4194,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
 
         base = pedidos_visibles(pedidos_base(), user).filter(cotizacion__vendedor=user)
         # Misma regla de importes que el listado y el detalle (EC-784).
-        ver_importes = puede_ver_contabilidad(user)
+        ver_importes = puede_ver_contabilidad(user, claves_de_la_peticion(self))
         data = {
             "generado_en": timezone.now(),
             "pedidos_activos": self._kpi_pedidos_activos(base, ver_importes),

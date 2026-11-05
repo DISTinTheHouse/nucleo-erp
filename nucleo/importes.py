@@ -25,6 +25,23 @@ def tiene_claves_de_importes(user, claves_permitidas, claves=None) -> bool:
     return bool(claves & claves_permitidas)
 
 
+def claves_de_la_peticion(view):
+    """Claves de departamento del usuario de la petición, resueltas una sola vez.
+
+    Se guardan en la vista, que vive lo que la petición (mismo patrón que
+    ``OrdenCompraViewSet.ver_montos``, #836), para que el alcance y la regla de
+    importes no repitan la consulta. ``None`` para el superusuario y el admin de
+    empresa: ninguna de las dos reglas las necesita y así no cuestan consulta.
+    """
+    if not hasattr(view, "_claves_departamento"):
+        user = view.request.user
+        if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
+            view._claves_departamento = None
+        else:
+            view._claves_departamento = claves_departamento_usuario(user)
+    return view._claves_departamento
+
+
 def quitar_claves(d, claves) -> None:
     """Quita ``claves`` de ``d`` en sitio; ignora lo que no sea dict."""
     if not isinstance(d, dict):
