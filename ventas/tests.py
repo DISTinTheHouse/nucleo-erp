@@ -1377,6 +1377,7 @@ class PedidoMesaControlUpdateTests(TestCase):
     ACCION_VINCULO = {
         "factura_detalle_ligado": "Cancelar la factura y limpiar su detalle antes de editar el pedido.",
         "picking_detalle_ligado": "Cancelar el picking y sus líneas antes de editar el pedido.",
+        "nota_credito_ligada": "Revisar/cancelar la nota de crédito ligada antes de editar el pedido.",
     }
 
     def _assert_vinculo_ajeno_oculta_documento_y_bloquea(self, tipo_documento, tipo_vinculo, filas_ajenas):
@@ -1493,6 +1494,48 @@ class PedidoMesaControlUpdateTests(TestCase):
         self._assert_linea_de_servicio_extra_bloquea(
             self.empresa, self.sucursal, Factura.FacturaStatus.BORRADOR
         )
+
+    def test_nota_de_credito_sobre_servicio_extra_se_reporta(self):
+        """La nota sobre una línea de servicio extra también es ``nota_credito_ligada``
+        (antes solo se veía la línea como ``factura_detalle_ligado``)."""
+        from finanzas.models import NotaCredito, NotaCreditoDetalle
+
+        servicio = self.pedido.servicios_extras.get()
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, pedido=self.pedido,
+            moneda=self.moneda, folio="FAC-SRV", subtotal="20.00", descuento="0.00",
+            impuestos="0.00", total="20.00", estatus=Factura.FacturaStatus.BORRADOR,
+        )
+        linea = FacturaDetalle.objects.create(
+            factura=factura, pedido_servicio_extra=servicio, cantidad="1.00",
+            precio_unitario="20.00", descuento="0.00", impuesto="0.00", subtotal="20.00", total="20.00",
+        )
+        nota = NotaCredito.objects.create(factura=factura, cliente=self.cliente, folio="NC-SRV")
+        NotaCreditoDetalle.objects.create(nota_credito=nota, factura_detalle=linea, cantidad="1.00", total="20.00")
+
+        response = self._client(self.admin_mesa).get(
+            pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["editable"])
+        self.assertEqual(
+            body["bloqueos"],
+            [
+                {"tipo": "factura_detalle_ligado", "accion_requerida": self.ACCION_VINCULO["factura_detalle_ligado"]},
+                {"tipo": "nota_credito_ligada", "accion_requerida": self.ACCION_VINCULO["nota_credito_ligada"]},
+            ],
+        )
+
+        payload = self._payload()
+        payload["servicios_extras"] = []
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk), payload, format="json"
+        )
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertEqual(response.json()["tipos_bloqueo"], ["factura_detalle_ligado", "nota_credito_ligada"])
+        self.assertEqual(list(self.pedido.servicios_extras.values_list("id", flat=True)), [servicio.pk])
+        self.assertTrue(NotaCreditoDetalle.objects.filter(nota_credito=nota, factura_detalle=linea).exists())
 
     def test_contexto_consultas_constantes(self):
         url = pedido_editar_mesa_control_contexto_url(self.pedido.pk)

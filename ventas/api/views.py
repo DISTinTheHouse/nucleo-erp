@@ -2950,6 +2950,13 @@ class PedidoViewSet(viewsets.ModelViewSet):
             "factura_detalle_ligado": [
                 FacturaDetalle.objects.filter(pedido_servicio_extra__pedido_id=OuterRef("pk")),
             ],
+            # Notas sobre líneas de servicio extra o ligadas solo a una talla.
+            "nota_credito_ligada": [
+                NotaCreditoDetalle.objects.filter(factura_detalle__pedido_servicio_extra__pedido_id=OuterRef("pk")),
+                NotaCreditoDetalle.objects.filter(
+                    factura_detalle__pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk")
+                ),
+            ],
         }
         alias_adicionales = {
             f"{tipo}_{n}": sub
