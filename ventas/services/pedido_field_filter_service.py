@@ -1,13 +1,8 @@
-import copy
-import logging
-
 from nucleo.importes import quitar_claves, tiene_claves_de_importes
 from seguridad.role_identity import (
     CLAVES_CONTABILIDAD_COMPRAS,
     CLAVES_CONTABILIDAD_VENTAS,
 )
-
-logger = logging.getLogger(__name__)
 
 CAMPOS_CONTABILIDAD_PEDIDO = [
     "anticipo_total", "anticipo_parcial", "pago_antes_embarque",
@@ -66,15 +61,33 @@ def quitar_campos_contabilidad_pedido(data) -> None:
         quitar_claves(s, CAMPOS_CONTABILIDAD_SERVICIO)
 
 
+def _copia_de_lo_que_se_filtra(data):
+    """Copia el pedido y los renglones, tallas y servicios de los que
+    ``quitar_campos_contabilidad_pedido`` quita claves; lo demás se comparte con ``data``, que
+    no se modifica. Sin ``deepcopy``: si la copia fallaba, el filtro devolvía los
+    datos sin filtrar (EC-784)."""
+    copia = dict(data)
+    if isinstance(copia.get("detalles"), list):
+        detalles = []
+        for det in copia["detalles"]:
+            if isinstance(det, dict):
+                det = dict(det)
+                if isinstance(det.get("tallas"), list):
+                    det["tallas"] = [dict(t) if isinstance(t, dict) else t for t in det["tallas"]]
+            detalles.append(det)
+        copia["detalles"] = detalles
+    if isinstance(copia.get("servicios_extras"), list):
+        copia["servicios_extras"] = [
+            dict(s) if isinstance(s, dict) else s for s in copia["servicios_extras"]
+        ]
+    return copia
+
+
 def filtrar_campos_contabilidad_pedido(data, user, claves=None):
+    """``data`` tal cual si el usuario ve importes; si no, una copia sin ellos.
+    Falla cerrado: no hay rama que devuelva los importes a quien no los ve."""
     if puede_ver_contabilidad(user, claves):
         return data
-
-    try:
-        cleaned = copy.deepcopy(data)
-    except Exception:
-        logger.warning("No se pudo copiar serializer.data en filtro contabilidad pedido")
-        return data
-
-    quitar_campos_contabilidad_pedido(cleaned)
-    return cleaned
+    filtrado = _copia_de_lo_que_se_filtra(data)
+    quitar_campos_contabilidad_pedido(filtrado)
+    return filtrado

@@ -8020,6 +8020,31 @@ class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
             with self.subTest(usuario=usuario.username):
                 self.assertEqual(puede_ver_contabilidad(usuario), ve)
 
+    def test_filtro_del_detalle_falla_cerrado(self):
+        """Un valor que ``deepcopy`` no puede copiar hacía que el filtro devolviera
+        todo sin filtrar; ahora quita los importes igual y no toca el original."""
+        import threading
+
+        from ventas.services.pedido_field_filter_service import filtrar_campos_contabilidad_pedido
+
+        data = {
+            "id": 1, "gran_total": "10.00", "forma_pago": "03", "no_copiable": threading.Lock(),
+            "detalles": [{"id": 2, "precio_unitario": "5.00", "tallas": [{"id": 3, "subtotal_talla": "5.00"}]}],
+            "servicios_extras": [{"id": 4, "monto": "1.00"}],
+        }
+        filtrado = filtrar_campos_contabilidad_pedido(data, self.sin_permiso)
+        self.assertNotIn("gran_total", filtrado)
+        self.assertNotIn("forma_pago", filtrado)
+        self.assertNotIn("precio_unitario", filtrado["detalles"][0])
+        self.assertNotIn("subtotal_talla", filtrado["detalles"][0]["tallas"][0])
+        self.assertNotIn("monto", filtrado["servicios_extras"][0])
+        self.assertEqual(filtrado["detalles"][0]["tallas"][0]["id"], 3)
+        # El original queda intacto (el serializer puede volver a leerlo).
+        self.assertEqual(data["gran_total"], "10.00")
+        self.assertEqual(data["detalles"][0]["tallas"][0]["subtotal_talla"], "5.00")
+        self.assertEqual(data["servicios_extras"][0]["monto"], "1.00")
+        self.assertIs(filtrar_campos_contabilidad_pedido(data, self.ventas), data)
+
     def test_detalle_por_perfil(self):
         pedido = next(iter(self.pedidos.values()))
         for usuario, ve in self.perfiles:
