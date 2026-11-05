@@ -2329,7 +2329,9 @@ Pantalla de cola para mesa de control: una tabla con todos los pedidos y su esta
   - `?sin_clasificar=true` — solo pedidos con `clasificacion` vacía (la cola de "pendientes por clasificar").
   - `?programado=true` — solo pedidos con al menos una entrada en `programacion_conf.programaciones` (ya se les corrió `PATCH /pedidos/{id}/programar/` con al menos un destino/cantidad). Un pedido programado y luego "limpiado" (`programaciones: []`) **no** cuenta como programado — vuelve a quedar fuera de este filtro.
   - `?con_muestras=true` — solo pedidos con al menos una línea de muestra.
-  - Se pueden combinar entre sí y con los filtros que ya existían (`?q=`/`?folio=`, `?mis_pedidos=true`).
+  - `?cliente={id}`, `?sucursal={id}`, `?vendedor={id}` (vendedor de la cotización de origen; los pedidos sin cotización no tienen) y `?fecha_desde=`/`?fecha_hasta=` (`YYYY-MM-DD`, sobre el día local de `created_at`, ambos inclusive) (#948). Un id que no es entero, una fecha inválida o `fecha_desde` posterior a `fecha_hasta` → `400` con el nombre del parámetro; un id de otra empresa o inexistente no trae filas.
+  - `?search=` busca en los mismos campos que `?q=` (folio, OC y nombre, razón social o RFC del cliente), pero por palabras: `?search=acme norte` exige las dos en cualquiera de los campos; `?q=` busca la frase completa (#948, antes `search` se ignoraba).
+  - Se pueden combinar entre sí y con los filtros que ya existían (`?q=`/`?folio=`, `?mis_pedidos=true`). Todos están en el OpenAPI (`/api/schema/`).
 - **Dos vistas típicas para el frontend, misma llamada**:
   - **Cola de pendientes** (todo lo que falta atender): `GET /pedidos/?estatus=3,4` — clasificación y programación pueden venir vacías, esa es la tabla de "qué falta".
   - **Tabla separada de ya programados**: `GET /pedidos/?estatus=3,4&programado=true` — solo los que ya tienen algo en `programacion_conf`, con su info completa (destino, cantidad, quién y cuándo lo programó).
