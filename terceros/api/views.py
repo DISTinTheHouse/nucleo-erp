@@ -117,8 +117,8 @@ class ClienteViewSet(viewsets.ModelViewSet):
         from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
 
         # Misma regla de importes que el listado y el detalle de pedidos (EC-784):
-        # sin ella se omiten ``montos_por_moneda`` y el ``gran_total`` de cada
-        # pedido (y no se corre su agregación); conteos, folios y fechas quedan.
+        # sin ella no se agregan ``montos_por_moneda`` ni el ``gran_total`` de cada
+        # pedido (ni se corre su agregación); conteos, folios y fechas quedan.
         # Las claves ya las resolvió ``get_queryset`` para el alcance: no se consultan dos veces.
         ver_importes = puede_ver_contabilidad(self.request.user, claves_de_la_peticion(self))
 
@@ -134,34 +134,22 @@ class ClienteViewSet(viewsets.ModelViewSet):
             estatus_pedido.get(fila["estatus"], fila["estatus"]): fila["total"]
             for fila in pedidos_qs.values("estatus").annotate(total=Count("id"))
         }
-        # Excluye CANCELADO (5) para no inflar el monto histórico con pedidos
-        # que nunca se concretaron; se separa por moneda porque un cliente
-        # puede tener pedidos en más de una.
-        montos_por_moneda = [
-            {"moneda": fila["moneda__codigo_iso"], "total": fila["total"]}
-            for fila in pedidos_qs.exclude(estatus=5)
-            .values("moneda__codigo_iso")
-            .annotate(total=Sum("gran_total"))
-        ] if ver_importes else None
-
         recientes = pedidos_qs.select_related("moneda").order_by("-created_at")[:5].values(
             "id", "folio", "created_at", "estatus", "gran_total", "moneda__codigo_iso"
         )
-        pedidos_recientes = [
-            {
+        pedidos_recientes = []
+        for fila in recientes:
+            pedido = {
                 "id": fila["id"],
                 "folio": fila["folio"],
                 "fecha": fila["created_at"],
                 "estatus": fila["estatus"],
                 "estatus_display": estatus_pedido.get(fila["estatus"], fila["estatus"]),
-                "gran_total": fila["gran_total"],
                 "moneda": fila["moneda__codigo_iso"],
             }
-            for fila in recientes
-        ]
-        if not ver_importes:
-            for pedido in pedidos_recientes:
-                del pedido["gran_total"]
+            if ver_importes:
+                pedido["gran_total"] = fila["gran_total"]
+            pedidos_recientes.append(pedido)
 
         resumen = {
             "total_pedidos": pedidos_qs.count(),
@@ -169,15 +157,22 @@ class ClienteViewSet(viewsets.ModelViewSet):
                 cliente=cliente, empresa_id=cliente.empresa_id
             ).count(),
             "pedidos_por_estatus": pedidos_por_estatus,
-            "montos_por_moneda": montos_por_moneda,
             "ultimo_pedido": pedidos_recientes[0] if pedidos_recientes else None,
             "pedidos_recientes": pedidos_recientes,
             "cartera": cartera_de_cliente(cliente),
             # Señal explícita para el front, como los ``kpis/`` (#841).
             "puede_ver_importes": ver_importes,
         }
-        if not ver_importes:
-            del resumen["montos_por_moneda"]
+        if ver_importes:
+            # Excluye CANCELADO (5) para no inflar el monto histórico con pedidos
+            # que nunca se concretaron; se separa por moneda porque un cliente
+            # puede tener pedidos en más de una.
+            resumen["montos_por_moneda"] = [
+                {"moneda": fila["moneda__codigo_iso"], "total": fila["total"]}
+                for fila in pedidos_qs.exclude(estatus=5)
+                .values("moneda__codigo_iso")
+                .annotate(total=Sum("gran_total"))
+            ]
         return resumen
 
     def perform_create(self, serializer):
