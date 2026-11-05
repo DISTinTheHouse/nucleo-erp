@@ -2941,6 +2941,21 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 "Liberar o cancelar las reservas por talla antes de editar el pedido.",
             ),
         ]
+        # Más vínculos que se reportan bajo un ``tipo`` ya existente. Las líneas de
+        # factura de un servicio extra (#744) son PROTECT y
+        # ``_save_pedido_servicios_extras`` borra los sobrantes: sin esto, el POST
+        # que quita ese servicio daba 500. Mismo criterio que el renglón: cualquier
+        # estatus y cualquier empresa.
+        vinculos_adicionales = {
+            "factura_detalle_ligado": [
+                FacturaDetalle.objects.filter(pedido_servicio_extra__pedido_id=OuterRef("pk")),
+            ],
+        }
+        alias_adicionales = {
+            f"{tipo}_{n}": sub
+            for tipo, subs in vinculos_adicionales.items()
+            for n, sub in enumerate(subs, start=1)
+        }
 
         anotaciones = {
             tipo: ArraySubquery(
@@ -2951,6 +2966,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             for tipo, qs, campo_id, campo_folio, campo_estatus, _ in documentos
         }
         anotaciones.update({tipo: Exists(sub) for tipo, sub, _ in vinculos})
+        anotaciones.update({alias: Exists(sub) for alias, sub in alias_adicionales.items()})
         hay = (
             Pedido.objects.filter(pk=pedido.pk)
             .annotate(**anotaciones)
@@ -2971,7 +2987,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
                     }
                 )
         for tipo, _, accion in vinculos:
-            if hay.get(tipo):
+            adicionales = vinculos_adicionales.get(tipo, [])
+            if hay.get(tipo) or any(hay.get(f"{tipo}_{n}") for n in range(1, len(adicionales) + 1)):
                 bloqueos.append({"tipo": tipo, "accion_requerida": accion})
 
         return bloqueos
