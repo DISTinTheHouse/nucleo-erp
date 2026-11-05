@@ -185,16 +185,17 @@ class MovimientoOperacionViewSetScopeTenantTests(TestCase):
         """Solo la empresa activa (#538), como ventas y producción."""
         self.assertEqual(self._ids(self.multi_empresa), [self.a["evento"].pk])
 
+    # La BD es la de producción (sin BD de pruebas vacía, EC-780): el
+    # superusuario ve también filas reales, así que se exige que incluya las
+    # de ambas empresas, no que sean las únicas.
     def test_superuser_ve_todo(self):
-        self.assertEqual(
-            sorted(self._ids(self.superuser)),
-            sorted([self.a["evento"].pk, self.b["evento"].pk]),
+        self.assertTrue(
+            {self.a["evento"].pk, self.b["evento"].pk} <= set(self._ids(self.superuser)),
         )
 
     def test_superuser_con_empresa_asignada_sigue_viendo_todo(self):
-        self.assertEqual(
-            sorted(self._ids(self.superuser_con_empresa)),
-            sorted([self.a["evento"].pk, self.b["evento"].pk]),
+        self.assertTrue(
+            {self.a["evento"].pk, self.b["evento"].pk} <= set(self._ids(self.superuser_con_empresa)),
         )
 
     def test_superuser_puede_acotar_con_el_param(self):
@@ -318,9 +319,8 @@ class ExistenciaViewSetScopeTenantTests(TestCase):
         )
 
     def test_superusuario_ve_todo_y_puede_filtrar(self):
-        self.assertEqual(
-            self._ids(self.superuser),
-            sorted([self.a["existencia"].pk, self.b["existencia"].pk]),
+        self.assertTrue(
+            {self.a["existencia"].pk, self.b["existencia"].pk} <= set(self._ids(self.superuser)),
         )
         self.assertEqual(
             self._ids(self.superuser, {"almacen_id": self.b["almacen"].pk}), [self.b["existencia"].pk],
@@ -711,7 +711,7 @@ class ReporteExistenciasProduccionComprasTests(TestCase):
         )
         regular.sucursales.add(sucursal)
 
-        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Playera {codigo}", codigo=f"{codigo}-SKU")
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Playera {codigo}", codigo=codigo[:5])  # varchar(5) (EC-780)
         var_ch = ProductoVariante.objects.create(
             producto=producto, empresa=empresa, color=cls.color, talla=cls.talla_ch,
             sku=f"{codigo}-CH", precio_base="100",
