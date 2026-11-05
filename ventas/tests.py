@@ -8130,6 +8130,46 @@ class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
                 for campo in ("subtotal", "gran_total", "importe_iva", "forma_pago"):
                     self.assertEqual(campo in resp.data, ve, campo)
 
+    def test_cotizacion_del_pedido_por_perfil(self):
+        """``GET /pedidos/{id}/cotizacion/`` (EC-787) sigue la regla de lectura de
+        importes del pedido en la cabecera y en cada nivel anidado."""
+        pedido = self.pedidos[self.ventas.pk]
+        cotizacion = pedido.cotizacion
+        Cotizacion.objects.filter(pk=cotizacion.pk).update(
+            subtotal="200.00", gran_total="232.00", forma_pago="03", uso_cfdi="G03",
+        )
+        producto = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=self.empresa, nombre="Prenda EC784", codigo="E784",
+        )
+        renglon = CotizacionDetalle.objects.create(
+            cotizacion=cotizacion, producto=producto, precio_unitario="10.00", subtotal_linea="20.00",
+        )
+        CotizacionDetalleTalla.objects.create(
+            cotizacion_detalle=renglon, talla=Talla.objects.create(nombre="E7"), cantidad=2,
+            precio_unitario="10.00", subtotal_talla="20.00",
+        )
+        CotizacionServicioExtra.objects.create(cotizacion=cotizacion, nombre="Extra EC784", monto="5.00", cantidad=1)
+        for usuario, ve in self.perfiles:
+            with self.subTest(usuario=usuario.username):
+                resp = self._api(usuario).get(f"{PEDIDOS_URL}{pedido.pk}/cotizacion/")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                data = resp.data
+                detalle = data["detalles"][0]
+                talla = detalle["tallas"][0]
+                servicio = data["servicios_extras"][0]
+                for bloque, campo in (
+                    (data, "gran_total"), (data, "subtotal"), (data, "forma_pago"),
+                    (detalle, "precio_unitario"), (detalle, "subtotal_linea"),
+                    (talla, "precio_unitario"), (talla, "subtotal_talla"), (servicio, "monto"),
+                ):
+                    self.assertEqual(campo in bloque, ve, campo)
+                # Lo que no es importe sigue ahí.
+                self.assertEqual((detalle["producto"], talla["cantidad"], servicio["nombre"]), (producto.pk, 2, "Extra EC784"))
+        for usuario, _ in self.perfiles[:-1]:
+            with self.subTest(otra_empresa=usuario.username):
+                resp = self._api(usuario).get(f"{PEDIDOS_URL}{self.pedido_otra.pk}/cotizacion/")
+                self.assertEqual(resp.status_code, 404)
+
     def test_detalle_de_otra_empresa_es_404(self):
         for usuario, _ in self.perfiles[:-1]:
             with self.subTest(usuario=usuario.username):
