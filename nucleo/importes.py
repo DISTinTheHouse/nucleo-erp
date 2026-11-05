@@ -42,6 +42,20 @@ def claves_de_la_peticion(view):
     return view._claves_departamento
 
 
+def copia_para_quitar(data, anidados=None):
+    """Copia ``data`` y las listas de dicts nombradas en ``anidados`` (recursivo:
+    ``{"detalles": {"tallas": {}}}``), que es lo que se modifica al quitar importes;
+    lo demás se comparte sin tocarse. Sin ``deepcopy``: si la copia fallaba, los
+    filtros de pedido y OC devolvían los datos sin filtrar (EC-784).
+    """
+    copia = dict(data)
+    for clave, sub in (anidados or {}).items():
+        valor = copia.get(clave)
+        if isinstance(valor, list):
+            copia[clave] = [copia_para_quitar(x, sub) if isinstance(x, dict) else x for x in valor]
+    return copia
+
+
 def quitar_claves(d, claves) -> None:
     """Quita ``claves`` de ``d`` en sitio; ignora lo que no sea dict."""
     if not isinstance(d, dict):

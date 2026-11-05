@@ -2538,3 +2538,35 @@ class ComprasDashboardRetiradoTests(TestCase):
                 api = APIClient()
                 api.force_authenticate(usuario)
                 self.assertEqual(api.get("/api/v1/compras/dashboard/").status_code, 404)
+
+
+class FiltroImportesOrdenCompraTests(TestCase):
+    """EC-784: ``filtrar_campos_contabilidad_orden_compra`` falla cerrado. Un valor que
+    ``deepcopy`` no puede copiar hacía que devolviera la OC sin filtrar; ahora quita
+    los importes igual y no toca el original. Con permiso, la devuelve tal cual."""
+
+    def test_falla_cerrado_y_no_modifica_el_original(self):
+        import threading
+
+        from compras.services.orden_compra_view_service import filtrar_campos_contabilidad_orden_compra
+
+        empresa = Empresa.objects.create(codigo="ec784-oc", razon_social="EC784 OC SA")
+        sin_permiso = Usuario.objects.create(username="oc-sin", email="oc-sin@ec784.test", empresa=empresa)
+        con_permiso = Usuario.objects.create(
+            username="oc-admin", email="oc-admin@ec784.test", empresa=empresa, is_admin_empresa=True,
+        )
+        data = {
+            "id": 1, "folio": "OC-1", "gran_total": "116.00", "subtotal": "100.00", "no_copiable": threading.Lock(),
+            "detalles": [{"id": 2, "cantidad": "1", "precio": "100.00", "importe": "100.00"}],
+            "recepciones": [{"id": 3, "detalles": [{"id": 4, "cantidad": "1"}]}],
+        }
+        filtrado = filtrar_campos_contabilidad_orden_compra(data, sin_permiso)
+        for campo in ("gran_total", "subtotal"):
+            self.assertNotIn(campo, filtrado)
+        self.assertNotIn("precio", filtrado["detalles"][0])
+        self.assertNotIn("importe", filtrado["detalles"][0])
+        self.assertEqual((filtrado["folio"], filtrado["detalles"][0]["cantidad"]), ("OC-1", "1"))
+        self.assertEqual(filtrado["recepciones"][0]["detalles"][0]["id"], 4)
+        # El original queda intacto.
+        self.assertEqual((data["gran_total"], data["detalles"][0]["precio"]), ("116.00", "100.00"))
+        self.assertIs(filtrar_campos_contabilidad_orden_compra(data, con_permiso), data)

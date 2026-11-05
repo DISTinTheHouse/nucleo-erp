@@ -1,12 +1,7 @@
 from __future__ import annotations
 
-import copy
-import logging
-
-from nucleo.importes import quitar_claves, tiene_claves_de_importes
+from nucleo.importes import copia_para_quitar, quitar_claves, tiene_claves_de_importes
 from seguridad.role_identity import CLAVES_CONTABILIDAD_COMPRAS
-
-logger = logging.getLogger(__name__)
 
 CAMPOS_CONTABILIDAD_OC = [
     "subtotal", "descuento", "impuestos", "total",
@@ -52,17 +47,18 @@ def quitar_montos_orden_compra(data) -> None:
             quitar_claves(rd, CAMPOS_CONTABILIDAD_OC_RECEPCION_DETALLE)
 
 
+# Lo que ``quitar_montos_orden_compra`` modifica dentro de la OC serializada.
+ANIDADOS_CON_IMPORTES_OC = {"detalles": {}, "recepciones": {"detalles": {}}}
+
+
 def filtrar_campos_contabilidad_orden_compra(data, user):
+    """``data`` tal cual si el usuario ve importes; si no, una copia sin ellos.
+    Falla cerrado (EC-784): antes, si ``deepcopy`` fallaba devolvía todo sin filtrar."""
     if puede_ver_contabilidad(user):
         return data
-    try:
-        cleaned = copy.deepcopy(data)
-    except Exception:
-        logger.warning("No se pudo copiar serializer.data en filtro contabilidad OC")
-        return data
-
-    quitar_montos_orden_compra(cleaned)
-    return cleaned
+    filtrado = copia_para_quitar(data, ANIDADOS_CON_IMPORTES_OC)
+    quitar_montos_orden_compra(filtrado)
+    return filtrado
 
 
 DOCUMENTOS_CONFIG = [
