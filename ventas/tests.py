@@ -1311,11 +1311,11 @@ class PedidoMesaControlUpdateTests(TestCase):
         )
         return factura
 
-    def _picking_activo(self, folio):
+    def _picking_activo(self, folio, empresa=None, sucursal=None):
         return Picking.objects.create(
             folio=folio,
-            empresa=self.empresa,
-            sucursal=self.sucursal,
+            empresa=empresa or self.empresa,
+            sucursal=sucursal or self.sucursal,
             pedido=self.pedido,
             operador=self.admin_mesa,
             almacen=self.almacen,
@@ -1374,22 +1374,69 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(body["tipos_bloqueo"], [b["tipo"] for b in body["bloqueos"]])
         self.assertEqual(body["tipos_bloqueo"].count("picking_activo"), 2)
 
-    def test_documento_de_otra_empresa_no_aparece_ni_bloquea(self):
-        # Factura (y su renglón) de otra empresa ligada al pedido: dato heredado
-        # como la factura 34 -> pedido 255 de la BD. No es un bloqueo.
-        self._factura_emitida_ligada(self.empresa_b, self.sucursal_b, "FAC-AJENA")
-        OrdenesBordado.objects.create(
-            empresa=self.empresa_b, sucursal=self.sucursal_b, pedido=self.pedido, folio_bordado="OB-AJENA",
-        )
+    def _assert_vinculo_ajeno_oculta_documento_y_bloquea(self, tipo_documento, tipo_vinculo, filas_ajenas):
+        """Documento de otra empresa ligado a un renglón del pedido (dato heredado,
+        como la factura 34 -> pedido 255 de la BD): no se lista con id/folio/estatus,
+        pero su vínculo de renglón sí bloquea, y el POST que quitaría el renglón
+        responde 409 sin borrar nada en ninguna de las dos empresas."""
+        detalle = self.pedido.detalles.get()
+        antes_ajenas = filas_ajenas()
 
-        self.assertEqual(PedidoViewSet()._get_bloqueos_edicion_estricta(self.pedido), [])
         response = self._client(self.admin_mesa).get(
             pedido_editar_mesa_control_contexto_url(self.pedido.pk)
         )
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["editable"])
-        self.assertEqual(response.json()["bloqueos"], [])
-        self.assertEqual(response.json()["tipos_bloqueo"], [])
+        body = response.json()
+        self.assertFalse(body["editable"])
+        self.assertEqual(body["codigo"], "pedido_con_bloqueos")
+        self.assertNotIn(tipo_documento, body["tipos_bloqueo"])
+        self.assertFalse([b for b in body["bloqueos"] if "id" in b])
+        self.assertEqual(
+            body["bloqueos"],
+            [{"tipo": tipo_vinculo, "accion_requerida": body["bloqueos"][0]["accion_requerida"]}],
+        )
+        self.assertEqual(body["tipos_bloqueo"], [tipo_vinculo])
+
+        # El payload cambia el renglón por uno nuevo: sin el bloqueo, el renglón
+        # ligado se borraría (PROTECT -> 500, CASCADE -> filas ajenas borradas).
+        payload = self._payload()
+        payload["detalle"][0].pop("id")
+        payload["detalle"][0]["producto"] = self.producto_b.pk
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk), payload, format="json"
+        )
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertEqual(response.json()["tipos_bloqueo"], [tipo_vinculo])
+        self.assertEqual(list(self.pedido.detalles.values_list("id", flat=True)), [detalle.pk])
+        self.assertEqual(detalle.tallas.count(), 1)
+        self.assertEqual(filas_ajenas(), antes_ajenas)
+
+    def test_factura_de_otra_empresa_no_se_lista_pero_su_renglon_bloquea(self):
+        factura = self._factura_emitida_ligada(self.empresa_b, self.sucursal_b, "FAC-AJENA")
+        self._assert_vinculo_ajeno_oculta_documento_y_bloquea(
+            "factura_emitida",
+            "factura_detalle_ligado",
+            lambda: list(FacturaDetalle.objects.filter(factura=factura).values_list("id", "pedido_detalle_id")),
+        )
+
+    def test_picking_de_otra_empresa_no_se_lista_pero_su_renglon_bloquea(self):
+        picking = self._picking_activo("PK-AJENO", empresa=self.empresa_b, sucursal=self.sucursal_b)
+        detalle = self.pedido.detalles.get()
+        PickingDetalle.objects.create(
+            picking=picking,
+            pedido_detalle=detalle,
+            pedido_detalle_talla=detalle.tallas.get(),
+            producto=self.producto_a,
+            cantidad_solicitada="2.0000",
+            cantidad_asignada="1.0000",
+            cantidad_surtida="0.0000",
+            estado=PickingDetalle.EstadoLinea.PENDIENTE,
+        )
+        self._assert_vinculo_ajeno_oculta_documento_y_bloquea(
+            "picking_activo",
+            "picking_detalle_ligado",
+            lambda: list(PickingDetalle.objects.filter(picking=picking).values_list("id", "pedido_detalle_id")),
+        )
 
     def test_contexto_consultas_constantes(self):
         self._factura_emitida_ligada(self.empresa, self.sucursal, "FAC-0001")
