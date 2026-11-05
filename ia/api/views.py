@@ -546,29 +546,29 @@ class AIAssistantAPIView(APIView):
                 "puede_ver_importes": ver_importes,
             }
         cliente = getattr(pedido, "cliente", None)
-        resultado = {
+        compra = {
+            "pedido_id": pedido.pk,
+            "folio": getattr(pedido, "folio", None),
+            "fecha": pedido.created_at.isoformat() if getattr(pedido, "created_at", None) else None,
+            "cliente": {
+                "id": getattr(cliente, "pk", None),
+                "razon_social": getattr(cliente, "razon_social", None),
+                "nombre": getattr(cliente, "nombre", None),
+                "rfc": getattr(cliente, "rfc", None),
+            },
+        }
+        # Misma regla de importes que el listado y el detalle de pedidos (EC-784):
+        # el monto sólo se agrega si el usuario lo ve.
+        if ver_importes:
+            compra["gran_total"] = str(getattr(pedido, "gran_total", ""))
+        return {
             "ok": True,
             "filters": {"date_from": d_from.isoformat() if d_from else None, "date_to": d_to.isoformat() if d_to else None},
-            "last_purchase": {
-                "pedido_id": pedido.pk,
-                "folio": getattr(pedido, "folio", None),
-                "fecha": pedido.created_at.isoformat() if getattr(pedido, "created_at", None) else None,
-                "gran_total": str(getattr(pedido, "gran_total", "")),
-                "cliente": {
-                    "id": getattr(cliente, "pk", None),
-                    "razon_social": getattr(cliente, "razon_social", None),
-                    "nombre": getattr(cliente, "nombre", None),
-                    "rfc": getattr(cliente, "rfc", None),
-                },
-            },
+            "last_purchase": compra,
             # El resultado va al modelo (mensaje ``tool``) y al front (``tool_results``):
             # con la señal, el asistente puede decir que el monto no está disponible.
             "puede_ver_importes": ver_importes,
         }
-        # Misma regla de importes que el listado y el detalle de pedidos (EC-784).
-        if not ver_importes:
-            del resultado["last_purchase"]["gran_total"]
-        return resultado
 
     def _tool_create_empresa(self, request, args):
         user = request.user
