@@ -2949,6 +2949,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
         vinculos_adicionales = {
             "factura_detalle_ligado": [
                 FacturaDetalle.objects.filter(pedido_servicio_extra__pedido_id=OuterRef("pk")),
+                # Línea ligada solo a una talla (``pedido_detalle_talla`` es PROTECT
+                # e independiente de ``pedido_detalle``): quitar la talla daba 500.
+                FacturaDetalle.objects.filter(pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk")),
             ],
             # Notas sobre líneas de servicio extra o ligadas solo a una talla.
             "nota_credito_ligada": [

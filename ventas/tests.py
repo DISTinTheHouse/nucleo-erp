@@ -1537,6 +1537,42 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(list(self.pedido.servicios_extras.values_list("id", flat=True)), [servicio.pk])
         self.assertTrue(NotaCreditoDetalle.objects.filter(nota_credito=nota, factura_detalle=linea).exists())
 
+    def test_linea_de_factura_solo_con_talla_bloquea(self):
+        """Línea de factura con ``pedido_detalle_talla`` y sin ``pedido_detalle``: el
+        POST que cambia esa talla por otra la borraría (PROTECT -> 500)."""
+        detalle = self.pedido.detalles.get()
+        talla = detalle.tallas.get()
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, pedido=self.pedido,
+            moneda=self.moneda, folio="FAC-TALLA", subtotal="95.00", descuento="0.00",
+            impuestos="0.00", total="95.00", estatus=Factura.FacturaStatus.BORRADOR,
+        )
+        linea = FacturaDetalle.objects.create(
+            factura=factura, pedido_detalle_talla=talla, cantidad="1.00",
+            precio_unitario="95.00", descuento="0.00", impuesto="0.00", subtotal="95.00", total="95.00",
+        )
+
+        response = self._client(self.admin_mesa).get(
+            pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["editable"])
+        self.assertEqual(
+            body["bloqueos"],
+            [{"tipo": "factura_detalle_ligado", "accion_requerida": self.ACCION_VINCULO["factura_detalle_ligado"]}],
+        )
+
+        payload = self._payload()
+        payload["detalle"][0]["tallas"][0]["talla"] = self.talla_l.pk
+        response = self._client(self.admin_mesa).post(
+            pedido_editar_mesa_control_url(self.pedido.pk), payload, format="json"
+        )
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertEqual(response.json()["tipos_bloqueo"], ["factura_detalle_ligado"])
+        self.assertEqual(list(detalle.tallas.values_list("id", flat=True)), [talla.pk])
+        self.assertTrue(FacturaDetalle.objects.filter(pk=linea.pk, pedido_detalle_talla=talla).exists())
+
     def test_contexto_consultas_constantes(self):
         url = pedido_editar_mesa_control_contexto_url(self.pedido.pk)
 
