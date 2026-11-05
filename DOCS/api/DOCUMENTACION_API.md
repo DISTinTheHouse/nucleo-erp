@@ -6437,7 +6437,7 @@ No hay endpoint especial tipo onboarding. El modal consta de 3 partes:
 ### 1) Polling de Lecturas (principal / polling cada 2s)
 
 - **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/scans/`
-- **Descripción**: devuelve **últimas 50 filas de `RfidScan`** en orden DESC (reciente → antiguo). **Cada scan tiene ya calculado el `match_impresion`** (true/false) contra `EtiquetaRFIDDetalle`, con scope empresa/sucursales.
+- **Descripción**: devuelve **últimas 50 filas de `RfidScan`** en orden DESC (reciente → antiguo). **Cada scan trae su `match_impresion`** (true/false): la lectura se liga a su `EtiquetaRFIDDetalle` (misma empresa del lector) al recibirse en `scans/receive/`, o al registrar la impresión si la lectura llegó antes. La primera lectura pone la etiqueta en `LEIDO`. Los tags ajenos (p. ej. `3035…` de fábrica) salen con `match_impresion: false`. Un no admin solo ve el detalle de etiquetas de sus sucursales.
 - **Autenticación**: Bearer token.
 - **Query params (opcionales para debug)**:
   - `epc=XXXX` (hex): busca directo este EPC en el payload de 50 scans y devuelve `debug_get.query_epc_search.found_in_scans` (booleano rápido sin iterar).
@@ -6455,7 +6455,7 @@ GET /api/v1/wms/etiquetas-rfid/scans/?epc=000012E32827000147C0C5F5
   "scans": [
     {
       "id": 3856,
-      "epc": "000012e32827000147c0c5f5",
+      "epc": "000012E32827000147C0C5F5",
       "timestamp": "2026-08-07T19:51:45.490950+00:00",
       "antenna": 1,
       "rssi": -45.0,
@@ -6471,50 +6471,38 @@ GET /api/v1/wms/etiquetas-rfid/scans/?epc=000012E32827000147C0C5F5
       "talla": "G",
       "barcode_value": "1000503G",
       "serial": "0001",
-      "estado": "IMPRESO",
+      "estado": "LEIDO",
       "detalle_id": 62,
       "match_debug": {
-        "scan_epc": "000012e32827000147c0c5f5",
-        "scan_epc_len": 24,
-        "variants_tried": ["12e32827000147c0c5f5", "000012e32827000147c0c5f5"],
-        "variant_used": "12e32827000147c0c5f5",
-        "detalle_epc_raw": "000012E32827000147C0C5F5",
-        "detalle_epc_len": 24,
-        "detalle_epc_variants": ["000012e32827000147c0c5f5", "12e32827000147c0c5f5"]
+        "scan_epc": "000012E32827000147C0C5F5",
+        "detalle_epc_raw": "000012E32827000147C0C5F5"
       }
     },
 
     {
       "id": 3827,
-      "epc": "3035c9d34c5767c0004ccc4c",
+      "epc": "3035C9D34C5767C0004CCC4C",
       "timestamp": "...",
       "antenna": null,
       "rssi": null,
       "reader_ip": "187.188.149.179",
       "match_impresion": false,
       "match_debug": {
-        "scan_epc": "3035c9d34c5767c0004ccc4c",
-        "scan_epc_len": 24,
-        "variants_tried": ["3035c9d34c5767c0004ccc4c", ...],
-        "variant_used": null,
-        "detalle_lookup_count": 2
+        "scan_epc": "3035C9D34C5767C0004CCC4C",
+        "detalle_epc_raw": null
       }
     }
   ],
 
   "debug_get": {
     "scans_returned": 2,
-    "scans_total_max_50": 2,
-    "lookup_detalle_count": 2,
+    "scans_ligados": 1,
     "unique_epc_in_50_scans_count": 2,
     "unique_epc_prefixes_head30": ["0000", "3035"],
     "query_epc_search": {
-      "query_epc": "000012e32827000147c0c5f5",
-      "query_epc_len": 24,
-      "variants_count": 2,
-      "variants_head5": ["000012e32827000147c0c5f5", "12e32827000147c0c5f5"],
+      "query_epc": "000012E32827000147C0C5F5",
       "found_in_scans": true,
-      "hit_variant": "000012e32827000147c0c5f5"
+      "hit_variant": "000012E32827000147C0C5F5"
     }
   }
 }

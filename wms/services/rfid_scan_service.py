@@ -6,9 +6,102 @@ import logging
 from django.http import JsonResponse
 from django.utils import timezone
 
-from wms.models import LectorRFID, RfidScan
+from wms.models import EtiquetaRFIDDetalle, LectorRFID, RfidScan
 
 logger = logging.getLogger(__name__)
+
+
+def normalizar_epc(raw):
+    """EPC en hex mayúsculas sin separadores (mismo formato que ``EtiquetaRFIDDetalle``)."""
+    return (
+        (raw or "").strip().replace(" ", "").replace(":", "").replace("-", "").upper()
+    )
+
+
+def variantes_epc(epc):
+    """Formas en que el lector puede reportar un EPC de 96 bits que imprimimos.
+
+    El FX puede mandar el banco con relleno a 128 bits o sin ceros a la
+    izquierda; nuestras etiquetas siempre son 24 hex.
+    """
+    base = normalizar_epc(epc)
+    if not base:
+        return set()
+    out = {base, base.lstrip("0"), base.rstrip("0"), base.strip("0")}
+    if len(base) > 24:
+        out |= {base[:24], base[-24:]}
+    elif len(base) < 24:
+        out |= {base.rjust(24, "0"), base.ljust(24, "0")}
+    return {v for v in out if len(v) >= 8}
+
+
+def etiquetas_por_epc(epcs, empresa_id):
+    """``{epc_leido: EtiquetaRFIDDetalle}`` de la empresa, en una sola consulta."""
+    variantes = {epc: variantes_epc(epc) for epc in epcs}
+    todas = set().union(*variantes.values()) if variantes else set()
+    if not todas or not empresa_id:
+        return {}
+    por_variante = {
+        d.epc: d
+        for d in EtiquetaRFIDDetalle.objects.filter(
+            epc__in=todas, impresion__empresa_id=empresa_id
+        ).only("id", "epc", "estado", "leida_at")
+    }
+    out = {}
+    for epc, vs in variantes.items():
+        # Exacto primero; luego cualquier variante.
+        detalle = por_variante.get(normalizar_epc(epc)) or next(
+            (por_variante[v] for v in sorted(vs) if v in por_variante), None
+        )
+        if detalle is not None:
+            out[epc] = detalle
+    return out
+
+
+def marcar_leidas(detalle_ids, cuando=None):
+    """Primera lectura: ``IMPRESO``/``PENDIENTE`` → ``LEIDO`` (una sola consulta)."""
+    if not detalle_ids:
+        return 0
+    return EtiquetaRFIDDetalle.objects.filter(
+        pk__in=detalle_ids,
+        estado__in=(
+            EtiquetaRFIDDetalle.Estado.PENDIENTE,
+            EtiquetaRFIDDetalle.Estado.IMPRESO,
+        ),
+    ).update(
+        estado=EtiquetaRFIDDetalle.Estado.LEIDO,
+        leida_at=cuando or timezone.now(),
+        updated_at=timezone.now(),
+    )
+
+
+def ligar_lecturas_previas(impresion):
+    """Liga a la impresión recién registrada las lecturas que llegaron antes.
+
+    Caso normal: la etiqueta se registra y luego se lee, y la lectura ya se liga
+    al recibirse. Esto cubre el orden inverso (registro tardío o reintento).
+    """
+    detalles = {d.epc: d for d in impresion.etiquetas.only("id", "epc")}
+    if not detalles:
+        return 0
+    buscar = set(detalles) | {e.lower() for e in detalles}
+    scans = list(
+        RfidScan.objects.filter(
+            empresa_id=impresion.empresa_id, etiqueta__isnull=True, epc__in=buscar
+        ).only("id", "epc", "created_at")
+    )
+    if not scans:
+        return 0
+    primera = {}
+    for scan in scans:
+        detalle = detalles[normalizar_epc(scan.epc)]
+        scan.etiqueta_id = detalle.pk
+        if detalle.pk not in primera or scan.created_at < primera[detalle.pk]:
+            primera[detalle.pk] = scan.created_at
+    RfidScan.objects.bulk_update(scans, ["etiqueta"], batch_size=500)
+    for detalle_id, cuando in primera.items():
+        marcar_leidas([detalle_id], cuando=cuando)
+    return len(scans)
 
 
 def _es_hexadecimal_epc(value):
@@ -482,14 +575,8 @@ def recibir_lecturas(request, lector):
                     }
                 )
                 continue
-            # limpia / normaliza hex (minusculas, sin separadores)
-            epc_norm = (
-                epc_raw.strip()
-                .replace(" ", "")
-                .replace(":", "")
-                .replace("-", "")
-                .lower()
-            )
+            # limpia / normaliza hex (mayúsculas, sin separadores), igual que la etiqueta
+            epc_norm = normalizar_epc(epc_raw)
             if not epc_norm or len(epc_norm) < 8:
                 debug_items.append(
                     {
@@ -581,8 +668,17 @@ def recibir_lecturas(request, lector):
                 json.dumps(summary, ensure_ascii=False, default=str),
                 (body[:200] if isinstance(body, str) else "(binary)"),
             )
+            # Liga cada lectura a la etiqueta que imprimimos con ese EPC (misma
+            # empresa del lector). Los tags ajenos quedan sin etiqueta.
+            match = etiquetas_por_epc([s.epc for s in tags_to_create], lector.empresa_id)
+            for scan in tags_to_create:
+                detalle = match.get(scan.epc)
+                if detalle is not None:
+                    scan.etiqueta_id = detalle.pk
             RfidScan.objects.bulk_create(tags_to_create, batch_size=200)
+            marcar_leidas({d.pk for d in match.values()})
             LectorRFID.objects.filter(pk=lector.pk).update(ultima_lectura=timezone.now())
+            debug_payload["etiquetas_ligadas"] = len(match)
             debug_payload["created_epcs_sample"] = summary["unique_epcs_sample"]
             debug_payload["antenna_values"] = summary["antenna_values"]
             debug_payload["rssi_values_sample"] = summary["rssi_values_sample"]
