@@ -1627,7 +1627,8 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 - **Endpoint**: `GET /api/v1/ventas/pedidos/kpis/`
 - Siempre es "MIS pedidos" (igual que `?mis_pedidos=true`): filtra por `cotizacion.vendedor = usuario autenticado`. Sin query params.
 - Solo **`pedidos_activos`** trae datos reales. `otif`, `lead_time_promedio` y `pedidos_en_riesgo` responden `"disponible": false` + `"motivo"` — el sistema no registra fecha/cantidad de entrega ni fecha compromiso del pedido. **Pinta esos 3 como "próximamente", no los ocultes ni los calcules en frontend.**
-- Sin empresa asignada → 200 con los 4 bloques en `disponible: false`.
+- Sin empresa asignada → 200 con los 4 bloques en `disponible: false` y `puede_ver_importes: false`.
+- **Importes (EC-784)**: misma regla que el listado y el detalle de pedidos. Trae `"puede_ver_importes": true|false`; sin permiso se omiten `valor` de `por_moneda[]` y `gran_total` de `drill_down[]` (conteos, folios y estatus no cambian) y el drill-down son los 20 activos más recientes (`-id`), no los de mayor monto. Usa `puede_ver_importes` para decidir si pintar montos.
 
 ```json
 {
@@ -1643,11 +1644,12 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
   },
   "otif": { "disponible": false, "motivo": "..." },
   "lead_time_promedio": { "disponible": false, "motivo": "..." },
-  "pedidos_en_riesgo": { "disponible": false, "motivo": "..." }
+  "pedidos_en_riesgo": { "disponible": false, "motivo": "..." },
+  "puede_ver_importes": true
 }
 ```
 
-- `valor` va **por moneda** (`por_moneda`): no se suman monedas. `drill_down` trae hasta 20 pedidos activos (`AUTORIZADA`+`EN PROCESO`), ordenados por `gran_total` desc; `drill_down_truncado` avisa si hay más.
+- `valor` va **por moneda** (`por_moneda`): no se suman monedas. `drill_down` trae hasta 20 pedidos activos (`AUTORIZADA`+`EN PROCESO`), ordenados por `gran_total` desc (por `id` desc sin permiso de importes); `drill_down_truncado` avisa si hay más.
 
 #### Automatización de Órdenes de Trabajo (Producción)
 
@@ -1664,7 +1666,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 > - Para surtido de almacén se usa el flujo tradicional `WMS → Picking` (documento-only, sin transferencias ni OT automáticas).
 
 - **Listar**: `GET /api/v1/ventas/pedidos/`
-  - **Importes**: sin permiso de contabilidad (`puede_ver_contabilidad`), cada fila omite `gran_total` y `subtotal` (los campos de `CAMPOS_CONTABILIDAD_PEDIDO`), igual que el detalle. Paginado o no, la llave no viene; el frontend no debe suponerla (#947).
+  - **Importes**: sin permiso de contabilidad (`puede_ver_contabilidad`: contabilidad de ventas **o** de compras, EC-784; ver el detalle abajo), cada fila omite `gran_total` y `subtotal` (los campos de `CAMPOS_CONTABILIDAD_PEDIDO`), igual que el detalle. Paginado o no, la llave no viene; el frontend no debe suponerla (#947). Aplica a todas las variantes del listado (`mis_pedidos`, `programado`, `estatus`, programación de mesa de control).
   - **Orden**: por defecto, más reciente primero (`created_at` descendente, desempate por `id` descendente). `?ordering=` acepta la lista blanca de pedidos, con `id` como desempate; un campo fuera de ella (p. ej. `gran_total`) se ignora y queda el orden por defecto (EC-757, ver "Mismo modo servidor en ventas y clientes").
 - **Detalle**: `GET /api/v1/ventas/pedidos/{id}/`
 - **Cancelar**: `POST /api/v1/ventas/pedidos/{id}/cancelar/` con `{"motivo": "..."}`. Solo mesa de control / admin. En una transacción:
@@ -1676,8 +1678,8 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
   Errores (`400`): `motivo` (falta), `permiso` (no es mesa de control), `pedido` (ya cancelado, o tiene picking, packing, factura, OP u orden de bordado/reflejante/corte de manga sin cancelar). `404` si ya no existe o es de otra empresa. No hay `DELETE` de pedidos ni cancelar por `PATCH estatus=5`.
   - Campos de contabilidad (dinero / forma*pago / metodos_pago / uso_cfdi / subtotal / iva / gran_total / precios_unitarios*$\_en_detalles_tallas_servicios):
-    - ✅ Se envían **completos** si el usuario tiene rol `Mesa-de-Control` o `Ventas` (o es `is_superuser` / `is_admin_empresa`).
-    - ❌ Se **eliminan del JSON** (no vienen en el response) para roles `WMS`, `Compras` o cualquier otro.
+    - ✅ Se envían **completos** si el usuario tiene contabilidad de ventas **o** de compras (EC-784): roles `Mesa-de-Control`, `Ventas`, `ContaVentas`, `MesaControlYVentas`, `Compras`, `Contabilidad` o `ContaCompras` (o es `is_superuser` / `is_admin_empresa`). Es la misma regla en listado, detalle, alta/edición, `editar-mesa-control` y `kpis/`.
+    - ❌ Se **eliminan del JSON** (no vienen en el response) para `WMS` o cualquier otro rol.
   - **Nuevo (Picking v2 Tracker)**: `tracker_picking` — 5 KPIs de surtido del pedido, derivados de TODOS los `Picking` activos (sin importar `almacen_destino`, regla de negocio v2). Shape **exactamente igual** que `header.tracker` del onboarding de WMS Picking (SSoT):
     | Campo | Tipo | Fórmula | UI recomendada |
     |---|---|---|---|
