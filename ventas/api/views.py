@@ -395,11 +395,12 @@ def _texto_comentario(data):
     return valor.strip()
 
 
-# Los backends globales menos ``OrderingFilter`` (EC-619), para los listados de orden
-# fijo: sin ``ordering_fields``, DRF acepta en ``?ordering=`` los ``source`` del
-# serializer, que reemplazaban ese orden y daban 500 con los que no son columnas
-# (``get_estatus_display``). Así el parámetro se ignora y sale del schema. Tupla: el
-# mismo objeto lo comparten varios ViewSets y ninguno debe poder mutarlo.
+# Los backends globales menos el ``OrderingFilter`` de DRF (EC-619): sin
+# ``ordering_fields``, DRF acepta en ``?ordering=`` los ``source`` del serializer,
+# que reemplazaban el orden por defecto y daban 500 con los que no son columnas
+# (``get_estatus_display``). Su lugar lo toma ``OrdenamientoEstableFilter`` en
+# ``FILTER_BACKENDS_LISTADO``. Tupla: el mismo objeto lo comparten varios ViewSets
+# y ninguno debe poder mutarlo.
 FILTER_BACKENDS_SIN_ORDERING = tuple(
     backend for backend in api_settings.DEFAULT_FILTER_BACKENDS if not issubclass(backend, OrderingFilter)
 )
@@ -584,14 +585,11 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     q_filter = q_filter | Q(id=int(q))
                 qs = qs.filter(q_filter)
 
-        # Orden fijo: más reciente primero, con ``-id`` como desempate estable.
-        # Ya no se admite ``?ordering=`` del cliente: el requisito de producto es
-        # que el listado siempre salga en ese orden, y el parámetro permitía
-        # romperlo (p. ej. ``?ordering=created_at`` devolvía lo más viejo arriba).
-        # Quitarlo de aquí no bastaba: el ``OrderingFilter`` global corre después
-        # de ``get_queryset`` y reemplazaba este orden. Lo que hace que el
-        # parámetro se ignore en silencio es ``filter_backends`` sin
-        # ``OrderingFilter`` en el ViewSet (EC-619).
+        # Orden por defecto: más reciente primero, con ``-id`` como desempate
+        # estable (EC-619). ``OrdenamientoEstableFilter`` (EC-757) corre después
+        # de ``get_queryset`` y solo lo reemplaza con un ``?ordering=`` de la lista
+        # blanca ``ordering_fields``, con ``id`` como desempate; un término fuera de
+        # ella (importes, ``get_*_display``) se ignora y queda este orden.
         # ``nulls_last``: ``Cotizacion.created_at`` es NULL-able y las filas
         # anteriores a la migración que lo agregó siguen en NULL; en PostgreSQL
         # un DESC las pondría al principio del listado.

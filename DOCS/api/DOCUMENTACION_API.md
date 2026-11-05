@@ -1426,7 +1426,7 @@ El vendedor realiza el onboarding desde **Cotizaciones**. Al guardar la cotizaci
 - **Query Params (opcionales)**:
   - `q`: busca por `oc`, `cliente.nombre`, `cliente.razon_social`, `cliente.rfc` o `id` (si es numérico)
   - `estatus`: uno o varios separados por coma (ej: `2` o `2,5`)
-- **Orden**: fijo, más reciente primero (`created_at` descendente, desempate por `id` descendente). No es configurable: el parámetro `ordering` ya no se admite y se ignora si se envía.
+- **Orden**: por defecto, más reciente primero (`created_at` descendente, desempate por `id` descendente). `?ordering=` acepta la lista blanca de cotizaciones, con `id` como desempate; un campo fuera de ella (p. ej. un importe) se ignora y queda el orden por defecto (EC-757, ver "Mismo modo servidor en ventas y clientes").
 - **Campos útiles para tabla**:
   - `estatus_label`, `cliente_nombre`, `cliente_razon_social`, `pedido_id`, `pedido_folio`
   - `piezas`: sumatoria de `cantidad` en tallas (detalle de la cotización)
@@ -1665,7 +1665,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
 - **Listar**: `GET /api/v1/ventas/pedidos/`
   - **Importes**: sin permiso de contabilidad (`puede_ver_contabilidad`), cada fila omite `gran_total` y `subtotal` (los campos de `CAMPOS_CONTABILIDAD_PEDIDO`), igual que el detalle. Paginado o no, la llave no viene; el frontend no debe suponerla (#947).
-  - **Orden**: fijo, más reciente primero (`created_at` descendente, desempate por `id` descendente). No es configurable: el parámetro `ordering` no se admite y se ignora si se envía.
+  - **Orden**: por defecto, más reciente primero (`created_at` descendente, desempate por `id` descendente). `?ordering=` acepta la lista blanca de pedidos, con `id` como desempate; un campo fuera de ella (p. ej. `gran_total`) se ignora y queda el orden por defecto (EC-757, ver "Mismo modo servidor en ventas y clientes").
 - **Detalle**: `GET /api/v1/ventas/pedidos/{id}/`
 - **Cancelar**: `POST /api/v1/ventas/pedidos/{id}/cancelar/` con `{"motivo": "..."}`. Solo mesa de control / admin. En una transacción:
   - devuelve al inventario lo que el pedido descontó al autorizar (movimiento `ENTRADA` + auditoría);
