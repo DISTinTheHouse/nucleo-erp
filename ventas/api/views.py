@@ -347,16 +347,23 @@ def _exigir_renglones_sin_dependencias(pedido):
 
     Lo decide el ``Collector`` de Django (el mismo que usa ``delete()``): cubre
     cualquier relación, incluidas las que se agreguen después, sin listarlas aquí.
+    Incluye los servicios extras, que ``_aplicar_cotizacion_a_pedido`` también
+    borra y recrea: una línea de factura ligada (aunque esté cancelada) los
+    protege y antes eso daba 500 (EC-790).
     """
     renglones = list(PedidoDetalle.objects.filter(pedido=pedido))
-    if not renglones:
+    servicios = list(PedidoServicioExtra.objects.filter(pedido=pedido))
+    if not renglones and not servicios:
         return
     collector = Collector(using=router.db_for_write(PedidoDetalle))
     try:
-        collector.collect(renglones)
+        if renglones:
+            collector.collect(renglones)
+        if servicios:
+            collector.collect(servicios)
     except (ProtectedError, RestrictedError) as exc:
         raise PedidoConDependencias(_etiquetas(_objetos_bloqueantes(exc))) from exc
-    propios = {PedidoDetalle, PedidoDetalleTalla}
+    propios = {PedidoDetalle, PedidoDetalleTalla, PedidoServicioExtra}
     afectados = {m for m, objs in collector.data.items() if objs and m not in propios}
     afectados |= {qs.model for qs in collector.fast_deletes if qs.model not in propios and qs.exists()}
     afectados |= {
