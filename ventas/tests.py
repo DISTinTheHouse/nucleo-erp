@@ -7924,3 +7924,97 @@ class OportunidadLigarCotizacionesTests(OportunidadesBase):
             cliente.get(self._url(op))
 
         self.assertEqual(len(pocas), len(muchas))
+
+
+class ImportesPedidoPorPerfilTests(TestCase):
+    """EC-784: una sola regla de importes del pedido —contabilidad de ventas O de
+    compras— en el listado, el detalle y ``kpis/``. Ningún perfil cruza de empresa."""
+
+    @classmethod
+    def _usuario(cls, nombre, empresa=None, clave=None, **extra):
+        usuario = Usuario.objects.create(
+            username=f"{nombre}-ec784", email=f"{nombre}@ec784.test", empresa=empresa, **extra
+        )
+        if clave:
+            rol = Rol.objects.create(
+                empresa=empresa, codigo=f"EC784-{nombre}", nombre=clave,
+                estatus=Rol.Estatus.ACTIVO, clave_departamento=clave,
+            )
+            UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=empresa)
+        return usuario
+
+    @classmethod
+    def _pedido(cls, empresa, sucursal, cliente, vendedor, folio, gran_total):
+        cotizacion = Cotizacion.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=cls.moneda, vendedor=vendedor,
+        )
+        return Pedido.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=cls.moneda, cotizacion=cotizacion,
+            folio=folio, estatus=3, subtotal=Decimal(gran_total), gran_total=Decimal(gran_total),
+            persona_pagos="Pagos", correo_facturas="pagos@ec784.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="XEC", nombre="Moneda EC-784")
+        cls.empresa = Empresa.objects.create(codigo="ec784", razon_social="EC784 SA")
+        cls.otra = Empresa.objects.create(codigo="ec784-otra", razon_social="Otra EC784 SA")
+        sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="EC784", nombre="EC784")
+        sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="EC784O", nombre="EC784 otra")
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente EC784")
+        cliente_otra = Cliente.objects.create(empresa=cls.otra, nombre="Cliente otra EC784")
+
+        cls.sin_permiso = cls._usuario("wms", cls.empresa, "WMS")
+        cls.ventas = cls._usuario("ventas", cls.empresa, "VENTAS")
+        cls.compras = cls._usuario("compras", cls.empresa, "COMPRAS")
+        cls.contabilidad = cls._usuario("conta", cls.empresa, "CONTABILIDAD")
+        cls.superusuario = cls._usuario("super", cls.empresa, is_superuser=True)
+        cls.superusuario_sin_empresa = cls._usuario("super-se", is_superuser=True)
+        # Perfiles que ven importes / que no, en el orden de los ``subTest``.
+        cls.perfiles = (
+            (cls.sin_permiso, False), (cls.ventas, True), (cls.compras, True),
+            (cls.contabilidad, True), (cls.superusuario, True),
+        )
+        # Cada perfil es vendedor de un pedido propio, para que ``kpis/`` (que sólo
+        # cuenta "mis pedidos") tenga algo que mostrar.
+        cls.pedidos = {
+            usuario.pk: cls._pedido(cls.empresa, sucursal, cliente, usuario, f"EC784-{i}", f"{i}00.00")
+            for i, (usuario, _) in enumerate(cls.perfiles, start=1)
+        }
+        cls.pedido_otra = cls._pedido(
+            cls.otra, sucursal_otra, cliente_otra, cls._usuario("ajeno", cls.otra, "VENTAS"),
+            "EC784-OTRA", "999.00",
+        )
+
+    def _api(self, usuario):
+        api = APIClient()
+        api.force_authenticate(usuario)
+        return api
+
+    def test_regla_es_la_union_de_ventas_y_compras(self):
+        from seguridad.role_identity import CLAVES_CONTABILIDAD_COMPRAS, CLAVES_CONTABILIDAD_VENTAS
+        from ventas.services.pedido_field_filter_service import (
+            CLAVES_IMPORTES_PEDIDO,
+            puede_ver_contabilidad,
+        )
+
+        self.assertEqual(CLAVES_IMPORTES_PEDIDO, CLAVES_CONTABILIDAD_VENTAS | CLAVES_CONTABILIDAD_COMPRAS)
+        for usuario, ve in (*self.perfiles, (self.superusuario_sin_empresa, True)):
+            with self.subTest(usuario=usuario.username):
+                self.assertEqual(puede_ver_contabilidad(usuario), ve)
+
+    def test_detalle_por_perfil(self):
+        pedido = next(iter(self.pedidos.values()))
+        for usuario, ve in self.perfiles:
+            with self.subTest(usuario=usuario.username):
+                resp = self._api(usuario).get(f"{PEDIDOS_URL}{pedido.pk}/")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                for campo in ("subtotal", "gran_total", "importe_iva", "forma_pago"):
+                    self.assertEqual(campo in resp.data, ve, campo)
+
+    def test_detalle_de_otra_empresa_es_404(self):
+        for usuario, _ in self.perfiles[:-1]:
+            with self.subTest(usuario=usuario.username):
+                resp = self._api(usuario).get(f"{PEDIDOS_URL}{self.pedido_otra.pk}/")
+                self.assertEqual(resp.status_code, 404)

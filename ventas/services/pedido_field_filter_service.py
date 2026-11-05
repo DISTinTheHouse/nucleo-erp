@@ -2,6 +2,7 @@ import copy
 import logging
 
 from seguridad.role_identity import (
+    CLAVES_CONTABILIDAD_COMPRAS,
     CLAVES_CONTABILIDAD_VENTAS,
     claves_departamento_usuario,
 )
@@ -24,15 +25,23 @@ CAMPOS_CONTABILIDAD_DETALLE = [
 CAMPOS_CONTABILIDAD_TALLA = ["precio_unitario", "subtotal_talla"]
 CAMPOS_CONTABILIDAD_SERVICIO = ["monto"]
 
+# Los importes de un pedido los ve quien tiene contabilidad en ventas O en compras
+# (EC-784): Compras › Pedidos lista los mismos pedidos y necesita sus montos. Hoy
+# ``CLAVES_CONTABILIDAD_COMPRAS`` ya incluye las de ventas; la unión explícita deja
+# la regla en pie aunque esos dos conjuntos se separen.
+CLAVES_IMPORTES_PEDIDO = CLAVES_CONTABILIDAD_VENTAS | CLAVES_CONTABILIDAD_COMPRAS
+
 
 def puede_ver_contabilidad(user) -> bool:
+    """Regla única de importes del pedido: listado, detalle, alta/edición,
+    ``editar-mesa-control``, ``kpis``, ``recomprar`` y documentos ligados."""
     if getattr(user, "is_superuser", False):
         return True
     if getattr(user, "is_admin_empresa", False):
         return True
 
     claves = claves_departamento_usuario(user)
-    return bool(claves & CLAVES_CONTABILIDAD_VENTAS) if claves else False
+    return bool(claves & CLAVES_IMPORTES_PEDIDO) if claves else False
 
 
 def _drop_keys(d: dict, keys: list) -> None:
