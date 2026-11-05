@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from nucleo.importes import copia_para_quitar, quitar_claves, tiene_claves_de_importes
+from nucleo.importes import Importes, quitar_importes, sin_importes, tiene_claves_de_importes
 from seguridad.role_identity import CLAVES_CONTABILIDAD_COMPRAS
 
 CAMPOS_CONTABILIDAD_OC = [
@@ -29,25 +29,26 @@ def puede_ver_contabilidad(user) -> bool:
 SIN_PERMISO_CONTABILIDAD = {"disponible": False, "motivo": "Sin permiso de contabilidad."}
 
 
+# Dónde hay importes en una OC serializada; la usan la copia y la limpieza.
+IMPORTES_OC = Importes(
+    tuple(CAMPOS_CONTABILIDAD_OC),
+    {
+        "detalles": Importes(tuple(CAMPOS_CONTABILIDAD_OC_DETALLE)),
+        "recepciones": Importes(
+            tuple(CAMPOS_CONTABILIDAD_OC_RECEPCION),
+            {"detalles": Importes(tuple(CAMPOS_CONTABILIDAD_OC_RECEPCION_DETALLE))},
+        ),
+    },
+)
+
+
 def quitar_montos_orden_compra(data) -> None:
     """Quita en sitio los importes de una OC serializada (y de sus anidados).
 
     Para listados: el permiso se evalúa una vez por petición y cada fila ya es
-    una copia propia del serializer, así que no hace falta ``deepcopy`` (#836).
+    una copia propia del serializer, así que no hace falta copiar (#836).
     """
-    quitar_claves(data, CAMPOS_CONTABILIDAD_OC)
-
-    for det in data.get("detalles") or []:
-        quitar_claves(det, CAMPOS_CONTABILIDAD_OC_DETALLE)
-
-    for rec in data.get("recepciones") or []:
-        quitar_claves(rec, CAMPOS_CONTABILIDAD_OC_RECEPCION)
-        for rd in rec.get("detalles") or []:
-            quitar_claves(rd, CAMPOS_CONTABILIDAD_OC_RECEPCION_DETALLE)
-
-
-# Lo que ``quitar_montos_orden_compra`` modifica dentro de la OC serializada.
-ANIDADOS_CON_IMPORTES_OC = {"detalles": {}, "recepciones": {"detalles": {}}}
+    quitar_importes(data, IMPORTES_OC)
 
 
 def filtrar_campos_contabilidad_orden_compra(data, user):
@@ -55,9 +56,7 @@ def filtrar_campos_contabilidad_orden_compra(data, user):
     Falla cerrado (EC-784): antes, si ``deepcopy`` fallaba devolvía todo sin filtrar."""
     if puede_ver_contabilidad(user):
         return data
-    filtrado = copia_para_quitar(data, ANIDADOS_CON_IMPORTES_OC)
-    quitar_montos_orden_compra(filtrado)
-    return filtrado
+    return sin_importes(data, IMPORTES_OC)
 
 
 DOCUMENTOS_CONFIG = [

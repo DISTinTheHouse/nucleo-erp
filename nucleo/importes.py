@@ -7,6 +7,8 @@ departamento de sus roles); cada módulo decide qué conjunto de claves la satis
 y se separaron (EC-784).
 """
 
+from typing import Mapping, NamedTuple
+
 from seguridad.role_identity import claves_departamento_usuario
 
 
@@ -20,18 +22,45 @@ def tiene_claves_de_importes(user, claves_permitidas) -> bool:
     return bool(claves_departamento_usuario(user) & claves_permitidas)
 
 
-def copia_para_quitar(data, anidados=None):
-    """Copia ``data`` y las listas de dicts nombradas en ``anidados`` (recursivo:
-    ``{"detalles": {"tallas": {}}}``), que es lo que se modifica al quitar importes;
-    lo demás se comparte sin tocarse. Sin ``deepcopy``: si la copia fallaba, los
-    filtros de pedido y OC devolvían los datos sin filtrar (EC-784).
-    """
+class Importes(NamedTuple):
+    """Dónde hay importes en un documento serializado: ``campos`` de este nivel y,
+    por clave, la estructura de cada fila de sus listas anidadas. La misma
+    estructura dice qué se copia y qué se quita, así que no pueden separarse
+    (EC-784): una lista anidada que se limpia es siempre una que se copió."""
+
+    campos: tuple
+    anidados: Mapping[str, "Importes"] = {}
+
+
+def quitar_importes(data, estructura: Importes) -> None:
+    """Quita en sitio los importes de ``data`` y de sus listas anidadas según
+    ``estructura``; ignora lo que no sea dict."""
+    if not isinstance(data, dict):
+        return
+    quitar_claves(data, estructura.campos)
+    for clave, sub in estructura.anidados.items():
+        for fila in data.get(clave) or []:
+            quitar_importes(fila, sub)
+
+
+def copia_para_quitar(data, estructura: Importes):
+    """Copia ``data`` y las filas de las listas anidadas de ``estructura`` —lo que
+    ``quitar_importes`` modifica—; lo demás se comparte sin tocarse. Sin
+    ``deepcopy``: si la copia fallaba, los filtros de pedido y OC devolvían los
+    datos sin filtrar (EC-784)."""
     copia = dict(data)
-    for clave, sub in (anidados or {}).items():
+    for clave, sub in estructura.anidados.items():
         valor = copia.get(clave)
         if isinstance(valor, list):
             copia[clave] = [copia_para_quitar(x, sub) if isinstance(x, dict) else x for x in valor]
     return copia
+
+
+def sin_importes(data, estructura: Importes):
+    """Copia de ``data`` sin importes, sin modificar ``data``."""
+    filtrado = copia_para_quitar(data, estructura)
+    quitar_importes(filtrado, estructura)
+    return filtrado
 
 
 def quitar_claves(d, claves) -> None:

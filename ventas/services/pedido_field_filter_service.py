@@ -1,4 +1,4 @@
-from nucleo.importes import copia_para_quitar, quitar_claves, tiene_claves_de_importes
+from nucleo.importes import Importes, quitar_importes, sin_importes, tiene_claves_de_importes
 from seguridad.role_identity import (
     CLAVES_CONTABILIDAD_COMPRAS,
     CLAVES_CONTABILIDAD_VENTAS,
@@ -43,25 +43,23 @@ def puede_modificar_importes_pedido(user) -> bool:
     return tiene_claves_de_importes(user, CLAVES_EDICION_IMPORTES_PEDIDO)
 
 
+# Dónde hay importes en un pedido serializado; la usan la copia y la limpieza.
+IMPORTES_PEDIDO = Importes(
+    tuple(CAMPOS_CONTABILIDAD_PEDIDO),
+    {
+        "detalles": Importes(tuple(CAMPOS_CONTABILIDAD_DETALLE), {"tallas": Importes(tuple(CAMPOS_CONTABILIDAD_TALLA))}),
+        "servicios_extras": Importes(tuple(CAMPOS_CONTABILIDAD_SERVICIO)),
+    },
+)
+
+
 def quitar_campos_contabilidad_pedido(data) -> None:
     """Quita en sitio los importes de un pedido serializado (y de sus anidados).
 
     Para listados: el permiso se evalúa una vez por petición y cada fila ya es
-    una copia propia del serializer, así que no hace falta ``deepcopy`` (#947).
+    una copia propia del serializer, así que no hace falta copiar (#947).
     """
-    quitar_claves(data, CAMPOS_CONTABILIDAD_PEDIDO)
-
-    for det in data.get("detalles") or []:
-        quitar_claves(det, CAMPOS_CONTABILIDAD_DETALLE)
-        for t in det.get("tallas") or []:
-            quitar_claves(t, CAMPOS_CONTABILIDAD_TALLA)
-
-    for s in data.get("servicios_extras") or []:
-        quitar_claves(s, CAMPOS_CONTABILIDAD_SERVICIO)
-
-
-# Lo que ``quitar_campos_contabilidad_pedido`` modifica dentro del pedido serializado.
-ANIDADOS_CON_IMPORTES_PEDIDO = {"detalles": {"tallas": {}}, "servicios_extras": {}}
+    quitar_importes(data, IMPORTES_PEDIDO)
 
 
 def filtrar_campos_contabilidad_pedido(data, user):
@@ -69,6 +67,4 @@ def filtrar_campos_contabilidad_pedido(data, user):
     Falla cerrado: no hay rama que devuelva los importes a quien no los ve."""
     if puede_ver_contabilidad(user):
         return data
-    filtrado = copia_para_quitar(data, ANIDADOS_CON_IMPORTES_PEDIDO)
-    quitar_campos_contabilidad_pedido(filtrado)
-    return filtrado
+    return sin_importes(data, IMPORTES_PEDIDO)

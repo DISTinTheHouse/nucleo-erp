@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import AnonymousUser
 from django.db import connection
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import NoReverseMatch, reverse
 from rest_framework.test import APIClient
@@ -1885,3 +1885,39 @@ class ConfigSatDesmontadaTests(TestCase):
         self.config.refresh_from_db()
         self.assertEqual(self.config.no_certificado, "30001000000400002434")
         self.assertTrue(EmpresaSatConfig.objects.filter(pk=self.config.pk).exists())
+
+
+class EstructuraImportesTests(SimpleTestCase):
+    """EC-784: ``nucleo.importes.Importes`` dice a la vez qué se copia y qué se quita;
+    ``sin_importes`` limpia cada nivel anidado sin tocar el original."""
+
+    ESTRUCTURA = None
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from nucleo.importes import Importes
+
+        cls.ESTRUCTURA = Importes(("total",), {"renglones": Importes(("precio",), {"tallas": Importes(("importe",))})})
+
+    def _documento(self):
+        return {
+            "id": 1, "total": "9.00", "otros": [{"total": "no se toca"}],
+            "renglones": [{"id": 2, "precio": "3.00", "tallas": [{"id": 3, "importe": "1.00"}, "no-dict"]}, None],
+        }
+
+    def test_quita_cada_nivel_y_deja_lo_demas(self):
+        from nucleo.importes import sin_importes
+
+        limpio = sin_importes(self._documento(), self.ESTRUCTURA)
+        self.assertEqual(limpio, {
+            "id": 1, "otros": [{"total": "no se toca"}],
+            "renglones": [{"id": 2, "tallas": [{"id": 3}, "no-dict"]}, None],
+        })
+
+    def test_no_modifica_el_original_en_ningun_nivel(self):
+        from nucleo.importes import sin_importes
+
+        original = self._documento()
+        sin_importes(original, self.ESTRUCTURA)
+        self.assertEqual(original, self._documento())
