@@ -1409,6 +1409,61 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()["bloqueos"]), 4)
 
+    def test_edicion_exitosa_guarda_y_responde_el_pedido_completo(self):
+        """EC-776: el 200 de ``editar-mesa-control`` sin el prefetch del pedido base.
+        Guarda los cambios y responde el pedido con sus renglones, tallas y servicios
+        (el prefetch de la respuesta se conserva). No depende de filas previas de la BD."""
+        detalle = self.pedido.detalles.get()
+        talla = detalle.tallas.get()
+        payload = self._payload()
+
+        # 83 en 67a87b9: -4 del prefetch del pedido base, -6 de los bloqueos.
+        with self.assertNumQueries(73):
+            response = self._client(self.admin_mesa).post(
+                pedido_editar_mesa_control_url(self.pedido.pk), payload, format="json"
+            )
+        self.assertEqual(response.status_code, 200, response.json())
+        body = response.json()
+        self.assertEqual(list(body), ["pedido", "cotizacion", "sincronizado", "modo"])
+        self.assertTrue(body["sincronizado"])
+        self.assertEqual(body["modo"], "estricto_contable_operativo")
+
+        pedido = body["pedido"]
+        for campo in ("id", "folio", "detalles", "servicios_extras", "documentos", "programacion_conf"):
+            self.assertIn(campo, pedido)
+        self.assertEqual(
+            (pedido["id"], pedido["folio"], pedido["persona_pagos"], pedido["oc"], pedido["subtotal"]),
+            (self.pedido.pk, "P-000001", "Pagos Mesa", "OC-MESA-01", "250.00"),
+        )
+        self.assertEqual(len(pedido["detalles"]), 1)
+        renglon = pedido["detalles"][0]
+        # El renglón se edita en su lugar (``requiere_ids_detalle``), no se recrea.
+        self.assertEqual((renglon["id"], renglon["producto"]), (detalle.pk, self.producto_a.pk))
+        self.assertEqual(len(renglon["tallas"]), 1)
+        self.assertEqual(
+            {k: renglon["tallas"][0][k] for k in ("id", "talla", "cantidad")},
+            {"id": talla.pk, "talla": self.talla_m.pk, "cantidad": 3},
+        )
+        self.assertIn("sku_produccion", renglon["tallas"][0])
+        self.assertEqual(
+            [(s["nombre"], s["cantidad"], s["visible_en_factura"]) for s in pedido["servicios_extras"]],
+            [("Urgencia", 2, False)],
+        )
+        self.assertEqual(body["cotizacion"]["id"], self.cotizacion.pk)
+        self.assertEqual(body["cotizacion"]["oc"], "OC-MESA-01")
+
+        self.pedido.refresh_from_db()
+        self.assertEqual((self.pedido.persona_pagos, self.pedido.oc), ("Pagos Mesa", "OC-MESA-01"))
+        self.assertEqual(
+            list(PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=self.pedido).values_list("id", "cantidad")),
+            [(talla.pk, 3)],
+        )
+        self.assertEqual(
+            list(self.pedido.servicios_extras.values_list("nombre", "cantidad")), [("Urgencia", 2)]
+        )
+        self.cotizacion.refresh_from_db()
+        self.assertEqual(self.cotizacion.oc, "OC-MESA-01")
+
     PROGRAMACION_VIGENTE = {
         "programaciones": [
             {
