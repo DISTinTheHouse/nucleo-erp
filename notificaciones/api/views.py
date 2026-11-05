@@ -6,9 +6,10 @@ from django.db.models import Max
 from django.http import StreamingHttpResponse
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
-from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 from rest_framework.request import Request
+
+from nucleo.listados import PaginacionOpcionalLimitOffset
 
 from ..models import Notificacion
 from ..services.notificacion_service import (
@@ -58,7 +59,8 @@ class NotificacionViewSet(
 ):
     serializer_class = NotificacionSerializer
     http_method_names = ["get", "post"]
-    pagination_class = LimitOffsetPagination  # sin ?limit= regresa la lista completa
+    # Sin ?limit= regresa la lista completa; ?limit= inválido → 400 y tope de 500 (#950).
+    pagination_class = PaginacionOpcionalLimitOffset
 
     def get_queryset(self):
         user = self.request.user

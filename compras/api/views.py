@@ -1164,6 +1164,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["get"], url_path="kpis")
     def kpis(self, request):
         user = request.user
+        # No acepta filtros (#950): un ``?sucursal=`` o una fecha → 400, no 200
+        # con los KPIs de toda la empresa como si se hubieran aplicado. Igual
+        # que ``recepciones/kpis/`` y antes de la empresa, como allá.
+        validar_parametros(request, set())
         empresa = getattr(user, "empresa", None)
         # Superusuario incluido, como recepciones y proveedores (#834, #861).
         if empresa is None:

@@ -1321,6 +1321,21 @@ class HistorialOCProveedorTests(TestCase):
         self.assertEqual(client.get("/api/v1/compras/ordenes/?estatus=99").status_code, 400)
         self.assertEqual(client.get("/api/v1/compras/ordenes/?proveedor=x").status_code, 400)
 
+    def test_limit_y_offset_invalidos_responden_400(self):
+        """#950: un ``?limit=`` que no es entero positivo ya no devuelve la lista
+        completa sin paginar; ``offset`` negativo o no entero, tampoco se ignora."""
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        for params in ("limit=abc", "limit=0", "limit=-1", "limit=1.5", "limit=1&offset=-1", "limit=1&offset=x"):
+            with self.subTest(params=params):
+                resp = client.get(f"/api/v1/compras/ordenes/?{params}")
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(set(resp.json()), {params.split("&")[-1].split("=")[0]})
+        # Vacío cuenta como ausente: lista completa; ``limit`` sobre el tope se recorta.
+        self.assertIsInstance(client.get("/api/v1/compras/ordenes/?limit=").json(), list)
+        self.assertEqual(client.get("/api/v1/compras/ordenes/?limit=9999").json()["count"], 2)
+        self.assertEqual(client.get("/api/v1/compras/ordenes/?limit=1&offset=").json()["count"], 2)
+
     def test_onboarding_avisa_si_la_lista_se_recorto(self):
         """#838: ``*_truncado`` indica si faltan elementos por el tope."""
         client = APIClient()
@@ -1994,6 +2009,19 @@ class OrdenCompraKpisTests(TestCase):
         self.assertEqual(kpi["total"], 1)
         self.assertEqual(kpi["drill_down"][0]["oc_id"], self.oc_vencida.pk)
         self.assertEqual(kpi["drill_down"][0]["dias_vencida"], 3)
+
+    def test_parametros_no_soportados_responden_400(self):
+        """#950: ``ordenes/kpis/`` no acepta filtros; un parámetro → 400, como
+        ``recepciones/kpis/``, también sin empresa."""
+        for user in (self.usuario, self.sin_empresa):
+            for params in ("parametro_inventado=1", "sucursal=1", "fecha_desde=2026-01-01"):
+                with self.subTest(user=user.username, params=params):
+                    client = APIClient()
+                    client.force_authenticate(user=user)
+                    resp = client.get(f"{self.URL}?{params}")
+                    self.assertEqual(resp.status_code, 400, resp.content)
+                    self.assertIn("parametros", resp.json())
+        self.assertEqual(self._get().status_code, 200)
 
     def test_ciclo_compra_no_disponible(self):
         resp = self._get()

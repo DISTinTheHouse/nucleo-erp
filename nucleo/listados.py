@@ -9,9 +9,39 @@ from nucleo.kpis import entero_param, rango_fechas
 
 class PaginacionOpcionalLimitOffset(LimitOffsetPagination):
     """Sin ``?limit=`` regresa la lista completa, como antes; con él,
-    ``{count, next, previous, results}``. ``limit`` se topa en ``max_limit``."""
+    ``{count, next, previous, results}``. ``limit`` se topa en ``max_limit``.
+
+    ``limit`` que no es entero positivo u ``offset`` negativo o no entero → 400
+    (#950). DRF los trata como ausentes: el cliente pedía una página y recibía
+    la lista completa, sin tope y con otra forma (arreglo en vez de
+    ``{count, results}``). Vacíos cuentan como ausentes, igual que en
+    ``entero_param``."""
 
     max_limit = 500
+
+    def get_limit(self, request):
+        valor = (request.query_params.get(self.limit_query_param) or "").strip()
+        if not valor:
+            return self.default_limit
+        try:
+            limit = int(valor)
+        except ValueError:
+            limit = 0
+        if limit <= 0:
+            raise ValidationError({self.limit_query_param: "Debe ser un entero positivo."})
+        return min(limit, self.max_limit) if self.max_limit else limit
+
+    def get_offset(self, request):
+        valor = (request.query_params.get(self.offset_query_param) or "").strip()
+        if not valor:
+            return 0
+        try:
+            offset = int(valor)
+        except ValueError:
+            offset = -1
+        if offset < 0:
+            raise ValidationError({self.offset_query_param: "Debe ser un entero mayor o igual a 0."})
+        return offset
 
 
 class OrdenamientoEstableFilter(OrderingFilter):
