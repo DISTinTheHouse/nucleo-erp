@@ -6,7 +6,8 @@ from django.core.serializers.json import DjangoJSONEncoder
 from django.db import router, transaction
 from django.db.models.deletion import Collector, ProtectedError, RestrictedError
 from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, Subquery, Sum
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, JSONObject
+from django.contrib.postgres.expressions import ArraySubquery
 from datetime import timedelta
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -2825,170 +2826,149 @@ class PedidoViewSet(viewsets.ModelViewSet):
         _save_servicios_extras(cotizacion, servicios_extras_data)
 
     def _get_bloqueos_edicion_estricta(self, pedido):
-        bloqueos = []
+        """Bloqueos de la edición estricta de mesa de control, en UNA consulta sobre
+        la fila del pedido (EC-776): un ``ArraySubquery`` por tipo de documento y un
+        ``EXISTS`` por vínculo de renglón.
 
-        facturas_emitidas = list(
-            Factura.objects.filter(
-                pedido=pedido,
-                activo=True,
-                estatus=Factura.FacturaStatus.EMITIDA,
-            ).values("id", "folio", "estatus")
-        )
-        for factura in facturas_emitidas:
-            bloqueos.append(
-                {
-                    "tipo": "factura_emitida",
-                    "id": factura["id"],
-                    "folio": factura["folio"],
-                    "estatus": factura["estatus"],
-                    "accion_requerida": "Cancelar la factura o emitir la nota de crédito correspondiente antes de editar el pedido.",
-                }
-            )
+        Todo se acota a la empresa del pedido: un documento de otra empresa ligado
+        al pedido (dato heredado) no se muestra ni bloquea. Los renglones no tienen
+        empresa propia, así que se acotan por la de su documento.
 
-        ordenes_bordado = list(
-            OrdenesBordado.objects.filter(pedido=pedido, activo=True).values(
-                "id", "folio_bordado", "estatus_bordado"
-            )
-        )
-        for orden in ordenes_bordado:
-            bloqueos.append(
-                {
-                    "tipo": "orden_bordado_activa",
-                    "id": orden["id"],
-                    "folio": orden["folio_bordado"],
-                    "estatus": orden["estatus_bordado"],
-                    "accion_requerida": "Cancelar y dar de baja la orden de bordado antes de editar el pedido.",
-                }
-            )
+        Mismo shape que antes: los tipos en el mismo orden, los documentos de cada
+        tipo por ``id`` y ``estatus`` con el tipo de su columna (texto en factura y
+        picking, entero en las órdenes de producción; el JSONB lo conserva).
+        """
+        misma_empresa = {"empresa_id": OuterRef("empresa_id")}
+        # (tipo, queryset, campo id, campo folio, campo estatus, acción requerida)
+        documentos = [
+            (
+                "factura_emitida",
+                Factura.objects.filter(activo=True, estatus=Factura.FacturaStatus.EMITIDA),
+                "id", "folio", "estatus",
+                "Cancelar la factura o emitir la nota de crédito correspondiente antes de editar el pedido.",
+            ),
+            (
+                "orden_bordado_activa",
+                OrdenesBordado.objects.filter(activo=True),
+                "id", "folio_bordado", "estatus_bordado",
+                "Cancelar y dar de baja la orden de bordado antes de editar el pedido.",
+            ),
+            (
+                "orden_reflejante_activa",
+                OrdenesReflejante.objects.filter(activo=True),
+                "id", "folio_reflejante", "estatus_reflejante",
+                "Cancelar y dar de baja la orden de reflejante antes de editar el pedido.",
+            ),
+            (
+                "orden_corte_manga_activa",
+                OrdenesCorteManga.objects.filter(activo=True),
+                "id", "folio_ocm", "estatus_corte",
+                "Cancelar y dar de baja la orden de corte de manga antes de editar el pedido.",
+            ),
+            (
+                "orden_produccion_activa",
+                OrdenProduccion.objects.filter(activo=True),
+                "op_id", "folio_op", "estatus_op",
+                "Cancelar y dar de baja la orden de producción antes de editar el pedido.",
+            ),
+            (
+                "picking_activo",
+                Picking.objects.exclude(estado=Picking.Estado.CANCELADO),
+                "id", "folio", "estado",
+                "Cancelar el picking antes de editar el pedido.",
+            ),
+        ]
 
-        ordenes_reflejante = list(
-            OrdenesReflejante.objects.filter(pedido=pedido, activo=True).values(
-                "id", "folio_reflejante", "estatus_reflejante"
-            )
-        )
-        for orden in ordenes_reflejante:
-            bloqueos.append(
-                {
-                    "tipo": "orden_reflejante_activa",
-                    "id": orden["id"],
-                    "folio": orden["folio_reflejante"],
-                    "estatus": orden["estatus_reflejante"],
-                    "accion_requerida": "Cancelar y dar de baja la orden de reflejante antes de editar el pedido.",
-                }
-            )
-
-        ordenes_corte = list(
-            OrdenesCorteManga.objects.filter(pedido=pedido, activo=True).values(
-                "id", "folio_ocm", "estatus_corte"
-            )
-        )
-        for orden in ordenes_corte:
-            bloqueos.append(
-                {
-                    "tipo": "orden_corte_manga_activa",
-                    "id": orden["id"],
-                    "folio": orden["folio_ocm"],
-                    "estatus": orden["estatus_corte"],
-                    "accion_requerida": "Cancelar y dar de baja la orden de corte de manga antes de editar el pedido.",
-                }
-            )
-
-        ordenes_produccion = list(
-            OrdenProduccion.objects.filter(pedido=pedido, activo=True).values(
-                "op_id", "folio_op", "estatus_op"
-            )
-        )
-        for orden in ordenes_produccion:
-            bloqueos.append(
-                {
-                    "tipo": "orden_produccion_activa",
-                    "id": orden["op_id"],
-                    "folio": orden["folio_op"],
-                    "estatus": orden["estatus_op"],
-                    "accion_requerida": "Cancelar y dar de baja la orden de producción antes de editar el pedido.",
-                }
-            )
-
-        pickings = list(
-            Picking.objects.filter(pedido=pedido).exclude(
-                estado=Picking.Estado.CANCELADO
-            ).values("id", "folio", "estado")
-        )
-        for picking in pickings:
-            bloqueos.append(
-                {
-                    "tipo": "picking_activo",
-                    "id": picking["id"],
-                    "folio": picking["folio"],
-                    "estatus": picking["estado"],
-                    "accion_requerida": "Cancelar el picking antes de editar el pedido.",
-                }
-            )
-
-        # Los vínculos por renglón se revisan en UNA consulta (un ``EXISTS`` por
-        # tipo) en vez de dos listas de ids y una consulta por tipo. Mismo
-        # orden y mismo criterio: todo cuelga de ``pedido_detalle__pedido``.
         reserva_viva = ~Q(
             estado__in=[
                 inventario_reservas.Estado.CANCELADA,
                 inventario_reservas.Estado.LIBERADA,
             ]
         )
+        en_el_pedido = {"pedido_detalle__pedido_id": OuterRef("pk")}
         vinculos = [
             (
                 "factura_detalle_ligado",
-                FacturaDetalle.objects.filter(pedido_detalle__pedido_id=OuterRef("pk")),
+                FacturaDetalle.objects.filter(**en_el_pedido, factura__empresa_id=OuterRef("empresa_id")),
                 "Cancelar la factura y limpiar su detalle antes de editar el pedido.",
             ),
             (
                 "nota_credito_ligada",
-                NotaCreditoDetalle.objects.filter(factura_detalle__pedido_detalle__pedido_id=OuterRef("pk")),
+                NotaCreditoDetalle.objects.filter(
+                    factura_detalle__pedido_detalle__pedido_id=OuterRef("pk"),
+                    factura_detalle__factura__empresa_id=OuterRef("empresa_id"),
+                ),
                 "Revisar/cancelar la nota de crédito ligada antes de editar el pedido.",
             ),
             (
                 "orden_bordado_detalle_ligado",
-                OrdenBordadoDetalle.objects.filter(pedido_detalle__pedido_id=OuterRef("pk")),
+                OrdenBordadoDetalle.objects.filter(**en_el_pedido, ob__empresa_id=OuterRef("empresa_id")),
                 "Dar de baja los renglones de bordado ligados antes de editar el pedido.",
             ),
             (
                 "orden_reflejante_detalle_ligado",
-                OrdenReflejanteDetalle.objects.filter(pedido_detalle__pedido_id=OuterRef("pk")),
+                OrdenReflejanteDetalle.objects.filter(**en_el_pedido, orden_r__empresa_id=OuterRef("empresa_id")),
                 "Dar de baja los renglones de reflejante ligados antes de editar el pedido.",
             ),
             (
                 "orden_corte_manga_detalle_ligado",
-                OrdenCorteMangaDetalle.objects.filter(pedido_detalle__pedido_id=OuterRef("pk")),
+                OrdenCorteMangaDetalle.objects.filter(**en_el_pedido, ocm__empresa_id=OuterRef("empresa_id")),
                 "Dar de baja los renglones de corte de manga ligados antes de editar el pedido.",
             ),
             (
                 "orden_produccion_detalle_ligado",
-                OrdenProduccionDetalle.objects.filter(pedido_detalle__pedido_id=OuterRef("pk")),
+                OrdenProduccionDetalle.objects.filter(**en_el_pedido, op__empresa_id=OuterRef("empresa_id")),
                 "Dar de baja los renglones de producción ligados antes de editar el pedido.",
             ),
             (
                 "picking_detalle_ligado",
-                PickingDetalle.objects.filter(pedido_detalle__pedido_id=OuterRef("pk")),
+                PickingDetalle.objects.filter(**en_el_pedido, picking__empresa_id=OuterRef("empresa_id")),
                 "Cancelar el picking y sus líneas antes de editar el pedido.",
             ),
             (
                 "reserva_inventario_activa",
-                inventario_reservas.objects.filter(reserva_viva, pedido_detalle__pedido_id=OuterRef("pk")),
+                inventario_reservas.objects.filter(reserva_viva, **en_el_pedido, **misma_empresa),
                 "Liberar o cancelar las reservas de inventario antes de editar el pedido.",
             ),
             (
                 "reserva_talla_activa",
                 inventario_reservas.objects.filter(
-                    reserva_viva, pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk")
+                    reserva_viva,
+                    pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk"),
+                    **misma_empresa,
                 ),
                 "Liberar o cancelar las reservas por talla antes de editar el pedido.",
             ),
         ]
+
+        anotaciones = {
+            tipo: ArraySubquery(
+                qs.filter(pedido_id=OuterRef("pk"), **misma_empresa)
+                .order_by(campo_id)
+                .values(doc=JSONObject(id=campo_id, folio=campo_folio, estatus=campo_estatus))
+            )
+            for tipo, qs, campo_id, campo_folio, campo_estatus, _ in documentos
+        }
+        anotaciones.update({tipo: Exists(sub) for tipo, sub, _ in vinculos})
         hay = (
             Pedido.objects.filter(pk=pedido.pk)
-            .annotate(**{tipo: Exists(sub) for tipo, sub, _ in vinculos})
-            .values(*[tipo for tipo, _, _ in vinculos])
+            .annotate(**anotaciones)
+            .values(*anotaciones)
             .first()
         ) or {}
+
+        bloqueos = []
+        for tipo, _, _, _, _, accion in documentos:
+            for doc in hay.get(tipo) or []:
+                bloqueos.append(
+                    {
+                        "tipo": tipo,
+                        "id": doc["id"],
+                        "folio": doc["folio"],
+                        "estatus": doc["estatus"],
+                        "accion_requerida": accion,
+                    }
+                )
         for tipo, _, accion in vinculos:
             if hay.get(tipo):
                 bloqueos.append({"tipo": tipo, "accion_requerida": accion})

@@ -1282,6 +1282,133 @@ class PedidoMesaControlUpdateTests(TestCase):
         tipos = {item["tipo"] for item in response.json()["bloqueos"]}
         self.assertIn("picking_activo", tipos)
 
+    # --- EC-776: bloqueos en una consulta y acotados a la empresa del pedido ---
+
+    def _factura_emitida_ligada(self, empresa, sucursal, folio):
+        factura = Factura.objects.create(
+            empresa=empresa,
+            sucursal=sucursal,
+            cliente=self.cliente,
+            pedido=self.pedido,
+            moneda=self.moneda,
+            folio=folio,
+            subtotal="100.00",
+            descuento="0.00",
+            impuestos="16.00",
+            total="116.00",
+            estatus=Factura.FacturaStatus.EMITIDA,
+        )
+        FacturaDetalle.objects.create(
+            factura=factura,
+            pedido_detalle=self.pedido.detalles.get(),
+            producto=self.producto_a,
+            cantidad="2.00",
+            precio_unitario="95.00",
+            descuento="0.00",
+            impuesto="0.00",
+            subtotal="190.00",
+            total="190.00",
+        )
+        return factura
+
+    def _picking_activo(self, folio):
+        return Picking.objects.create(
+            folio=folio,
+            empresa=self.empresa,
+            sucursal=self.sucursal,
+            pedido=self.pedido,
+            operador=self.admin_mesa,
+            almacen=self.almacen,
+            prioridad=Picking.Prioridad.MEDIA,
+            tipo=Picking.TipoPicking.ORDER_PICKING,
+            estado=Picking.Estado.EN_PROCESO,
+            usuario=self.admin_mesa,
+        )
+
+    def test_contexto_conserva_las_dos_formas_de_bloqueo_y_su_orden(self):
+        factura = self._factura_emitida_ligada(self.empresa, self.sucursal, "FAC-0001")
+        orden = OrdenesBordado.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido, folio_bordado="OB-1",
+        )
+        # Dos pickings: el mismo tipo se repite, por ``id``.
+        picking_1 = self._picking_activo("PK-001")
+        picking_2 = self._picking_activo("PK-002")
+
+        response = self._client(self.admin_mesa).get(
+            pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(
+            list(body),
+            [
+                "pedido_id", "folio", "editable", "modo", "requiere_ids_detalle",
+                "permite_eliminar_renglones", "permite_eliminar_tallas",
+                "permite_eliminar_servicios_extras", "requiere_cancelacion_previa",
+                "codigo", "mensaje", "bloqueos", "tipos_bloqueo",
+            ],
+        )
+        self.assertFalse(body["editable"])
+        self.assertEqual(body["codigo"], "pedido_con_bloqueos")
+        self.assertEqual(
+            [list(b) for b in body["bloqueos"]],
+            [["tipo", "id", "folio", "estatus", "accion_requerida"]] * 4
+            + [["tipo", "accion_requerida"]],
+        )
+        self.assertEqual(
+            [{k: v for k, v in b.items() if k != "accion_requerida"} for b in body["bloqueos"]],
+            [
+                {"tipo": "factura_emitida", "id": factura.pk, "folio": "FAC-0001", "estatus": "Emitida"},
+                {"tipo": "orden_bordado_activa", "id": orden.pk, "folio": "OB-1", "estatus": orden.estatus_bordado},
+                {"tipo": "picking_activo", "id": picking_1.pk, "folio": "PK-001", "estatus": "En proceso"},
+                {"tipo": "picking_activo", "id": picking_2.pk, "folio": "PK-002", "estatus": "En proceso"},
+                {"tipo": "factura_detalle_ligado"},
+            ],
+        )
+        # ``estatus`` conserva el tipo de su columna: texto en factura y picking,
+        # entero en las órdenes de producción.
+        self.assertIsInstance(body["bloqueos"][0]["estatus"], str)
+        self.assertIsInstance(body["bloqueos"][1]["estatus"], int)
+        self.assertIsInstance(body["bloqueos"][2]["estatus"], str)
+        # ``tipos_bloqueo`` va en paralelo 1:1, con duplicados.
+        self.assertEqual(body["tipos_bloqueo"], [b["tipo"] for b in body["bloqueos"]])
+        self.assertEqual(body["tipos_bloqueo"].count("picking_activo"), 2)
+
+    def test_documento_de_otra_empresa_no_aparece_ni_bloquea(self):
+        # Factura (y su renglón) de otra empresa ligada al pedido: dato heredado
+        # como la factura 34 -> pedido 255 de la BD. No es un bloqueo.
+        self._factura_emitida_ligada(self.empresa_b, self.sucursal_b, "FAC-AJENA")
+        OrdenesBordado.objects.create(
+            empresa=self.empresa_b, sucursal=self.sucursal_b, pedido=self.pedido, folio_bordado="OB-AJENA",
+        )
+
+        self.assertEqual(PedidoViewSet()._get_bloqueos_edicion_estricta(self.pedido), [])
+        response = self._client(self.admin_mesa).get(
+            pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["editable"])
+        self.assertEqual(response.json()["bloqueos"], [])
+        self.assertEqual(response.json()["tipos_bloqueo"], [])
+
+    def test_contexto_consultas_constantes(self):
+        self._factura_emitida_ligada(self.empresa, self.sucursal, "FAC-0001")
+        self._picking_activo("PK-001")
+        self._picking_activo("PK-002")
+        # Pedido + bloqueos (una consulta). Sin prefetch de renglones.
+        with self.assertNumQueries(2):
+            response = self._client(self.admin_mesa).get(
+                pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+            )
+        self.assertEqual(response.status_code, 200)
+        # + los roles de quien no es admin para ``_require_mesa_control``.
+        with self.assertNumQueries(3):
+            response = self._client(self.mesa_no_admin).get(
+                pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()["bloqueos"]), 4)
+
     PROGRAMACION_VIGENTE = {
         "programaciones": [
             {
