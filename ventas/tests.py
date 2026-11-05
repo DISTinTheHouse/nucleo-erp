@@ -4475,6 +4475,14 @@ class PedidoKpisTests(TestCase):
         cls.vendedor_b = Usuario.objects.create(
             username="vendedor_b", email="vendedor.b@acme.test", empresa=cls.empresa
         )
+        # Rol de Ventas: ``valor`` y el drill-down con importes exigen contabilidad
+        # (EC-784); sin ella se prueban en ``ImportesPedidoPorPerfilTests``.
+        rol_ventas = Rol.objects.create(
+            empresa=cls.empresa, codigo="VENTAS-KPIS", nombre="Ventas",
+            estatus=Rol.Estatus.ACTIVO, clave_departamento="VENTAS",
+        )
+        for vendedor in (cls.vendedor_a, cls.vendedor_b):
+            UsuarioRol.objects.create(usuario=vendedor, rol=rol_ventas, empresa=cls.empresa)
         cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
 
         cot_a = cls._cotizacion(cls.vendedor_a)
@@ -8053,3 +8061,51 @@ class ImportesPedidoPorPerfilTests(TestCase):
         with CaptureQueriesContext(connection) as sin_importes:
             self._api(self.sin_permiso).get(url)
         self.assertEqual(len(sin_importes), len(con_importes))
+
+    def test_kpis_por_perfil(self):
+        for usuario, ve in self.perfiles:
+            with self.subTest(usuario=usuario.username):
+                resp = self._api(usuario).get(f"{PEDIDOS_URL}kpis/")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.assertIs(resp.data["puede_ver_importes"], ve)
+                activos = resp.data["pedidos_activos"]
+                # El shape y los conteos no cambian: sólo faltan los importes.
+                self.assertEqual(activos["total"], 1)
+                self.assertEqual([f["total"] for f in activos["por_moneda"]], [1])
+                self.assertEqual(
+                    [f["id"] for f in activos["drill_down"]], [self.pedidos[usuario.pk].pk]
+                )
+                self.assertEqual(all("valor" in f for f in activos["por_moneda"]), ve)
+                self.assertEqual(all("gran_total" in f for f in activos["drill_down"]), ve)
+                self.assertTrue(all("folio" in f for f in activos["drill_down"]))
+
+    def test_kpis_sin_permiso_no_ordena_por_importe(self):
+        # El pedido más viejo pasa a ser el más grande; el nuevo es chico. Por
+        # ``-gran_total`` el viejo iría primero y delataría cuál es el mayor.
+        viejo = self.pedidos[self.sin_permiso.pk]
+        Pedido.objects.filter(pk=viejo.pk).update(gran_total=Decimal("100000.00"))
+        nuevo = self._pedido(
+            self.empresa, viejo.sucursal, viejo.cliente, self.sin_permiso, "EC784-NUEVO", "1.00",
+        )
+        drill_down = self._api(self.sin_permiso).get(f"{PEDIDOS_URL}kpis/").data["pedidos_activos"]["drill_down"]
+        self.assertEqual([f["id"] for f in drill_down], [nuevo.pk, viejo.pk])
+        # Con permiso sigue el orden por importe.
+        Pedido.objects.filter(pk__in=[viejo.pk, nuevo.pk]).update(cotizacion=self.pedidos[self.ventas.pk].cotizacion)
+        drill_down = self._api(self.ventas).get(f"{PEDIDOS_URL}kpis/").data["pedidos_activos"]["drill_down"]
+        self.assertEqual(
+            [f["id"] for f in drill_down], [viejo.pk, self.pedidos[self.ventas.pk].pk, nuevo.pk],
+        )  # 100000 > 200 > 1
+
+    def test_kpis_sin_empresa_declara_sin_importes(self):
+        sin_empresa = self._usuario("se")
+        resp = self._api(sin_empresa).get(f"{PEDIDOS_URL}kpis/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(resp.data["puede_ver_importes"], False)
+        self.assertFalse(resp.data["pedidos_activos"]["disponible"])
+
+    def test_kpis_no_cuentan_pedidos_de_otra_empresa(self):
+        # El superusuario sin empresa sólo ve los pedidos de los que es vendedor:
+        # ninguno aquí, aunque haya pedidos de dos empresas.
+        resp = self._api(self.superusuario_sin_empresa).get(f"{PEDIDOS_URL}kpis/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["pedidos_activos"]["total"], 0)

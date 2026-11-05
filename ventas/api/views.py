@@ -113,6 +113,7 @@ from ventas.services.pedido_field_filter_service import (
     puede_ver_contabilidad,
     quitar_campos_contabilidad_pedido,
 )
+from compras.services.orden_compra_view_service import quitar_montos
 from wms.models import Estado as EstadoWms, Picking, PickingDetalle
 
 logger = logging.getLogger(__name__)
@@ -4184,9 +4185,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
             return Response(self._kpis_vacio())
 
         base = pedidos_visibles(pedidos_base(), user).filter(cotizacion__vendedor=user)
+        # Misma regla de importes que el listado y el detalle (EC-784).
+        ver_importes = puede_ver_contabilidad(user)
         data = {
             "generado_en": timezone.now(),
-            "pedidos_activos": self._kpi_pedidos_activos(base),
+            "pedidos_activos": self._kpi_pedidos_activos(base, ver_importes),
             "otif": {
                 "disponible": False,
                 "motivo": "Entrega/EnvioDetalle no registran fecha ni cantidad entregada: no hay forma de saber si un pedido se entregó a tiempo y completo.",
@@ -4200,6 +4203,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 "motivo": "El pedido no tiene fecha compromiso (solo una clasificación A-F en días) y no hay proyección de avance de OP.",
             },
         }
+        # Mismo contrato que los ``kpis/`` de compras (#841, #860): sin permiso se
+        # omiten ``valor`` y el ``gran_total`` del drill-down; los conteos quedan.
+        data["puede_ver_importes"] = ver_importes
+        if not ver_importes:
+            quitar_montos(data["pedidos_activos"], ["valor", "gran_total"])
         return Response(data)
 
     def _kpis_vacio(self):
@@ -4210,9 +4218,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
             "otif": motivo,
             "lead_time_promedio": motivo,
             "pedidos_en_riesgo": motivo,
+            # Clave fija del contrato; sin datos no hay importes.
+            "puede_ver_importes": False,
         }
 
-    def _kpi_pedidos_activos(self, base):
+    def _kpi_pedidos_activos(self, base, ver_importes):
         # "Activo" = AUTORIZADA o EN PROCESO: ya es un pedido en firme, no un
         # borrador ni algo cancelado. Mismo criterio que
         # ``ComprasDashboardView.ESTATUS_GASTO_OC`` (excluir lo que todavía no
@@ -4226,8 +4236,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
             .order_by("moneda__codigo_iso")
         ]
         total = sum(f["total"] for f in por_moneda)
+        # Sin permiso, los 20 del drill-down son los más recientes: elegir los de
+        # mayor ``gran_total`` delataría cuáles son los pedidos más grandes.
+        orden = ("-gran_total", "-id") if ver_importes else ("-id",)
         drill_down = list(
-            activos.order_by("-gran_total", "-id").values(
+            activos.order_by(*orden).values(
                 "id", "folio", "estatus", "gran_total", "cliente_nombre", "moneda__codigo_iso"
             )[:20]
         )
