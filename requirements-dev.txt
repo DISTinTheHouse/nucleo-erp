@@ -1,0 +1,5 @@
+# Dependencias sólo de desarrollo y pruebas; producción (Vercel/Render) usa requirements.txt.
+-r requirements.txt
+
+# manage.py test --parallel: serializa los tracebacks de los procesos hijos.
+tblib==3.1.0

@@ -11,7 +11,7 @@ The **Núcleo (Core)** of a multi-tenant ERP, built with **Django 6.0 + Django R
 ```bash
 # Setup
 python -m venv venv && .\venv\Scripts\activate   # Windows
-pip install -r requirements.txt
+pip install -r requirements.txt          # requirements-dev.txt adds test-only deps (tblib for --parallel)
 
 # Run (note: README uses port 8003; docker-compose uses 8000)
 python manage.py runserver 0.0.0.0:8003
@@ -21,8 +21,12 @@ python manage.py makemigrations
 python manage.py migrate
 python manage.py makemigrations --dry-run --check   # what CI enforces — must report "No changes"
 
-# Validation (this is the full CI gate — tests are not run, see Pruebas below)
+# Validation (this is the full CI gate — tests are not run in CI, see Pruebas below)
 python manage.py check
+
+# Tests — ONLY with the local-Postgres settings (see Pruebas below)
+python manage.py test --settings=ERP.settings_test --keepdb --parallel 4 ventas compras   # whole suite ~1.5 min
+python manage.py test --settings=ERP.settings_test --keepdb ventas.tests.PedidoKpisTests  # one class: seconds
 
 # Operational
 python manage.py axes_reset                # clear brute-force lockouts (run after lockout during dev)
@@ -38,13 +42,16 @@ docker compose run --rm web python manage.py migrate   # migrating is manual and
 
 Because of that, the `web` service runs **only** `runserver` and must **never** auto-run `migrate` on `up` — doing so applied every unapplied migration straight to production on each start. Migrating is a deliberate, manual action: `docker compose run --rm web python manage.py migrate`. Production migration policy lives in the `migrate_production` job (see below), not in compose.
 
-### Pruebas — en producción, sin SQLite
+### Pruebas — Postgres local, nunca Supabase ni SQLite
 
-- **Never run `manage.py test`.** There is no test settings module; a bare run creates its test database on the production Supabase (it happened on 2026-08-03 and left an orphaned `test_postgres`). SQLite was dropped on purpose (`a316b99`) and must not come back.
-- **Verify changes against production instead**, from a `manage.py shell -c` script with DRF's `APIClient` + `force_authenticate`:
-  - reads: plain `GET`s (read-only);
+- **Tests run only with `--settings=ERP.settings_test`**, against a local Postgres 17 in Docker (`nucleo-erp-db`, `127.0.0.1:5432`). `ERP/settings_test.py` builds the DB from `LOCAL_POSTGRES_*` regardless of `USE_REMOTE_DB` and **refuses to start if the host is not local**. Django creates `test_erp_pruebas` (and `_1`…`_N` clones with `--parallel`) on that server; `--keepdb` reuses it, so migrations only run the first time (~5 min) or when new ones appear. Use `--parallel 4`: on Windows more workers are slower (process spawn + Docker). `tblib` (`requirements-dev.txt`) is needed for `--parallel` to report failures.
+- **Never run a bare `manage.py test`** (without `--settings=ERP.settings_test`): with the default settings it creates its test database on the production Supabase (it happened on 2026-08-03 and left an orphaned `test_postgres`). SQLite was dropped on purpose (`a316b99`) and must not come back.
+- **Local setup**: `docker run -d --name nucleo-erp-db --restart unless-stopped -p 127.0.0.1:5432:5432 -v nucleo-erp-db-data:/var/lib/postgresql/data -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=<local> -e POSTGRES_DB=erp_restore postgres:17`, then `CREATE EXTENSION pg_trgm` in `template1` (the `gin_trgm_ops` indexes need it and no migration creates it). `.env` points `LOCAL_POSTGRES_*` at it (host `127.0.0.1`, db `erp_restore`, user `postgres`).
+- **`erp_restore` is a copy of Supabase** (`pg_dump --schema=public --no-owner --no-privileges` through the **session** pooler, port 5432, then `pg_restore`; create `pg_trgm` first, `--schema` dumps omit extensions). Run the API or verification scripts against it with `USE_REMOTE_DB=False`: same data, ~10–100 ms per request instead of hundreds. Refresh it when you need newer data; it holds personal data, so dumps never go into the repo.
+- **Verify behavior against real data** (permissions catalog, users, SAT catalogs only exist in the DB) from a `manage.py shell -c` script with DRF's `APIClient` + `force_authenticate`, preferably with `USE_REMOTE_DB=False` on the local copy; use Supabase only when the live state matters:
+  - reads: plain `GET`s;
   - writes and migrations: inside `transaction.atomic()` and raise an exception at the end so everything rolls back (`MigrationExecutor(connection).migrate(...)` for an unapplied migration).
-- `*/tests.py` files stay as executable documentation of expected behavior; keep them updated, but they are not a gate. The CI gate is `manage.py check` + migration-drift check only.
+- While iterating, run only the test classes the change touches; the whole suite once at the end. `*/tests.py` are not a CI gate yet (CI is `manage.py check` + migration-drift check only), but keep them updated and green locally.
 
 ### Prioridad 1: velocidad de los endpoints
 
@@ -57,7 +64,7 @@ La app está por liberarse a la operación real: **ningún endpoint puede sentir
 
 ## Database & environments
 
-DB selection is driven by env vars, not Django settings files (`ERP/settings.py` is the only settings module):
+DB selection is driven by env vars, not Django settings files (`ERP/settings.py` is the runtime settings module; `ERP/settings_test.py` exists only for `manage.py test`, see Pruebas):
 
 - **`USE_REMOTE_DB`** (defaults true on Vercel or `ENVIRONMENT=production`) toggles local Postgres vs. remote.
 - Remote uses `DATABASE_URL` / `SUPABASE_DATABASE_URL` (Supabase), with SSL required and server-side cursors disabled (required for Supabase's transaction pooler).
