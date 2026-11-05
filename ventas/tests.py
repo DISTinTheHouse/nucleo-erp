@@ -5123,6 +5123,19 @@ class AceptarCambiosConDependenciasTests(TestCase):
         self._assert_bloqueado(self._aceptar())
         self.assertTrue(OrdenBordadoDetalle.objects.filter(pk=obd.pk).exists())
 
+    def test_con_servicio_extra_facturado_responde_409_no_500(self):
+        """EC-790: los servicios extras también se borran y recrean; una línea de
+        factura ligada (aunque la factura esté cancelada) es PROTECT."""
+        servicio = PedidoServicioExtra.objects.create(pedido=self.pedido, nombre="Flete", monto=Decimal("100"))
+        factura = Factura.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda, pedido=self.pedido,
+        )
+        fd = FacturaDetalle.objects.create(factura=factura, pedido_servicio_extra=servicio)
+
+        self._assert_bloqueado(self._aceptar())
+        self.assertTrue(PedidoServicioExtra.objects.filter(pk=servicio.pk).exists())
+        self.assertTrue(FacturaDetalle.objects.filter(pk=fd.pk).exists())
+
 
 class DescuentoVentaAlmacenesConSalidaTests(TestCase):
     """#421: autorizar / aceptar-cambios descuentan solo de almacenes ACTIVOS con
