@@ -515,7 +515,10 @@ class AIAssistantAPIView(APIView):
         return {"ok": True, "counts": {"clientes": qs.count()}}
 
     def _tool_get_last_cliente_compra(self, request, args):
+        from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
+
         user = request.user
+        ver_importes = puede_ver_contabilidad(user)
         pedidos_qs = Pedido.objects.filter(activo=True).exclude(estatus=5)
         if not getattr(user, "is_superuser", False):
             empresa = getattr(user, "empresa", None)
@@ -540,9 +543,10 @@ class AIAssistantAPIView(APIView):
                 "ok": True,
                 "filters": {"date_from": d_from.isoformat() if d_from else None, "date_to": d_to.isoformat() if d_to else None},
                 "last_purchase": None,
+                "puede_ver_importes": ver_importes,
             }
         cliente = getattr(pedido, "cliente", None)
-        return {
+        resultado = {
             "ok": True,
             "filters": {"date_from": d_from.isoformat() if d_from else None, "date_to": d_to.isoformat() if d_to else None},
             "last_purchase": {
@@ -557,7 +561,14 @@ class AIAssistantAPIView(APIView):
                     "rfc": getattr(cliente, "rfc", None),
                 },
             },
+            # El resultado va al modelo (mensaje ``tool``) y al front (``tool_results``):
+            # con la señal, el asistente puede decir que el monto no está disponible.
+            "puede_ver_importes": ver_importes,
         }
+        # Misma regla de importes que el listado y el detalle de pedidos (EC-784).
+        if not ver_importes:
+            del resultado["last_purchase"]["gran_total"]
+        return resultado
 
     def _tool_create_empresa(self, request, args):
         user = request.user

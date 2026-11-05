@@ -6734,6 +6734,7 @@ Notas:
 
 - `message` es obligatorio.
 - `conversation` es opcional; enviar historial breve mejora el contexto (máx. ~20 turnos recientes).
+- **Importes (EC-784)**: la herramienta `get_last_cliente_compra` sigue la misma regla que el listado y el detalle de pedidos (contabilidad de ventas **o** de compras). Su resultado trae `"puede_ver_importes": true|false`; sin permiso se omite `last_purchase.gran_total`, tanto en lo que recibe el modelo como en `tool_results`. La última compra se elige por fecha (`-created_at`), no por monto.
 
 ### Response
 
