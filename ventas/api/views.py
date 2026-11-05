@@ -12,6 +12,8 @@ from django.db.models.functions import Coalesce, JSONObject
 from django.contrib.postgres.expressions import ArraySubquery
 from datetime import timedelta
 from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from catalogo.compatibilidad import exigir_compatibilidad, matriz_onboarding
@@ -62,6 +64,7 @@ from ventas.api.serializers import (
     errores_montos_guardados,
 )
 
+from nucleo.kpis import entero_param, rango_fechas
 from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset
 from nucleo.models import SerieFolio, Empresa
 from notificaciones.services.notificacion_service import crear_notificacion_usuario
@@ -2654,6 +2657,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
     queryset = pedidos_base()
     serializer_class = PedidoSerializer
     filter_backends = FILTER_BACKENDS_LISTADO
+    # Campos de ``?q=`` (la frase completa) y de ``?search=`` (``SearchFilter``,
+    # por palabras): el schema publicaba ``search`` y se ignoraba (#948, como #839
+    # en Compras). Todos en la tabla ``pedidos``, sin JOIN.
+    CAMPOS_BUSQUEDA = ("folio", "oc", "cliente_nombre", "cliente_razon_social", "cliente_rfc")
+    search_fields = list(CAMPOS_BUSQUEDA)
 
     def get_serializer_class(self):
         # Listado: serializer minimalista (9 campos escalares). Resto de acciones
@@ -2663,6 +2671,25 @@ class PedidoViewSet(viewsets.ModelViewSet):
             return PedidoListSerializer
         return PedidoSerializer
 
+    @extend_schema(parameters=[
+        # ``search``/``ordering``/``limit``/``offset`` los publica cada backend; estos
+        # los lee ``get_queryset`` y el schema no los veía (#948).
+        OpenApiParameter("q", OpenApiTypes.STR, description=(
+            "Contiene la frase completa, en folio, OC y nombre, razón social o RFC del cliente. "
+            "`search` busca en los mismos campos, por palabras."
+        )),
+        OpenApiParameter("folio", OpenApiTypes.STR, description="Contiene, solo en el folio."),
+        OpenApiParameter("cliente", OpenApiTypes.INT, description="Id del cliente."),
+        OpenApiParameter("vendedor", OpenApiTypes.INT, description="Id del vendedor de la cotización de origen."),
+        OpenApiParameter("sucursal", OpenApiTypes.INT, description="Id de la sucursal."),
+        OpenApiParameter("fecha_desde", OpenApiTypes.DATE, description="Día local de creación, desde (YYYY-MM-DD)."),
+        OpenApiParameter("fecha_hasta", OpenApiTypes.DATE, description="Día local de creación, hasta (YYYY-MM-DD)."),
+        OpenApiParameter("estatus", OpenApiTypes.STR, description="Uno o varios estatus separados por coma."),
+        OpenApiParameter("mis_pedidos", OpenApiTypes.BOOL, description="Solo los de cotizaciones del usuario."),
+        OpenApiParameter("sin_clasificar", OpenApiTypes.BOOL, description="Solo los que no tienen clasificación."),
+        OpenApiParameter("programado", OpenApiTypes.BOOL, description="Solo los que tienen alguna parcialidad programada."),
+        OpenApiParameter("con_muestras", OpenApiTypes.BOOL, description="Solo los que tienen alguna línea de muestra."),
+    ])
     def list(self, request, *args, **kwargs):
         # #947: el listado oculta los mismos importes que el detalle (#537); antes
         # ``gran_total``/``subtotal`` salían aquí a cualquier rol. El permiso se
@@ -3095,13 +3122,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # de nombre y razón social. ``?folio=`` sigue buscando solo el folio.
         q = (self.request.query_params.get("q") or "").strip()
         if q:
-            qs = qs.filter(
-                Q(folio__icontains=q)
-                | Q(oc__icontains=q)
-                | Q(cliente_nombre__icontains=q)
-                | Q(cliente_razon_social__icontains=q)
-                | Q(cliente_rfc__icontains=q)
-            )
+            qs = qs.filter(reduce(operator.or_, (Q(**{f"{c}__icontains": q}) for c in self.CAMPOS_BUSQUEDA)))
         folio = (self.request.query_params.get("folio") or "").strip()
         if folio:
             qs = qs.filter(folio__icontains=folio)
@@ -3141,6 +3162,23 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 qs = qs.filter(Exists(
                     PedidoDetalle.objects.filter(pedido_id=OuterRef("pk")).exclude(linea_no_muestra_q(""))
                 ))
+            # ``?cliente=``, ``?sucursal=``, ``?vendedor=`` (el de la cotización de
+            # origen, como ``?mis_pedidos=``) y ``?fecha_desde=``/``?fecha_hasta=``
+            # sobre el día local de ``created_at`` (#948): se ignoraban y llegaba el
+            # listado completo. Mismos lectores que los listados de Compras
+            # (``filtrar_listado_compras``): inválido → 400; un id ajeno no trae
+            # filas. Van en la misma consulta, por FK indexada.
+            for nombre, campo in (
+                ("cliente", "cliente_id"), ("sucursal", "sucursal_id"), ("vendedor", "cotizacion__vendedor_id"),
+            ):
+                valor = entero_param(self.request, nombre)
+                if valor is not None:
+                    qs = qs.filter(**{campo: valor})
+            fecha_desde, fecha_hasta = rango_fechas(self.request)
+            if fecha_desde:
+                qs = qs.filter(created_at__date__gte=fecha_desde)
+            if fecha_hasta:
+                qs = qs.filter(created_at__date__lte=fecha_hasta)
             # ``piezas`` (EC-571, PE-01): todas las tallas del pedido, muestras
             # incluidas. Subquery y no ``Sum`` sobre el join, igual que el listado de
             # cotizaciones: sin ``GROUP BY`` ni JOINs multivaluados en la consulta

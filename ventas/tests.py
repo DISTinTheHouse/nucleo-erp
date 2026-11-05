@@ -7022,6 +7022,84 @@ class ImporteIvaTests(TestCase):
                         self.assertFalse(set(fila) & set(CAMPOS_CONTABILIDAD_PEDIDO))
 
 
+class PedidoListadoFiltrosTests(TestCase):
+    """#948: ``pedidos/`` ya no ignora ``?search=``, ``?cliente=``, ``?vendedor=``,
+    ``?sucursal=`` ni ``?fecha_desde=``/``?fecha_hasta=``; inválidos → 400. Solo en el
+    listado: el detalle no se filtra."""
+
+    @classmethod
+    def setUpTestData(cls):
+        PedidoMesaControlUpdateTests.setUpTestData.__func__(cls)
+        Cotizacion.objects.filter(pk=cls.cotizacion.pk).update(vendedor=cls.admin_mesa)
+        cls.otro_cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Otro", razon_social="Otro SA")
+        cls.otra_sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="SLT", nombre="Saltillo")
+        # 23:30 del 15 de enero en México ya es 16 en UTC: el filtro va por el día local.
+        Pedido.objects.filter(pk=cls.pedido_sin_cotizacion.pk).update(
+            cliente=cls.otro_cliente, sucursal=cls.otra_sucursal, cliente_nombre="Otro",
+            created_at=timezone.make_aware(datetime(2025, 1, 15, 23, 30)),
+        )
+        Pedido.objects.filter(pk=cls.pedido.pk).update(
+            cliente_nombre="Cliente ACME", created_at=timezone.make_aware(datetime(2026, 3, 1, 10, 0)),
+        )
+
+    def _get(self, params):
+        api = APIClient()
+        api.force_authenticate(self.admin_mesa)
+        return api.get(PEDIDOS_URL, params)
+
+    def _ids(self, params):
+        resp = self._get(params)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return sorted(f["id"] for f in resp.json())
+
+    def test_filtros(self):
+        a, b = self.pedido.pk, self.pedido_sin_cotizacion.pk
+        casos = [
+            ({}, [a, b]),
+            ({"search": "zzz-no-existe"}, []),
+            ({"search": "acme"}, [a]),
+            ({"search": "P-000002"}, [b]),
+            ({"q": "acme"}, [a]),
+            ({"cliente": self.cliente.pk}, [a]),
+            ({"cliente": self.otro_cliente.pk}, [b]),
+            ({"cliente": 999999999}, []),
+            ({"sucursal": self.otra_sucursal.pk}, [b]),
+            ({"vendedor": self.admin_mesa.pk}, [a]),
+            ({"vendedor": 999999999}, []),
+            ({"fecha_desde": "2025-01-15", "fecha_hasta": "2025-01-15"}, [b]),
+            ({"fecha_desde": "2025-01-16"}, [a]),
+            ({"fecha_hasta": "2025-12-31"}, [b]),
+            ({"fecha_desde": "2099-01-01", "fecha_hasta": "2099-12-31"}, []),
+            ({"cliente": self.cliente.pk, "vendedor": self.admin_mesa.pk, "sucursal": self.sucursal.pk}, [a]),
+        ]
+        for params, esperado in casos:
+            with self.subTest(params=params):
+                self.assertEqual(self._ids(params), sorted(esperado))
+
+    def test_invalidos_responden_400(self):
+        for params in ({"cliente": "abc"}, {"vendedor": "x"}, {"sucursal": "1.5"}, {"fecha_desde": "no-es-fecha"},
+                       {"fecha_desde": "2026-12-31", "fecha_hasta": "2026-01-01"}):
+            with self.subTest(params=params):
+                resp = self._get(params)
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(set(resp.json()), {next(iter(params))})
+
+    def test_el_detalle_no_se_filtra(self):
+        api = APIClient()
+        api.force_authenticate(self.admin_mesa)
+        resp = api.get(f"{PEDIDOS_URL}{self.pedido.pk}/", {"cliente": 999999999, "fecha_desde": "2099-01-01"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_schema_publica_los_filtros(self):
+        from drf_spectacular.generators import SchemaGenerator
+
+        operacion = SchemaGenerator().get_schema(request=None, public=True)["paths"][PEDIDOS_URL]["get"]
+        nombres = {p["name"] for p in operacion["parameters"]}
+        self.assertLessEqual(
+            {"q", "search", "cliente", "vendedor", "sucursal", "fecha_desde", "fecha_hasta", "estatus"}, nombres,
+        )
+
+
 class CotizacionListadoMonedaTests(TestCase):
     """EC-617: los listados de cotizaciones y de mesa de control traen ``moneda`` (id)
     y ``moneda_codigo`` en todas las filas; sin moneda, ambos salen ``null``."""
