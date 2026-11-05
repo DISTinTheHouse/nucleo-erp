@@ -2830,9 +2830,14 @@ class PedidoViewSet(viewsets.ModelViewSet):
         la fila del pedido (EC-776): un ``ArraySubquery`` por tipo de documento y un
         ``EXISTS`` por vínculo de renglón.
 
-        Todo se acota a la empresa del pedido: un documento de otra empresa ligado
-        al pedido (dato heredado) no se muestra ni bloquea. Los renglones no tienen
-        empresa propia, así que se acotan por la de su documento.
+        Sólo la lista de documentos (lo que expone ``id``/``folio``/``estatus``) se
+        acota a la empresa del pedido: un documento de otra empresa ligado al pedido
+        (dato heredado) no se muestra. Los ``EXISTS`` de renglón NO se acotan: son la
+        garantía con la que ``_save_pedido_detalle`` borra renglones y tallas
+        sobrantes, y un vínculo de cualquier empresa lo rompería (``FacturaDetalle``
+        es PROTECT -> 500; picking, órdenes y reservas son CASCADE -> borraría filas
+        de otra empresa). Sólo informan ``tipo`` y ``accion_requerida``, así que no
+        exponen nada del documento ajeno.
 
         Mismo shape que antes: los tipos en el mismo orden, los documentos de cada
         tipo por ``id`` y ``estatus`` con el tipo de su columna (texto en factura y
@@ -2889,45 +2894,42 @@ class PedidoViewSet(viewsets.ModelViewSet):
         vinculos = [
             (
                 "factura_detalle_ligado",
-                FacturaDetalle.objects.filter(**en_el_pedido, factura__empresa_id=OuterRef("empresa_id")),
+                FacturaDetalle.objects.filter(**en_el_pedido),
                 "Cancelar la factura y limpiar su detalle antes de editar el pedido.",
             ),
             (
                 "nota_credito_ligada",
-                NotaCreditoDetalle.objects.filter(
-                    factura_detalle__pedido_detalle__pedido_id=OuterRef("pk"),
-                    factura_detalle__factura__empresa_id=OuterRef("empresa_id"),
-                ),
+                NotaCreditoDetalle.objects.filter(factura_detalle__pedido_detalle__pedido_id=OuterRef("pk")),
                 "Revisar/cancelar la nota de crédito ligada antes de editar el pedido.",
             ),
             (
                 "orden_bordado_detalle_ligado",
-                OrdenBordadoDetalle.objects.filter(**en_el_pedido, ob__empresa_id=OuterRef("empresa_id")),
+                OrdenBordadoDetalle.objects.filter(**en_el_pedido),
                 "Dar de baja los renglones de bordado ligados antes de editar el pedido.",
             ),
             (
                 "orden_reflejante_detalle_ligado",
-                OrdenReflejanteDetalle.objects.filter(**en_el_pedido, orden_r__empresa_id=OuterRef("empresa_id")),
+                OrdenReflejanteDetalle.objects.filter(**en_el_pedido),
                 "Dar de baja los renglones de reflejante ligados antes de editar el pedido.",
             ),
             (
                 "orden_corte_manga_detalle_ligado",
-                OrdenCorteMangaDetalle.objects.filter(**en_el_pedido, ocm__empresa_id=OuterRef("empresa_id")),
+                OrdenCorteMangaDetalle.objects.filter(**en_el_pedido),
                 "Dar de baja los renglones de corte de manga ligados antes de editar el pedido.",
             ),
             (
                 "orden_produccion_detalle_ligado",
-                OrdenProduccionDetalle.objects.filter(**en_el_pedido, op__empresa_id=OuterRef("empresa_id")),
+                OrdenProduccionDetalle.objects.filter(**en_el_pedido),
                 "Dar de baja los renglones de producción ligados antes de editar el pedido.",
             ),
             (
                 "picking_detalle_ligado",
-                PickingDetalle.objects.filter(**en_el_pedido, picking__empresa_id=OuterRef("empresa_id")),
+                PickingDetalle.objects.filter(**en_el_pedido),
                 "Cancelar el picking y sus líneas antes de editar el pedido.",
             ),
             (
                 "reserva_inventario_activa",
-                inventario_reservas.objects.filter(reserva_viva, **en_el_pedido, **misma_empresa),
+                inventario_reservas.objects.filter(reserva_viva, **en_el_pedido),
                 "Liberar o cancelar las reservas de inventario antes de editar el pedido.",
             ),
             (
@@ -2935,7 +2937,6 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 inventario_reservas.objects.filter(
                     reserva_viva,
                     pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk"),
-                    **misma_empresa,
                 ),
                 "Liberar o cancelar las reservas por talla antes de editar el pedido.",
             ),
