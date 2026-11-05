@@ -108,6 +108,7 @@ from ventas.services.pedido_field_filter_service import (
     CAMPOS_CONTABILIDAD_PEDIDO,
     filtrar_campos_contabilidad_pedido,
     puede_ver_contabilidad,
+    quitar_campos_contabilidad_pedido,
 )
 from wms.models import Estado as EstadoWms, Picking, PickingDetalle
 
@@ -2661,6 +2662,21 @@ class PedidoViewSet(viewsets.ModelViewSet):
         if getattr(self, "action", None) == "list":
             return PedidoListSerializer
         return PedidoSerializer
+
+    def list(self, request, *args, **kwargs):
+        # #947: el listado oculta los mismos importes que el detalle (#537); antes
+        # ``gran_total``/``subtotal`` salían aquí a cualquier rol. El permiso se
+        # evalúa una sola vez por petición, no por fila, y cada fila ya es un
+        # dict propio del serializer: se limpia en sitio, sin ``deepcopy``.
+        # ``ordering_fields`` no incluye importes, así que ``?ordering=`` tampoco
+        # deja deducirlos (a diferencia de las OC, #837).
+        response = super().list(request, *args, **kwargs)
+        if puede_ver_contabilidad(request.user):
+            return response
+        paginado = isinstance(response.data, dict) and "results" in response.data
+        for fila in response.data["results"] if paginado else response.data:
+            quitar_campos_contabilidad_pedido(fila)
+        return response
 
     def retrieve(self, request, *args, **kwargs):
         # ``get_queryset`` ya prefetchea ``detalles``+``tallas`` para las acciones

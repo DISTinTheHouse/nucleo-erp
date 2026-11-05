@@ -7005,6 +7005,22 @@ class ImporteIvaTests(TestCase):
         self.assertNotIn("importe_iva", data)
         self.assertNotIn("gran_total", data)
 
+    def test_listado_oculta_importes_a_quien_no_ve_contabilidad(self):
+        """#947: el listado de pedidos oculta lo mismo que el detalle, paginado o no;
+        un rol de mesa de control y el admin de la empresa siguen viendo los importes."""
+        from ventas.services.pedido_field_filter_service import CAMPOS_CONTABILIDAD_PEDIDO
+
+        casos = ((self.usuario_sin_permiso, False), (self.mesa_no_admin, True), (self.admin_mesa, True))
+        for usuario, ve in casos:
+            for params in ({}, {"limit": 100}):
+                with self.subTest(usuario=usuario.username, params=params):
+                    datos = self._api(usuario).get(PEDIDOS_URL, params).data
+                    filas = datos["results"] if isinstance(datos, dict) else datos
+                    fila = next(f for f in filas if f["id"] == self.pedido.pk)
+                    self.assertEqual(("gran_total" in fila, "subtotal" in fila), (ve, ve))
+                    if not ve:
+                        self.assertFalse(set(fila) & set(CAMPOS_CONTABILIDAD_PEDIDO))
+
 
 class CotizacionListadoMonedaTests(TestCase):
     """EC-617: los listados de cotizaciones y de mesa de control traen ``moneda`` (id)

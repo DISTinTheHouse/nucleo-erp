@@ -42,6 +42,23 @@ def _drop_keys(d: dict, keys: list) -> None:
         d.pop(k, None)
 
 
+def quitar_campos_contabilidad_pedido(data) -> None:
+    """Quita en sitio los importes de un pedido serializado (y de sus anidados).
+
+    Para listados: el permiso se evalúa una vez por petición y cada fila ya es
+    una copia propia del serializer, así que no hace falta ``deepcopy`` (#947).
+    """
+    _drop_keys(data, CAMPOS_CONTABILIDAD_PEDIDO)
+
+    for det in data.get("detalles") or []:
+        _drop_keys(det, CAMPOS_CONTABILIDAD_DETALLE)
+        for t in det.get("tallas") or []:
+            _drop_keys(t, CAMPOS_CONTABILIDAD_TALLA)
+
+    for s in data.get("servicios_extras") or []:
+        _drop_keys(s, CAMPOS_CONTABILIDAD_SERVICIO)
+
+
 def filtrar_campos_contabilidad_pedido(data, user):
     if puede_ver_contabilidad(user):
         return data
@@ -52,14 +69,5 @@ def filtrar_campos_contabilidad_pedido(data, user):
         logger.warning("No se pudo copiar serializer.data en filtro contabilidad pedido")
         return data
 
-    _drop_keys(cleaned, CAMPOS_CONTABILIDAD_PEDIDO)
-
-    for det in cleaned.get("detalles") or []:
-        _drop_keys(det, CAMPOS_CONTABILIDAD_DETALLE)
-        for t in det.get("tallas") or []:
-            _drop_keys(t, CAMPOS_CONTABILIDAD_TALLA)
-
-    for s in cleaned.get("servicios_extras") or []:
-        _drop_keys(s, CAMPOS_CONTABILIDAD_SERVICIO)
-
+    quitar_campos_contabilidad_pedido(cleaned)
     return cleaned
