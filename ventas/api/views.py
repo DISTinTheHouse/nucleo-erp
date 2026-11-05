@@ -3106,9 +3106,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
             # Solo las columnas del nombre, no las filas completas de cotización y
             # usuario (``aprobado_snapshot`` es un JSONB) en un listado sin paginar.
             qs = qs.annotate(
+                # ``piezas_programables`` no se anota: hoy es igual a ``piezas`` y el
+                # serializer la lee de ahí (EC-776). Anotarla repetía el subquery.
                 piezas=Coalesce(Subquery(piezas_qs[:1]), 0),
-                # Programable = todas las piezas, muestras incluidas (igual que ``programar``).
-                piezas_programables=Coalesce(Subquery(piezas_qs[:1]), 0),
                 piezas_muestra=Coalesce(Subquery(muestra_qs[:1]), 0),
                 piezas_surtidas=Subquery(surtido_qs[:1]),
                 vendedor_cotizacion_id=F("cotizacion__vendedor_id"),

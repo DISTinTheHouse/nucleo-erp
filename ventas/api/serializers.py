@@ -742,7 +742,9 @@ class PedidoListSerializer(serializers.ModelSerializer):
     # es ``None`` sin cotización o sin vendedor.
     piezas = serializers.IntegerField(read_only=True)
     # El ``total_piezas`` de ``programar`` (muestras incluidas, hoy igual a ``piezas``).
-    piezas_programables = serializers.IntegerField(read_only=True)
+    # Sale de la anotación de ``piezas`` (EC-776): si los dos valores vuelven a
+    # diferir, ``PedidoViewSet.get_queryset`` debe anotarla otra vez por separado.
+    piezas_programables = serializers.IntegerField(source="piezas", read_only=True)
     # Tallas de líneas de muestra (``es_muestra``); 0 si no tiene.
     piezas_muestra = serializers.IntegerField(read_only=True)
     # Σ surtido de sus pickings (= ``tracker_picking.total_surtido`` del detalle), entero.

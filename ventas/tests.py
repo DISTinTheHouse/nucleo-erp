@@ -6990,6 +6990,26 @@ class PedidoListadoPiezasVendedorTests(TestCase):
         self.assertNotIn("aprobado_snapshot", sql_listado)
         self.assertNotIn("password", sql_listado)
 
+    def test_piezas_programables_sin_repetir_el_subquery(self):
+        """EC-776: ``piezas_programables`` sale de la misma anotación que ``piezas``;
+        el SQL calcula las piezas una vez (más la de muestras), no dos."""
+        con_muestra = self._pedido("P-1", self.ana, tallas=[(2, False), (49, True)])
+        vacio = self._pedido("P-2", self.sin_nombre)
+        with self.assertNumQueries(1):
+            filas = self._listado()
+        for pedido, piezas in ((con_muestra, 51), (vacio, 0)):
+            fila = filas[pedido.pk]
+            self.assertEqual((fila["piezas"], fila["piezas_programables"]), (piezas, piezas))
+            self.assertIsInstance(fila["piezas_programables"], int)
+        # El orden de campos del listado no cambia.
+        campos = list(filas[con_muestra.pk])
+        self.assertEqual(campos[campos.index("piezas"):campos.index("piezas") + 4],
+                         ["piezas", "piezas_programables", "piezas_muestra", "piezas_surtidas"])
+        with CaptureQueriesContext(connection) as ctx:
+            self._listado()
+        sql = ctx.captured_queries[0]["sql"]
+        self.assertEqual(sql.count('SUM(U0."cantidad")'), 2)
+
 
 class MetodoPagoEtiquetaTests(TestCase):
     """EC-571 UX-01: la etiqueta de PUE dice EXHIBICIÓN; el valor sigue siendo PUE."""
