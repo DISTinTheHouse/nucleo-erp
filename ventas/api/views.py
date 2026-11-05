@@ -17,7 +17,7 @@ from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from catalogo.compatibilidad import exigir_compatibilidad, matriz_onboarding
-from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.filters import OrderingFilter
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
@@ -2702,6 +2702,35 @@ class PedidoViewSet(viewsets.ModelViewSet):
         for fila in response.data["results"] if paginado else response.data:
             quitar_campos_contabilidad_pedido(fila)
         return response
+
+    @action(detail=True, methods=["get"], url_path="cotizacion")
+    def cotizacion(self, request, pk=None):
+        """Cotización ligada al pedido con el alcance del pedido (EC-787).
+
+        Pedido 360° la leía de ``/cotizaciones/{id}/``, cuyo alcance es el de
+        ventas (vendedor/estatus): mesa de control, WMS, compras y producción
+        recibían 404. Aquí basta ver el pedido; la cotización debe ser de la
+        misma empresa y los importes se ocultan con la regla de #537.
+        """
+        pedido = get_object_or_404(
+            pedidos_visibles(pedidos_base(), request.user).only("id", "empresa_id", "cotizacion_id"),
+            pk=pk,
+        )
+        if not pedido.cotizacion_id:
+            raise NotFound("El pedido no tiene cotización ligada.")
+        detalles_qs = CotizacionDetalle.objects.select_related("producto", "color", "categoria_producto").prefetch_related(
+            Prefetch("tallas", queryset=CotizacionDetalleTalla.objects.select_related("talla"))
+        )
+        cotizacion = (
+            Cotizacion.objects.filter(pk=pedido.cotizacion_id, empresa_id=pedido.empresa_id)
+            .select_related("cliente", "sucursal", "moneda", "vendedor")
+            .prefetch_related(Prefetch("cotizaciondetalle", queryset=detalles_qs), "servicios_extras")
+            .first()
+        )
+        if cotizacion is None:
+            raise NotFound("Cotización no encontrada.")
+        data = CotizacionFullSerializer(cotizacion, context=self.get_serializer_context()).data
+        return Response(filtrar_campos_contabilidad_pedido(data, request.user))
 
     def retrieve(self, request, *args, **kwargs):
         # ``get_queryset`` ya prefetchea ``detalles``+``tallas`` para las acciones
