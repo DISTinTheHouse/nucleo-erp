@@ -7210,10 +7210,20 @@ class PedidoListadoPiezasVendedorTests(TestCase):
         campos = list(filas[con_muestra.pk])
         self.assertEqual(campos[campos.index("piezas"):campos.index("piezas") + 4],
                          ["piezas", "piezas_programables", "piezas_muestra", "piezas_surtidas"])
-        with CaptureQueriesContext(connection) as ctx:
-            self._listado()
-        sql = ctx.captured_queries[0]["sql"]
-        self.assertEqual(sql.count('SUM(U0."cantidad")'), 2)
+        # Sin depender del SQL generado: el queryset del listado anota ``piezas`` pero
+        # no ``piezas_programables``, que el serializer toma de ``piezas``.
+        from rest_framework.request import Request
+        from rest_framework.test import APIRequestFactory
+        from ventas.api.serializers import PedidoListSerializer
+
+        view = PedidoViewSet()
+        view.action = "list"
+        view.request = Request(APIRequestFactory().get(PEDIDOS_URL))
+        view.request.user = self.admin
+        anotaciones = view.get_queryset().query.annotations
+        self.assertIn("piezas", anotaciones)
+        self.assertNotIn("piezas_programables", anotaciones)
+        self.assertEqual(PedidoListSerializer().fields["piezas_programables"].source, "piezas")
 
 
 class MetodoPagoEtiquetaTests(TestCase):
