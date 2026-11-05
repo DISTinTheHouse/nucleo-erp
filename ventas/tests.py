@@ -1439,22 +1439,46 @@ class PedidoMesaControlUpdateTests(TestCase):
         )
 
     def test_contexto_consultas_constantes(self):
+        url = pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+
+        def medir(user):
+            with CaptureQueriesContext(connection) as ctx:
+                response = self._client(user).get(url)
+            self.assertEqual(response.status_code, 200)
+            return len(ctx), response.json()
+
         self._factura_emitida_ligada(self.empresa, self.sucursal, "FAC-0001")
         self._picking_activo("PK-001")
         self._picking_activo("PK-002")
-        # Pedido + bloqueos (una consulta). Sin prefetch de renglones.
-        with self.assertNumQueries(2):
-            response = self._client(self.admin_mesa).get(
-                pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        # Pedido + bloqueos (una consulta). Sin prefetch de renglones; quien no es
+        # admin suma la consulta de roles de ``_require_mesa_control``.
+        pocos_admin, body = medir(self.admin_mesa)
+        pocos_mesa, _ = medir(self.mesa_no_admin)
+        self.assertEqual((pocos_admin, pocos_mesa), (2, 3))
+        self.assertEqual(len(body["bloqueos"]), 4)
+
+        # Más documentos de cada tipo y más renglones ligados: mismas consultas.
+        detalle = self.pedido.detalles.get()
+        for i in range(3, 7):
+            picking = self._picking_activo(f"PK-00{i}")
+            PickingDetalle.objects.create(
+                picking=picking,
+                pedido_detalle=detalle,
+                pedido_detalle_talla=detalle.tallas.get(),
+                producto=self.producto_a,
+                cantidad_solicitada="1.0000",
+                cantidad_asignada="0.0000",
+                cantidad_surtida="0.0000",
+                estado=PickingDetalle.EstadoLinea.PENDIENTE,
             )
-        self.assertEqual(response.status_code, 200)
-        # + los roles de quien no es admin para ``_require_mesa_control``.
-        with self.assertNumQueries(3):
-            response = self._client(self.mesa_no_admin).get(
-                pedido_editar_mesa_control_contexto_url(self.pedido.pk)
+        for i in range(3):
+            OrdenesBordado.objects.create(
+                empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido, folio_bordado=f"OB-{i}",
             )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.json()["bloqueos"]), 4)
+        muchos_admin, body = medir(self.admin_mesa)
+        muchos_mesa, _ = medir(self.mesa_no_admin)
+        self.assertEqual(len(body["bloqueos"]), 1 + 6 + 3 + 2)
+        self.assertEqual((muchos_admin, muchos_mesa), (pocos_admin, pocos_mesa))
 
     def test_edicion_exitosa_guarda_y_responde_el_pedido_completo(self):
         """EC-776: el 200 de ``editar-mesa-control`` sin el prefetch del pedido base.
