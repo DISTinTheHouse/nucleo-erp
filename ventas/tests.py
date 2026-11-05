@@ -1464,12 +1464,35 @@ class PedidoMesaControlUpdateTests(TestCase):
         talla = detalle.tallas.get()
         payload = self._payload()
 
-        # 83 en 67a87b9: -4 del prefetch del pedido base, -6 de los bloqueos.
-        with self.assertNumQueries(73):
+        with CaptureQueriesContext(connection) as ctx:
             response = self._client(self.admin_mesa).post(
                 pedido_editar_mesa_control_url(self.pedido.pk), payload, format="json"
             )
         self.assertEqual(response.status_code, 200, response.json())
+
+        # Lo que EC-776 cambió en el POST, sin fijar el resto del flujo: lo previo a
+        # la primera escritura (pedido base, bloqueos de fila y bloqueos de edición).
+        sqls = [q["sql"] for q in ctx.captured_queries]
+        primera_escritura = next(
+            i for i, sql in enumerate(sqls) if sql.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE"))
+        )
+        lectura = sqls[:primera_escritura]
+        candado = next(
+            i for i, sql in enumerate(lectura) if sql.startswith('SELECT "pedidos".') and "FOR UPDATE" in sql
+        )
+        # El pedido base de ``get_object()`` no carga renglones, tallas, variantes
+        # de producción ni servicios extras antes del ``select_for_update``.
+        for tabla in ("pedido_detalle", "pedido_detalle_talla", "variantes_producto_produccion", "pedido_servicios_extras"):
+            self.assertFalse([sql for sql in lectura[:candado] if f'FROM "{tabla}"' in sql], tabla)
+        # Los bloqueos salen en UNA consulta: ninguna otra lectura va a las tablas
+        # de documentos ni de renglones ligados.
+        bloqueos = [sql for sql in lectura if 'AS "reserva_talla_activa"' in sql]
+        self.assertEqual(len(bloqueos), 1)
+        for tabla in ("facturas", "orden_bordado", "orden_reflejante", "orden_corte_manga",
+                      "ordenes_produccion", "picking", "factura_detalle", "picking_detalle"):
+            self.assertEqual(
+                [sql for sql in lectura if f'"{tabla}"' in sql and sql not in bloqueos], [], tabla
+            )
         body = response.json()
         self.assertEqual(list(body), ["pedido", "cotizacion", "sincronizado", "modo"])
         self.assertTrue(body["sincronizado"])
