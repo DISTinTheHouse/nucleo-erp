@@ -1,5 +1,7 @@
 """Recepción de lecturas del lector RFID (webhook del FX) y token por lector."""
 
+import base64
+import binascii
 import json
 import logging
 
@@ -196,16 +198,17 @@ def _extract_epc_raw(item):
     if isinstance(fuzzy_top, (str, bytes)) and fuzzy_top:
         candidates.append(fuzzy_top)
 
+    # Primer candidato que de verdad sea hex: un EPC siempre lo es. Evita tomar
+    # como EPC un texto cualquiera de un evento que no es lectura (heartbeat,
+    # evento de gestión) cuyo nombre de llave contenga "tag"/"hex"/"epc".
     for c in candidates:
         if isinstance(c, bytes):
             try:
                 c = c.decode("utf-8", errors="replace")
             except Exception:
                 continue
-        if isinstance(c, str):
-            s = c.strip()
-            if s:
-                return s
+        if isinstance(c, str) and _es_hexadecimal_epc(c):
+            return c.strip()
     return None
 
 
@@ -388,13 +391,38 @@ def _extract_antenna_rssi(item, fallback_antenna=None, fallback_rssi=None):
     return antenna, rssi
 
 
+def _token_de_authorization(auth):
+    """Token de ``Authorization: Bearer <token>`` o ``Basic base64(usuario:token)``.
+
+    El endpoint HTTP POST del IoT Connector de Zebra (FX7500/FX9600) solo ofrece
+    autenticación *Basic* (usuario + contraseña) o TLS: no deja mandar headers
+    propios ni Bearer. Con Basic, la contraseña es el token del lector y el
+    usuario es libre (si la contraseña viene vacía se toma el usuario).
+    """
+    scheme, _, value = (auth or "").strip().partition(" ")
+    scheme = scheme.lower()
+    value = value.strip()
+    if scheme == "bearer":
+        return value
+    if scheme == "basic" and value:
+        try:
+            decoded = base64.b64decode(value, validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            return ""
+        usuario, _, password = decoded.partition(":")
+        return (password or usuario).strip()
+    return ""
+
+
 def lector_desde_request(request):
-    """Lector activo dueño del token (header X-RFID-Token, Bearer o ?token=)."""
+    """Lector activo dueño del token.
+
+    Acepta, en este orden: header ``X-RFID-Token``, ``?token=`` en la URL y
+    ``Authorization`` (Bearer o Basic con el token como contraseña).
+    """
     token = (request.headers.get("X-RFID-Token") or request.GET.get("token") or "").strip()
     if not token:
-        auth = request.headers.get("Authorization") or ""
-        if auth.lower().startswith("bearer "):
-            token = auth[7:].strip()
+        token = _token_de_authorization(request.headers.get("Authorization"))
     if not token:
         return None
     return LectorRFID.objects.filter(token=token, activo=True).first()
@@ -438,6 +466,28 @@ def recibir_lecturas(request, lector):
         except (json.JSONDecodeError, ValueError, Exception) as e:
             parse_attempts.append(f"json_loads:FAIL:{type(e).__name__}")
             data = None
+
+        # 1b) NDJSON: un objeto JSON por línea (lote sin corchetes ni comas)
+        if data is None and raw_body and raw_body.strip():
+            lineas = [ln.strip() for ln in raw_body.strip().splitlines() if ln.strip()]
+            if len(lineas) > 1:
+                try:
+                    eventos = []
+                    for ln in lineas:
+                        evento = json.loads(ln)
+                        if isinstance(evento, dict):
+                            eventos.append(evento)
+                        elif isinstance(evento, list):
+                            eventos.extend(evento)
+                        else:
+                            # Un número suelto no es un evento: puede ser un EPC
+                            # todo en dígitos de una lista en texto plano (paso 3).
+                            raise ValueError("línea sin objeto JSON")
+                    data = eventos
+                    parse_attempts.append("ndjson:OK")
+                except (json.JSONDecodeError, ValueError):
+                    data = None
+                    parse_attempts.append("ndjson:FAIL")
 
         # 2) request.POST (x-www-form-urlencoded) — FXs viejos a veces usan esto
         if data is None and request.POST:
@@ -493,7 +543,7 @@ def recibir_lecturas(request, lector):
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict):
-            items = (
+            envuelto = (
                 data.get("tagData")
                 or data.get("tags")
                 or data.get("events")
@@ -503,8 +553,12 @@ def recibir_lecturas(request, lector):
                 or data.get("reads")
                 or data.get("readEvents")
                 or data.get("tagReadEvents")
-                or [data]
             )
+            # Lista de lecturas envuelta ({"tags": [...]}) o UN solo evento. El
+            # IoT Connector manda cada lectura como {"data": {"idHex": ...},
+            # "timestamp": ..., "type": "SIMPLE"}: ahí ``data`` es un objeto, no
+            # una lista, y antes se descartaba el evento completo (0 lecturas).
+            items = envuelto if isinstance(envuelto, list) else [data]
             fallback_antenna = (
                 data.get("antenna")
                 or data.get("antennaID")
@@ -577,12 +631,12 @@ def recibir_lecturas(request, lector):
                 continue
             # limpia / normaliza hex (mayúsculas, sin separadores), igual que la etiqueta
             epc_norm = normalizar_epc(epc_raw)
-            if not epc_norm or len(epc_norm) < 8:
+            if not _es_hexadecimal_epc(epc_norm):
                 debug_items.append(
                     {
                         "i": idx,
                         "epc_raw": epc_raw[:40] if isinstance(epc_raw, str) else epc_raw,
-                        "skip_reason": f"len<8 epc={epc_norm}",
+                        "skip_reason": f"no es EPC hex de 8-64 caracteres: {epc_norm[:40]}",
                     }
                 )
                 continue
