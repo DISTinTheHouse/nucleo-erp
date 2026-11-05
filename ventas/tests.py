@@ -8018,3 +8018,38 @@ class ImportesPedidoPorPerfilTests(TestCase):
             with self.subTest(usuario=usuario.username):
                 resp = self._api(usuario).get(f"{PEDIDOS_URL}{self.pedido_otra.pk}/")
                 self.assertEqual(resp.status_code, 404)
+
+    def _filas(self, resp):
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.data["results"] if isinstance(resp.data, dict) else resp.data
+
+    def test_listado_por_perfil_en_todas_sus_variantes(self):
+        # ``?q=EC784`` acota a los pedidos de esta prueba (la BD no está vacía).
+        variantes = (
+            "?q=EC784", "?q=EC784&limit=50", "?q=EC784&mis_pedidos=true", "?q=EC784&estatus=3",
+            "?q=EC784&programado=false&sin_clasificar=true", "?q=EC784&ordering=-folio",
+        )
+        for usuario, ve in self.perfiles:
+            for params in variantes:
+                with self.subTest(usuario=usuario.username, params=params):
+                    filas = self._filas(self._api(usuario).get(f"{PEDIDOS_URL}{params}"))
+                    self.assertTrue(filas)
+                    for fila in filas:
+                        self.assertEqual("subtotal" in fila, ve)
+                        self.assertEqual("gran_total" in fila, ve)
+                        self.assertIn("piezas", fila)  # el resto del shape no cambia
+
+    def test_listado_no_cruza_de_empresa(self):
+        for usuario, _ in self.perfiles[:-1]:
+            with self.subTest(usuario=usuario.username):
+                ids = {f["id"] for f in self._filas(self._api(usuario).get(f"{PEDIDOS_URL}?q=EC784"))}
+                self.assertEqual(ids, {p.pk for p in self.pedidos.values()})
+
+    def test_listado_sin_permiso_no_agrega_consultas(self):
+        url = f"{PEDIDOS_URL}?q=EC784"
+        self._api(self.ventas).get(url)  # calienta caches de ContentType, etc.
+        with CaptureQueriesContext(connection) as con_importes:
+            self._api(self.ventas).get(url)
+        with CaptureQueriesContext(connection) as sin_importes:
+            self._api(self.sin_permiso).get(url)
+        self.assertEqual(len(sin_importes), len(con_importes))

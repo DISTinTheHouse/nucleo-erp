@@ -416,8 +416,9 @@ FILTER_BACKENDS_SIN_ORDERING = tuple(
 )
 # Modo servidor (EC-757): ``?ordering=`` solo con la lista blanca de cada vista y
 # ``id`` como desempate. Sin el parámetro queda el orden fijo de ``get_queryset``
-# (más reciente primero, EC-619). Los importes no entran: ordenar por un monto
-# que la lectura oculta (#537) dejaría deducirlo.
+# (más reciente primero, EC-619). Los importes no entran: el listado y el detalle
+# se los ocultan a quien no ve contabilidad (#537, #947, EC-784), y ordenar por un
+# monto oculto dejaría deducirlo.
 FILTER_BACKENDS_LISTADO = (*FILTER_BACKENDS_SIN_ORDERING, OrdenamientoEstableFilter)
 
 
