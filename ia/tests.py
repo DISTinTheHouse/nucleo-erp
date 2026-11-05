@@ -57,8 +57,16 @@ class UltimaCompraImportesPorPerfilTests(ImportesPedidoFixture, TestCase):
             self.assertIs(datos["puede_ver_importes"], True)
 
     def test_no_cruza_de_empresa(self):
-        # Fuera de los pedidos de la empresa del usuario no hay "última compra" posible.
+        """Para cada perfil hay un pedido MÁS NUEVO en la otra empresa del que es
+        vendedor (``cotizacion.vendedor``): sin el filtro por empresa sería su
+        "última compra". Con el filtro, sigue siendo el pedido de su empresa."""
         for usuario, _ in self.perfiles[:-1]:
             with self.subTest(usuario=usuario.username):
-                resultado, _ = self._chat(usuario)
-                self.assertNotEqual(resultado["last_purchase"]["pedido_id"], self.pedido_otra.pk)
+                ajeno = self._pedido(
+                    self.otra, self.sucursal_otra, self.cliente_otra, usuario,
+                    f"EC784-AJENO-{usuario.pk}", "777.00",
+                )
+                resultado, al_modelo = self._chat(usuario)
+                for datos in (resultado, al_modelo):
+                    self.assertEqual(datos["last_purchase"]["pedido_id"], self.pedidos[usuario.pk].pk)
+                    self.assertNotEqual(datos["last_purchase"]["pedido_id"], ajeno.pk)
