@@ -1793,3 +1793,51 @@ class ClienteEmpresaSucursalTests(TestCase):
 
         self.assertFalse(resultado["ok"])
         self.assertFalse(Cliente.objects.exists())
+
+
+class ResumenComercialImportesPorPerfilTests(TestCase):
+    """EC-784: ``resumen_comercial`` del detalle de cliente sigue la regla de importes
+    del pedido (contabilidad de ventas O de compras). Sin ella se omiten
+    ``montos_por_moneda`` y el ``gran_total`` de ``pedidos_recientes``/``ultimo_pedido``;
+    conteos, folios y ``cartera`` no cambian."""
+
+    @classmethod
+    def setUpTestData(cls):
+        import ventas.tests as ventas_tests
+
+        # Mismo fixture que ``ImportesPedidoPorPerfilTests`` (perfiles, pedidos, otra empresa).
+        base = ventas_tests.ImportesPedidoPorPerfilTests
+        for helper in ("_usuario", "_pedido"):
+            setattr(cls, helper, classmethod(base.__dict__[helper].__func__))
+        base.setUpTestData.__func__(cls)
+        cls.cliente = next(iter(cls.pedidos.values())).cliente
+        cls.cliente_otra = cls.pedido_otra.cliente
+        # Sin ser Mesa de Control/Contabilidad, un usuario sólo ve sus clientes asignados.
+        cls.cliente.vendedores.add(*(usuario for usuario, _ in cls.perfiles))
+
+    def _resumen(self, usuario, cliente):
+        api = APIClient()
+        api.force_authenticate(usuario)
+        return api.get(f"{CLIENTES_URL}{cliente.pk}/")
+
+    def test_resumen_por_perfil(self):
+        for usuario, ve in self.perfiles:
+            with self.subTest(usuario=usuario.username):
+                resp = self._resumen(usuario, self.cliente)
+                self.assertEqual(resp.status_code, 200, resp.content)
+                resumen = resp.data["resumen_comercial"]
+                self.assertEqual("montos_por_moneda" in resumen, ve)
+                self.assertIs(resumen.get("puede_ver_importes"), ve)
+                self.assertEqual(resumen["total_pedidos"], len(self.pedidos))
+                self.assertEqual(len(resumen["pedidos_recientes"]), 5)
+                for pedido in [*resumen["pedidos_recientes"], resumen["ultimo_pedido"]]:
+                    self.assertEqual("gran_total" in pedido, ve)
+                    self.assertIn("folio", pedido)
+                self.assertIn("cartera", resumen)
+                if ve:
+                    self.assertEqual(resumen["montos_por_moneda"], [{"moneda": "XEC", "total": Decimal("1500.00")}])
+
+    def test_cliente_de_otra_empresa_es_404(self):
+        for usuario, _ in self.perfiles[:-1]:
+            with self.subTest(usuario=usuario.username):
+                self.assertEqual(self._resumen(usuario, self.cliente_otra).status_code, 404)

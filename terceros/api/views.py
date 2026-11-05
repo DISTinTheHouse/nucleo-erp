@@ -113,6 +113,12 @@ class ClienteViewSet(viewsets.ModelViewSet):
         # módulo (FK ``Cliente``), así que importar ``ventas.models`` aquí
         # arriba crearía un ciclo al cargar las apps.
         from ventas.models import Pedido, Cotizacion
+        from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
+
+        # Misma regla de importes que el listado y el detalle de pedidos (EC-784):
+        # sin ella se omiten ``montos_por_moneda`` y el ``gran_total`` de cada
+        # pedido (y no se corre su agregación); conteos, folios y fechas quedan.
+        ver_importes = puede_ver_contabilidad(self.request.user)
 
         estatus_pedido = dict(Pedido.CHOICES_ESTATUS)
         # Sólo documentos de la empresa del cliente: sin este filtro, un pedido o
@@ -134,7 +140,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
             for fila in pedidos_qs.exclude(estatus=5)
             .values("moneda__codigo_iso")
             .annotate(total=Sum("gran_total"))
-        ]
+        ] if ver_importes else None
 
         recientes = pedidos_qs.select_related("moneda").order_by("-created_at")[:5].values(
             "id", "folio", "created_at", "estatus", "gran_total", "moneda__codigo_iso"
@@ -151,8 +157,11 @@ class ClienteViewSet(viewsets.ModelViewSet):
             }
             for fila in recientes
         ]
+        if not ver_importes:
+            for pedido in pedidos_recientes:
+                del pedido["gran_total"]
 
-        return {
+        resumen = {
             "total_pedidos": pedidos_qs.count(),
             "total_cotizaciones": Cotizacion.objects.filter(
                 cliente=cliente, empresa_id=cliente.empresa_id
@@ -162,7 +171,12 @@ class ClienteViewSet(viewsets.ModelViewSet):
             "ultimo_pedido": pedidos_recientes[0] if pedidos_recientes else None,
             "pedidos_recientes": pedidos_recientes,
             "cartera": cartera_de_cliente(cliente),
+            # Señal explícita para el front, como los ``kpis/`` (#841).
+            "puede_ver_importes": ver_importes,
         }
+        if not ver_importes:
+            del resumen["montos_por_moneda"]
+        return resumen
 
     def perform_create(self, serializer):
         user = self.request.user
