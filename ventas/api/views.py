@@ -178,6 +178,27 @@ PEDIDO_COTIZACION_MIRROR_FIELDS = (
 )
 
 
+# ``accion_requerida`` de cada tipo de bloqueo de la edición estricta de mesa de
+# control (``PedidoViewSet._get_bloqueos_edicion_estricta``).
+ACCIONES_BLOQUEO_MESA_CONTROL = {
+    "factura_emitida": "Cancelar la factura o emitir la nota de crédito correspondiente antes de editar el pedido.",
+    "orden_bordado_activa": "Cancelar y dar de baja la orden de bordado antes de editar el pedido.",
+    "orden_reflejante_activa": "Cancelar y dar de baja la orden de reflejante antes de editar el pedido.",
+    "orden_corte_manga_activa": "Cancelar y dar de baja la orden de corte de manga antes de editar el pedido.",
+    "orden_produccion_activa": "Cancelar y dar de baja la orden de producción antes de editar el pedido.",
+    "picking_activo": "Cancelar el picking antes de editar el pedido.",
+    "factura_detalle_ligado": "Cancelar la factura y limpiar su detalle antes de editar el pedido.",
+    "nota_credito_ligada": "Revisar/cancelar la nota de crédito ligada antes de editar el pedido.",
+    "orden_bordado_detalle_ligado": "Dar de baja los renglones de bordado ligados antes de editar el pedido.",
+    "orden_reflejante_detalle_ligado": "Dar de baja los renglones de reflejante ligados antes de editar el pedido.",
+    "orden_corte_manga_detalle_ligado": "Dar de baja los renglones de corte de manga ligados antes de editar el pedido.",
+    "orden_produccion_detalle_ligado": "Dar de baja los renglones de producción ligados antes de editar el pedido.",
+    "picking_detalle_ligado": "Cancelar el picking y sus líneas antes de editar el pedido.",
+    "reserva_inventario_activa": "Liberar o cancelar las reservas de inventario antes de editar el pedido.",
+    "reserva_talla_activa": "Liberar o cancelar las reservas por talla antes de editar el pedido.",
+}
+
+
 def _pedido_detalles_prefetch():
     """Prefetch de ``detalles`` (+``tallas``) con las FK que
     ``PedidoDetalleReadSerializer`` resuelve a nombre — un único set de
@@ -2857,37 +2878,37 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 "factura_emitida",
                 Factura.objects.filter(activo=True, estatus=Factura.FacturaStatus.EMITIDA),
                 "id", "folio", "estatus",
-                "Cancelar la factura o emitir la nota de crédito correspondiente antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["factura_emitida"],
             ),
             (
                 "orden_bordado_activa",
                 OrdenesBordado.objects.filter(activo=True),
                 "id", "folio_bordado", "estatus_bordado",
-                "Cancelar y dar de baja la orden de bordado antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["orden_bordado_activa"],
             ),
             (
                 "orden_reflejante_activa",
                 OrdenesReflejante.objects.filter(activo=True),
                 "id", "folio_reflejante", "estatus_reflejante",
-                "Cancelar y dar de baja la orden de reflejante antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["orden_reflejante_activa"],
             ),
             (
                 "orden_corte_manga_activa",
                 OrdenesCorteManga.objects.filter(activo=True),
                 "id", "folio_ocm", "estatus_corte",
-                "Cancelar y dar de baja la orden de corte de manga antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["orden_corte_manga_activa"],
             ),
             (
                 "orden_produccion_activa",
                 OrdenProduccion.objects.filter(activo=True),
                 "op_id", "folio_op", "estatus_op",
-                "Cancelar y dar de baja la orden de producción antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["orden_produccion_activa"],
             ),
             (
                 "picking_activo",
                 Picking.objects.exclude(estado=Picking.Estado.CANCELADO),
                 "id", "folio", "estado",
-                "Cancelar el picking antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["picking_activo"],
             ),
         ]
 
@@ -2912,7 +2933,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
                     # e independiente de ``pedido_detalle``).
                     FacturaDetalle.objects.filter(pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk")),
                 ],
-                "Cancelar la factura y limpiar su detalle antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["factura_detalle_ligado"],
             ),
             (
                 "nota_credito_ligada",
@@ -2923,37 +2944,37 @@ class PedidoViewSet(viewsets.ModelViewSet):
                         factura_detalle__pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk")
                     ),
                 ],
-                "Revisar/cancelar la nota de crédito ligada antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["nota_credito_ligada"],
             ),
             (
                 "orden_bordado_detalle_ligado",
                 [OrdenBordadoDetalle.objects.filter(**en_el_pedido)],
-                "Dar de baja los renglones de bordado ligados antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["orden_bordado_detalle_ligado"],
             ),
             (
                 "orden_reflejante_detalle_ligado",
                 [OrdenReflejanteDetalle.objects.filter(**en_el_pedido)],
-                "Dar de baja los renglones de reflejante ligados antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["orden_reflejante_detalle_ligado"],
             ),
             (
                 "orden_corte_manga_detalle_ligado",
                 [OrdenCorteMangaDetalle.objects.filter(**en_el_pedido)],
-                "Dar de baja los renglones de corte de manga ligados antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["orden_corte_manga_detalle_ligado"],
             ),
             (
                 "orden_produccion_detalle_ligado",
                 [OrdenProduccionDetalle.objects.filter(**en_el_pedido)],
-                "Dar de baja los renglones de producción ligados antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["orden_produccion_detalle_ligado"],
             ),
             (
                 "picking_detalle_ligado",
                 [PickingDetalle.objects.filter(**en_el_pedido)],
-                "Cancelar el picking y sus líneas antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["picking_detalle_ligado"],
             ),
             (
                 "reserva_inventario_activa",
                 [inventario_reservas.objects.filter(reserva_viva, **en_el_pedido)],
-                "Liberar o cancelar las reservas de inventario antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["reserva_inventario_activa"],
             ),
             (
                 "reserva_talla_activa",
@@ -2963,7 +2984,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
                         pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk"),
                     )
                 ],
-                "Liberar o cancelar las reservas por talla antes de editar el pedido.",
+                ACCIONES_BLOQUEO_MESA_CONTROL["reserva_talla_activa"],
             ),
         ]
 
