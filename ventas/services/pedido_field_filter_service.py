@@ -30,18 +30,17 @@ CLAVES_IMPORTES_PEDIDO = CLAVES_CONTABILIDAD_VENTAS | CLAVES_CONTABILIDAD_COMPRA
 CLAVES_EDICION_IMPORTES_PEDIDO = CLAVES_CONTABILIDAD_VENTAS
 
 
-def puede_ver_contabilidad(user, claves=None) -> bool:
+def puede_ver_contabilidad(user) -> bool:
     """LECTURA de importes del pedido: listado, detalle, respuestas de alta/edición
     y ``editar-mesa-control``, ``kpis``, trazabilidad, documentos ligados, resumen
-    del cliente y asistente de IA. ``claves``: las del usuario si ya se resolvieron
-    en esta petición."""
-    return tiene_claves_de_importes(user, CLAVES_IMPORTES_PEDIDO, claves)
+    del cliente y asistente de IA."""
+    return tiene_claves_de_importes(user, CLAVES_IMPORTES_PEDIDO)
 
 
-def puede_modificar_importes_pedido(user, claves=None) -> bool:
+def puede_modificar_importes_pedido(user) -> bool:
     """ESCRITURA: campos de contabilidad del pedido (#537) y ``recomprar``, que clona
     sus precios. Es la regla de antes de EC-784, sin la ampliación a compras."""
-    return tiene_claves_de_importes(user, CLAVES_EDICION_IMPORTES_PEDIDO, claves)
+    return tiene_claves_de_importes(user, CLAVES_EDICION_IMPORTES_PEDIDO)
 
 
 def quitar_campos_contabilidad_pedido(data) -> None:
@@ -65,10 +64,10 @@ def quitar_campos_contabilidad_pedido(data) -> None:
 ANIDADOS_CON_IMPORTES_PEDIDO = {"detalles": {"tallas": {}}, "servicios_extras": {}}
 
 
-def filtrar_campos_contabilidad_pedido(data, user, claves=None):
+def filtrar_campos_contabilidad_pedido(data, user):
     """``data`` tal cual si el usuario ve importes; si no, una copia sin ellos.
     Falla cerrado: no hay rama que devuelva los importes a quien no los ve."""
-    if puede_ver_contabilidad(user, claves):
+    if puede_ver_contabilidad(user):
         return data
     filtrado = copia_para_quitar(data, ANIDADOS_CON_IMPORTES_PEDIDO)
     quitar_campos_contabilidad_pedido(filtrado)

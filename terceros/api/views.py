@@ -29,7 +29,6 @@ from terceros.api.serializers import (
 )
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
 from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, booleano_param
-from nucleo.importes import claves_de_la_peticion
 from terceros.cartera import cartera_de_cliente
 from terceros import csf, facturama
 from finanzas.services.facturama.acceso import puede_consultar_cfdis
@@ -94,7 +93,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
         # en una sola consulta, no una por cliente. Orden por defecto: nombre, con
         # ``id`` como desempate estable (antes era indefinido, EC-757).
         return (
-            clientes_visibles(super().get_queryset(), self.request.user, claves=claves_de_la_peticion(self))
+            clientes_visibles(super().get_queryset(), self.request.user)
             .prefetch_related("vendedores")
             .order_by("nombre", "id")
         )
@@ -119,8 +118,9 @@ class ClienteViewSet(viewsets.ModelViewSet):
         # Misma regla de importes que el listado y el detalle de pedidos (EC-784):
         # sin ella no se agregan ``montos_por_moneda`` ni el ``gran_total`` de cada
         # pedido (ni se corre su agregación); conteos, folios y fechas quedan.
-        # Las claves ya las resolvió ``get_queryset`` para el alcance: no se consultan dos veces.
-        ver_importes = puede_ver_contabilidad(self.request.user, claves_de_la_peticion(self))
+        # Las claves de departamento ya las consultó el alcance (``clientes_visibles``)
+        # y quedaron guardadas en el usuario: no se consultan dos veces.
+        ver_importes = puede_ver_contabilidad(self.request.user)
 
         estatus_pedido = dict(Pedido.CHOICES_ESTATUS)
         # Sólo documentos de la empresa del cliente: sin este filtro, un pedido o

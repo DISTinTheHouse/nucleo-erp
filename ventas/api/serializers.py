@@ -904,10 +904,7 @@ class PedidoSerializer(serializers.ModelSerializer):
             request = self.context.get("request")
             # Recién creado (``autorizar``): nada más que su cotización lo referencia aún.
             tipos = {"cotizacion"} if self.context.get("_pedido_nuevo") else None
-            return listar_documentos_pedido(
-                obj, getattr(request, "user", None), tipos=tipos,
-                claves=self.context.get("_claves_departamento"),
-            )
+            return listar_documentos_pedido(obj, getattr(request, "user", None), tipos=tipos)
         except Exception:
             return []
 

@@ -111,6 +111,22 @@ def resolver_clave_departamento_rol(rol) -> str:
     )
 
 
+# Las claves de un usuario se guardan en su propio objeto (``request.user``) para que
+# el alcance, las reglas de importes y los permisos de mesa de control no repitan la
+# misma consulta dentro de una petición (EC-784). La generación sube al empezar cada
+# petición y con cualquier alta, cambio o baja de ``Rol``/``UsuarioRol`` (ver
+# ``seguridad.apps``): lo guardado dura a lo más una petición y nunca sobrevive a un
+# cambio de roles, aunque el objeto usuario se reutilice (``force_authenticate``, un
+# shell). Un ``.update()``/``bulk_create`` masivo no dispara señales: dentro de la
+# misma petición, tras uno de esos, la caché podría estar vieja.
+_GENERACION_ROLES = 0
+
+
+def invalidar_claves_departamento(**_kwargs) -> None:
+    global _GENERACION_ROLES
+    _GENERACION_ROLES += 1
+
+
 def claves_departamento_usuario(user, empresa=None) -> set[str]:
     from .models import Rol, UsuarioRol
     from usuarios.models import Usuario
@@ -120,19 +136,31 @@ def claves_departamento_usuario(user, empresa=None) -> set[str]:
     if getattr(user, "estatus", None) != Usuario.Estatus.ACTIVO:
         return set()
 
-    qs = UsuarioRol.objects.filter(usuario=user, rol__estatus=Rol.Estatus.ACTIVO)
     empresa_id = getattr(empresa, "pk", empresa)
     if empresa_id is None:
         empresa_id = getattr(user, "empresa_id", None)
     if empresa_id is None:
         return set()
-    qs = qs.filter(rol__empresa_id=empresa_id)
 
+    generacion, por_empresa = getattr(user, "_claves_departamento_cache", (None, None))
+    if generacion != _GENERACION_ROLES:
+        por_empresa = {}
+    if empresa_id in por_empresa:
+        return set(por_empresa[empresa_id])
+
+    qs = UsuarioRol.objects.filter(
+        usuario=user, rol__estatus=Rol.Estatus.ACTIVO, rol__empresa_id=empresa_id
+    )
     claves = set()
     for asignacion in qs.select_related("rol"):
         clave = resolver_clave_departamento_rol(getattr(asignacion, "rol", None))
         if clave:
             claves.add(clave)
+    por_empresa[empresa_id] = frozenset(claves)
+    try:
+        user._claves_departamento_cache = (_GENERACION_ROLES, por_empresa)
+    except AttributeError:  # objetos sin ``__dict__`` (p. ej. AnonymousUser con slots)
+        pass
     return claves
 
 

@@ -52,7 +52,7 @@ def clientes_visibles_entre(user, ids):
     )
 
 
-def clientes_visibles(qs, user, claves=None):
+def clientes_visibles(qs, user):
     """Alcance de ``terceros.Cliente``: empresa + ``vendedores`` si no es admin/mesa de control/contabilidad.
 
     El superusuario ve todo; dentro de la empresa, ``is_admin_empresa``, Mesa de
@@ -70,10 +70,6 @@ def clientes_visibles(qs, user, claves=None):
     qs = qs.filter(empresa=empresa)
     if getattr(user, "is_admin_empresa", False):
         return qs
-    # ``claves``: las del usuario si quien llama ya las resolvió en esta petición
-    # (``nucleo.importes.claves_de_la_peticion``); son las de su empresa activa.
-    if claves is None:
-        claves = claves_departamento_usuario(user, empresa=empresa)
-    if claves & DEPARTAMENTOS_TODOS_LOS_CLIENTES:
+    if claves_departamento_usuario(user, empresa=empresa) & DEPARTAMENTOS_TODOS_LOS_CLIENTES:
         return qs
     return qs.filter(vendedores__id=getattr(user, "id", None))

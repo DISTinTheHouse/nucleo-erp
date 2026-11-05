@@ -10,36 +10,14 @@ y se separaron (EC-784).
 from seguridad.role_identity import claves_departamento_usuario
 
 
-def tiene_claves_de_importes(user, claves_permitidas, claves=None) -> bool:
+def tiene_claves_de_importes(user, claves_permitidas) -> bool:
     """``True`` si ``user`` es superusuario, admin de empresa o tiene un rol activo
-    con alguna de ``claves_permitidas``.
-
-    ``claves``: las claves de departamento del usuario si quien llama ya las resolvió
-    en esta petición (cuestan una consulta); con ``None`` se consultan aquí. El
-    superusuario y el admin nunca las necesitan.
-    """
+    con alguna de ``claves_permitidas``. El superusuario y el admin no consultan sus
+    claves; para el resto, ``claves_departamento_usuario`` las consulta una sola vez
+    por petición (se guardan en el objeto usuario)."""
     if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
         return True
-    if claves is None:
-        claves = claves_departamento_usuario(user)
-    return bool(claves & claves_permitidas)
-
-
-def claves_de_la_peticion(view):
-    """Claves de departamento del usuario de la petición, resueltas una sola vez.
-
-    Se guardan en la vista, que vive lo que la petición (mismo patrón que
-    ``OrdenCompraViewSet.ver_montos``, #836), para que el alcance y la regla de
-    importes no repitan la consulta. ``None`` para el superusuario y el admin de
-    empresa: ninguna de las dos reglas las necesita y así no cuestan consulta.
-    """
-    if not hasattr(view, "_claves_departamento"):
-        user = view.request.user
-        if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
-            view._claves_departamento = None
-        else:
-            view._claves_departamento = claves_departamento_usuario(user)
-    return view._claves_departamento
+    return bool(claves_departamento_usuario(user) & claves_permitidas)
 
 
 def copia_para_quitar(data, anidados=None):

@@ -1106,6 +1106,19 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["editable"])
 
+    def test_editar_mesa_control_consulta_los_roles_una_vez(self):
+        """EC-784: el permiso de mesa de control, el filtro de importes y los
+        documentos del pedido comparten las claves de departamento del usuario."""
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(vendedor=self.mesa_no_admin)
+        client = self._client(self.mesa_no_admin)
+        with CaptureQueriesContext(connection) as consultas:
+            response = client.post(
+                pedido_editar_mesa_control_url(self.pedido.pk), self._payload(), format="json",
+            )
+        self.assertEqual(response.status_code, 200, response.content)
+        roles = sum('"usuarios_roles"' in q["sql"] for q in consultas.captured_queries)
+        self.assertEqual(roles, 1)
+
     def test_edicion_mesa_control_actualiza_pedido_y_cotizacion_sin_inventario(self):
         Cotizacion.objects.filter(pk=self.cotizacion.pk).update(vendedor=self.mesa_no_admin)
         response = self._client(self.admin_mesa).post(
@@ -6370,6 +6383,23 @@ class AutorizarCotizacionRendimientoTests(TestCase):
                 cotizacion=cls.cotizacion, nombre=f"Extra {i}", monto="5.00", cantidad=1,
             )
 
+    def test_autorizar_consulta_los_roles_una_vez(self):
+        """EC-784: con un usuario de mesa de control (no admin), el permiso y los
+        documentos del pedido de la respuesta comparten sus claves de departamento."""
+        mesa = Usuario.objects.create(username="perf-au-mesa@perf.test", email="perf-au-mesa@perf.test", empresa=self.empresa)
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="MESA-AU", nombre="Mesa", estatus=Rol.Estatus.ACTIVO,
+            clave_departamento="MESACONTROL",
+        )
+        UsuarioRol.objects.create(usuario=mesa, rol=rol, empresa=self.empresa)
+        client = APIClient()
+        client.force_authenticate(user=mesa)
+        with CaptureQueriesContext(connection) as consultas:
+            # Mesa de control (no admin) ve la cotización por su propio listado.
+            resp = client.post(f"/api/v1/ventas/mesa-control/{self.cotizacion.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(sum('"usuarios_roles"' in q["sql"] for q in consultas.captured_queries), 1)
+
     def test_autorizar_rendimiento(self):
         client = APIClient()
         client.force_authenticate(user=self.usuario)
@@ -8026,6 +8056,30 @@ class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
         for usuario, ve in (*self.perfiles, (self.superusuario_sin_empresa, True)):
             with self.subTest(usuario=usuario.username):
                 self.assertEqual(puede_ver_contabilidad(usuario), ve)
+
+    def test_claves_guardadas_se_invalidan_al_cambiar_roles(self):
+        """Las claves viven en el objeto usuario; un alta o baja de ``UsuarioRol`` o un
+        cambio de ``Rol`` las invalida, aunque el objeto sobreviva a varias peticiones
+        (``force_authenticate`` reutiliza el mismo)."""
+        from seguridad.role_identity import claves_departamento_usuario
+
+        usuario = self.sin_permiso
+        api = self._api(usuario)
+        url = f"{PEDIDOS_URL}{self.pedidos[usuario.pk].pk}/"
+        self.assertNotIn("gran_total", api.get(url).data)
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="EC784-INV", nombre="Ventas", estatus=Rol.Estatus.ACTIVO,
+            clave_departamento="VENTAS",
+        )
+        asignacion = UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=self.empresa)
+        self.assertIn("gran_total", api.get(url).data)
+        rol.estatus = Rol.Estatus.INACTIVO
+        rol.save()
+        self.assertNotIn("gran_total", api.get(url).data)
+        rol.estatus = Rol.Estatus.ACTIVO
+        rol.save()
+        asignacion.delete()
+        self.assertEqual(claves_departamento_usuario(usuario), {"WMS"})
 
     def test_claves_del_usuario_se_consultan_una_vez_por_peticion(self):
         """El alcance, la regla de lectura, la de escritura y los documentos del

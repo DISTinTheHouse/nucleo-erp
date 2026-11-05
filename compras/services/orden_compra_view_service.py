@@ -13,7 +13,7 @@ CAMPOS_CONTABILIDAD_OC_RECEPCION = []
 CAMPOS_CONTABILIDAD_OC_RECEPCION_DETALLE = []
 
 
-def puede_ver_contabilidad(user, claves=None) -> bool:
+def puede_ver_contabilidad(user) -> bool:
     """Reglas de visibilidad $ en OrdenCompra:
 
     - `is_superuser` / `is_admin_empresa` → todo.
@@ -22,9 +22,8 @@ def puede_ver_contabilidad(user, claves=None) -> bool:
     - Cualquier otro rol (incluyendo WMS sin acceso) → se ocultan los keys $$.
 
     La regla vive en ``nucleo.importes``; aquí sólo se elige el conjunto de claves.
-    ``claves``: las del usuario si quien llama ya las resolvió en esta petición.
     """
-    return tiene_claves_de_importes(user, CLAVES_CONTABILIDAD_COMPRAS, claves)
+    return tiene_claves_de_importes(user, CLAVES_CONTABILIDAD_COMPRAS)
 
 
 SIN_PERMISO_CONTABILIDAD = {"disponible": False, "motivo": "Sin permiso de contabilidad."}
