@@ -3137,9 +3137,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # ``nulls_last``: ``Pedido.created_at`` se agregó como NULL-able
         # (migración 0007) y los pedidos previos siguen en NULL; en PostgreSQL
         # un DESC los pondría al principio del listado.
-        # El orden es fijo porque ``filter_backends`` no incluye ``OrderingFilter``:
-        # el global corre después de ``get_queryset`` y lo reemplazaría con
-        # ``?ordering=`` (EC-619, igual que en ``CotizacionViewSet``).
+        # Es el orden por defecto (EC-619): ``OrdenamientoEstableFilter`` (EC-757)
+        # corre después de ``get_queryset`` y sólo lo reemplaza con un ``?ordering=``
+        # de la lista blanca ``ordering_fields``, con ``id`` como desempate.
         return qs.order_by(F("created_at").desc(nulls_last=True), "-id")
 
     def _exigir_permiso_campos_contabilidad(self, request):
