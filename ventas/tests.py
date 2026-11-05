@@ -8057,12 +8057,16 @@ class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
             with self.subTest(usuario=usuario.username):
                 self.assertEqual(puede_ver_contabilidad(usuario), ve)
 
-    def test_claves_guardadas_se_invalidan_al_cambiar_roles(self):
-        """Las claves viven en el objeto usuario; un alta o baja de ``UsuarioRol`` o un
-        cambio de ``Rol`` las invalida, aunque el objeto sobreviva a varias peticiones
-        (``force_authenticate`` reutiliza el mismo)."""
-        from seguridad.role_identity import claves_departamento_usuario
+    def test_claves_no_pasan_de_una_peticion_a_otra(self):
+        """La caché de claves vive una petición: con el mismo objeto usuario
+        (``force_authenticate`` lo reutiliza), cada petición consulta sus roles una vez."""
+        api = self._api(self.compras)
+        url = f"{PEDIDOS_URL}{self.pedidos[self.compras.pk].pk}/"
+        self.assertEqual([self._consultas_de_roles(lambda: api.get(url)) for _ in range(2)], [1, 1])
 
+    def test_rol_quitado_entre_peticiones_se_ve_en_la_siguiente(self):
+        """Sin señales ni contadores: un rol quitado (incluso con un ``.delete()`` de
+        queryset, que no dispara señales) ya no cuenta en la petición siguiente."""
         usuario = self.sin_permiso
         api = self._api(usuario)
         url = f"{PEDIDOS_URL}{self.pedidos[usuario.pk].pk}/"
@@ -8071,15 +8075,28 @@ class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
             empresa=self.empresa, codigo="EC784-INV", nombre="Ventas", estatus=Rol.Estatus.ACTIVO,
             clave_departamento="VENTAS",
         )
-        asignacion = UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=self.empresa)
+        UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=self.empresa)
         self.assertIn("gran_total", api.get(url).data)
-        rol.estatus = Rol.Estatus.INACTIVO
-        rol.save()
+        UsuarioRol.objects.filter(usuario=usuario, rol=rol).delete()
         self.assertNotIn("gran_total", api.get(url).data)
-        rol.estatus = Rol.Estatus.ACTIVO
-        rol.save()
-        asignacion.delete()
-        self.assertEqual(claves_departamento_usuario(usuario), {"WMS"})
+        Rol.objects.filter(pk=rol.pk).update(estatus=Rol.Estatus.INACTIVO)
+        UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=self.empresa)
+        self.assertNotIn("gran_total", api.get(url).data)  # rol inactivo
+
+    def test_fuera_de_una_peticion_cada_llamada_consulta(self):
+        from seguridad.role_identity import claves_departamento_usuario
+
+        with CaptureQueriesContext(connection) as consultas:
+            for _ in range(3):
+                self.assertEqual(claves_departamento_usuario(self.compras), {"COMPRAS"})
+        self.assertEqual(sum('"usuarios_roles"' in q["sql"] for q in consultas.captured_queries), 3)
+
+    def test_borrar_asignaciones_es_un_solo_delete(self):
+        """Sin receptores de señales en ``UsuarioRol``, Django vuelve a borrar por
+        queryset con un solo DELETE (``_set_roles`` lo hace en cada edición de roles)."""
+        with CaptureQueriesContext(connection) as consultas:
+            UsuarioRol.objects.filter(usuario=self.compras).delete()
+        self.assertEqual([q["sql"].split()[0] for q in consultas.captured_queries], ["DELETE"])
 
     def test_claves_del_usuario_se_consultan_una_vez_por_peticion(self):
         """El alcance, la regla de lectura, la de escritura y los documentos del

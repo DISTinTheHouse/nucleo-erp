@@ -1,4 +1,5 @@
 import re
+from contextvars import ContextVar
 
 
 CLAVE_DEPARTAMENTO_MESA_CONTROL = "MESACONTROL"
@@ -111,20 +112,24 @@ def resolver_clave_departamento_rol(rol) -> str:
     )
 
 
-# Las claves de un usuario se guardan en su propio objeto (``request.user``) para que
-# el alcance, las reglas de importes y los permisos de mesa de control no repitan la
-# misma consulta dentro de una petición (EC-784). La generación sube al empezar cada
-# petición y con cualquier alta, cambio o baja de ``Rol``/``UsuarioRol`` (ver
-# ``seguridad.apps``): lo guardado dura a lo más una petición y nunca sobrevive a un
-# cambio de roles, aunque el objeto usuario se reutilice (``force_authenticate``, un
-# shell). Un ``.update()``/``bulk_create`` masivo no dispara señales: dentro de la
-# misma petición, tras uno de esos, la caché podría estar vieja.
-_GENERACION_ROLES = 0
+# Claves de departamento ya consultadas EN ESTA PETICIÓN, por ``(usuario, empresa)``,
+# para que el alcance, las reglas de importes y el permiso de mesa de control no
+# repitan la misma consulta (EC-784). La abre ``request_started`` con un dict nuevo y
+# la cierra ``request_finished`` (ver ``seguridad.apps``). Una ``ContextVar`` es propia
+# de cada hilo en WSGI y de cada tarea en ASGI, así que dos peticiones nunca la
+# comparten. Fuera de una petición (shell, comandos, jobs) vale ``None``: cada llamada
+# consulta la BD, como antes de EC-784.
+_CLAVES_DE_LA_PETICION: ContextVar[dict | None] = ContextVar("claves_departamento_peticion", default=None)
 
 
-def invalidar_claves_departamento(**_kwargs) -> None:
-    global _GENERACION_ROLES
-    _GENERACION_ROLES += 1
+def abrir_cache_claves_departamento(**_kwargs) -> None:
+    """Receptor de ``request_started``: caché vacía para la petición que empieza."""
+    _CLAVES_DE_LA_PETICION.set({})
+
+
+def cerrar_cache_claves_departamento(**_kwargs) -> None:
+    """Receptor de ``request_finished``: nada de lo consultado sale de la petición."""
+    _CLAVES_DE_LA_PETICION.set(None)
 
 
 def claves_departamento_usuario(user, empresa=None) -> set[str]:
@@ -142,11 +147,10 @@ def claves_departamento_usuario(user, empresa=None) -> set[str]:
     if empresa_id is None:
         return set()
 
-    generacion, por_empresa = getattr(user, "_claves_departamento_cache", (None, None))
-    if generacion != _GENERACION_ROLES:
-        por_empresa = {}
-    if empresa_id in por_empresa:
-        return set(por_empresa[empresa_id])
+    cache = _CLAVES_DE_LA_PETICION.get()
+    llave = (user.pk, empresa_id)
+    if cache is not None and llave in cache:
+        return set(cache[llave])
 
     qs = UsuarioRol.objects.filter(
         usuario=user, rol__estatus=Rol.Estatus.ACTIVO, rol__empresa_id=empresa_id
@@ -156,11 +160,8 @@ def claves_departamento_usuario(user, empresa=None) -> set[str]:
         clave = resolver_clave_departamento_rol(getattr(asignacion, "rol", None))
         if clave:
             claves.add(clave)
-    por_empresa[empresa_id] = frozenset(claves)
-    try:
-        user._claves_departamento_cache = (_GENERACION_ROLES, por_empresa)
-    except AttributeError:  # objetos sin ``__dict__`` (p. ej. AnonymousUser con slots)
-        pass
+    if cache is not None:
+        cache[llave] = frozenset(claves)
     return claves
 
 

@@ -6,21 +6,11 @@ class SeguridadConfig(AppConfig):
     name = 'seguridad'
 
     def ready(self):
-        # Invalida las claves de departamento guardadas en los objetos usuario
-        # (``role_identity.claves_departamento_usuario``) al cambiar roles o asignaciones.
-        # Y al empezar cada petición, para que lo guardado dure exactamente una: un
-        # objeto usuario reutilizado entre peticiones (``force_authenticate``) no
-        # arrastra claves de la anterior.
-        from django.core.signals import request_started
-        from django.db.models.signals import post_delete, post_save
+        # Caché de claves de departamento por petición (``role_identity``): se abre al
+        # empezar cada petición y se cierra al terminar.
+        from django.core.signals import request_finished, request_started
 
-        from .models import Rol, UsuarioRol
-        from .role_identity import invalidar_claves_departamento
+        from .role_identity import abrir_cache_claves_departamento, cerrar_cache_claves_departamento
 
-        request_started.connect(invalidar_claves_departamento, dispatch_uid="claves-departamento-peticion")
-        for modelo in (Rol, UsuarioRol):
-            for nombre, senal in (("save", post_save), ("delete", post_delete)):
-                senal.connect(
-                    invalidar_claves_departamento, sender=modelo,
-                    dispatch_uid=f"claves-departamento-{modelo.__name__}-{nombre}",
-                )
+        request_started.connect(abrir_cache_claves_departamento, dispatch_uid="claves-departamento-abrir")
+        request_finished.connect(cerrar_cache_claves_departamento, dispatch_uid="claves-departamento-cerrar")
