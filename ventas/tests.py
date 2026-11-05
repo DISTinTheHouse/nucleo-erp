@@ -1374,6 +1374,11 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(body["tipos_bloqueo"], [b["tipo"] for b in body["bloqueos"]])
         self.assertEqual(body["tipos_bloqueo"].count("picking_activo"), 2)
 
+    ACCION_VINCULO = {
+        "factura_detalle_ligado": "Cancelar la factura y limpiar su detalle antes de editar el pedido.",
+        "picking_detalle_ligado": "Cancelar el picking y sus líneas antes de editar el pedido.",
+    }
+
     def _assert_vinculo_ajeno_oculta_documento_y_bloquea(self, tipo_documento, tipo_vinculo, filas_ajenas):
         """Documento de otra empresa ligado a un renglón del pedido (dato heredado,
         como la factura 34 -> pedido 255 de la BD): no se lista con id/folio/estatus,
@@ -1393,7 +1398,7 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertFalse([b for b in body["bloqueos"] if "id" in b])
         self.assertEqual(
             body["bloqueos"],
-            [{"tipo": tipo_vinculo, "accion_requerida": body["bloqueos"][0]["accion_requerida"]}],
+            [{"tipo": tipo_vinculo, "accion_requerida": self.ACCION_VINCULO[tipo_vinculo]}],
         )
         self.assertEqual(body["tipos_bloqueo"], [tipo_vinculo])
 
