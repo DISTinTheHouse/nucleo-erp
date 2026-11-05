@@ -63,9 +63,9 @@ from compras.services.orden_compra_view_service import (
     CAMPOS_CONTABILIDAD_OC,
     SIN_PERMISO_CONTABILIDAD,
     puede_ver_contabilidad,
-    quitar_montos,
     quitar_montos_orden_compra,
 )
+from nucleo.importes import quitar_montos
 from hr.models import Empleado
 from inventarios.models import (
     Almacen,

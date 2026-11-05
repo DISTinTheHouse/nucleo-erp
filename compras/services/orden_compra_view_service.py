@@ -3,10 +3,8 @@ from __future__ import annotations
 import copy
 import logging
 
-from seguridad.role_identity import (
-    CLAVES_CONTABILIDAD_COMPRAS,
-    claves_departamento_usuario,
-)
+from nucleo.importes import quitar_claves, tiene_claves_de_importes
+from seguridad.role_identity import CLAVES_CONTABILIDAD_COMPRAS
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +18,7 @@ CAMPOS_CONTABILIDAD_OC_RECEPCION = []
 CAMPOS_CONTABILIDAD_OC_RECEPCION_DETALLE = []
 
 
-def puede_ver_contabilidad(user) -> bool:
+def puede_ver_contabilidad(user, claves=None) -> bool:
     """Reglas de visibilidad $ en OrdenCompra:
 
     - `is_superuser` / `is_admin_empresa` → todo.
@@ -28,35 +26,13 @@ def puede_ver_contabilidad(user) -> bool:
       MesaControl, Ventas, ContaVentas, MesaControlYVentas, **Compras**, **Contabilidad**, **ContaCompras**.
     - Cualquier otro rol (incluyendo WMS sin acceso) → se ocultan los keys $$.
 
-    Racional: en compras los roles "Compras"/"Contabilidad"/"ContaCompras" SÍ
-    deben ver importes; en el patrón de Pedido solo MesaControl/Ventas. Aquí se
-    extiende sin tocar el patrón (lista centralizada).
+    La regla vive en ``nucleo.importes``; aquí sólo se elige el conjunto de claves.
+    ``claves``: las del usuario si quien llama ya las resolvió en esta petición.
     """
-    if getattr(user, "is_superuser", False):
-        return True
-    if getattr(user, "is_admin_empresa", False):
-        return True
-    claves = claves_departamento_usuario(user)
-    return bool(claves & CLAVES_CONTABILIDAD_COMPRAS) if claves else False
+    return tiene_claves_de_importes(user, CLAVES_CONTABILIDAD_COMPRAS, claves)
 
 
 SIN_PERMISO_CONTABILIDAD = {"disponible": False, "motivo": "Sin permiso de contabilidad."}
-
-
-def quitar_montos(bloque: dict, campos) -> None:
-    """Quita ``campos`` del bloque de KPI y de las filas de sus listas."""
-    _drop_keys(bloque, campos)
-    for valor in bloque.values():
-        if isinstance(valor, list):
-            for fila in valor:
-                _drop_keys(fila, campos)
-
-
-def _drop_keys(d: dict, keys: list) -> None:
-    if not isinstance(d, dict):
-        return
-    for k in keys:
-        d.pop(k, None)
 
 
 def quitar_montos_orden_compra(data) -> None:
@@ -65,15 +41,15 @@ def quitar_montos_orden_compra(data) -> None:
     Para listados: el permiso se evalúa una vez por petición y cada fila ya es
     una copia propia del serializer, así que no hace falta ``deepcopy`` (#836).
     """
-    _drop_keys(data, CAMPOS_CONTABILIDAD_OC)
+    quitar_claves(data, CAMPOS_CONTABILIDAD_OC)
 
     for det in data.get("detalles") or []:
-        _drop_keys(det, CAMPOS_CONTABILIDAD_OC_DETALLE)
+        quitar_claves(det, CAMPOS_CONTABILIDAD_OC_DETALLE)
 
     for rec in data.get("recepciones") or []:
-        _drop_keys(rec, CAMPOS_CONTABILIDAD_OC_RECEPCION)
+        quitar_claves(rec, CAMPOS_CONTABILIDAD_OC_RECEPCION)
         for rd in rec.get("detalles") or []:
-            _drop_keys(rd, CAMPOS_CONTABILIDAD_OC_RECEPCION_DETALLE)
+            quitar_claves(rd, CAMPOS_CONTABILIDAD_OC_RECEPCION_DETALLE)
 
 
 def filtrar_campos_contabilidad_orden_compra(data, user):

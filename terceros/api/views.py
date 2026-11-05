@@ -677,7 +677,8 @@ class ProveedorViewSet(viewsets.ModelViewSet):
                 "truncado": False,
             })
 
-        from compras.services.orden_compra_view_service import puede_ver_contabilidad, quitar_montos
+        from compras.services.orden_compra_view_service import puede_ver_contabilidad
+        from nucleo.importes import quitar_montos
 
         puede_ver_importes = puede_ver_contabilidad(request.user)
         proveedores = calcular_scorecards(alcance, meta)
@@ -703,7 +704,8 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         filtros de ``kpis``). Acotado a ``TOPE_DETALLE`` con ``total``."""
         from compras.services.kpi_criterios import AlcanceCompras
         from compras.services.kpi_proveedores import FACTORES_DETALLE, TOPE_DETALLE, detalle_proveedor
-        from compras.services.orden_compra_view_service import puede_ver_contabilidad, quitar_montos
+        from compras.services.orden_compra_view_service import puede_ver_contabilidad
+        from nucleo.importes import quitar_montos
 
         validar_parametros(request, {"factor", "sucursal", "fecha_desde", "fecha_hasta"})
         factor = (request.query_params.get("factor") or "").strip()

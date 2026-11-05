@@ -110,10 +110,11 @@ from ventas.services.sku_produccion_service import (
 from ventas.services.pedido_field_filter_service import (
     CAMPOS_CONTABILIDAD_PEDIDO,
     filtrar_campos_contabilidad_pedido,
+    puede_modificar_importes_pedido,
     puede_ver_contabilidad,
     quitar_campos_contabilidad_pedido,
 )
-from compras.services.orden_compra_view_service import quitar_montos
+from nucleo.importes import quitar_montos
 from wms.models import Estado as EstadoWms, Picking, PickingDetalle
 
 logger = logging.getLogger(__name__)
@@ -3290,8 +3291,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
         """#537: lo que la lectura le oculta (importes, forma/método de pago, uso
         CFDI) tampoco lo puede escribir. Corre ANTES de validar el payload: un 400
         por el valor (p. ej. anticipo contra gran_total) le dejaría deducir lo oculto,
-        así que con cualquier valor la respuesta es el mismo 403."""
-        if puede_ver_contabilidad(request.user):
+        así que con cualquier valor la respuesta es el mismo 403. Escribirlos exige
+        contabilidad de ventas, aunque compras ya los vea (EC-784)."""
+        if puede_modificar_importes_pedido(request.user):
             return
         escribibles = {n for n, f in self.get_serializer().fields.items() if not f.read_only}
         ocultos = sorted(set(CAMPOS_CONTABILIDAD_PEDIDO) & escribibles & set(request.data))
@@ -3934,9 +3936,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
         """
         user = request.user
         pedido = self.get_object()
-        # Clona precios y montos que la lectura le oculta a quien no ve contabilidad (#537).
-        from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
-        if not puede_ver_contabilidad(request.user):
+        # Clona precios y montos (#537): mismo permiso que escribirlos, contabilidad
+        # de ventas; compras los ve pero no recompra (EC-784).
+        if not puede_modificar_importes_pedido(request.user):
             raise PermissionDenied("No tienes permiso para recomprar pedidos.")
 
         with transaction.atomic():
