@@ -3142,8 +3142,13 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # toca, así que ahí se omite el prefetch — es lo que baja el tiempo del
         # listado de ~15s a <1s. ``documentos`` sólo lo añade ``retrieve()``.
         # ``editar-mesa-control-contexto`` tampoco: sólo lee ``pk`` y ``folio``
-        # del pedido; los bloqueos van por su propia consulta (EC-776).
-        if getattr(self, "action", None) not in ("list", "cancelar", "editar_mesa_control_contexto"):
+        # del pedido; los bloqueos van por su propia consulta (EC-776). Ni
+        # ``editar-mesa-control``: de ``get_object()`` sólo usa el ``pk`` para
+        # el ``select_for_update`` y la respuesta vuelve a traer el pedido con
+        # su propio prefetch.
+        if getattr(self, "action", None) not in (
+            "list", "cancelar", "editar_mesa_control_contexto", "editar_mesa_control",
+        ):
             qs = qs.prefetch_related(
                 _pedido_detalles_prefetch(),
                 _pedido_servicios_extras_prefetch(),
