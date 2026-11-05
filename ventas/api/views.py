@@ -1,11 +1,13 @@
 from nucleo.middleware import ip_auditoria
 import json
 import logging
+import operator
+from functools import reduce
 from decimal import Decimal, ROUND_HALF_UP
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import router, transaction
 from django.db.models.deletion import Collector, ProtectedError, RestrictedError
-from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, Subquery, Sum
+from django.db.models import BooleanField, Count, Exists, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum
 from django.db.models.functions import Coalesce, JSONObject
 from django.contrib.postgres.expressions import ArraySubquery
 from datetime import timedelta
@@ -2891,81 +2893,81 @@ class PedidoViewSet(viewsets.ModelViewSet):
             ]
         )
         en_el_pedido = {"pedido_detalle__pedido_id": OuterRef("pk")}
+        # (tipo, querysets que lo activan, acción requerida). Varios querysets bajo un
+        # mismo ``tipo`` se combinan con OR en una sola anotación.
         vinculos = [
             (
                 "factura_detalle_ligado",
-                FacturaDetalle.objects.filter(**en_el_pedido),
+                [
+                    FacturaDetalle.objects.filter(**en_el_pedido),
+                    # Líneas de un servicio extra (#744): ``_save_pedido_servicios_extras``
+                    # borra los sobrantes y la FK es PROTECT.
+                    FacturaDetalle.objects.filter(pedido_servicio_extra__pedido_id=OuterRef("pk")),
+                    # Líneas ligadas solo a una talla (``pedido_detalle_talla`` es PROTECT
+                    # e independiente de ``pedido_detalle``).
+                    FacturaDetalle.objects.filter(pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk")),
+                ],
                 "Cancelar la factura y limpiar su detalle antes de editar el pedido.",
             ),
             (
                 "nota_credito_ligada",
-                NotaCreditoDetalle.objects.filter(factura_detalle__pedido_detalle__pedido_id=OuterRef("pk")),
+                [
+                    NotaCreditoDetalle.objects.filter(factura_detalle__pedido_detalle__pedido_id=OuterRef("pk")),
+                    NotaCreditoDetalle.objects.filter(factura_detalle__pedido_servicio_extra__pedido_id=OuterRef("pk")),
+                    NotaCreditoDetalle.objects.filter(
+                        factura_detalle__pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk")
+                    ),
+                ],
                 "Revisar/cancelar la nota de crédito ligada antes de editar el pedido.",
             ),
             (
                 "orden_bordado_detalle_ligado",
-                OrdenBordadoDetalle.objects.filter(**en_el_pedido),
+                [OrdenBordadoDetalle.objects.filter(**en_el_pedido)],
                 "Dar de baja los renglones de bordado ligados antes de editar el pedido.",
             ),
             (
                 "orden_reflejante_detalle_ligado",
-                OrdenReflejanteDetalle.objects.filter(**en_el_pedido),
+                [OrdenReflejanteDetalle.objects.filter(**en_el_pedido)],
                 "Dar de baja los renglones de reflejante ligados antes de editar el pedido.",
             ),
             (
                 "orden_corte_manga_detalle_ligado",
-                OrdenCorteMangaDetalle.objects.filter(**en_el_pedido),
+                [OrdenCorteMangaDetalle.objects.filter(**en_el_pedido)],
                 "Dar de baja los renglones de corte de manga ligados antes de editar el pedido.",
             ),
             (
                 "orden_produccion_detalle_ligado",
-                OrdenProduccionDetalle.objects.filter(**en_el_pedido),
+                [OrdenProduccionDetalle.objects.filter(**en_el_pedido)],
                 "Dar de baja los renglones de producción ligados antes de editar el pedido.",
             ),
             (
                 "picking_detalle_ligado",
-                PickingDetalle.objects.filter(**en_el_pedido),
+                [PickingDetalle.objects.filter(**en_el_pedido)],
                 "Cancelar el picking y sus líneas antes de editar el pedido.",
             ),
             (
                 "reserva_inventario_activa",
-                inventario_reservas.objects.filter(reserva_viva, **en_el_pedido),
+                [inventario_reservas.objects.filter(reserva_viva, **en_el_pedido)],
                 "Liberar o cancelar las reservas de inventario antes de editar el pedido.",
             ),
             (
                 "reserva_talla_activa",
-                inventario_reservas.objects.filter(
-                    reserva_viva,
-                    pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk"),
-                ),
+                [
+                    inventario_reservas.objects.filter(
+                        reserva_viva,
+                        pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk"),
+                    )
+                ],
                 "Liberar o cancelar las reservas por talla antes de editar el pedido.",
             ),
         ]
-        # Más vínculos que se reportan bajo un ``tipo`` ya existente. Las líneas de
-        # factura de un servicio extra (#744) son PROTECT y
-        # ``_save_pedido_servicios_extras`` borra los sobrantes: sin esto, el POST
-        # que quita ese servicio daba 500. Mismo criterio que el renglón: cualquier
-        # estatus y cualquier empresa.
-        vinculos_adicionales = {
-            "factura_detalle_ligado": [
-                FacturaDetalle.objects.filter(pedido_servicio_extra__pedido_id=OuterRef("pk")),
-                # Línea ligada solo a una talla (``pedido_detalle_talla`` es PROTECT
-                # e independiente de ``pedido_detalle``): quitar la talla daba 500.
-                FacturaDetalle.objects.filter(pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk")),
-            ],
-            # Notas sobre líneas de servicio extra o ligadas solo a una talla.
-            "nota_credito_ligada": [
-                NotaCreditoDetalle.objects.filter(factura_detalle__pedido_servicio_extra__pedido_id=OuterRef("pk")),
-                NotaCreditoDetalle.objects.filter(
-                    factura_detalle__pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk")
-                ),
-            ],
-        }
-        alias_adicionales = {
-            f"{tipo}_{n}": sub
-            for tipo, subs in vinculos_adicionales.items()
-            for n, sub in enumerate(subs, start=1)
-        }
+
+        def alguno(subs):
+            if len(subs) == 1:
+                return Exists(subs[0])
+            return ExpressionWrapper(
+                reduce(operator.or_, (Q(Exists(sub)) for sub in subs)), output_field=BooleanField()
+            )
 
         anotaciones = {
             tipo: ArraySubquery(
@@ -2975,8 +2977,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             )
             for tipo, qs, campo_id, campo_folio, campo_estatus, _ in documentos
         }
-        anotaciones.update({tipo: Exists(sub) for tipo, sub, _ in vinculos})
-        anotaciones.update({alias: Exists(sub) for alias, sub in alias_adicionales.items()})
+        anotaciones.update({tipo: alguno(subs) for tipo, subs, _ in vinculos})
         hay = (
             Pedido.objects.filter(pk=pedido.pk)
             .annotate(**anotaciones)
@@ -2997,8 +2998,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
                     }
                 )
         for tipo, _, accion in vinculos:
-            adicionales = vinculos_adicionales.get(tipo, [])
-            if hay.get(tipo) or any(hay.get(f"{tipo}_{n}") for n in range(1, len(adicionales) + 1)):
+            if hay.get(tipo):
                 bloqueos.append({"tipo": tipo, "accion_requerida": accion})
 
         return bloqueos
