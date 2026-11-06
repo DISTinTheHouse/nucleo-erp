@@ -133,17 +133,17 @@ Next.js
 
 ## 4. Conexión Django → PostgreSQL
 
-`ERP/settings.py:174-252`. Selector: `USE_REMOTE_DB` (default `True` en Vercel/`ENVIRONMENT=production`, default `False` en local).
+`ERP/settings.py:174-263`. Selector: `USE_REMOTE_DB` (default `True` en Vercel/`ENVIRONMENT=production`, default `False` en local).
 
 | | Remoto (Supabase) | Local |
 |---|---|---|
-| Engine | `dj_database_url.parse(DATABASE_URL / SUPABASE_DATABASE_URL, ssl_require=True)` | `django.db.backends.postgresql` directo |
-| `CONN_MAX_AGE` | Con `DATABASE_URL`: **0 en Vercel/producción** (conexión nueva por request), 600 en otro caso (`ERP/settings.py:225`). Con `POSTGRESQL_DB_*`: no se define, queda el 0 por defecto de Django | por defecto de Django |
+| Engine | Con `DATABASE_URL` / `SUPABASE_DATABASE_URL`: `dj_database_url.parse(..., ssl_require=True)`. Sin URL: `django.db.backends.postgresql` directo con `POSTGRESQL_DB_*` y `sslmode=require` | `django.db.backends.postgresql` directo |
+| `CONN_MAX_AGE` | Con `DATABASE_URL`: **0 en Vercel/producción** (conexión nueva en cada request que toca la BD; Django conecta de forma perezosa), 600 en otro caso (`ERP/settings.py:225`). Con `POSTGRESQL_DB_*`: no se define, queda el 0 por defecto de Django | por defecto de Django |
 | `DISABLE_SERVER_SIDE_CURSORS` | `True` — **requerido**, el pooler transaccional de Supabase no soporta cursors server-side entre statements | `True` también, por consistencia |
 | Puerto | **6543 (transaction pooler)** — el workflow de CI rechaza 5432 (session pooler) | 5432 |
 | SSL | `sslmode=require` | configurable, `disable` por default |
 
-`CONN_MAX_AGE=0` en Vercel es intencional, pero no porque cada invocación sea un proceso nuevo: la instancia puede seguir caliente entre invocaciones. La razón es que el runtime Python de Vercel (`vc_init.py` de `vercel/vercel`) sirve WSGI con `ThreadingHTTPServer`, que crea un hilo nuevo por request, y Django guarda la conexión por hilo. Con `CONN_MAX_AGE > 0` ninguna conexión se reutiliza entre requests y además quedan conexiones huérfanas abiertas hasta que pasa el garbage collector (reproducción en EC-779: 20 requests con `CONN_MAX_AGE=600` → 20 conexiones, 0 reutilizadas, 4 huérfanas). Lo único que sí sobreviviría al hilo por request es un pool a nivel de proceso (el pool nativo de Django, `OPTIONS["pool"]`), evaluado en EC-779 y no adoptado por ahora. Mientras tanto, el pooler transaccional de Supabase administra el pool real hacia Postgres.
+`CONN_MAX_AGE=0` en Vercel es intencional, pero no porque cada invocación sea un proceso nuevo: la instancia puede seguir caliente entre invocaciones. La razón es que el runtime Python de Vercel (`vc_init.py` de `vercel/vercel`) sirve WSGI con `ThreadingHTTPServer`, que crea un hilo nuevo por request, y Django guarda la conexión por hilo (observado el 2026-11-06 en EC-779 en `python/vercel-runtime/src/vercel_runtime/vc_init.py` de `vercel/vercel`; el proyecto usa el builder legacy `@vercel/python` sin versión fija, así que hay que revalidarlo si el runtime cambia). Con `CONN_MAX_AGE > 0` o `None` ninguna conexión se reutiliza entre requests y además quedan conexiones huérfanas abiertas hasta que pasa el garbage collector (reproducción en EC-779: 20 requests con `CONN_MAX_AGE=600` → 20 conexiones, 0 reutilizadas, 4 huérfanas). Lo único que sí sobreviviría al hilo por request es un pool a nivel de proceso (el pool nativo de Django, `OPTIONS["pool"]`), evaluado en EC-779 y no adoptado por ahora. Esta razón aplica solo a Vercel: el 0 que `ERP/settings.py:225` también fuerza con `ENVIRONMENT=production` en deploys de proceso largo (Oracle) no lo justifica EC-779, y no está verificado si ahí una conexión persistente se reutilizaría (el repo no tiene la config de gunicorn/workers de Oracle). Mientras tanto, el pooler transaccional de Supabase administra el pool real hacia Postgres.
 
 ---
 
