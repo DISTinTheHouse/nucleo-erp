@@ -4801,9 +4801,10 @@ class PedidoReglasEstatusTests(TestCase):
             estado=inventario_reservas.Estado.ACTIVA, usuario=self.mesa,
         )
 
-        # 23 con inventario que devolver; incluye la carga perezosa evitable de
-        # ``pedido.sucursal`` al registrar el movimiento: EC-803, debe bajar en uno.
-        with self.assertNumQueries(23):
+        # 21 con inventario que devolver: los 16 de cancelar sin inventario más el
+        # bloqueo de las existencias, su UPDATE en lote, el movimiento, su detalle y la
+        # auditoría ENTRADA. Sin cargar ``empresa`` ni ``sucursal`` (EC-803).
+        with self.assertNumQueries(21):
             resp = self._cancelar(self.mesa)
 
         self.assertEqual(resp.status_code, 200, resp.content)
@@ -4826,13 +4827,22 @@ class PedidoReglasEstatusTests(TestCase):
         self.assertIsNotNone(reserva.fecha_devolucion)
         auditoria = AuditoriaEvento.objects.get(modulo="ventas", accion="CANCELAR", id_registro=str(self.pedido.pk))
         self.assertEqual(auditoria.despues_json["motivo"], "Cliente canceló la compra")
+        # EC-803: se guardan por ``_id`` la misma empresa y sucursal del pedido.
+        auditoria_entrada = AuditoriaEvento.objects.get(
+            modulo="inventarios", accion="ENTRADA", id_registro=str(self.pedido.pk)
+        )
+        self.assertEqual(
+            (movimiento.empresa_id, movimiento.sucursal_id), (self.pedido.empresa_id, self.pedido.sucursal_id)
+        )
+        self.assertEqual(auditoria_entrada.empresa_id, self.pedido.empresa_id)
+        self.assertEqual(auditoria.empresa_id, self.pedido.empresa_id)
 
     def test_cancelar_es_rapido(self):
         inicio = time.perf_counter()
-        # 17 desde EC-583 (bloqueo, devolución de inventario, reservas y auditoría).
-        # Incluye la carga perezosa evitable de ``pedido.empresa`` (la de
-        # ``pedido.sucursal`` solo ocurre al devolver inventario): EC-803, debe bajar a 16.
-        with self.assertNumQueries(17):
+        # 16: bloqueo, documentos vivos, lectura de la auditoría de inventario (sin nada
+        # que devolver: no hay bloqueo, UPDATE ni movimiento), reservas y auditoría
+        # (EC-583), sin cargar ``pedido.empresa`` para la auditoría (EC-803).
+        with self.assertNumQueries(16):
             self._cancelar(self.mesa)
         self.assertLess(time.perf_counter() - inicio, 0.5)
 
