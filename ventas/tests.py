@@ -8374,3 +8374,200 @@ class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
         resp = self._api(self.superusuario_sin_empresa).get(f"{PEDIDOS_URL}kpis/")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data["pedidos_activos"]["total"], 0)
+
+
+class _PedidosModoServidorBase:
+    """Fixtures de EC-782: dos empresas, dos monedas y pedidos que cubren cada filtro.
+
+    ``admin`` ve importes (admin de empresa); ``sin_importes`` es de la misma empresa
+    sin roles, así que no los ve (``puede_ver_contabilidad``).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.mxn = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        cls.empresa = Empresa.objects.create(codigo="acme-782", razon_social="ACME 782 SA")
+        cls.empresa_b = Empresa.objects.create(codigo="globex-782", razon_social="Globex 782 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="A782", nombre="Matriz")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.empresa_b, codigo="B782", nombre="Globex")
+        cls.admin = Usuario.objects.create(
+            username="adm@acme-782.test", email="adm@acme-782.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.sin_importes = Usuario.objects.create(
+            username="wms@acme-782.test", email="wms@acme-782.test", empresa=cls.empresa,
+        )
+        cls.admin_b = Usuario.objects.create(
+            username="adm@globex-782.test", email="adm@globex-782.test", empresa=cls.empresa_b, is_admin_empresa=True,
+        )
+        cls.ana = Usuario.objects.create(
+            username="ana@acme-782.test", email="ana@acme-782.test", empresa=cls.empresa,
+            first_name="Ana", last_name="Zapata",
+        )
+        cls.beto = Usuario.objects.create(
+            username="beto@acme-782.test", email="beto@acme-782.test", empresa=cls.empresa,
+            first_name="Beto", last_name="Arce",
+        )
+        cls.cliente_a = Cliente.objects.create(empresa=cls.empresa, nombre="Alfa", razon_social="Alfa SA")
+        cls.cliente_b = Cliente.objects.create(empresa=cls.empresa, nombre="Beta", razon_social="")
+        cls.cliente_globex = Cliente.objects.create(empresa=cls.empresa_b, nombre="Secreto", razon_social="Secreto SA")
+        cls.talla = Talla.objects.create(nombre="M")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera", codigo="P782")
+
+        confirmado_oct = timezone.make_aware(datetime(2026, 10, 20, 12, 0))
+        # p1: MXN, Alfa, Ana, A, confirmado en octubre, 60 piezas (10 de muestra), 30 programadas.
+        cls.p1 = cls._pedido(
+            "P-782-1", cls.cliente_a, cls.mxn, vendedor=cls.ana, clasificacion="A", subtotal="5000", gran_total="5800",
+            fecha_confirmacion=confirmado_oct, creado=datetime(2026, 9, 5, 10, 0), tallas=[(50, False), (10, True)],
+            programaciones=[{"destino": "EMBARQUE", "cantidad": 20}, {"destino": "BORDADO", "cantidad": 10}],
+        )
+        # p2: USD, Beta, Beto, B, por confirmar, 5 piezas, todas de muestra, 5 programadas.
+        cls.p2 = cls._pedido(
+            "P-782-2", cls.cliente_b, cls.usd, vendedor=cls.beto, clasificacion="B", subtotal="20000", gran_total="23200",
+            creado=datetime(2026, 10, 1, 9, 0), tallas=[(5, True)],
+            programaciones=[{"destino": "EMBARQUE", "cantidad": 5}],
+        )
+        # p3: MXN, Alfa, sin cotización (sin vendedor), sin clasificar, por confirmar, 600 piezas.
+        cls.p3 = cls._pedido(
+            "P-782-3", cls.cliente_a, cls.mxn, subtotal="150000", gran_total="174000",
+            creado=datetime(2026, 10, 31, 23, 30), tallas=[(600, False)],
+        )
+        # p4: cancelado, MXN, Beta, Ana, confirmado: fuera de los KPIs.
+        cls.p4 = cls._pedido(
+            "P-782-4", cls.cliente_b, cls.mxn, vendedor=cls.ana, clasificacion="A", subtotal="100", gran_total="116",
+            fecha_confirmacion=confirmado_oct, creado=datetime(2026, 8, 1, 9, 0), estatus=Pedido.ESTATUS_CANCELADO,
+        )
+        # Otra empresa: nunca aparece.
+        cls.p_globex = Pedido.objects.create(
+            empresa=cls.empresa_b, sucursal=cls.sucursal_b, cliente=cls.cliente_globex, moneda=cls.mxn,
+            folio="G-782-1", persona_pagos="P", correo_facturas="p@globex.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03", clasificacion="C", subtotal="999", gran_total="999",
+            fecha_confirmacion=confirmado_oct, estatus=3,
+        )
+
+    @classmethod
+    def _pedido(cls, folio, cliente, moneda, vendedor=None, clasificacion=None, subtotal="0", gran_total="0",
+                fecha_confirmacion=None, creado=None, tallas=(), programaciones=None, estatus=3):
+        cot = None
+        if vendedor is not None:
+            cot = Cotizacion.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=moneda, vendedor=vendedor,
+            )
+        pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, cotizacion=cot, moneda=moneda,
+            folio=folio, persona_pagos="P", correo_facturas="p@acme-782.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03", clasificacion=clasificacion, estatus=estatus,
+            subtotal=Decimal(subtotal), gran_total=Decimal(gran_total), fecha_confirmacion=fecha_confirmacion,
+            programacion_conf={"programaciones": programaciones} if programaciones else {},
+        )
+        for cantidad, muestra in tallas:
+            det = PedidoDetalle.objects.create(
+                pedido=pedido, producto=None if muestra else cls.producto,
+                producto_nombre_externo="Muestra" if muestra else None,
+            )
+            PedidoDetalleTalla.objects.create(pedido_detalle=det, talla=cls.talla, cantidad=cantidad)
+        if creado:
+            Pedido.objects.filter(pk=pedido.pk).update(created_at=timezone.make_aware(creado))
+        return pedido
+
+    def _api(self, user):
+        api = APIClient()
+        api.force_authenticate(user)
+        return api
+
+    def _get(self, url, params=None, user=None):
+        return self._api(user or self.admin).get(url, params or {})
+
+    def _ids(self, params, user=None, url=PEDIDOS_URL):
+        resp = self._get(url, params, user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        filas = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+        return [f["id"] for f in filas]
+
+
+class PedidoListadoFiltrosColumnaTests(_PedidosModoServidorBase, TestCase):
+    """EC-782: filtros de columna de Mesa de Control y Compras › Pedidos en el servidor."""
+
+    def test_filtros(self):
+        p1, p2, p3, p4 = self.p1.pk, self.p2.pk, self.p3.pk, self.p4.pk
+        casos = [
+            ({}, [p1, p2, p3, p4]),
+            ({"moneda": self.usd.pk}, [p2]),
+            ({"moneda": 999999999}, []),
+            ({"clasificacion": "A"}, [p1, p4]),
+            ({"clasificacion": "a,b"}, [p1, p2, p4]),
+            ({"confirmado": "true"}, [p1, p4]),
+            ({"confirmado": "false"}, [p2, p3]),
+            ({"mes": "2026-10"}, [p2, p3]),  # p3: 31 oct 23:30 en México (ya 1 nov en UTC)
+            ({"mes": "2026-09"}, [p1]),
+            ({"mes_confirmacion": "2026-10"}, [p1, p4]),
+            ({"mes_confirmacion": "sin_confirmar"}, [p2, p3]),
+            ({"piezas_min": "1", "piezas_max": "51"}, [p2]),  # máximo exclusivo
+            ({"piezas_min": "51", "piezas_max": "501"}, [p1]),
+            ({"piezas_min": "501"}, [p3]),
+            ({"piezas_max": "1"}, [p4]),
+            ({"subtotal_max": "10000"}, [p1, p4]),
+            ({"subtotal_min": "10000", "subtotal_max": "100000"}, [p2]),
+            ({"gran_total_min": "100000"}, [p3]),
+            ({"muestras": "con"}, [p1, p2]),
+            ({"muestras": "solo"}, [p2]),
+            ({"muestras": "sin"}, [p3, p4]),
+            ({"con_muestras": "true"}, [p1, p2]),  # el filtro previo sigue igual
+            ({"cliente": self.cliente_a.pk, "confirmado": "false", "moneda": self.mxn.pk}, [p3]),
+            ({"vendedor": self.ana.pk, "estatus": "3"}, [p1]),
+        ]
+        for params, esperado in casos:
+            with self.subTest(params=params):
+                self.assertEqual(sorted(self._ids(params)), sorted(esperado))
+
+    def test_invalidos_responden_400(self):
+        for params in (
+            {"moneda": "x"}, {"clasificacion": "Z"}, {"clasificacion": ","}, {"confirmado": "quizas"},
+            {"mes": "2026-13"}, {"mes": "octubre"}, {"mes_confirmacion": "nunca"}, {"piezas_min": "abc"},
+            {"piezas_max": "NaN"}, {"subtotal_min": "1e"}, {"muestras": "todas"},
+        ):
+            with self.subTest(params=params):
+                resp = self._get(PEDIDOS_URL, params)
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(set(resp.json()), {next(iter(params))})
+
+    def test_sin_permiso_de_importes_se_ignoran_los_rangos_de_importe(self):
+        """Contar las filas de un rango dejaría deducir el importe oculto."""
+        todos = sorted(self._ids({}, self.sin_importes))
+        self.assertEqual(len(todos), 4)
+        for params in ({"subtotal_max": "1"}, {"gran_total_min": "1000000"}, {"gran_total_min": "no-numero"}):
+            with self.subTest(params=params):
+                self.assertEqual(sorted(self._ids(params, self.sin_importes)), todos)
+        # Los demás filtros sí le aplican.
+        self.assertEqual(self._ids({"moneda": self.usd.pk}, self.sin_importes), [self.p2.pk])
+
+    def test_otra_empresa_no_ve_nada(self):
+        self.assertEqual(self._ids({"clasificacion": "A,B,C"}, self.admin_b), [self.p_globex.pk])
+        self.assertEqual(self._ids({"clasificacion": "C"}), [])
+
+    def test_el_detalle_no_se_filtra(self):
+        resp = self._get(f"{PEDIDOS_URL}{self.p1.pk}/", {"moneda": 999999999, "muestras": "sin", "piezas_min": "9999"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_sin_consultas_por_fila(self):
+        params = {"muestras": "con", "piezas_min": "0", "confirmado": "true", "limit": 50}
+        self._get(PEDIDOS_URL, params)
+        with CaptureQueriesContext(connection) as antes:
+            self._get(PEDIDOS_URL, params)
+        for i in range(4):
+            self._pedido(f"P-782-X{i}", self.cliente_a, self.mxn, vendedor=self.ana,
+                         fecha_confirmacion=timezone.now(), tallas=[(i + 1, True)])
+        with CaptureQueriesContext(connection) as despues:
+            resp = self._get(PEDIDOS_URL, params)
+        self.assertEqual(resp.data["count"], 5)
+        self.assertEqual(len(despues), len(antes))
+
+    def test_schema_publica_los_filtros(self):
+        from drf_spectacular.generators import SchemaGenerator
+
+        operacion = SchemaGenerator().get_schema(request=None, public=True)["paths"][PEDIDOS_URL]["get"]
+        nombres = {p["name"] for p in operacion["parameters"]}
+        self.assertLessEqual({
+            "moneda", "clasificacion", "confirmado", "mes", "mes_confirmacion", "piezas_min", "piezas_max",
+            "subtotal_min", "subtotal_max", "gran_total_min", "gran_total_max", "muestras",
+        }, nombres)

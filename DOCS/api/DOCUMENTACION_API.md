@@ -1653,6 +1653,28 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
 - `valor` va **por moneda** (`por_moneda`): no se suman monedas. `drill_down` trae hasta 20 pedidos activos (`AUTORIZADA`+`EN PROCESO`), ordenados por `gran_total` desc (por `id` desc sin permiso de importes); `drill_down_truncado` avisa si hay más.
 
+### Modo servidor de Mesa de Control y Compras › Pedidos (EC-782)
+
+Lo que `/operations/orders`, `/procurement/orders` y `/sales/orders` calculaban en el navegador sobre la lista completa. Todo sale de `pedidos_visibles` (la empresa del usuario; superusuario, todas): un pedido de otra empresa nunca aparece en filas, conteos ni opciones. Los importes siguen la regla de lectura del pedido (`puede_ver_contabilidad`, EC-784): **a quien no los ve se le ignoran en silencio** los rangos de importe y el orden por importe — contar o reordenar filas por un monto oculto lo dejaría deducir.
+
+#### Filtros de columna — `GET /api/v1/ventas/pedidos/`
+
+Se suman a los que ya había (`q`, `search`, `folio`, `cliente`, `vendedor`, `sucursal`, `fecha_desde`/`fecha_hasta`, `estatus`, `mis_pedidos`, `sin_clasificar`, `programado`, `con_muestras`). Solo en el listado (y en `exportar/` y `kpis-mesa/`); el detalle no se filtra. Inválido → `400 {"<parámetro>": "..."}`.
+
+| Parámetro | Valor | Filtra |
+|---|---|---|
+| `moneda` | id | `moneda` del pedido (el selector de CxC pendiente usa `cliente` + `moneda`). |
+| `clasificacion` | `A`…`F`, `X`; uno o varios separados por coma | `clasificacion` (`?sin_clasificar=true` sigue para los vacíos). |
+| `confirmado` | `true` / `false` | `fecha_confirmacion` puesta / vacía (EC-748). **No** es el booleano contable `por_confirmar`. |
+| `mes` | `AAAA-MM` | mes de `created_at` en hora de México. |
+| `mes_confirmacion` | `AAAA-MM` o `sin_confirmar` | mes de `fecha_confirmacion` en hora de México, o los que no la tienen. |
+| `piezas_min` / `piezas_max` | número | `piezas` (todas las tallas, muestras incluidas). |
+| `subtotal_min` / `subtotal_max` | número | `subtotal`. Ignorado sin permiso de importes. |
+| `gran_total_min` / `gran_total_max` | número | `gran_total`. Ignorado sin permiso de importes. |
+| `muestras` | `con` / `solo` / `sin` | `con`: alguna pieza de muestra; `solo`: todas las piezas son de muestra; `sin`: ninguna (sobre `piezas_muestra` y `piezas`, igual que la etiqueta del front). `?con_muestras=true` sigue igual (alguna **línea** de muestra). |
+
+Los rangos son como `matchesRangeFilter` del front: **mínimo inclusivo, máximo exclusivo** (`1 a 50 piezas` = `piezas_min=1&piezas_max=51`; `Hasta 10,000` = `subtotal_max=10000`).
+
 #### Automatización de Órdenes de Trabajo (Producción)
 
 > 🚨 **Decisión de negocio (Presidencia) — v2 en producción**
@@ -1669,6 +1691,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
 - **Listar**: `GET /api/v1/ventas/pedidos/`
   - **Importes**: sin permiso de contabilidad (`puede_ver_contabilidad`: contabilidad de ventas **o** de compras, EC-784; ver el detalle abajo), cada fila omite `gran_total` y `subtotal` (los campos de `CAMPOS_CONTABILIDAD_PEDIDO`), igual que el detalle. Paginado o no, la llave no viene; el frontend no debe suponerla (#947). Aplica a todas las variantes del listado (`mis_pedidos`, `programado`, `estatus`, programación de mesa de control).
+  - **Filtros de columna, exportación, KPIs de Mesa de Control y opciones de filtros**: ver "Modo servidor de Mesa de Control y Compras › Pedidos (EC-782)" arriba.
   - **Orden**: por defecto, más reciente primero (`created_at` descendente, desempate por `id` descendente). `?ordering=` acepta la lista blanca de pedidos, con `id` como desempate; un campo fuera de ella (p. ej. `gran_total`) se ignora y queda el orden por defecto (EC-757, ver "Mismo modo servidor en ventas y clientes").
 - **Detalle**: `GET /api/v1/ventas/pedidos/{id}/`
 - **Cancelar**: `POST /api/v1/ventas/pedidos/{id}/cancelar/` con `{"motivo": "..."}`. Solo mesa de control / admin. En una transacción:
