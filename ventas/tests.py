@@ -8738,3 +8738,50 @@ class PedidoKpisMesaTests(_PedidosModoServidorBase, TestCase):
         self.assertEqual(data["total"], 4)
         self.assertEqual(len(despues), len(antes))
         self.assertEqual(len(antes), 1)
+
+
+class PedidoOpcionesFiltrosTests(_PedidosModoServidorBase, TestCase):
+    """EC-782: ``pedidos/opciones/``, en una consulta sobre los pedidos visibles."""
+
+    URL = f"{PEDIDOS_URL}opciones/"
+
+    def test_opciones(self):
+        data = self._get(self.URL).json()
+        self.assertEqual(data["cliente"], [
+            {"value": self.cliente_a.pk, "label": "Alfa SA"},
+            {"value": self.cliente_b.pk, "label": "Beta"},  # sin razón social → nombre
+        ])
+        self.assertEqual(data["vendedor"], [
+            {"value": self.ana.pk, "label": "Ana Zapata"},
+            {"value": self.beto.pk, "label": "Beto Arce"},
+        ])
+        self.assertEqual([m["value"] for m in data["mes"]], ["2026-10", "2026-09", "2026-08"])
+        self.assertEqual(data["mes"][0]["label"], "Octubre 2026")
+        self.assertEqual(data["mes_confirmacion"], [
+            {"value": "2026-10", "label": "Octubre 2026"},
+            {"value": "sin_confirmar", "label": "Sin confirmar"},
+        ])
+        self.assertEqual([c["value"] for c in data["clasificacion"]], ["A", "B"])
+        self.assertEqual(data["clasificacion"][0]["label"], "A - 2 a 5 días")
+
+    def test_solo_la_empresa_del_usuario(self):
+        data = self._get(self.URL, user=self.admin_b).json()
+        self.assertEqual(data["cliente"], [{"value": self.cliente_globex.pk, "label": "Secreto SA"}])
+        self.assertEqual(data["vendedor"], [])
+        self.assertEqual([c["value"] for c in data["clasificacion"]], ["C"])
+        self.assertNotIn("Secreto SA", str(self._get(self.URL).json()))
+        sin_empresa = Usuario.objects.create(username="se2@782.test", email="se2@782.test")
+        data = self._get(self.URL, user=sin_empresa).json()
+        self.assertEqual((data["cliente"], data["mes"], data["mes_confirmacion"]), ([], [], []))
+
+    def test_mis_pedidos_y_parametros_no_soportados(self):
+        data = self._get(self.URL, {"mis_pedidos": "true"}, self.beto).json()
+        self.assertEqual([c["value"] for c in data["cliente"]], [self.cliente_b.pk])
+        resp = self._get(self.URL, {"cliente": self.cliente_a.pk})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_una_consulta(self):
+        self._get(self.URL)
+        with CaptureQueriesContext(connection) as ctx:
+            self._get(self.URL)
+        self.assertEqual(len(ctx), 1)

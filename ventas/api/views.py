@@ -67,7 +67,7 @@ from ventas.api.serializers import (
     errores_montos_guardados,
 )
 
-from nucleo.kpis import entero_param, rango_fechas
+from nucleo.kpis import entero_param, rango_fechas, validar_parametros
 from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset
 from nucleo.models import SerieFolio, Empresa
 from notificaciones.services.notificacion_service import crear_notificacion_usuario
@@ -3277,7 +3277,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # su propio prefetch.
         if getattr(self, "action", None) not in (
             "list", "cancelar", "editar_mesa_control_contexto", "editar_mesa_control",
-            "exportar", "kpis_mesa",
+            "exportar", "kpis_mesa", "opciones",
         ):
             qs = qs.prefetch_related(
                 _pedido_detalles_prefetch(),
@@ -4234,6 +4234,24 @@ class PedidoViewSet(viewsets.ModelViewSet):
         qs = self.filter_queryset(self.get_queryset())
         ver_importes = puede_ver_contabilidad(request.user)
         return Response({"generado_en": timezone.now(), **pedidos_listado.kpis_mesa(qs, ver_importes)})
+
+    @extend_schema(
+        summary="Opciones de los filtros de encabezado del listado de pedidos",
+        parameters=[
+            OpenApiParameter("mis_pedidos", OpenApiTypes.BOOL, description="Solo los de cotizaciones del usuario."),
+        ],
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="opciones")
+    def opciones(self, request):
+        """Clientes, vendedores, meses de creación y de confirmación y
+        clasificaciones presentes en los pedidos que el usuario ve, en una
+        consulta. No reaccionan a los filtros (como ``por-almacen/resumen/``)."""
+        validar_parametros(request, {"mis_pedidos"})
+        qs = pedidos_visibles(pedidos_base(), request.user)
+        if (request.query_params.get("mis_pedidos") or "").lower() in ("true", "1"):
+            qs = qs.filter(cotizacion__vendedor=request.user)
+        return Response(pedidos_listado.opciones(qs))
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-420): mismo
     # criterio que ``OrdenProduccionViewSet.kpis``/``OrdenBordadoViewSet.kpis``

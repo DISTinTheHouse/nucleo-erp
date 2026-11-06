@@ -30,10 +30,12 @@ una sola consulta agregada: nada por fila.
 """
 
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
 
-from django.db.models import CharField, Count, F, Func, IntegerField, OuterRef, Q, Subquery, Sum, Value
-from django.db.models.functions import Coalesce, Concat, NullIf, Trim
+from django.contrib.postgres.aggregates import ArrayAgg
+from django.db.models import CharField, Count, DateField, F, Func, IntegerField, OuterRef, Q, Subquery, Sum, Value
+from django.db.models.functions import Coalesce, Concat, JSONObject, NullIf, Trim, Trunc
 from rest_framework.exceptions import ValidationError
 
 from nucleo.kpis import entero_param
@@ -63,6 +65,10 @@ MUESTRAS = ("con", "solo", "sin")
 SIN_CONFIRMAR = "sin_confirmar"
 
 _MES_RE = re.compile(r"^(\d{4})-(\d{2})$")
+_MESES = (
+    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+)
 
 
 # --- Anotaciones -----------------------------------------------------------------
@@ -333,3 +339,81 @@ def kpis_mesa(qs, ver_importes):
     }
 
 
+# --- Opciones de filtros -----------------------------------------------------------
+
+
+def _clave_orden(texto):
+    """Orden alfabético aproximado al ``localeCompare(..., "es")`` del front."""
+    sin_acentos = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
+    return (sin_acentos.casefold(), texto)
+
+
+def _meses(fechas):
+    return [
+        {"value": f"{m.year:04d}-{m.month:02d}", "label": f"{_MESES[m.month - 1]} {m.year}"}
+        for m in sorted(fechas or [], reverse=True)
+    ]
+
+
+def opciones(qs):
+    """Opciones de los filtros de encabezado sobre el conjunto visible completo (no
+    reaccionan a filtros, como ``por-almacen/resumen/`` de EC-774), en UNA consulta.
+    Los nombres de cliente y vendedor salen de su catálogo (una etiqueta por id),
+    no del snapshot de cada pedido."""
+    datos = qs.order_by().aggregate(
+        clientes=ArrayAgg(
+            JSONObject(
+                value=F("cliente_id"),
+                label=Coalesce(NullIf(Trim(F("cliente__razon_social")), Value("")), F("cliente__nombre")),
+            ),
+            distinct=True,
+        ),
+        vendedores=ArrayAgg(
+            JSONObject(
+                value=F("cotizacion__vendedor_id"),
+                first_name=F("cotizacion__vendedor__first_name"),
+                last_name=F("cotizacion__vendedor__last_name"),
+                email=F("cotizacion__vendedor__email"),
+            ),
+            distinct=True,
+            filter=Q(cotizacion__vendedor__isnull=False),
+        ),
+        meses=ArrayAgg(
+            Trunc("created_at", "month", output_field=DateField()),
+            distinct=True,
+            filter=Q(created_at__isnull=False),
+        ),
+        meses_confirmacion=ArrayAgg(
+            Trunc("fecha_confirmacion", "month", output_field=DateField()),
+            distinct=True,
+            filter=Q(fecha_confirmacion__isnull=False),
+        ),
+        sin_confirmar=Count("id", filter=Q(fecha_confirmacion__isnull=True)),
+        clasificaciones=ArrayAgg("clasificacion", distinct=True, filter=Q(clasificacion__isnull=False)),
+    )
+    from ventas.utils.helpers import nombre_para_mostrar
+
+    clientes = sorted(
+        ({"value": c["value"], "label": (c["label"] or "").strip()} for c in datos["clientes"] or []),
+        key=lambda o: _clave_orden(o["label"]),
+    )
+    vendedores = sorted(
+        (
+            {"value": v["value"], "label": nombre_para_mostrar(v["first_name"], v["last_name"], v["email"])}
+            for v in datos["vendedores"] or []
+        ),
+        key=lambda o: _clave_orden(o["label"] or ""),
+    )
+    etiquetas = dict(Pedido.Clasificacion.choices)
+    meses_confirmacion = _meses(datos["meses_confirmacion"])
+    if datos["sin_confirmar"]:
+        meses_confirmacion.append({"value": SIN_CONFIRMAR, "label": "Sin confirmar"})
+    return {
+        "cliente": clientes,
+        "vendedor": vendedores,
+        "mes": _meses(datos["meses"]),
+        "mes_confirmacion": meses_confirmacion,
+        "clasificacion": [
+            {"value": c, "label": etiquetas.get(c, c)} for c in sorted(datos["clasificaciones"] or [])
+        ],
+    }

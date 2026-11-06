@@ -1713,6 +1713,21 @@ Las tarjetas de Mesa de Control **con los mismos filtros que el listado** (todos
 - `confirmados` = con `fecha_confirmacion`. `valor` = Σ `gran_total` por moneda (nunca se suman monedas).
 - Sin permiso de importes: `puede_ver_importes: false` y cada fila de `por_moneda` sin `valor` (los conteos quedan). Sin empresa: todo en 0.
 
+#### Opciones de filtros — `GET /api/v1/ventas/pedidos/opciones/`
+
+Valores de los filtros de encabezado, en el estilo de `existencias/por-almacen/resumen/` (EC-774): sobre **todos** los pedidos que el usuario ve, sin reaccionar a los filtros. Una consulta. Único parámetro: `mis_pedidos=true` (otro → `400`).
+
+```json
+{ "cliente": [{ "value": 12, "label": "Cliente SA" }],
+  "vendedor": [{ "value": 7, "label": "Ana López" }],
+  "mes": [{ "value": "2026-10", "label": "Octubre 2026" }],
+  "mes_confirmacion": [{ "value": "2026-10", "label": "Octubre 2026" }, { "value": "sin_confirmar", "label": "Sin confirmar" }],
+  "clasificacion": [{ "value": "A", "label": "A - 2 a 5 días" }] }
+```
+
+- `cliente`: id y nombre del **catálogo** de clientes (razón social o, si está vacía, nombre), uno por id; `value` va en `?cliente=`. `vendedor`: el de la cotización de origen (nombre completo o correo), `value` va en `?vendedor=`. Ambos en orden alfabético.
+- `mes` / `mes_confirmacion`: más reciente primero, en hora de México; `sin_confirmar` aparece solo si hay pedidos sin confirmar. `clasificacion`: solo las presentes.
+
 #### Automatización de Órdenes de Trabajo (Producción)
 
 > 🚨 **Decisión de negocio (Presidencia) — v2 en producción**
