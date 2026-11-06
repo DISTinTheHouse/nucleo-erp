@@ -115,17 +115,13 @@ def anotar_columnas(qs):
         .annotate(total=Sum("cantidad_surtida"))
         .values("total")[:1]
     )
-    # Solo las columnas del nombre, no las filas completas de cotización y usuario
-    # (``aprobado_snapshot`` es un JSONB).
     return qs.annotate(
         piezas_surtidas=Coalesce(Subquery(surtido_qs), Value(Decimal("0"))),
         piezas_programadas=SumaCantidadesProgramadas(F("programacion_conf")),
-        vendedor_cotizacion_id=F("cotizacion__vendedor_id"),
-        vendedor_first_name=F("cotizacion__vendedor__first_name"),
-        vendedor_last_name=F("cotizacion__vendedor__last_name"),
-        vendedor_email=F("cotizacion__vendedor__email"),
-        # ``vendedor_nombre`` (para ``?ordering=``) reproduce ``nombre_para_mostrar``:
-        # nombre completo o, si queda vacío, el correo.
+        # ``vendedor_nombre`` (la columna que pinta el listado y la de ``?ordering=``)
+        # reproduce ``nombre_para_mostrar``: nombre completo o, si queda vacío, el
+        # correo; ``None`` sin cotización o sin vendedor. Solo las columnas del
+        # nombre, no las filas completas de cotización y usuario.
         vendedor_nombre=Coalesce(
             NullIf(
                 Trim(Concat(

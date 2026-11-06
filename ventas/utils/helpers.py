@@ -789,8 +789,9 @@ def _save_pedido_servicios_extras(pedido_obj, rows):
 def nombre_para_mostrar(first_name, last_name, email):
     """Nombre de un usuario para mostrar: ``get_full_name().strip() or email``.
 
-    Recibe las partes y no el usuario para servir también a un listado que solo
-    anota esas columnas (``PedidoListSerializer``). ``Usuario`` no redefine
+    Recibe las partes y no el usuario para servir también a consultas que solo traen
+    esas columnas (``pedidos/opciones/``). El listado de pedidos usa la misma regla
+    en SQL (``pedidos_listado.anotar_columnas``). ``Usuario`` no redefine
     ``get_full_name``: es el ``"first last".strip()`` de ``AbstractUser``.
     """
     return f"{first_name or ''} {last_name or ''}".strip() or email

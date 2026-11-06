@@ -736,10 +736,11 @@ class PedidoListSerializer(serializers.ModelSerializer):
     # de ``programacion_conf``. Cada item: destino/cantidad/comentarios/
     # fecha/usuario_id/usuario_nombre (mismo shape que arma ``programar``).
     parcialidades = serializers.SerializerMethodField()
-    # EC-571, PE-01. ``piezas`` y las columnas del vendedor de
-    # ``cotizacion.vendedor`` las anota ``PedidoViewSet.get_queryset`` en el
-    # listado (piezas: todas las tallas, muestras incluidas); ``vendedor_nombre``
-    # es ``None`` sin cotización o sin vendedor.
+    # EC-571, PE-01. ``piezas`` y ``vendedor_nombre`` (de ``cotizacion.vendedor``) los
+    # anota ``PedidoViewSet.get_queryset`` en el listado (``pedidos_listado``):
+    # piezas = todas las tallas, muestras incluidas; ``vendedor_nombre`` es el nombre
+    # completo o el correo (``nombre_para_mostrar`` en SQL, la misma columna que usa
+    # ``?ordering=vendedor_nombre``) y ``None`` sin cotización o sin vendedor.
     piezas = serializers.IntegerField(read_only=True)
     # El ``total_piezas`` de ``programar`` (muestras incluidas, hoy igual a ``piezas``).
     # Sale de la anotación de ``piezas`` (EC-776): si los dos valores vuelven a
@@ -749,15 +750,10 @@ class PedidoListSerializer(serializers.ModelSerializer):
     piezas_muestra = serializers.IntegerField(read_only=True)
     # Σ surtido de sus pickings (= ``tracker_picking.total_surtido`` del detalle), entero.
     piezas_surtidas = serializers.SerializerMethodField()
-    vendedor_nombre = serializers.SerializerMethodField()
+    vendedor_nombre = serializers.CharField(read_only=True, allow_null=True)
 
     def get_piezas_surtidas(self, obj):
         return int(obj.piezas_surtidas or 0)
-
-    def get_vendedor_nombre(self, obj):
-        if obj.vendedor_cotizacion_id is None:
-            return None
-        return nombre_para_mostrar(obj.vendedor_first_name, obj.vendedor_last_name, obj.vendedor_email)
 
     def get_fecha_entrega_min(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
