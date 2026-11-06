@@ -3,10 +3,13 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from django.db import transaction
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum, Value, Window
+from django.db.models import (
+    Count, DecimalField, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum, Value, Window,
+    prefetch_related_objects,
+)
 from django.db.models.functions import Coalesce, RowNumber
 from django.utils import timezone
-from rest_framework import status, viewsets
+from rest_framework import generics, status, viewsets
 from rest_framework.filters import OrderingFilter
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -2909,35 +2912,85 @@ def _resolver_tag_rfid(encuadre, codigo_tag):
     }
 
 
-def resumen_encuadre_rfid(encuadre):
+def prefetch_lecturas_rfid():
+    """Lecturas del encuadre con producto y variante en la misma consulta (antes,
+    dos consultas por lectura), en orden de captura: ``id`` explícito, porque sin
+    ``order_by`` el orden dependía del plan de Postgres (con el JOIN cambiaba)."""
+    return Prefetch(
+        "lecturas",
+        queryset=RecepcionRFIDLectura.objects.select_related("producto", "producto_variante").order_by("id"),
+    )
+
+
+def _renglones_oc_rfid(orden_compra_ids):
+    return (
+        OrdenCompraDetalle.objects.filter(orden_compra_id__in=orden_compra_ids)
+        .select_related("producto", "producto_variante__talla").order_by("id")
+    )
+
+
+def _renglones_op_rfid(op_ids):
+    return (
+        OrdenProduccionDetalle.objects.filter(op_id__in=op_ids)
+        .select_related("producto_variante__producto", "producto_variante__talla").order_by("op_detalle_id")
+    )
+
+
+def mapas_resumen_encuadres_rfid(encuadres):
+    """Renglones y recibido de todos los encuadres de un listado, en bloque.
+
+    Constante en consultas: renglones de OC, renglones de OP y recibido +
+    rechazado de cada lado, en lugar de tres consultas por encuadre. Mismos
+    filtros y orden que ``resumen_encuadre_rfid`` encuadre por encuadre: el
+    recibido se agrupa por renglón, así que juntar los renglones de varias
+    órdenes en un ``IN`` da el mismo total por renglón.
+    """
+    oc_ids = {e.orden_compra_id for e in encuadres if e.orden_compra_id}
+    op_ids = {e.op_id for e in encuadres if not e.orden_compra_id and e.op_id}
+    renglones_oc, renglones_op = {}, {}
+    if oc_ids:
+        for detalle in _renglones_oc_rfid(oc_ids):
+            renglones_oc.setdefault(detalle.orden_compra_id, []).append(detalle)
+    if op_ids:
+        for detalle in _renglones_op_rfid(op_ids):
+            renglones_op.setdefault(detalle.op_id, []).append(detalle)
+    recepcion_vs = RecepcionViewSet()
+    return {
+        "renglones_oc": renglones_oc,
+        "renglones_op": renglones_op,
+        "recibido_oc": recepcion_vs._recibido_por_detalle(
+            "orden_compra_detalle_id", [d.pk for ds in renglones_oc.values() for d in ds]
+        ),
+        "recibido_op": recepcion_vs._recibido_por_detalle(
+            "orden_produccion_detalle_id", [d.pk for ds in renglones_op.values() for d in ds]
+        ),
+    }
+
+
+def resumen_encuadre_rfid(encuadre, mapas=None):
     """Esperado = ordenado - ya recibido (no solo lo contratado, ver B1 del audit).
 
     Reutiliza ``RecepcionViewSet._recibido_por_detalle`` -- ya resta lo que
     Calidad rechaza, una sola fuente de verdad para "cuánto falta". Va en
     bloque: antes eran dos consultas por renglón de la orden.
+
+    ``mapas`` (de ``mapas_resumen_encuadres_rfid``) trae los renglones y el
+    recibido ya calculados para un listado; sin él se calculan para este
+    encuadre con la misma función, así listado y detalle no pueden divergir.
     """
-    recepcion_vs = RecepcionViewSet()
+    if mapas is None:
+        mapas = mapas_resumen_encuadres_rfid([encuadre])
     lecturas = list(encuadre.lecturas.all())
 
     if encuadre.orden_compra_id:
-        detalle_qs = list(
-            OrdenCompraDetalle.objects.filter(orden_compra_id=encuadre.orden_compra_id)
-            .select_related("producto", "producto_variante__talla").order_by("id")
-        )
-        campo_recibido = "orden_compra_detalle_id"
+        detalle_qs = mapas["renglones_oc"].get(encuadre.orden_compra_id, [])
+        recibido_map = mapas["recibido_oc"]
     elif encuadre.op_id:
-        detalle_qs = list(
-            OrdenProduccionDetalle.objects.filter(op_id=encuadre.op_id)
-            .select_related("producto_variante__producto", "producto_variante__talla").order_by("op_detalle_id")
-        )
-        campo_recibido = "orden_produccion_detalle_id"
+        detalle_qs = mapas["renglones_op"].get(encuadre.op_id, [])
+        recibido_map = mapas["recibido_op"]
     else:
         detalle_qs = []
-        campo_recibido = None
-    recibido_map = (
-        recepcion_vs._recibido_por_detalle(campo_recibido, [d.pk for d in detalle_qs])
-        if campo_recibido else {}
-    )
+        recibido_map = {}
 
     detalles = []
     total_esperado = Decimal("0")
@@ -3007,7 +3060,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         qs = (
             self.queryset
             .select_related("orden_compra", "op", "almacen", "proveedor", "sucursal")
-            .prefetch_related("lecturas")
+            .prefetch_related(prefetch_lecturas_rfid())
         )
         if getattr(user, "is_superuser", False):
             return qs.order_by("-created_at", "-id")
@@ -3020,6 +3073,20 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         if self.action == "create":
             return RecepcionRFIDEncuadreCreateSerializer
         return RecepcionRFIDEncuadreSerializer
+
+    def list(self, request, *args, **kwargs):
+        # El resumen de cada encuadre se calcula con renglones y recibido ya
+        # traídos en bloque para toda la respuesta (antes, 3 consultas por
+        # encuadre). Mismos filtros, orden y paginación que ``ListModelMixin``.
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        encuadres = list(page if page is not None else queryset)
+        context = self.get_serializer_context()
+        context["resumen_mapas"] = mapas_resumen_encuadres_rfid(encuadres)
+        serializer = self.get_serializer(encuadres, many=True, context=context)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
     @action(detail=False, methods=["get"])
     def onboarding(self, request):
@@ -3072,11 +3139,19 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             factura_referencia=(data.get("factura_referencia") or "").strip() or None,
             observaciones=(data.get("observaciones") or "").strip() or None,
         )
+        # Las relaciones ya están en memoria; solo se precargan las lecturas
+        # (vacías), igual que en el detalle, para no consultarlas dos veces.
+        prefetch_related_objects([encuadre], prefetch_lecturas_rfid())
         return Response(RecepcionRFIDEncuadreSerializer(encuadre).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
     def lecturas(self, request, pk=None):
-        encuadre = self.get_object()
+        # Igual que get_object (mismo alcance, filtros y permisos) pero sin el
+        # prefetch de lecturas: solo se responde la lectura nueva.
+        encuadre = generics.get_object_or_404(
+            self.filter_queryset(self.get_queryset().prefetch_related(None)), pk=pk
+        )
+        self.check_object_permissions(request, encuadre)
         if encuadre.estatus != RecepcionRFIDEncuadre.Estatus.PENDIENTE:
             raise ValidationError({"estatus": "Solo se puede escanear un encuadre pendiente."})
 
