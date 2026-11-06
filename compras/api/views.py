@@ -2972,30 +2972,22 @@ def resumen_encuadre_rfid(encuadre, mapas=None):
     bloque: antes eran dos consultas por renglón de la orden.
 
     ``mapas`` (de ``mapas_resumen_encuadres_rfid``) trae los renglones y el
-    recibido ya calculados para un listado; sin él se consultan aquí.
+    recibido ya calculados para un listado; sin él se calculan para este
+    encuadre con la misma función, así listado y detalle no pueden divergir.
     """
+    if mapas is None:
+        mapas = mapas_resumen_encuadres_rfid([encuadre])
     lecturas = list(encuadre.lecturas.all())
 
     if encuadre.orden_compra_id:
-        campo_recibido = "orden_compra_detalle_id"
-        if mapas is not None:
-            detalle_qs = mapas["renglones_oc"].get(encuadre.orden_compra_id, [])
-            recibido_map = mapas["recibido_oc"]
-        else:
-            detalle_qs = list(_renglones_oc_rfid([encuadre.orden_compra_id]))
+        detalle_qs = mapas["renglones_oc"].get(encuadre.orden_compra_id, [])
+        recibido_map = mapas["recibido_oc"]
     elif encuadre.op_id:
-        campo_recibido = "orden_produccion_detalle_id"
-        if mapas is not None:
-            detalle_qs = mapas["renglones_op"].get(encuadre.op_id, [])
-            recibido_map = mapas["recibido_op"]
-        else:
-            detalle_qs = list(_renglones_op_rfid([encuadre.op_id]))
+        detalle_qs = mapas["renglones_op"].get(encuadre.op_id, [])
+        recibido_map = mapas["recibido_op"]
     else:
         detalle_qs = []
-        campo_recibido = None
         recibido_map = {}
-    if mapas is None and campo_recibido:
-        recibido_map = RecepcionViewSet()._recibido_por_detalle(campo_recibido, [d.pk for d in detalle_qs])
 
     detalles = []
     total_esperado = Decimal("0")
