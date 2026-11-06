@@ -32,7 +32,7 @@ una sola consulta agregada: nada por fila.
 import re
 from decimal import Decimal, InvalidOperation
 
-from django.db.models import CharField, F, Func, IntegerField, OuterRef, Subquery, Sum, Value
+from django.db.models import CharField, Count, F, Func, IntegerField, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.functions import Coalesce, Concat, NullIf, Trim
 from rest_framework.exceptions import ValidationError
 
@@ -46,7 +46,8 @@ from wms.models import Picking, PickingDetalle
 # Acciones que pasan por los filtros del listado en ``PedidoViewSet.get_queryset``.
 # Las de detalle no: un filtro suelto en una acción de detalle (``get_object()``
 # también pasa por ``get_queryset``) puede dar 404 sobre un pedido visible.
-ACCIONES_FILTRADAS = ("list", "exportar")
+ACCION_KPIS_MESA = "kpis_mesa"
+ACCIONES_FILTRADAS = ("list", "exportar", ACCION_KPIS_MESA)
 # Las que además ordenan y serializan columnas: llevan todas las anotaciones.
 ACCIONES_CON_COLUMNAS = ("list", "exportar")
 
@@ -187,6 +188,12 @@ def _rango(request, qs, campo):
     return qs
 
 
+def filtra_piezas(request):
+    """``True`` si la petición filtra por piezas o muestras (necesita
+    ``anotar_piezas`` aunque la acción no pinte columnas)."""
+    return any(_texto(request, n) for n in ("piezas_min", "piezas_max", "muestras"))
+
+
 def filtrar(request, qs, ver_importes):
     """Filtros de columna sobre campos de ``pedidos`` (sin anotaciones). Valores
     fuera de catálogo → 400. Los rangos de importe se ignoran sin permiso."""
@@ -291,5 +298,38 @@ def filas_exportacion(qs, ver_importes):
         fila["estatus_display"] = etiquetas.get(fila["estatus"], str(fila["estatus"]))
         filas.append(fila)
     return filas
+
+
+# --- KPIs de mesa de control ------------------------------------------------------
+
+
+def kpis_mesa(qs, ver_importes):
+    """Conteos y valor por moneda del conjunto filtrado, sin cancelados: ``total`` =
+    ``confirmados`` + ``por_confirmar``. UNA consulta agrupada por moneda."""
+    vigentes = qs.exclude(estatus=Pedido.ESTATUS_CANCELADO).order_by()
+    filas = list(
+        vigentes.values("moneda_id", "moneda__codigo_iso")
+        .annotate(
+            total=Count("id"),
+            confirmados=Count("id", filter=Q(fecha_confirmacion__isnull=False)),
+            valor=Sum("gran_total"),
+        )
+        .order_by("moneda__codigo_iso", "moneda_id")
+    )
+    confirmados = sum(f["confirmados"] for f in filas)
+    total = sum(f["total"] for f in filas)
+    por_moneda = []
+    for f in filas:
+        fila = {"moneda_id": f["moneda_id"], "moneda": f["moneda__codigo_iso"], "total": f["total"]}
+        if ver_importes:
+            fila["valor"] = f["valor"] or Decimal("0")
+        por_moneda.append(fila)
+    return {
+        "total": total,
+        "confirmados": confirmados,
+        "por_confirmar": total - confirmados,
+        "por_moneda": por_moneda,
+        "puede_ver_importes": ver_importes,
+    }
 
 

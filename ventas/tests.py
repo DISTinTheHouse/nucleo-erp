@@ -8675,3 +8675,66 @@ class PedidoExportarTests(_PedidosModoServidorBase, TestCase):
         with CaptureQueriesContext(connection) as ctx:
             self._get(self.URL, {"ordering": "-piezas_programadas", "muestras": "con"})
         self.assertEqual(len(ctx), 1)
+
+
+class PedidoKpisMesaTests(_PedidosModoServidorBase, TestCase):
+    """EC-782: ``pedidos/kpis-mesa/`` con los filtros del listado; ``total`` excluye
+    cancelados y es ``confirmados`` + ``por_confirmar``."""
+
+    URL = f"{PEDIDOS_URL}kpis-mesa/"
+
+    def test_conteos_y_valor_por_moneda(self):
+        data = self._get(self.URL).json()
+        # p1 (confirmado), p2 y p3 (por confirmar); p4 cancelado fuera.
+        self.assertEqual((data["total"], data["confirmados"], data["por_confirmar"]), (3, 1, 2))
+        self.assertTrue(data["puede_ver_importes"])
+        por_moneda = {f["moneda"]: f for f in data["por_moneda"]}
+        self.assertEqual(por_moneda["MXN"]["total"], 2)
+        self.assertEqual(Decimal(str(por_moneda["MXN"]["valor"])), Decimal("179800"))  # 5,800 + 174,000
+        self.assertEqual(por_moneda["MXN"]["moneda_id"], self.mxn.pk)
+        self.assertEqual(Decimal(str(por_moneda["USD"]["valor"])), Decimal("23200"))
+
+    def test_coinciden_con_el_listado_filtrado(self):
+        for params in ({}, {"cliente": self.cliente_a.pk}, {"muestras": "con"}, {"mes": "2026-10"},
+                       {"search": "782-1"}, {"estatus": "5"}, {"piezas_min": "51"}):
+            with self.subTest(params=params):
+                filas = self._get(PEDIDOS_URL, params).json()
+                vigentes = [f for f in filas if f["estatus"] != Pedido.ESTATUS_CANCELADO]
+                data = self._get(self.URL, params).json()
+                self.assertEqual(data["total"], len(vigentes))
+                self.assertEqual(data["confirmados"], sum(1 for f in vigentes if f["fecha_confirmacion"]))
+                self.assertEqual(data["total"], data["confirmados"] + data["por_confirmar"])
+
+    def test_sin_permiso_sin_valor(self):
+        data = self._get(self.URL, {"gran_total_min": "1000000"}, self.sin_importes).json()
+        self.assertFalse(data["puede_ver_importes"])
+        self.assertEqual(data["total"], 3)  # el rango de importe se ignora
+        self.assertTrue(all("valor" not in f for f in data["por_moneda"]))
+
+    def test_otra_empresa_y_sin_empresa(self):
+        data = self._get(self.URL, user=self.admin_b).json()
+        self.assertEqual((data["total"], data["confirmados"]), (1, 1))
+        sin_empresa = Usuario.objects.create(username="se@782.test", email="se@782.test")
+        data = self._get(self.URL, user=sin_empresa).json()
+        self.assertEqual((data["total"], data["por_moneda"], data["puede_ver_importes"]), (0, [], False))
+
+    def test_invalidos_400(self):
+        self.assertEqual(self._get(self.URL, {"clasificacion": "Z"}).status_code, 400)
+
+    def test_kpis_de_mis_pedidos_no_cambian(self):
+        """``kpis/`` (EC-420) sigue siendo "mis pedidos" y no lee filtros."""
+        data = self._get(f"{PEDIDOS_URL}kpis/", {"cliente": self.cliente_b.pk}, self.ana).json()
+        self.assertEqual(data["pedidos_activos"]["total"], 1)  # p1 (p4 cancelado)
+
+    def test_una_consulta_sin_importar_las_filas(self):
+        params = {"muestras": "con", "confirmado": "true"}
+        self._get(self.URL, params)
+        with CaptureQueriesContext(connection) as antes:
+            self._get(self.URL, params)
+        for i in range(3):
+            self._pedido(f"P-782-K{i}", self.cliente_a, self.mxn, fecha_confirmacion=timezone.now(), tallas=[(1, True)])
+        with CaptureQueriesContext(connection) as despues:
+            data = self._get(self.URL, params).json()
+        self.assertEqual(data["total"], 4)
+        self.assertEqual(len(despues), len(antes))
+        self.assertEqual(len(antes), 1)

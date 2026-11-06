@@ -1697,6 +1697,22 @@ El conjunto filtrado **completo, sin paginar** (para el CSV/PDF de Compras › P
 
 Sin permiso de importes no vienen `subtotal` ni `gran_total`.
 
+#### KPIs de Mesa de Control — `GET /api/v1/ventas/pedidos/kpis-mesa/`
+
+Las tarjetas de Mesa de Control **con los mismos filtros que el listado** (todos los de arriba, `search` incluido). Es una acción nueva: `kpis/` (EC-420, "mis pedidos") no cambia. Una consulta.
+
+```json
+{ "generado_en": "2026-11-06T12:00:00Z",
+  "total": 116, "confirmados": 39, "por_confirmar": 77,
+  "por_moneda": [{ "moneda_id": 1, "moneda": "MXN", "total": 101, "valor": 8909627.16 },
+                 { "moneda_id": 7, "moneda": "USD", "total": 15, "valor": 910942.2 }],
+  "puede_ver_importes": true }
+```
+
+- **Los cancelados (estatus 5) no cuentan**: `total` = `confirmados` + `por_confirmar`. Con `?estatus=5` todo sale en 0.
+- `confirmados` = con `fecha_confirmacion`. `valor` = Σ `gran_total` por moneda (nunca se suman monedas).
+- Sin permiso de importes: `puede_ver_importes: false` y cada fila de `por_moneda` sin `valor` (los conteos quedan). Sin empresa: todo en 0.
+
 #### Automatización de Órdenes de Trabajo (Producción)
 
 > 🚨 **Decisión de negocio (Presidencia) — v2 en producción**

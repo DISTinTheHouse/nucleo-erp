@@ -3258,9 +3258,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
             qs = pedidos_listado.filtrar(self.request, qs, ver_importes)
             # ``piezas``/``piezas_muestra`` y el resto de columnas son subqueries por
             # FK indexada (nada de JOINs multivaluados): ni el filtro ni el orden por
-            # ellas multiplican filas. ``piezas_programables`` no se anota: hoy es
-            # igual a ``piezas`` y el serializer la lee de ahí (EC-776).
-            if accion in pedidos_listado.ACCIONES_CON_COLUMNAS:
+            # ellas multiplican filas. ``kpis-mesa`` sólo anota piezas si filtra por
+            # ellas. ``piezas_programables`` no se anota: hoy es igual a ``piezas`` y
+            # el serializer la lee de ahí (EC-776).
+            if accion in pedidos_listado.ACCIONES_CON_COLUMNAS or pedidos_listado.filtra_piezas(self.request):
                 qs = pedidos_listado.filtrar_piezas(self.request, pedidos_listado.anotar_piezas(qs))
             if accion in pedidos_listado.ACCIONES_CON_COLUMNAS:
                 qs = pedidos_listado.anotar_columnas(qs)
@@ -3276,7 +3277,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # su propio prefetch.
         if getattr(self, "action", None) not in (
             "list", "cancelar", "editar_mesa_control_contexto", "editar_mesa_control",
-            "exportar",
+            "exportar", "kpis_mesa",
         ):
             qs = qs.prefetch_related(
                 _pedido_detalles_prefetch(),
@@ -4218,6 +4219,21 @@ class PedidoViewSet(viewsets.ModelViewSet):
         listado aplica solo), sin paginar y con sólo las columnas de la exportación."""
         qs = self.filter_queryset(self.get_queryset())
         return Response(pedidos_listado.filas_exportacion(qs, puede_ver_contabilidad(request.user)))
+
+    @extend_schema(
+        summary="KPIs de pedidos de Mesa de Control con los filtros del listado",
+        parameters=PARAMETROS_LISTADO_PEDIDOS,
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="kpis-mesa")
+    def kpis_mesa(self, request):
+        """``total`` = ``confirmados`` + ``por_confirmar``, sin cancelados; el valor
+        por moneda (``gran_total``) solo para quien ve importes. No es el
+        ``kpis/`` de EC-420, que siempre es "mis pedidos" y no se toca. Mismo
+        ``get_queryset`` + ``filter_queryset`` que el listado: mismos filtros."""
+        qs = self.filter_queryset(self.get_queryset())
+        ver_importes = puede_ver_contabilidad(request.user)
+        return Response({"generado_en": timezone.now(), **pedidos_listado.kpis_mesa(qs, ver_importes)})
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-420): mismo
     # criterio que ``OrdenProduccionViewSet.kpis``/``OrdenBordadoViewSet.kpis``
