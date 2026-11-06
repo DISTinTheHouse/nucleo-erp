@@ -3358,7 +3358,9 @@ class PedidoMovimientoInventarioVarianteTests(TestCase):
         detalle_entrada = MovimientoInventarioDetalle.objects.get(movimiento_inventario=entrada)
         self.assertEqual(detalle_entrada.producto_variante_id, self.variante.pk)
         self.assertEqual(detalle_entrada.cantidad, Decimal("2"))
-        self.assertEqual(detalle_entrada.ubicacion_origen_id, self.ub1.pk)  # comportamiento actual
+        # Una ENTRADA guarda la ubicación en destino, como las demás entradas (EC-590).
+        self.assertEqual(detalle_entrada.ubicacion_destino_id, self.ub1.pk)
+        self.assertIsNone(detalle_entrada.ubicacion_origen_id)
         self.ex_var_1.refresh_from_db()
         self.assertEqual(self.ex_var_1.cantidad, Decimal("2"))
 
