@@ -48,6 +48,7 @@ from ventas.models import (
     TIPO_PEDIDO_CHOICES,
 )
 
+from ventas.api import pedidos_listado
 from ventas.api.serializers import (
     CotizacionComentarioSerializer,
     CotizacionSerializer,
@@ -66,7 +67,7 @@ from ventas.api.serializers import (
     errores_montos_guardados,
 )
 
-from nucleo.kpis import entero_param, rango_fechas
+from nucleo.kpis import entero_param, rango_fechas, validar_parametros
 from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset
 from nucleo.models import SerieFolio, Empresa
 from notificaciones.services.notificacion_service import crear_notificacion_usuario
@@ -102,7 +103,6 @@ from ventas.utils.helpers import (
     nombre_para_mostrar,
 )
 from ventas.services.sku_produccion_service import (
-    TALLAS_DE_LINEA_NO_MUESTRA_Q,
     linea_no_muestra_q,
     es_muestra,
     variante_produccion_de_talla,
@@ -2667,16 +2667,56 @@ def _nombre_corto(nombre, largo=40):
     return nombre[:largo].rsplit(" ", 1)[0].rstrip(" -_,;:./|") + "…"
 
 
+# Filtros que lee ``PedidoViewSet.get_queryset`` en el listado y en las acciones que
+# filtran igual (#948, EC-782); ``search``/``ordering``/``limit``/``offset`` los
+# publica cada backend.
+PARAMETROS_LISTADO_PEDIDOS = [
+    OpenApiParameter("q", OpenApiTypes.STR, description=(
+        "Contiene la frase completa, en folio, OC y nombre, razón social o RFC del cliente. "
+        "`search` busca en los mismos campos, por palabras."
+    )),
+    OpenApiParameter("folio", OpenApiTypes.STR, description="Contiene, solo en el folio."),
+    OpenApiParameter("cliente", OpenApiTypes.INT, description="Id del cliente."),
+    OpenApiParameter("vendedor", OpenApiTypes.INT, description="Id del vendedor de la cotización de origen."),
+    OpenApiParameter("sucursal", OpenApiTypes.INT, description="Id de la sucursal."),
+    OpenApiParameter("fecha_desde", OpenApiTypes.DATE, description="Día local de creación, desde (YYYY-MM-DD)."),
+    OpenApiParameter("fecha_hasta", OpenApiTypes.DATE, description="Día local de creación, hasta (YYYY-MM-DD)."),
+    OpenApiParameter("estatus", OpenApiTypes.STR, description="Uno o varios estatus separados por coma."),
+    OpenApiParameter("mis_pedidos", OpenApiTypes.BOOL, description="Solo los de cotizaciones del usuario."),
+    OpenApiParameter("sin_clasificar", OpenApiTypes.BOOL, description="Solo los que no tienen clasificación."),
+    OpenApiParameter("programado", OpenApiTypes.BOOL, description="Solo los que tienen alguna parcialidad programada."),
+    OpenApiParameter("con_muestras", OpenApiTypes.BOOL, description="Solo los que tienen alguna línea de muestra."),
+    # EC-782: filtros de columna de Mesa de Control, Compras › Pedidos y Mis pedidos.
+    OpenApiParameter("moneda", OpenApiTypes.INT, description="Id de la moneda."),
+    OpenApiParameter("clasificacion", OpenApiTypes.STR, description="Una o varias clasificaciones (A-F, X) separadas por coma."),
+    OpenApiParameter("confirmado", OpenApiTypes.BOOL, description="true: con `fecha_confirmacion`; false: por confirmar."),
+    OpenApiParameter("mes", OpenApiTypes.STR, description="AAAA-MM de `created_at` (hora de México)."),
+    OpenApiParameter("mes_confirmacion", OpenApiTypes.STR, description="AAAA-MM de `fecha_confirmacion` (hora de México), o `sin_confirmar`."),
+    OpenApiParameter("piezas_min", OpenApiTypes.NUMBER, description="Piezas, mínimo inclusivo."),
+    OpenApiParameter("piezas_max", OpenApiTypes.NUMBER, description="Piezas, máximo exclusivo."),
+    OpenApiParameter("subtotal_min", OpenApiTypes.NUMBER, description="Subtotal, mínimo inclusivo. Se ignora sin permiso de importes."),
+    OpenApiParameter("subtotal_max", OpenApiTypes.NUMBER, description="Subtotal, máximo exclusivo. Se ignora sin permiso de importes."),
+    OpenApiParameter("gran_total_min", OpenApiTypes.NUMBER, description="Gran total, mínimo inclusivo. Se ignora sin permiso de importes."),
+    OpenApiParameter("gran_total_max", OpenApiTypes.NUMBER, description="Gran total, máximo exclusivo. Se ignora sin permiso de importes."),
+    OpenApiParameter("muestras", OpenApiTypes.STR, enum=list(pedidos_listado.MUESTRAS), description=(
+        "con: alguna pieza de muestra; solo: todas; sin: ninguna."
+    )),
+]
+
+
 class PedidoViewSet(viewsets.ModelViewSet):
     pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= regresa la lista completa
     ordering_fields = [
         "id", "folio", "estatus", "clasificacion", "oc", "created_at", "updated_at", "fecha_confirmacion",
         "cliente_nombre", "cliente_razon_social", "cliente_rfc",
+        # EC-782: columnas anotadas (sólo en ``list``/``exportar``) e importes (sólo
+        # para quien los ve); los filtra ``OrdenamientoPedidosFilter``.
+        *pedidos_listado.CAMPOS_ORDEN,
     ]
     http_method_names = ["get", "post", "put", "patch", "head", "options"]
     queryset = pedidos_base()
     serializer_class = PedidoSerializer
-    filter_backends = FILTER_BACKENDS_LISTADO
+    filter_backends = (*FILTER_BACKENDS_SIN_ORDERING, pedidos_listado.OrdenamientoPedidosFilter)
     # Campos de ``?q=`` (la frase completa) y de ``?search=`` (``SearchFilter``,
     # por palabras): el schema publicaba ``search`` y se ignoraba (#948, como #839
     # en Compras). Todos en la tabla ``pedidos``, sin JOIN.
@@ -2691,32 +2731,14 @@ class PedidoViewSet(viewsets.ModelViewSet):
             return PedidoListSerializer
         return PedidoSerializer
 
-    @extend_schema(parameters=[
-        # ``search``/``ordering``/``limit``/``offset`` los publica cada backend; estos
-        # los lee ``get_queryset`` y el schema no los veía (#948).
-        OpenApiParameter("q", OpenApiTypes.STR, description=(
-            "Contiene la frase completa, en folio, OC y nombre, razón social o RFC del cliente. "
-            "`search` busca en los mismos campos, por palabras."
-        )),
-        OpenApiParameter("folio", OpenApiTypes.STR, description="Contiene, solo en el folio."),
-        OpenApiParameter("cliente", OpenApiTypes.INT, description="Id del cliente."),
-        OpenApiParameter("vendedor", OpenApiTypes.INT, description="Id del vendedor de la cotización de origen."),
-        OpenApiParameter("sucursal", OpenApiTypes.INT, description="Id de la sucursal."),
-        OpenApiParameter("fecha_desde", OpenApiTypes.DATE, description="Día local de creación, desde (YYYY-MM-DD)."),
-        OpenApiParameter("fecha_hasta", OpenApiTypes.DATE, description="Día local de creación, hasta (YYYY-MM-DD)."),
-        OpenApiParameter("estatus", OpenApiTypes.STR, description="Uno o varios estatus separados por coma."),
-        OpenApiParameter("mis_pedidos", OpenApiTypes.BOOL, description="Solo los de cotizaciones del usuario."),
-        OpenApiParameter("sin_clasificar", OpenApiTypes.BOOL, description="Solo los que no tienen clasificación."),
-        OpenApiParameter("programado", OpenApiTypes.BOOL, description="Solo los que tienen alguna parcialidad programada."),
-        OpenApiParameter("con_muestras", OpenApiTypes.BOOL, description="Solo los que tienen alguna línea de muestra."),
-    ])
+    @extend_schema(parameters=PARAMETROS_LISTADO_PEDIDOS)
     def list(self, request, *args, **kwargs):
         # #947: el listado oculta los mismos importes que el detalle (#537); antes
         # ``gran_total``/``subtotal`` salían aquí a cualquier rol. El permiso se
         # evalúa una sola vez por petición, no por fila, y cada fila ya es un
         # dict propio del serializer: se limpia en sitio, sin ``deepcopy``.
-        # ``ordering_fields`` no incluye importes, así que ``?ordering=`` tampoco
-        # deja deducirlos (a diferencia de las OC, #837).
+        # ``?ordering=`` por ``subtotal``/``gran_total`` y los rangos de importe se
+        # ignoran para él (``OrdenamientoPedidosFilter``, EC-782; como las OC, #837).
         response = super().list(request, *args, **kwargs)
         if puede_ver_contabilidad(request.user):
             return response
@@ -3179,8 +3201,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # ``CotizacionViewSet._apply_filters``: un filtro suelto que se cuele a
         # una acción de detalle (``get_object()`` también pasa por aquí) puede
         # devolver 404 sobre un pedido que existe y es visible. Pensados para
-        # la pestaña "Programación de pedidos" de mesa de control.
-        if getattr(self, "action", None) == "list":
+        # la pestaña "Programación de pedidos" de mesa de control. Las acciones de
+        # ``pedidos_listado.ACCIONES_FILTRADAS`` (EC-782) filtran igual que el listado.
+        accion = getattr(self, "action", None)
+        if accion in pedidos_listado.ACCIONES_FILTRADAS:
             estatus = self.request.query_params.get("estatus")
             if estatus:
                 try:
@@ -3228,51 +3252,19 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 qs = qs.filter(created_at__date__gte=fecha_desde)
             if fecha_hasta:
                 qs = qs.filter(created_at__date__lte=fecha_hasta)
-            # ``piezas`` (EC-571, PE-01): todas las tallas del pedido, muestras
-            # incluidas. Subquery y no ``Sum`` sobre el join, igual que el listado de
-            # cotizaciones: sin ``GROUP BY`` ni JOINs multivaluados en la consulta
-            # principal. ``vendedor_nombre`` sale de ``cotizacion.vendedor``.
-            piezas_qs = (
-                PedidoDetalleTalla.objects.filter(pedido_detalle__pedido_id=OuterRef("pk"))
-                .values("pedido_detalle__pedido_id")
-                .annotate(total=Sum("cantidad"))
-                .values("total")
-            )
-            # ``piezas_muestra``: tallas de líneas de muestra (mismo criterio que
-            # ``es_muestra``: ``producto_nombre_externo`` puesto).
-            muestra_qs = (
-                PedidoDetalleTalla.objects.filter(pedido_detalle__pedido_id=OuterRef("pk"))
-                .exclude(TALLAS_DE_LINEA_NO_MUESTRA_Q)
-                .values("pedido_detalle__pedido_id")
-                .annotate(total=Sum("cantidad"))
-                .values("total")
-            )
-            # ``piezas_surtidas``: Σ ``cantidad_surtida`` de sus pickings, mismo
-            # alcance que ``tracker_picking.total_surtido`` (picking y renglón no
-            # cancelados, con talla).
-            surtido_qs = (
-                PickingDetalle.objects.filter(
-                    pedido_detalle__pedido_id=OuterRef("pk"), pedido_detalle_talla__isnull=False,
-                )
-                .exclude(picking__estado=Picking.Estado.CANCELADO)
-                .exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
-                .values("pedido_detalle__pedido_id")
-                .annotate(total=Sum("cantidad_surtida"))
-                .values("total")
-            )
-            # Solo las columnas del nombre, no las filas completas de cotización y
-            # usuario (``aprobado_snapshot`` es un JSONB) en un listado sin paginar.
-            qs = qs.annotate(
-                # ``piezas_programables`` no se anota: hoy es igual a ``piezas`` y el
-                # serializer la lee de ahí (EC-776). Anotarla repetía el subquery.
-                piezas=Coalesce(Subquery(piezas_qs[:1]), 0),
-                piezas_muestra=Coalesce(Subquery(muestra_qs[:1]), 0),
-                piezas_surtidas=Subquery(surtido_qs[:1]),
-                vendedor_cotizacion_id=F("cotizacion__vendedor_id"),
-                vendedor_first_name=F("cotizacion__vendedor__first_name"),
-                vendedor_last_name=F("cotizacion__vendedor__last_name"),
-                vendedor_email=F("cotizacion__vendedor__email"),
-            )
+            # Filtros de columna de EC-782 (moneda, clasificación, confirmación,
+            # meses, rangos de importe y muestras), sobre columnas de ``pedidos``.
+            ver_importes = puede_ver_contabilidad(user)
+            qs = pedidos_listado.filtrar(self.request, qs, ver_importes)
+            # ``piezas``/``piezas_muestra`` y el resto de columnas son subqueries por
+            # FK indexada (nada de JOINs multivaluados): ni el filtro ni el orden por
+            # ellas multiplican filas. ``kpis-mesa`` sólo anota piezas si filtra por
+            # ellas. ``piezas_programables`` no se anota: hoy es igual a ``piezas`` y
+            # el serializer la lee de ahí (EC-776).
+            if accion in pedidos_listado.ACCIONES_CON_COLUMNAS or pedidos_listado.filtra_piezas(self.request):
+                qs = pedidos_listado.filtrar_piezas(self.request, pedidos_listado.anotar_piezas(qs))
+            if accion in pedidos_listado.ACCIONES_CON_COLUMNAS:
+                qs = pedidos_listado.anotar_columnas(qs)
         # El shape de detalle (retrieve/create/update) serializa ``detalles`` +
         # ``tallas`` vía ``PedidoSerializer``: se prefetchean para evitar el N+1.
         # El listado usa ``PedidoListSerializer`` (9 campos escalares) y NO los
@@ -3285,6 +3277,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # su propio prefetch.
         if getattr(self, "action", None) not in (
             "list", "cancelar", "editar_mesa_control_contexto", "editar_mesa_control",
+            "exportar", "kpis_mesa", "opciones",
         ):
             qs = qs.prefetch_related(
                 _pedido_detalles_prefetch(),
@@ -4210,6 +4203,55 @@ class PedidoViewSet(viewsets.ModelViewSet):
             resultados.append(item)
 
         return Response(resultados)
+
+    # --- Modo servidor de Mesa de Control y Compras › Pedidos (EC-782) ----------
+    # Detalle en ``ventas/api/pedidos_listado.py``.
+
+    @extend_schema(
+        summary="Pedidos filtrados sin paginar, para exportar (Compras › Pedidos)",
+        parameters=PARAMETROS_LISTADO_PEDIDOS,
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="exportar")
+    def exportar(self, request):
+        """Mismos filtros, ``search``, ``ordering`` y regla de importes que el
+        listado (parte de ``get_queryset`` y ``filter_queryset``: un filtro nuevo del
+        listado aplica solo), sin paginar y con sólo las columnas de la exportación."""
+        qs = self.filter_queryset(self.get_queryset())
+        return Response(pedidos_listado.filas_exportacion(qs, puede_ver_contabilidad(request.user)))
+
+    @extend_schema(
+        summary="KPIs de pedidos de Mesa de Control con los filtros del listado",
+        parameters=PARAMETROS_LISTADO_PEDIDOS,
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="kpis-mesa")
+    def kpis_mesa(self, request):
+        """``total`` = ``confirmados`` + ``por_confirmar``, sin cancelados; el valor
+        por moneda (``gran_total``) solo para quien ve importes. No es el
+        ``kpis/`` de EC-420, que siempre es "mis pedidos" y no se toca. Mismo
+        ``get_queryset`` + ``filter_queryset`` que el listado: mismos filtros."""
+        qs = self.filter_queryset(self.get_queryset())
+        ver_importes = puede_ver_contabilidad(request.user)
+        return Response({"generado_en": timezone.now(), **pedidos_listado.kpis_mesa(qs, ver_importes)})
+
+    @extend_schema(
+        summary="Opciones de los filtros de encabezado del listado de pedidos",
+        parameters=[
+            OpenApiParameter("mis_pedidos", OpenApiTypes.BOOL, description="Solo los de cotizaciones del usuario."),
+        ],
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="opciones")
+    def opciones(self, request):
+        """Clientes, vendedores, meses de creación y de confirmación y
+        clasificaciones presentes en los pedidos que el usuario ve, en una
+        consulta. No reaccionan a los filtros (como ``por-almacen/resumen/``)."""
+        validar_parametros(request, {"mis_pedidos"})
+        qs = pedidos_visibles(pedidos_base(), request.user)
+        if (request.query_params.get("mis_pedidos") or "").lower() in ("true", "1"):
+            qs = qs.filter(cotizacion__vendedor=request.user)
+        return Response(pedidos_listado.opciones(qs))
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-420): mismo
     # criterio que ``OrdenProduccionViewSet.kpis``/``OrdenBordadoViewSet.kpis``

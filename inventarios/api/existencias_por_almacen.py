@@ -25,15 +25,13 @@ que la pantalla hace hoy en memoria (``StockView.tsx``, ``StockColumns.tsx``,
   para ``stock`` entero), sin flotantes ni subconsultas repetidas.
 """
 
-import re
-import unicodedata
-
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.db.models import Case, CharField, Count, DateField, F, Max, Q, Sum, Value, When
 from django.db.models.functions import Coalesce, Concat, JSONObject, Trunc
 from rest_framework.exceptions import ValidationError
 
 from nucleo.kpis import entero_param
+from nucleo.opciones_filtros import clave_orden, mes_param, opciones_meses
 from nucleo.listados import OrdenamientoEstableFilter
 
 # (estado, porcentaje mínimo EXCLUSIVO), de mayor a menor; el último
@@ -54,11 +52,6 @@ CAMPOS_ORDENAMIENTO = (
     "sku", "nombre", "tipo", "color", "stock", "fecha_actualizacion", "ubicacion_nombre", "id",
 )
 
-_MES_RE = re.compile(r"^(\d{4})-(\d{2})$")
-_MESES = (
-    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
-)
 
 _ES_CATALOGO = Q(producto__isnull=False) | Q(producto_variante__isnull=False)
 _ES_MUESTRA = Q(variante_produccion__isnull=False)
@@ -174,17 +167,11 @@ def filtrar(request, qs, maximo):
             raise ValidationError({"existencias": f"Usa uno de: {', '.join(RANGOS_EXISTENCIAS)}."})
         qs = qs.filter(**RANGOS_EXISTENCIAS[rango])
 
-    mes = _texto(request, "mes")
+    mes = mes_param(request, "mes")
     if mes:
-        coincide = _MES_RE.match(mes)
-        if not coincide or not 1 <= int(coincide.group(2)) <= 12:
-            raise ValidationError({"mes": "Formato AAAA-MM."})
         # ``__year``/``__month`` usan la zona del proyecto (America/Mexico_City),
         # la misma que el navegador de quien opera.
-        qs = qs.filter(
-            fecha_actualizacion__year=int(coincide.group(1)),
-            fecha_actualizacion__month=int(coincide.group(2)),
-        )
+        qs = qs.filter(fecha_actualizacion__year=mes[0], fecha_actualizacion__month=mes[1])
 
     estado = _texto(request, "estado")
     if estado:
@@ -237,17 +224,11 @@ def filas(qs):
     )
 
 
-def _clave_orden(texto):
-    """Orden alfabético aproximado al ``localeCompare(..., "es")`` del front."""
-    sin_acentos = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
-    return (sin_acentos.casefold(), texto)
-
-
 def _opciones(valores):
     """``buildDistinctFilterOptions``: valores distintos, sin vacíos ni
     etiquetas en blanco; ``value`` crudo y ``label`` recortada."""
     vistos = {v for v in (valores or []) if v is not None and v != "" and str(v).strip()}
-    return sorted(({"value": v, "label": v.strip()} for v in vistos), key=lambda o: _clave_orden(o["label"]))
+    return sorted(({"value": v, "label": v.strip()} for v in vistos), key=lambda o: clave_orden(o["label"]))
 
 
 def resumen(qs, maximo):
@@ -276,12 +257,9 @@ def resumen(qs, maximo):
     )
     ubicaciones = sorted(
         ({"value": u["value"], "label": u["label"].strip()} for u in datos["ubicaciones"] or [] if u["label"].strip()),
-        key=lambda o: _clave_orden(o["label"]),
+        key=lambda o: clave_orden(o["label"]),
     )
-    meses = [
-        {"value": f"{m.year:04d}-{m.month:02d}", "label": f"{_MESES[m.month - 1]} {m.year}"}
-        for m in sorted(datos["meses"] or [], reverse=True)
-    ]
+    meses = opciones_meses(datos["meses"])
     return {
         "max_stock": maximo,
         "kpis": {

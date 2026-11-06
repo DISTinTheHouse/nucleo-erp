@@ -56,14 +56,31 @@ class OrdenamientoEstableFilter(OrderingFilter):
         return ordering
 
 
+def estatus_param(request, estatus_validos, nombre="estatus"):
+    """``?estatus=3`` o ``?estatus=3,4`` (EC-782) → lista de enteros; vacío → ``None``.
+    Un valor no entero → 400 como ``entero_param``; uno fuera de ``estatus_validos``
+    → 400 ``Estatus inexistente.``, igual que cuando sólo se aceptaba uno."""
+    valor = (request.query_params.get(nombre) or "").strip()
+    if not valor:
+        return None
+    try:
+        lista = [int(parte) for parte in valor.split(",") if parte.strip()]
+    except ValueError:
+        raise ValidationError({nombre: "Debe ser un entero válido."})
+    if not lista:
+        raise ValidationError({nombre: "Debe ser un entero válido."})
+    if any(e not in estatus_validos for e in lista):
+        raise ValidationError({nombre: "Estatus inexistente."})
+    return lista
+
+
 def filtrar_listado_compras(request, qs, estatus_validos, campo_fecha):
-    """``?estatus``, ``?proveedor``, ``?sucursal`` y ``?fecha_desde``/``?fecha_hasta``
-    (sobre ``campo_fecha``) de los listados de OC y recepciones. Inválidos → 400."""
-    estatus = entero_param(request, "estatus")
+    """``?estatus`` (uno o varios separados por coma, EC-782), ``?proveedor``,
+    ``?sucursal`` y ``?fecha_desde``/``?fecha_hasta`` (sobre ``campo_fecha``) de los
+    listados de OC y recepciones. Inválidos → 400."""
+    estatus = estatus_param(request, estatus_validos)
     if estatus is not None:
-        if estatus not in estatus_validos:
-            raise ValidationError({"estatus": "Estatus inexistente."})
-        qs = qs.filter(estatus=estatus)
+        qs = qs.filter(estatus__in=estatus)
     for nombre in ("proveedor", "sucursal"):
         valor = entero_param(request, nombre)
         if valor is not None:

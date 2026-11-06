@@ -2570,3 +2570,315 @@ class FiltroImportesOrdenCompraTests(TestCase):
         # El original queda intacto.
         self.assertEqual((data["gran_total"], data["detalles"][0]["precio"]), ("116.00", "100.00"))
         self.assertIs(filtrar_campos_contabilidad_orden_compra(data, con_permiso), data)
+
+
+class _OrdenesModoServidorBase:
+    """Fixtures de EC-782 en compras: una OC por estatus en ACME, MXN y USD, una OC
+    sin proveedor y una de otra empresa."""
+
+    URL = "/api/v1/compras/ordenes/"
+
+    @classmethod
+    def setUpTestData(cls):
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
+        cls.mxn = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        cls.empresa = Empresa.objects.create(codigo="acme-oc782", razon_social="ACME OC SA")
+        cls.otra = Empresa.objects.create(codigo="globex-oc782", razon_social="Globex OC SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="AOC", nombre="Matriz")
+        cls.sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="GOC", nombre="Globex")
+        datos = dict(
+            sat_regimen_fiscal=regimen, sat_forma_pago=forma, sat_metodo_pago=metodo,
+            telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000",
+        )
+        cls.proveedor = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="Telas Norte", moneda=cls.mxn, codigo="PRV-782", razon_social="Telas SA",
+            email="t@acme.test", **datos,
+        )
+        cls.proveedor_otra = Proveedor.objects.create(
+            empresa=cls.otra, nombre="Secreto", moneda=cls.mxn, codigo="PRV-G782", razon_social="Secreto SA",
+            email="s@globex.test", **datos,
+        )
+        cls.admin = Usuario.objects.create(
+            username="adm@acme-oc782.test", email="adm@acme-oc782.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.almacenista = Usuario.objects.create(
+            username="alm@acme-oc782.test", email="alm@acme-oc782.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+        )
+        cls.admin_otra = Usuario.objects.create(
+            username="adm@globex-oc782.test", email="adm@globex-oc782.test", empresa=cls.otra,
+            sucursal_default=cls.sucursal_otra, is_admin_empresa=True,
+        )
+        E = OrdenCompra.EstatusOrdenCompra
+        hoy = timezone.localdate()
+        cls.ocs = {}
+        for estatus, total, moneda, entrega in (
+            (E.BORRADOR, "100", cls.mxn, None),
+            (E.POR_AUTORIZAR, "200", cls.mxn, None),
+            (E.AUTORIZADA, "300", cls.mxn, hoy + timedelta(days=9)),
+            (E.PARCIALMENTE_RECIBIDA, "400", cls.mxn, hoy + timedelta(days=5)),
+            (E.RECIBIDA, "500", cls.usd, None),
+            (E.CANCELADA, "99999", cls.mxn, None),
+        ):
+            cls.ocs[estatus] = cls._oc(estatus, total, moneda, entrega)
+        # Otra parcial sin fecha (al final de "en curso") y una sin proveedor.
+        cls.oc_parcial_sin_fecha = cls._oc(E.PARCIALMENTE_RECIBIDA, "50", cls.usd, None)
+        cls.oc_sin_proveedor = cls._oc(E.AUTORIZADA, "10", cls.mxn, None, proveedor=None)
+        cls.oc_otra = OrdenCompra.objects.create(
+            empresa=cls.otra, sucursal=cls.sucursal_otra, proveedor=cls.proveedor_otra, moneda=cls.mxn,
+            usuario=cls.admin_otra, fecha_oc=hoy, estatus=E.AUTORIZADA, gran_total=Decimal("777"),
+        )
+
+    @classmethod
+    def _oc(cls, estatus, total, moneda, entrega, proveedor="default"):
+        return OrdenCompra.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, moneda=moneda, usuario=cls.admin,
+            proveedor=cls.proveedor if proveedor == "default" else proveedor,
+            fecha_oc=timezone.localdate(), estatus=estatus, gran_total=Decimal(total),
+            fecha_entrega_estimada=entrega,
+        )
+
+    def _get(self, url, params=None, user=None):
+        client = APIClient()
+        client.force_authenticate(user=user or self.admin)
+        return client.get(url, params or {})
+
+    def _ids(self, params, user=None, url=None):
+        resp = self._get(url or self.URL, params, user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        return sorted(r["id"] for r in (data["results"] if isinstance(data, dict) else data))
+
+
+class EstatusMultivalorListadosComprasTests(_OrdenesModoServidorBase, TestCase):
+    """EC-782: ``?estatus=`` de OC y recepciones acepta uno o varios separados por coma
+    (``filtrar_listado_compras``); un solo entero sigue igual."""
+
+    def test_ordenes(self):
+        E = OrdenCompra.EstatusOrdenCompra
+        self.assertEqual(self._ids({"estatus": "3"}), sorted([self.ocs[E.AUTORIZADA].pk, self.oc_sin_proveedor.pk]))
+        self.assertEqual(
+            self._ids({"estatus": "3,4"}),
+            sorted([self.ocs[E.AUTORIZADA].pk, self.oc_sin_proveedor.pk, self.ocs[E.PARCIALMENTE_RECIBIDA].pk,
+                    self.oc_parcial_sin_fecha.pk]),
+        )
+        self.assertEqual(self._ids({"estatus": " 5 , 6 ,"}), sorted([self.ocs[E.RECIBIDA].pk, self.ocs[E.CANCELADA].pk]))
+        # Paginado también; y otra empresa no se cuela.
+        self.assertEqual(self._get(self.URL, {"estatus": "3,4", "limit": 2}).json()["count"], 4)
+        self.assertEqual(self._ids({"estatus": "3,4"}, self.admin_otra), [self.oc_otra.pk])
+
+    def test_ordenes_invalidos(self):
+        for valor, mensaje in (("99", "Estatus inexistente."), ("3,99", "Estatus inexistente."),
+                               ("abc", "Debe ser un entero válido."), ("3,x", "Debe ser un entero válido."),
+                               (",", "Debe ser un entero válido.")):
+            with self.subTest(valor=valor):
+                resp = self._get(self.URL, {"estatus": valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(resp.json(), {"estatus": mensaje})
+
+    def test_recepciones(self):
+        almacen = Almacen.objects.create(empresa=self.empresa, sucursal=self.sucursal, codigo="A-782", nombre="MP")
+        R = Recepcion.EstatusRecepcion
+        recepciones = {
+            estatus: Recepcion.objects.create(
+                empresa=self.empresa, sucursal=self.sucursal, almacen=almacen, usuario=self.admin,
+                folio=f"RC-782-{estatus}", fecha_recepcion=timezone.now(), estatus=estatus,
+            )
+            for estatus in (R.BORRADOR, R.RECIBIDA, R.CANCELADA)
+        }
+        self.assertEqual(self._ids({"estatus": "2"}, url=RECEPCIONES_URL), [recepciones[R.RECIBIDA].pk])
+        self.assertEqual(
+            self._ids({"estatus": "1,6"}, url=RECEPCIONES_URL),
+            sorted([recepciones[R.BORRADOR].pk, recepciones[R.CANCELADA].pk]),
+        )
+        self.assertEqual(self._get(RECEPCIONES_URL, {"estatus": "9"}).status_code, 400)
+        self.assertEqual(self._get(RECEPCIONES_URL, {"estatus": "1,x"}).status_code, 400)
+
+
+class OrdenCompraConProveedorTests(_OrdenesModoServidorBase, TestCase):
+    """EC-782: ``?con_proveedor=`` para el selector de OC de facturas de proveedor."""
+
+    def test_filtro(self):
+        todas = self._ids({})
+        con = self._ids({"con_proveedor": "true"})
+        self.assertNotIn(self.oc_sin_proveedor.pk, con)
+        self.assertEqual(sorted(con + [self.oc_sin_proveedor.pk]), todas)
+        self.assertEqual(self._ids({"con_proveedor": "false"}), [self.oc_sin_proveedor.pk])
+        # El selector: con proveedor y sin canceladas.
+        self.assertEqual(len(self._ids({"con_proveedor": "true", "estatus": "1,2,3,4,5"})), 6)
+        self.assertEqual(self._get(self.URL, {"con_proveedor": "tal-vez"}).status_code, 400)
+
+
+class OrdenCompraPedidosVinculadosEstatusTests(_OrdenesModoServidorBase, TestCase):
+    """EC-782: ``pedidos_vinculados`` trae ``estatus``, ``activo`` y ``cliente_nombre``
+    del pedido, sin consultas extra."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from terceros.models import Cliente
+        from ventas.models import Pedido
+
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 782")
+
+        def pedido(folio, **extra):
+            return Pedido.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=cls.mxn, folio=folio,
+                persona_pagos="P", correo_facturas="p@acme.test", telefono_pagos="8100000000",
+                forma_pago="03", metodo_pago="PUE", uso_cfdi="G03", cliente_nombre="Cliente 782", **extra,
+            )
+
+        cls.vigente = pedido("P-V782", estatus=3)
+        cls.cancelado = pedido("P-C782", estatus=Pedido.ESTATUS_CANCELADO)
+        cls.baja = pedido("P-B782", estatus=3, activo=False)
+        cls.oc = cls.ocs[OrdenCompra.EstatusOrdenCompra.AUTORIZADA]
+        cls.oc.pedido = cls.vigente
+        cls.oc.save(update_fields=["pedido"])
+        cls.oc.pedidos.set([cls.vigente, cls.cancelado, cls.baja])
+
+    def test_listado_y_detalle(self):
+        esperado = [
+            {"id": self.vigente.pk, "folio": "P-V782", "estatus": 3, "activo": True, "cliente_nombre": "Cliente 782"},
+            {"id": self.cancelado.pk, "folio": "P-C782", "estatus": 5, "activo": True, "cliente_nombre": "Cliente 782"},
+            {"id": self.baja.pk, "folio": "P-B782", "estatus": 3, "activo": False, "cliente_nombre": "Cliente 782"},
+        ]
+        detalle = self._get(f"{self.URL}{self.oc.pk}/").json()
+        self.assertEqual(detalle["pedidos_vinculados"], esperado)
+        fila = next(r for r in self._get(self.URL).json() if r["id"] == self.oc.pk)
+        self.assertEqual(fila["pedidos_vinculados"], esperado)
+        self.assertEqual(fila["pedidos"], [p["id"] for p in esperado])
+
+    def test_legado_solo_fk(self):
+        oc = self.ocs[OrdenCompra.EstatusOrdenCompra.BORRADOR]
+        oc.pedido = self.cancelado
+        oc.save(update_fields=["pedido"])
+        detalle = self._get(f"{self.URL}{oc.pk}/").json()
+        self.assertEqual([(p["id"], p["estatus"]) for p in detalle["pedidos_vinculados"]], [(self.cancelado.pk, 5)])
+
+    def test_sin_consultas_extra(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._get(self.URL)
+        with CaptureQueriesContext(connection) as antes:
+            self._get(self.URL)
+        for oc in self.ocs.values():
+            oc.pedidos.add(self.vigente, self.cancelado)
+        with CaptureQueriesContext(connection) as despues:
+            self._get(self.URL)
+        self.assertEqual(len(despues), len(antes))
+
+
+class OrdenCompraKpisDashboardTests(_OrdenesModoServidorBase, TestCase):
+    """EC-782: ``kpis/`` cubre el dashboard de Compras sin cambiar sus claves previas."""
+
+    URL_KPIS = "/api/v1/compras/ordenes/kpis/"
+
+    def test_claves_previas_intactas(self):
+        data = self._get(self.URL_KPIS).json()
+        self.assertLessEqual(
+            {"generado_en", "ocs_abiertas", "ocs_vencidas_sin_recibir", "ciclo_compra", "gasto_por_categoria",
+             "puede_ver_importes"},
+            set(data),
+        )
+        self.assertEqual(data["ocs_abiertas"]["total"], 6)  # 1, 2, 3 (x2), 4 (x2)
+
+    def test_grupos_y_valor(self):
+        data = self._get(self.URL_KPIS).json()
+        self.assertEqual(data["ocs_por_grupo"], {
+            "disponible": True, "activas": 7, "por_autorizar": 2, "autorizadas_o_completadas": 5,
+            "en_curso": 2, "recibidas": 1, "canceladas": 1,
+        })
+        valor = {f["moneda"]: f for f in data["valor_ocs_activas"]["por_moneda"]}
+        self.assertEqual(data["valor_ocs_activas"]["total"], 7)
+        self.assertEqual((valor["MXN"]["total"], Decimal(str(valor["MXN"]["monto"]))), (5, Decimal("1010")))
+        self.assertEqual((valor["USD"]["total"], Decimal(str(valor["USD"]["monto"]))), (2, Decimal("550")))
+
+    def test_top_por_moneda(self):
+        E = OrdenCompra.EstatusOrdenCompra
+        monedas = {m["moneda"]: m["ocs"] for m in self._get(self.URL_KPIS).json()["top_ocs_por_moneda"]["monedas"]}
+        # Sin la cancelada de 99,999; las 5 mayores de MXN y las 2 de USD.
+        self.assertEqual([o["id"] for o in monedas["MXN"]], [
+            self.ocs[E.PARCIALMENTE_RECIBIDA].pk, self.ocs[E.AUTORIZADA].pk, self.ocs[E.POR_AUTORIZAR].pk,
+            self.ocs[E.BORRADOR].pk, self.oc_sin_proveedor.pk,
+        ])
+        self.assertEqual([o["id"] for o in monedas["USD"]], [self.ocs[E.RECIBIDA].pk, self.oc_parcial_sin_fecha.pk])
+        primera = monedas["MXN"][0]
+        self.assertEqual(
+            (primera["moneda_codigo"], primera["proveedor_nombre"], Decimal(str(primera["gran_total"]))),
+            ("MXN", "Telas Norte", Decimal("400")),
+        )
+        self.assertIsNone(monedas["MXN"][4]["proveedor_nombre"])
+
+    def test_en_curso_por_entrega_mas_proxima(self):
+        E = OrdenCompra.EstatusOrdenCompra
+        drill = self._get(self.URL_KPIS).json()["ocs_en_curso_proxima_entrega"]["drill_down"]
+        self.assertEqual([o["id"] for o in drill], [self.ocs[E.PARCIALMENTE_RECIBIDA].pk, self.oc_parcial_sin_fecha.pk])
+        self.assertEqual(drill[0]["proveedor_nombre"], "Telas Norte")
+        self.assertIsNone(drill[1]["fecha_entrega_estimada"])
+
+    def test_en_curso_marca_el_tope(self):
+        """Mismas llaves que los demás drill-downs (``marcar_tope``): tope de 8."""
+        bloque = self._get(self.URL_KPIS).json()["ocs_en_curso_proxima_entrega"]
+        self.assertEqual((bloque["drill_down_total"], bloque["drill_down_truncado"]), (2, False))
+        for i in range(7):
+            self._oc(OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA, "1", self.mxn, None)
+        bloque = self._get(self.URL_KPIS).json()["ocs_en_curso_proxima_entrega"]
+        self.assertEqual(len(bloque["drill_down"]), 8)
+        self.assertEqual((bloque["drill_down_total"], bloque["drill_down_truncado"]), (9, True))
+
+    def test_sin_permiso_sin_importes(self):
+        data = self._get(self.URL_KPIS, user=self.almacenista).json()
+        self.assertFalse(data["puede_ver_importes"])
+        self.assertTrue(all("monto" not in f for f in data["valor_ocs_activas"]["por_moneda"]))
+        self.assertEqual(data["valor_ocs_activas"]["total"], 7)
+        self.assertEqual(data["top_ocs_por_moneda"], {"disponible": False, "motivo": "Sin permiso de contabilidad."})
+        # Conteos y "en curso" no llevan importes.
+        self.assertEqual(data["ocs_por_grupo"]["activas"], 7)
+        self.assertEqual(len(data["ocs_en_curso_proxima_entrega"]["drill_down"]), 2)
+
+    def test_otra_empresa_y_sin_empresa(self):
+        data = self._get(self.URL_KPIS, user=self.admin_otra).json()
+        self.assertEqual(data["ocs_por_grupo"]["activas"], 1)
+        self.assertEqual([o["id"] for m in data["top_ocs_por_moneda"]["monedas"] for o in m["ocs"]], [self.oc_otra.pk])
+        self.assertNotIn("Telas Norte", str(data))
+        sin_empresa = Usuario.objects.create(username="se@oc782.test", email="se@oc782.test")
+        data = self._get(self.URL_KPIS, user=sin_empresa).json()
+        motivo = {"disponible": False, "motivo": "Usuario sin empresa asignada."}
+        for clave in ("ocs_por_grupo", "valor_ocs_activas", "top_ocs_por_moneda", "ocs_en_curso_proxima_entrega"):
+            self.assertEqual(data[clave], motivo)
+
+    def test_numero_de_consultas(self):
+        """``ocs_abiertas``, ``ocs_por_grupo`` y ``valor_ocs_activas`` salen de UNA consulta
+        agrupada por estatus y moneda: 6 en total para un admin (antes 9). Las demás:
+        vencidas (conteo + drill-down), gasto por categoría, top por moneda y en curso."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._get(self.URL_KPIS)
+        with CaptureQueriesContext(connection) as ctx:
+            self._get(self.URL_KPIS)
+        self.assertEqual(len(ctx), 6, [q["sql"][:120] for q in ctx.captured_queries])
+
+    def test_acepta_format_y_rechaza_filtros(self):
+        """``validar_parametros`` deja pasar ``?format=`` de DRF en todos los ``kpis/``."""
+        self.assertEqual(self._get(self.URL_KPIS, {"format": "json"}).status_code, 200)
+        self.assertEqual(self._get(RECEPCIONES_URL + "kpis/", {"format": "json"}).status_code, 200)
+        self.assertEqual(self._get(self.URL_KPIS, {"sucursal": "1"}).status_code, 400)
+
+    def test_consultas_no_crecen_con_las_filas(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._get(self.URL_KPIS)
+        with CaptureQueriesContext(connection) as antes:
+            self._get(self.URL_KPIS)
+        for i in range(6):
+            self._oc(OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA, str(i + 1), self.usd, None)
+        with CaptureQueriesContext(connection) as despues:
+            self._get(self.URL_KPIS)
+        self.assertEqual(len(despues), len(antes))

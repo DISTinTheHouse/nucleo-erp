@@ -1325,14 +1325,15 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
   - `?limit=` que no es entero positivo (`abc`, `0`, `-1`, `1.5`) → `400 {"limit": "Debe ser un entero positivo."}`; `?offset=` negativo o no entero → `400 {"offset": "..."}` (#950). Antes se ignoraban y llegaba la lista completa sin paginar, como arreglo. Aplica a todo listado con `PaginacionOpcionalLimitOffset` y a `notificaciones/`.
   - `?ordering=` acepta solo una lista blanca (campo inválido → orden por defecto). OC: `id`, `folio`, `referencia`, `tipo_compra`, `tipo`, `fecha_oc`, `fecha_entrega_estimada`, `fecha_autorizacion`, `fecha_vencimiento`, `estatus`, `proveedor__nombre`, `sucursal__nombre`, `moneda__codigo_iso`, `pedido__folio`, `total_piezas`, los importes (solo con contabilidad), `created_at`, `updated_at`. Recepciones: `id`, `folio`, `tipo_origen`, `fecha_recepcion`, `estatus`, `remision`, `factura_referencia`, `proveedor__nombre`, `almacen__nombre`, `orden_compra__folio`, `orden_compra__tipo_compra`, `created_at`, `updated_at`. Proveedores: `id`, `codigo`, `nombre`, `razon_social`, `rfc`, `tipo`, `ciudad`, `estado`, `contacto_principal`, `email`, `telefono`, `fecha_alta`, `fecha_baja`, `fecha_ultima_compra`, `plazo_dias`, `dias_credito`, `activo`, `created_at`, `updated_at`.
   - Con `?ordering=` siempre se agrega `id` como último desempate (`-id` si el primer campo es descendente).
-  - OC y recepciones: `?estatus=` (entero), `?proveedor=`, `?sucursal=` (ids), `?fecha_desde=`/`?fecha_hasta=` (`YYYY-MM-DD`, sobre `fecha_oc` o el día de `fecha_recepcion`), `?tipo_compra=MP|PT` (en recepciones, el de la OC de origen). Solo recepciones: `?almacen=` y `?orden_compra=` (ids; uno de otra empresa no trae filas). Inválidos → `400` (#889).
+  - OC y recepciones: `?estatus=` (uno o varios separados por coma: `3` o `3,4`, EC-782; un valor no entero → `400 {"estatus": "Debe ser un entero válido."}`, uno inexistente → `400 {"estatus": "Estatus inexistente."}`), `?proveedor=`, `?sucursal=` (ids), `?fecha_desde=`/`?fecha_hasta=` (`YYYY-MM-DD`, sobre `fecha_oc` o el día de `fecha_recepcion`), `?tipo_compra=MP|PT` (en recepciones, el de la OC de origen). Solo recepciones: `?almacen=` y `?orden_compra=` (ids; uno de otra empresa no trae filas). Inválidos → `400` (#889).
+  - Solo OC: `?con_proveedor=true|false` (EC-782): con o sin `proveedor` (el FK es `SET_NULL`). El selector de OC de facturas de proveedor usa `?con_proveedor=true&estatus=1,2,3,4,5&search=...&limit=...` en vez de bajar la lista completa. El listado ya solo trae OC activas (`activo=true`).
   - Proveedores: `?activo=true|false` (default `true`; `false` lista las bajas). Una baja se abre en solo lectura: `GET {id}/`, `historial-ordenes-compra/` y `kpis-detalle/` responden `200`; `PUT`/`PATCH`/`DELETE` sobre ella → `400 {"detail": "El proveedor está dado de baja."}` (#888).
 - **Mismo modo servidor en ventas y clientes (EC-757)**: `GET /api/v1/terceros/clientes/`, `ventas/cotizaciones/` (y `ventas/mesa-control/`), `ventas/pedidos/` y `ventas/oportunidades/`.
   - `?limit=&offset=` igual que arriba (tope 500; en oportunidades antes no había tope). Sin `?limit=` sigue la lista completa.
-  - `?ordering=` con lista blanca y `id` de desempate; sin él, el orden por defecto: clientes por `nombre` (antes indefinido), cotizaciones y pedidos más reciente primero. Los importes (`gran_total`, `subtotal`…) **no** se aceptan (#537): se ignoran y queda el orden por defecto.
+  - `?ordering=` con lista blanca y `id` de desempate; sin él, el orden por defecto: clientes por `nombre` (antes indefinido), cotizaciones y pedidos más reciente primero. Los importes (`gran_total`, `subtotal`…) **no** se aceptan (#537): se ignoran y queda el orden por defecto. Excepción: pedidos los acepta para quien ve importes (EC-782).
     - Clientes: `id`, `clave`, `nombre`, `razon_social`, `rfc`, `correo`, `telefono`, `ciudad`, `estado`, `giro_empresarial`, `dias_credito`, `fecha_alta`, `fecha_ultima_compra`, `created_at`, `updated_at`.
     - Cotizaciones: `id`, `estatus`, `tipo_pedido`, `oc`, `created_at`, `updated_at`, `autorizada_at`, `cliente__nombre`, `cliente__razon_social`.
-    - Pedidos: `id`, `folio`, `estatus`, `clasificacion`, `oc`, `created_at`, `updated_at`, `fecha_confirmacion`, `cliente_nombre`, `cliente_razon_social`, `cliente_rfc`.
+    - Pedidos: `id`, `folio`, `estatus`, `clasificacion`, `oc`, `created_at`, `updated_at`, `fecha_confirmacion`, `cliente_nombre`, `cliente_razon_social`, `cliente_rfc` y, desde EC-782, `piezas`, `piezas_programadas`, `piezas_surtidas`, `vendedor_nombre`, `subtotal`, `gran_total`.
   - Búsqueda: clientes `?search=` (nombre, razón social, RFC, clave, correo); pedidos `?q=` ahora busca en folio, OC, nombre, razón social y RFC del cliente (`?folio=` sigue solo por folio); cotizaciones `?q=` sin cambios (OC, cliente, id).
   - Todo se combina con `?search=`.
 
@@ -1655,6 +1656,84 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
 - `valor` va **por moneda** (`por_moneda`): no se suman monedas. `drill_down` trae hasta 20 pedidos activos (`AUTORIZADA`+`EN PROCESO`), ordenados por `gran_total` desc (por `id` desc sin permiso de importes); `drill_down_truncado` avisa si hay más.
 
+### Modo servidor de Mesa de Control y Compras › Pedidos (EC-782)
+
+Lo que `/operations/orders`, `/procurement/orders` y `/sales/orders` calculaban en el navegador sobre la lista completa. Todo sale de `pedidos_visibles` (la empresa del usuario; superusuario, todas): un pedido de otra empresa nunca aparece en filas, conteos ni opciones. Los importes siguen la regla de lectura del pedido (`puede_ver_contabilidad`, EC-784): **a quien no los ve se le ignoran en silencio** los rangos de importe y el orden por importe — contar o reordenar filas por un monto oculto lo dejaría deducir.
+
+#### Filtros de columna — `GET /api/v1/ventas/pedidos/`
+
+Se suman a los que ya había (`q`, `search`, `folio`, `cliente`, `vendedor`, `sucursal`, `fecha_desde`/`fecha_hasta`, `estatus`, `mis_pedidos`, `sin_clasificar`, `programado`, `con_muestras`). Solo en el listado (y en `exportar/` y `kpis-mesa/`); el detalle no se filtra. Inválido → `400 {"<parámetro>": "..."}`.
+
+| Parámetro | Valor | Filtra |
+|---|---|---|
+| `moneda` | id | `moneda` del pedido (el selector de CxC pendiente usa `cliente` + `moneda`). |
+| `clasificacion` | `A`…`F`, `X`; uno o varios separados por coma | `clasificacion` (`?sin_clasificar=true` sigue para los vacíos). |
+| `confirmado` | `true` / `false` | `fecha_confirmacion` puesta / vacía (EC-748). **No** es el booleano contable `por_confirmar`. |
+| `mes` | `AAAA-MM` | mes de `created_at` en hora de México. |
+| `mes_confirmacion` | `AAAA-MM` o `sin_confirmar` | mes de `fecha_confirmacion` en hora de México, o los que no la tienen. |
+| `piezas_min` / `piezas_max` | entero (una fracción como `0.5` → `400`) | `piezas` (todas las tallas, muestras incluidas). |
+| `subtotal_min` / `subtotal_max` | número | `subtotal`. Ignorado sin permiso de importes. |
+| `gran_total_min` / `gran_total_max` | número | `gran_total`. Ignorado sin permiso de importes. |
+| `muestras` | `con` / `solo` / `sin` | `con`: alguna pieza de muestra; `solo`: todas las piezas son de muestra; `sin`: ninguna (sobre `piezas_muestra` y `piezas`, igual que la etiqueta del front). `?con_muestras=true` sigue igual (alguna **línea** de muestra). |
+
+Los rangos son como `matchesRangeFilter` del front: **mínimo inclusivo, máximo exclusivo** (`1 a 50 piezas` = `piezas_min=1&piezas_max=51`; `Hasta 10,000` = `subtotal_max=10000`).
+
+Los rangos de importe usan la precisión de la columna (`subtotal`/`gran_total`: 10 dígitos, 2 decimales): un valor con más dígitos o decimales (p. ej. `1e999999` o `1.234`) responde `400 {"gran_total_max": ["..."]}`, igual en `exportar/` y `kpis-mesa/`.
+
+#### Orden por columnas — `?ordering=`
+
+Además de la lista blanca de EC-757 (`id`, `folio`, `estatus`, `clasificacion`, `oc`, `created_at`, `updated_at`, `fecha_confirmacion`, `cliente_nombre`, `cliente_razon_social`, `cliente_rfc`), en el listado y en `exportar/`:
+
+- `piezas`, `piezas_programadas` (Σ `programacion_conf.programaciones[].cantidad`, la misma suma que valida `editar-mesa-control`; 0 sin programación), `piezas_surtidas`, `vendedor_nombre` (vacíos al final en ambos sentidos).
+- `subtotal`, `gran_total`: solo para quien ve importes; para el resto se ignoran y queda el orden por defecto (como OC, #837).
+- `id` es siempre el último desempate (`-id` si el primer campo es descendente): las páginas con `offset` no repiten ni pierden filas. Son subconsultas por pedido, sin JOINs que multipliquen filas; el `count` no cambia.
+
+#### Exportar — `GET /api/v1/ventas/pedidos/exportar/`
+
+El conjunto filtrado **completo, sin paginar** (para el CSV/PDF de Compras › Pedidos): mismos filtros, `search`, `ordering`, alcance y regla de importes que el listado; `limit`/`offset` no aplican. Una consulta. Arreglo de:
+
+```json
+[{ "id": 88, "folio": "P-00088-2026", "estatus": 3, "estatus_display": "AUTORIZADA", "oc": "OC-1",
+   "cliente": 12, "cliente_razon_social": "Cliente SA", "cliente_nombre": "Cliente",
+   "created_at": "2026-10-01T15:00:00Z", "fecha_confirmacion": null, "clasificacion": "B",
+   "piezas": 120, "vendedor_nombre": "Ana López", "subtotal": 10000.0, "gran_total": 11600.0,
+   "moneda": 1, "moneda_codigo": "MXN" }]
+```
+
+Sin permiso de importes no vienen `subtotal` ni `gran_total`.
+
+#### KPIs de Mesa de Control — `GET /api/v1/ventas/pedidos/kpis-mesa/`
+
+Las tarjetas de Mesa de Control **con los mismos filtros que el listado** (todos los de arriba, `search` incluido). Es una acción nueva: `kpis/` (EC-420, "mis pedidos") no cambia. Una consulta.
+
+```json
+{ "generado_en": "2026-11-06T12:00:00Z",
+  "total": 116, "confirmados": 39, "por_confirmar": 77, "cancelados": 1,
+  "por_moneda": [{ "moneda_id": 1, "moneda": "MXN", "total": 101, "valor": 8909627.16 },
+                 { "moneda_id": 7, "moneda": "USD", "total": 15, "valor": 910942.2 }],
+  "puede_ver_importes": true }
+```
+
+- **Los cancelados (estatus 5) no cuentan** en `total`, `confirmados`, `por_confirmar` ni `por_moneda`: `total` = `confirmados` + `por_confirmar`. Van aparte en `cancelados` (mismos filtros), así que `total` + `cancelados` = `count` del listado con los mismos parámetros. Con `?estatus=5` todo sale en 0 salvo `cancelados`.
+- Un pedido cancelado con `POST /pedidos/{id}/cancelar/` queda además `activo=false` y ya no está ni en el listado ni aquí; `cancelados` cuenta los que siguen activos con estatus 5 (p. ej. anteriores a esa regla).
+- `confirmados` = con `fecha_confirmacion`. `valor` = Σ `gran_total` por moneda (nunca se suman monedas).
+- Sin permiso de importes: `puede_ver_importes: false` y cada fila de `por_moneda` sin `valor` (los conteos quedan). Sin empresa: todo en 0.
+
+#### Opciones de filtros — `GET /api/v1/ventas/pedidos/opciones/`
+
+Valores de los filtros de encabezado, en el estilo de `existencias/por-almacen/resumen/` (EC-774): sobre **todos** los pedidos que el usuario ve, sin reaccionar a los filtros. Una consulta. Único parámetro: `mis_pedidos=true` (otro → `400`; `format` de DRF siempre se acepta, como en todos los endpoints que rechazan parámetros desconocidos).
+
+```json
+{ "cliente": [{ "value": 12, "label": "Cliente SA" }],
+  "vendedor": [{ "value": 7, "label": "Ana López" }],
+  "mes": [{ "value": "2026-10", "label": "Octubre 2026" }],
+  "mes_confirmacion": [{ "value": "2026-10", "label": "Octubre 2026" }, { "value": "sin_confirmar", "label": "Sin confirmar" }],
+  "clasificacion": [{ "value": "A", "label": "A - 2 a 5 días" }] }
+```
+
+- `cliente`: id y nombre del **catálogo** de clientes (razón social o, si está vacía, nombre), uno por id; `value` va en `?cliente=`. `vendedor`: el de la cotización de origen (nombre completo o correo), `value` va en `?vendedor=`. Ambos en orden alfabético.
+- `mes` / `mes_confirmacion`: más reciente primero, en hora de México; `sin_confirmar` aparece solo si hay pedidos sin confirmar. `clasificacion`: solo las presentes.
+
 #### Automatización de Órdenes de Trabajo (Producción)
 
 > 🚨 **Decisión de negocio (Presidencia) — v2 en producción**
@@ -1671,7 +1750,8 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
 - **Listar**: `GET /api/v1/ventas/pedidos/`
   - **Importes**: sin permiso de contabilidad (`puede_ver_contabilidad`: contabilidad de ventas **o** de compras, EC-784; ver el detalle abajo), cada fila omite `gran_total` y `subtotal` (los campos de `CAMPOS_CONTABILIDAD_PEDIDO`), igual que el detalle. Paginado o no, la llave no viene; el frontend no debe suponerla (#947). Aplica a todas las variantes del listado (`mis_pedidos`, `programado`, `estatus`, programación de mesa de control).
-  - **Orden**: por defecto, más reciente primero (`created_at` descendente, desempate por `id` descendente). `?ordering=` acepta la lista blanca de pedidos, con `id` como desempate; un campo fuera de ella (p. ej. `gran_total`) se ignora y queda el orden por defecto (EC-757, ver "Mismo modo servidor en ventas y clientes").
+  - **Filtros de columna, exportación, KPIs de Mesa de Control y opciones de filtros**: ver "Modo servidor de Mesa de Control y Compras › Pedidos (EC-782)" arriba.
+  - **Orden**: por defecto, más reciente primero (`created_at` descendente, desempate por `id` descendente). `?ordering=` acepta la lista blanca de pedidos, con `id` como desempate; un campo fuera de ella se ignora y queda el orden por defecto (EC-757, ver "Mismo modo servidor en ventas y clientes"). Desde EC-782 incluye `piezas`, `piezas_programadas`, `piezas_surtidas`, `vendedor_nombre` y, solo para quien ve importes, `subtotal`/`gran_total`.
 - **Detalle**: `GET /api/v1/ventas/pedidos/{id}/`
 - **Cancelar**: `POST /api/v1/ventas/pedidos/{id}/cancelar/` con `{"motivo": "..."}`. Solo mesa de control / admin. En una transacción:
   - devuelve al inventario lo que el pedido descontó al autorizar (movimiento `ENTRADA` + auditoría);
@@ -2495,10 +2575,12 @@ Respuesta (`GET` lista/detalle, y `orden_compra` de onboarding/PUT/aceptar) aña
 ```json
 { "pedido": 12, "pedido_folio": "PED-000012",
   "pedidos": [12, 15],
-  "pedidos_vinculados": [ {"id": 12, "folio": "PED-000012"}, {"id": 15, "folio": "PED-000015"} ],
+  "pedidos_vinculados": [ {"id": 12, "folio": "PED-000012", "estatus": 3, "activo": true, "cliente_nombre": "Cliente SA"},
+                          {"id": 15, "folio": "PED-000015", "estatus": 5, "activo": true, "cliente_nombre": "Otro SA"} ],
   "tipo_compra": "PT", "tipo_compra_label": "Producto terminado" }
 ```
 
+- `pedidos_vinculados[]` trae además `estatus`, `activo` y `cliente_nombre` del pedido (EC-782): la OC avisa si un pedido ligado está cancelado (`estatus` 5) o dado de baja (`activo: false`) sin consultar cada pedido. Salen del mismo prefetch: no agregan consultas.
 - `pedido` / `pedido_folio` / `pedido_vinculado` **se conservan** y reflejan el primer pedido de `pedidos` (o `null`): ninguna integración existente se rompe. Una OC creada antes (o desde el admin) con solo `pedido` aparece también en `pedidos`.
 - **Folios**: `aceptar` toma la serie activa de la sucursal por `tipo_compra`: `MP` → `SerieFolio.tipo_documento` `ORDEN_COMPRA` u `Orden de Compra` (serie `OC`), `PT` → `ORDEN_COMPRA_PT` u `Orden de Compra PT` (serie `O`). Si no hay serie configurada se usa el folio de respaldo `OC-{empresa}-{id}` / `O-{empresa}-{id}`.
 - Rendimiento: crear/editar/aceptar una OC ya no hace consultas por renglón (alta de 10 renglones: 47 → 15 consultas; edición: 62 → 30; aceptar: 16 → 11). Los renglones se insertan en lote conservando su historial.
@@ -2866,7 +2948,7 @@ Resuelve por `sku` de variante, o `codigo`/`cod_proscai` de producto. Con SKU, l
 
 ## 🧾 Compras - KPIs por pantalla (EC-432 / EC-434 / EC-436)
 
-Cada uno es la tarjeta de KPIs de **una pantalla específica**. `GET /compras/dashboard/` (el resumen general) se retiró en EC-784: responde `404`; el dashboard de Compras se servirá desde `ordenes/kpis/` (EC-782). Mismo patrón en los 3: `GET`, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.
+Cada uno es la tarjeta de KPIs de **una pantalla específica**. `GET /compras/dashboard/` (el resumen general) se retiró en EC-784: responde `404`; el dashboard de Compras se sirve desde `ordenes/kpis/` (EC-782). Mismo patrón en los 3: `GET`, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.
 
 **Reglas comunes**
 - **Parámetros no soportados → `400`** (`{"parametros": "..."}`), nunca se ignoran en silencio. `ordenes/kpis/` no acepta ninguno; `recepciones/kpis/` y `proveedores/kpis/` aceptan los de su sección. Los filtros aplicados se devuelven en `filtros`.
@@ -2892,6 +2974,24 @@ Cada uno es la tarjeta de KPIs de **una pantalla específica**. `GET /compras/da
 }
 ```
 `gasto_por_categoria` agrupa por `Producto.categoria_producto.nombre` y moneda de la OC (una fila por categoría y moneda), y solo cuenta OCs comprometidas (Autorizada/Parcial/Recibida).
+
+**Dashboard de Compras (EC-782)** — claves nuevas en la misma respuesta (las anteriores no cambian; sigue sin aceptar parámetros). Todas sobre las OC activas (`activo=true`) de la empresa:
+
+```json
+{
+  "ocs_por_grupo": { "disponible": true, "activas": 42, "por_autorizar": 8, "autorizadas_o_completadas": 34, "en_curso": 7, "recibidas": 20, "canceladas": 43 },
+  "valor_ocs_activas": { "disponible": true, "total": 42, "por_moneda": [{ "moneda": "MXN", "total": 40, "monto": 345611.5 }] },
+  "top_ocs_por_moneda": { "disponible": true, "monedas": [{ "moneda": "MXN", "ocs": [{ "id": 128, "folio": "OC-1-128", "gran_total": 40702.0, "moneda_codigo": "MXN", "proveedor_nombre": "Telas Norte" }] }] },
+  "ocs_en_curso_proxima_entrega": { "disponible": true, "drill_down": [{ "id": 115, "folio": "OC-1-115", "proveedor_nombre": "Telas Norte", "fecha_entrega_estimada": "2026-11-10" }], "drill_down_total": 7, "drill_down_truncado": false }
+}
+```
+
+- `ocs_por_grupo`: `activas` = estatus ≠ 6; `por_autorizar` = 1 y 2; `autorizadas_o_completadas` = 3, 4 y 5; `en_curso` = 4; `recibidas` = 5; `canceladas` = 6.
+- `valor_ocs_activas`: Σ `gran_total` de las activas por moneda (`monto`).
+- `top_ocs_por_moneda`: las 5 activas de mayor `gran_total` **dentro de cada moneda** (desempate por id descendente).
+- `ocs_en_curso_proxima_entrega`: las 8 OC en estatus 4 con la `fecha_entrega_estimada` más próxima; sin fecha, al final. `drill_down_total` (= `ocs_por_grupo.en_curso`) y `drill_down_truncado` como en los demás drill-downs.
+- Sin permiso de importes (`puede_ver_importes: false`): `valor_ocs_activas.por_moneda[]` sin `monto` (los conteos quedan) y `top_ocs_por_moneda` = `{"disponible": false, "motivo": "Sin permiso de contabilidad."}` (el ranking mismo delataría cuáles OC valen más). Sin empresa: las 4 claves con `disponible: false` y `motivo`.
+- El valor es `gran_total` (con IVA), igual que `ocs_abiertas`: el dashboard deja de sumar `total`.
 
 ### Recepciones — `GET /api/v1/compras/recepciones/kpis/`
 
