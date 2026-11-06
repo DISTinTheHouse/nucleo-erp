@@ -8212,6 +8212,77 @@ class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
                 resp = self._api(usuario).get(f"{PEDIDOS_URL}{self.pedido_otra.pk}/cotizacion/")
                 self.assertEqual(resp.status_code, 404)
 
+    def test_cotizacion_del_pedido_no_trae_aprobado_snapshot(self):
+        """EC-794: el snapshot de la cotización autorizada lleva todos sus importes y
+        el filtro de contabilidad no entra en él. El endpoint no lo devuelve a ningún
+        perfil; ``/cotizaciones/{id}/`` lo sigue devolviendo."""
+        pedido = self.pedidos[self.ventas.pk]
+        cotizacion = pedido.cotizacion
+        Cotizacion.objects.filter(pk=cotizacion.pk).update(subtotal="200.00", gran_total="232.00")
+        renglon = CotizacionDetalle.objects.create(
+            cotizacion=cotizacion,
+            producto=Producto.objects.create(
+                tipo=_tipo_producto(), empresa=self.empresa, nombre="Prenda EC794", codigo="E794",
+            ),
+            precio_unitario="10.00", costo_unitario="4.00", subtotal_linea="20.00",
+        )
+        CotizacionDetalleTalla.objects.create(
+            cotizacion_detalle=renglon, talla=Talla.objects.create(nombre="E794"), cantidad=2,
+            precio_unitario="10.00", subtotal_talla="20.00",
+        )
+        CotizacionServicioExtra.objects.create(cotizacion=cotizacion, nombre="Extra EC794", monto="5.00", cantidad=1)
+        # El mismo constructor que ``autorizar``, ``aceptar-cambios`` y
+        # ``editar-mesa-control``, dos veces: la segunda anida la primera, como en
+        # una cotización re-autorizada.
+        for _ in range(2):
+            cotizacion.refresh_from_db()
+            Cotizacion.objects.filter(pk=cotizacion.pk).update(
+                estatus=3, autorizada_at=timezone.now(),
+                aprobado_snapshot=CotizacionViewSet._snapshot_cotizacion(None, cotizacion),
+            )
+        cotizacion.refresh_from_db()
+        snapshot = cotizacion.aprobado_snapshot
+        self.assertEqual(snapshot["cotizacion"]["gran_total"], "232.00")
+        self.assertEqual(snapshot["detalles"][0]["tallas"][0]["precio_unitario"], "10.00")
+        self.assertEqual(snapshot["servicios_extras"][0]["monto"], "5.00")
+        self.assertEqual(snapshot["cotizacion"]["aprobado_snapshot"]["cotizacion"]["gran_total"], "232.00")
+
+        for usuario, ve in self.perfiles:
+            with self.subTest(usuario=usuario.username):
+                resp = self._api(usuario).get(f"{PEDIDOS_URL}{pedido.pk}/cotizacion/")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.assertNotIn("aprobado_snapshot", resp.data)
+                self.assertNotIn("aprobado_snapshot", resp.content.decode())
+                # El resto de la respuesta no cambia.
+                self.assertEqual(("gran_total" in resp.data), ve)
+                self.assertEqual((resp.data["id"], resp.data["estatus"]), (cotizacion.pk, 3))
+                self.assertIsNotNone(resp.data["autorizada_at"])
+        resp = self._api(self.superusuario).get(f"{COTIZACIONES_URL}{cotizacion.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.data["aprobado_snapshot"], snapshot)
+
+    def test_cotizacion_del_pedido_es_404_sin_cotizacion_visible(self):
+        """404 para un pedido sin cotización, para uno dado de baja y para uno cuya
+        cotización es de otra empresa: ningún perfil, ni el superusuario, la ve."""
+        sin_cotizacion = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
+            folio="EC794-SINCOT", estatus=3, gran_total=Decimal("1.00"),
+        )
+        inactivo = self._pedido(self.empresa, self.sucursal, self.cliente, self.ventas, "EC794-BAJA", "1.00")
+        Pedido.objects.filter(pk=inactivo.pk).update(activo=False)
+        cruzado = self._pedido(self.empresa, self.sucursal, self.cliente, self.ventas, "EC794-CRUZ", "1.00")
+        Cotizacion.objects.filter(pk=cruzado.cotizacion_id).update(
+            empresa=self.otra, sucursal=self.sucursal_otra, cliente=self.cliente_otra,
+        )
+        casos = (("sin_cotizacion", sin_cotizacion), ("inactivo", inactivo), ("cotizacion_de_otra_empresa", cruzado))
+        for caso, pedido in casos:
+            for usuario, _ in self.perfiles:
+                with self.subTest(caso=caso, usuario=usuario.username):
+                    resp = self._api(usuario).get(f"{PEDIDOS_URL}{pedido.pk}/cotizacion/")
+                    self.assertEqual(resp.status_code, 404, resp.content)
+        # El pedido cruzado sí es visible: el 404 es por la cotización, no por el pedido.
+        self.assertEqual(self._api(self.ventas).get(f"{PEDIDOS_URL}{cruzado.pk}/").status_code, 200)
+
     def test_detalle_de_otra_empresa_es_404(self):
         for usuario, _ in self.perfiles[:-1]:
             with self.subTest(usuario=usuario.username):
