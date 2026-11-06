@@ -3,8 +3,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from django.db import transaction
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum, Value
-from django.db.models.functions import Coalesce
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum, Value, Window
+from django.db.models.functions import Coalesce, RowNumber
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.filters import OrderingFilter
@@ -1226,6 +1226,12 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 "motivo": "El flujo Requisición → Solicitud de compra → OC no se usa hoy (OrdenCompra.solicitud_compra siempre queda null); no hay fecha de requisición contra qué medir el ciclo.",
             },
             "gasto_por_categoria": self._kpi_gasto_por_categoria(base),
+            # Dashboard de Compras (EC-782): lo que hoy calcula en memoria sobre el
+            # listado completo. Claves nuevas; las de arriba no cambian.
+            "ocs_por_grupo": self._kpi_ocs_por_grupo(base),
+            "valor_ocs_activas": self._kpi_valor_ocs_activas(base),
+            "top_ocs_por_moneda": self._kpi_top_ocs_por_moneda(base),
+            "ocs_en_curso_proxima_entrega": self._kpi_ocs_en_curso(base),
         }
         # Señal explícita para el front (#841): no puede deducirla de las claves
         # de departamento de los roles, que no viajan en la sesión.
@@ -1233,6 +1239,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         if not data["puede_ver_importes"]:
             quitar_montos(data["ocs_abiertas"], ["monto"])
             data["gasto_por_categoria"] = SIN_PERMISO_CONTABILIDAD
+            quitar_montos(data["valor_ocs_activas"], ["monto"])
+            # El ranking mismo delata cuáles OC valen más: se oculta completo.
+            data["top_ocs_por_moneda"] = SIN_PERMISO_CONTABILIDAD
         return Response(data)
 
     def _kpis_vacio(self):
@@ -1243,6 +1252,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             "ocs_vencidas_sin_recibir": motivo,
             "ciclo_compra": motivo,
             "gasto_por_categoria": motivo,
+            "ocs_por_grupo": motivo,
+            "valor_ocs_activas": motivo,
+            "top_ocs_por_moneda": motivo,
+            "ocs_en_curso_proxima_entrega": motivo,
             # Clave fija del contrato; sin datos no hay importes (#860).
             "puede_ver_importes": False,
         }
@@ -1276,6 +1289,95 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             "total": sum(f["total"] for f in por_moneda),
             "por_moneda": por_moneda,
             "por_estatus": por_estatus,
+        }
+
+    # Grupos del dashboard de Compras (EC-782), los mismos que pinta el front.
+    ESTATUS_OC_POR_AUTORIZAR = (
+        OrdenCompra.EstatusOrdenCompra.BORRADOR,
+        OrdenCompra.EstatusOrdenCompra.POR_AUTORIZAR,
+    )
+    ESTATUS_OC_AUTORIZADAS_O_COMPLETADAS = (
+        OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+        OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
+        OrdenCompra.EstatusOrdenCompra.RECIBIDA,
+    )
+    TOPE_TOP_OCS = 5
+    TOPE_OCS_EN_CURSO = 8
+
+    def _kpi_ocs_por_grupo(self, base):
+        """Conteos por grupo de estatus en UNA consulta. "Activas" = todo menos
+        canceladas (6); "en curso" = parcialmente recibidas (4)."""
+        estatus = OrdenCompra.EstatusOrdenCompra
+        conteos = base.aggregate(
+            activas=Count("id", filter=~Q(estatus=estatus.CANCELADA)),
+            por_autorizar=Count("id", filter=Q(estatus__in=self.ESTATUS_OC_POR_AUTORIZAR)),
+            autorizadas_o_completadas=Count("id", filter=Q(estatus__in=self.ESTATUS_OC_AUTORIZADAS_O_COMPLETADAS)),
+            en_curso=Count("id", filter=Q(estatus=estatus.PARCIALMENTE_RECIBIDA)),
+            recibidas=Count("id", filter=Q(estatus=estatus.RECIBIDA)),
+            canceladas=Count("id", filter=Q(estatus=estatus.CANCELADA)),
+        )
+        return {"disponible": True, **conteos}
+
+    def _kpi_valor_ocs_activas(self, base):
+        """Σ ``gran_total`` de las OC activas (≠ 6), por moneda (#374)."""
+        activas = base.exclude(estatus=OrdenCompra.EstatusOrdenCompra.CANCELADA)
+        por_moneda = [
+            {"moneda": fila["moneda__codigo_iso"], "total": fila["total"], "monto": fila["monto"] or Decimal("0")}
+            for fila in activas.values("moneda__codigo_iso")
+            .annotate(total=Count("id"), monto=Sum("gran_total"))
+            .order_by("moneda__codigo_iso")
+        ]
+        return {"disponible": True, "total": sum(f["total"] for f in por_moneda), "por_moneda": por_moneda}
+
+    def _kpi_top_ocs_por_moneda(self, base):
+        """Las ``TOPE_TOP_OCS`` OC activas de mayor ``gran_total`` DENTRO de cada
+        moneda, en UNA consulta (``ROW_NUMBER`` por moneda): un importe en USD no se
+        compara con uno en MXN."""
+        filas = (
+            base.exclude(estatus=OrdenCompra.EstatusOrdenCompra.CANCELADA)
+            .annotate(
+                posicion=Window(
+                    RowNumber(),
+                    partition_by=[F("moneda_id")],
+                    order_by=[F("gran_total").desc(), F("id").desc()],
+                )
+            )
+            .filter(posicion__lte=self.TOPE_TOP_OCS)
+            .order_by("moneda__codigo_iso", "posicion")
+            .values("id", "folio", "gran_total", "moneda__codigo_iso", "proveedor__nombre")
+        )
+        monedas = {}
+        for fila in filas:
+            moneda = fila["moneda__codigo_iso"]
+            monedas.setdefault(moneda, []).append({
+                "id": fila["id"],
+                "folio": fila["folio"],
+                "gran_total": fila["gran_total"],
+                "moneda_codigo": moneda,
+                "proveedor_nombre": fila["proveedor__nombre"],
+            })
+        return {"disponible": True, "monedas": [{"moneda": m, "ocs": ocs} for m, ocs in monedas.items()]}
+
+    def _kpi_ocs_en_curso(self, base):
+        """Las ``TOPE_OCS_EN_CURSO`` OC en estatus 4 con la ``fecha_entrega_estimada``
+        más próxima; las que no tienen fecha van al final. El total ya está en
+        ``ocs_por_grupo.en_curso``."""
+        filas = (
+            base.filter(estatus=OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA)
+            .order_by(F("fecha_entrega_estimada").asc(nulls_last=True), "id")
+            .values("id", "folio", "fecha_entrega_estimada", "proveedor__nombre")[: self.TOPE_OCS_EN_CURSO]
+        )
+        return {
+            "disponible": True,
+            "drill_down": [
+                {
+                    "id": f["id"],
+                    "folio": f["folio"],
+                    "proveedor_nombre": f["proveedor__nombre"],
+                    "fecha_entrega_estimada": f["fecha_entrega_estimada"],
+                }
+                for f in filas
+            ],
         }
 
     def _kpi_ocs_vencidas(self, base):

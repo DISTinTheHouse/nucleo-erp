@@ -2771,3 +2771,86 @@ class OrdenCompraPedidosVinculadosEstatusTests(_OrdenesModoServidorBase, TestCas
         with CaptureQueriesContext(connection) as despues:
             self._get(self.URL)
         self.assertEqual(len(despues), len(antes))
+
+
+class OrdenCompraKpisDashboardTests(_OrdenesModoServidorBase, TestCase):
+    """EC-782: ``kpis/`` cubre el dashboard de Compras sin cambiar sus claves previas."""
+
+    URL_KPIS = "/api/v1/compras/ordenes/kpis/"
+
+    def test_claves_previas_intactas(self):
+        data = self._get(self.URL_KPIS).json()
+        self.assertLessEqual(
+            {"generado_en", "ocs_abiertas", "ocs_vencidas_sin_recibir", "ciclo_compra", "gasto_por_categoria",
+             "puede_ver_importes"},
+            set(data),
+        )
+        self.assertEqual(data["ocs_abiertas"]["total"], 6)  # 1, 2, 3 (x2), 4 (x2)
+
+    def test_grupos_y_valor(self):
+        data = self._get(self.URL_KPIS).json()
+        self.assertEqual(data["ocs_por_grupo"], {
+            "disponible": True, "activas": 7, "por_autorizar": 2, "autorizadas_o_completadas": 5,
+            "en_curso": 2, "recibidas": 1, "canceladas": 1,
+        })
+        valor = {f["moneda"]: f for f in data["valor_ocs_activas"]["por_moneda"]}
+        self.assertEqual(data["valor_ocs_activas"]["total"], 7)
+        self.assertEqual((valor["MXN"]["total"], Decimal(str(valor["MXN"]["monto"]))), (5, Decimal("1010")))
+        self.assertEqual((valor["USD"]["total"], Decimal(str(valor["USD"]["monto"]))), (2, Decimal("550")))
+
+    def test_top_por_moneda(self):
+        E = OrdenCompra.EstatusOrdenCompra
+        monedas = {m["moneda"]: m["ocs"] for m in self._get(self.URL_KPIS).json()["top_ocs_por_moneda"]["monedas"]}
+        # Sin la cancelada de 99,999; las 5 mayores de MXN y las 2 de USD.
+        self.assertEqual([o["id"] for o in monedas["MXN"]], [
+            self.ocs[E.PARCIALMENTE_RECIBIDA].pk, self.ocs[E.AUTORIZADA].pk, self.ocs[E.POR_AUTORIZAR].pk,
+            self.ocs[E.BORRADOR].pk, self.oc_sin_proveedor.pk,
+        ])
+        self.assertEqual([o["id"] for o in monedas["USD"]], [self.ocs[E.RECIBIDA].pk, self.oc_parcial_sin_fecha.pk])
+        primera = monedas["MXN"][0]
+        self.assertEqual(
+            (primera["moneda_codigo"], primera["proveedor_nombre"], Decimal(str(primera["gran_total"]))),
+            ("MXN", "Telas Norte", Decimal("400")),
+        )
+        self.assertIsNone(monedas["MXN"][4]["proveedor_nombre"])
+
+    def test_en_curso_por_entrega_mas_proxima(self):
+        E = OrdenCompra.EstatusOrdenCompra
+        drill = self._get(self.URL_KPIS).json()["ocs_en_curso_proxima_entrega"]["drill_down"]
+        self.assertEqual([o["id"] for o in drill], [self.ocs[E.PARCIALMENTE_RECIBIDA].pk, self.oc_parcial_sin_fecha.pk])
+        self.assertEqual(drill[0]["proveedor_nombre"], "Telas Norte")
+        self.assertIsNone(drill[1]["fecha_entrega_estimada"])
+
+    def test_sin_permiso_sin_importes(self):
+        data = self._get(self.URL_KPIS, user=self.almacenista).json()
+        self.assertFalse(data["puede_ver_importes"])
+        self.assertTrue(all("monto" not in f for f in data["valor_ocs_activas"]["por_moneda"]))
+        self.assertEqual(data["valor_ocs_activas"]["total"], 7)
+        self.assertEqual(data["top_ocs_por_moneda"], {"disponible": False, "motivo": "Sin permiso de contabilidad."})
+        # Conteos y "en curso" no llevan importes.
+        self.assertEqual(data["ocs_por_grupo"]["activas"], 7)
+        self.assertEqual(len(data["ocs_en_curso_proxima_entrega"]["drill_down"]), 2)
+
+    def test_otra_empresa_y_sin_empresa(self):
+        data = self._get(self.URL_KPIS, user=self.admin_otra).json()
+        self.assertEqual(data["ocs_por_grupo"]["activas"], 1)
+        self.assertEqual([o["id"] for m in data["top_ocs_por_moneda"]["monedas"] for o in m["ocs"]], [self.oc_otra.pk])
+        self.assertNotIn("Telas Norte", str(data))
+        sin_empresa = Usuario.objects.create(username="se@oc782.test", email="se@oc782.test")
+        data = self._get(self.URL_KPIS, user=sin_empresa).json()
+        motivo = {"disponible": False, "motivo": "Usuario sin empresa asignada."}
+        for clave in ("ocs_por_grupo", "valor_ocs_activas", "top_ocs_por_moneda", "ocs_en_curso_proxima_entrega"):
+            self.assertEqual(data[clave], motivo)
+
+    def test_consultas_no_crecen_con_las_filas(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._get(self.URL_KPIS)
+        with CaptureQueriesContext(connection) as antes:
+            self._get(self.URL_KPIS)
+        for i in range(6):
+            self._oc(OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA, str(i + 1), self.usd, None)
+        with CaptureQueriesContext(connection) as despues:
+            self._get(self.URL_KPIS)
+        self.assertEqual(len(despues), len(antes))

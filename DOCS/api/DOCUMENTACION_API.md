@@ -2943,7 +2943,7 @@ Resuelve por `sku` de variante, o `codigo`/`cod_proscai` de producto. Con SKU, l
 
 ## 🧾 Compras - KPIs por pantalla (EC-432 / EC-434 / EC-436)
 
-Cada uno es la tarjeta de KPIs de **una pantalla específica**. `GET /compras/dashboard/` (el resumen general) se retiró en EC-784: responde `404`; el dashboard de Compras se servirá desde `ordenes/kpis/` (EC-782). Mismo patrón en los 3: `GET`, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.
+Cada uno es la tarjeta de KPIs de **una pantalla específica**. `GET /compras/dashboard/` (el resumen general) se retiró en EC-784: responde `404`; el dashboard de Compras se sirve desde `ordenes/kpis/` (EC-782). Mismo patrón en los 3: `GET`, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.
 
 **Reglas comunes**
 - **Parámetros no soportados → `400`** (`{"parametros": "..."}`), nunca se ignoran en silencio. `ordenes/kpis/` no acepta ninguno; `recepciones/kpis/` y `proveedores/kpis/` aceptan los de su sección. Los filtros aplicados se devuelven en `filtros`.
@@ -2969,6 +2969,24 @@ Cada uno es la tarjeta de KPIs de **una pantalla específica**. `GET /compras/da
 }
 ```
 `gasto_por_categoria` agrupa por `Producto.categoria_producto.nombre` y moneda de la OC (una fila por categoría y moneda), y solo cuenta OCs comprometidas (Autorizada/Parcial/Recibida).
+
+**Dashboard de Compras (EC-782)** — claves nuevas en la misma respuesta (las anteriores no cambian; sigue sin aceptar parámetros). Todas sobre las OC activas (`activo=true`) de la empresa:
+
+```json
+{
+  "ocs_por_grupo": { "disponible": true, "activas": 42, "por_autorizar": 8, "autorizadas_o_completadas": 34, "en_curso": 7, "recibidas": 20, "canceladas": 43 },
+  "valor_ocs_activas": { "disponible": true, "total": 42, "por_moneda": [{ "moneda": "MXN", "total": 40, "monto": 345611.5 }] },
+  "top_ocs_por_moneda": { "disponible": true, "monedas": [{ "moneda": "MXN", "ocs": [{ "id": 128, "folio": "OC-1-128", "gran_total": 40702.0, "moneda_codigo": "MXN", "proveedor_nombre": "Telas Norte" }] }] },
+  "ocs_en_curso_proxima_entrega": { "disponible": true, "drill_down": [{ "id": 115, "folio": "OC-1-115", "proveedor_nombre": "Telas Norte", "fecha_entrega_estimada": "2026-11-10" }] }
+}
+```
+
+- `ocs_por_grupo`: `activas` = estatus ≠ 6; `por_autorizar` = 1 y 2; `autorizadas_o_completadas` = 3, 4 y 5; `en_curso` = 4; `recibidas` = 5; `canceladas` = 6.
+- `valor_ocs_activas`: Σ `gran_total` de las activas por moneda (`monto`).
+- `top_ocs_por_moneda`: las 5 activas de mayor `gran_total` **dentro de cada moneda** (desempate por id descendente).
+- `ocs_en_curso_proxima_entrega`: las 8 OC en estatus 4 con la `fecha_entrega_estimada` más próxima; sin fecha, al final. El total está en `ocs_por_grupo.en_curso`.
+- Sin permiso de importes (`puede_ver_importes: false`): `valor_ocs_activas.por_moneda[]` sin `monto` (los conteos quedan) y `top_ocs_por_moneda` = `{"disponible": false, "motivo": "Sin permiso de contabilidad."}` (el ranking mismo delataría cuáles OC valen más). Sin empresa: las 4 claves con `disponible: false` y `motivo`.
+- El valor es `gran_total` (con IVA), igual que `ocs_abiertas`: el dashboard deja de sumar `total`.
 
 ### Recepciones — `GET /api/v1/compras/recepciones/kpis/`
 
