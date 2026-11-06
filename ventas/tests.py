@@ -1106,6 +1106,19 @@ class PedidoMesaControlUpdateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["editable"])
 
+    def test_editar_mesa_control_consulta_los_roles_una_vez(self):
+        """EC-784: el permiso de mesa de control, el filtro de importes y los
+        documentos del pedido comparten las claves de departamento del usuario."""
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(vendedor=self.mesa_no_admin)
+        client = self._client(self.mesa_no_admin)
+        with CaptureQueriesContext(connection) as consultas:
+            response = client.post(
+                pedido_editar_mesa_control_url(self.pedido.pk), self._payload(), format="json",
+            )
+        self.assertEqual(response.status_code, 200, response.content)
+        roles = sum('"usuarios_roles"' in q["sql"] for q in consultas.captured_queries)
+        self.assertEqual(roles, 1)
+
     def test_edicion_mesa_control_actualiza_pedido_y_cotizacion_sin_inventario(self):
         Cotizacion.objects.filter(pk=self.cotizacion.pk).update(vendedor=self.mesa_no_admin)
         response = self._client(self.admin_mesa).post(
@@ -4475,6 +4488,14 @@ class PedidoKpisTests(TestCase):
         cls.vendedor_b = Usuario.objects.create(
             username="vendedor_b", email="vendedor.b@acme.test", empresa=cls.empresa
         )
+        # Rol de Ventas: ``valor`` y el drill-down con importes exigen contabilidad
+        # (EC-784); sin ella se prueban en ``ImportesPedidoPorPerfilTests``.
+        rol_ventas = Rol.objects.create(
+            empresa=cls.empresa, codigo="VENTAS-KPIS", nombre="Ventas",
+            estatus=Rol.Estatus.ACTIVO, clave_departamento="VENTAS",
+        )
+        for vendedor in (cls.vendedor_a, cls.vendedor_b):
+            UsuarioRol.objects.create(usuario=vendedor, rol=rol_ventas, empresa=cls.empresa)
         cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
 
         cot_a = cls._cotizacion(cls.vendedor_a)
@@ -6362,6 +6383,23 @@ class AutorizarCotizacionRendimientoTests(TestCase):
                 cotizacion=cls.cotizacion, nombre=f"Extra {i}", monto="5.00", cantidad=1,
             )
 
+    def test_autorizar_consulta_los_roles_una_vez(self):
+        """EC-784: con un usuario de mesa de control (no admin), el permiso y los
+        documentos del pedido de la respuesta comparten sus claves de departamento."""
+        mesa = Usuario.objects.create(username="perf-au-mesa@perf.test", email="perf-au-mesa@perf.test", empresa=self.empresa)
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="MESA-AU", nombre="Mesa", estatus=Rol.Estatus.ACTIVO,
+            clave_departamento="MESACONTROL",
+        )
+        UsuarioRol.objects.create(usuario=mesa, rol=rol, empresa=self.empresa)
+        client = APIClient()
+        client.force_authenticate(user=mesa)
+        with CaptureQueriesContext(connection) as consultas:
+            # Mesa de control (no admin) ve la cotización por su propio listado.
+            resp = client.post(f"/api/v1/ventas/mesa-control/{self.cotizacion.pk}/autorizar/")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(sum('"usuarios_roles"' in q["sql"] for q in consultas.captured_queries), 1)
+
     def test_autorizar_rendimiento(self):
         client = APIClient()
         client.force_authenticate(user=self.usuario)
@@ -7924,3 +7962,400 @@ class OportunidadLigarCotizacionesTests(OportunidadesBase):
             cliente.get(self._url(op))
 
         self.assertEqual(len(pocas), len(muchas))
+
+
+class ImportesPedidoFixture:
+    """Fixture de EC-784, compartido por las pruebas de importes de ventas, terceros
+    (``resumen_comercial``) e IA (``get_last_cliente_compra``): un usuario por perfil
+    de contabilidad, cada uno vendedor de un pedido propio, y una segunda empresa con
+    su cliente y su pedido. Mixin, no ``TestCase``: se hereda junto con ``TestCase``."""
+
+    @classmethod
+    def _usuario(cls, nombre, empresa=None, clave=None, **extra):
+        usuario = Usuario.objects.create(
+            username=f"{nombre}-ec784", email=f"{nombre}@ec784.test", empresa=empresa, **extra
+        )
+        if clave:
+            rol = Rol.objects.create(
+                empresa=empresa, codigo=f"EC784-{nombre}", nombre=clave,
+                estatus=Rol.Estatus.ACTIVO, clave_departamento=clave,
+            )
+            UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=empresa)
+        return usuario
+
+    @classmethod
+    def _pedido(cls, empresa, sucursal, cliente, vendedor, folio, gran_total):
+        cotizacion = Cotizacion.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=cls.moneda, vendedor=vendedor,
+        )
+        return Pedido.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=cls.moneda, cotizacion=cotizacion,
+            folio=folio, estatus=3, subtotal=Decimal(gran_total), gran_total=Decimal(gran_total),
+            persona_pagos="Pagos", correo_facturas="pagos@ec784.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="XEC", nombre="Moneda EC-784")
+        cls.empresa = Empresa.objects.create(codigo="ec784", razon_social="EC784 SA")
+        cls.otra = Empresa.objects.create(codigo="ec784-otra", razon_social="Otra EC784 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="EC784", nombre="EC784")
+        cls.sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="EC784O", nombre="EC784 otra")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente EC784")
+        cls.cliente_otra = Cliente.objects.create(empresa=cls.otra, nombre="Cliente otra EC784")
+
+        cls.sin_permiso = cls._usuario("wms", cls.empresa, "WMS")
+        cls.ventas = cls._usuario("ventas", cls.empresa, "VENTAS")
+        cls.compras = cls._usuario("compras", cls.empresa, "COMPRAS")
+        cls.contabilidad = cls._usuario("conta", cls.empresa, "CONTABILIDAD")
+        cls.superusuario = cls._usuario("super", cls.empresa, is_superuser=True)
+        cls.superusuario_sin_empresa = cls._usuario("super-se", is_superuser=True)
+        cls.admin_empresa = cls._usuario("admin", cls.empresa, is_admin_empresa=True)
+        # Perfiles que ven importes / que no, en el orden de los ``subTest``.
+        cls.perfiles = (
+            (cls.sin_permiso, False), (cls.ventas, True), (cls.compras, True),
+            (cls.contabilidad, True), (cls.superusuario, True),
+        )
+        # Cada perfil es vendedor de un pedido propio, para que ``kpis/`` (que sólo
+        # cuenta "mis pedidos") tenga algo que mostrar.
+        cls.pedidos = {
+            usuario.pk: cls._pedido(cls.empresa, cls.sucursal, cls.cliente, usuario, f"EC784-{i}", f"{i}00.00")
+            for i, (usuario, _) in enumerate(cls.perfiles, start=1)
+        }
+        cls.pedido_otra = cls._pedido(
+            cls.otra, cls.sucursal_otra, cls.cliente_otra, cls._usuario("ajeno", cls.otra, "VENTAS"),
+            "EC784-OTRA", "999.00",
+        )
+
+    def _api(self, usuario):
+        api = APIClient()
+        api.force_authenticate(usuario)
+        return api
+
+    def _consultas_de_roles(self, peticion):
+        """Cuántas veces ``peticion()`` lee los roles del usuario (``usuarios_roles``)."""
+        with CaptureQueriesContext(connection) as consultas:
+            resp = peticion()
+        self.assertLess(resp.status_code, 300, getattr(resp, "content", resp))
+        return sum('"usuarios_roles"' in q["sql"] for q in consultas.captured_queries)
+
+
+class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
+    """EC-784: una sola regla de importes del pedido —contabilidad de ventas O de
+    compras— en el listado, el detalle y ``kpis/``. Ningún perfil cruza de empresa."""
+
+    def test_regla_es_la_union_de_ventas_y_compras(self):
+        from seguridad.role_identity import CLAVES_CONTABILIDAD_COMPRAS, CLAVES_CONTABILIDAD_VENTAS
+        from ventas.services.pedido_field_filter_service import (
+            CLAVES_IMPORTES_PEDIDO,
+            puede_ver_contabilidad,
+        )
+
+        self.assertEqual(CLAVES_IMPORTES_PEDIDO, CLAVES_CONTABILIDAD_VENTAS | CLAVES_CONTABILIDAD_COMPRAS)
+        for usuario, ve in (*self.perfiles, (self.superusuario_sin_empresa, True)):
+            with self.subTest(usuario=usuario.username):
+                self.assertEqual(puede_ver_contabilidad(usuario), ve)
+
+    def test_claves_no_pasan_de_una_peticion_a_otra(self):
+        """La caché de claves vive una petición: con el mismo objeto usuario
+        (``force_authenticate`` lo reutiliza), cada petición consulta sus roles una vez."""
+        api = self._api(self.compras)
+        url = f"{PEDIDOS_URL}{self.pedidos[self.compras.pk].pk}/"
+        self.assertEqual([self._consultas_de_roles(lambda: api.get(url)) for _ in range(2)], [1, 1])
+
+    def test_rol_quitado_entre_peticiones_se_ve_en_la_siguiente(self):
+        """Sin señales ni contadores: un rol quitado (incluso con un ``.delete()`` de
+        queryset, que no dispara señales) ya no cuenta en la petición siguiente."""
+        usuario = self.sin_permiso
+        api = self._api(usuario)
+        url = f"{PEDIDOS_URL}{self.pedidos[usuario.pk].pk}/"
+        self.assertNotIn("gran_total", api.get(url).data)
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="EC784-INV", nombre="Ventas", estatus=Rol.Estatus.ACTIVO,
+            clave_departamento="VENTAS",
+        )
+        UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=self.empresa)
+        self.assertIn("gran_total", api.get(url).data)
+        UsuarioRol.objects.filter(usuario=usuario, rol=rol).delete()
+        self.assertNotIn("gran_total", api.get(url).data)
+        Rol.objects.filter(pk=rol.pk).update(estatus=Rol.Estatus.INACTIVO)
+        UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=self.empresa)
+        self.assertNotIn("gran_total", api.get(url).data)  # rol inactivo
+
+    def test_fuera_de_una_peticion_cada_llamada_consulta(self):
+        from seguridad.role_identity import claves_departamento_usuario
+
+        with CaptureQueriesContext(connection) as consultas:
+            for _ in range(3):
+                self.assertEqual(claves_departamento_usuario(self.compras), {"COMPRAS"})
+        self.assertEqual(sum('"usuarios_roles"' in q["sql"] for q in consultas.captured_queries), 3)
+
+    def test_borrar_asignaciones_es_un_solo_delete(self):
+        """Sin receptores de señales en ``UsuarioRol``, Django vuelve a borrar por
+        queryset con un solo DELETE (``_set_roles`` lo hace en cada edición de roles)."""
+        with CaptureQueriesContext(connection) as consultas:
+            UsuarioRol.objects.filter(usuario=self.compras).delete()
+        self.assertEqual([q["sql"].split()[0] for q in consultas.captured_queries], ["DELETE"])
+
+    def test_claves_del_usuario_se_consultan_una_vez_por_peticion(self):
+        """El alcance, la regla de lectura, la de escritura y los documentos del
+        detalle comparten las claves de departamento: una sola consulta de roles."""
+        pedido = self.pedidos[self.compras.pk]
+        api = self._api(self.compras)
+        url = f"{PEDIDOS_URL}{pedido.pk}/"
+        for nombre, peticion in (
+            ("listado", lambda: api.get(f"{PEDIDOS_URL}?q=EC784")),
+            ("kpis", lambda: api.get(f"{PEDIDOS_URL}kpis/")),
+            ("detalle", lambda: api.get(url)),
+            ("patch", lambda: api.patch(url, {"oc": "OC-EC784"}, format="json")),
+        ):
+            with self.subTest(peticion=nombre):
+                self.assertEqual(self._consultas_de_roles(peticion), 1)
+
+    def test_filtro_del_detalle_falla_cerrado(self):
+        """Un valor que ``deepcopy`` no puede copiar hacía que el filtro devolviera
+        todo sin filtrar; ahora quita los importes igual y no toca el original."""
+        import threading
+
+        from ventas.services.pedido_field_filter_service import filtrar_campos_contabilidad_pedido
+
+        data = {
+            "id": 1, "gran_total": "10.00", "forma_pago": "03", "no_copiable": threading.Lock(),
+            "detalles": [{"id": 2, "precio_unitario": "5.00", "tallas": [{"id": 3, "subtotal_talla": "5.00"}]}],
+            "servicios_extras": [{"id": 4, "monto": "1.00"}],
+        }
+        filtrado = filtrar_campos_contabilidad_pedido(data, self.sin_permiso)
+        self.assertNotIn("gran_total", filtrado)
+        self.assertNotIn("forma_pago", filtrado)
+        self.assertNotIn("precio_unitario", filtrado["detalles"][0])
+        self.assertNotIn("subtotal_talla", filtrado["detalles"][0]["tallas"][0])
+        self.assertNotIn("monto", filtrado["servicios_extras"][0])
+        self.assertEqual(filtrado["detalles"][0]["tallas"][0]["id"], 3)
+        # El original queda intacto (el serializer puede volver a leerlo).
+        self.assertEqual(data["gran_total"], "10.00")
+        self.assertEqual(data["detalles"][0]["tallas"][0]["subtotal_talla"], "5.00")
+        self.assertEqual(data["servicios_extras"][0]["monto"], "1.00")
+        self.assertIs(filtrar_campos_contabilidad_pedido(data, self.ventas), data)
+
+    def test_detalle_por_perfil(self):
+        pedido = next(iter(self.pedidos.values()))
+        for usuario, ve in self.perfiles:
+            with self.subTest(usuario=usuario.username):
+                resp = self._api(usuario).get(f"{PEDIDOS_URL}{pedido.pk}/")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                for campo in ("subtotal", "gran_total", "importe_iva", "forma_pago"):
+                    self.assertEqual(campo in resp.data, ve, campo)
+
+    def test_cotizacion_del_pedido_por_perfil(self):
+        """``GET /pedidos/{id}/cotizacion/`` (EC-787) sigue la regla de lectura de
+        importes del pedido en la cabecera y en cada nivel anidado."""
+        pedido = self.pedidos[self.ventas.pk]
+        cotizacion = pedido.cotizacion
+        Cotizacion.objects.filter(pk=cotizacion.pk).update(
+            subtotal="200.00", gran_total="232.00", forma_pago="03", uso_cfdi="G03",
+        )
+        producto = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=self.empresa, nombre="Prenda EC784", codigo="E784",
+        )
+        renglon = CotizacionDetalle.objects.create(
+            cotizacion=cotizacion, producto=producto, precio_unitario="10.00", subtotal_linea="20.00",
+        )
+        CotizacionDetalleTalla.objects.create(
+            cotizacion_detalle=renglon, talla=Talla.objects.create(nombre="E7"), cantidad=2,
+            precio_unitario="10.00", subtotal_talla="20.00",
+        )
+        CotizacionServicioExtra.objects.create(cotizacion=cotizacion, nombre="Extra EC784", monto="5.00", cantidad=1)
+        for usuario, ve in self.perfiles:
+            with self.subTest(usuario=usuario.username):
+                resp = self._api(usuario).get(f"{PEDIDOS_URL}{pedido.pk}/cotizacion/")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                data = resp.data
+                detalle = data["detalles"][0]
+                talla = detalle["tallas"][0]
+                servicio = data["servicios_extras"][0]
+                for bloque, campo in (
+                    (data, "gran_total"), (data, "subtotal"), (data, "forma_pago"),
+                    (detalle, "precio_unitario"), (detalle, "subtotal_linea"),
+                    (talla, "precio_unitario"), (talla, "subtotal_talla"), (servicio, "monto"),
+                ):
+                    self.assertEqual(campo in bloque, ve, campo)
+                # Lo que no es importe sigue ahí.
+                self.assertEqual((detalle["producto"], talla["cantidad"], servicio["nombre"]), (producto.pk, 2, "Extra EC784"))
+        for usuario, _ in self.perfiles[:-1]:
+            with self.subTest(otra_empresa=usuario.username):
+                resp = self._api(usuario).get(f"{PEDIDOS_URL}{self.pedido_otra.pk}/cotizacion/")
+                self.assertEqual(resp.status_code, 404)
+
+    def test_detalle_de_otra_empresa_es_404(self):
+        for usuario, _ in self.perfiles[:-1]:
+            with self.subTest(usuario=usuario.username):
+                resp = self._api(usuario).get(f"{PEDIDOS_URL}{self.pedido_otra.pk}/")
+                self.assertEqual(resp.status_code, 404)
+
+    def _escritores(self):
+        """(usuario, puede escribir importes/recomprar): VER es la unión ventas/compras,
+        ESCRIBIR sigue siendo sólo contabilidad de ventas, como en main (EC-784)."""
+        return (
+            (self.sin_permiso, False), (self.ventas, True), (self.compras, False),
+            (self.contabilidad, False), (self.superusuario, True), (self.admin_empresa, True),
+        )
+
+    def test_escribir_campos_contables_exige_contabilidad_de_ventas(self):
+        pedido = self.pedidos[self.ventas.pk]
+        for usuario, puede in self._escritores():
+            with self.subTest(usuario=usuario.username):
+                api = self._api(usuario)
+                pedido.refresh_from_db()
+                # Un valor distinto del guardado: reenviar el mismo no cuenta como escribir.
+                otra = "01" if pedido.forma_pago != "01" else "03"
+                resp = api.patch(f"{PEDIDOS_URL}{pedido.pk}/", {"forma_pago": otra}, format="json")
+                self.assertEqual(resp.status_code, 200 if puede else 403, resp.content)
+                if not puede:
+                    resp = api.patch(f"{PEDIDOS_URL}{pedido.pk}/", {"gran_total": "1.00"}, format="json")
+                    self.assertEqual(resp.status_code, 403, resp.content)
+        pedido.refresh_from_db()
+        self.assertEqual(pedido.gran_total, Decimal("200.00"))
+
+    def _eco_contable(self, usuario, pedido):
+        """Lo que un formulario reenviaría: los campos contables escribibles tal
+        como los devolvió el GET del detalle a ``usuario``."""
+        from ventas.services.pedido_field_filter_service import CAMPOS_CONTABILIDAD_PEDIDO
+
+        detalle = self._api(usuario).get(f"{PEDIDOS_URL}{pedido.pk}/").data
+        return {c: detalle[c] for c in CAMPOS_CONTABILIDAD_PEDIDO if c in detalle and c != "importe_iva"}
+
+    def test_reenviar_importes_sin_cambio_no_exige_escribirlos(self):
+        """Quien ve los importes pero no los escribe (Compras, Contabilidad) puede
+        mandarlos de vuelta sin cambio junto con otro campo (EC-784)."""
+        pedido = self.pedidos[self.ventas.pk]
+        for usuario in (self.compras, self.contabilidad):
+            with self.subTest(usuario=usuario.username):
+                eco = self._eco_contable(usuario, pedido)
+                self.assertIn("gran_total", eco)
+                # Mismo valor en otro formato: se compara ya interpretado.
+                eco["gran_total"] = str(Decimal(eco["gran_total"]).normalize())
+                eco["oc"] = f"OC-{usuario.pk}"
+                resp = self._api(usuario).patch(f"{PEDIDOS_URL}{pedido.pk}/", eco, format="json")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                pedido.refresh_from_db()
+                self.assertEqual(
+                    (pedido.oc, pedido.gran_total, pedido.forma_pago, pedido.uso_cfdi),
+                    (f"OC-{usuario.pk}", Decimal("200.00"), "03", "G03"),
+                )
+
+    def test_cambiar_un_importe_sigue_exigiendo_contabilidad_de_ventas(self):
+        pedido = self.pedidos[self.ventas.pk]
+        cambios = ({"gran_total": "1.00"}, {"forma_pago": "01"}, {"uso_cfdi": "G01"}, {"anticipo_total": True})
+        for usuario in (self.compras, self.contabilidad):
+            for cambio in cambios:
+                with self.subTest(usuario=usuario.username, cambio=cambio):
+                    eco = {**self._eco_contable(usuario, pedido), **cambio}
+                    resp = self._api(usuario).patch(f"{PEDIDOS_URL}{pedido.pk}/", eco, format="json")
+                    self.assertEqual(resp.status_code, 403, resp.content)
+                    self.assertIn(next(iter(cambio)), str(resp.data))
+        resp = self._api(self.ventas).patch(f"{PEDIDOS_URL}{pedido.pk}/", {"forma_pago": "01"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        pedido.refresh_from_db()
+        self.assertEqual((pedido.forma_pago, pedido.gran_total), ("01", Decimal("200.00")))
+
+    def test_quien_no_ve_importes_no_puede_adivinarlos(self):
+        """A quien no ve los importes se le rechaza con sólo mandarlos, aunque
+        acierte el valor guardado: un 200 al acertar los delataría."""
+        pedido = self.pedidos[self.ventas.pk]
+        resp = self._api(self.sin_permiso).patch(
+            f"{PEDIDOS_URL}{pedido.pk}/", {"oc": "X", "gran_total": "200.00"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 403, resp.content)
+
+    def test_recomprar_exige_contabilidad_de_ventas(self):
+        pedido = self.pedidos[self.ventas.pk]
+        for usuario, puede in self._escritores():
+            with self.subTest(usuario=usuario.username):
+                antes = Cotizacion.objects.filter(vendedor=usuario).count()
+                resp = self._api(usuario).post(f"{PEDIDOS_URL}{pedido.pk}/recomprar/")
+                self.assertEqual(resp.status_code, 201 if puede else 403, resp.content)
+                self.assertEqual(Cotizacion.objects.filter(vendedor=usuario).count(), antes + int(puede))
+
+    def _filas(self, resp):
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.data["results"] if isinstance(resp.data, dict) else resp.data
+
+    def test_listado_por_perfil_en_todas_sus_variantes(self):
+        # ``?q=EC784`` acota a los pedidos de esta prueba (la BD no está vacía).
+        variantes = (
+            "?q=EC784", "?q=EC784&limit=50", "?q=EC784&mis_pedidos=true", "?q=EC784&estatus=3",
+            "?q=EC784&programado=false&sin_clasificar=true", "?q=EC784&ordering=-folio",
+        )
+        for usuario, ve in self.perfiles:
+            for params in variantes:
+                with self.subTest(usuario=usuario.username, params=params):
+                    filas = self._filas(self._api(usuario).get(f"{PEDIDOS_URL}{params}"))
+                    self.assertTrue(filas)
+                    for fila in filas:
+                        self.assertEqual("subtotal" in fila, ve)
+                        self.assertEqual("gran_total" in fila, ve)
+                        self.assertIn("piezas", fila)  # el resto del shape no cambia
+
+    def test_listado_no_cruza_de_empresa(self):
+        for usuario, _ in self.perfiles[:-1]:
+            with self.subTest(usuario=usuario.username):
+                ids = {f["id"] for f in self._filas(self._api(usuario).get(f"{PEDIDOS_URL}?q=EC784"))}
+                self.assertEqual(ids, {p.pk for p in self.pedidos.values()})
+
+    def test_listado_sin_permiso_no_agrega_consultas(self):
+        url = f"{PEDIDOS_URL}?q=EC784"
+        self._api(self.ventas).get(url)  # calienta caches de ContentType, etc.
+        with CaptureQueriesContext(connection) as con_importes:
+            self._api(self.ventas).get(url)
+        with CaptureQueriesContext(connection) as sin_importes:
+            self._api(self.sin_permiso).get(url)
+        self.assertEqual(len(sin_importes), len(con_importes))
+
+    def test_kpis_por_perfil(self):
+        for usuario, ve in self.perfiles:
+            with self.subTest(usuario=usuario.username):
+                resp = self._api(usuario).get(f"{PEDIDOS_URL}kpis/")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.assertIs(resp.data["puede_ver_importes"], ve)
+                activos = resp.data["pedidos_activos"]
+                # El shape y los conteos no cambian: sólo faltan los importes.
+                self.assertEqual(activos["total"], 1)
+                self.assertEqual([f["total"] for f in activos["por_moneda"]], [1])
+                self.assertEqual(
+                    [f["id"] for f in activos["drill_down"]], [self.pedidos[usuario.pk].pk]
+                )
+                self.assertEqual(all("valor" in f for f in activos["por_moneda"]), ve)
+                self.assertEqual(all("gran_total" in f for f in activos["drill_down"]), ve)
+                self.assertTrue(all("folio" in f for f in activos["drill_down"]))
+
+    def test_kpis_sin_permiso_no_ordena_por_importe(self):
+        # El pedido más viejo pasa a ser el más grande; el nuevo es chico. Por
+        # ``-gran_total`` el viejo iría primero y delataría cuál es el mayor.
+        viejo = self.pedidos[self.sin_permiso.pk]
+        Pedido.objects.filter(pk=viejo.pk).update(gran_total=Decimal("100000.00"))
+        nuevo = self._pedido(
+            self.empresa, viejo.sucursal, viejo.cliente, self.sin_permiso, "EC784-NUEVO", "1.00",
+        )
+        drill_down = self._api(self.sin_permiso).get(f"{PEDIDOS_URL}kpis/").data["pedidos_activos"]["drill_down"]
+        self.assertEqual([f["id"] for f in drill_down], [nuevo.pk, viejo.pk])
+        # Con permiso sigue el orden por importe.
+        Pedido.objects.filter(pk__in=[viejo.pk, nuevo.pk]).update(cotizacion=self.pedidos[self.ventas.pk].cotizacion)
+        drill_down = self._api(self.ventas).get(f"{PEDIDOS_URL}kpis/").data["pedidos_activos"]["drill_down"]
+        self.assertEqual(
+            [f["id"] for f in drill_down], [viejo.pk, self.pedidos[self.ventas.pk].pk, nuevo.pk],
+        )  # 100000 > 200 > 1
+
+    def test_kpis_sin_empresa_declara_sin_importes(self):
+        sin_empresa = self._usuario("se")
+        resp = self._api(sin_empresa).get(f"{PEDIDOS_URL}kpis/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(resp.data["puede_ver_importes"], False)
+        self.assertFalse(resp.data["pedidos_activos"]["disponible"])
+
+    def test_kpis_no_cuentan_pedidos_de_otra_empresa(self):
+        # El superusuario sin empresa sólo ve los pedidos de los que es vendedor:
+        # ninguno aquí, aunque haya pedidos de dos empresas.
+        resp = self._api(self.superusuario_sin_empresa).get(f"{PEDIDOS_URL}kpis/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["pedidos_activos"]["total"], 0)

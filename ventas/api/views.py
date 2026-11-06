@@ -4,6 +4,7 @@ import logging
 import operator
 from functools import reduce
 from decimal import Decimal, ROUND_HALF_UP
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import router, transaction
 from django.db.models.deletion import Collector, ProtectedError, RestrictedError
@@ -18,6 +19,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from catalogo.compatibilidad import exigir_compatibilidad, matriz_onboarding
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
+from rest_framework.fields import ChoiceField
 from rest_framework.filters import OrderingFilter
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
@@ -110,9 +112,11 @@ from ventas.services.sku_produccion_service import (
 from ventas.services.pedido_field_filter_service import (
     CAMPOS_CONTABILIDAD_PEDIDO,
     filtrar_campos_contabilidad_pedido,
+    puede_modificar_importes_pedido,
     puede_ver_contabilidad,
     quitar_campos_contabilidad_pedido,
 )
+from nucleo.importes import quitar_montos
 from wms.models import Estado as EstadoWms, Picking, PickingDetalle
 
 logger = logging.getLogger(__name__)
@@ -416,8 +420,9 @@ FILTER_BACKENDS_SIN_ORDERING = tuple(
 )
 # Modo servidor (EC-757): ``?ordering=`` solo con la lista blanca de cada vista y
 # ``id`` como desempate. Sin el parámetro queda el orden fijo de ``get_queryset``
-# (más reciente primero, EC-619). Los importes no entran: ordenar por un monto
-# que la lectura oculta (#537) dejaría deducirlo.
+# (más reciente primero, EC-619). Los importes no entran: el listado y el detalle
+# se los ocultan a quien no ve contabilidad (#537, #947, EC-784), y ordenar por un
+# monto oculto dejaría deducirlo.
 FILTER_BACKENDS_LISTADO = (*FILTER_BACKENDS_SIN_ORDERING, OrdenamientoEstableFilter)
 
 
@@ -3288,14 +3293,43 @@ class PedidoViewSet(viewsets.ModelViewSet):
         """#537: lo que la lectura le oculta (importes, forma/método de pago, uso
         CFDI) tampoco lo puede escribir. Corre ANTES de validar el payload: un 400
         por el valor (p. ej. anticipo contra gran_total) le dejaría deducir lo oculto,
-        así que con cualquier valor la respuesta es el mismo 403."""
-        if puede_ver_contabilidad(request.user):
+        así que con cualquier valor la respuesta es el mismo 403. Escribirlos exige
+        contabilidad de ventas, aunque compras ya los vea (EC-784).
+
+        Quien SÍ ve los importes pero no los escribe (compras, contabilidad) puede
+        reenviarlos sin cambio —un formulario que devuelve lo que leyó—: sólo se
+        rechaza si el valor cambia. A quien no los ve se le rechaza con sólo
+        mandarlos: aceptarle el valor exacto le dejaría adivinarlo (200 si acierta).
+        """
+        user = request.user
+        if puede_modificar_importes_pedido(user):
             return
-        escribibles = {n for n, f in self.get_serializer().fields.items() if not f.read_only}
-        ocultos = sorted(set(CAMPOS_CONTABILIDAD_PEDIDO) & escribibles & set(request.data))
-        if ocultos:
-            self.get_object()  # un pedido ajeno sigue siendo 404, no 403
-            raise PermissionDenied(f"No puedes modificar: {', '.join(ocultos)}.")
+        campos = self.get_serializer().fields
+        escribibles = {n for n, f in campos.items() if not f.read_only}
+        enviados = sorted(set(CAMPOS_CONTABILIDAD_PEDIDO) & escribibles & set(request.data))
+        if not enviados:
+            return
+        pedido = self.get_object()  # un pedido ajeno sigue siendo 404, no 403
+        if puede_ver_contabilidad(user):
+            enviados = [n for n in enviados if self._cambia_campo(campos[n], pedido, request.data[n])]
+        if enviados:
+            raise PermissionDenied(f"No puedes modificar: {', '.join(enviados)}.")
+
+    @staticmethod
+    def _cambia_campo(campo, pedido, valor):
+        """``True`` si ``valor`` (crudo del payload) cambia lo guardado, comparado ya
+        interpretado por el propio campo del serializer: ``"1.00"`` y ``Decimal("1")``,
+        ``"true"`` y ``True`` o ``"16"`` y ``16`` son iguales. En los choices, ``""`` y
+        ``None`` también (``forma_pago`` vacía). Un valor que el campo no acepta cuenta
+        como cambio: 403, igual que antes, sin el 400 de la validación."""
+        try:
+            nuevo = campo.run_validation(valor)
+        except (ValidationError, DjangoValidationError, TypeError, ValueError):
+            return True
+        actual = getattr(pedido, campo.source)
+        if isinstance(campo, ChoiceField):
+            return (nuevo or "") != (actual or "")
+        return nuevo != actual
 
     def _filtrar_respuesta_contabilidad(self, response):
         # Mismo filtro que ``retrieve`` y ``editar-mesa-control``: la respuesta del
@@ -3932,9 +3966,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
         """
         user = request.user
         pedido = self.get_object()
-        # Clona precios y montos que la lectura le oculta a quien no ve contabilidad (#537).
-        from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
-        if not puede_ver_contabilidad(request.user):
+        # Clona precios y montos (#537): mismo permiso que escribirlos, contabilidad
+        # de ventas; compras los ve pero no recompra (EC-784).
+        if not puede_modificar_importes_pedido(request.user):
             raise PermissionDenied("No tienes permiso para recomprar pedidos.")
 
         with transaction.atomic():
@@ -4183,9 +4217,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
             return Response(self._kpis_vacio())
 
         base = pedidos_visibles(pedidos_base(), user).filter(cotizacion__vendedor=user)
+        # Misma regla de importes que el listado y el detalle (EC-784).
+        ver_importes = puede_ver_contabilidad(user)
         data = {
             "generado_en": timezone.now(),
-            "pedidos_activos": self._kpi_pedidos_activos(base),
+            "pedidos_activos": self._kpi_pedidos_activos(base, ver_importes),
             "otif": {
                 "disponible": False,
                 "motivo": "Entrega/EnvioDetalle no registran fecha ni cantidad entregada: no hay forma de saber si un pedido se entregó a tiempo y completo.",
@@ -4199,6 +4235,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 "motivo": "El pedido no tiene fecha compromiso (solo una clasificación A-F en días) y no hay proyección de avance de OP.",
             },
         }
+        # Mismo contrato que los ``kpis/`` de compras (#841, #860): sin permiso se
+        # omiten ``valor`` y el ``gran_total`` del drill-down; los conteos quedan.
+        data["puede_ver_importes"] = ver_importes
+        if not ver_importes:
+            quitar_montos(data["pedidos_activos"], ["valor", "gran_total"])
         return Response(data)
 
     def _kpis_vacio(self):
@@ -4209,13 +4250,14 @@ class PedidoViewSet(viewsets.ModelViewSet):
             "otif": motivo,
             "lead_time_promedio": motivo,
             "pedidos_en_riesgo": motivo,
+            # Clave fija del contrato; sin datos no hay importes.
+            "puede_ver_importes": False,
         }
 
-    def _kpi_pedidos_activos(self, base):
+    def _kpi_pedidos_activos(self, base, ver_importes):
         # "Activo" = AUTORIZADA o EN PROCESO: ya es un pedido en firme, no un
-        # borrador ni algo cancelado. Mismo criterio que
-        # ``ComprasDashboardView.ESTATUS_GASTO_OC`` (excluir lo que todavía no
-        # es compromiso real).
+        # borrador ni algo cancelado (se excluye lo que todavía no es compromiso
+        # real).
         activos = base.filter(estatus__in=self.ESTATUS_PEDIDO_ACTIVOS)
         # El valor va por moneda (#370): un pedido en USD no se suma con los MXN.
         por_moneda = [
@@ -4225,8 +4267,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
             .order_by("moneda__codigo_iso")
         ]
         total = sum(f["total"] for f in por_moneda)
+        # Sin permiso, los 20 del drill-down son los más recientes: elegir los de
+        # mayor ``gran_total`` delataría cuáles son los pedidos más grandes.
+        orden = ("-gran_total", "-id") if ver_importes else ("-id",)
         drill_down = list(
-            activos.order_by("-gran_total", "-id").values(
+            activos.order_by(*orden).values(
                 "id", "folio", "estatus", "gran_total", "cliente_nombre", "moneda__codigo_iso"
             )[:20]
         )

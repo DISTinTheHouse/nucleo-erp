@@ -113,6 +113,14 @@ class ClienteViewSet(viewsets.ModelViewSet):
         # módulo (FK ``Cliente``), así que importar ``ventas.models`` aquí
         # arriba crearía un ciclo al cargar las apps.
         from ventas.models import Pedido, Cotizacion
+        from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
+
+        # Misma regla de importes que el listado y el detalle de pedidos (EC-784):
+        # sin ella no se agregan ``montos_por_moneda`` ni el ``gran_total`` de cada
+        # pedido (ni se corre su agregación); conteos, folios y fechas quedan.
+        # Las claves de departamento ya las consultó el alcance (``clientes_visibles``)
+        # y quedaron guardadas en el usuario: no se consultan dos veces.
+        ver_importes = puede_ver_contabilidad(self.request.user)
 
         estatus_pedido = dict(Pedido.CHOICES_ESTATUS)
         # Sólo documentos de la empresa del cliente: sin este filtro, un pedido o
@@ -126,43 +134,46 @@ class ClienteViewSet(viewsets.ModelViewSet):
             estatus_pedido.get(fila["estatus"], fila["estatus"]): fila["total"]
             for fila in pedidos_qs.values("estatus").annotate(total=Count("id"))
         }
-        # Excluye CANCELADO (5) para no inflar el monto histórico con pedidos
-        # que nunca se concretaron; se separa por moneda porque un cliente
-        # puede tener pedidos en más de una.
-        montos_por_moneda = [
-            {"moneda": fila["moneda__codigo_iso"], "total": fila["total"]}
-            for fila in pedidos_qs.exclude(estatus=5)
-            .values("moneda__codigo_iso")
-            .annotate(total=Sum("gran_total"))
-        ]
-
         recientes = pedidos_qs.select_related("moneda").order_by("-created_at")[:5].values(
             "id", "folio", "created_at", "estatus", "gran_total", "moneda__codigo_iso"
         )
-        pedidos_recientes = [
-            {
+        pedidos_recientes = []
+        for fila in recientes:
+            pedido = {
                 "id": fila["id"],
                 "folio": fila["folio"],
                 "fecha": fila["created_at"],
                 "estatus": fila["estatus"],
                 "estatus_display": estatus_pedido.get(fila["estatus"], fila["estatus"]),
-                "gran_total": fila["gran_total"],
                 "moneda": fila["moneda__codigo_iso"],
             }
-            for fila in recientes
-        ]
+            if ver_importes:
+                pedido["gran_total"] = fila["gran_total"]
+            pedidos_recientes.append(pedido)
 
-        return {
+        resumen = {
             "total_pedidos": pedidos_qs.count(),
             "total_cotizaciones": Cotizacion.objects.filter(
                 cliente=cliente, empresa_id=cliente.empresa_id
             ).count(),
             "pedidos_por_estatus": pedidos_por_estatus,
-            "montos_por_moneda": montos_por_moneda,
             "ultimo_pedido": pedidos_recientes[0] if pedidos_recientes else None,
             "pedidos_recientes": pedidos_recientes,
             "cartera": cartera_de_cliente(cliente),
+            # Señal explícita para el front, como los ``kpis/`` (#841).
+            "puede_ver_importes": ver_importes,
         }
+        if ver_importes:
+            # Excluye CANCELADO (5) para no inflar el monto histórico con pedidos
+            # que nunca se concretaron; se separa por moneda porque un cliente
+            # puede tener pedidos en más de una.
+            resumen["montos_por_moneda"] = [
+                {"moneda": fila["moneda__codigo_iso"], "total": fila["total"]}
+                for fila in pedidos_qs.exclude(estatus=5)
+                .values("moneda__codigo_iso")
+                .annotate(total=Sum("gran_total"))
+            ]
+        return resumen
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -663,7 +674,8 @@ class ProveedorViewSet(viewsets.ModelViewSet):
                 "truncado": False,
             })
 
-        from compras.services.orden_compra_view_service import puede_ver_contabilidad, quitar_montos
+        from compras.services.orden_compra_view_service import puede_ver_contabilidad
+        from nucleo.importes import quitar_montos
 
         puede_ver_importes = puede_ver_contabilidad(request.user)
         proveedores = calcular_scorecards(alcance, meta)
@@ -689,7 +701,8 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         filtros de ``kpis``). Acotado a ``TOPE_DETALLE`` con ``total``."""
         from compras.services.kpi_criterios import AlcanceCompras
         from compras.services.kpi_proveedores import FACTORES_DETALLE, TOPE_DETALLE, detalle_proveedor
-        from compras.services.orden_compra_view_service import puede_ver_contabilidad, quitar_montos
+        from compras.services.orden_compra_view_service import puede_ver_contabilidad
+        from nucleo.importes import quitar_montos
 
         validar_parametros(request, {"factor", "sucursal", "fecha_desde", "fecha_hasta"})
         factor = (request.query_params.get("factor") or "").strip()

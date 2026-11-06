@@ -1,12 +1,8 @@
-import copy
-import logging
-
+from nucleo.importes import Importes, quitar_importes, sin_importes, tiene_claves_de_importes
 from seguridad.role_identity import (
+    CLAVES_CONTABILIDAD_COMPRAS,
     CLAVES_CONTABILIDAD_VENTAS,
-    claves_departamento_usuario,
 )
-
-logger = logging.getLogger(__name__)
 
 CAMPOS_CONTABILIDAD_PEDIDO = [
     "anticipo_total", "anticipo_parcial", "pago_antes_embarque",
@@ -24,50 +20,51 @@ CAMPOS_CONTABILIDAD_DETALLE = [
 CAMPOS_CONTABILIDAD_TALLA = ["precio_unitario", "subtotal_talla"]
 CAMPOS_CONTABILIDAD_SERVICIO = ["monto"]
 
+# VER los importes de un pedido: contabilidad de ventas O de compras (EC-784):
+# Compras › Pedidos lista los mismos pedidos y necesita sus montos. Hoy
+# ``CLAVES_CONTABILIDAD_COMPRAS`` ya incluye las de ventas; la unión explícita deja
+# la regla en pie aunque esos dos conjuntos se separen.
+CLAVES_IMPORTES_PEDIDO = CLAVES_CONTABILIDAD_VENTAS | CLAVES_CONTABILIDAD_COMPRAS
+# MODIFICARLOS (#537) y ``recomprar``: sólo contabilidad de ventas. Compras ve los
+# montos del pedido pero no los escribe ni clona pedidos en cotizaciones.
+CLAVES_EDICION_IMPORTES_PEDIDO = CLAVES_CONTABILIDAD_VENTAS
+
 
 def puede_ver_contabilidad(user) -> bool:
-    if getattr(user, "is_superuser", False):
-        return True
-    if getattr(user, "is_admin_empresa", False):
-        return True
-
-    claves = claves_departamento_usuario(user)
-    return bool(claves & CLAVES_CONTABILIDAD_VENTAS) if claves else False
+    """LECTURA de importes del pedido: listado, detalle, respuestas de alta/edición
+    y ``editar-mesa-control``, ``kpis``, trazabilidad, documentos ligados, resumen
+    del cliente y asistente de IA."""
+    return tiene_claves_de_importes(user, CLAVES_IMPORTES_PEDIDO)
 
 
-def _drop_keys(d: dict, keys: list) -> None:
-    if not isinstance(d, dict):
-        return
-    for k in keys:
-        d.pop(k, None)
+def puede_modificar_importes_pedido(user) -> bool:
+    """ESCRITURA: campos de contabilidad del pedido (#537) y ``recomprar``, que clona
+    sus precios. Es la regla de antes de EC-784, sin la ampliación a compras."""
+    return tiene_claves_de_importes(user, CLAVES_EDICION_IMPORTES_PEDIDO)
+
+
+# Dónde hay importes en un pedido serializado; la usan la copia y la limpieza.
+IMPORTES_PEDIDO = Importes(
+    tuple(CAMPOS_CONTABILIDAD_PEDIDO),
+    {
+        "detalles": Importes(tuple(CAMPOS_CONTABILIDAD_DETALLE), {"tallas": Importes(tuple(CAMPOS_CONTABILIDAD_TALLA))}),
+        "servicios_extras": Importes(tuple(CAMPOS_CONTABILIDAD_SERVICIO)),
+    },
+)
 
 
 def quitar_campos_contabilidad_pedido(data) -> None:
     """Quita en sitio los importes de un pedido serializado (y de sus anidados).
 
     Para listados: el permiso se evalúa una vez por petición y cada fila ya es
-    una copia propia del serializer, así que no hace falta ``deepcopy`` (#947).
+    una copia propia del serializer, así que no hace falta copiar (#947).
     """
-    _drop_keys(data, CAMPOS_CONTABILIDAD_PEDIDO)
-
-    for det in data.get("detalles") or []:
-        _drop_keys(det, CAMPOS_CONTABILIDAD_DETALLE)
-        for t in det.get("tallas") or []:
-            _drop_keys(t, CAMPOS_CONTABILIDAD_TALLA)
-
-    for s in data.get("servicios_extras") or []:
-        _drop_keys(s, CAMPOS_CONTABILIDAD_SERVICIO)
+    quitar_importes(data, IMPORTES_PEDIDO)
 
 
 def filtrar_campos_contabilidad_pedido(data, user):
+    """``data`` tal cual si el usuario ve importes; si no, una copia sin ellos.
+    Falla cerrado: no hay rama que devuelva los importes a quien no los ve."""
     if puede_ver_contabilidad(user):
         return data
-
-    try:
-        cleaned = copy.deepcopy(data)
-    except Exception:
-        logger.warning("No se pudo copiar serializer.data en filtro contabilidad pedido")
-        return data
-
-    quitar_campos_contabilidad_pedido(cleaned)
-    return cleaned
+    return sin_importes(data, IMPORTES_PEDIDO)

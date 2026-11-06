@@ -10,6 +10,7 @@ from usuarios.models import Usuario
 from nucleo.models import Empresa
 from terceros.models import Cliente, Proveedor
 from catalogo.models import TipoProducto
+from ventas.tests import ImportesPedidoFixture
 
 
 def _tipo_producto():
@@ -1793,3 +1794,51 @@ class ClienteEmpresaSucursalTests(TestCase):
 
         self.assertFalse(resultado["ok"])
         self.assertFalse(Cliente.objects.exists())
+
+
+class ResumenComercialImportesPorPerfilTests(ImportesPedidoFixture, TestCase):
+    """EC-784: ``resumen_comercial`` del detalle de cliente sigue la regla de importes
+    del pedido (contabilidad de ventas O de compras). Sin ella se omiten
+    ``montos_por_moneda`` y el ``gran_total`` de ``pedidos_recientes``/``ultimo_pedido``;
+    conteos, folios y ``cartera`` no cambian."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Sin ser Mesa de Control/Contabilidad, un usuario sólo ve sus clientes asignados.
+        cls.cliente.vendedores.add(*(usuario for usuario, _ in cls.perfiles))
+
+    def _resumen(self, usuario, cliente):
+        return self._api(usuario).get(f"{CLIENTES_URL}{cliente.pk}/")
+
+    def test_detalle_consulta_las_claves_una_vez(self):
+        """El alcance (``clientes_visibles``) y la regla de importes comparten las
+        claves de departamento: una sola consulta de roles por petición."""
+        for usuario in (self.compras, self.sin_permiso):
+            with self.subTest(usuario=usuario.username):
+                api = self._api(usuario)
+                self.assertEqual(
+                    self._consultas_de_roles(lambda: api.get(f"{CLIENTES_URL}{self.cliente.pk}/")), 1
+                )
+
+    def test_resumen_por_perfil(self):
+        for usuario, ve in self.perfiles:
+            with self.subTest(usuario=usuario.username):
+                resp = self._resumen(usuario, self.cliente)
+                self.assertEqual(resp.status_code, 200, resp.content)
+                resumen = resp.data["resumen_comercial"]
+                self.assertEqual("montos_por_moneda" in resumen, ve)
+                self.assertIs(resumen.get("puede_ver_importes"), ve)
+                self.assertEqual(resumen["total_pedidos"], len(self.pedidos))
+                self.assertEqual(len(resumen["pedidos_recientes"]), 5)
+                for pedido in [*resumen["pedidos_recientes"], resumen["ultimo_pedido"]]:
+                    self.assertEqual("gran_total" in pedido, ve)
+                    self.assertIn("folio", pedido)
+                self.assertIn("cartera", resumen)
+                if ve:
+                    self.assertEqual(resumen["montos_por_moneda"], [{"moneda": "XEC", "total": Decimal("1500.00")}])
+
+    def test_cliente_de_otra_empresa_es_404(self):
+        for usuario, _ in self.perfiles[:-1]:
+            with self.subTest(usuario=usuario.username):
+                self.assertEqual(self._resumen(usuario, self.cliente_otra).status_code, 404)

@@ -1207,6 +1207,7 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
   - `total_pedidos` cuenta todos los pedidos no borrados del cliente (incluye cancelados); `pedidos_por_estatus` desglosa cuántos hay en cada estatus (usa las mismas etiquetas de `Pedido.CHOICES_ESTATUS`: BORRADOR, POR AUTORIZAR, AUTORIZADA, EN PROCESO, CANCELADO) — útil para mostrar chips/badges.
   - `montos_por_moneda` **excluye pedidos CANCELADO** (no se sumaron a la venta real) y viene separado por moneda por si el cliente compra en más de una — no asumas que solo hay un elemento en el arreglo.
   - `ultimo_pedido` es `null` si el cliente no tiene pedidos todavía; si existe, es el mismo objeto que aparece primero en `pedidos_recientes`.
+  - **Importes (EC-784)**: misma regla que el listado y el detalle de pedidos (contabilidad de ventas **o** de compras). `resumen_comercial` trae `"puede_ver_importes": true|false`; sin permiso **no viene** `montos_por_moneda` y se omite `gran_total` de `pedidos_recientes[]` y de `ultimo_pedido`. Conteos, folios, fechas, estatus y `cartera` no cambian. El front debe tolerar la ausencia de esas claves y decidir con `puede_ver_importes`.
   - `pedidos_recientes` trae como máximo los 5 pedidos más nuevos (por fecha de creación), pensado para una mini-tabla o timeline en la ficha del cliente — no es un listado paginado; si se necesita el historial completo, usar `GET /api/v1/ventas/pedidos/?cliente={id}`.
 
 ### KPIs de Clientes (EC-422)
@@ -1309,7 +1310,7 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
   }
   ```
 - `resumen` se calcula sobre el queryset ya filtrado (respeta `estatus`/`fecha_inicio`/`fecha_final` si se mandan), no solo sobre la página actual.
-- `monto_por_moneda` excluye `CANCELADA` (mismo criterio que `resumen_comercial` de cliente y que el dashboard de compras).
+- `monto_por_moneda` excluye `CANCELADA` (mismo criterio que `resumen_comercial` de cliente).
 - Solo trae OC activas (`activo=true`); una OC dada de baja no aparece aquí.
 - `por_estatus` usa como llave el estatus **entero** (en JSON, string: `"3"`), igual que `results[].estatus`.
 - `monto_por_moneda[].total` es string decimal, igual que los montos de `results`.
@@ -1627,7 +1628,8 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 - **Endpoint**: `GET /api/v1/ventas/pedidos/kpis/`
 - Siempre es "MIS pedidos" (igual que `?mis_pedidos=true`): filtra por `cotizacion.vendedor = usuario autenticado`. Sin query params.
 - Solo **`pedidos_activos`** trae datos reales. `otif`, `lead_time_promedio` y `pedidos_en_riesgo` responden `"disponible": false` + `"motivo"` — el sistema no registra fecha/cantidad de entrega ni fecha compromiso del pedido. **Pinta esos 3 como "próximamente", no los ocultes ni los calcules en frontend.**
-- Sin empresa asignada → 200 con los 4 bloques en `disponible: false`.
+- Sin empresa asignada → 200 con los 4 bloques en `disponible: false` y `puede_ver_importes: false`.
+- **Importes (EC-784)**: misma regla que el listado y el detalle de pedidos. Trae `"puede_ver_importes": true|false`; sin permiso se omiten `valor` de `por_moneda[]` y `gran_total` de `drill_down[]` (conteos, folios y estatus no cambian) y el drill-down son los 20 activos más recientes (`-id`), no los de mayor monto. Usa `puede_ver_importes` para decidir si pintar montos.
 
 ```json
 {
@@ -1643,11 +1645,12 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
   },
   "otif": { "disponible": false, "motivo": "..." },
   "lead_time_promedio": { "disponible": false, "motivo": "..." },
-  "pedidos_en_riesgo": { "disponible": false, "motivo": "..." }
+  "pedidos_en_riesgo": { "disponible": false, "motivo": "..." },
+  "puede_ver_importes": true
 }
 ```
 
-- `valor` va **por moneda** (`por_moneda`): no se suman monedas. `drill_down` trae hasta 20 pedidos activos (`AUTORIZADA`+`EN PROCESO`), ordenados por `gran_total` desc; `drill_down_truncado` avisa si hay más.
+- `valor` va **por moneda** (`por_moneda`): no se suman monedas. `drill_down` trae hasta 20 pedidos activos (`AUTORIZADA`+`EN PROCESO`), ordenados por `gran_total` desc (por `id` desc sin permiso de importes); `drill_down_truncado` avisa si hay más.
 
 #### Automatización de Órdenes de Trabajo (Producción)
 
@@ -1664,7 +1667,7 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 > - Para surtido de almacén se usa el flujo tradicional `WMS → Picking` (documento-only, sin transferencias ni OT automáticas).
 
 - **Listar**: `GET /api/v1/ventas/pedidos/`
-  - **Importes**: sin permiso de contabilidad (`puede_ver_contabilidad`), cada fila omite `gran_total` y `subtotal` (los campos de `CAMPOS_CONTABILIDAD_PEDIDO`), igual que el detalle. Paginado o no, la llave no viene; el frontend no debe suponerla (#947).
+  - **Importes**: sin permiso de contabilidad (`puede_ver_contabilidad`: contabilidad de ventas **o** de compras, EC-784; ver el detalle abajo), cada fila omite `gran_total` y `subtotal` (los campos de `CAMPOS_CONTABILIDAD_PEDIDO`), igual que el detalle. Paginado o no, la llave no viene; el frontend no debe suponerla (#947). Aplica a todas las variantes del listado (`mis_pedidos`, `programado`, `estatus`, programación de mesa de control).
   - **Orden**: por defecto, más reciente primero (`created_at` descendente, desempate por `id` descendente). `?ordering=` acepta la lista blanca de pedidos, con `id` como desempate; un campo fuera de ella (p. ej. `gran_total`) se ignora y queda el orden por defecto (EC-757, ver "Mismo modo servidor en ventas y clientes").
 - **Detalle**: `GET /api/v1/ventas/pedidos/{id}/`
 - **Cancelar**: `POST /api/v1/ventas/pedidos/{id}/cancelar/` con `{"motivo": "..."}`. Solo mesa de control / admin. En una transacción:
@@ -1676,8 +1679,9 @@ Gestión de pedidos generados a partir de cotizaciones autorizadas.
 
   Errores (`400`): `motivo` (falta), `permiso` (no es mesa de control), `pedido` (ya cancelado, o tiene picking, packing, factura, OP u orden de bordado/reflejante/corte de manga sin cancelar). `404` si ya no existe o es de otra empresa. No hay `DELETE` de pedidos ni cancelar por `PATCH estatus=5`.
   - Campos de contabilidad (dinero / forma*pago / metodos_pago / uso_cfdi / subtotal / iva / gran_total / precios_unitarios*$\_en_detalles_tallas_servicios):
-    - ✅ Se envían **completos** si el usuario tiene rol `Mesa-de-Control` o `Ventas` (o es `is_superuser` / `is_admin_empresa`).
-    - ❌ Se **eliminan del JSON** (no vienen en el response) para roles `WMS`, `Compras` o cualquier otro.
+    - ✅ Se envían **completos** si el usuario tiene contabilidad de ventas **o** de compras (EC-784): roles `Mesa-de-Control`, `Ventas`, `ContaVentas`, `MesaControlYVentas`, `Compras`, `Contabilidad` o `ContaCompras` (o es `is_superuser` / `is_admin_empresa`). Es la misma regla de **lectura** en listado, detalle, respuestas de alta/edición, `editar-mesa-control` y `kpis/`.
+    - ✍️ **Escribirlos** (PATCH/PUT de importes, forma/método de pago o uso CFDI, #537) y `POST /pedidos/{id}/recomprar/` exigen contabilidad de **ventas** (`Mesa-de-Control`, `Ventas`, `ContaVentas`, `MesaControlYVentas`, o `is_superuser` / `is_admin_empresa`). `Compras`, `Contabilidad` y `ContaCompras` ven los montos pero reciben `403` al **cambiarlos** o recomprar; si los reenvían **sin cambio** (un formulario que devuelve lo que leyó) el PATCH pasa. La comparación es por valor ya interpretado (`"200.0"` = `"200.00"`, `""` = `null` en los choices). Quien no ve los importes recibe `403` con sólo mandarlos, aunque acierte el valor.
+    - ❌ Se **eliminan del JSON** (no vienen en el response) para `WMS` o cualquier otro rol.
   - **Nuevo (Picking v2 Tracker)**: `tracker_picking` — 5 KPIs de surtido del pedido, derivados de TODOS los `Picking` activos (sin importar `almacen_destino`, regla de negocio v2). Shape **exactamente igual** que `header.tracker` del onboarding de WMS Picking (SSoT):
     | Campo | Tipo | Fórmula | UI recomendada |
     |---|---|---|---|
@@ -2857,68 +2861,9 @@ Resuelve por `sku` de variante, o `codigo`/`cod_proscai` de producto. Con SKU, l
 
 ---
 
-## 🧾 Compras - Dashboard
-
-**Endpoint**: `GET /api/v1/compras/dashboard/`
-
-KPIs para agente de compras y mesa directiva. **4 queries fijas, agregadas en DB** (`values().annotate()` / `aggregate()` con `Count`/`Sum`) — nunca itera `OrdenCompra`/`Recepcion` fila por fila. No pagina, no crece con el número de OCs.
-
-### Query params (todos opcionales)
-
-| Param | Formato | Default | Efecto |
-|---|---|---|---|
-| `dias` | int, `1-90` | `7` | Ventana de "por vencer" (`fecha_vencimiento` entre hoy y hoy+`dias`) |
-| `desde` | `YYYY-MM-DD` | ninguno | Filtra `gasto_por_moneda`/`top_proveedores` por `fecha_oc >= desde` |
-| `hasta` | `YYYY-MM-DD` | ninguno | Igual, `fecha_oc <= hasta` |
-
-Sin `desde`/`hasta` el gasto es histórico completo. `desde`/`hasta` inválidos → `400`.
-
-### Respuesta
-
-```json
-{
-  "generado_en": "2026-09-24T18:00:00Z",
-  "filtros": { "dias_por_vencer": 7, "desde": null, "hasta": null },
-  "ordenes_por_estatus": [
-    { "estatus": 3, "estatus_label": "Autorizada", "total": 12 },
-    { "estatus": 5, "estatus_label": "Recibida", "total": 40 }
-  ],
-  "ordenes_vencidas": 2,
-  "ordenes_por_vencer": 5,
-  "recepciones_por_estatus": [
-    { "estatus": 2, "estatus_label": "Recibida", "total": 30 },
-    { "estatus": 3, "estatus_label": "Parcial", "total": 4 }
-  ],
-  "recepciones_por_origen": [
-    { "tipo_origen": "OC", "tipo_origen_label": "Orden de compra", "total": 30 },
-    { "tipo_origen": "OP", "tipo_origen_label": "Orden de produccion", "total": 4 }
-  ],
-  "gasto_por_moneda": [
-    { "moneda_codigo": "MXN", "total": "1250000.00", "ordenes": 45 }
-  ],
-  "top_proveedores": [
-    { "proveedor_id": 7, "proveedor_nombre": "Textiles ACME", "total": "310000.00", "ordenes": 9 }
-  ]
-}
-```
-
-### Reglas de cada campo
-
-- `ordenes_por_estatus` / `recepciones_por_estatus` / `recepciones_por_origen`: conteo de TODO lo activo (`activo=true`), sin filtro de fecha. Es "estado actual", no histórico.
-- `ordenes_vencidas` / `ordenes_por_vencer`: excluyen OC en `RECIBIDA`(5) y `CANCELADA`(6) — ya cerradas, no hay nada que vencer.
-- `gasto_por_moneda` / `top_proveedores`: solo OC con `estatus` en `AUTORIZADA`(3) / `PARCIALMENTE_RECIBIDA`(4) / `RECIBIDA`(5). `BORRADOR`/`POR_AUTORIZAR` no son gasto comprometido todavía.
-- `top_proveedores`: top 5 por `gran_total` sumado, misma ventana de fechas que `gasto_por_moneda`.
-
-### ⚠️ Léelo antes de graficarlo
-
-- **`top_proveedores` NO separa por moneda** — suma `gran_total` tal cual, sin convertir tipo de cambio. Si la empresa opera en más de una moneda, ese top mezcla importes no comparables. Usa `gasto_por_moneda` para desagregar por moneda; no hay tasa de cambio en ningún lado del sistema.
-- Sin `empresa` asignada y sin `is_superuser` → todo en cero (`filtros: null`), mismo patrón multi-tenant que el resto de `/api/v1/`.
-- **No incluye nada de Calidad todavía** (`recepciones_por_estatus` ya puede traer `EN_CALIDAD`/`CERRADA`, pero no hay un desglose de aprobado/rechazado/cuarentena en este dashboard — pendiente si lo necesitan). `EnvioProveedor` sigue sin usarse en ningún lado, ese sí es puro modelo sin dato real.
-- Desde este cambio, `Existencia` se abona en `POST /api/v1/compras/calidad-inspecciones/onboarding/`, no en `recepciones/onboarding/` — ver `DOCS/arquitectura/flujo-recepcion-calidad-compras.md`.
-
 ## 🧾 Compras - KPIs por pantalla (EC-432 / EC-434 / EC-436)
 
-Distintos de `/dashboard/` de arriba: cada uno es la tarjeta de KPIs de **una pantalla específica**, no el resumen general. Mismo patrón en los 3: `GET`, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.
+Cada uno es la tarjeta de KPIs de **una pantalla específica**. `GET /compras/dashboard/` (el resumen general) se retiró en EC-784: responde `404`; el dashboard de Compras se servirá desde `ordenes/kpis/` (EC-782). Mismo patrón en los 3: `GET`, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.
 
 **Reglas comunes**
 - **Parámetros no soportados → `400`** (`{"parametros": "..."}`), nunca se ignoran en silencio. `ordenes/kpis/` no acepta ninguno; `recepciones/kpis/` y `proveedores/kpis/` aceptan los de su sección. Los filtros aplicados se devuelven en `filtros`.
@@ -6790,6 +6735,7 @@ Notas:
 
 - `message` es obligatorio.
 - `conversation` es opcional; enviar historial breve mejora el contexto (máx. ~20 turnos recientes).
+- **Importes (EC-784)**: la herramienta `get_last_cliente_compra` sigue la misma regla que el listado y el detalle de pedidos (contabilidad de ventas **o** de compras). Su resultado trae `"puede_ver_importes": true|false`; sin permiso se omite `last_purchase.gran_total`, tanto en lo que recibe el modelo como en `tool_results`. La última compra se elige por fecha (`-created_at`), no por monto.
 
 ### Response
 

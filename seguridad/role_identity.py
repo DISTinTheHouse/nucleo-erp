@@ -1,4 +1,5 @@
 import re
+from contextvars import ContextVar
 
 
 CLAVE_DEPARTAMENTO_MESA_CONTROL = "MESACONTROL"
@@ -111,6 +112,26 @@ def resolver_clave_departamento_rol(rol) -> str:
     )
 
 
+# Claves de departamento ya consultadas EN ESTA PETICIÓN, por ``(usuario, empresa)``,
+# para que el alcance, las reglas de importes y el permiso de mesa de control no
+# repitan la misma consulta (EC-784). La abre ``request_started`` con un dict nuevo y
+# la cierra ``request_finished`` (ver ``seguridad.apps``). Una ``ContextVar`` es propia
+# de cada hilo en WSGI y de cada tarea en ASGI, así que dos peticiones nunca la
+# comparten. Fuera de una petición (shell, comandos, jobs) vale ``None``: cada llamada
+# consulta la BD, como antes de EC-784.
+_CLAVES_DE_LA_PETICION: ContextVar[dict | None] = ContextVar("claves_departamento_peticion", default=None)
+
+
+def abrir_cache_claves_departamento(**_kwargs) -> None:
+    """Receptor de ``request_started``: caché vacía para la petición que empieza."""
+    _CLAVES_DE_LA_PETICION.set({})
+
+
+def cerrar_cache_claves_departamento(**_kwargs) -> None:
+    """Receptor de ``request_finished``: nada de lo consultado sale de la petición."""
+    _CLAVES_DE_LA_PETICION.set(None)
+
+
 def claves_departamento_usuario(user, empresa=None) -> set[str]:
     from .models import Rol, UsuarioRol
     from usuarios.models import Usuario
@@ -120,19 +141,27 @@ def claves_departamento_usuario(user, empresa=None) -> set[str]:
     if getattr(user, "estatus", None) != Usuario.Estatus.ACTIVO:
         return set()
 
-    qs = UsuarioRol.objects.filter(usuario=user, rol__estatus=Rol.Estatus.ACTIVO)
     empresa_id = getattr(empresa, "pk", empresa)
     if empresa_id is None:
         empresa_id = getattr(user, "empresa_id", None)
     if empresa_id is None:
         return set()
-    qs = qs.filter(rol__empresa_id=empresa_id)
 
+    cache = _CLAVES_DE_LA_PETICION.get()
+    llave = (user.pk, empresa_id)
+    if cache is not None and llave in cache:
+        return set(cache[llave])
+
+    qs = UsuarioRol.objects.filter(
+        usuario=user, rol__estatus=Rol.Estatus.ACTIVO, rol__empresa_id=empresa_id
+    )
     claves = set()
     for asignacion in qs.select_related("rol"):
         clave = resolver_clave_departamento_rol(getattr(asignacion, "rol", None))
         if clave:
             claves.add(clave)
+    if cache is not None:
+        cache[llave] = frozenset(claves)
     return claves
 
 

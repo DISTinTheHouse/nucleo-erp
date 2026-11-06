@@ -515,7 +515,10 @@ class AIAssistantAPIView(APIView):
         return {"ok": True, "counts": {"clientes": qs.count()}}
 
     def _tool_get_last_cliente_compra(self, request, args):
+        from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
+
         user = request.user
+        ver_importes = puede_ver_contabilidad(user)
         pedidos_qs = Pedido.objects.filter(activo=True).exclude(estatus=5)
         if not getattr(user, "is_superuser", False):
             empresa = getattr(user, "empresa", None)
@@ -540,23 +543,31 @@ class AIAssistantAPIView(APIView):
                 "ok": True,
                 "filters": {"date_from": d_from.isoformat() if d_from else None, "date_to": d_to.isoformat() if d_to else None},
                 "last_purchase": None,
+                "puede_ver_importes": ver_importes,
             }
         cliente = getattr(pedido, "cliente", None)
+        compra = {
+            "pedido_id": pedido.pk,
+            "folio": getattr(pedido, "folio", None),
+            "fecha": pedido.created_at.isoformat() if getattr(pedido, "created_at", None) else None,
+            "cliente": {
+                "id": getattr(cliente, "pk", None),
+                "razon_social": getattr(cliente, "razon_social", None),
+                "nombre": getattr(cliente, "nombre", None),
+                "rfc": getattr(cliente, "rfc", None),
+            },
+        }
+        # Misma regla de importes que el listado y el detalle de pedidos (EC-784):
+        # el monto sólo se agrega si el usuario lo ve.
+        if ver_importes:
+            compra["gran_total"] = str(getattr(pedido, "gran_total", ""))
         return {
             "ok": True,
             "filters": {"date_from": d_from.isoformat() if d_from else None, "date_to": d_to.isoformat() if d_to else None},
-            "last_purchase": {
-                "pedido_id": pedido.pk,
-                "folio": getattr(pedido, "folio", None),
-                "fecha": pedido.created_at.isoformat() if getattr(pedido, "created_at", None) else None,
-                "gran_total": str(getattr(pedido, "gran_total", "")),
-                "cliente": {
-                    "id": getattr(cliente, "pk", None),
-                    "razon_social": getattr(cliente, "razon_social", None),
-                    "nombre": getattr(cliente, "nombre", None),
-                    "rfc": getattr(cliente, "rfc", None),
-                },
-            },
+            "last_purchase": compra,
+            # El resultado va al modelo (mensaje ``tool``) y al front (``tool_results``):
+            # con la señal, el asistente puede decir que el monto no está disponible.
+            "puede_ver_importes": ver_importes,
         }
 
     def _tool_create_empresa(self, request, args):
