@@ -1171,8 +1171,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         observaciones,
     ):
         movimiento = MovimientoInventario.objects.create(
-            empresa=pedido.empresa,
-            sucursal=pedido.sucursal,
+            empresa_id=pedido.empresa_id,
+            sucursal_id=pedido.sucursal_id,
             pedido=pedido,
             entrega_id=None,
             devolucion_id=None,
@@ -1231,7 +1231,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         ip, user_agent = self._get_request_meta(request)
 
         return AuditoriaEvento.objects.create(
-            empresa=pedido.empresa,
+            empresa_id=pedido.empresa_id,
             usuario=user if getattr(user, "pk", None) else None,
             modulo="inventarios",
             accion=accion,
@@ -3465,7 +3465,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             ]
             ip, user_agent = inventario._get_request_meta(request)
             AuditoriaEvento.objects.create(
-                empresa=pedido.empresa, usuario=request.user, modulo="ventas", accion="CANCELAR",
+                empresa_id=pedido.empresa_id, usuario=request.user, modulo="ventas", accion="CANCELAR",
                 tabla="pedidos", id_registro=str(pedido.pk), ip=ip, user_agent=user_agent,
                 antes_json={"estatus": estatus_anterior, "activo": True},
                 despues_json={"estatus": pedido.estatus, "activo": False, "motivo": motivo,
