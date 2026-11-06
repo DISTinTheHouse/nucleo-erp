@@ -4801,9 +4801,10 @@ class PedidoReglasEstatusTests(TestCase):
             estado=inventario_reservas.Estado.ACTIVA, usuario=self.mesa,
         )
 
-        # 23 con inventario que devolver; incluye la carga perezosa evitable de
-        # ``pedido.sucursal`` al registrar el movimiento: EC-803, debe bajar en uno.
-        with self.assertNumQueries(23):
+        # 21 con inventario que devolver: los 16 de cancelar sin inventario más el
+        # bloqueo de las existencias, su UPDATE en lote, el movimiento, su detalle y la
+        # auditoría ENTRADA. Sin cargar ``empresa`` ni ``sucursal`` (EC-803).
+        with self.assertNumQueries(21):
             resp = self._cancelar(self.mesa)
 
         self.assertEqual(resp.status_code, 200, resp.content)
@@ -4829,10 +4830,9 @@ class PedidoReglasEstatusTests(TestCase):
 
     def test_cancelar_es_rapido(self):
         inicio = time.perf_counter()
-        # 17 desde EC-583 (bloqueo, devolución de inventario, reservas y auditoría).
-        # Incluye la carga perezosa evitable de ``pedido.empresa`` (la de
-        # ``pedido.sucursal`` solo ocurre al devolver inventario): EC-803, debe bajar a 16.
-        with self.assertNumQueries(17):
+        # 16: bloqueo, devolución de inventario, reservas y auditoría (EC-583), sin
+        # cargar ``pedido.empresa`` para la auditoría (EC-803).
+        with self.assertNumQueries(16):
             self._cancelar(self.mesa)
         self.assertLess(time.perf_counter() - inicio, 0.5)
 
