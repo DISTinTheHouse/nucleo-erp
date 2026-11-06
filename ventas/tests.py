@@ -7565,6 +7565,11 @@ class CompatibilidadPrendaProcesoVentasTests(TestCase):
             empresa=cls.empresa, nombre=nombre, codigo=nombre[:3].upper(), descripcion="x"
         )
         cls.playera, cls.pantalon, cls.libre = categoria("Playera"), categoria("Pantalón"), categoria("Libre")
+        # Una categoría sin tallas configuradas no acepta ninguna en las muestras
+        # (#927): las tres admiten la talla de estas pruebas.
+        from catalogo.models import CategoriaProductoTalla
+        for cat in (cls.playera, cls.pantalon, cls.libre):
+            CategoriaProductoTalla.objects.create(categoria_producto=cat, talla=cls.talla)
         producto = lambda nombre, cat: Producto.objects.create(
             tipo=_tipo_producto(),
             empresa=cls.empresa, nombre=nombre, codigo=nombre[:4], categoria_producto=cat
