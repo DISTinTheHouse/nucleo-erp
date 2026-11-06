@@ -35,6 +35,6 @@ def verfy_syncfy_signature(signature: str):
         raise SyncfyWebhookException(
             message='Invalid Syncfy webhook signature.', 
             code='INVALID_SIGNATURE',
-            status_code=500
+            status_code=401
         )
  
