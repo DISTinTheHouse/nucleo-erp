@@ -3,7 +3,10 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from django.db import transaction
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum, Value, Window
+from django.db.models import (
+    Count, DecimalField, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum, Value, Window,
+    prefetch_related_objects,
+)
 from django.db.models.functions import Coalesce, RowNumber
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -3135,9 +3138,9 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             factura_referencia=(data.get("factura_referencia") or "").strip() or None,
             observaciones=(data.get("observaciones") or "").strip() or None,
         )
-        # Se relee con el queryset del ViewSet (relaciones y prefetch de
-        # lecturas), igual que el detalle.
-        encuadre = self.get_queryset().get(pk=encuadre.pk)
+        # Las relaciones ya están en memoria; solo se precargan las lecturas
+        # (vacías), igual que en el detalle, para no consultarlas dos veces.
+        prefetch_related_objects([encuadre], prefetch_lecturas_rfid())
         return Response(RecepcionRFIDEncuadreSerializer(encuadre).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
