@@ -46,6 +46,24 @@ from finanzas.services.cuenta_por_pagar_service import (
 )
 
 
+def _no_existe(campo, obj):
+    """Un id de otra empresa responde igual que uno inexistente (#893, #894)."""
+    msg = str(serializers.PrimaryKeyRelatedField.default_error_messages["does_not_exist"])
+    return ValidationError({campo: [msg.format(pk_value=obj.pk)]}, code="does_not_exist")
+
+
+def _empresa_id_del_registro(serializer, attrs):
+    """Empresa del registro: la de la instancia en update; en create, la que manda
+    el superusuario o la del usuario."""
+    if serializer.instance is not None:
+        return serializer.instance.empresa_id
+    emp = attrs.get("empresa")
+    if emp is not None:
+        return getattr(emp, "pk", emp)
+    user = getattr(serializer.context.get("request"), "user", None)
+    return getattr(getattr(user, "empresa", None), "pk", None)
+
+
 class EmpresaResueltaEnServidorMixin:
     """``empresa`` la fija el servidor, no el cliente.
 
@@ -531,6 +549,10 @@ class CuentaContableSerializer(EmpresaResueltaEnServidorMixin, serializers.Model
             emp = attrs.get("empresa")
             if user_empresa and emp and getattr(emp, "pk", emp) != getattr(user_empresa, "pk", user_empresa):
                 raise ValidationError({"empresa": "Empresa no autorizada."})
+        padre = attrs.get("cuenta_padre")
+        emp_id = _empresa_id_del_registro(self, attrs)
+        if padre is not None and emp_id and padre.empresa_id != emp_id:
+            raise _no_existe("cuenta_padre", padre)
         self._validar_codigo_unico_en_la_empresa(attrs)
         return attrs
 
@@ -975,6 +997,9 @@ class CuentaBancariaSerializer(
             banco = attrs.get("banco")
             if banco and emp_id and getattr(banco, "empresa_id", None) and banco.empresa_id != emp_id:
                 raise ValidationError({"banco": "Banco no pertenece a la empresa."})
+        moneda = attrs.get("moneda")
+        if moneda is not None and emp_id and moneda.empresa_id and moneda.empresa_id != emp_id:
+            raise _no_existe("moneda", moneda)
         self._validar_cuenta(attrs.get("cuenta_contable"), emp_id, "cuenta_contable")
         return attrs
 
@@ -1212,6 +1237,11 @@ class MovimientoBancarioSerializer(serializers.ModelSerializer):
                 raise ValidationError({"cobro": "Cobro corresponde a otra cuenta bancaria."})
             if attrs.get("pago") and cta and attrs["pago"].cuenta_bancaria_id != getattr(cta, "pk", cta):
                 raise ValidationError({"pago": "Pago corresponde a otra cuenta bancaria."})
+        # Se valida al guardar, no solo cuando el motor genera la póliza (#894).
+        contrapartida = attrs.get("cuenta_contable_contrapartida")
+        cta = attrs.get("cuenta_bancaria") or getattr(self.instance, "cuenta_bancaria", None)
+        if contrapartida is not None and cta is not None and contrapartida.empresa_id != cta.empresa_id:
+            raise _no_existe("cuenta_contable_contrapartida", contrapartida)
         return attrs
 
 
@@ -1222,6 +1252,26 @@ class ConciliacionBancariaSerializer(serializers.ModelSerializer):
     class Meta:
         model = ConciliacionBancaria
         fields = "__all__"
+        # El estatus cambia por ``cerrar/`` y ``cancelar/``; ``saldo_libros`` lo
+        # calcula ``preparar/`` (#893).
+        read_only_fields = ("estatus", "saldo_libros", "created_at", "updated_at")
+
+    def validate(self, attrs):
+        cta = attrs.get("cuenta_bancaria")
+        if cta is None:
+            return attrs
+        if self.instance is not None:
+            # La empresa de la conciliación es la de su cuenta: no se cambia (#893).
+            if cta.empresa_id != self.instance.cuenta_bancaria.empresa_id:
+                raise _no_existe("cuenta_bancaria", cta)
+            if cta.pk != self.instance.cuenta_bancaria_id:
+                raise ValidationError({"cuenta_bancaria": "No se cambia la cuenta de una conciliación."})
+            return attrs
+        user = getattr(self.context.get("request"), "user", None)
+        empresa_id = getattr(getattr(user, "empresa", None), "pk", None)
+        if not getattr(user, "is_superuser", False) and empresa_id and cta.empresa_id != empresa_id:
+            raise _no_existe("cuenta_bancaria", cta)
+        return attrs
 
     def get_diferencia(self, obj):
         return str((Decimal(str(obj.saldo_estado_cuenta or 0)) - Decimal(str(obj.saldo_libros or 0))).quantize(Decimal("0.01")))
