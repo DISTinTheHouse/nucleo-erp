@@ -32,13 +32,14 @@ una sola consulta agregada: nada por fila.
 import re
 from decimal import Decimal, InvalidOperation
 
-from django.db.models import F, OuterRef, Subquery, Sum, Value
-from django.db.models.functions import Coalesce
+from django.db.models import CharField, F, Func, IntegerField, OuterRef, Subquery, Sum, Value
+from django.db.models.functions import Coalesce, Concat, NullIf, Trim
 from rest_framework.exceptions import ValidationError
 
 from nucleo.kpis import entero_param
-from nucleo.listados import booleano_param
+from nucleo.listados import OrdenamientoEstableFilter, booleano_param
 from ventas.models import Pedido, PedidoDetalleTalla
+from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
 from ventas.services.sku_produccion_service import TALLAS_DE_LINEA_NO_MUESTRA_Q
 from wms.models import Picking, PickingDetalle
 
@@ -50,6 +51,13 @@ ACCIONES_FILTRADAS = ("list",)
 ACCIONES_CON_COLUMNAS = ("list",)
 
 CAMPOS_IMPORTE = ("subtotal", "gran_total")
+# ``?ordering=`` sobre anotaciones de ``anotar_columnas`` (sólo en
+# ``ACCIONES_CON_COLUMNAS``); ``vendedor_nombre`` deja los vacíos al final en
+# ambos sentidos, como el front.
+CAMPOS_ORDEN_ANOTADOS = ("piezas", "piezas_programadas", "piezas_surtidas", "vendedor_nombre")
+CAMPOS_ORDEN_NULOS_AL_FINAL = ("vendedor_nombre",)
+CAMPOS_ORDEN = (*CAMPOS_ORDEN_ANOTADOS, *CAMPOS_IMPORTE)
+
 MUESTRAS = ("con", "solo", "sin")
 SIN_CONFIRMAR = "sin_confirmar"
 
@@ -57,6 +65,21 @@ _MES_RE = re.compile(r"^(\d{4})-(\d{2})$")
 
 
 # --- Anotaciones -----------------------------------------------------------------
+
+
+class SumaCantidadesProgramadas(Func):
+    """Σ ``cantidad`` de ``programacion_conf.programaciones``, 0 sin programación.
+    Tolera un ``programacion_conf`` nulo, sin la llave o con algo que no sea
+    arreglo (``jsonb_array_elements`` fallaría) y cantidades no numéricas."""
+
+    template = (
+        "(SELECT COALESCE(SUM((e->>'cantidad')::numeric), 0)::integer "
+        "FROM jsonb_array_elements("
+        "CASE WHEN jsonb_typeof(%(expressions)s->'programaciones') = 'array' "
+        "THEN %(expressions)s->'programaciones' ELSE '[]'::jsonb END) AS e "
+        "WHERE jsonb_typeof(e->'cantidad') = 'number')"
+    )
+    output_field = IntegerField()
 
 
 def _suma_tallas(excluir=None):
@@ -79,7 +102,7 @@ def anotar_piezas(qs):
 
 
 def anotar_columnas(qs):
-    """El resto de columnas del listado."""
+    """El resto de columnas del listado y de ``?ordering=``."""
     # ``piezas_surtidas``: Σ ``cantidad_surtida`` de sus pickings, mismo alcance que
     # ``tracker_picking.total_surtido`` (picking y renglón no cancelados, con talla).
     # Sin pickings, 0 (como ya lo pintaba el serializer).
@@ -95,10 +118,25 @@ def anotar_columnas(qs):
     # (``aprobado_snapshot`` es un JSONB).
     return qs.annotate(
         piezas_surtidas=Coalesce(Subquery(surtido_qs), Value(Decimal("0"))),
+        piezas_programadas=SumaCantidadesProgramadas(F("programacion_conf")),
         vendedor_cotizacion_id=F("cotizacion__vendedor_id"),
         vendedor_first_name=F("cotizacion__vendedor__first_name"),
         vendedor_last_name=F("cotizacion__vendedor__last_name"),
         vendedor_email=F("cotizacion__vendedor__email"),
+        # ``vendedor_nombre`` (para ``?ordering=``) reproduce ``nombre_para_mostrar``:
+        # nombre completo o, si queda vacío, el correo.
+        vendedor_nombre=Coalesce(
+            NullIf(
+                Trim(Concat(
+                    Coalesce(F("cotizacion__vendedor__first_name"), Value("")),
+                    Value(" "),
+                    Coalesce(F("cotizacion__vendedor__last_name"), Value("")),
+                )),
+                Value(""),
+            ),
+            F("cotizacion__vendedor__email"),
+            output_field=CharField(),
+        ),
     )
 
 
@@ -201,5 +239,36 @@ def filtrar_piezas(request, qs):
     elif muestras == "sin":
         qs = qs.filter(piezas_muestra__lte=0)
     return qs
+
+
+# --- Ordenamiento ----------------------------------------------------------------
+
+
+class OrdenamientoPedidosFilter(OrdenamientoEstableFilter):
+    """``?ordering=`` del listado de pedidos: la lista blanca de la vista, más las
+    columnas anotadas sólo donde existen (``list``/``exportar``; en el resto de
+    acciones se descartan, como cualquier campo inválido) y sin importes para
+    quien no los ve (#837, EC-784). ``vendedor_nombre`` deja los vacíos al final."""
+
+    def remove_invalid_fields(self, queryset, fields, view, request):
+        validos = super().remove_invalid_fields(queryset, fields, view, request)
+        if getattr(view, "action", None) not in ACCIONES_CON_COLUMNAS:
+            validos = [f for f in validos if f.lstrip("-") not in CAMPOS_ORDEN_ANOTADOS]
+        if not puede_ver_contabilidad(request.user):
+            validos = [f for f in validos if f.lstrip("-") not in CAMPOS_IMPORTE]
+        return validos
+
+    def filter_queryset(self, request, queryset, view):
+        ordering = self.get_ordering(request, queryset, view)
+        if not ordering:
+            return queryset
+        return queryset.order_by(*[_orden(campo) for campo in ordering])
+
+
+def _orden(campo):
+    nombre = campo.lstrip("-")
+    if nombre not in CAMPOS_ORDEN_NULOS_AL_FINAL:
+        return campo
+    return F(nombre).desc(nulls_last=True) if campo.startswith("-") else F(nombre).asc(nulls_last=True)
 
 

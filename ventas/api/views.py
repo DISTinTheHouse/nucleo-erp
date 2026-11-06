@@ -2709,11 +2709,14 @@ class PedidoViewSet(viewsets.ModelViewSet):
     ordering_fields = [
         "id", "folio", "estatus", "clasificacion", "oc", "created_at", "updated_at", "fecha_confirmacion",
         "cliente_nombre", "cliente_razon_social", "cliente_rfc",
+        # EC-782: columnas anotadas (sólo en ``list``/``exportar``) e importes (sólo
+        # para quien los ve); los filtra ``OrdenamientoPedidosFilter``.
+        *pedidos_listado.CAMPOS_ORDEN,
     ]
     http_method_names = ["get", "post", "put", "patch", "head", "options"]
     queryset = pedidos_base()
     serializer_class = PedidoSerializer
-    filter_backends = FILTER_BACKENDS_LISTADO
+    filter_backends = (*FILTER_BACKENDS_SIN_ORDERING, pedidos_listado.OrdenamientoPedidosFilter)
     # Campos de ``?q=`` (la frase completa) y de ``?search=`` (``SearchFilter``,
     # por palabras): el schema publicaba ``search`` y se ignoraba (#948, como #839
     # en Compras). Todos en la tabla ``pedidos``, sin JOIN.
@@ -2734,9 +2737,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # ``gran_total``/``subtotal`` salían aquí a cualquier rol. El permiso se
         # evalúa una sola vez por petición, no por fila, y cada fila ya es un
         # dict propio del serializer: se limpia en sitio, sin ``deepcopy``.
-        # ``ordering_fields`` no incluye importes, así que ``?ordering=`` tampoco
-        # deja deducirlos (a diferencia de las OC, #837). Los rangos de importe
-        # (EC-782) se ignoran para él.
+        # ``?ordering=`` por ``subtotal``/``gran_total`` y los rangos de importe se
+        # ignoran para él (``OrdenamientoPedidosFilter``, EC-782; como las OC, #837).
         response = super().list(request, *args, **kwargs)
         if puede_ver_contabilidad(request.user):
             return response

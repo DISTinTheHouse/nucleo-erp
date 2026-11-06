@@ -1327,10 +1327,10 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
   - Proveedores: `?activo=true|false` (default `true`; `false` lista las bajas). Una baja se abre en solo lectura: `GET {id}/`, `historial-ordenes-compra/` y `kpis-detalle/` responden `200`; `PUT`/`PATCH`/`DELETE` sobre ella → `400 {"detail": "El proveedor está dado de baja."}` (#888).
 - **Mismo modo servidor en ventas y clientes (EC-757)**: `GET /api/v1/terceros/clientes/`, `ventas/cotizaciones/` (y `ventas/mesa-control/`), `ventas/pedidos/` y `ventas/oportunidades/`.
   - `?limit=&offset=` igual que arriba (tope 500; en oportunidades antes no había tope). Sin `?limit=` sigue la lista completa.
-  - `?ordering=` con lista blanca y `id` de desempate; sin él, el orden por defecto: clientes por `nombre` (antes indefinido), cotizaciones y pedidos más reciente primero. Los importes (`gran_total`, `subtotal`…) **no** se aceptan (#537): se ignoran y queda el orden por defecto.
+  - `?ordering=` con lista blanca y `id` de desempate; sin él, el orden por defecto: clientes por `nombre` (antes indefinido), cotizaciones y pedidos más reciente primero. Los importes (`gran_total`, `subtotal`…) **no** se aceptan (#537): se ignoran y queda el orden por defecto. Excepción: pedidos los acepta para quien ve importes (EC-782).
     - Clientes: `id`, `clave`, `nombre`, `razon_social`, `rfc`, `correo`, `telefono`, `ciudad`, `estado`, `giro_empresarial`, `dias_credito`, `fecha_alta`, `fecha_ultima_compra`, `created_at`, `updated_at`.
     - Cotizaciones: `id`, `estatus`, `tipo_pedido`, `oc`, `created_at`, `updated_at`, `autorizada_at`, `cliente__nombre`, `cliente__razon_social`.
-    - Pedidos: `id`, `folio`, `estatus`, `clasificacion`, `oc`, `created_at`, `updated_at`, `fecha_confirmacion`, `cliente_nombre`, `cliente_razon_social`, `cliente_rfc`.
+    - Pedidos: `id`, `folio`, `estatus`, `clasificacion`, `oc`, `created_at`, `updated_at`, `fecha_confirmacion`, `cliente_nombre`, `cliente_razon_social`, `cliente_rfc` y, desde EC-782, `piezas`, `piezas_programadas`, `piezas_surtidas`, `vendedor_nombre`, `subtotal`, `gran_total`.
   - Búsqueda: clientes `?search=` (nombre, razón social, RFC, clave, correo); pedidos `?q=` ahora busca en folio, OC, nombre, razón social y RFC del cliente (`?folio=` sigue solo por folio); cotizaciones `?q=` sin cambios (OC, cliente, id).
   - Todo se combina con `?search=`.
 
@@ -1675,6 +1675,14 @@ Se suman a los que ya había (`q`, `search`, `folio`, `cliente`, `vendedor`, `su
 
 Los rangos son como `matchesRangeFilter` del front: **mínimo inclusivo, máximo exclusivo** (`1 a 50 piezas` = `piezas_min=1&piezas_max=51`; `Hasta 10,000` = `subtotal_max=10000`).
 
+#### Orden por columnas — `?ordering=`
+
+Además de la lista blanca de EC-757 (`id`, `folio`, `estatus`, `clasificacion`, `oc`, `created_at`, `updated_at`, `fecha_confirmacion`, `cliente_nombre`, `cliente_razon_social`, `cliente_rfc`), en el listado y en `exportar/`:
+
+- `piezas`, `piezas_programadas` (Σ `programacion_conf.programaciones[].cantidad`, la misma suma que valida `editar-mesa-control`; 0 sin programación), `piezas_surtidas`, `vendedor_nombre` (vacíos al final en ambos sentidos).
+- `subtotal`, `gran_total`: solo para quien ve importes; para el resto se ignoran y queda el orden por defecto (como OC, #837).
+- `id` es siempre el último desempate (`-id` si el primer campo es descendente): las páginas con `offset` no repiten ni pierden filas. Son subconsultas por pedido, sin JOINs que multipliquen filas; el `count` no cambia.
+
 #### Automatización de Órdenes de Trabajo (Producción)
 
 > 🚨 **Decisión de negocio (Presidencia) — v2 en producción**
@@ -1692,7 +1700,7 @@ Los rangos son como `matchesRangeFilter` del front: **mínimo inclusivo, máximo
 - **Listar**: `GET /api/v1/ventas/pedidos/`
   - **Importes**: sin permiso de contabilidad (`puede_ver_contabilidad`: contabilidad de ventas **o** de compras, EC-784; ver el detalle abajo), cada fila omite `gran_total` y `subtotal` (los campos de `CAMPOS_CONTABILIDAD_PEDIDO`), igual que el detalle. Paginado o no, la llave no viene; el frontend no debe suponerla (#947). Aplica a todas las variantes del listado (`mis_pedidos`, `programado`, `estatus`, programación de mesa de control).
   - **Filtros de columna, exportación, KPIs de Mesa de Control y opciones de filtros**: ver "Modo servidor de Mesa de Control y Compras › Pedidos (EC-782)" arriba.
-  - **Orden**: por defecto, más reciente primero (`created_at` descendente, desempate por `id` descendente). `?ordering=` acepta la lista blanca de pedidos, con `id` como desempate; un campo fuera de ella (p. ej. `gran_total`) se ignora y queda el orden por defecto (EC-757, ver "Mismo modo servidor en ventas y clientes").
+  - **Orden**: por defecto, más reciente primero (`created_at` descendente, desempate por `id` descendente). `?ordering=` acepta la lista blanca de pedidos, con `id` como desempate; un campo fuera de ella se ignora y queda el orden por defecto (EC-757, ver "Mismo modo servidor en ventas y clientes"). Desde EC-782 incluye `piezas`, `piezas_programadas`, `piezas_surtidas`, `vendedor_nombre` y, solo para quien ve importes, `subtotal`/`gran_total`.
 - **Detalle**: `GET /api/v1/ventas/pedidos/{id}/`
 - **Cancelar**: `POST /api/v1/ventas/pedidos/{id}/cancelar/` con `{"motivo": "..."}`. Solo mesa de control / admin. En una transacción:
   - devuelve al inventario lo que el pedido descontó al autorizar (movimiento `ENTRADA` + auditoría);

@@ -7262,7 +7262,9 @@ class VentasOrderingServidorTests(TestCase):
         "gran_total", "-gran_total", "moneda__codigo_iso",
         "get_estatus_display", "-get_tipo_pedido_display", "no_existe",
     )
-    IGNORADOS_PEDIDO = ("gran_total", "-subtotal", "get_estatus_display", "get_clasificacion_display", "no_existe")
+    # Los importes de pedidos sí se aceptan para quien los ve (EC-782); a quien no, se
+    # le ignoran (``PedidoListadoOrdenColumnasTests``).
+    IGNORADOS_PEDIDO = ("get_estatus_display", "get_clasificacion_display", "no_existe")
 
     @classmethod
     def setUpTestData(cls):
@@ -7360,14 +7362,22 @@ class VentasOrderingServidorTests(TestCase):
         from nucleo.listados import OrdenamientoEstableFilter
         from ventas.api.views import MesaControlViewSet
 
+        from ventas.api.pedidos_listado import OrdenamientoPedidosFilter
+
         # Los globales sin el ``OrderingFilter`` de DRF, más el de lista blanca y desempate.
-        for viewset in (CotizacionViewSet, MesaControlViewSet, PedidoViewSet):
+        for viewset in (CotizacionViewSet, MesaControlViewSet):
             with self.subTest(viewset=viewset.__name__):
                 self.assertEqual(
                     tuple(viewset.filter_backends), (DjangoFilterBackend, SearchFilter, OrdenamientoEstableFilter),
                 )
                 # Ningún importe en la lista blanca (#537): ordenar por él dejaría deducirlo.
                 self.assertFalse({"gran_total", "subtotal"} & set(viewset.ordering_fields))
+        # Pedidos (EC-782): el mismo desempate, y los importes solo para quien los ve.
+        self.assertEqual(
+            tuple(PedidoViewSet.filter_backends), (DjangoFilterBackend, SearchFilter, OrdenamientoPedidosFilter),
+        )
+        self.assertTrue(issubclass(OrdenamientoPedidosFilter, OrdenamientoEstableFilter))
+        self.assertLessEqual({"gran_total", "subtotal"}, set(PedidoViewSet.ordering_fields))
 
     def test_schema_con_parametro_ordering(self):
         from drf_spectacular.generators import SchemaGenerator
@@ -8571,3 +8581,59 @@ class PedidoListadoFiltrosColumnaTests(_PedidosModoServidorBase, TestCase):
             "moneda", "clasificacion", "confirmado", "mes", "mes_confirmacion", "piezas_min", "piezas_max",
             "subtotal_min", "subtotal_max", "gran_total_min", "gran_total_max", "muestras",
         }, nombres)
+
+
+class PedidoListadoOrdenColumnasTests(_PedidosModoServidorBase, TestCase):
+    """EC-782: ``?ordering=`` por piezas, piezas programadas, surtidas, vendedor e
+    importes; los importes sólo para quien los ve."""
+
+    def _orden(self, ordering, user=None, **extra):
+        return self._ids({"ordering": ordering, **extra}, user)
+
+    def test_orden_por_columnas_anotadas(self):
+        p1, p2, p3, p4 = self.p1.pk, self.p2.pk, self.p3.pk, self.p4.pk
+        casos = [
+            ("piezas", [p4, p2, p1, p3]),
+            ("-piezas", [p3, p1, p2, p4]),
+            # p1: 30, p2: 5, p3 y p4: 0 (desempate por id en la dirección del primer campo).
+            ("-piezas_programadas", [p1, p2, p4, p3]),
+            ("piezas_programadas", [p3, p4, p2, p1]),
+            # Ana Zapata (p1, p4), Beto Arce (p2); sin vendedor (p3) al final en ambos sentidos.
+            ("vendedor_nombre", [p1, p4, p2, p3]),
+            ("-vendedor_nombre", [p2, p4, p1, p3]),
+            ("subtotal", [p4, p1, p2, p3]),
+            ("-gran_total", [p3, p2, p1, p4]),
+        ]
+        for ordering, esperado in casos:
+            with self.subTest(ordering=ordering):
+                self.assertEqual(self._orden(ordering), esperado)
+
+    def test_piezas_surtidas_ordena(self):
+        resp = self._get(PEDIDOS_URL, {"ordering": "-piezas_surtidas"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(all(f["piezas_surtidas"] == 0 for f in resp.json()))
+
+    def test_sin_permiso_de_importes_se_ignora_el_orden_por_importe(self):
+        """Mismo orden que sin ``?ordering=`` (más reciente primero): ordenar por un
+        importe oculto lo dejaría deducir (#837)."""
+        por_defecto = self._ids({}, self.sin_importes)
+        for ordering in ("gran_total", "-subtotal", "-gran_total,folio"):
+            with self.subTest(ordering=ordering):
+                esperado = por_defecto if "folio" not in ordering else self._orden("folio", self.sin_importes)
+                self.assertEqual(self._orden(ordering, self.sin_importes), esperado)
+        # Las demás columnas sí.
+        self.assertEqual(self._orden("-piezas", self.sin_importes), self._orden("-piezas"))
+
+    def test_paginas_sin_repetidos(self):
+        vistos = []
+        for offset in range(0, 4, 2):
+            resp = self._get(PEDIDOS_URL, {"ordering": "piezas_programadas", "limit": 2, "offset": offset})
+            self.assertEqual(resp.data["count"], 4)
+            vistos += [f["id"] for f in resp.data["results"]]
+        self.assertEqual(sorted(vistos), sorted([self.p1.pk, self.p2.pk, self.p3.pk, self.p4.pk]))
+
+    def test_en_el_detalle_y_los_kpis_se_ignora(self):
+        resp = self._get(f"{PEDIDOS_URL}{self.p1.pk}/", {"ordering": "-piezas_programadas"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        resp = self._get(f"{PEDIDOS_URL}kpis/", {"ordering": "vendedor_nombre"})
+        self.assertEqual(resp.status_code, 200, resp.content)
