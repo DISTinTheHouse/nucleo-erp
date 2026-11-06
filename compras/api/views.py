@@ -3007,7 +3007,12 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         qs = (
             self.queryset
             .select_related("orden_compra", "op", "almacen", "proveedor", "sucursal")
-            .prefetch_related("lecturas")
+            # producto_nombre / producto_variante_nombre de las lecturas en una
+            # consulta por relación (antes, dos por lectura). Prefetch y no
+            # select_related: la consulta de lecturas no cambia, y con ella el
+            # orden en que salen (no tiene order_by); con el JOIN, Postgres las
+            # devolvía en otro orden.
+            .prefetch_related("lecturas", "lecturas__producto", "lecturas__producto_variante")
         )
         if getattr(user, "is_superuser", False):
             return qs.order_by("-created_at", "-id")
