@@ -1217,9 +1217,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(self._kpis_vacio())
 
         base = OrdenCompra.objects.filter(empresa=empresa, activo=True)
+        filas = self._filas_estatus_moneda(base)
         data = {
             "generado_en": timezone.now(),
-            "ocs_abiertas": self._kpi_ocs_abiertas(base),
+            "ocs_abiertas": self._kpi_ocs_abiertas(filas),
             "ocs_vencidas_sin_recibir": self._kpi_ocs_vencidas(base),
             "ciclo_compra": {
                 "disponible": False,
@@ -1228,8 +1229,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             "gasto_por_categoria": self._kpi_gasto_por_categoria(base),
             # Dashboard de Compras (EC-782): lo que hoy calcula en memoria sobre el
             # listado completo. Claves nuevas; las de arriba no cambian.
-            "ocs_por_grupo": self._kpi_ocs_por_grupo(base),
-            "valor_ocs_activas": self._kpi_valor_ocs_activas(base),
+            "ocs_por_grupo": self._kpi_ocs_por_grupo(filas),
+            "valor_ocs_activas": self._kpi_valor_ocs_activas(filas),
             "top_ocs_por_moneda": self._kpi_top_ocs_por_moneda(base),
         }
         data["ocs_en_curso_proxima_entrega"] = self._kpi_ocs_en_curso(base, data["ocs_por_grupo"]["en_curso"])
@@ -1260,11 +1261,35 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             "puede_ver_importes": False,
         }
 
-    def _kpi_ocs_abiertas(self, base):
+    def _filas_estatus_moneda(self, base):
+        """``[{estatus, moneda__codigo_iso, total, monto}]`` de todas las OC de
+        ``base``: UNA consulta de la que salen ``ocs_abiertas``, ``ocs_por_grupo`` y
+        ``valor_ocs_activas`` (EC-782; antes eran cuatro)."""
+        return list(
+            base.values("estatus", "moneda__codigo_iso")
+            .annotate(total=Count("id"), monto=Sum("gran_total"))
+            .order_by("estatus", "moneda__codigo_iso")
+        )
+
+    @staticmethod
+    def _por_moneda(filas):
+        """Suma ``total`` y ``monto`` por moneda, en el orden de ``ORDER BY codigo_iso``
+        de Postgres (``NULL`` al final). Los montos van por moneda (#374)."""
+        por_moneda = {}
+        for fila in filas:
+            acumulado = por_moneda.setdefault(
+                fila["moneda__codigo_iso"],
+                {"moneda": fila["moneda__codigo_iso"], "total": 0, "monto": Decimal("0")},
+            )
+            acumulado["total"] += fila["total"]
+            acumulado["monto"] += fila["monto"] or Decimal("0")
+        return sorted(por_moneda.values(), key=lambda f: (f["moneda"] is None, f["moneda"] or ""))
+
+    def _kpi_ocs_abiertas(self, filas):
         # Los montos van por moneda (#374): una OC en USD no se suma con las
         # MXN. ``total`` (conteo) sí es de todas; cada fila con ``monto``
         # trae su ``moneda``.
-        abiertas = base.filter(estatus__in=self.ESTATUS_OC_ABIERTAS)
+        abiertas = [f for f in filas if f["estatus"] in self.ESTATUS_OC_ABIERTAS]
         estatus_labels = dict(OrdenCompra.EstatusOrdenCompra.choices)
         por_estatus = [
             {
@@ -1274,16 +1299,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 "total": fila["total"],
                 "monto": fila["monto"] or Decimal("0"),
             }
-            for fila in abiertas.values("estatus", "moneda__codigo_iso")
-            .annotate(total=Count("id"), monto=Sum("gran_total"))
-            .order_by("estatus", "moneda__codigo_iso")
+            for fila in abiertas
         ]
-        por_moneda = [
-            {"moneda": fila["moneda__codigo_iso"], "total": fila["total"], "monto": fila["monto"] or Decimal("0")}
-            for fila in abiertas.values("moneda__codigo_iso")
-            .annotate(total=Count("id"), monto=Sum("gran_total"))
-            .order_by("moneda__codigo_iso")
-        ]
+        por_moneda = self._por_moneda(abiertas)
         return {
             "disponible": True,
             "total": sum(f["total"] for f in por_moneda),
@@ -1304,29 +1322,28 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     TOPE_TOP_OCS = 5
     TOPE_OCS_EN_CURSO = 8
 
-    def _kpi_ocs_por_grupo(self, base):
-        """Conteos por grupo de estatus en UNA consulta. "Activas" = todo menos
-        canceladas (6); "en curso" = parcialmente recibidas (4)."""
+    def _kpi_ocs_por_grupo(self, filas):
+        """Conteos por grupo de estatus. "Activas" = todo menos canceladas (6);
+        "en curso" = parcialmente recibidas (4)."""
         estatus = OrdenCompra.EstatusOrdenCompra
-        conteos = base.aggregate(
-            activas=Count("id", filter=~Q(estatus=estatus.CANCELADA)),
-            por_autorizar=Count("id", filter=Q(estatus__in=self.ESTATUS_OC_POR_AUTORIZAR)),
-            autorizadas_o_completadas=Count("id", filter=Q(estatus__in=self.ESTATUS_OC_AUTORIZADAS_O_COMPLETADAS)),
-            en_curso=Count("id", filter=Q(estatus=estatus.PARCIALMENTE_RECIBIDA)),
-            recibidas=Count("id", filter=Q(estatus=estatus.RECIBIDA)),
-            canceladas=Count("id", filter=Q(estatus=estatus.CANCELADA)),
-        )
-        return {"disponible": True, **conteos}
 
-    def _kpi_valor_ocs_activas(self, base):
+        def contar(condicion):
+            return sum(f["total"] for f in filas if condicion(f["estatus"]))
+
+        return {
+            "disponible": True,
+            "activas": contar(lambda e: e != estatus.CANCELADA),
+            "por_autorizar": contar(lambda e: e in self.ESTATUS_OC_POR_AUTORIZAR),
+            "autorizadas_o_completadas": contar(lambda e: e in self.ESTATUS_OC_AUTORIZADAS_O_COMPLETADAS),
+            "en_curso": contar(lambda e: e == estatus.PARCIALMENTE_RECIBIDA),
+            "recibidas": contar(lambda e: e == estatus.RECIBIDA),
+            "canceladas": contar(lambda e: e == estatus.CANCELADA),
+        }
+
+    def _kpi_valor_ocs_activas(self, filas):
         """Σ ``gran_total`` de las OC activas (≠ 6), por moneda (#374)."""
-        activas = base.exclude(estatus=OrdenCompra.EstatusOrdenCompra.CANCELADA)
-        por_moneda = [
-            {"moneda": fila["moneda__codigo_iso"], "total": fila["total"], "monto": fila["monto"] or Decimal("0")}
-            for fila in activas.values("moneda__codigo_iso")
-            .annotate(total=Count("id"), monto=Sum("gran_total"))
-            .order_by("moneda__codigo_iso")
-        ]
+        activas = [f for f in filas if f["estatus"] != OrdenCompra.EstatusOrdenCompra.CANCELADA]
+        por_moneda = self._por_moneda(activas)
         return {"disponible": True, "total": sum(f["total"] for f in por_moneda), "por_moneda": por_moneda}
 
     def _kpi_top_ocs_por_moneda(self, base):

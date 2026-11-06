@@ -2852,6 +2852,18 @@ class OrdenCompraKpisDashboardTests(_OrdenesModoServidorBase, TestCase):
         for clave in ("ocs_por_grupo", "valor_ocs_activas", "top_ocs_por_moneda", "ocs_en_curso_proxima_entrega"):
             self.assertEqual(data[clave], motivo)
 
+    def test_numero_de_consultas(self):
+        """``ocs_abiertas``, ``ocs_por_grupo`` y ``valor_ocs_activas`` salen de UNA consulta
+        agrupada por estatus y moneda: 6 en total para un admin (antes 9). Las demás:
+        vencidas (conteo + drill-down), gasto por categoría, top por moneda y en curso."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._get(self.URL_KPIS)
+        with CaptureQueriesContext(connection) as ctx:
+            self._get(self.URL_KPIS)
+        self.assertEqual(len(ctx), 6, [q["sql"][:120] for q in ctx.captured_queries])
+
     def test_acepta_format_y_rechaza_filtros(self):
         """``validar_parametros`` deja pasar ``?format=`` de DRF en todos los ``kpis/``."""
         self.assertEqual(self._get(self.URL_KPIS, {"format": "json"}).status_code, 200)
